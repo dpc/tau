@@ -40,7 +40,7 @@ fn connect_start_agent_interceptor(h: &mut Harness) {
 /// Return whether one source committed a matching event.
 fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
             return true;
@@ -55,7 +55,7 @@ fn first_committed_matching(
     predicate: impl Fn(&Event) -> bool,
 ) -> crate::event_log::LogEntry {
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if predicate(&entry.event) {
             return entry;
@@ -66,7 +66,8 @@ fn first_committed_matching(
 
 /// Count side agents carrying one extension query correlation.
 fn query_agent_count(h: &Harness, query_id: &str) -> usize {
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .values()
         .filter(|agent| {
@@ -368,9 +369,10 @@ fn configured_kinds_have_authority_but_unconfigured_and_socket_do_not() {
         "socket-origin",
         tau_proto::ClientKind::Tool,
     );
-    h.bus
+    h.runtime_io
+        .bus
         .disconnect(&crate::test_connection_id("socket-origin"));
-    h.bus.connect(Connection::new(
+    h.runtime_io.bus.connect(Connection::new(
         PendingConnectionMetadata {
             id: Some(crate::test_connection_id("socket-origin")),
             name: crate::test_extension_name("socket-origin"),
@@ -495,7 +497,7 @@ fn stale_session_request_is_observation_only() {
             Event::StartAgentRequest(request) if request.query_id == "q-stale-session"
         )
     }));
-    assert_eq!(h.current_session_id.as_str(), "s1");
+    assert_eq!(h.session_runtime.current_session_id.as_str(), "s1");
     assert_eq!(query_agent_count(&h, "q-stale-session"), 0);
     assert!(directed_acceptance(&sink, "q-stale-session").is_none());
     assert!(directed_result(&sink, "q-stale-session").is_none());
@@ -550,7 +552,7 @@ fn pre_ready_request_keeps_original_admission_session() {
             Event::StartAgentRequest(request) if request.query_id == "q-pre-ready-session"
         )
     }));
-    assert_eq!(h.current_session_id.as_str(), "s2");
+    assert_eq!(h.session_runtime.current_session_id.as_str(), "s2");
     assert_eq!(query_agent_count(&h, "q-pre-ready-session"), 0);
     assert!(directed_acceptance(&sink, "q-pre-ready-session").is_none());
     assert!(directed_result(&sink, "q-pre-ready-session").is_none());
@@ -574,6 +576,7 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
     )
     .expect("start first request");
     let side_cid = h
+        .agent_runtime
         .agent_registry
         .agents
         .iter()
@@ -586,7 +589,7 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
             .then(|| cid.clone())
         })
         .expect("side agent");
-    let side_agent_id = h.agent_registry.agents[&side_cid]
+    let side_agent_id = h.agent_runtime.agent_registry.agents[&side_cid]
         .agent_id
         .clone()
         .expect("public side agent id");
@@ -605,7 +608,7 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
 
     assert_eq!(query_agent_count(&h, "q-duplicate"), 1);
     assert_eq!(
-        h.agent_registry.agents[&side_cid]
+        h.agent_runtime.agent_registry.agents[&side_cid]
             .source_connection
             .as_deref(),
         Some("new-requester")
@@ -664,7 +667,10 @@ fn pending_duplicate_rebinds_without_minting_or_dispatching() {
         .expect("prepare")
         .expect("new pending request");
     let expected_agent_id = pending.agent_id.clone();
-    h.agent_registry.pending_start_requests.push_back(pending);
+    h.agent_runtime
+        .agent_registry
+        .pending_start_requests
+        .push_back(pending);
 
     let new_sink = connect_ready_configured_extension(
         &mut h,
@@ -678,13 +684,16 @@ fn pending_duplicate_rebinds_without_minting_or_dispatching() {
     )
     .expect("rebind pending duplicate");
 
-    assert_eq!(h.agent_registry.pending_start_requests.len(), 1);
     assert_eq!(
-        h.agent_registry.pending_start_requests[0].source_id,
+        h.agent_runtime.agent_registry.pending_start_requests.len(),
+        1
+    );
+    assert_eq!(
+        h.agent_runtime.agent_registry.pending_start_requests[0].source_id,
         "new-requester"
     );
     assert_eq!(
-        h.agent_registry.pending_start_requests[0].agent_id,
+        h.agent_runtime.agent_registry.pending_start_requests[0].agent_id,
         expected_agent_id
     );
     assert_eq!(query_agent_count(&h, "q-pending"), 0);
@@ -698,6 +707,7 @@ fn pending_duplicate_rebinds_without_minting_or_dispatching() {
     h.drain_pending_start_agent_requests()
         .expect("dispatch rebound pending request");
     let side_cid = h
+        .agent_runtime
         .agent_registry
         .agent_routes
         .get(&expected_agent_id)

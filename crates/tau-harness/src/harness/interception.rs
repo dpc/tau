@@ -1006,7 +1006,8 @@ impl Harness {
         &mut self,
         connection_id: &tau_proto::ConnectionId,
     ) {
-        self.publication
+        self.runtime_io
+            .publication
             .suspended_interceptor_connections
             .insert(connection_id.clone());
     }
@@ -1019,7 +1020,7 @@ impl Harness {
         completion: &AgentPublishCompletion,
     ) {
         let transaction_id = completion.transaction_id();
-        self.publication.deferred.retain(|publish| {
+        self.runtime_io.publication.deferred.retain(|publish| {
             publish
                 .sync_head_for
                 .as_ref()
@@ -1037,6 +1038,7 @@ impl Harness {
         let mut canceled_initial_prompts = Vec::new();
         let mut canceled_watch_retirements = Vec::new();
         let removed_pending = self
+            .runtime_io
             .publication
             .pending_intercept
             .as_ref()
@@ -1052,6 +1054,7 @@ impl Harness {
             });
         if removed_pending {
             let pending = self
+                .runtime_io
                 .publication
                 .pending_intercept
                 .take()
@@ -1081,7 +1084,7 @@ impl Harness {
             self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
             self.rollback_rejected_activation_successor(&pending.event);
         }
-        self.publication.deferred.retain(|publish| {
+        self.runtime_io.publication.deferred.retain(|publish| {
             let canceled = publish
                 .sync_head_for
                 .as_ref()
@@ -1146,7 +1149,7 @@ impl Harness {
     /// Drop-equivalent cleanup, suspend in-flight responders, and drain the
     /// retained FIFO.
     pub(crate) fn quiesce_synchronized_publications_for_rollover(&mut self) {
-        if let Some(pending) = self.publication.pending_intercept.take() {
+        if let Some(pending) = self.runtime_io.publication.pending_intercept.take() {
             self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
             if Self::is_synchronized_agent_checkpoint_or_completion(
                 &pending.event,
@@ -1185,8 +1188,8 @@ impl Harness {
         // shell, and peer failure paths. Retain mandatory terminal/lifecycle
         // publications, including SessionShutdown, and force their interception
         // chains to completion before changing the bound session.
-        let mut retained = VecDeque::with_capacity(self.publication.deferred.len());
-        while let Some(publish) = self.publication.deferred.pop_front() {
+        let mut retained = VecDeque::with_capacity(self.runtime_io.publication.deferred.len());
+        while let Some(publish) = self.runtime_io.publication.deferred.pop_front() {
             if let Some(AgentPublishCompletion::InitialPromptSubmission { correlation }) = publish
                 .sync_head_for
                 .as_ref()
@@ -1212,10 +1215,11 @@ impl Harness {
                 self.discard_deferred_publish(publish, "session rollover canceled publication");
             }
         }
-        self.publication.deferred = retained;
+        self.runtime_io.publication.deferred = retained;
         loop {
             self.drain_deferred_publishes();
-            let Some(pending_must_pass) = self.publication.pending_intercept.take() else {
+            let Some(pending_must_pass) = self.runtime_io.publication.pending_intercept.take()
+            else {
                 break;
             };
             self.suspend_interceptor_after_destructive_cancel(&pending_must_pass.conn_id);
@@ -1262,7 +1266,8 @@ impl Harness {
             _ => None,
         };
         let agent_id = self.agent_id_for_event(&event).or_else(|| {
-            self.agent_registry
+            self.agent_runtime
+                .agent_registry
                 .agents
                 .get(cid)
                 .and_then(|agent| agent.agent_id.as_deref())
@@ -1276,7 +1281,7 @@ impl Harness {
             Some(ConversationHeadSync {
                 cid: cid.clone(),
                 agent_id,
-                session_generation: self.current_session_generation,
+                session_generation: self.session_runtime.current_session_generation,
                 fold_parent,
                 suppress_activation_dispatch: true,
                 continuation: Some(PostCommitContinuation::AgentPublish(Box::new(completion))),
@@ -1294,6 +1299,7 @@ impl Harness {
     ) -> bool {
         let mut cleared = false;
         if let Some(Event::ProviderModelsUpdated(update)) = self
+            .runtime_io
             .publication
             .pending_intercept
             .as_mut()
@@ -1303,7 +1309,7 @@ impl Harness {
             update.models.clear();
             cleared = true;
         }
-        for deferred in &mut self.publication.deferred {
+        for deferred in &mut self.runtime_io.publication.deferred {
             if let Event::ProviderModelsUpdated(update) = &mut deferred.event
                 && &update.publisher_extension_id == publisher
             {
@@ -1321,6 +1327,7 @@ impl Harness {
         canceled: &std::collections::HashSet<tau_proto::AgentMessageId>,
     ) {
         if self
+            .runtime_io
             .publication
             .pending_intercept
             .as_ref()
@@ -1333,6 +1340,7 @@ impl Harness {
             })
         {
             let pending = self
+                .runtime_io
                 .publication
                 .pending_intercept
                 .take()
@@ -1345,8 +1353,8 @@ impl Harness {
             );
             self.discard_peer_activation_reservation(&pending.source.peer_context);
         }
-        let mut retained = VecDeque::with_capacity(self.publication.deferred.len());
-        while let Some(deferred) = self.publication.deferred.pop_front() {
+        let mut retained = VecDeque::with_capacity(self.runtime_io.publication.deferred.len());
+        while let Some(deferred) = self.runtime_io.publication.deferred.pop_front() {
             if matches!(
                 deferred.event(),
                 Event::AgentMessageReceived(received)
@@ -1360,7 +1368,7 @@ impl Harness {
                 retained.push_back(deferred);
             }
         }
-        self.publication.deferred = retained;
+        self.runtime_io.publication.deferred = retained;
         self.drain_deferred_publishes();
         self.drain_publish_idle_dispatches();
     }
@@ -1403,18 +1411,23 @@ impl Harness {
     /// True when no event is parked in interception and no publish is
     /// queued behind one.
     pub(super) fn publish_chain_is_idle(&self) -> bool {
-        self.publication.pending_intercept.is_none() && self.publication.deferred.is_empty()
+        self.runtime_io.publication.pending_intercept.is_none()
+            && self.runtime_io.publication.deferred.is_empty()
     }
 
     /// True when `cid` already has a prompt dispatch waiting for a
     /// publish/interception condition.
     pub(crate) fn has_deferred_prompt_dispatch_for(&self, cid: &AgentId) -> bool {
-        self.publication.idle_dispatches.iter().any(|queued| {
-            &queued.cid == cid
-                && (!queued.obligation.is_committed()
-                    || queued.activation_through.is_none()
-                    || self.deferred_activation_is_selected(queued))
-        })
+        self.runtime_io
+            .publication
+            .idle_dispatches
+            .iter()
+            .any(|queued| {
+                &queued.cid == cid
+                    && (!queued.obligation.is_committed()
+                        || queued.activation_through.is_none()
+                        || self.deferred_activation_is_selected(queued))
+            })
     }
 
     /// Send `cid`'s prompt now if the publish chain is idle; otherwise
@@ -1431,6 +1444,7 @@ impl Harness {
             return;
         }
         if !self
+            .runtime_io
             .publication
             .idle_dispatches
             .iter()
@@ -1470,6 +1484,7 @@ impl Harness {
     ) {
         let _ = self.ensure_agent_id_for_agent(cid);
         let state = self
+            .agent_runtime
             .agent_registry
             .agents
             .get(cid)
@@ -1487,12 +1502,17 @@ impl Harness {
         if !self.agent_can_start_deferred_inference_dispatch(cid) {
             return;
         }
-        let output_length_owner_ready = self.agent_registry.agents.get(cid).is_some_and(|agent| {
-            matches!(
-                agent.output_length_continuation,
-                path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
-            )
-        });
+        let output_length_owner_ready = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .is_some_and(|agent| {
+                matches!(
+                    agent.output_length_continuation,
+                    path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
+                )
+            });
         if !output_length_owner_ready && !self.validate_prompt_render_for_dispatch(cid) {
             return;
         }
@@ -1539,15 +1559,20 @@ impl Harness {
             );
             return;
         }
-        let output_length_continuation =
-            self.agent_registry.agents.get(&cid).is_some_and(|agent| {
+        let output_length_continuation = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(&cid)
+            .is_some_and(|agent| {
                 matches!(
                     agent.output_length_continuation,
                     crate::agent::OutputLengthContinuationState::Planned(_)
                         | crate::agent::OutputLengthContinuationState::OwnerReady(_)
                 )
             });
-        self.publication
+        self.runtime_io
+            .publication
             .idle_dispatches
             .push_back(DeferredPromptDispatch {
                 cid,
@@ -1575,23 +1600,28 @@ impl Harness {
     /// provider request.
     fn agent_can_start_deferred_inference_dispatch(&self, cid: &AgentId) -> bool {
         self.agent_context_ready_for(cid)
-            && self.agent_registry.agents.get(cid).is_some_and(|agent| {
-                !agent.terminating
-                    && matches!(
-                        agent.outer_turn,
-                        path_crate_agent::OuterTurnRuntimeState::None
-                            | path_crate_agent::OuterTurnRuntimeState::Active(_)
-                    )
-                    && matches!(
-                        agent.activation_dispatch,
-                        crate::agent::ActivationDispatchState::None
-                    )
-                    && !matches!(
-                        agent.turn_state,
-                        crate::agent::AgentTurnState::ToolsRunning { .. }
-                    )
-                    && !self.agent_has_open_foreground_tool_round(cid)
-            })
+            && self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(cid)
+                .is_some_and(|agent| {
+                    !agent.terminating
+                        && matches!(
+                            agent.outer_turn,
+                            path_crate_agent::OuterTurnRuntimeState::None
+                                | path_crate_agent::OuterTurnRuntimeState::Active(_)
+                        )
+                        && matches!(
+                            agent.activation_dispatch,
+                            crate::agent::ActivationDispatchState::None
+                        )
+                        && !matches!(
+                            agent.turn_state,
+                            crate::agent::AgentTurnState::ToolsRunning { .. }
+                        )
+                        && !self.agent_has_open_foreground_tool_round(cid)
+                })
     }
 
     fn same_deferred_prompt_dispatch(
@@ -1611,23 +1641,30 @@ impl Harness {
         if !selected {
             return false;
         }
-        if !self.agent_registry.agents.contains_key(&deferred.cid) {
+        if !self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .contains_key(&deferred.cid)
+        {
             return true;
         }
-        let owner_can_advance =
-            self.agent_registry
-                .agents
-                .get(&deferred.cid)
-                .is_some_and(|agent| {
-                    (matches!(
-                        agent.activation_dispatch,
-                        crate::agent::ActivationDispatchState::Running { .. }
-                    ) && !agent.terminating
-                        && self.agent_context_ready_for(&deferred.cid))
-                        || self.agent_can_start_deferred_inference_dispatch(&deferred.cid)
-                });
+        let owner_can_advance = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(&deferred.cid)
+            .is_some_and(|agent| {
+                (matches!(
+                    agent.activation_dispatch,
+                    crate::agent::ActivationDispatchState::Running { .. }
+                ) && !agent.terminating
+                    && self.agent_context_ready_for(&deferred.cid))
+                    || self.agent_can_start_deferred_inference_dispatch(&deferred.cid)
+            });
         owner_can_advance
             && !self
+                .prompt_coordination
                 .prompt_runtime
                 .pending_publish_completions
                 .contains_key(&deferred.cid)
@@ -1635,11 +1672,15 @@ impl Harness {
 
     /// Returns the runtime-selected durable head for one loaded agent.
     pub(super) fn selected_head_for_agent(&self, cid: &AgentId) -> Option<tau_proto::AgentHead> {
-        self.agent_registry.agents.get(cid).map(|agent| {
-            agent
-                .head
-                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
-        })
+        self.agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .map(|agent| {
+                agent
+                    .head
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+            })
     }
 
     /// Returns whether one branch-owned deferred activation is selected now.
@@ -1647,13 +1688,13 @@ impl Harness {
         let Some(owner) = deferred.activation_through else {
             return false;
         };
-        let Some(agent) = self.agent_registry.agents.get(&deferred.cid) else {
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get(&deferred.cid) else {
             return false;
         };
         let Some(tree) = agent
             .agent_id
             .as_deref()
-            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
         else {
             return false;
         };
@@ -1673,10 +1714,12 @@ impl Harness {
         activation_cut: Option<tau_proto::AgentHead>,
         activation_through: Option<tau_proto::AgentHead>,
     ) {
-        self.publication
+        self.runtime_io
+            .publication
             .idle_dispatches
             .retain(|deferred| deferred.cid != cid || deferred.obligation.is_committed());
-        self.publication
+        self.runtime_io
+            .publication
             .idle_dispatches
             .push_back(DeferredPromptDispatch {
                 cid,
@@ -1696,11 +1739,12 @@ impl Harness {
         activation_through: Option<tau_proto::AgentHead>,
     ) {
         let activation_cut = activation_through.and_then(|_| {
-            self.agent_registry
+            self.agent_runtime
+                .agent_registry
                 .agents
                 .get(&cid)
                 .and_then(|agent| agent.agent_id.as_deref())
-                .and_then(|agent_id| self.agent_store.agent(agent_id))
+                .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
                 .and_then(|tree| {
                     tree.node_for_durable_event_seq(source_seq)
                         .and_then(|node_id| tree.node(node_id))
@@ -1710,10 +1754,12 @@ impl Harness {
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
                 })
         });
-        self.publication
+        self.runtime_io
+            .publication
             .idle_dispatches
             .retain(|deferred| deferred.cid != cid || deferred.obligation.is_committed());
-        self.publication
+        self.runtime_io
+            .publication
             .idle_dispatches
             .push_back(DeferredPromptDispatch {
                 cid,
@@ -1733,11 +1779,14 @@ impl Harness {
         cid: &AgentId,
         activation_through: Option<tau_proto::AgentHead>,
     ) {
-        self.publication.idle_dispatches.retain(|deferred| {
-            deferred.cid != *cid
-                || !deferred.obligation.is_committed()
-                || deferred.activation_through != activation_through
-        });
+        self.runtime_io
+            .publication
+            .idle_dispatches
+            .retain(|deferred| {
+                deferred.cid != *cid
+                    || !deferred.obligation.is_committed()
+                    || deferred.activation_through != activation_through
+            });
     }
 
     /// Transfer every selected-branch activation obligation covered by a
@@ -1748,21 +1797,25 @@ impl Harness {
         through: tau_proto::AgentHead,
     ) {
         let tree = self
+            .agent_runtime
             .agent_registry
             .agents
             .get(cid)
             .and_then(|agent| agent.agent_id.as_deref())
-            .and_then(|agent_id| self.agent_store.agent(agent_id));
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id));
         let Some(tree) = tree else {
             return;
         };
-        self.publication.idle_dispatches.retain(|deferred| {
-            deferred.cid != *cid
-                || !deferred.obligation.is_committed()
-                || deferred
-                    .activation_through
-                    .is_none_or(|owner| !tree.is_ancestor_head(owner, through))
-        });
+        self.runtime_io
+            .publication
+            .idle_dispatches
+            .retain(|deferred| {
+                deferred.cid != *cid
+                    || !deferred.obligation.is_committed()
+                    || deferred
+                        .activation_through
+                        .is_none_or(|owner| !tree.is_ancestor_head(owner, through))
+            });
     }
 
     /// Retire both possible runtime forms of one exact dormant output-length
@@ -1773,18 +1826,21 @@ impl Harness {
         activation_cut: tau_proto::AgentHead,
         steer: tau_proto::AgentHead,
     ) {
-        self.publication.idle_dispatches.retain(|deferred| {
-            if deferred.cid != *cid {
-                return true;
-            }
-            if deferred.obligation.is_committed() {
-                return deferred.activation_through != Some(steer);
-            }
-            deferred.obligation != DeferredActivationObligation::OutputLengthPublishIdle
-                || deferred
-                    .activation_cut
-                    .is_some_and(|cut| cut != activation_cut)
-        });
+        self.runtime_io
+            .publication
+            .idle_dispatches
+            .retain(|deferred| {
+                if deferred.cid != *cid {
+                    return true;
+                }
+                if deferred.obligation.is_committed() {
+                    return deferred.activation_through != Some(steer);
+                }
+                deferred.obligation != DeferredActivationObligation::OutputLengthPublishIdle
+                    || deferred
+                        .activation_cut
+                        .is_some_and(|cut| cut != activation_cut)
+            });
     }
 
     /// Computes the closed provider prefix immediately before the selected
@@ -1798,9 +1854,12 @@ impl Harness {
         &self,
         cid: &AgentId,
     ) -> Option<tau_proto::AgentHead> {
-        let agent = self.agent_registry.agents.get(cid)?;
+        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
         let head = agent.head?;
-        let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
+        let tree = self
+            .session_runtime
+            .agent_store
+            .agent(agent.agent_id.as_deref()?)?;
         let provisional = tree
             .node(head)?
             .parent_id
@@ -1897,8 +1956,8 @@ impl Harness {
                 capabilities: entry.peer_capabilities.clone(),
                 instance_id: entry.instance_id,
                 admission: admission.unwrap_or_else(|| ExtensionFrameAdmission {
-                    session_id: self.current_session_id.clone(),
-                    session_generation: self.current_session_generation,
+                    session_id: self.session_runtime.current_session_id.clone(),
+                    session_generation: self.session_runtime.current_session_generation,
                 }),
                 shell_report_targets_ephemeral,
                 activation_reservation,
@@ -1908,14 +1967,17 @@ impl Harness {
             connection_id: source.cloned(),
             peer_context,
         };
-        if self.publication.pending_intercept.is_some() {
-            self.publication.deferred.push_back(DeferredPublish {
-                source,
-                event,
-                persist,
-                must_pass,
-                sync_head_for,
-            });
+        if self.runtime_io.publication.pending_intercept.is_some() {
+            self.runtime_io
+                .publication
+                .deferred
+                .push_back(DeferredPublish {
+                    source,
+                    event,
+                    persist,
+                    must_pass,
+                    sync_head_for,
+                });
             return;
         }
         self.dispatch_publish_step(source, event, persist, must_pass, sync_head_for, None);
@@ -1954,6 +2016,7 @@ impl Harness {
     ) {
         loop {
             let Some(interceptor_match) = self
+                .runtime_io
                 .publication
                 .interceptors
                 .next_for(&event, cursor.as_ref())
@@ -1969,6 +2032,7 @@ impl Harness {
             };
             let interceptor = interceptor_match.registration;
             if self
+                .runtime_io
                 .publication
                 .suspended_interceptor_connections
                 .contains(&interceptor.connection_id)
@@ -1988,7 +2052,7 @@ impl Harness {
                 "intercepting event emission"
             );
             let conn_id = interceptor.connection_id.to_owned();
-            let report = self.bus.send_to(
+            let report = self.runtime_io.bus.send_to(
                 &conn_id,
                 None,
                 HarnessOutputMessage::InterceptRequest(InterceptRequest {
@@ -2000,7 +2064,7 @@ impl Harness {
                 .as_ref()
                 .is_ok_and(|report| report.delivered_to.iter().any(|id| id == &conn_id));
             if delivered {
-                self.publication.pending_intercept = Some(PendingIntercept {
+                self.runtime_io.publication.pending_intercept = Some(PendingIntercept {
                     conn_id: conn_id.clone(),
                     event,
                     persist,
@@ -2021,7 +2085,10 @@ impl Harness {
                 error = ?report.err(),
                 "interceptor request delivery failed; skipping interceptor"
             );
-            self.publication.interceptors.remove_connection(&conn_id);
+            self.runtime_io
+                .publication
+                .interceptors
+                .remove_connection(&conn_id);
             cursor = Some(InterceptorCursor {
                 set: interceptor_match.set,
                 registration: interceptor,
@@ -2043,6 +2110,7 @@ impl Harness {
         reply: InterceptReply,
     ) -> Result<(), crate::HarnessError> {
         if self
+            .runtime_io
             .publication
             .suspended_interceptor_connections
             .remove(conn_id)
@@ -2054,7 +2122,7 @@ impl Harness {
             );
             return Ok(());
         }
-        let Some(pending) = self.publication.pending_intercept.take() else {
+        let Some(pending) = self.runtime_io.publication.pending_intercept.take() else {
             tracing::warn!(
                 target: "tau_harness::interception",
                 connection_id = %conn_id,
@@ -2071,7 +2139,7 @@ impl Harness {
                  continuing to wait",
             );
             // Restore — we're still waiting on the original responder.
-            self.publication.pending_intercept = Some(pending);
+            self.runtime_io.publication.pending_intercept = Some(pending);
             return Ok(());
         }
         self.advance_pending_intercept(pending, reply.action);
@@ -2089,11 +2157,11 @@ impl Harness {
         &mut self,
         conn_id: &tau_proto::ConnectionId,
     ) {
-        let Some(pending) = self.publication.pending_intercept.take() else {
+        let Some(pending) = self.runtime_io.publication.pending_intercept.take() else {
             return;
         };
         if pending.conn_id != *conn_id {
-            self.publication.pending_intercept = Some(pending);
+            self.runtime_io.publication.pending_intercept = Some(pending);
             return;
         }
         tracing::warn!(
@@ -2102,7 +2170,7 @@ impl Harness {
             "interceptor disconnected mid-reply; treating as Pass(None)",
         );
         self.advance_pending_intercept(pending, InterceptAction::Pass(None));
-        if self.publication.pending_error.is_none() {
+        if self.runtime_io.publication.pending_error.is_none() {
             self.drain_deferred_publishes();
             self.drain_publish_idle_dispatches();
         }
@@ -2248,8 +2316,8 @@ impl Harness {
     /// Drain `deferred_publishes` until either it's empty or one of
     /// them parks a new intercept.
     fn drain_deferred_publishes(&mut self) {
-        while self.publication.pending_intercept.is_none() {
-            let Some(deferred) = self.publication.deferred.pop_front() else {
+        while self.runtime_io.publication.pending_intercept.is_none() {
+            let Some(deferred) = self.runtime_io.publication.deferred.pop_front() else {
                 break;
             };
             let DeferredPublish {
@@ -2276,26 +2344,29 @@ impl Harness {
     pub(crate) fn drain_publish_idle_dispatches(&mut self) {
         let mut attempted = Vec::new();
         while self.publish_chain_is_idle() {
-            for index in 0..self.publication.idle_dispatches.len() {
-                let needs_binding = self.publication.idle_dispatches[index]
+            for index in 0..self.runtime_io.publication.idle_dispatches.len() {
+                let needs_binding = self.runtime_io.publication.idle_dispatches[index]
                     .obligation
                     .is_committed()
-                    && self.publication.idle_dispatches[index]
+                    && self.runtime_io.publication.idle_dispatches[index]
                         .activation_through
                         .is_none();
                 if !needs_binding {
                     continue;
                 }
-                let cid = self.publication.idle_dispatches[index].cid.clone();
+                let cid = self.runtime_io.publication.idle_dispatches[index]
+                    .cid
+                    .clone();
                 if let Some(source_seq) =
-                    self.publication.idle_dispatches[index].activation_source_seq
+                    self.runtime_io.publication.idle_dispatches[index].activation_source_seq
                 {
                     let materialized = self
+                        .agent_runtime
                         .agent_registry
                         .agents
                         .get(&cid)
                         .and_then(|agent| agent.agent_id.as_deref())
-                        .and_then(|agent_id| self.agent_store.agent(agent_id))
+                        .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
                         .and_then(|tree| {
                             tree.node_for_durable_event_seq(source_seq)
                                 .and_then(|node_id| {
@@ -2305,19 +2376,20 @@ impl Harness {
                     let Some((node_id, parent_id)) = materialized else {
                         continue;
                     };
-                    self.publication.idle_dispatches[index].activation_through =
+                    self.runtime_io.publication.idle_dispatches[index].activation_through =
                         Some(tau_proto::AgentHead::Node(node_id));
-                    self.publication.idle_dispatches[index].activation_cut = Some(
+                    self.runtime_io.publication.idle_dispatches[index].activation_cut = Some(
                         parent_id.map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
                     );
                     continue;
                 }
                 let through = self.selected_head_for_agent(&cid);
                 let cut = self.activation_cut_before_current_head(&cid);
-                self.publication.idle_dispatches[index].activation_through = through;
-                self.publication.idle_dispatches[index].activation_cut = cut;
+                self.runtime_io.publication.idle_dispatches[index].activation_through = through;
+                self.runtime_io.publication.idle_dispatches[index].activation_cut = cut;
             }
             let Some(index) = self
+                .runtime_io
                 .publication
                 .idle_dispatches
                 .iter()
@@ -2335,14 +2407,14 @@ impl Harness {
             else {
                 break;
             };
-            let deferred = self.publication.idle_dispatches[index].clone();
+            let deferred = self.runtime_io.publication.idle_dispatches[index].clone();
             let cid = deferred.cid.clone();
-            if !self.agent_registry.agents.contains_key(&cid) {
-                self.publication.idle_dispatches.remove(index);
+            if !self.agent_runtime.agent_registry.agents.contains_key(&cid) {
+                self.runtime_io.publication.idle_dispatches.remove(index);
                 continue;
             }
             if !deferred.obligation.is_committed() {
-                self.publication.idle_dispatches.remove(index);
+                self.runtime_io.publication.idle_dispatches.remove(index);
             }
             if deferred.obligation.is_committed()
                 && self.schedule_standalone_auto_compaction_for_activation(
@@ -2353,11 +2425,17 @@ impl Harness {
                         .or_else(|| self.activation_cut_before_current_head(&cid)),
                 )
             {
-                if self.publication.idle_dispatches.iter().any(|queued| {
-                    queued.cid == cid
-                        && queued.obligation.is_committed()
-                        && queued.activation_through == deferred.activation_through
-                }) {
+                if self
+                    .runtime_io
+                    .publication
+                    .idle_dispatches
+                    .iter()
+                    .any(|queued| {
+                        queued.cid == cid
+                            && queued.obligation.is_committed()
+                            && queued.activation_through == deferred.activation_through
+                    })
+                {
                     // A synchronous persistence rejection left the branch
                     // obligation unclaimed. Stop this drain pass instead of
                     // immediately retrying the same failed successor forever.
@@ -2368,6 +2446,7 @@ impl Harness {
             self.checkpoint_or_send_prompt(&cid, deferred.activation_cut);
             if deferred.obligation.is_committed()
                 && self
+                    .runtime_io
                     .publication
                     .idle_dispatches
                     .iter()

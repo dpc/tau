@@ -20,12 +20,14 @@ fn queue_extension_event(h: &Harness, connection_id: &tau_proto::ConnectionId, e
             .len() as u64,
     )
     .expect("encoded event frame is nonempty");
-    h.tx.send(HarnessEvent::FromConnection {
-        connection_id: connection_id.clone(),
-        message: Box::new(message),
-        frame_bytes,
-    })
-    .expect("queue session-init extension event");
+    h.runtime_io
+        .tx
+        .send(HarnessEvent::FromConnection {
+            connection_id: connection_id.clone(),
+            message: Box::new(message),
+            frame_bytes,
+        })
+        .expect("queue session-init extension event");
 }
 
 /// Ensures direct committed discovery and readiness renew only for accepted
@@ -54,12 +56,12 @@ fn direct_discovery_and_readiness_renew_only_for_outstanding_provider() {
     }
     let provider = crate::test_connection_id(provider);
     let remaining = crate::test_connection_id(remaining);
-    h.turn_state = TurnState::InitializingSession {
-        session_id: h.current_session_id.clone(),
+    h.session_runtime.turn_state = TurnState::InitializingSession {
+        session_id: h.session_runtime.current_session_id.clone(),
         reason: tau_proto::SessionStartReason::Initial,
         waiting_on: HashSet::from([provider.clone(), remaining.clone()]),
     };
-    let initial = h.session_init_progress_generation;
+    let initial = h.session_runtime.session_init_progress_generation;
 
     h.handle_extension_event(
         provider.as_str(),
@@ -68,7 +70,7 @@ fn direct_discovery_and_readiness_renew_only_for_outstanding_provider() {
                 "test.session_init_generic"
                     .parse()
                     .expect("custom event name"),
-                Some(h.current_session_id.clone()),
+                Some(h.session_runtime.current_session_id.clone()),
                 CborValue::Null,
             )
             .expect("custom event"),
@@ -95,46 +97,46 @@ fn direct_discovery_and_readiness_renew_only_for_outstanding_provider() {
         )),
     )
     .expect("wrong-session readiness");
-    assert_eq!(h.session_init_progress_generation, initial);
+    assert_eq!(h.session_runtime.session_init_progress_generation, initial);
 
     h.handle_extension_event(
         provider.as_str(),
         TestProtocolItem::Event(Event::ExtensionSessionDiscoverySnapshotDeclared(
             tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
-                session_id: h.current_session_id.clone(),
+                session_id: h.session_runtime.current_session_id.clone(),
                 skills: Vec::new(),
                 agents_files: Vec::new(),
             },
         )),
     )
     .expect("direct discovery");
-    let after_discovery = h.session_init_progress_generation;
+    let after_discovery = h.session_runtime.session_init_progress_generation;
     assert_ne!(after_discovery, initial);
 
     h.handle_extension_event(
         provider.as_str(),
         TestProtocolItem::Event(Event::ExtensionSessionContextReady(
             tau_proto::ExtensionSessionContextReady {
-                session_id: h.current_session_id.clone(),
+                session_id: h.session_runtime.current_session_id.clone(),
             },
         )),
     )
     .expect("accepted readiness");
-    let after_readiness = h.session_init_progress_generation;
+    let after_readiness = h.session_runtime.session_init_progress_generation;
     assert_ne!(after_readiness, after_discovery);
     assert!(matches!(
-        &h.turn_state,
+        &h.session_runtime.turn_state,
         TurnState::InitializingSession { waiting_on, .. }
-            if waiting_on == &HashSet::from([remaining])
+            if *waiting_on == HashSet::from([remaining])
     ));
 
     for event in [
         Event::ExtensionSessionContextReady(tau_proto::ExtensionSessionContextReady {
-            session_id: h.current_session_id.clone(),
+            session_id: h.session_runtime.current_session_id.clone(),
         }),
         Event::ExtensionSessionDiscoverySnapshotDeclared(
             tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
-                session_id: h.current_session_id.clone(),
+                session_id: h.session_runtime.current_session_id.clone(),
                 skills: Vec::new(),
                 agents_files: Vec::new(),
             },
@@ -143,9 +145,12 @@ fn direct_discovery_and_readiness_renew_only_for_outstanding_provider() {
         h.handle_extension_event(provider.as_str(), TestProtocolItem::Event(event))
             .expect("duplicate or non-waiter event");
     }
-    assert_eq!(h.session_init_progress_generation, after_readiness);
+    assert_eq!(
+        h.session_runtime.session_init_progress_generation,
+        after_readiness
+    );
 
-    h.turn_state = TurnState::Idle;
+    h.session_runtime.turn_state = TurnState::Idle;
     h.shutdown().expect("shutdown");
 }
 
@@ -168,7 +173,7 @@ fn staged_discovery_renews_only_after_current_generation_activation() {
         accepted,
         TestProtocolItem::Event(Event::ExtensionSessionDiscoverySnapshotDeclared(
             tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
-                session_id: h.current_session_id.clone(),
+                session_id: h.session_runtime.current_session_id.clone(),
                 skills: Vec::new(),
                 agents_files: Vec::new(),
             },
@@ -176,18 +181,21 @@ fn staged_discovery_renews_only_after_current_generation_activation() {
     )
     .expect("stage discovery");
     let accepted = crate::test_connection_id(accepted);
-    h.turn_state = TurnState::InitializingSession {
-        session_id: h.current_session_id.clone(),
+    h.session_runtime.turn_state = TurnState::InitializingSession {
+        session_id: h.session_runtime.current_session_id.clone(),
         reason: tau_proto::SessionStartReason::Initial,
         waiting_on: HashSet::from([accepted.clone()]),
     };
-    let before_activation = h.session_init_progress_generation;
+    let before_activation = h.session_runtime.session_init_progress_generation;
     h.handle_extension_message(
         &accepted,
         TestMessage::Ready(tau_proto::Ready { message: None }),
     )
     .expect("activate staged provider");
-    assert_ne!(h.session_init_progress_generation, before_activation);
+    assert_ne!(
+        h.session_runtime.session_init_progress_generation,
+        before_activation
+    );
 
     let stale = "session-progress-stale";
     let _stale_sink = connect_handshaking_tool(&mut h, stale);
@@ -202,7 +210,7 @@ fn staged_discovery_renews_only_after_current_generation_activation() {
         stale,
         TestProtocolItem::Event(Event::ExtensionSessionDiscoverySnapshotDeclared(
             tau_proto::ExtensionSessionDiscoverySnapshotDeclared {
-                session_id: h.current_session_id.clone(),
+                session_id: h.session_runtime.current_session_id.clone(),
                 skills: Vec::new(),
                 agents_files: Vec::new(),
             },
@@ -210,25 +218,31 @@ fn staged_discovery_renews_only_after_current_generation_activation() {
     )
     .expect("stage stale discovery");
     let stale = crate::test_connection_id(stale);
-    h.turn_state = TurnState::InitializingSession {
-        session_id: h.current_session_id.clone(),
+    h.session_runtime.turn_state = TurnState::InitializingSession {
+        session_id: h.session_runtime.current_session_id.clone(),
         reason: tau_proto::SessionStartReason::Initial,
         waiting_on: HashSet::from([stale.clone()]),
     };
-    let before_stale_activation = h.session_init_progress_generation;
-    h.current_session_generation = h.current_session_generation.saturating_add(1);
+    let before_stale_activation = h.session_runtime.session_init_progress_generation;
+    h.session_runtime.current_session_generation = h
+        .session_runtime
+        .current_session_generation
+        .saturating_add(1);
     h.handle_extension_message(
         &stale,
         TestMessage::Ready(tau_proto::Ready { message: None }),
     )
     .expect("activate provider with stale staged admission");
-    h.current_session_generation = h.current_session_generation.saturating_sub(1);
+    h.session_runtime.current_session_generation = h
+        .session_runtime
+        .current_session_generation
+        .saturating_sub(1);
     assert_eq!(
-        h.session_init_progress_generation, before_stale_activation,
+        h.session_runtime.session_init_progress_generation, before_stale_activation,
         "stale-generation staged discovery must not renew session init"
     );
 
-    h.turn_state = TurnState::Idle;
+    h.session_runtime.turn_state = TurnState::Idle;
     h.shutdown().expect("shutdown");
 }
 
@@ -239,9 +253,9 @@ fn waiter_classifies_idle_and_absolute_expiry() {
     for absolute_expires in [false, true] {
         let td = TempDir::new().expect("tempdir");
         let mut h = quiet_provider_harness(td.path()).expect("harness");
-        while h.rx.try_recv().is_ok() {}
-        h.turn_state = TurnState::InitializingSession {
-            session_id: h.current_session_id.clone(),
+        while h.runtime_io.rx.try_recv().is_ok() {}
+        h.session_runtime.turn_state = TurnState::InitializingSession {
+            session_id: h.session_runtime.current_session_id.clone(),
             reason: tau_proto::SessionStartReason::Initial,
             waiting_on: HashSet::from([crate::test_connection_id("missing-provider")]),
         };
@@ -251,15 +265,18 @@ fn waiter_classifies_idle_and_absolute_expiry() {
         } else {
             (now, now + Duration::from_secs(1))
         };
-        let deadline =
-            SessionInitDeadline::for_test(idle, absolute, h.session_init_progress_generation);
+        let deadline = SessionInitDeadline::for_test(
+            idle,
+            absolute,
+            h.session_runtime.session_init_progress_generation,
+        );
 
         let error = h
             .wait_for_session_init_with_deadline(deadline)
             .expect_err("expired provider wait must fail");
         assert!(matches!(error, HarnessError::SessionInitTimeout));
 
-        h.turn_state = TurnState::Idle;
+        h.session_runtime.turn_state = TurnState::Idle;
         h.shutdown().expect("shutdown");
     }
 }
@@ -284,13 +301,14 @@ fn waiter_prioritizes_final_readiness_and_runs_finalization() {
         )),
     )
     .expect("register provider");
-    while h.rx.try_recv().is_ok() {}
+    while h.runtime_io.rx.try_recv().is_ok() {}
     let provider = crate::test_connection_id(provider);
-    h.context_discovery
+    h.prompt_coordination
+        .context_discovery
         .initialized_sessions
-        .remove(&h.current_session_id);
-    h.turn_state = TurnState::InitializingSession {
-        session_id: h.current_session_id.clone(),
+        .remove(&h.session_runtime.current_session_id);
+    h.session_runtime.turn_state = TurnState::InitializingSession {
+        session_id: h.session_runtime.current_session_id.clone(),
         reason: tau_proto::SessionStartReason::Initial,
         waiting_on: HashSet::from([provider.clone()]),
     };
@@ -298,19 +316,21 @@ fn waiter_prioritizes_final_readiness_and_runs_finalization() {
         &h,
         &provider,
         Event::ExtensionSessionContextReady(tau_proto::ExtensionSessionContextReady {
-            session_id: h.current_session_id.clone(),
+            session_id: h.session_runtime.current_session_id.clone(),
         }),
     );
     let now = Instant::now();
-    let deadline = SessionInitDeadline::for_test(now, now, h.session_init_progress_generation);
+    let deadline =
+        SessionInitDeadline::for_test(now, now, h.session_runtime.session_init_progress_generation);
 
     h.wait_for_session_init_with_deadline(deadline)
         .expect("final readiness and finalization must win");
-    assert!(matches!(h.turn_state, TurnState::Idle));
+    assert!(matches!(h.session_runtime.turn_state, TurnState::Idle));
     assert!(
-        h.context_discovery
+        h.prompt_coordination
+            .context_discovery
             .initialized_sessions
-            .contains(&h.current_session_id),
+            .contains(&h.session_runtime.current_session_id),
         "complete_session_init must record the finalized session"
     );
 

@@ -857,7 +857,7 @@ struct SourcedToolPromptFragment {
 /// User-facing explanation recorded for a configured role disabled because one
 /// or more required skills are not available.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct DisabledRoleReason {
+pub(crate) struct DisabledRoleReason {
     /// Complete diagnostic message already suitable for a UI notice.
     message: String,
 }
@@ -1473,6 +1473,7 @@ mod tool_policy_tests;
 
 mod agent_context;
 mod agent_registry;
+mod agent_runtime_state;
 mod agent_watch;
 mod agent_watch_provider_deliveries;
 mod compaction_runtime;
@@ -1483,16 +1484,21 @@ mod construction;
 mod context_discovery_state;
 mod extension_activation;
 mod extension_lifecycle;
+mod harness_config_state;
 mod peer_messaging;
 mod peer_reports;
+mod prompt_coordination_state;
 mod prompt_materialization;
 mod prompt_runtime_state;
 mod provider_response;
 mod publication;
 mod publication_completion;
 mod publication_state;
+mod runtime_io_state;
 mod runtime_loop;
 mod session_runtime;
+mod session_runtime_state;
+mod tool_routing_state;
 mod tool_runtime;
 mod ui_runtime;
 #[cfg(test)]
@@ -1517,14 +1523,20 @@ pub use subagents_tool::normalized_wait_timeout_minutes;
 mod gated_final;
 mod user_skill_invocation;
 
+use agent_runtime_state::AgentRuntimeState;
 pub(crate) use agent_watch::AgentWatchProviderDeliveryKind;
 use agent_watch::watch_category_for_retry;
+use harness_config_state::HarnessConfigState;
 pub(crate) use peer_messaging::{
     AgentMessageRecipientStatus, EXTERNAL_AGENT_MESSAGE_CLIENT_NAME,
     PendingExternalAgentMessageAuth, PendingExternalReceiveAck, PendingPeerReceiveCompletion,
     agent_message_activation_class,
 };
+use prompt_coordination_state::PromptCoordinationState;
+use runtime_io_state::RuntimeIoState;
+use session_runtime_state::SessionRuntimeState;
 pub(crate) use subagents_tool::ExternalMessageToolCompletion;
+use tool_routing_state::ToolRoutingState;
 
 /// Connection ID used for harness-owned tools and their side-query
 /// [`PromptOriginator`] name (e.g. `skill`, `agent_start`, and `wait`).
@@ -1655,186 +1667,26 @@ enum ClientMessageDisposition {
 /// Owns the event bus, live connections, durable stores, and provider/tool
 /// routing state for the currently bound session.
 pub struct Harness {
-    /// Sender side of the harness's central event channel. Cloned into
-    /// each per-connection reader thread so they can feed
-    /// `HarnessEvent`s back into the main loop.
-    pub(crate) tx: Sender<HarnessEvent>,
-    /// Receiver side of the central event channel. The main loop
-    /// blocks on this and dispatches one `HarnessEvent` at a time.
-    pub(crate) rx: Receiver<HarnessEvent>,
-    /// Producer side of the naturally backpressured component-ingress lane.
-    component_ingress_tx: ComponentIngressSender,
-    /// Harness-owned component-ingress slot, closed before producer joins.
-    component_ingress: ComponentIngress,
-    /// Received event held while bounded overdue-deadline catch-up completes.
-    pending_runtime_event: Option<HarnessEvent>,
-    /// Deterministic post-receive clock cut for runtime scheduler tests.
-    #[cfg(test)]
-    runtime_event_receive_cut: Option<Instant>,
-    /// Routes protocol events between connections (agent ↔ extensions
-    /// ↔ socket clients). Owns connection state and per-connection
-    /// publication-time route metadata.
-    pub(crate) bus: EventBus,
-    /// Maps tool name → providing connection. Used to resolve
-    /// `ToolRequest` into either a broadcast `ToolStarted`
-    /// or a broadcast `ToolRejected`.
-    pub(crate) registry: ToolRegistry,
-    /// Maps extension-provided UI actions to their owning extension connection.
-    pub(crate) action_registry: ActionRegistry,
-    /// Injected handlers for tools implemented inside the harness process.
-    pub(crate) internal_tool_handlers: InternalToolHandlers,
-    /// Runtime state root for this harness. Extension-specific persistent
-    /// directories are allocated below this path and sent in Configure.
-    pub(crate) state_dir: PathBuf,
-    /// Provider settings captured under instance lifecycle locks before spawn.
-    provider_settings_snapshots: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
-    /// Complete accepted startup settings retained as the runtime baseline.
-    accepted_harness_settings: tau_config::settings::HarnessSettings,
-    /// Session membership store. Owns the folded loaded-agent set for each
-    /// session id, either from the durable membership journal at
-    /// `<state_dir>/sessions/<session_id>/events.cbor` or from the live
-    /// in-memory view for ephemeral sessions.
-    pub(crate) store: SessionStore,
-    /// Per-agent transcript store: durable by default, process-local for
-    /// explicitly ephemeral agents or every agent in memory-only mode.
-    pub(crate) agent_store: AgentStore,
-    /// Harness-wide storage policy.
-    ///
-    /// Session-ephemeral mode suppresses session-owned artifacts only.
-    /// Memory-only mode also suppresses agent and diagnostic state, disables
-    /// retention mutation, and makes all delegated extension storage
-    /// unavailable.
-    pub(crate) storage_mode: crate::HarnessStorageMode,
-    /// Runtime harness path stem for this daemon's socket/metadata pair.
-    ///
-    /// Daemon-mode harnesses set this so `:session new` can keep discovery
-    /// metadata's active session id synchronized with `current_session_id`.
-    pub(crate) runtime_harness_path: Option<PathBuf>,
-    /// Absolute canonical startup root returned by live-session control reads.
-    project_root: PathBuf,
-    /// The single active session this harness currently owns. User messages and
-    /// harness-owned RPCs with a different `session_id` are rejected. `:session
-    /// new` reuses the daemon process but switches this binding, clears
-    /// session-scoped runtime state, and starts a new session init sequence.
-    pub(crate) current_session_id: SessionId,
-    /// Monotonic in-process generation for the active session binding.
-    ///
-    /// Advanced at the start of every `switch_session` attempt, before
-    /// publication quiescence or fallible rebinding work, so no old-session
-    /// completion can acquire current-generation authority even if the
-    /// switch later fails.
-    pub(crate) current_session_generation: u64,
-    /// Reason associated with the current session binding. Late UI subscribers
-    /// receive a replayed `SessionStarted` snapshot with this reason.
-    pub(crate) current_session_start_reason: tau_proto::SessionStartReason,
-    /// Live and completed tool ownership, routing, and turn coordination.
-    pub(crate) tool_runtime: ToolRuntimeState,
-    /// Runtime event sequencer. Replay for reconnecting clients is rebuilt from
-    /// semantic state instead of retained event payloads.
-    pub(crate) event_log: std::sync::Arc<EventLog>,
-    /// Agent identity, membership, routing, and lifecycle state.
-    pub(crate) agent_registry: AgentRegistryState,
+    /// Central ingress, live delivery, diagnostics, and publication state.
+    pub(crate) runtime_io: RuntimeIoState,
+    /// Session binding, persistence, and lifecycle state.
+    pub(crate) session_runtime: SessionRuntimeState,
+    /// Effective startup configuration and runtime policy selections.
+    pub(crate) config: HarnessConfigState,
+    /// Tool and action registration, routing, and lifecycle state.
+    pub(crate) tool_routing: ToolRoutingState,
+    /// Agent identity, watch, delegation, and indicator state.
+    pub(crate) agent_runtime: AgentRuntimeState,
+    /// Prompt dispatch, discovery, cancellation, and compaction state.
+    pub(crate) prompt_coordination: PromptCoordinationState,
     /// Attached-client and human-UI command runtime state.
     pub(crate) ui_runtime: UiRuntimeState,
     /// External peer authentication, delivery, I/O, and routing state.
     peer_messaging: PeerMessagingState,
-    /// Buffered human-readable lifecycle messages (extension init,
-    /// model changes, etc.) surfaced to the UI as part of the next
-    /// `InteractionOutcome`.
-    pub(crate) lifecycle_messages: Vec<String>,
-    /// Mandatory harness diagnostics that must be replayed to late UI clients.
-    ///
-    /// Extension config errors commonly happen during daemon startup, before
-    /// the terminal UI has subscribed. Keep these messages as explicit
-    /// current harness state instead of relying on the append-only event
-    /// log: a config parse failure must never be visible only in stderr or
-    /// historical debug logs.
-    pub(crate) replayable_harness_notices: Vec<tau_proto::HarnessNotice>,
-    /// Extension process lifecycle and pre-`Ready` activation state.
+    /// Extension process lifecycle and activation state.
     pub(crate) extensions: ExtensionRuntimeState,
-    /// Prompt correlation, dispatch snapshots, stale handling, and replay
-    /// state.
-    pub(crate) prompt_runtime: PromptRuntimeState,
-    /// Harness-local acceptance order for visible user interactions.
-    ///
-    /// This is routing authority for untargeted live shell output; wall-clock
-    /// sidecars are deliberately not consulted.
-    user_interaction_order: HashMap<String, u64>,
-    /// Next process-local visible interaction ordinal.
-    next_user_interaction_order: u64,
-    /// Counts interaction facts journal-appended before central delivery.
-    precommitted_user_interactions: HashMap<String, u64>,
-    /// Agent watch topology, delivery deduplication, and retirement state.
-    pub(crate) agent_watch: AgentWatchState,
-    /// Last diagnostic-only warning about a pathologically lagging live
-    /// follower.
-    last_live_egress_lag_warning: Option<Instant>,
-    /// Global harness state. Currently only tracks per-session init
-    /// (waiting on extensions to announce skills + AGENTS.md). Agent
-    /// turn state is per-agent; multiple agents may have
-    /// in-flight prompts simultaneously and the agent extension
-    /// serializes its own consumption of `AgentPromptCreated`.
-    pub(crate) turn_state: TurnState,
-    /// Accepted current-generation progress from outstanding session providers.
-    session_init_progress_generation: SessionInitProgressGeneration,
-    /// Producer for the append-only best-effort event debug log.
-    pub(crate) debug_log: Option<DebugEventLog>,
-    /// Whether the synchronous fault-injection writer observed uncertain
-    /// rollback.
-    ///
-    /// Production rollback poison lives in the process-wide detached writer.
-    /// This harness-local compatibility state supports deterministic tests.
-    debug_log_poisoned: bool,
-    /// Interception, deferred publication, and post-commit continuation state.
-    pub(crate) publication: PublicationState,
-    /// Provider declarations, cache refresh, quota, and live route ownership.
+    /// Provider declarations, cache refresh, quota, and route ownership.
     pub(crate) provider_runtime: ProviderRuntimeState,
-    /// Available agent roles.
-    pub(crate) available_roles: std::collections::HashMap<String, tau_config::settings::AgentRole>,
-    /// Configured roles disabled because their required skills are unavailable.
-    disabled_role_reasons: HashMap<String, DisabledRoleReason>,
-    /// Ordered role navigation groups for the currently available roles.
-    pub(crate) available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
-    /// Receiver-capable roles in deterministic configured order.
-    pub(crate) inter_session_receivers: Vec<crate::model::InterSessionReceiverRole>,
-    /// Reusable prompt templates from the effective startup harness settings.
-    pub(crate) custom_prompts: Vec<tau_proto::HarnessCustomPrompt>,
-    /// Handlebars template used to mint new stable agent identifiers.
-    pub(crate) agent_id_template: String,
-    /// Optional Handlebars template used to name newly created agents.
-    pub(crate) agent_display_name_template: Option<String>,
-    /// Role overrides changed at runtime for this process.
-    pub(crate) role_overrides: std::collections::HashMap<String, tau_config::settings::AgentRole>,
-    /// Harness-owned declarative tool tag policy applied before role overrides.
-    pub(crate) tool_policy: tau_config::settings::ToolPolicy,
-    /// Currently selected role. The resolved model is derived from this role
-    /// and provider model availability.
-    pub(crate) selected_role: String,
-    /// Model currently resolved from [`Self::selected_role`] and provider
-    /// availability. `None` means the role has no provider-published model yet.
-    pub(crate) selected_model: Option<ModelId>,
-    /// State that belongs to exactly the currently bound session.
-    /// Keep session-scoped counters here instead of as top-level
-    /// harness fields, so `:session new` resets them with one assignment.
-    pub(crate) current_session_state: CurrentSessionState,
-    /// Manual, reactive, and UI standalone-compaction runtime ownership.
-    pub(crate) compaction_runtime: CompactionRuntimeState,
-    /// Skill, AGENTS.md, context-provider, preview, and template discovery
-    /// state.
-    pub(crate) context_discovery: ContextDiscoveryState,
-    /// Model-visible notices waiting to be folded into the next real user
-    /// prompt.
-    pub(crate) pending_notices: PendingPromptNoticeState,
-    /// Complete transient ambient-indicator contributions by source and agent.
-    agent_runtime_indicators: HashMap<
-        tau_proto::ConnectionId,
-        HashMap<AgentId, std::collections::BTreeSet<tau_proto::AgentRuntimeIndicator>>,
-    >,
-    /// Prompt ids canceled by `:cancel`. Late agent events for these
-    /// prompts are ignored and never folded into session state.
-    pub(crate) canceled_prompts: std::collections::HashSet<AgentPromptId>,
-    /// State for harness-owned delegate/wait tools.
-    pub(crate) subagents: SubagentToolState,
 }
 
 /// Decode the provider-only HumanUi wrapper for the semantic echo test
@@ -2130,7 +1982,7 @@ struct PendingUiCompactionAfterWait {
 
 impl Harness {
     fn enable_debug_log(&mut self, dir: &Path) -> Result<PathBuf, HarnessError> {
-        if self.debug_log_poisoned {
+        if self.runtime_io.debug_log_poisoned {
             return Err(path_std_io::Error::other(
                 "debug JSONL append disabled after an incomplete rollback",
             )
@@ -2138,7 +1990,7 @@ impl Harness {
         }
         let log = DebugEventLog::open(dir)?;
         let path = log.path().to_path_buf();
-        self.debug_log = Some(log);
+        self.runtime_io.debug_log = Some(log);
         Ok(path)
     }
 
@@ -2239,6 +2091,7 @@ impl Harness {
             .expect("known-safe SessionId must be valid");
         self.dispatch_user_prompt(target_session_id.clone(), text.to_owned())?;
         let (target_agent_id, target_outer_turn_id) = self
+            .agent_runtime
             .agent_registry
             .agents
             .values()
@@ -2272,7 +2125,7 @@ impl Harness {
             is_final: false,
         }));
         let sink_observations = path_std_sync::Arc::clone(&observations);
-        self.bus.connect(Connection::new(
+        self.runtime_io.bus.connect(Connection::new(
             PendingConnectionMetadata {
                 id: Some(committed_observer_id.clone()),
                 name: tau_proto::ExtensionName::parse("embedded_committed_event_observer")
@@ -2328,7 +2181,7 @@ impl Harness {
                 }
             })),
         ));
-        if let Err(error) = self.bus.set_subscriptions(
+        if let Err(error) = self.runtime_io.bus.set_subscriptions(
             &committed_observer_id,
             Vec::new(),
             vec![
@@ -2339,7 +2192,7 @@ impl Harness {
                 EventSelector::Exact(tau_proto::EventName::AGENT_OUTER_TURN_FINISHED),
             ],
         ) {
-            self.bus.disconnect(&committed_observer_id);
+            self.runtime_io.bus.disconnect(&committed_observer_id);
             return Err(HarnessError::Route(error));
         }
         let started_at = Instant::now();
@@ -2372,7 +2225,7 @@ impl Harness {
                         .min(remaining)
                 })
                 .unwrap_or(remaining);
-            let harness_evt = match self.rx.recv_timeout(wait) {
+            let harness_evt = match self.runtime_io.rx.recv_timeout(wait) {
                 Ok(event) => self.expand_component_ingress_wake(event),
                 Err(mpsc::RecvTimeoutError::Timeout)
                     if started_at.elapsed() < RESPONSE_TIMEOUT
@@ -2443,7 +2296,7 @@ impl Harness {
                 }
             }
         };
-        self.bus.disconnect(&committed_observer_id);
+        self.runtime_io.bus.disconnect(&committed_observer_id);
         result
     }
 
@@ -2462,9 +2315,9 @@ impl Harness {
             tau_proto::SessionStartReason::Initial,
             crate::HarnessStorageMode::Durable,
         )?;
-        harness.selected_model = Some("test/model".parse().expect("model id"));
+        harness.config.selected_model = Some("test/model".parse().expect("model id"));
 
-        let role = harness.selected_role.clone();
+        let role = harness.config.selected_role.clone();
         let cid = harness.try_create_durable_user_agent(
             "s1".parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
@@ -2536,9 +2389,13 @@ impl Harness {
     ) -> Result<AgentPromptCreated, HarnessError> {
         let mut cursor = path_crate_event_log::EventLogSeq::new(0);
         loop {
-            let entry = self.event_log.get_next_from(cursor).ok_or_else(|| {
-                HarnessError::Participant("prompt event missing from test observer".to_owned())
-            })?;
+            let entry = self
+                .runtime_io
+                .event_log
+                .get_next_from(cursor)
+                .ok_or_else(|| {
+                    HarnessError::Participant("prompt event missing from test observer".to_owned())
+                })?;
             cursor = entry.seq.next();
             if let Event::AgentPromptCreated(prompt) = entry.event {
                 if prompt.tools_ref.is_some() {
@@ -2586,9 +2443,9 @@ impl Harness {
             .extensions
             .order
             .iter()
-            .filter_map(|id| self.bus.disconnect(id).map(|_| id.clone()))
+            .filter_map(|id| self.runtime_io.bus.disconnect(id).map(|_| id.clone()))
             .collect::<HashSet<_>>();
-        self.component_ingress.close();
+        self.runtime_io.component_ingress.close();
         let in_process_shutdown_deadline = Instant::now() + in_process_cleanup_grace;
 
         let order = self.extensions.order.clone();
@@ -2856,7 +2713,7 @@ impl Harness {
         match message {
             HarnessInputMessage::Hello(hello) => {
                 if let Err(error) = validate_protocol_version(&hello) {
-                    let _ = self.bus.send_to(
+                    let _ = self.runtime_io.bus.send_to(
                         client_id,
                         None,
                         HarnessOutputMessage::Disconnect(Disconnect {
@@ -2866,7 +2723,7 @@ impl Harness {
                     return Ok(ClientMessageDisposition::CloseAfterReply);
                 }
                 if hello.client_kind != ClientKind::Ui && hello.expected_session_id.is_some() {
-                    let _ = self.bus.send_to(
+                    let _ = self.runtime_io.bus.send_to(
                         client_id,
                         None,
                         HarnessOutputMessage::Disconnect(Disconnect {
@@ -2878,8 +2735,8 @@ impl Harness {
                     return Ok(ClientMessageDisposition::CloseAfterReply);
                 }
                 if let Some(expected_session_id) = hello.expected_session_id {
-                    if expected_session_id != self.current_session_id {
-                        let _ = self.bus.send_to(
+                    if expected_session_id != self.session_runtime.current_session_id {
+                        let _ = self.runtime_io.bus.send_to(
                             client_id,
                             None,
                             HarnessOutputMessage::Disconnect(Disconnect {
@@ -2887,17 +2744,17 @@ impl Harness {
                                     "session target mismatch: requested `{expected_session_id}`, \
                                      but the connected harness is serving `{}`; retry `tau attach \
                                      {expected_session_id}`",
-                                    self.current_session_id
+                                    self.session_runtime.current_session_id
                                 )),
                             }),
                         );
                         return Ok(ClientMessageDisposition::CloseAfterReply);
                     }
-                    self.bus.send_to(
+                    self.runtime_io.bus.send_to(
                         client_id,
                         None,
                         HarnessOutputMessage::UiSessionAccepted(tau_proto::UiSessionAccepted {
-                            session_id: self.current_session_id.clone(),
+                            session_id: self.session_runtime.current_session_id.clone(),
                         }),
                     )?;
                 }
@@ -2918,7 +2775,7 @@ impl Harness {
                 ) {
                     Ok(()) => Ok(ClientMessageDisposition::Continue),
                     Err(RouteError::SubscriptionDenied { reason, .. }) => {
-                        let _ = self.bus.send_to(
+                        let _ = self.runtime_io.bus.send_to(
                             client_id,
                             None,
                             HarnessOutputMessage::Disconnect(Disconnect {
@@ -2949,14 +2806,14 @@ impl Harness {
             }
             HarnessInputMessage::GetCurrentSession(request) => {
                 if self.is_ui_client(client_id) {
-                    let _ = self.bus.send_to(
+                    let _ = self.runtime_io.bus.send_to(
                         client_id,
                         None,
                         HarnessOutputMessage::CurrentSessionResult(
                             tau_proto::CurrentSessionResult {
                                 request_id: request.request_id,
-                                session_id: self.current_session_id.clone(),
-                                project_root: self.project_root.clone(),
+                                session_id: self.session_runtime.current_session_id.clone(),
+                                project_root: self.session_runtime.project_root.clone(),
                             },
                         ),
                     );
@@ -2991,7 +2848,7 @@ impl Harness {
                 if let Some(result) =
                     self.start_external_agent_message_auth(client_id.clone(), request)
                 {
-                    let _ = self.bus.send_to(
+                    let _ = self.runtime_io.bus.send_to(
                         client_id,
                         None,
                         HarnessOutputMessage::ExternalAgentMessageResult(result),
@@ -3008,7 +2865,7 @@ impl Harness {
                     return Ok(ClientMessageDisposition::Continue);
                 }
                 let result = self.handle_external_agent_message_auth_request(request);
-                let _ = self.bus.send_to(
+                let _ = self.runtime_io.bus.send_to(
                     client_id,
                     None,
                     HarnessOutputMessage::ExternalAgentMessageAuthResult(result),
@@ -3025,10 +2882,10 @@ impl Harness {
                 }
                 let result = tau_proto::PeerSessionProbeResult {
                     request_id: request.request_id,
-                    available: request.session_id == self.current_session_id
+                    available: request.session_id == self.session_runtime.current_session_id
                         && self.has_peer_entrypoint(),
                 };
-                let _ = self.bus.send_to(
+                let _ = self.runtime_io.bus.send_to(
                     client_id,
                     None,
                     HarnessOutputMessage::PeerSessionProbeResult(result),
@@ -3116,13 +2973,20 @@ impl Harness {
         request: &tau_proto::ExtInternalPromptSubmitRequest,
     ) -> Result<(), HarnessError> {
         let agent_id = request.agent_id.to_string();
-        let Some(cid) = self.agent_registry.agent_routes.get(&agent_id).cloned() else {
+        let Some(cid) = self
+            .agent_runtime
+            .agent_registry
+            .agent_routes
+            .get(&agent_id)
+            .cloned()
+        else {
             self.emit_info(&format!(
                 "extension prompt submit rejected: unknown or unloaded agent `{agent_id}`"
             ));
             return Ok(());
         };
         let Some(session_id) = self
+            .agent_runtime
             .agent_registry
             .agents
             .get(&cid)

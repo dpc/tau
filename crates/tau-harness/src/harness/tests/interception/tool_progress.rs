@@ -19,11 +19,12 @@ fn progress_report(call_id: &str, message: &str) -> Event {
 
 /// Seed the minimum routed-call ownership needed by progress validation.
 fn seed_routed_call(harness: &mut Harness, call_id: &str, source: &str) {
-    harness.tool_runtime.tool_agents.insert(
+    harness.tool_routing.tool_runtime.tool_agents.insert(
         call_id.into(),
         tau_proto::AgentId::parse("agent").expect("valid agent id"),
     );
     harness
+        .tool_routing
         .tool_runtime
         .pending_tool_providers
         .insert(call_id.into(), crate::test_connection_id(source));
@@ -36,7 +37,7 @@ fn committed_progress(
 ) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = harness.event_log.get_next_from(seq) {
+    while let Some(entry) = harness.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         let matches_call = match &entry.event {
             Event::ToolProgressReported(progress) | Event::ToolProgress(progress) => {
@@ -105,6 +106,7 @@ fn replaced_progress_report_is_validated_only_after_commit() {
         .expect("commit replacement report");
     assert!(matches!(
         harness
+            .runtime_io
             .publication
             .pending_intercept
             .as_ref()
@@ -165,6 +167,7 @@ fn dropped_progress_report_has_no_downstream_effect() {
     assert!(committed_progress(&harness, "call-dropped").is_empty());
     assert_eq!(
         harness
+            .tool_routing
             .tool_runtime
             .pending_tool_providers
             .get("call-dropped")
@@ -185,7 +188,7 @@ fn progress_report_without_exact_route_commits_without_canonical_fact() {
         "configured-tool",
         tau_proto::ClientKind::Tool,
     );
-    harness.tool_runtime.tool_agents.insert(
+    harness.tool_routing.tool_runtime.tool_agents.insert(
         "call-unrouted".into(),
         tau_proto::AgentId::parse("agent").expect("valid agent id"),
     );
@@ -301,6 +304,7 @@ fn parked_stale_generation_cannot_publish_canonical_progress() {
     ));
     assert_eq!(
         harness
+            .tool_routing
             .tool_runtime
             .pending_tool_providers
             .get("call-stale")

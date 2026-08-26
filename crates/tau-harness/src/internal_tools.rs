@@ -206,14 +206,15 @@ impl<'a> InternalToolHost<'a> {
     /// Register a harness-process internal tool.
     pub fn register_internal_tool(&mut self, spec: ToolSpec, group: Option<tau_proto::ToolGroup>) {
         if let Some(group) = group {
-            let _ = self.harness.registry.register_internal_with_group(
-                crate::harness::harness_connection_id(),
-                spec,
-                group,
-            );
+            let _ = self
+                .harness
+                .tool_routing
+                .registry
+                .register_internal_with_group(crate::harness::harness_connection_id(), spec, group);
         } else {
             let _ = self
                 .harness
+                .tool_routing
                 .registry
                 .register_internal(crate::harness::harness_connection_id(), spec);
         }
@@ -233,15 +234,23 @@ impl<'a> InternalToolHost<'a> {
     pub fn discovered_skills(&self, conversation_id: &AgentId) -> Vec<InternalSkill> {
         let skills = self
             .harness
+            .agent_runtime
             .agent_registry
             .agents
             .get(conversation_id)
             .and_then(|agent| agent.agent_id.as_deref())
             .and_then(|agent_id| tau_proto::AgentId::parse(agent_id).ok())
-            .and_then(|agent_id| self.harness.context_discovery.frozen_agents.get(&agent_id))
-            .map_or(&self.harness.context_discovery.skills, |snapshot| {
-                &snapshot.skills
-            });
+            .and_then(|agent_id| {
+                self.harness
+                    .prompt_coordination
+                    .context_discovery
+                    .frozen_agents
+                    .get(&agent_id)
+            })
+            .map_or(
+                &self.harness.prompt_coordination.context_discovery.skills,
+                |snapshot| &snapshot.skills,
+            );
         skills
             .iter()
             .filter(|(_, skill)| !skill.disable_model_invocation)
@@ -285,6 +294,7 @@ impl<'a> InternalToolHost<'a> {
     pub fn current_agent_summaries(&self) -> Vec<InternalAgentSummary> {
         let mut summaries = self
             .harness
+            .agent_runtime
             .agent_registry
             .agents
             .values()
@@ -294,7 +304,7 @@ impl<'a> InternalToolHost<'a> {
                 let role = agent
                     .role
                     .clone()
-                    .unwrap_or_else(|| self.harness.selected_role.clone());
+                    .unwrap_or_else(|| self.harness.config.selected_role.clone());
                 Some(InternalAgentSummary {
                     group: self.harness.role_group_name_for_role(&role),
                     role,
@@ -314,20 +324,26 @@ impl<'a> InternalToolHost<'a> {
                 state: InternalAgentState::Pending,
             },
         ));
-        summaries.extend(self.harness.agent_registry.restored_unavailable.iter().map(
-            |(agent_id, role)| InternalAgentSummary {
-                group: self.harness.role_group_name_for_role(role),
-                agent_id: agent_id.clone(),
-                role: role.clone(),
-                state: InternalAgentState::RestoredUnavailable,
-            },
-        ));
+        summaries.extend(
+            self.harness
+                .agent_runtime
+                .agent_registry
+                .restored_unavailable
+                .iter()
+                .map(|(agent_id, role)| InternalAgentSummary {
+                    group: self.harness.role_group_name_for_role(role),
+                    agent_id: agent_id.clone(),
+                    role: role.to_string(),
+                    state: InternalAgentState::RestoredUnavailable,
+                }),
+        );
         let represented = summaries
             .iter()
             .map(|summary| summary.agent_id.clone())
             .collect::<std::collections::HashSet<_>>();
         summaries.extend(
             self.harness
+                .agent_runtime
                 .agent_registry
                 .stopped_ids
                 .iter()
@@ -335,6 +351,7 @@ impl<'a> InternalToolHost<'a> {
                 .map(|agent_id| {
                     let role = self
                         .harness
+                        .session_runtime
                         .agent_store
                         .agent_events(agent_id.as_str())
                         .ok()
@@ -344,7 +361,7 @@ impl<'a> InternalToolHost<'a> {
                                 _ => None,
                             })
                         })
-                        .unwrap_or_else(|| self.harness.selected_role.clone());
+                        .unwrap_or_else(|| self.harness.config.selected_role.clone());
                     InternalAgentSummary {
                         group: self.harness.role_group_name_for_role(&role),
                         agent_id: agent_id.to_string(),
@@ -364,6 +381,7 @@ impl<'a> InternalToolHost<'a> {
     /// process-local map.
     pub fn agent_id_for_harness_start_query(&self, query_id: &str) -> Option<String> {
         self.harness
+            .agent_runtime
             .agent_registry
             .pending_builtin_delegates
             .get(query_id)
@@ -392,11 +410,11 @@ impl<'a> InternalToolHost<'a> {
             );
             return;
         };
-        let tx = self.harness.tx.clone();
-        let current_session_id = self.harness.current_session_id.clone();
+        let tx = self.harness.runtime_io.tx.clone();
+        let current_session_id = self.harness.session_runtime.current_session_id.clone();
         let command = crate::event::SessionDiscoveryCompletedCommand {
             conversation_id: conversation_id.clone(),
-            session_generation: self.harness.current_session_generation,
+            session_generation: self.harness.session_runtime.current_session_generation,
             call_id: call.id.clone(),
             tool_name: visible_tool_name,
             tool_type: call.tool_type,
@@ -472,6 +490,7 @@ impl<'a> InternalToolHost<'a> {
     pub fn background_tool_call(&mut self, call_id: &ToolCallId, result: CborValue) {
         if self
             .harness
+            .tool_routing
             .tool_runtime
             .tool_turn
             .begin_backgrounding(call_id)
@@ -539,11 +558,13 @@ impl<'a> InternalToolHost<'a> {
     ) -> Option<(AgentId, AgentToolCall, ToolName)> {
         let cid = self
             .harness
+            .tool_routing
             .tool_runtime
             .tool_agents
             .get(&started.call_id)
             .or_else(|| {
                 self.harness
+                    .tool_routing
                     .tool_runtime
                     .peer_internal_tool_agents
                     .get(&started.call_id)
@@ -551,6 +572,7 @@ impl<'a> InternalToolHost<'a> {
             .clone();
         let pending = self
             .harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .get(&started.call_id)?
@@ -573,12 +595,14 @@ impl<'a> InternalToolHost<'a> {
     ) -> Option<AgentOwnedInternalToolCall> {
         let cid = self
             .harness
+            .tool_routing
             .tool_runtime
             .tool_agents
             .get(&started.call_id)?
             .clone();
         let pending = self
             .harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .get(&started.call_id)?
@@ -607,27 +631,36 @@ impl<'a> InternalToolHost<'a> {
     pub(crate) fn self_info(&self, owner: &AgentOwnedInternalToolCall) -> Option<InternalSelfInfo> {
         let agent = self
             .harness
+            .agent_runtime
             .agent_registry
             .agents
             .get(owner.conversation_id())?;
         let agent_id = tau_proto::AgentId::parse(agent.agent_id.as_deref()?).ok()?;
         let prompt_id = self
             .harness
+            .prompt_coordination
             .prompt_runtime
             .tool_call_prompts
             .get(&owner.call().id)?;
         let started = self
             .harness
+            .session_runtime
             .agent_store
             .agent(agent_id.as_str())?
             .prompt_started(prompt_id)?;
         let model_params = started.model_params?;
-        let session_dir = self.harness.storage_mode.is_durable().then(|| {
-            self.harness
-                .store
-                .sessions_dir()
-                .join(agent.session_id.as_str())
-        });
+        let session_dir = self
+            .harness
+            .session_runtime
+            .storage_mode
+            .is_durable()
+            .then(|| {
+                self.harness
+                    .session_runtime
+                    .store
+                    .sessions_dir()
+                    .join(agent.session_id.as_str())
+            });
         Some(InternalSelfInfo {
             agent_id,
             session_id: agent.session_id.clone(),
@@ -651,6 +684,7 @@ impl<'a> InternalToolHost<'a> {
     ) -> Result<(), HarnessError> {
         let cid = self
             .harness
+            .agent_runtime
             .agent_registry
             .agent_routes
             .get(agent_id)
@@ -843,7 +877,7 @@ impl<'a> InternalToolHost<'a> {
 
     /// Return the harness's active session id.
     pub fn current_session_id(&self) -> tau_proto::SessionId {
-        self.harness.current_session_id.clone()
+        self.harness.session_runtime.current_session_id.clone()
     }
 
     /// Resolve and publish one bare message through this session's entrypoint.
@@ -885,7 +919,7 @@ impl<'a> InternalToolHost<'a> {
             tau_proto::AgentMessageKind::Message,
             Some(crate::harness::ExternalMessageToolCompletion {
                 conversation_id: conversation_id.clone(),
-                session_generation: self.harness.current_session_generation,
+                session_generation: self.harness.session_runtime.current_session_generation,
                 call_id,
                 tool_name,
                 tool_type,
@@ -960,6 +994,7 @@ impl<'a> InternalToolHost<'a> {
 
     fn sender_conversation_id(&self, sender_agent_id: &str) -> Result<AgentId, String> {
         self.harness
+            .agent_runtime
             .agent_registry
             .agent_routes
             .get(sender_agent_id)
@@ -989,8 +1024,8 @@ impl Harness {
         let reserved_name = ToolName::new(crate::self_info_tool::SELF_INFO_TOOL_NAME);
         handlers.retain(|handler| !handler.handles(&reserved_name));
         handlers.insert(0, crate::self_info_tool::handler());
-        self.internal_tool_handlers = handlers;
-        let handlers = self.internal_tool_handlers.clone();
+        self.tool_routing.internal_tool_handlers = handlers;
+        let handlers = self.tool_routing.internal_tool_handlers.clone();
         let mut host = InternalToolHost::new(self);
         for handler in handlers {
             for spec in handler.tool_specs() {
@@ -1004,7 +1039,7 @@ impl Harness {
         &mut self,
         event: &Event,
     ) -> Result<(), HarnessError> {
-        let handlers = self.internal_tool_handlers.clone();
+        let handlers = self.tool_routing.internal_tool_handlers.clone();
         for handler in handlers {
             let mut host = InternalToolHost::new(self);
             handler.handle_event(&mut host, event)?;

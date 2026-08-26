@@ -96,7 +96,13 @@ pub(super) fn watch_category_for_retry(
 impl Harness {
     pub(super) fn notify_agent_watchers_about_user_prompt(&mut self, agent_id: &str, text: &str) {
         for watcher_id in self.watchers_for_agent(agent_id) {
-            let Some(sender_cid) = self.agent_registry.agent_routes.get(agent_id).cloned() else {
+            let Some(sender_cid) = self
+                .agent_runtime
+                .agent_registry
+                .agent_routes
+                .get(agent_id)
+                .cloned()
+            else {
                 return;
             };
             if self
@@ -117,6 +123,7 @@ impl Harness {
     /// provider response itself has committed.
     pub(super) fn notify_agent_watchers_about_response(&mut self, cid: &AgentId, message: String) {
         let Some(agent_id) = self
+            .agent_runtime
             .agent_registry
             .agents
             .get(cid)

@@ -40,7 +40,7 @@ fn add_routed_prompt(h: &mut Harness, agent_id: &str, prompt_id: &str, provider_
     let mut agent = Agent::new(
         cid.clone(),
         1,
-        h.current_session_id.clone(),
+        h.session_runtime.current_session_id.clone(),
         tau_proto::PromptOriginator::User,
         None,
         None,
@@ -52,11 +52,15 @@ fn add_routed_prompt(h: &mut Harness, agent_id: &str, prompt_id: &str, provider_
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
     );
-    h.agent_registry.agents.insert(cid.clone(), agent);
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .insert(cid.clone(), agent);
+    h.agent_runtime
+        .agent_registry
         .agent_routes
         .insert(agent_id.to_owned(), cid.clone());
-    h.prompt_runtime.agents.insert(
+    h.prompt_coordination.prompt_runtime.agents.insert(
         prompt_id
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -162,7 +166,10 @@ fn retry_routes_exact_prompt_and_trusts_only_correlated_provider_result() {
     );
 
     h.provider_runtime.pending_prompts.remove("prompt-b");
-    h.prompt_runtime.agents.remove("prompt-b");
+    h.prompt_coordination
+        .prompt_runtime
+        .agents
+        .remove("prompt-b");
     h.handle_extension_event(
         "provider-b",
         TestProtocolItem::Event(retry_result(
@@ -218,14 +225,18 @@ fn retry_rejects_invalid_targets_and_duplicate_request_ids() {
     let mut idle_agent = Agent::new(
         idle.clone(),
         2,
-        h.current_session_id.clone(),
+        h.session_runtime.current_session_id.clone(),
         tau_proto::PromptOriginator::User,
         None,
         None,
     );
     idle_agent.agent_id = Some("idle-agent".to_owned());
-    h.agent_registry.agents.insert(idle.clone(), idle_agent);
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .insert(idle.clone(), idle_agent);
+    h.agent_runtime
+        .agent_registry
         .agent_routes
         .insert("idle-agent".to_owned(), idle);
 

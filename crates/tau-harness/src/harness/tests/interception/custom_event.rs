@@ -25,7 +25,7 @@ fn source_committed(
     predicate: impl Fn(&tau_proto::CustomEvent) -> bool,
 ) -> bool {
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source)
             && let Event::ExtensionEvent(event) = &entry.event
@@ -44,7 +44,8 @@ fn connect_custom_observer(
     selectors: Vec<EventSelector>,
 ) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let sink = connect_test_client(h, id, tau_proto::ClientKind::Tool);
-    h.bus
+    h.runtime_io
+        .bus
         .set_subscriptions(&crate::test_connection_id(id), Vec::new(), selectors)
         .expect("subscribe to custom events");
     sink

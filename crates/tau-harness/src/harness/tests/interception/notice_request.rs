@@ -16,6 +16,7 @@ fn connect_notice_observer(
 ) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let sink = connect_test_client(harness, connection_id, tau_proto::ClientKind::Ui);
     harness
+        .runtime_io
         .bus
         .set_subscriptions(
             &crate::test_connection_id(connection_id),
@@ -49,7 +50,7 @@ fn connect_handshaking_configured_extension(
 fn committed_extension_notices(harness: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut notices = Vec::new();
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = harness.event_log.get_next_from(seq) {
+    while let Some(entry) = harness.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches!(
             &entry.event,
@@ -501,6 +502,7 @@ fn pre_hello_request_follows_protocol_failure_path() {
     assert_eq!(entry.state, crate::extension::ExtensionState::Disconnected);
     assert!(
         harness
+            .runtime_io
             .bus
             .connection(&crate::test_connection_id("spawning-requester"))
             .is_none()
@@ -679,9 +681,16 @@ fn routine_notice_output_is_not_replayed() {
             notice_request("live only", tau_proto::NoticeLevel::Warning),
         )
         .expect("request notice");
-    assert!(harness.replayable_harness_notices.iter().all(|notice| {
-        notice.kind != tau_proto::notice_kind::EXTENSION_NOTICE || notice.message != "live only"
-    }));
+    assert!(
+        harness
+            .runtime_io
+            .replayable_harness_notices
+            .iter()
+            .all(|notice| {
+                notice.kind != tau_proto::notice_kind::EXTENSION_NOTICE
+                    || notice.message != "live only"
+            })
+    );
 
     let late = connect_test_client(&mut harness, "late", tau_proto::ClientKind::Ui);
     harness.replay_harness_notice(

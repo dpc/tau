@@ -18,7 +18,7 @@ fn prompt_submission_events(
 ) -> Vec<(Option<tau_proto::ConnectionId>, tau_proto::EventName)> {
     let mut events = Vec::new();
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = harness.event_log.get_next_from(seq) {
+    while let Some(entry) = harness.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches!(
             entry.event,
@@ -33,7 +33,7 @@ fn prompt_submission_events(
 fn committed_events(harness: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = harness.event_log.get_next_from(seq) {
+    while let Some(entry) = harness.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         events.push((entry.source, entry.event));
     }
@@ -53,7 +53,7 @@ fn publish_terminal_accounting_report(
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "accounting-prompt");
-    harness.prompt_runtime.agents.insert(
+    harness.prompt_coordination.prompt_runtime.agents.insert(
         "accounting-prompt"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -65,18 +65,22 @@ fn publish_terminal_accounting_report(
             .expect("known-safe AgentPromptId must be valid"),
         crate::test_connection_id("provider"),
     );
-    harness.prompt_runtime.models.insert(
+    harness.prompt_coordination.prompt_runtime.models.insert(
         "accounting-prompt"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         "provider/model".into(),
     );
-    harness.prompt_runtime.estimated_cost_rates.insert(
-        "accounting-prompt"
-            .parse::<tau_proto::AgentPromptId>()
-            .expect("known-safe AgentPromptId must be valid"),
-        tau_proto::ESTIMATED_API_COST_FALLBACK,
-    );
+    harness
+        .prompt_coordination
+        .prompt_runtime
+        .estimated_cost_rates
+        .insert(
+            "accounting-prompt"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+            tau_proto::ESTIMATED_API_COST_FALLBACK,
+        );
     let mut report = super::dispatch::provider_text_response(
         &"accounting-prompt"
             .parse::<tau_proto::AgentPromptId>()
@@ -186,8 +190,9 @@ fn prompt_submitted_report_commits_before_harness_canonical_fact() {
     );
     assert!(
         harness
+            .session_runtime
             .store
-            .session_restore_events(harness.current_session_id.as_str())
+            .session_restore_events(harness.session_runtime.current_session_id.as_str())
             .expect("restore events")
             .is_empty(),
         "explicit persist=true must not make reports restore facts"
@@ -253,8 +258,9 @@ fn pre_ready_provider_execution_report_retains_persistence_envelope() {
     ));
     assert!(
         harness
+            .session_runtime
             .store
-            .session_restore_events(harness.current_session_id.as_str())
+            .session_restore_events(harness.session_runtime.current_session_id.as_str())
             .expect("restore events")
             .is_empty(),
         "the staged persist=false envelope must remain live-only"
@@ -326,7 +332,7 @@ fn canceled_prompt_still_accepts_owned_cache_diagnostic() {
             .expect("known-safe AgentPromptId must be valid"),
         crate::test_connection_id("provider"),
     );
-    harness.canceled_prompts.insert(
+    harness.prompt_coordination.canceled_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -355,7 +361,7 @@ fn canceled_prompt_still_accepts_owned_cache_diagnostic() {
 
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
     let mut found = false;
-    while let Some(entry) = harness.event_log.get_next_from(seq) {
+    while let Some(entry) = harness.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         found |= entry.source.as_deref() == Some(HARNESS_CONNECTION_ID)
             && matches!(entry.event, Event::ProviderCacheMissDiagnostic(_));
@@ -592,6 +598,7 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
     provider.lock().expect("provider sink").clear();
     harness.preempt_cache_refresh_for_prompt(&changed_prefix);
     harness
+        .runtime_io
         .bus
         .send_to(
             &crate::test_connection_id("provider"),
@@ -811,7 +818,7 @@ fn canceled_submitted_and_updated_reports_are_observation_only() {
             .expect("known-safe AgentPromptId must be valid"),
         crate::test_connection_id("provider"),
     );
-    harness.canceled_prompts.insert(
+    harness.prompt_coordination.canceled_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -919,13 +926,14 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_runtime.agents.insert(
+    harness.prompt_coordination.prompt_runtime.agents.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         cid.clone(),
     );
     harness
+        .agent_runtime
         .agent_registry
         .agents
         .get_mut(&cid)
@@ -936,6 +944,7 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
             .expect("known-safe AgentPromptId must be valid"),
     );
     harness
+        .agent_runtime
         .agent_registry
         .agents
         .get_mut(&cid)
@@ -987,6 +996,7 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
             .map(|(_, event)| event.name())
             .collect::<Vec<_>>(),
         harness
+            .runtime_io
             .publication
             .pending_intercept
             .as_ref()
@@ -1037,13 +1047,14 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_runtime.agents.insert(
+    harness.prompt_coordination.prompt_runtime.agents.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         cid.clone(),
     );
     harness
+        .agent_runtime
         .agent_registry
         .agents
         .get_mut(&cid)
@@ -1054,6 +1065,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
             .expect("known-safe AgentPromptId must be valid"),
     );
     harness
+        .agent_runtime
         .agent_registry
         .agents
         .get_mut(&cid)
@@ -1145,7 +1157,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
 fn startup_connection_handling_surfaces_pending_publish_error_once() {
     let temp = TempDir::new().expect("temp dir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.publication.pending_error = Some(HarnessError::Participant(
+    harness.runtime_io.publication.pending_error = Some(HarnessError::Participant(
         "terminal dispatch failed".to_owned(),
     ));
 
@@ -1193,14 +1205,19 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
         .expect("subscribe observer");
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_runtime.agents.insert(
+    harness.prompt_coordination.prompt_runtime.agents.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         cid.clone(),
     );
     {
-        let agent = harness.agent_registry.agents.get_mut(&cid).expect("agent");
+        let agent = harness
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent");
         agent.in_flight_prompt = Some(
             "prompt-1"
                 .parse::<tau_proto::AgentPromptId>()
@@ -1240,7 +1257,7 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
     let event_path = failure_store.join(agent_id.as_str()).join("events.cbor");
     std::fs::remove_file(&event_path).expect("remove agent stream");
     std::fs::create_dir_all(&event_path).expect("block agent stream with directory");
-    harness.agent_store = agent_store;
+    harness.session_runtime.agent_store = agent_store;
 
     harness
         .handle_extension_event_inner(
@@ -1276,6 +1293,7 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
     );
     assert!(
         harness
+            .agent_runtime
             .agent_registry
             .agents
             .get(&cid)
@@ -1391,14 +1409,19 @@ fn stale_finished_report_termination_uses_harness_source() {
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_runtime.agents.insert(
+    harness.prompt_coordination.prompt_runtime.agents.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         cid.clone(),
     );
     {
-        let agent = harness.agent_registry.agents.get_mut(&cid).expect("agent");
+        let agent = harness
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent");
         agent.in_flight_prompt = Some(
             "prompt-1"
                 .parse::<tau_proto::AgentPromptId>()

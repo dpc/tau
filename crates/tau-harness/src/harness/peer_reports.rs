@@ -518,6 +518,7 @@ impl Harness {
                 .get(source_id)
                 .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
                 && self
+                    .runtime_io
                     .bus
                     .connection(source_id)
                     .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
@@ -551,6 +552,7 @@ impl Harness {
                 .get(source_id)
                 .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
                 && self
+                    .runtime_io
                     .bus
                     .connection(source_id)
                     .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
@@ -584,6 +586,7 @@ impl Harness {
                 .get(source_id)
                 .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
                 && self
+                    .runtime_io
                     .bus
                     .connection(source_id)
                     .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
@@ -617,6 +620,7 @@ impl Harness {
                 .get(source_id)
                 .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
                 && self
+                    .runtime_io
                     .bus
                     .connection(source_id)
                     .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
@@ -656,6 +660,7 @@ impl Harness {
                 .get(source_id)
                 .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
                 && self
+                    .runtime_io
                     .bus
                     .connection(source_id)
                     .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
@@ -708,6 +713,7 @@ impl Harness {
                 .get(source_id)
                 .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
                 && self
+                    .runtime_io
                     .bus
                     .connection(source_id)
                     .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
@@ -755,6 +761,7 @@ impl Harness {
                 .get(source_id)
                 .is_some_and(|entry| entry.state != ExtensionState::Disconnected)
                 && self
+                    .runtime_io
                     .bus
                     .connection(source_id)
                     .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket);
@@ -829,8 +836,9 @@ impl Harness {
     ) {
         if !Self::peer_event_semantics_survive_rollover(event)
             && peer_context.extension.as_ref().is_some_and(|extension| {
-                extension.admission.session_id != self.current_session_id
-                    || extension.admission.session_generation != self.current_session_generation
+                extension.admission.session_id != self.session_runtime.current_session_id
+                    || extension.admission.session_generation
+                        != self.session_runtime.current_session_generation
             })
         {
             // The raw event has already committed and remains observable. A
@@ -1022,8 +1030,9 @@ impl Harness {
         };
         let source_id = &extension.source;
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
-            extension.admission.session_id == self.current_session_id
-                && extension.admission.session_generation == self.current_session_generation
+            extension.admission.session_id == self.session_runtime.current_session_id
+                && extension.admission.session_generation
+                    == self.session_runtime.current_session_generation
                 && entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
                 && entry.name == extension.publisher
@@ -1037,7 +1046,10 @@ impl Harness {
         if let Err(error) =
             self.handle_extension_internal_prompt_submit_request(&extension.publisher, request)
         {
-            self.publication.pending_error.get_or_insert(error);
+            self.runtime_io
+                .publication
+                .pending_error
+                .get_or_insert(error);
         }
     }
 
@@ -1053,8 +1065,9 @@ impl Harness {
         };
         let source_id = &extension.source;
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
-            extension.admission.session_id == self.current_session_id
-                && extension.admission.session_generation == self.current_session_generation
+            extension.admission.session_id == self.session_runtime.current_session_id
+                && extension.admission.session_generation
+                    == self.session_runtime.current_session_generation
                 && entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
                 && entry.name == extension.publisher
@@ -1065,7 +1078,10 @@ impl Harness {
             return;
         }
         if let Err(error) = self.handle_start_agent_request(source_id, request.clone()) {
-            self.publication.pending_error.get_or_insert(error);
+            self.runtime_io
+                .publication
+                .pending_error
+                .get_or_insert(error);
         }
     }
 
@@ -1094,6 +1110,7 @@ impl Harness {
                         && entry.state != ExtensionState::Disconnected
                 })
                 && self
+                    .runtime_io
                     .bus
                     .connection(&extension.source)
                     .is_some_and(|connection| connection.origin != ConnectionOrigin::Socket)
@@ -1140,8 +1157,9 @@ impl Harness {
         };
         let source_id = &extension.source;
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
-            extension.admission.session_id == self.current_session_id
-                && extension.admission.session_generation == self.current_session_generation
+            extension.admission.session_id == self.session_runtime.current_session_id
+                && extension.admission.session_generation
+                    == self.session_runtime.current_session_generation
                 && entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
                 && entry.name == extension.publisher
@@ -1194,7 +1212,10 @@ impl Harness {
             }
             Event::ExtensionContextReady(ready) => {
                 if let Err(error) = self.apply_extension_context_ready(source_id, ready.clone()) {
-                    self.publication.pending_error.get_or_insert(error);
+                    self.runtime_io
+                        .publication
+                        .pending_error
+                        .get_or_insert(error);
                 }
             }
             _ => unreachable!("caller filters per-agent context events"),
@@ -1247,18 +1268,24 @@ impl Harness {
 
         self.track_extension_tool_request_metadata(request);
         let turn_categories = self
+            .tool_routing
             .registry
             .resolve_provider(request.tool_name.as_str())
             .map_or_else(ToolTurnCategories::default, |provider| {
                 ToolTurnCategories::from_tags(&provider.tool.tags)
             });
-        match self.registry.route_tool_request(request.clone()) {
+        match self
+            .tool_routing
+            .registry
+            .route_tool_request(request.clone())
+        {
             Ok(route) => {
                 let Some(cid) = self
+                    .agent_runtime
                     .agent_registry
                     .agent_routes
                     .get(request.agent_id.as_str())
-                    .filter(|cid| self.agent_registry.agents.contains_key(*cid))
+                    .filter(|cid| self.agent_runtime.agent_registry.agents.contains_key(*cid))
                     .cloned()
                 else {
                     self.reject_peer_tool_request(
@@ -1271,14 +1298,18 @@ impl Harness {
                     );
                     return;
                 };
-                self.tool_runtime
+                self.tool_routing
+                    .tool_runtime
                     .peer_internal_tool_agents
                     .insert(request.call_id.clone(), cid.clone());
-                self.tool_runtime.tool_turn.record_unqueued_in_flight(
-                    cid.clone(),
-                    request.call_id.clone(),
-                    turn_categories,
-                );
+                self.tool_routing
+                    .tool_runtime
+                    .tool_turn
+                    .record_unqueued_in_flight(
+                        cid.clone(),
+                        request.call_id.clone(),
+                        turn_categories,
+                    );
                 self.bump_tools_started_for(&cid);
                 match &route.target {
                     ToolRouteTarget::Internal => {
@@ -1292,10 +1323,12 @@ impl Harness {
                         // Establish terminal-report authority before the selected
                         // tool can observe `tool.started` and immediately answer.
                         self.ensure_tool_started_subscription(provider_connection_id);
-                        self.tool_runtime
+                        self.tool_routing
+                            .tool_runtime
                             .pending_tool_providers
                             .insert(request.call_id.clone(), provider_connection_id.clone());
-                        self.tool_runtime
+                        self.tool_routing
+                            .tool_runtime
                             .peer_tool_requests
                             .insert(request.call_id.clone());
                     }
@@ -1307,7 +1340,7 @@ impl Harness {
                 self.reject_unroutable_extension_tool_request(request.clone(), tool_name);
             }
             Err(error) => {
-                self.publication.pending_error = Some(HarnessError::ToolRoute(error));
+                self.runtime_io.publication.pending_error = Some(HarnessError::ToolRoute(error));
             }
         }
     }
@@ -1454,7 +1487,8 @@ impl Harness {
             return;
         }
         if self.agent_is_ephemeral(&pending.target_agent_id) {
-            self.prompt_runtime
+            self.prompt_coordination
+                .prompt_runtime
                 .ephemeral_provider_retry_requests
                 .insert(result.request_id.clone());
         }
@@ -1470,7 +1504,7 @@ impl Harness {
                 pending.target_label
             ),
         };
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             &pending.requester_client_id,
             Some(crate::harness::harness_connection_id()),
             HarnessOutputMessage::deliver(Event::UiRetryPromptResult(
@@ -1490,7 +1524,10 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         submitted: &tau_proto::ProviderPromptSubmitted,
     ) {
-        if !self.canceled_prompts.contains(&submitted.agent_prompt_id)
+        if !self
+            .prompt_coordination
+            .canceled_prompts
+            .contains(&submitted.agent_prompt_id)
             && self.provider_prompt_owner_matches(
                 source_id,
                 &submitted.agent_prompt_id,
@@ -1509,7 +1546,10 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         updated: &tau_proto::ProviderResponseUpdated,
     ) {
-        if self.canceled_prompts.contains(&updated.agent_prompt_id)
+        if self
+            .prompt_coordination
+            .canceled_prompts
+            .contains(&updated.agent_prompt_id)
             || !self.provider_prompt_owner_matches(
                 source_id,
                 &updated.agent_prompt_id,
@@ -1524,7 +1564,8 @@ impl Harness {
         let mut updated = updated.clone();
         updated.agent_id = agent_id;
         if !updated.deltas.is_empty() {
-            self.prompt_runtime
+            self.prompt_coordination
+                .prompt_runtime
                 .semantic_output
                 .insert(updated.agent_prompt_id.clone());
         }
@@ -1534,6 +1575,7 @@ impl Harness {
             .as_ref()
             .and_then(|status| status.retry.clone())
             && !self
+                .agent_runtime
                 .agent_registry
                 .agents
                 .get(&updated.agent_id)
@@ -1541,6 +1583,7 @@ impl Harness {
             && let Some(public_id) = self.ensure_agent_id_for_agent(&updated.agent_id)
         {
             let turn_generation = self
+                .agent_runtime
                 .agent_registry
                 .agents
                 .get(&updated.agent_id)
@@ -1548,7 +1591,7 @@ impl Harness {
             self.update_agent_watch_provider_status(
                 &public_id,
                 tau_proto::AgentWatchProviderStatusNotification {
-                    session_id: self.current_session_id.clone(),
+                    session_id: self.session_runtime.current_session_id.clone(),
                     subscription_id: String::new(),
                     turn_generation,
                     agent_prompt_id: updated.agent_prompt_id.clone(),
@@ -1589,7 +1632,10 @@ impl Harness {
                 },
             );
             if let Err(error) = result {
-                self.publication.pending_error.get_or_insert(error);
+                self.runtime_io
+                    .publication
+                    .pending_error
+                    .get_or_insert(error);
             }
         }
     }
@@ -1641,21 +1687,25 @@ impl Harness {
                         && entry.state != ExtensionState::Disconnected
                 });
         let source_owns_route = self
+            .tool_routing
             .tool_runtime
             .pending_tool_providers
             .get(&progress.call_id)
             .is_some_and(|source| source == &extension.source);
         if !source_is_current
             || !(self
+                .tool_routing
                 .tool_runtime
                 .tool_agents
                 .contains_key(&progress.call_id)
                 || self
+                    .tool_routing
                     .tool_runtime
                     .peer_tool_requests
                     .contains(&progress.call_id))
             || !source_owns_route
             || self
+                .tool_routing
                 .tool_runtime
                 .tool_turn
                 .is_backgrounded(&progress.call_id)
@@ -1663,7 +1713,12 @@ impl Harness {
             return;
         }
         let mut progress = progress.clone();
-        if let Some(tool) = self.tool_runtime.pending_tools.get(&progress.call_id) {
+        if let Some(tool) = self
+            .tool_routing
+            .tool_runtime
+            .pending_tools
+            .get(&progress.call_id)
+        {
             progress.tool_name = tool.name.clone();
         }
         self.enqueue_publish(
@@ -1712,13 +1767,22 @@ impl Harness {
             _ => unreachable!("caller filters terminal tool reports"),
         };
         let source_owns_route = self
+            .tool_routing
             .tool_runtime
             .pending_tool_providers
             .get(call_id)
             .is_some_and(|source| source == &extension.source);
         if !source_is_current
-            || !(self.tool_runtime.tool_agents.contains_key(call_id)
-                || self.tool_runtime.peer_tool_requests.contains(call_id))
+            || !(self
+                .tool_routing
+                .tool_runtime
+                .tool_agents
+                .contains_key(call_id)
+                || self
+                    .tool_routing
+                    .tool_runtime
+                    .peer_tool_requests
+                    .contains(call_id))
             || !source_owns_route
         {
             return;
@@ -1751,8 +1815,9 @@ impl Harness {
         };
         let source_id = &extension.source;
         let source_is_current = self.extensions.entries.get(source_id).is_some_and(|entry| {
-            extension.admission.session_id == self.current_session_id
-                && extension.admission.session_generation == self.current_session_generation
+            extension.admission.session_id == self.session_runtime.current_session_id
+                && extension.admission.session_generation
+                    == self.session_runtime.current_session_generation
                 && entry.connection_id == extension.source
                 && entry.instance_id == extension.instance_id
                 && entry.name == extension.publisher
@@ -1796,7 +1861,10 @@ impl Harness {
                 if let Err(error) =
                     self.apply_extension_session_context_ready(source_id, ready.clone())
                 {
-                    self.publication.pending_error.get_or_insert(error);
+                    self.runtime_io
+                        .publication
+                        .pending_error
+                        .get_or_insert(error);
                 }
             }
             _ => unreachable!("caller filters session-discovery events"),
@@ -1939,7 +2007,10 @@ impl Harness {
                 MAX_EXTENSION_ACTIVATION_MESSAGES, MAX_EXTENSION_ACTIVATION_BYTES
             );
             if let Err(error) = self.handle_extension_protocol_failure(source_id, message) {
-                self.publication.pending_error.get_or_insert(error);
+                self.runtime_io
+                    .publication
+                    .pending_error
+                    .get_or_insert(error);
             }
             return false;
         }
@@ -2107,16 +2178,16 @@ impl Harness {
         if remove {
             pending.remove(&source_id);
         }
-        if self.publication.pending_error.is_none()
+        if self.runtime_io.publication.pending_error.is_none()
             && let Err(error) = self.maybe_finish_extension_activation(Some(&source_id))
         {
-            self.publication.pending_error = Some(error);
+            self.runtime_io.publication.pending_error = Some(error);
         }
     }
 
     /// Propagate a fatal error raised synchronously by downstream publish work.
     pub(super) fn take_pending_publish_error(&mut self) -> Result<(), HarnessError> {
-        match self.publication.pending_error.take() {
+        match self.runtime_io.publication.pending_error.take() {
             Some(error) => Err(error),
             None => Ok(()),
         }
@@ -2200,6 +2271,7 @@ impl Harness {
             }
         } else {
             let visible_name = self
+                .tool_routing
                 .registry
                 .providers_for(unregister.tool_name.as_str())
                 .into_iter()
@@ -2207,10 +2279,12 @@ impl Harness {
                 .map(|provider| self.tool_model_visible_name(&provider.tool).clone())
                 .unwrap_or_else(|| unregister.tool_name.clone());
             let removed = self
+                .tool_routing
                 .registry
                 .unregister(source_id, unregister.tool_name.as_str());
             if removed {
                 if self
+                    .tool_routing
                     .registry
                     .providers_for(unregister.tool_name.as_str())
                     .is_empty()
@@ -2259,7 +2333,12 @@ impl Harness {
         tool_name: ToolName,
         message: String,
     ) {
-        let owning_cid = self.tool_runtime.tool_agents.get(&request.call_id).cloned();
+        let owning_cid = self
+            .tool_routing
+            .tool_runtime
+            .tool_agents
+            .get(&request.call_id)
+            .cloned();
         let rejected = ToolRejected {
             call_id: request.call_id.clone(),
             tool_name: tool_name.clone(),
@@ -2349,11 +2428,27 @@ impl Harness {
         if !self.validate_tool_event_source(&result.call_id, source_id) {
             return;
         }
-        if self.tool_runtime.tool_turn.is_backgrounded(&result.call_id) {
+        if self
+            .tool_routing
+            .tool_runtime
+            .tool_turn
+            .is_backgrounded(&result.call_id)
+        {
             self.handle_background_tool_result(crate::harness::harness_connection_id(), result);
-        } else if let Some(cid) = self.tool_runtime.tool_agents.get(&result.call_id).cloned() {
+        } else if let Some(cid) = self
+            .tool_routing
+            .tool_runtime
+            .tool_agents
+            .get(&result.call_id)
+            .cloned()
+        {
             let mut allows_provider_image = false;
-            if let Some(tool) = self.tool_runtime.pending_tools.get(&result.call_id) {
+            if let Some(tool) = self
+                .tool_routing
+                .tool_runtime
+                .pending_tools
+                .get(&result.call_id)
+            {
                 tool.restore_terminal_result_metadata(&mut result);
                 allows_provider_image = tool.allows_provider_image;
             }
@@ -2361,7 +2456,8 @@ impl Harness {
             let validation = if has_provider_image && !allows_provider_image {
                 Err("the originating tool is not authorized for image output".to_owned())
             } else {
-                self.agent_registry
+                self.agent_runtime
+                    .agent_registry
                     .agents
                     .get(&cid)
                     .and_then(|agent| {
@@ -2374,7 +2470,8 @@ impl Harness {
                     })
                     .ok_or_else(|| "the owning agent is unavailable".to_owned())
                     .and_then(|(agent_id, parent)| {
-                        self.agent_store
+                        self.session_runtime
+                            .agent_store
                             .validate_agent_event_at(
                                 &agent_id,
                                 Some(tau_core::PersistedEventSource::Connection(
@@ -2429,10 +2526,12 @@ impl Harness {
                 result,
             );
         } else if self
+            .tool_routing
             .tool_runtime
             .peer_tool_requests
             .contains(&result.call_id)
             && let Some(tool) = self
+                .tool_routing
                 .tool_runtime
                 .pending_tools
                 .get(&result.call_id)
@@ -2478,10 +2577,26 @@ impl Harness {
         if !self.validate_tool_event_source(&error.call_id, source_id) {
             return;
         }
-        if self.tool_runtime.tool_turn.is_backgrounded(&error.call_id) {
+        if self
+            .tool_routing
+            .tool_runtime
+            .tool_turn
+            .is_backgrounded(&error.call_id)
+        {
             self.handle_background_tool_error(Some(crate::harness::harness_connection_id()), error);
-        } else if let Some(cid) = self.tool_runtime.tool_agents.get(&error.call_id).cloned() {
-            if let Some(tool) = self.tool_runtime.pending_tools.get(&error.call_id) {
+        } else if let Some(cid) = self
+            .tool_routing
+            .tool_runtime
+            .tool_agents
+            .get(&error.call_id)
+            .cloned()
+        {
+            if let Some(tool) = self
+                .tool_routing
+                .tool_runtime
+                .pending_tools
+                .get(&error.call_id)
+            {
                 error.tool_name = tool.name.clone();
                 error.tool_type = tool.tool_type;
             }
@@ -2492,10 +2607,16 @@ impl Harness {
                 error,
             );
         } else if self
+            .tool_routing
             .tool_runtime
             .peer_tool_requests
             .contains(&error.call_id)
-            && let Some(tool) = self.tool_runtime.pending_tools.get(&error.call_id).cloned()
+            && let Some(tool) = self
+                .tool_routing
+                .tool_runtime
+                .pending_tools
+                .get(&error.call_id)
+                .cloned()
         {
             error.tool_name = tool.name;
             error.tool_type = tool.tool_type;
@@ -2521,6 +2642,7 @@ impl Harness {
             return;
         }
         if self
+            .tool_routing
             .tool_runtime
             .tool_turn
             .is_backgrounded(&cancelled.call_id)
@@ -2530,18 +2652,25 @@ impl Harness {
                 cancelled,
             );
         } else if let Some(cid) = self
+            .tool_routing
             .tool_runtime
             .tool_agents
             .get(&cancelled.call_id)
             .cloned()
         {
             let call_id = cancelled.call_id.clone();
-            if let Some(tool) = self.tool_runtime.pending_tools.get(&cancelled.call_id) {
+            if let Some(tool) = self
+                .tool_routing
+                .tool_runtime
+                .pending_tools
+                .get(&cancelled.call_id)
+            {
                 cancelled.tool_name = tool.name.clone();
                 cancelled.tool_type = tool.tool_type;
             }
             if self.tool_terminal_has_open_durable_owner(&cid, &call_id) {
                 let cause = self
+                    .tool_routing
                     .tool_runtime
                     .pending_cancellation_observations
                     .get(&call_id)
@@ -2565,10 +2694,12 @@ impl Harness {
                 self.clear_tool_call_tracking(call_id.as_str());
             }
         } else if self
+            .tool_routing
             .tool_runtime
             .peer_tool_requests
             .contains(&cancelled.call_id)
             && let Some(tool) = self
+                .tool_routing
                 .tool_runtime
                 .pending_tools
                 .get(&cancelled.call_id)
@@ -2603,8 +2734,9 @@ impl Harness {
                 .get(&extension.source)
                 .is_some_and(|entry| {
                     entry.connection_id == extension.source
-                        && extension.admission.session_id == self.current_session_id
-                        && extension.admission.session_generation == self.current_session_generation
+                        && extension.admission.session_id == self.session_runtime.current_session_id
+                        && extension.admission.session_generation
+                            == self.session_runtime.current_session_generation
                         && entry.instance_id == extension.instance_id
                         && entry.name == extension.publisher
                         && entry.kind == extension.kind

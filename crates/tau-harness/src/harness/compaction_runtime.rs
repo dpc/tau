@@ -12,12 +12,12 @@ impl Harness {
         session_id: SessionId,
         target_agent_id: Option<&str>,
     ) {
-        if session_id != self.current_session_id {
+        if session_id != self.session_runtime.current_session_id {
             self.send_ui_error_response(
                 client_id,
                 format!(
                     "cannot compact session `{session_id}` in this harness; active session is `{}`",
-                    self.current_session_id
+                    self.session_runtime.current_session_id
                 ),
             );
             return;
@@ -26,7 +26,7 @@ impl Harness {
             self.send_ui_error_response(client_id, "unknown agent for compaction");
             return;
         };
-        let Some(agent) = self.agent_registry.agents.get(&cid) else {
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get(&cid) else {
             self.send_ui_error_response(client_id, "target user agent is missing");
             return;
         };
@@ -69,7 +69,11 @@ impl Harness {
             );
             return;
         };
-        if let Some(pending) = self.compaction_runtime.pending_ui_after_wait.get(&cid)
+        if let Some(pending) = self
+            .prompt_coordination
+            .compaction_runtime
+            .pending_ui_after_wait
+            .get(&cid)
             && pending.wait_call_id == *wait_call_id
             && self.wait_claimed_for_manual_compaction(&cid, wait_call_id)
         {
@@ -80,6 +84,7 @@ impl Harness {
             return;
         }
         if self
+            .tool_routing
             .tool_runtime
             .pending_terminal_observations
             .contains_key(wait_call_id)
@@ -91,7 +96,13 @@ impl Harness {
             return;
         }
         let wait_call_id = wait_call_id.clone();
-        let Some(tool) = self.tool_runtime.pending_tools.get(&wait_call_id).cloned() else {
+        let Some(tool) = self
+            .tool_routing
+            .tool_runtime
+            .pending_tools
+            .get(&wait_call_id)
+            .cloned()
+        else {
             self.send_ui_error_response(
                 client_id,
                 "cannot compact while a prompt or tool turn is in flight",
@@ -107,15 +118,18 @@ impl Harness {
             );
             return;
         }
-        self.compaction_runtime.pending_ui_after_wait.insert(
-            cid.clone(),
-            PendingUiCompactionAfterWait {
-                session_generation: self.current_session_generation,
-                agent_id,
-                wait_call_id: wait_call_id.clone(),
-                requester_client_id: client_id.clone(),
-            },
-        );
+        self.prompt_coordination
+            .compaction_runtime
+            .pending_ui_after_wait
+            .insert(
+                cid.clone(),
+                PendingUiCompactionAfterWait {
+                    session_generation: self.session_runtime.current_session_generation,
+                    agent_id,
+                    wait_call_id: wait_call_id.clone(),
+                    requester_client_id: client_id.clone(),
+                },
+            );
         self.observe_tool_terminal(&cid, &wait_call_id, tau_proto::ToolTerminalCause::Unknown);
         self.publish_for_agent(
             &cid,
@@ -133,6 +147,7 @@ impl Harness {
     /// have established an idle target.
     pub(super) fn start_admitted_manual_compaction(&mut self, cid: &AgentId) {
         let conv = self
+            .agent_runtime
             .agent_registry
             .agents
             .get(cid)
@@ -192,7 +207,7 @@ impl Harness {
             ))
             .expect("known-safe AgentPromptId must be valid");
             let originator = conv.originator.clone();
-            if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
                 agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
             }
             self.publish_for_agent(
@@ -279,7 +294,7 @@ impl Harness {
             );
             return;
         };
-        let Some(target) = self.agent_registry.agents.get(&target_cid) else {
+        let Some(target) = self.agent_runtime.agent_registry.agents.get(&target_cid) else {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
                 call.id.clone(),
@@ -293,6 +308,7 @@ impl Harness {
         let self_request = target_cid == *caller_cid;
         let target_public_id = target.agent_id.clone();
         if self
+            .prompt_coordination
             .compaction_runtime
             .accepted_manual_tools
             .values()
@@ -379,12 +395,14 @@ impl Harness {
             return;
         };
         let caller_active_requests = self
+            .prompt_coordination
             .compaction_runtime
             .accepted_manual_tools
             .values()
             .filter(|entry| entry.request.caller_agent_id.as_str() == caller_public_id)
             .count()
             + self
+                .prompt_coordination
                 .compaction_runtime
                 .pending_manual_tools
                 .values()
@@ -401,8 +419,12 @@ impl Harness {
             );
             return;
         }
-        let Some(initiating_agent_prompt_id) =
-            self.prompt_runtime.tool_call_prompts.get(&call.id).cloned()
+        let Some(initiating_agent_prompt_id) = self
+            .prompt_coordination
+            .prompt_runtime
+            .tool_call_prompts
+            .get(&call.id)
+            .cloned()
         else {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
@@ -415,10 +437,12 @@ impl Harness {
             return;
         };
         let target_generation = self
+            .session_runtime
             .agent_store
             .agent(target_public_id.as_str())
             .map_or(0, tau_core::AgentTree::ordinary_inference_generation);
         let repeated_generation = self
+            .session_runtime
             .agent_store
             .agent(target_public_id.as_str())
             .and_then(|tree| tree.manual_compaction_recoveries().into_iter().last())
@@ -453,6 +477,7 @@ impl Harness {
             return;
         }
         let request_ordinal = self
+            .session_runtime
             .agent_store
             .agent(target_public_id.as_str())
             .map_or(0, |tree| tree.manual_compaction_recoveries().len());
@@ -482,14 +507,22 @@ impl Harness {
             &target_cid,
             Event::AgentManualCompactionRequested(request.clone()),
         );
-        self.compaction_runtime.accepted_manual_tools.insert(
-            request_id.clone(),
-            AcceptedManualCompactionTool {
-                request: request.clone(),
-                visible_tool_name,
-            },
-        );
-        if self.tool_runtime.tool_turn.begin_backgrounding(&call.id) {
+        self.prompt_coordination
+            .compaction_runtime
+            .accepted_manual_tools
+            .insert(
+                request_id.clone(),
+                AcceptedManualCompactionTool {
+                    request: request.clone(),
+                    visible_tool_name,
+                },
+            );
+        if self
+            .tool_routing
+            .tool_runtime
+            .tool_turn
+            .begin_backgrounding(&call.id)
+        {
             self.observe_tool_backgrounded(&call.id);
             self.publish_internal_background_placeholder(
                 &call.id,
@@ -524,6 +557,7 @@ impl Harness {
         request_id: &tau_proto::CompactionRequestId,
     ) -> bool {
         let Some(accepted) = self
+            .prompt_coordination
             .compaction_runtime
             .accepted_manual_tools
             .get(request_id)
@@ -531,7 +565,7 @@ impl Harness {
         else {
             return false;
         };
-        let Some(target) = self.agent_registry.agents.get(target_cid) else {
+        let Some(target) = self.agent_runtime.agent_registry.agents.get(target_cid) else {
             self.fail_accepted_manual_compaction(
                 target_cid,
                 &accepted.request,
@@ -592,6 +626,7 @@ impl Harness {
                     )
                 });
         let safe_boundary = self
+            .session_runtime
             .agent_store
             .agent(accepted.request.target_agent_id.as_str())
             .is_some_and(|tree| {
@@ -643,22 +678,26 @@ impl Harness {
         let compact_prompt_id =
             tau_proto::AgentPromptId::parse(format!("ap-{target_public_id}-{next_prompt_index}"))
                 .expect("known-safe AgentPromptId must be valid");
-        if let Some(target) = self.agent_registry.agents.get_mut(target_cid) {
+        if let Some(target) = self.agent_runtime.agent_registry.agents.get_mut(target_cid) {
             target.next_prompt_index = target.next_prompt_index.saturating_add(1);
         }
-        self.compaction_runtime
+        self.prompt_coordination
+            .compaction_runtime
             .accepted_manual_tools
             .remove(request_id);
-        self.compaction_runtime.pending_manual_tools.insert(
-            transaction_id.clone(),
-            PendingManualCompactionTool {
-                request_id: request_id.clone(),
-                caller_agent_id: accepted.request.caller_agent_id.clone(),
-                call_id: accepted.request.initiating_tool_call_id.clone(),
-                tool_name: accepted.request.visible_tool_name.clone(),
-                target_agent_id: accepted.request.target_agent_id.clone(),
-            },
-        );
+        self.prompt_coordination
+            .compaction_runtime
+            .pending_manual_tools
+            .insert(
+                transaction_id.clone(),
+                PendingManualCompactionTool {
+                    request_id: request_id.clone(),
+                    caller_agent_id: accepted.request.caller_agent_id.clone(),
+                    call_id: accepted.request.initiating_tool_call_id.clone(),
+                    tool_name: accepted.request.visible_tool_name.clone(),
+                    target_agent_id: accepted.request.target_agent_id.clone(),
+                },
+            );
         self.publish_for_agent(
             target_cid,
             Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
@@ -715,6 +754,7 @@ impl Harness {
 
         let role_name = self.role_name_for_agent_id(cid);
         let role_compaction = self
+            .config
             .available_roles
             .get(&role_name)
             .and_then(|role| role.inference_compaction.or(role.compaction))
@@ -735,7 +775,7 @@ impl Harness {
     }
 
     pub(super) fn agent_model_supports_compaction(&self, cid: &AgentId) -> bool {
-        let Some(conv) = self.agent_registry.agents.get(cid) else {
+        let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
         let continuation_model = match &conv.output_length_continuation {
@@ -763,7 +803,8 @@ impl Harness {
         agent_id: &str,
         provisional_cut: tau_proto::AgentHead,
     ) -> tau_proto::AgentHead {
-        self.agent_store
+        self.session_runtime
+            .agent_store
             .agent(agent_id)
             .map_or(provisional_cut, |tree| {
                 tree.closed_provider_prefix_at_or_before(provisional_cut)
@@ -779,7 +820,7 @@ impl Harness {
         resume_through: Option<tau_proto::AgentHead>,
         current_head: tau_proto::AgentHead,
     ) -> Option<tau_proto::AgentHead> {
-        let tree = self.agent_store.agent(agent_id)?;
+        let tree = self.session_runtime.agent_store.agent(agent_id)?;
         let normalized = tree.closed_provider_prefix_at_or_before(failed_cut);
         (tree.contains_head_ancestry(normalized, current_head)
             && resume_through.is_none_or(|owed| tree.contains_head_ancestry(owed, current_head)))
@@ -799,7 +840,7 @@ impl Harness {
         let Some((failed_id, failed_cut, resume_through)) = dispatch.blocked_recovery() else {
             return false;
         };
-        let Some(tree) = self.agent_store.agent(agent_id) else {
+        let Some(tree) = self.session_runtime.agent_store.agent(agent_id) else {
             return false;
         };
         let Some(tau_core::StandaloneCompactionRecovery::Blocked { failed, .. }) =
@@ -828,11 +869,12 @@ impl Harness {
         activation_cut: Option<tau_proto::AgentHead>,
     ) -> bool {
         let owed = self
+            .agent_runtime
             .agent_registry
             .agents
             .get(cid)
             .and_then(|agent| agent.agent_id.as_deref())
-            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
             .and_then(tau_core::AgentTree::standalone_compaction_recovery);
         if let Some(tau_core::StandaloneCompactionRecovery::AwaitingAutomaticStart {
             decision,
@@ -866,12 +908,12 @@ impl Harness {
         projected_tokens: Option<u64>,
         policies: &BTreeMap<String, tau_config::settings::CompactionPolicy>,
     ) -> Option<tau_proto::AutomaticCompactionDecision> {
-        let conv = self.agent_registry.agents.get(cid)?;
+        let conv = self.agent_runtime.agent_registry.agents.get(cid)?;
         let projected_tokens = projected_tokens?;
         if conv
             .agent_id
             .as_deref()
-            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
             .and_then(tau_core::AgentTree::standalone_compaction_recovery)
             .is_some()
         {
@@ -926,7 +968,7 @@ impl Harness {
         let transaction_id =
             tau_proto::CompactionTransactionId::parse(format!("ct-{}", conv.next_prompt_index))
                 .expect("generated compaction transaction id is valid");
-        if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
         }
         Some(tau_proto::AutomaticCompactionDecision {
@@ -963,7 +1005,7 @@ impl Harness {
         decision: tau_proto::AutomaticCompactionDecision,
         cut: tau_proto::AgentHead,
     ) -> bool {
-        let Some(conv) = self.agent_registry.agents.get(cid) else {
+        let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
         if conv.pending_automatic_compaction_start.as_ref() == Some(&decision.transaction_id) {
@@ -976,11 +1018,12 @@ impl Harness {
             .head
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
         if self
+            .session_runtime
             .agent_store
             .agent(&agent_id)
             .is_some_and(|tree| !tree.is_ancestor_head(cut, selected))
         {
-            if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
                 agent.pending_automatic_compaction_start = Some(decision.transaction_id.clone());
             }
             self.publish_for_agent(
@@ -1002,7 +1045,7 @@ impl Harness {
                 .expect("known-safe AgentPromptId must be valid");
         let originator = conv.originator.clone();
         let resume_through = (selected != cut).then_some(selected);
-        if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
             agent.pending_automatic_compaction_start = Some(decision.transaction_id.clone());
         }
@@ -1033,7 +1076,7 @@ impl Harness {
         activation_cut: Option<tau_proto::AgentHead>,
         point: path_tau_config_settings::ContextPolicyPoint,
     ) -> bool {
-        let Some(conv) = self.agent_registry.agents.get(cid) else {
+        let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
         let Some(input_tokens) = conv.context_input_tokens else {
@@ -1055,7 +1098,7 @@ impl Harness {
             return false;
         }
         let role_name = self.role_name_for_agent_id(cid);
-        let role = self.available_roles.get(&role_name);
+        let role = self.config.available_roles.get(&role_name);
         let status_available =
             if point == path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished {
                 conv.terminal_status_was_available
@@ -1146,7 +1189,8 @@ impl Harness {
         };
         let provisional_cut = activation_cut.unwrap_or_else(|| {
             if resume_through.is_some() {
-                self.agent_store
+                self.session_runtime
+                    .agent_store
                     .agent(&agent_id)
                     .and_then(|tree| conv.head.and_then(|head| tree.node(head)))
                     .and_then(|node| node.parent_id)
@@ -1164,7 +1208,7 @@ impl Harness {
         let compact_prompt_id =
             tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{}", conv.next_prompt_index))
                 .expect("known-safe AgentPromptId must be valid");
-        if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
         }
         self.publish_for_agent(
@@ -1189,16 +1233,18 @@ impl Harness {
     /// state has seeded the run-local wait tracker.
     pub(super) fn consume_restored_self_compaction_deliveries(&mut self) {
         let delivered = self
+            .agent_runtime
             .agent_registry
             .agents
             .values()
             .filter_map(|agent| agent.agent_id.as_deref())
-            .filter_map(|agent_id| self.agent_store.agent(agent_id))
+            .filter_map(|agent_id| self.session_runtime.agent_store.agent(agent_id))
             .flat_map(tau_core::AgentTree::manual_compaction_recoveries)
             .filter_map(|recovery| match recovery {
                 tau_core::ManualCompactionRecovery::Waiting(_) => None,
                 tau_core::ManualCompactionRecovery::Started { requested, .. }
                 | tau_core::ManualCompactionRecovery::Failed { requested, .. } => self
+                    .session_runtime
                     .agent_store
                     .agent(requested.caller_agent_id.as_str())
                     .and_then(|tree| {
@@ -1216,12 +1262,13 @@ impl Harness {
     /// already committed an inference activation that still lacks a checkpoint.
     pub(super) fn release_restored_self_compaction_failure_continuations(&mut self) {
         let releasable = self
+            .agent_runtime
             .agent_registry
             .agents
             .iter()
             .filter_map(|(cid, agent)| {
                 let agent_id = agent.agent_id.as_deref()?;
-                let tree = self.agent_store.agent(agent_id)?;
+                let tree = self.session_runtime.agent_store.agent(agent_id)?;
                 let typed_failure = tree.manual_compaction_recoveries().into_iter().any(
                     |recovery| match recovery {
                         tau_core::ManualCompactionRecovery::Started {
@@ -1250,7 +1297,7 @@ impl Harness {
             })
             .collect::<Vec<_>>();
         for cid in releasable {
-            if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
             }
         }
@@ -1277,7 +1324,7 @@ impl Harness {
         else {
             return None;
         };
-        let conv = self.agent_registry.agents.get_mut(cid)?;
+        let conv = self.agent_runtime.agent_registry.agents.get_mut(cid)?;
         let agent_id = conv.agent_id.as_deref()?;
         let prompt_id =
             tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{}", conv.next_prompt_index))
@@ -1313,13 +1360,16 @@ impl Harness {
             let (request, started) = match recovery {
                 tau_core::ManualCompactionRecovery::Waiting(request) => {
                     let tool_name = request.visible_tool_name.clone();
-                    self.compaction_runtime.accepted_manual_tools.insert(
-                        request.request_id.clone(),
-                        AcceptedManualCompactionTool {
-                            request: request.clone(),
-                            visible_tool_name: tool_name,
-                        },
-                    );
+                    self.prompt_coordination
+                        .compaction_runtime
+                        .accepted_manual_tools
+                        .insert(
+                            request.request_id.clone(),
+                            AcceptedManualCompactionTool {
+                                request: request.clone(),
+                                visible_tool_name: tool_name,
+                            },
+                        );
                     if let Some(caller_cid) = self
                         .runtime_agent_id_for_target_agent(Some(request.caller_agent_id.as_str()))
                         && !self
@@ -1367,7 +1417,8 @@ impl Harness {
                         tool_name: requested.visible_tool_name.clone(),
                         target_agent_id: requested.target_agent_id.clone(),
                     };
-                    self.compaction_runtime
+                    self.prompt_coordination
+                        .compaction_runtime
                         .pending_manual_tools
                         .insert(started.transaction_id.clone(), pending);
                     (requested, Some((started, outcome)))
@@ -1406,7 +1457,12 @@ impl Harness {
                         && !self.self_compaction_terminal_delivered(&requested)
                     {
                         self.consume_wait_background_completion(&requested.initiating_tool_call_id);
-                        if let Some(agent) = self.agent_registry.agents.get_mut(&caller_cid) {
+                        if let Some(agent) = self
+                            .agent_runtime
+                            .agent_registry
+                            .agents
+                            .get_mut(&caller_cid)
+                        {
                             agent
                                 .pending_prompts
                                 .push_back(self_compaction_terminal_pending_prompt(
@@ -1438,7 +1494,8 @@ impl Harness {
                 &caller_cid,
                 &request.initiating_tool_call_id,
             ) {
-                self.compaction_runtime
+                self.prompt_coordination
+                    .compaction_runtime
                     .pending_manual_tools
                     .remove(&started.transaction_id);
                 if request.resume_inference && !self.self_compaction_terminal_delivered(&request) {
@@ -1464,7 +1521,12 @@ impl Harness {
                         }
                         None => continue,
                     };
-                    if let Some(agent) = self.agent_registry.agents.get_mut(&caller_cid) {
+                    if let Some(agent) = self
+                        .agent_runtime
+                        .agent_registry
+                        .agents
+                        .get_mut(&caller_cid)
+                    {
                         agent
                             .pending_prompts
                             .push_back(self_compaction_terminal_pending_prompt(terminal));
@@ -1517,12 +1579,18 @@ impl Harness {
                             BackgroundCompletionPromptMode::QueueOnly
                         },
                     );
-                    self.compaction_runtime
+                    self.prompt_coordination
+                        .compaction_runtime
                         .pending_manual_tools
                         .remove(&started.transaction_id);
                     if request.resume_inference {
                         self.consume_wait_background_completion(&request.initiating_tool_call_id);
-                        if let Some(agent) = self.agent_registry.agents.get_mut(&target_cid) {
+                        if let Some(agent) = self
+                            .agent_runtime
+                            .agent_registry
+                            .agents
+                            .get_mut(&target_cid)
+                        {
                             agent.pending_prompts.push_back(
                                 self_compaction_terminal_pending_prompt(
                                     tau_proto::SelfCompactionTerminal {
@@ -1559,12 +1627,18 @@ impl Harness {
                             BackgroundCompletionPromptMode::QueueAndAdvance
                         },
                     );
-                    self.compaction_runtime
+                    self.prompt_coordination
+                        .compaction_runtime
                         .pending_manual_tools
                         .remove(&started.transaction_id);
                     if request.resume_inference {
                         self.consume_wait_background_completion(&call_id);
-                        if let Some(agent) = self.agent_registry.agents.get_mut(&caller_cid) {
+                        if let Some(agent) = self
+                            .agent_runtime
+                            .agent_registry
+                            .agents
+                            .get_mut(&caller_cid)
+                        {
                             agent.pending_prompts.push_back(
                                 self_compaction_terminal_pending_prompt(
                                     tau_proto::SelfCompactionTerminal {
@@ -1586,6 +1660,7 @@ impl Harness {
         }
         for (target_cid, request_id) in waiting {
             let self_request = self
+                .prompt_coordination
                 .compaction_runtime
                 .accepted_manual_tools
                 .get(&request_id)
@@ -1601,10 +1676,11 @@ impl Harness {
         caller_cid: &AgentId,
         request: &tau_proto::AgentManualCompactionRequested,
     ) {
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .tool_agents
             .insert(request.initiating_tool_call_id.clone(), caller_cid.clone());
-        self.tool_runtime.pending_tools.insert(
+        self.tool_routing.tool_runtime.pending_tools.insert(
             request.initiating_tool_call_id.clone(),
             PendingTool {
                 name: request.visible_tool_name.clone(),
@@ -1613,7 +1689,8 @@ impl Harness {
                 allows_provider_image: false,
             },
         );
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .tool_turn
             .restore_backgrounded(caller_cid.clone(), request.initiating_tool_call_id.clone());
     }
@@ -1632,7 +1709,8 @@ impl Harness {
         &self,
         request: &tau_proto::AgentManualCompactionRequested,
     ) -> bool {
-        self.agent_store
+        self.session_runtime
+            .agent_store
             .agent(request.caller_agent_id.as_str())
             .is_some_and(|tree| tree.self_compaction_delivery(&request.request_id).is_some())
     }
@@ -1644,27 +1722,28 @@ impl Harness {
         target_cid: &AgentId,
         started: &tau_proto::AgentStandaloneCompactionStarted,
     ) {
-        let Some((agent_prompt_id, through)) =
-            self.agent_registry
-                .agents
-                .get(target_cid)
-                .and_then(|agent| {
-                    let agent_id = agent.agent_id.clone()?;
-                    Some((
-                        tau_proto::AgentPromptId::parse(format!(
-                            "ap-{agent_id}-{}",
-                            agent.next_prompt_index
-                        ))
-                        .expect("known-safe AgentPromptId must be valid"),
-                        agent
-                            .head
-                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+        let Some((agent_prompt_id, through)) = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(target_cid)
+            .and_then(|agent| {
+                let agent_id = agent.agent_id.clone()?;
+                Some((
+                    tau_proto::AgentPromptId::parse(format!(
+                        "ap-{agent_id}-{}",
+                        agent.next_prompt_index
                     ))
-                })
+                    .expect("known-safe AgentPromptId must be valid"),
+                    agent
+                        .head
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                ))
+            })
         else {
             return;
         };
-        if let Some(agent) = self.agent_registry.agents.get_mut(target_cid) {
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(target_cid) {
             agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
             agent.activation_dispatch =
                 path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
@@ -1683,11 +1762,13 @@ impl Harness {
     }
 
     pub(super) fn is_pending_manual_compaction_call(&self, call_id: &ToolCallId) -> bool {
-        self.compaction_runtime
+        self.prompt_coordination
+            .compaction_runtime
             .accepted_manual_tools
             .values()
             .any(|accepted| accepted.request.initiating_tool_call_id == *call_id)
             || self
+                .prompt_coordination
                 .compaction_runtime
                 .pending_manual_tools
                 .values()
@@ -1699,6 +1780,7 @@ impl Harness {
         request_id: &tau_proto::CompactionRequestId,
     ) -> bool {
         let Some(accepted) = self
+            .prompt_coordination
             .compaction_runtime
             .accepted_manual_tools
             .get(request_id)
@@ -1710,14 +1792,15 @@ impl Harness {
         else {
             return false;
         };
-        self.agent_registry
+        self.agent_runtime
+            .agent_registry
             .agents
             .get(&caller_cid)
             .and_then(|agent| {
                 agent
                     .agent_id
                     .as_deref()
-                    .and_then(|agent_id| self.agent_store.agent(agent_id))
+                    .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
                     .map(|tree| {
                         tree.has_complete_tool_round_for(
                             agent.head,

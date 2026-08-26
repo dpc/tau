@@ -45,10 +45,11 @@ fn image_result(call_id: &str, bytes: Vec<u8>) -> ToolResult {
 
 fn track_image_call(h: &mut Harness, cid: &crate::AgentId, call_id: &str, allowed: bool) {
     seed_assistant_tool_round(h, cid, &[(call_id, "read_image")]);
-    h.tool_runtime
+    h.tool_routing
+        .tool_runtime
         .tool_agents
         .insert(call_id.into(), cid.clone());
-    h.tool_runtime.pending_tools.insert(
+    h.tool_routing.tool_runtime.pending_tools.insert(
         call_id.into(),
         PendingTool {
             name: ToolName::new("read_image"),
@@ -57,7 +58,8 @@ fn track_image_call(h: &mut Harness, cid: &crate::AgentId, call_id: &str, allowe
             allows_provider_image: allowed,
         },
     );
-    h.tool_runtime
+    h.tool_routing
+        .tool_runtime
         .pending_tool_providers
         .insert(call_id.into(), crate::test_connection_id("shell"));
 }
@@ -127,8 +129,18 @@ fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_
             0,
             "rejection must happen before generic/provider success publication"
         );
-        assert!(!h.tool_runtime.pending_tools.contains_key(call_id));
-        assert!(!h.tool_runtime.tool_agents.contains_key(call_id));
+        assert!(
+            !h.tool_routing
+                .tool_runtime
+                .pending_tools
+                .contains_key(call_id)
+        );
+        assert!(
+            !h.tool_routing
+                .tool_runtime
+                .tool_agents
+                .contains_key(call_id)
+        );
     }
 
     let valid_bytes = encoded_test_png();
@@ -159,11 +171,15 @@ fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_
                 )
     )));
 
-    let agent_id = h.agent_registry.agents[&cid]
+    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .expect("durable agent id");
-    let tree = h.agent_store.agent(agent_id).expect("agent tree");
+    let tree = h
+        .session_runtime
+        .agent_store
+        .agent(agent_id)
+        .expect("agent tree");
     assert!(tree.nodes().iter().any(|node| matches!(
         &node.entry,
         AgentEntry::ToolResults { items }
@@ -257,10 +273,11 @@ fn run_tool_result(
     let _ = h.ensure_agent_id_for_agent(cid);
     let name = ToolName::new(tool_name);
     seed_assistant_tool_round(h, cid, &[(call_id, tool_name)]);
-    h.tool_runtime
+    h.tool_routing
+        .tool_runtime
         .tool_agents
         .insert(call_id_typed.clone(), cid.clone());
-    h.tool_runtime.pending_tools.insert(
+    h.tool_routing.tool_runtime.pending_tools.insert(
         call_id_typed.clone(),
         PendingTool {
             name: name.clone(),
@@ -269,7 +286,8 @@ fn run_tool_result(
             allows_provider_image: false,
         },
     );
-    h.tool_runtime
+    h.tool_routing
+        .tool_runtime
         .pending_tool_providers
         .insert(call_id_typed.clone(), crate::test_connection_id("shell"));
     h.handle_extension_event(
@@ -290,12 +308,17 @@ fn run_tool_result(
     .expect("tool result");
 
     let agent_id = h
+        .agent_runtime
         .agent_registry
         .agents
         .get(cid)
         .and_then(|conv| conv.agent_id.as_deref())
         .expect("conversation agent id");
-    let tree = h.agent_store.agent(agent_id).expect("agent tree");
+    let tree = h
+        .session_runtime
+        .agent_store
+        .agent(agent_id)
+        .expect("agent tree");
     tree.nodes()
         .iter()
         .rev()
@@ -331,10 +354,11 @@ fn run_tool_error(
     let _ = h.ensure_agent_id_for_agent(cid);
     let name = ToolName::new(tool_name);
     seed_assistant_tool_round(h, cid, &[(call_id, tool_name)]);
-    h.tool_runtime
+    h.tool_routing
+        .tool_runtime
         .tool_agents
         .insert(call_id_typed.clone(), cid.clone());
-    h.tool_runtime.pending_tools.insert(
+    h.tool_routing.tool_runtime.pending_tools.insert(
         call_id_typed.clone(),
         PendingTool {
             name: name.clone(),
@@ -343,7 +367,8 @@ fn run_tool_error(
             allows_provider_image: false,
         },
     );
-    h.tool_runtime
+    h.tool_routing
+        .tool_runtime
         .pending_tool_providers
         .insert(call_id_typed.clone(), crate::test_connection_id("shell"));
     h.handle_extension_event(
@@ -363,12 +388,17 @@ fn run_tool_error(
     .expect("tool error");
 
     let agent_id = h
+        .agent_runtime
         .agent_registry
         .agents
         .get(cid)
         .and_then(|conv| conv.agent_id.as_deref())
         .expect("conversation agent id");
-    let tree = h.agent_store.agent(agent_id).expect("agent tree");
+    let tree = h
+        .session_runtime
+        .agent_store
+        .agent(agent_id)
+        .expect("agent tree");
     tree.nodes()
         .iter()
         .rev()
@@ -518,7 +548,8 @@ fn pointer_entries_are_not_themselves_dedup_anchors() {
     // Force a rebuild on the next intake by clearing the cached dedup map. The
     // next result rebuilds from [Request_orig, Result_orig (real), Request_dup,
     // Result_dup (pointer)], where the pointer remains below the threshold.
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("default conv")
@@ -642,7 +673,8 @@ fn dedup_map_rebuilds_on_session_restore() {
         .expect("resume");
     let cid = ensure_test_user_agent(&mut h);
     assert!(
-        h.agent_registry
+        h.agent_runtime
+            .agent_registry
             .agents
             .get(&cid)
             .expect("default conv")
@@ -688,7 +720,8 @@ fn new_session_reset_does_not_dedup_against_previous_branch() {
 
     let cid = ensure_test_user_agent(&mut h);
     assert_eq!(
-        h.agent_registry
+        h.agent_runtime
+            .agent_registry
             .agents
             .get(&cid)
             .expect("default conv")
@@ -739,7 +772,7 @@ fn dedup_is_scoped_to_a_single_branch() {
     // the side conv's model has no visibility into the default
     // conv's history.
     let side_cid: crate::AgentId = crate::parse_agent_id("side-test");
-    h.agent_registry.agents.insert(
+    h.agent_runtime.agent_registry.agents.insert(
         side_cid.clone(),
         path_crate_agent::Agent::new(
             side_cid.clone(),

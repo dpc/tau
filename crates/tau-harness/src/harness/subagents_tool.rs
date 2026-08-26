@@ -380,7 +380,10 @@ impl Harness {
     /// Returns the inclusive effective bounds for activating-input `wait`
     /// calls.
     pub(crate) fn input_wait_timeout_bounds(&self) -> (u64, u64) {
-        self.subagents.wait_tracker.input_wait_timeout_bounds()
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .input_wait_timeout_bounds()
     }
 
     /// Normalize an activating-input wait timeout with this harness's validated
@@ -394,7 +397,7 @@ impl Harness {
 
     #[cfg(test)]
     pub(crate) fn register_harness_tools(&mut self) {
-        let mut handlers = self.internal_tool_handlers.clone();
+        let mut handlers = self.tool_routing.internal_tool_handlers.clone();
         handlers.push(Arc::new(TestBuiltinTools));
         self.install_internal_tool_handlers(handlers);
     }
@@ -416,19 +419,23 @@ impl Harness {
             })
             .collect();
         let agent_ids: Vec<_> = self
+            .agent_runtime
             .agent_registry
             .agents
             .values()
             .filter_map(|agent| agent.agent_id.clone())
             .collect();
         for agent_id in agent_ids {
-            self.context_discovery.agent_context.publish(
-                tau_proto::AgentId::parse(agent_id).expect("agent id"),
-                AgentContextKey::new("delegate_roles"),
-                crate::harness::harness_connection_id().clone(),
-                "harness".to_owned(),
-                AgentContextValue(serde_json::Value::Array(roles.clone())),
-            );
+            self.prompt_coordination
+                .context_discovery
+                .agent_context
+                .publish(
+                    tau_proto::AgentId::parse(agent_id).expect("agent id"),
+                    AgentContextKey::new("delegate_roles"),
+                    crate::harness::harness_connection_id().clone(),
+                    "harness".to_owned(),
+                    AgentContextValue(serde_json::Value::Array(roles.clone())),
+                );
         }
     }
 
@@ -448,19 +455,20 @@ impl Harness {
     fn visible_available_delegate_roles(&self) -> Vec<tau_proto::HarnessRoleInfo> {
         let mut roles: Vec<_> = crate::model::role_infos(
             &self.provider_runtime.model_info,
-            &self.available_roles,
+            &self.config.available_roles,
             &self.provider_runtime.available_models,
         )
         .into_iter()
         .filter(|info| {
-            self.available_roles
+            self.config
+                .available_roles
                 .get(&info.name)
                 .is_some_and(|role| role.visible != Some(false))
         })
         .filter(|info| {
             crate::model::model_for_role(
                 &self.provider_runtime.model_info,
-                &self.available_roles,
+                &self.config.available_roles,
                 &info.name,
             )
             .is_some()
@@ -472,28 +480,28 @@ impl Harness {
 
     /// Reset retained wait correlation before dispatching a reused call ID.
     pub(crate) fn record_wait_tool_request(&mut self, call_id: &ToolCallId) {
-        if let Some(tool) = self.tool_runtime.pending_tools.get(call_id) {
+        if let Some(tool) = self.tool_routing.tool_runtime.pending_tools.get(call_id) {
             let Some(owner) = self.wait_owner_for_call(call_id) else {
                 return;
             };
-            self.subagents.wait_tracker.record_tool_invoke(
-                call_id.clone(),
-                tool.name.clone(),
-                owner,
-            );
+            self.agent_runtime
+                .subagents
+                .wait_tracker
+                .record_tool_invoke(call_id.clone(), tool.name.clone(), owner);
         }
     }
 
     /// Retain the exact provider declaration before runtime dispatch.
     pub(crate) fn record_wait_tool_call_ref(&mut self, call_id: ToolCallId, call_ref: ToolCallRef) {
-        self.subagents
+        self.agent_runtime
+            .subagents
             .wait_tracker
             .reset_call_ref(call_id, call_ref);
     }
 
     /// Returns the exact provider declaration for a tracked runtime call.
     pub(crate) fn wait_tool_call_ref(&self, call_id: &ToolCallId) -> Option<ToolCallRef> {
-        self.subagents.wait_tracker.call_ref(call_id)
+        self.agent_runtime.subagents.wait_tracker.call_ref(call_id)
     }
 
     /// Returns the canonical terminal retained for a completed waitable call.
@@ -501,13 +509,19 @@ impl Harness {
         &self,
         call_id: &ToolCallId,
     ) -> Option<tau_proto::ObservationId> {
-        self.subagents.wait_tracker.terminal_observation(call_id)
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .terminal_observation(call_id)
     }
 
     /// Reports whether the wait projection tracks one pending tool call.
     #[cfg(test)]
     pub(crate) fn wait_tracks_call_for_test(&self, call_id: &ToolCallId) -> bool {
-        self.subagents.wait_tracker.tracks_call(call_id)
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .tracks_call(call_id)
     }
 
     /// Record one tool result with its canonical terminal observation, when
@@ -521,6 +535,7 @@ impl Harness {
             return;
         };
         let replies = self
+            .agent_runtime
             .subagents
             .wait_tracker
             .record_tool_result(result, owner, terminal);
@@ -538,6 +553,7 @@ impl Harness {
             return;
         };
         let replies = self
+            .agent_runtime
             .subagents
             .wait_tracker
             .record_tool_error(error, owner, terminal);
@@ -555,6 +571,7 @@ impl Harness {
             return;
         };
         let replies = self
+            .agent_runtime
             .subagents
             .wait_tracker
             .record_background_result(result, owner, terminal);
@@ -572,6 +589,7 @@ impl Harness {
             return;
         };
         let replies = self
+            .agent_runtime
             .subagents
             .wait_tracker
             .record_background_error(error, owner, terminal);
@@ -582,7 +600,10 @@ impl Harness {
     /// Consume a terminal that a harness-owned control continuation delivered
     /// directly instead of retaining it for `wait`.
     pub(crate) fn consume_wait_background_completion(&mut self, call_id: &ToolCallId) {
-        self.subagents.wait_tracker.consume_completed_call(call_id);
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .consume_completed_call(call_id);
         self.synchronize_work_waits();
     }
 
@@ -593,7 +614,8 @@ impl Harness {
         owner: &AgentId,
         call_id: &ToolCallId,
     ) -> bool {
-        self.subagents
+        self.agent_runtime
+            .subagents
             .wait_tracker
             .completed_call_is_owned_by(call_id, owner)
     }
@@ -614,32 +636,51 @@ impl Harness {
         owner: &AgentId,
         now: Instant,
     ) -> Vec<ToolCallId> {
-        let discarded = self.subagents.wait_tracker.discard_owner(owner);
-        if let Some(agent) = self.agent_registry.agents.get_mut(owner) {
+        let discarded = self
+            .agent_runtime
+            .subagents
+            .wait_tracker
+            .discard_owner(owner);
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(owner) {
             agent.work_status.retire_wait_at(now);
         }
         discarded
     }
 
     fn wait_owner_for_call(&self, call_id: &ToolCallId) -> Option<AgentId> {
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .tool_agents
             .get(call_id)
-            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
-            .or_else(|| self.tool_runtime.background_completion_targets.get(call_id))
+            .or_else(|| {
+                self.tool_routing
+                    .tool_runtime
+                    .peer_internal_tool_agents
+                    .get(call_id)
+            })
+            .or_else(|| {
+                self.tool_routing
+                    .tool_runtime
+                    .background_completion_targets
+                    .get(call_id)
+            })
             .cloned()
     }
 
     /// Settle runtime accounting and clear one harness-owned internal call.
     pub(crate) fn finish_harness_owned_tool_tracking(&mut self, call_id: &ToolCallId) {
         if let Some(cid) = self
+            .tool_routing
             .tool_runtime
             .peer_internal_tool_agents
             .get(call_id)
             .cloned()
         {
-            self.tool_runtime.tool_turn.mark_complete(call_id);
-            if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
+            self.tool_routing
+                .tool_runtime
+                .tool_turn
+                .mark_complete(call_id);
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 agent.tools_in_flight = agent.tools_in_flight.saturating_sub(1);
             }
             self.emit_agent_stats_updated(&cid);
@@ -660,6 +701,7 @@ impl Harness {
         call_id: &ToolCallId,
     ) -> Option<&'a AgentId> {
         (!self
+            .tool_routing
             .tool_runtime
             .peer_internal_tool_agents
             .contains_key(call_id)
@@ -675,6 +717,7 @@ impl Harness {
         activation: tau_proto::ObservationId,
     ) {
         let replies = self
+            .agent_runtime
             .subagents
             .wait_tracker
             .activate_waits_for(owner, activation);
@@ -685,15 +728,21 @@ impl Harness {
     /// Drop runtime-only input-wait registration when its owning agent endpoint
     /// is unloaded.
     pub(crate) fn discard_input_wait_for(&mut self, owner: &AgentId) {
-        self.subagents.wait_tracker.discard_input_wait_for(owner);
-        if let Some(agent) = self.agent_registry.agents.get_mut(owner) {
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .discard_input_wait_for(owner);
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(owner) {
             agent.work_status.retire_wait_at(Instant::now());
         }
     }
 
     /// Return the earliest monotonic deadline among registered input waiters.
     pub(crate) fn next_input_wait_deadline(&self) -> Option<Instant> {
-        self.subagents.wait_tracker.next_input_wait_deadline()
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .next_input_wait_deadline()
     }
 
     /// Synchronize semantic wait accounting against current tracker ownership.
@@ -712,8 +761,12 @@ impl Harness {
 
     /// Synchronize semantic wait clocks without publishing threshold crossings.
     fn synchronize_work_wait_clocks_at(&mut self, now: Instant) {
-        let installed = self.subagents.wait_tracker.installed_wait_owners();
-        for (cid, agent) in &mut self.agent_registry.agents {
+        let installed = self
+            .agent_runtime
+            .subagents
+            .wait_tracker
+            .installed_wait_owners();
+        for (cid, agent) in &mut self.agent_runtime.agent_registry.agents {
             agent
                 .work_status
                 .synchronize_wait_at(installed.contains(cid), now);
@@ -722,7 +775,8 @@ impl Harness {
 
     /// Return the earliest semantic wait threshold deadline.
     pub(crate) fn next_work_wait_threshold_deadline(&self) -> Option<Instant> {
-        self.agent_registry
+        self.agent_runtime
+            .agent_registry
             .agents
             .values()
             .filter_map(|agent| agent.work_status.next_wait_deadline())
@@ -743,7 +797,7 @@ impl Harness {
     /// Capture all overdue cursors with the subscriptions present at `now`.
     fn capture_crossed_work_wait_thresholds_at(&mut self, now: Instant) {
         let mut captured = Vec::new();
-        for agent in self.agent_registry.agents.values_mut() {
+        for agent in self.agent_runtime.agent_registry.agents.values_mut() {
             let Some(thresholds) = agent.work_status.take_all_crossed_wait_thresholds_at(now)
             else {
                 continue;
@@ -760,6 +814,7 @@ impl Harness {
                 .into_iter()
                 .filter_map(|watcher_id| {
                     let subscription_id = self
+                        .agent_runtime
                         .agent_watch
                         .subscriptions
                         .get(&(watcher_id.clone(), sender_id.clone()))?
@@ -770,16 +825,17 @@ impl Harness {
             if recipients.is_empty() {
                 continue;
             }
-            self.agent_watch.pending_long_wait_notifications.push_back(
-                PendingLongWaitNotifications {
+            self.agent_runtime
+                .agent_watch
+                .pending_long_wait_notifications
+                .push_back(PendingLongWaitNotifications {
                     sender_id,
                     status_epoch,
                     recipients,
                     thresholds,
                     current_threshold: None,
                     recipient_index: 0,
-                },
-            );
+                });
         }
     }
 
@@ -787,14 +843,22 @@ impl Harness {
     fn drain_pending_long_wait_notifications(&mut self, budget: usize) -> usize {
         let mut processed = 0;
         while processed < budget {
-            let Some(batch) = self.agent_watch.pending_long_wait_notifications.front_mut() else {
+            let Some(batch) = self
+                .agent_runtime
+                .agent_watch
+                .pending_long_wait_notifications
+                .front_mut()
+            else {
                 break;
             };
             if batch.current_threshold.is_none() {
                 batch.current_threshold = batch.thresholds.pop_next();
             }
             let Some(threshold_minutes) = batch.current_threshold else {
-                self.agent_watch.pending_long_wait_notifications.pop_front();
+                self.agent_runtime
+                    .agent_watch
+                    .pending_long_wait_notifications
+                    .pop_front();
                 continue;
             };
             let sender_id = batch.sender_id.clone();
@@ -815,7 +879,10 @@ impl Harness {
             );
             processed += 1;
             if batch_complete {
-                self.agent_watch.pending_long_wait_notifications.pop_front();
+                self.agent_runtime
+                    .agent_watch
+                    .pending_long_wait_notifications
+                    .pop_front();
             }
         }
         processed
@@ -823,14 +890,21 @@ impl Harness {
 
     /// Drain against both the caller's limit and the active scheduler budget.
     fn drain_pending_long_wait_notifications_with_budget(&mut self, budget: usize) -> usize {
-        let previous_budget = self.agent_watch.long_wait_materialization_budget;
+        let previous_budget = self
+            .agent_runtime
+            .agent_watch
+            .long_wait_materialization_budget;
         let effective = previous_budget.map_or(budget, |remaining| remaining.min(budget));
         // Publication re-enters wait synchronization through post-commit tool
         // settlement. Reserve this entire batch before publishing so nested
         // paths cannot recursively acquire a fresh budget.
-        self.agent_watch.long_wait_materialization_budget = Some(0);
+        self.agent_runtime
+            .agent_watch
+            .long_wait_materialization_budget = Some(0);
         let processed = self.drain_pending_long_wait_notifications(effective);
-        self.agent_watch.long_wait_materialization_budget =
+        self.agent_runtime
+            .agent_watch
+            .long_wait_materialization_budget =
             previous_budget.map(|remaining| remaining.saturating_sub(processed));
         processed
     }
@@ -838,7 +912,11 @@ impl Harness {
     /// Return whether captured long-wait occurrences still await
     /// materialization.
     pub(crate) fn has_pending_long_wait_notifications(&self) -> bool {
-        !self.agent_watch.pending_long_wait_notifications.is_empty()
+        !self
+            .agent_runtime
+            .agent_watch
+            .pending_long_wait_notifications
+            .is_empty()
     }
 
     /// Return the front backlog cursor and recipients for deterministic tests.
@@ -846,7 +924,8 @@ impl Harness {
     pub(crate) fn pending_long_wait_front_for_test(
         &self,
     ) -> Option<(usize, Vec<(String, String)>)> {
-        self.agent_watch
+        self.agent_runtime
+            .agent_watch
             .pending_long_wait_notifications
             .front()
             .map(|batch| (batch.recipient_index, batch.recipients.clone()))
@@ -861,7 +940,11 @@ impl Harness {
 
     /// Complete every input waiter due at or before `now`.
     pub(crate) fn process_input_wait_deadlines(&mut self, now: Instant) {
-        let replies = self.subagents.wait_tracker.expire_input_waits(now);
+        let replies = self
+            .agent_runtime
+            .subagents
+            .wait_tracker
+            .expire_input_waits(now);
         self.synchronize_work_waits_at(now);
         self.publish_wait_replies(replies);
     }
@@ -873,6 +956,7 @@ impl Harness {
         call_id: &ToolCallId,
     ) -> bool {
         let claimed = self
+            .agent_runtime
             .subagents
             .wait_tracker
             .claim_wait_for_manual_compaction(owner, call_id);
@@ -888,6 +972,7 @@ impl Harness {
         call_id: &ToolCallId,
     ) {
         let replies = self
+            .agent_runtime
             .subagents
             .wait_tracker
             .rollback_manual_compaction_claim(owner, call_id);
@@ -901,7 +986,8 @@ impl Harness {
         owner: &AgentId,
         call_id: &ToolCallId,
     ) -> bool {
-        self.subagents
+        self.agent_runtime
+            .subagents
             .wait_tracker
             .wait_claimed_for_manual_compaction(owner, call_id)
     }
@@ -909,14 +995,20 @@ impl Harness {
     #[cfg(test)]
     /// Reports whether one agent owns an installed input waiter.
     pub(crate) fn input_wait_pending_for(&self, owner: &AgentId) -> bool {
-        self.subagents.wait_tracker.input_wait_pending_for(owner)
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .input_wait_pending_for(owner)
     }
 
     #[cfg(test)]
     /// Report whether a placeholder has moved this call into waitable
     /// background state.
     pub(crate) fn wait_call_is_backgrounded_for_test(&self, call_id: &ToolCallId) -> bool {
-        self.subagents.wait_tracker.is_backgrounded(call_id)
+        self.agent_runtime
+            .subagents
+            .wait_tracker
+            .is_backgrounded(call_id)
     }
 
     /// Record cancellation and optionally correlate one canonical terminal.
@@ -926,6 +1018,7 @@ impl Harness {
         terminal: Option<(&ToolCallId, tau_proto::ObservationId)>,
     ) {
         let cancelled = self
+            .agent_runtime
             .subagents
             .wait_tracker
             .record_tool_cancelled(call_ids, terminal);
@@ -1023,7 +1116,7 @@ impl Harness {
         self.peer_messaging.pending_external_receive_acks.insert(
             message_id.clone(),
             crate::harness::PendingExternalReceiveAck {
-                session_generation: self.current_session_generation,
+                session_generation: self.session_runtime.current_session_generation,
                 recipient_id: recipient_id.clone(),
                 recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
                 expected_receive: received.clone(),
@@ -1109,6 +1202,7 @@ impl Harness {
                 }
             }
             let already_present = self
+                .agent_runtime
                 .agent_watch
                 .forward
                 .get(watcher_id)
@@ -1140,7 +1234,7 @@ impl Harness {
             if !visited.insert(agent_id.clone()) {
                 continue;
             }
-            if let Some(watched) = self.agent_watch.forward.get(&agent_id) {
+            if let Some(watched) = self.agent_runtime.agent_watch.forward.get(&agent_id) {
                 pending.extend(watched.iter().cloned());
             }
         }
@@ -1165,12 +1259,14 @@ impl Harness {
         }
         if enable {
             let inserted = self
+                .agent_runtime
                 .agent_watch
                 .forward
                 .entry(watcher_id.to_owned())
                 .or_default()
                 .insert(watched_agent_id.to_owned());
-            self.agent_watch
+            self.agent_runtime
+                .agent_watch
                 .reverse
                 .entry(watched_agent_id.to_owned())
                 .or_default()
@@ -1180,7 +1276,7 @@ impl Harness {
                     "watch-{}",
                     next_agent_message_id(&crate::parse_agent_id(watcher_id)).as_str()
                 );
-                self.agent_watch.subscriptions.insert(
+                self.agent_runtime.agent_watch.subscriptions.insert(
                     (watcher_id.to_owned(), watched_agent_id.to_owned()),
                     subscription_id,
                 );
@@ -1188,6 +1284,7 @@ impl Harness {
             self.publish_agent_watches_snapshot(watcher_id, Some(watched_agent_id), cause);
             self.notify_agent_watcher_work_status(watcher_id, watched_agent_id, true);
             if let Some(status) = self
+                .agent_runtime
                 .agent_watch
                 .provider_status
                 .get(watched_agent_id)
@@ -1202,16 +1299,24 @@ impl Harness {
             }
             return;
         } else {
-            if let Some(watched) = self.agent_watch.forward.get_mut(watcher_id) {
+            if let Some(watched) = self.agent_runtime.agent_watch.forward.get_mut(watcher_id) {
                 watched.remove(watched_agent_id);
                 if watched.is_empty() {
-                    self.agent_watch.forward.remove(watcher_id);
+                    self.agent_runtime.agent_watch.forward.remove(watcher_id);
                 }
             }
-            if let Some(watchers) = self.agent_watch.reverse.get_mut(watched_agent_id) {
+            if let Some(watchers) = self
+                .agent_runtime
+                .agent_watch
+                .reverse
+                .get_mut(watched_agent_id)
+            {
                 watchers.remove(watcher_id);
                 if watchers.is_empty() {
-                    self.agent_watch.reverse.remove(watched_agent_id);
+                    self.agent_runtime
+                        .agent_watch
+                        .reverse
+                        .remove(watched_agent_id);
                 }
             }
             self.retire_agent_watch_subscription(watcher_id, watched_agent_id);
@@ -1236,7 +1341,8 @@ impl Harness {
 
     /// Return a sorted snapshot of current watcher ids for a watched agent.
     pub(crate) fn watchers_for_agent(&self, watched_agent_id: &str) -> Vec<String> {
-        self.agent_watch
+        self.agent_runtime
+            .agent_watch
             .reverse
             .get(watched_agent_id)
             .map(|watchers| watchers.iter().cloned().collect())
@@ -1253,13 +1359,20 @@ impl Harness {
         result: &tau_proto::StartAgentResult,
     ) {
         let Some(sender_id) = self
+            .agent_runtime
             .agent_registry
             .pending_builtin_delegates
             .remove(&result.query_id)
         else {
             return;
         };
-        let Some(sender_cid) = self.agent_registry.agent_routes.get(&sender_id).cloned() else {
+        let Some(sender_cid) = self
+            .agent_runtime
+            .agent_registry
+            .agent_routes
+            .get(&sender_id)
+            .cloned()
+        else {
             return;
         };
         let message = if result
@@ -1299,7 +1412,8 @@ impl Harness {
         &self,
         watched_agent_id: &str,
     ) -> Option<String> {
-        self.agent_watch
+        self.agent_runtime
+            .agent_watch
             .provider_status
             .get(watched_agent_id)
             .map(|status| crate::prompt::watch_provider_status_summary(&status.state))
@@ -1329,7 +1443,12 @@ impl Harness {
         agent_id: &str,
         reason: Option<tau_proto::AgentWatchLifecycleReason>,
     ) {
-        if self.agent_watch.pending_retirements.contains_key(agent_id) {
+        if self
+            .agent_runtime
+            .agent_watch
+            .pending_retirements
+            .contains_key(agent_id)
+        {
             return;
         }
         let Some(reason) = reason else {
@@ -1338,6 +1457,7 @@ impl Harness {
         };
         let sender_id = crate::parse_agent_id(agent_id);
         let deliveries = self
+            .agent_runtime
             .agent_watch
             .reverse
             .get(agent_id)
@@ -1356,7 +1476,7 @@ impl Harness {
             self.prune_agent_watch_endpoint(agent_id);
             return;
         }
-        self.agent_watch.pending_retirements.insert(
+        self.agent_runtime.agent_watch.pending_retirements.insert(
             agent_id.to_owned(),
             PendingWatchRetirement {
                 deliveries: deliveries
@@ -1390,6 +1510,7 @@ impl Harness {
                 message: String::new(),
             });
             let watcher_cid = self
+                .agent_runtime
                 .agent_registry
                 .agent_routes
                 .get(watcher_id.as_str())
@@ -1398,7 +1519,7 @@ impl Harness {
             let sync = ConversationHeadSync {
                 cid: watcher_cid,
                 agent_id: Some(watcher_id.clone()),
-                session_generation: self.current_session_generation,
+                session_generation: self.session_runtime.current_session_generation,
                 fold_parent: None,
                 suppress_activation_dispatch: false,
                 continuation: Some(PostCommitContinuation::WatchRetirement(
@@ -1428,6 +1549,7 @@ impl Harness {
     ) {
         let watched_agent_id = completion.watched_agent_id.to_string();
         let Some(retirement) = self
+            .agent_runtime
             .agent_watch
             .pending_retirements
             .get_mut(&watched_agent_id)
@@ -1465,14 +1587,16 @@ impl Harness {
         {
             return;
         }
-        self.agent_watch
+        self.agent_runtime
+            .agent_watch
             .pending_retirements
             .remove(&watched_agent_id);
         self.prune_agent_watch_endpoint(&watched_agent_id);
     }
 
     fn prune_agent_watch_endpoint(&mut self, agent_id: &str) {
-        self.agent_watch
+        self.agent_runtime
+            .agent_watch
             .pending_long_wait_notifications
             .retain_mut(|batch| {
                 if batch.sender_id == agent_id {
@@ -1481,31 +1605,41 @@ impl Harness {
                 batch.retain_recipients(|(watcher_id, _)| watcher_id != agent_id)
             });
         let outgoing = self
+            .agent_runtime
             .agent_watch
             .forward
             .remove(agent_id)
             .unwrap_or_default();
         let incoming = self
+            .agent_runtime
             .agent_watch
             .reverse
             .remove(agent_id)
             .unwrap_or_default();
 
         for watched_agent_id in outgoing {
-            if let Some(watchers) = self.agent_watch.reverse.get_mut(&watched_agent_id) {
+            if let Some(watchers) = self
+                .agent_runtime
+                .agent_watch
+                .reverse
+                .get_mut(&watched_agent_id)
+            {
                 watchers.remove(agent_id);
                 if watchers.is_empty() {
-                    self.agent_watch.reverse.remove(&watched_agent_id);
+                    self.agent_runtime
+                        .agent_watch
+                        .reverse
+                        .remove(&watched_agent_id);
                 }
             }
             self.retire_agent_watch_subscription(agent_id, &watched_agent_id);
         }
 
         for watcher_id in incoming {
-            if let Some(watched) = self.agent_watch.forward.get_mut(&watcher_id) {
+            if let Some(watched) = self.agent_runtime.agent_watch.forward.get_mut(&watcher_id) {
                 watched.remove(agent_id);
                 if watched.is_empty() {
-                    self.agent_watch.forward.remove(&watcher_id);
+                    self.agent_runtime.agent_watch.forward.remove(&watcher_id);
                 }
             }
             self.retire_agent_watch_subscription(&watcher_id, agent_id);
@@ -1519,22 +1653,28 @@ impl Harness {
             }
         }
 
-        self.agent_watch.provider_status.remove(agent_id);
+        self.agent_runtime
+            .agent_watch
+            .provider_status
+            .remove(agent_id);
     }
 
     /// Remove one subscription identity and all delivery-dedupe state it owns.
     fn retire_agent_watch_subscription(&mut self, watcher_id: &str, watched_agent_id: &str) {
         if let Some(subscription_id) = self
+            .agent_runtime
             .agent_watch
             .subscriptions
             .remove(&(watcher_id.to_owned(), watched_agent_id.to_owned()))
         {
-            self.agent_watch
+            self.agent_runtime
+                .agent_watch
                 .pending_long_wait_notifications
                 .retain_mut(|batch| {
                     batch.retain_recipients(|(_, candidate)| candidate != &subscription_id)
                 });
-            self.agent_watch
+            self.agent_runtime
+                .agent_watch
                 .provider_deliveries
                 .remove(&subscription_id);
         }
@@ -1547,6 +1687,7 @@ impl Harness {
         cause: AgentWatchUpdateCause,
     ) {
         let watched_agent_ids = self
+            .agent_runtime
             .agent_watch
             .forward
             .get(watcher_id)
@@ -1560,7 +1701,7 @@ impl Harness {
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::AgentWatchesUpdated(AgentWatchesUpdated {
-                session_id: self.current_session_id.clone(),
+                session_id: self.session_runtime.current_session_id.clone(),
                 watcher_id: crate::parse_agent_id(watcher_id),
                 watched_agent_ids,
                 changed_agent_id: changed_agent_id.map(crate::parse_agent_id),
@@ -1578,12 +1719,18 @@ impl Harness {
         let now = Instant::now();
         self.synchronize_work_waits_at(now);
         let wait_installed = self
+            .agent_runtime
             .subagents
             .wait_tracker
             .installed_wait_owners()
             .contains(conversation_id);
         let (changed, watched_agent_id) = {
-            let Some(agent) = self.agent_registry.agents.get_mut(conversation_id) else {
+            let Some(agent) = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get_mut(conversation_id)
+            else {
                 return Err("status caller is no longer loaded".to_owned());
             };
             let current = &mut agent.work_status;
@@ -1612,6 +1759,7 @@ impl Harness {
             return;
         }
         let Some(subscription_id) = self
+            .agent_runtime
             .agent_watch
             .subscriptions
             .get(&(watcher_id.to_owned(), watched_agent_id.to_owned()))
@@ -1620,10 +1768,11 @@ impl Harness {
             return;
         };
         let status = self
+            .agent_runtime
             .agent_registry
             .agent_routes
             .get(watched_agent_id)
-            .and_then(|cid| self.agent_registry.agents.get(cid))
+            .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
             .map(|agent| agent.work_status.clone())
             .unwrap_or_default();
         let sender_id = crate::parse_agent_id(watched_agent_id);
@@ -1637,7 +1786,7 @@ impl Harness {
                 kind: tau_proto::AgentMessageKind::WatchWorkStatus,
                 watch_provider_status: None,
                 watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
-                    session_id: self.current_session_id.clone(),
+                    session_id: self.session_runtime.current_session_id.clone(),
                     subscription_id,
                     status_epoch: status.epoch(),
                     phase: status.phase(),
@@ -1675,7 +1824,7 @@ impl Harness {
                 watch_provider_status: None,
                 watch_work_status: None,
                 watch_long_wait: Some(tau_proto::AgentWatchLongWaitNotification {
-                    session_id: self.current_session_id.clone(),
+                    session_id: self.session_runtime.current_session_id.clone(),
                     subscription_id,
                     status_epoch,
                     threshold_minutes,
@@ -1700,6 +1849,7 @@ impl Harness {
         }
         status.initial = false;
         if self
+            .agent_runtime
             .agent_watch
             .provider_status
             .get(watched_agent_id)
@@ -1707,7 +1857,8 @@ impl Harness {
         {
             return;
         }
-        self.agent_watch
+        self.agent_runtime
+            .agent_watch
             .provider_status
             .insert(watched_agent_id.to_owned(), status.clone());
         for watcher_id in self.watchers_for_agent(watched_agent_id) {
@@ -1732,6 +1883,7 @@ impl Harness {
             return;
         };
         let turn_generation = self
+            .agent_runtime
             .agent_registry
             .agents
             .get(cid)
@@ -1739,7 +1891,7 @@ impl Harness {
         self.update_agent_watch_provider_status(
             &watched_agent_id,
             tau_proto::AgentWatchProviderStatusNotification {
-                session_id: self.current_session_id.clone(),
+                session_id: self.session_runtime.current_session_id.clone(),
                 subscription_id: String::new(),
                 turn_generation,
                 agent_prompt_id,
@@ -1763,6 +1915,7 @@ impl Harness {
             return;
         }
         let Some(subscription_id) = self
+            .agent_runtime
             .agent_watch
             .subscriptions
             .get(&(watcher_id.to_owned(), watched_agent_id.to_owned()))
@@ -1772,6 +1925,7 @@ impl Harness {
         };
         if !initial {
             let retry_notification_threshold = self
+                .config
                 .accepted_harness_settings
                 .agent_watch_retry_notification_threshold;
             if retry_notification_threshold != 0
@@ -1784,6 +1938,7 @@ impl Harness {
                 return;
             }
             let deliveries = self
+                .agent_runtime
                 .agent_watch
                 .provider_deliveries
                 .entry(subscription_id.clone())
@@ -1820,7 +1975,7 @@ impl Harness {
             }
         }
         let mut status = status.clone();
-        status.session_id = self.current_session_id.clone();
+        status.session_id = self.session_runtime.current_session_id.clone();
         status.subscription_id = subscription_id;
         status.initial = initial;
         let sender_id = crate::parse_agent_id(watched_agent_id);
@@ -1927,13 +2082,14 @@ impl Harness {
         let sender_id: tau_proto::AgentId = crate::parse_agent_id(&sender_id);
         let message_id = next_agent_message_id(&sender_id);
         let request_id = format!("external-{message_id}");
-        let capability = random_external_message_capability(&mut self.agent_registry.id_rng);
+        let capability =
+            random_external_message_capability(&mut self.agent_runtime.agent_registry.id_rng);
         let publish_sent = kind == tau_proto::AgentMessageKind::Message;
         self.peer_messaging.pending_external_message_auth.insert(
             message_id.clone(),
             PendingExternalAgentMessageAuth {
                 capability: capability.clone(),
-                sender_session_id: self.current_session_id.clone(),
+                sender_session_id: self.session_runtime.current_session_id.clone(),
                 sender_id: sender_id.clone(),
                 recipient_session_id: recipient_session_id.clone(),
                 recipient: recipient.clone(),
@@ -1945,14 +2101,14 @@ impl Harness {
             request_id,
             message_id,
             capability,
-            sender_session_id: self.current_session_id.clone(),
+            sender_session_id: self.session_runtime.current_session_id.clone(),
             sender_id,
             recipient_session_id,
             recipient,
             kind,
             message,
         };
-        let tx = self.tx.clone();
+        let tx = self.runtime_io.tx.clone();
         let cancellation = Arc::new(path_std_sync_atomic::AtomicBool::new(false));
         self.peer_messaging
             .peer_io_cancellations
@@ -2026,10 +2182,10 @@ impl Harness {
         {
             return Err("external message capability does not match request".to_owned());
         }
-        if request.sender_session_id != self.current_session_id {
+        if request.sender_session_id != self.session_runtime.current_session_id {
             return Err(format!(
                 "sender harness is on active session `{}`, not `{}`",
-                self.current_session_id, request.sender_session_id
+                self.session_runtime.current_session_id, request.sender_session_id
             ));
         }
         Ok(())
@@ -2051,8 +2207,8 @@ impl Harness {
                 tau_proto::ExternalAgentMessageFailure::Rejected,
             ));
         };
-        let tx = self.tx.clone();
-        let session_generation = self.current_session_generation;
+        let tx = self.runtime_io.tx.clone();
+        let session_generation = self.session_runtime.current_session_generation;
         let cancellation = Arc::new(path_std_sync_atomic::AtomicBool::new(false));
         let cancellations = self
             .peer_messaging
@@ -2106,7 +2262,7 @@ impl Harness {
         request: tau_proto::ExternalAgentMessageRequest,
     ) -> Result<(), tau_proto::ExternalAgentMessageFailure> {
         self.validate_external_agent_message_target(&request)?;
-        if session_generation != self.current_session_generation {
+        if session_generation != self.session_runtime.current_session_generation {
             return Err(tau_proto::ExternalAgentMessageFailure::TargetSessionChanged);
         }
         if !self
@@ -2236,7 +2392,7 @@ impl Harness {
         &self,
         request: &tau_proto::ExternalAgentMessageRequest,
     ) -> Result<(), tau_proto::ExternalAgentMessageFailure> {
-        if request.recipient_session_id != self.current_session_id {
+        if request.recipient_session_id != self.session_runtime.current_session_id {
             return Err(tau_proto::ExternalAgentMessageFailure::TargetSessionChanged);
         }
         if request.message.trim().is_empty() {
@@ -2245,6 +2401,7 @@ impl Harness {
         let tau_proto::ExternalAgentMessageRecipient::Exact(recipient_id) = &request.recipient
         else {
             return self
+                .config
                 .inter_session_receivers
                 .first()
                 .map(|_| ())
@@ -2269,7 +2426,7 @@ impl Harness {
         &self,
         request: &tau_proto::ExternalAgentMessageRequest,
     ) -> Result<(), tau_proto::ExternalAgentMessageFailure> {
-        if request.recipient_session_id != self.current_session_id {
+        if request.recipient_session_id != self.session_runtime.current_session_id {
             return Err(tau_proto::ExternalAgentMessageFailure::TargetSessionChanged);
         }
         if request.message.trim().is_empty() {
@@ -2282,22 +2439,24 @@ impl Harness {
     }
 
     fn select_peer_entrypoint_recipient(&self) -> Result<AgentId, String> {
-        if self.inter_session_receivers.is_empty() {
+        if self.config.inter_session_receivers.is_empty() {
             return Err(INTER_SESSION_UNAVAILABLE.to_owned());
         }
         let role_available = |role: &str| {
-            self.inter_session_receivers
+            self.config
+                .inter_session_receivers
                 .iter()
                 .any(|receiver| receiver.role == role)
-                && self.available_roles.contains_key(role)
+                && self.config.available_roles.contains_key(role)
                 && crate::model::model_for_role(
                     &self.provider_runtime.model_info,
-                    &self.available_roles,
+                    &self.config.available_roles,
                     role,
                 )
                 .is_some()
         };
         let mut candidates = self
+            .agent_runtime
             .agent_registry
             .agents
             .values()
@@ -2320,7 +2479,8 @@ impl Harness {
                 })
             })
             .chain(
-                self.agent_registry
+                self.agent_runtime
+                    .agent_registry
                     .pending_start_requests
                     .iter()
                     .filter(|pending| role_available(&pending.role))
@@ -2363,16 +2523,18 @@ impl Harness {
             return Ok((recipient_id, false, admitted_at));
         }
         let role = self
+            .config
             .inter_session_receivers
             .iter()
             .filter(|receiver| receiver.auto_start)
             .find_map(|receiver| {
-                self.available_roles
+                self.config
+                    .available_roles
                     .contains_key(&receiver.role)
                     .then(|| {
                         crate::model::model_for_role(
                             &self.provider_runtime.model_info,
-                            &self.available_roles,
+                            &self.config.available_roles,
                             &receiver.role,
                         )
                     })
@@ -2404,6 +2566,7 @@ impl Harness {
         if let Err(error) = self.start_peer_agent_request(pending) {
             self.release_peer_input_rate(&recipient_id, admitted_at);
             if let Some(cid) = self
+                .agent_runtime
                 .agent_registry
                 .agent_routes
                 .get(recipient_id.as_str())
@@ -2426,14 +2589,16 @@ impl Harness {
         message_bytes: usize,
     ) -> Result<Instant, String> {
         let loaded_wake_bytes = self
+            .agent_runtime
             .agent_registry
             .agent_routes
             .get(recipient_id.as_str())
-            .and_then(|cid| self.agent_registry.agents.get(cid))
+            .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
             .into_iter()
             .flat_map(|agent| &agent.pending_message_wakes)
             .filter_map(|wake| wake.source.peer_admission_bytes());
         let pending_start_wake_bytes = self
+            .agent_runtime
             .agent_registry
             .pending_start_requests
             .iter()
@@ -2495,32 +2660,39 @@ impl Harness {
     /// Revalidate one concrete endpoint against current receiver-role,
     /// provider/model, skill, and termination authority.
     pub(crate) fn peer_entrypoint_recipient_is_eligible(&self, recipient_id: &AgentId) -> bool {
-        if self.inter_session_receivers.is_empty() {
+        if self.config.inter_session_receivers.is_empty() {
             return false;
         }
         let role_available = |role: &str| {
-            self.inter_session_receivers
+            self.config
+                .inter_session_receivers
                 .iter()
                 .any(|receiver| receiver.role == role)
-                && self.available_roles.contains_key(role)
+                && self.config.available_roles.contains_key(role)
                 && crate::model::model_for_role(
                     &self.provider_runtime.model_info,
-                    &self.available_roles,
+                    &self.config.available_roles,
                     role,
                 )
                 .is_some()
         };
-        self.agent_registry.agents.values().any(|agent| {
-            !agent.terminating
-                && agent.agent_id.as_deref() == Some(recipient_id.as_str())
-                && agent.role.as_deref().is_some_and(role_available)
-        }) || self
+        self.agent_runtime
             .agent_registry
-            .pending_start_requests
-            .iter()
-            .any(|pending| {
-                pending.agent_id == recipient_id.as_str() && role_available(&pending.role)
+            .agents
+            .values()
+            .any(|agent| {
+                !agent.terminating
+                    && agent.agent_id.as_deref() == Some(recipient_id.as_str())
+                    && agent.role.as_deref().is_some_and(role_available)
             })
+            || self
+                .agent_runtime
+                .agent_registry
+                .pending_start_requests
+                .iter()
+                .any(|pending| {
+                    pending.agent_id == recipient_id.as_str() && role_available(&pending.role)
+                })
     }
 
     /// Record a successful concrete route for deterministic
@@ -2593,18 +2765,23 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
         if let Some(call_ref) = call.call_ref {
-            self.subagents
+            self.agent_runtime
+                .subagents
                 .wait_tracker
                 .retain_call_ref(call_id.clone(), call_ref);
         }
         self.ensure_harness_owned_tool_tracking(agent_id, call, &visible_tool_name);
         let parsed = parse_wait_args_with_bounds(
             &call.arguments,
-            self.subagents.wait_tracker.input_wait_timeout_bounds(),
+            self.agent_runtime
+                .subagents
+                .wait_tracker
+                .input_wait_timeout_bounds(),
         );
         let wait_observation = call.call_ref.map(|_| tau_proto::ObservationId::random());
         let observed_mode = match &parsed {
             Ok(WaitTarget::Exact(target)) => self
+                .agent_runtime
                 .subagents
                 .wait_tracker
                 .call_ref(target)
@@ -2630,11 +2807,13 @@ impl Harness {
         }
         let consumable_completion = match &parsed {
             Ok(WaitTarget::Exact(target)) => self
+                .agent_runtime
                 .subagents
                 .wait_tracker
                 .completed_call_is_owned_by(target, agent_id)
                 .then(|| target.clone()),
             Ok(WaitTarget::AnyBackground) => self
+                .agent_runtime
                 .subagents
                 .wait_tracker
                 .oldest_completed_for_owner(agent_id),
@@ -2658,6 +2837,7 @@ impl Harness {
                 }
                 Ok(WaitTarget::Exact(target))
                     if !self
+                        .agent_runtime
                         .subagents
                         .wait_tracker
                         .call_is_owned_by(target, agent_id) =>
@@ -2676,6 +2856,7 @@ impl Harness {
             let mut reply = match parsed {
                 Ok(WaitTarget::Exact(target)) => {
                     if !self
+                        .agent_runtime
                         .subagents
                         .wait_tracker
                         .call_is_owned_by(&target, agent_id)
@@ -2687,7 +2868,11 @@ impl Harness {
                             None,
                         )
                     } else {
-                        let source_tool_name = self.subagents.wait_tracker.call_tool_name(&target);
+                        let source_tool_name = self
+                            .agent_runtime
+                            .subagents
+                            .wait_tracker
+                            .call_tool_name(&target);
                         wait_interrupted_reply(
                             call_id,
                             visible_tool_name,
@@ -2712,14 +2897,18 @@ impl Harness {
             self.publish_wait_replies(vec![reply]);
             return Ok(());
         }
-        let start = self.subagents.wait_tracker.handle_wait_invoke_at(
-            agent_id,
-            call_id,
-            visible_tool_name,
-            &call.arguments,
-            now,
-            wait_observation,
-        );
+        let start = self
+            .agent_runtime
+            .subagents
+            .wait_tracker
+            .handle_wait_invoke_at(
+                agent_id,
+                call_id,
+                visible_tool_name,
+                &call.arguments,
+                now,
+                wait_observation,
+            );
         self.synchronize_work_waits_at(now);
         if let Some((observation_id, registration)) = start.registration.clone() {
             self.append_best_effort_observation(
@@ -2743,7 +2932,8 @@ impl Harness {
         if self.has_wait_preempting_message_wake(agent_id) {
             return true;
         }
-        self.agent_registry
+        self.agent_runtime
+            .agent_registry
             .agents
             .get(agent_id)
             .is_some_and(|agent| {
@@ -2769,7 +2959,7 @@ impl Harness {
         agent_id: &AgentId,
         consumable_completion: Option<&ToolCallId>,
     ) -> Option<tau_proto::ObservationId> {
-        let agent = self.agent_registry.agents.get(agent_id)?;
+        let agent = self.agent_runtime.agent_registry.agents.get(agent_id)?;
         agent
             .pending_message_wakes
             .iter()
@@ -2793,18 +2983,24 @@ impl Harness {
         call: &AgentToolCall,
         visible_tool_name: &ToolName,
     ) {
-        if self.tool_runtime.tool_agents.contains_key(&call.id)
+        if self
+            .tool_routing
+            .tool_runtime
+            .tool_agents
+            .contains_key(&call.id)
             || self
+                .tool_routing
                 .tool_runtime
                 .peer_internal_tool_agents
                 .contains_key(&call.id)
         {
             return;
         }
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .tool_agents
             .insert(call.id.clone(), cid.clone());
-        self.tool_runtime.pending_tools.insert(
+        self.tool_routing.tool_runtime.pending_tools.insert(
             call.id.clone(),
             crate::harness::PendingTool {
                 name: visible_tool_name.clone(),
@@ -2914,15 +3110,26 @@ impl Harness {
     ) {
         let call_id = result.call_id.clone();
         let Some(owner_cid) = self
+            .tool_routing
             .tool_runtime
             .tool_agents
             .get(&call_id)
-            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(&call_id))
+            .or_else(|| {
+                self.tool_routing
+                    .tool_runtime
+                    .peer_internal_tool_agents
+                    .get(&call_id)
+            })
             .cloned()
         else {
             return;
         };
-        if self.tool_runtime.tool_turn.is_backgrounded(&call_id) {
+        if self
+            .tool_routing
+            .tool_runtime
+            .tool_turn
+            .is_backgrounded(&call_id)
+        {
             self.handle_background_tool_result_inner(
                 crate::harness::harness_connection_id(),
                 result,
@@ -2951,15 +3158,26 @@ impl Harness {
     ) {
         let call_id = error.call_id.clone();
         let Some(owner_cid) = self
+            .tool_routing
             .tool_runtime
             .tool_agents
             .get(&call_id)
-            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(&call_id))
+            .or_else(|| {
+                self.tool_routing
+                    .tool_runtime
+                    .peer_internal_tool_agents
+                    .get(&call_id)
+            })
             .cloned()
         else {
             return;
         };
-        if self.tool_runtime.tool_turn.is_backgrounded(&call_id) {
+        if self
+            .tool_routing
+            .tool_runtime
+            .tool_turn
+            .is_backgrounded(&call_id)
+        {
             self.handle_background_tool_error_inner(
                 Some(crate::harness::harness_connection_id()),
                 error,
@@ -2979,17 +3197,19 @@ impl Harness {
                 settlement.outcome == tau_proto::ToolWaitOutcome::TimedOut
             }) {
                 let owner = self
+                    .tool_routing
                     .tool_runtime
                     .tool_agents
                     .get(&reply.wait_call_id)
                     .or_else(|| {
-                        self.tool_runtime
+                        self.tool_routing
+                            .tool_runtime
                             .peer_internal_tool_agents
                             .get(&reply.wait_call_id)
                     })
                     .cloned();
                 if owner
-                    .and_then(|owner| self.agent_registry.agents.get_mut(&owner))
+                    .and_then(|owner| self.agent_runtime.agent_registry.agents.get_mut(&owner))
                     .is_some_and(|agent| agent.work_status.record_input_wait_timeout())
                 {
                     reply.add_timeout_advice(
@@ -3005,11 +3225,13 @@ impl Harness {
             }
             let wait_call_id = reply.wait_call_id.clone();
             let Some(cid) = self
+                .tool_routing
                 .tool_runtime
                 .tool_agents
                 .get(&wait_call_id)
                 .or_else(|| {
-                    self.tool_runtime
+                    self.tool_routing
+                        .tool_runtime
                         .peer_internal_tool_agents
                         .get(&wait_call_id)
                 })
@@ -3028,7 +3250,8 @@ impl Harness {
             if wait_terminal.is_some()
                 && let Some(settlement) = reply.settlement
             {
-                self.tool_runtime
+                self.tool_routing
+                    .tool_runtime
                     .pending_wait_settlements
                     .insert(wait_call_id.clone(), settlement);
             }

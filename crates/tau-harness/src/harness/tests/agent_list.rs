@@ -25,6 +25,7 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
         }),
     );
     harness
+        .agent_runtime
         .agent_registry
         .agents
         .get_mut(&cid)
@@ -73,6 +74,7 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
     );
 
     harness
+        .agent_runtime
         .agent_registry
         .agents
         .get_mut(&cid)
@@ -92,7 +94,7 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
     );
     assert_eq!(stopping[0].work_status, None);
 
-    harness.agent_registry.agents.remove(&cid);
+    harness.agent_runtime.agent_registry.agents.remove(&cid);
     harness.publish_event(
         None,
         Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
@@ -137,10 +139,12 @@ fn roster_keeps_committed_member_without_runtime_or_facts() {
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
     let agent_id = tau_proto::AgentId::parse("missing-agent").expect("agent id");
     harness
+        .agent_runtime
         .agent_registry
         .roster_loaded
         .insert(agent_id.clone());
     harness
+        .agent_runtime
         .agent_registry
         .roster_ever_loaded
         .insert(agent_id.clone());
@@ -297,6 +301,7 @@ fn roster_bounds_cached_membership_before_projection() {
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
     for index in 0..=super::super::MAX_SESSION_AGENT_LIST_ENTRIES {
         harness
+            .agent_runtime
             .agent_registry
             .roster_ever_loaded
             .insert(tau_proto::AgentId::parse(format!("agent-{index}")).expect("agent id"));
@@ -315,8 +320,13 @@ fn roster_bounds_cached_membership_before_projection() {
         tau_proto::SessionAgentListErrorKind::TooManyAgents
     );
 
-    harness.agent_registry.roster_ever_loaded.clear();
     harness
+        .agent_runtime
+        .agent_registry
+        .roster_ever_loaded
+        .clear();
+    harness
+        .agent_runtime
         .agent_registry
         .roster_loaded
         .insert(tau_proto::AgentId::parse("orphan").expect("agent id"));
@@ -332,8 +342,8 @@ fn roster_bounds_cached_membership_before_projection() {
         error.kind,
         tau_proto::SessionAgentListErrorKind::SessionRead
     );
-    harness.agent_registry.roster_loaded.clear();
-    harness.agent_registry.roster_valid = false;
+    harness.agent_runtime.agent_registry.roster_loaded.clear();
+    harness.agent_runtime.agent_registry.roster_valid = false;
     let error = harness
         .build_session_agent_list(
             &"s1"

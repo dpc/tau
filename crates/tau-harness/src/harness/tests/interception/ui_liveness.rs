@@ -27,7 +27,7 @@ fn focus(focused: bool) -> Event {
 /// Return whether one source committed a matching event.
 fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
             return true;
@@ -39,7 +39,8 @@ fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> boo
 /// Subscribe one peer to live UI liveness observations.
 fn connect_liveness_observer(h: &mut Harness, id: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let sink = connect_test_client(h, id, tau_proto::ClientKind::Tool);
-    h.bus
+    h.runtime_io
+        .bus
         .set_subscriptions(
             &crate::test_connection_id(id),
             Vec::new(),
@@ -139,7 +140,9 @@ fn other_client_sources_cannot_publish_liveness_events() {
         tau_proto::ClientKind::Ui,
         ConnectionOrigin::Socket,
     );
-    h.bus.disconnect(&crate::test_connection_id("disconnected"));
+    h.runtime_io
+        .bus
+        .disconnect(&crate::test_connection_id("disconnected"));
     h.handle_client_event_inner(&crate::test_connection_id("disconnected"), focus(false))
         .expect("reject disconnected client");
     assert!(!source_committed(&h, "disconnected", |_| true));

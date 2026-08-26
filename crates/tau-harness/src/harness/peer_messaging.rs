@@ -168,16 +168,19 @@ impl Harness {
         recipient_id: &str,
     ) -> AgentMessageRecipientStatus {
         if self
+            .agent_runtime
             .agent_registry
             .agent_routes
             .get(recipient_id)
             .is_some_and(|cid| {
-                self.agent_registry
+                self.agent_runtime
+                    .agent_registry
                     .agents
                     .get(cid)
                     .is_some_and(|agent| !agent.terminating)
             })
             || self
+                .agent_runtime
                 .agent_registry
                 .pending_start_requests
                 .iter()
@@ -185,13 +188,19 @@ impl Harness {
         {
             AgentMessageRecipientStatus::Live
         } else if self
+            .agent_runtime
             .agent_registry
             .restored_unavailable
             .contains_key(recipient_id)
         {
             AgentMessageRecipientStatus::RestoredUnavailable
-        } else if self.agent_registry.stopped_ids.contains(recipient_id)
+        } else if self
+            .agent_runtime
+            .agent_registry
+            .stopped_ids
+            .contains(recipient_id)
             || self
+                .agent_runtime
                 .agent_registry
                 .session_ever_loaded
                 .contains(recipient_id)
@@ -216,12 +225,14 @@ impl Harness {
             .contains_key(&message.message_id)
             .then_some(message.message.len());
         if let Some(cid) = self
+            .agent_runtime
             .agent_registry
             .agent_routes
             .get(message.recipient_id.as_str())
             .cloned()
         {
             if self
+                .agent_runtime
                 .agent_registry
                 .agents
                 .get(&cid)
@@ -231,7 +242,7 @@ impl Harness {
             }
             if outcome.folded_node_id.is_some()
                 && let Some(node_id) = outcome.selected_head_id
-                && let Some(agent) = self.agent_registry.agents.get_mut(&cid)
+                && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
             {
                 agent.head = Some(node_id);
                 agent.result_dedup.note_head_advanced_to(node_id);
@@ -244,7 +255,7 @@ impl Harness {
                 self.promote_lifecycle_notification_turn(&cid);
             }
             let activation = tau_proto::ObservationId::random();
-            if let Some(agent) = self.agent_registry.agents.get_mut(&cid)
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
                 && !agent.pending_message_wakes.iter().any(|wake| {
                     matches!(
                         wake.source,
@@ -295,6 +306,7 @@ impl Harness {
             return;
         };
         if let Some(pending) = self
+            .agent_runtime
             .agent_registry
             .pending_start_requests
             .iter_mut()
@@ -327,6 +339,7 @@ impl Harness {
     /// Resolve wakes buffered behind an open provider tool round.
     pub(super) fn resolve_materialized_message_wakes(&mut self, cid: &AgentId) {
         let Some(agent_id) = self
+            .agent_runtime
             .agent_registry
             .agents
             .get(cid)
@@ -334,7 +347,7 @@ impl Harness {
         else {
             return;
         };
-        let Some(tree) = self.agent_store.agent(agent_id) else {
+        let Some(tree) = self.session_runtime.agent_store.agent(agent_id) else {
             return;
         };
         let resolved_message_inputs: HashMap<_, _> = tree
@@ -350,7 +363,7 @@ impl Harness {
                 _ => None,
             })
             .collect();
-        if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             for wake in &mut agent.pending_message_wakes {
                 if wake.node_id.is_none() {
                     wake.node_id = resolved_message_inputs
@@ -370,18 +383,19 @@ impl Harness {
     ) {
         self.resolve_materialized_message_wakes(cid);
         let branch: HashSet<_> = self
+            .agent_runtime
             .agent_registry
             .agents
             .get(cid)
             .and_then(|agent| agent.agent_id.as_deref())
-            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
             .map(|tree| {
                 tree.branch_node_ids_from(through.as_option())
                     .into_iter()
                     .collect()
             })
             .unwrap_or_default();
-        if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             agent.pending_replay_activation = false;
             agent.pending_message_wakes.retain(|wake| {
                 wake.node_id
@@ -393,13 +407,13 @@ impl Harness {
     /// Returns whether at least one materialized wake belongs to the selected
     /// branch. Off-branch wakes remain dormant until navigation reselects them.
     pub(crate) fn has_ready_message_wake_on_selected_branch(&self, cid: &AgentId) -> bool {
-        let Some(agent) = self.agent_registry.agents.get(cid) else {
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
         let Some(agent_id) = agent.agent_id.as_deref() else {
             return false;
         };
-        let Some(tree) = self.agent_store.agent(agent_id) else {
+        let Some(tree) = self.session_runtime.agent_store.agent(agent_id) else {
             return false;
         };
         let branch: HashSet<_> = tree.branch_node_ids_from(agent.head).into_iter().collect();
@@ -416,12 +430,17 @@ impl Harness {
     /// open. Once materialized, only wakes on the selected branch interrupt;
     /// sibling-branch wakes stay dormant until navigation reselects them.
     pub(crate) fn has_wait_preempting_message_wake(&self, cid: &AgentId) -> bool {
-        self.agent_registry.agents.get(cid).is_some_and(|agent| {
-            agent
-                .pending_message_wakes
-                .iter()
-                .any(|wake| wake.node_id.is_none())
-        }) || self.has_ready_message_wake_on_selected_branch(cid)
+        self.agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .is_some_and(|agent| {
+                agent
+                    .pending_message_wakes
+                    .iter()
+                    .any(|wake| wake.node_id.is_none())
+            })
+            || self.has_ready_message_wake_on_selected_branch(cid)
     }
 
     /// Returns the earliest materialized message wake on the selected branch.
@@ -429,8 +448,11 @@ impl Harness {
     /// Branch order, rather than wake insertion order, defines the immutable
     /// activation cut used by proactive and reactive compaction.
     pub(crate) fn earliest_selected_message_wake_node(&self, cid: &AgentId) -> Option<NodeId> {
-        let agent = self.agent_registry.agents.get(cid)?;
-        let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
+        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
+        let tree = self
+            .session_runtime
+            .agent_store
+            .agent(agent.agent_id.as_deref()?)?;
         let wake_nodes: HashSet<_> = agent
             .pending_message_wakes
             .iter()
@@ -446,8 +468,11 @@ impl Harness {
         &self,
         cid: &AgentId,
     ) -> Option<tau_proto::AgentHead> {
-        let agent = self.agent_registry.agents.get(cid)?;
-        let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
+        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
+        let tree = self
+            .session_runtime
+            .agent_store
+            .agent(agent.agent_id.as_deref()?)?;
         let wake_node = tree.node(self.earliest_selected_message_wake_node(cid)?)?;
         Some(
             wake_node
@@ -464,9 +489,9 @@ impl Harness {
         &self,
         cid: &AgentId,
     ) -> Option<crate::agent::AgentMessageActivationClass> {
-        let agent = self.agent_registry.agents.get(cid)?;
+        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
         let agent_id = agent.agent_id.as_deref()?;
-        let tree = self.agent_store.agent(agent_id)?;
+        let tree = self.session_runtime.agent_store.agent(agent_id)?;
         let branch: HashSet<_> = tree.branch_node_ids_from(agent.head).into_iter().collect();
         let mut classes = agent
             .pending_message_wakes
@@ -490,7 +515,8 @@ impl Harness {
 
     pub(super) fn preempt_queued_tool_calls_for_message_received(&mut self, cid: &AgentId) {
         let Some(remaining_calls) =
-            self.agent_registry
+            self.agent_runtime
+                .agent_registry
                 .agents
                 .get(cid)
                 .and_then(|conv| match &conv.turn_state {
@@ -502,8 +528,13 @@ impl Harness {
         else {
             return;
         };
-        if self.tool_runtime.tool_turn.any_in_flight_for(cid)
+        if self
+            .tool_routing
+            .tool_runtime
+            .tool_turn
+            .any_in_flight_for(cid)
             || self
+                .tool_routing
                 .tool_runtime
                 .tool_turn
                 .backgrounded_calls_for(cid)
@@ -515,6 +546,7 @@ impl Harness {
         let remaining: std::collections::HashSet<ToolCallId> =
             remaining_calls.iter().cloned().collect();
         let cancelled = self
+            .tool_routing
             .tool_runtime
             .tool_turn
             .cancel_queued_for(cid, &remaining);
@@ -522,7 +554,8 @@ impl Harness {
             return;
         }
         for (call_id, tool_name, tool_type) in cancelled {
-            self.tool_runtime
+            self.tool_routing
+                .tool_runtime
                 .tool_agents
                 .entry(call_id.clone())
                 .or_insert_with(|| cid.clone());
@@ -540,13 +573,17 @@ impl Harness {
     }
 
     pub(super) fn has_pending_agent_message_wake(&self, cid: &AgentId) -> bool {
-        self.agent_registry.agents.get(cid).is_some_and(|conv| {
-            conv.pending_message_wakes.iter().any(|wake| {
-                matches!(
-                    wake.source,
-                    crate::agent::PendingMessageWakeSource::AgentMessageReceived { .. }
-                )
+        self.agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .is_some_and(|conv| {
+                conv.pending_message_wakes.iter().any(|wake| {
+                    matches!(
+                        wake.source,
+                        crate::agent::PendingMessageWakeSource::AgentMessageReceived { .. }
+                    )
+                })
             })
-        })
     }
 }

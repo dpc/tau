@@ -89,7 +89,7 @@ enum TestMessage {
 /// Configure deterministic receiver authority directly for focused harness
 /// tests that do not load user role configuration.
 fn configure_inter_session_receivers(harness: &mut Harness, receivers: &[(&str, bool)]) {
-    harness.inter_session_receivers = receivers
+    harness.config.inter_session_receivers = receivers
         .iter()
         .map(|(role, auto_start)| InterSessionReceiverRole {
             role: (*role).to_owned(),
@@ -337,42 +337,61 @@ fn set_test_agent_context_wait(
     agent_id: tau_proto::AgentId,
     waiting_on: std::collections::HashSet<tau_proto::ConnectionId>,
 ) {
-    h.context_discovery.frozen_agents.remove(&agent_id);
-    h.context_discovery.pending_agents.insert(
-        agent_id,
-        PendingAgentDiscovery {
-            initialization_id: tau_proto::AgentInitializationId::parse("test-init")
-                .expect("test identifier must be valid"),
-            skill_candidates: h.context_discovery.skill_candidates.clone(),
-            skills: h.context_discovery.skills.clone(),
-            agents_files: h.context_discovery.agents_files.clone(),
-            waiting_on,
-        },
-    );
+    h.prompt_coordination
+        .context_discovery
+        .frozen_agents
+        .remove(&agent_id);
+    h.prompt_coordination
+        .context_discovery
+        .pending_agents
+        .insert(
+            agent_id,
+            PendingAgentDiscovery {
+                initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                    .expect("test identifier must be valid"),
+                skill_candidates: h
+                    .prompt_coordination
+                    .context_discovery
+                    .skill_candidates
+                    .clone(),
+                skills: h.prompt_coordination.context_discovery.skills.clone(),
+                agents_files: h.prompt_coordination.context_discovery.agents_files.clone(),
+                waiting_on,
+            },
+        );
 }
 
 fn test_agent_context_waits<'a>(
     h: &'a Harness,
     agent_id: &tau_proto::AgentId,
 ) -> Option<&'a std::collections::HashSet<tau_proto::ConnectionId>> {
-    h.context_discovery
+    h.prompt_coordination
+        .context_discovery
         .pending_agents
         .get(agent_id)
         .map(|pending| &pending.waiting_on)
 }
 
 fn finish_test_agent_context_wait(h: &mut Harness, agent_id: &tau_proto::AgentId) {
-    let Some(mut pending) = h.context_discovery.pending_agents.remove(agent_id) else {
+    let Some(mut pending) = h
+        .prompt_coordination
+        .context_discovery
+        .pending_agents
+        .remove(agent_id)
+    else {
         return;
     };
     pending.waiting_on.clear();
-    h.context_discovery.frozen_agents.insert(
-        agent_id.clone(),
-        crate::frozen_agent_discovery::FrozenAgentDiscovery {
-            initialization_id: pending.initialization_id,
-            skills: pending.skills,
-        },
-    );
+    h.prompt_coordination
+        .context_discovery
+        .frozen_agents
+        .insert(
+            agent_id.clone(),
+            crate::frozen_agent_discovery::FrozenAgentDiscovery {
+                initialization_id: pending.initialization_id,
+                skills: pending.skills,
+            },
+        );
 }
 
 /// Ensures build timestamps used for built-in skill freshness parse to exact
@@ -421,14 +440,21 @@ fn skill_winner_disconnect_restores_next_best_candidate() {
     let older = test_discovered_skill("old-ext", "older", 100);
     let newer = test_discovered_skill("new-ext", "newer", 200);
 
-    h.context_discovery
+    h.prompt_coordination
+        .context_discovery
         .skill_candidates
         .insert(name.clone(), vec![older, newer]);
     h.recompute_discovered_skill_winner(&name);
-    assert_eq!(h.context_discovery.skills[&name].description, "newer");
+    assert_eq!(
+        h.prompt_coordination.context_discovery.skills[&name].description,
+        "newer"
+    );
 
     h.remove_discovered_context(&crate::test_connection_id("new-ext"));
-    assert_eq!(h.context_discovery.skills[&name].description, "older");
+    assert_eq!(
+        h.prompt_coordination.context_discovery.skills[&name].description,
+        "older"
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -439,7 +465,7 @@ fn skill_winner_disconnect_restores_next_best_candidate() {
 fn literal_existing_agent_skill_text_bypasses_skill_expansion() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    h.selected_model = Some("test/model".into());
+    h.config.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
@@ -544,7 +570,7 @@ fn authenticated_ui_pending_prompt_classification_moves_text_buffer() {
 fn literal_new_agent_skill_text_bypasses_skill_expansion() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    h.selected_model = Some("test/model".into());
+    h.config.selected_model = Some("test/model".into());
 
     h.handle_ui_create_agent_from(
         &crate::test_connection_id("ui-create-test"),
@@ -555,7 +581,7 @@ fn literal_new_agent_skill_text_bypasses_skill_expansion() {
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
-            role: h.selected_role.clone(),
+            role: h.config.selected_role.clone(),
             model_override: None,
             metadata: Vec::new(),
             initial_prompt: Some(":skill definitely-not-installed".to_owned()),
@@ -743,7 +769,7 @@ fn minted_agent_ids_use_deterministic_test_rng_sequence() {
     let mint_pair = || {
         let tmp = TempDir::new().expect("tempdir");
         let mut h = echo_harness(tmp.path()).expect("harness");
-        let role = h.selected_role.clone();
+        let role = h.config.selected_role.clone();
         let first = h.create_durable_user_agent(
             "s1".parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
@@ -980,23 +1006,28 @@ fn render_self_knowledge_pim_content_inserts_config_defaults() {
 
 fn agent_tree_for_conversation<'a>(h: &'a Harness, cid: &AgentId) -> &'a AgentTree {
     let agent_id = h
+        .agent_runtime
         .agent_registry
         .agents
         .get(cid)
         .and_then(|conv| conv.agent_id.as_deref())
         .expect("conversation has agent id");
-    h.agent_store.agent(agent_id).expect("agent tree")
+    h.session_runtime
+        .agent_store
+        .agent(agent_id)
+        .expect("agent tree")
 }
 
 pub(super) fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
     let cid = h
+        .agent_runtime
         .agent_registry
         .agents
         .iter()
         .find_map(|(cid, conv)| conv.originator.is_user().then_some(cid.clone()))
         .unwrap_or_else(|| {
-            let session_id = h.current_session_id.clone();
-            let role = h.selected_role.clone();
+            let session_id = h.session_runtime.current_session_id.clone();
+            let role = h.config.selected_role.clone();
             h.create_durable_user_agent(session_id, &role)
         });
     // Most harness unit tests use this helper to focus on tool/provider state,
@@ -1004,6 +1035,7 @@ pub(super) fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
     // registered context providers have already acknowledged it; tests that
     // exercise context readiness drive `session.agent_loaded` explicitly.
     if let Some(agent_id) = h
+        .agent_runtime
         .agent_registry
         .agents
         .get(&cid)
@@ -1016,7 +1048,8 @@ pub(super) fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
 }
 
 fn test_user_agent(h: &Harness) -> AgentId {
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .iter()
         .find_map(|(cid, conv)| conv.originator.is_user().then_some(cid.clone()))
@@ -1025,7 +1058,8 @@ fn test_user_agent(h: &Harness) -> AgentId {
 
 fn durable_agent_id_for_conversation(h: &Harness, cid: &AgentId) -> tau_proto::AgentId {
     crate::parse_agent_id(
-        h.agent_registry
+        h.agent_runtime
+            .agent_registry
             .agents
             .get(cid)
             .and_then(|conv| conv.agent_id.clone())
@@ -1039,7 +1073,12 @@ fn default_agent_tree(h: &Harness) -> &AgentTree {
 }
 
 fn agent_branch_for_conversation<'a>(h: &'a Harness, cid: &AgentId) -> Vec<&'a AgentEntry> {
-    let head = h.agent_registry.agents.get(cid).and_then(|conv| conv.head);
+    let head = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get(cid)
+        .and_then(|conv| conv.head);
     agent_tree_for_conversation(h, cid).branch_from(head)
 }
 
@@ -1055,7 +1094,7 @@ fn default_agent_node(h: &Harness, id: NodeId) -> &tau_core::AgentNode {
 fn event_log_events(h: &Harness) -> Vec<Event> {
     let mut events = Vec::new();
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         events.push(entry.event);
     }
@@ -1063,14 +1102,19 @@ fn event_log_events(h: &Harness) -> Vec<Event> {
 }
 
 fn loaded_agent_events(h: &Harness, session_id: &str) -> Vec<Event> {
-    let Some(session) = h.store.session(session_id) else {
+    let Some(session) = h.session_runtime.store.session(session_id) else {
         return Vec::new();
     };
 
     session
         .loaded_agents()
         .into_iter()
-        .filter_map(|agent_id| h.agent_store.agent_events(agent_id.as_str()).ok())
+        .filter_map(|agent_id| {
+            h.session_runtime
+                .agent_store
+                .agent_events(agent_id.as_str())
+                .ok()
+        })
         .flatten()
         .map(|entry| entry.event)
         .collect()
@@ -1104,7 +1148,7 @@ fn persisted_agent_branches(state_dir: &Path, session_id: &str) -> Vec<Vec<Agent
 /// Test-only helper that appends a user message through the harness's normal
 /// agent-transcript publish path without driving a provider turn.
 fn append_user_message_via_event(h: &mut Harness, session_id: &str, text: &str) {
-    assert_eq!(session_id, h.current_session_id.as_str());
+    assert_eq!(session_id, h.session_runtime.current_session_id.as_str());
     let cid = ensure_test_user_agent(h);
     h.publish_pending_prompt_for_agent(&cid, PendingPrompt::user(text.to_owned()))
         .expect("append user message");
@@ -1208,25 +1252,37 @@ fn echo_harness_with_dirs_and_start_reason(
         start_reason,
         storage_mode,
     )?;
-    h.agent_registry.id_rng = super::deterministic_agent_id_rng();
+    h.agent_runtime.agent_registry.id_rng = super::deterministic_agent_id_rng();
     h.enable_echo_tool_for_tests();
     // Keep the generic echo helper independent from any test fixture discovery.
     // Readiness and AGENTS.md injection tests add their own deterministic
     // context directly.
-    h.context_discovery.agents_files.clear();
+    h.prompt_coordination.context_discovery.agents_files.clear();
     // Do not let shell's startup context-provider registration defer unrelated
     // prompt dispatch assertions; readiness-specific tests register providers
     // directly.
-    h.context_discovery.agent_context_providers.clear();
-    h.context_discovery.session_context_providers.clear();
+    h.prompt_coordination
+        .context_discovery
+        .agent_context_providers
+        .clear();
+    h.prompt_coordination
+        .context_discovery
+        .session_context_providers
+        .clear();
     let pending_agents = h
+        .prompt_coordination
         .context_discovery
         .pending_agents
         .keys()
         .cloned()
         .collect::<Vec<_>>();
     for agent_id in pending_agents {
-        if let Some(pending) = h.context_discovery.pending_agents.get_mut(&agent_id) {
+        if let Some(pending) = h
+            .prompt_coordination
+            .context_discovery
+            .pending_agents
+            .get_mut(&agent_id)
+        {
             pending.waiting_on.clear();
         }
         h.finalize_agent_discovery(&agent_id)?;
@@ -1312,9 +1368,9 @@ agents:
 
     let mut harness = echo_harness_with_dirs("fixture-session", &state_dir, dirs)
         .expect("fixture must ignore poisoned startup environment");
-    assert_eq!(harness.selected_role, "fixture");
+    assert_eq!(harness.config.selected_role, "fixture");
     assert_eq!(
-        harness.project_root,
+        harness.session_runtime.project_root,
         state_dir
             .join("test-project")
             .canonicalize()
@@ -1322,12 +1378,19 @@ agents:
     );
     assert!(
         !harness
+            .prompt_coordination
             .context_discovery
             .skills
             .contains_key("ambient-skill")
     );
-    assert!(harness.context_discovery.agents_files.is_empty());
-    let expected_project_root = harness.project_root.clone();
+    assert!(
+        harness
+            .prompt_coordination
+            .context_discovery
+            .agents_files
+            .is_empty()
+    );
+    let expected_project_root = harness.session_runtime.project_root.clone();
     let outcome = harness
         .send_user_message("fixture-session", "shell pwd", None)
         .expect("shell command must run in the fixture project root");
@@ -1470,7 +1533,7 @@ fn quiet_provider_harness_for_with_start_reason_and_storage_mode(
         start_reason,
         storage_mode,
     )?;
-    h.agent_registry.id_rng = super::deterministic_agent_id_rng();
+    h.agent_runtime.agent_registry.id_rng = super::deterministic_agent_id_rng();
     Ok(h)
 }
 
@@ -1501,7 +1564,7 @@ fn connect_test_client_with_origin(
     origin: ConnectionOrigin,
 ) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let events = Arc::new(Mutex::new(Vec::new()));
-    h.bus.connect(Connection::new(
+    h.runtime_io.bus.connect(Connection::new(
         PendingConnectionMetadata {
             id: Some(crate::test_connection_id(name)),
             name: crate::test_extension_name(name),
@@ -1585,6 +1648,7 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
         .ensure_agent_id_for_agent(cid)
         .expect("conversation agent id");
     let conv = h
+        .agent_runtime
         .agent_registry
         .agents
         .get(cid)
@@ -1592,14 +1656,15 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
     let role = h.role_name_for_agent(conv).to_owned();
     let model = h
         .model_for_agent_role(conv)
-        .or_else(|| h.selected_model.clone());
+        .or_else(|| h.config.selected_model.clone());
     let tool_specs = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
-    h.prompt_runtime.tool_specs.insert(
+    h.prompt_coordination.prompt_runtime.tool_specs.insert(
         spid.parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         tool_specs,
     );
     let conv = h
+        .agent_runtime
         .agent_registry
         .agents
         .get_mut(cid)
@@ -1616,11 +1681,12 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
     };
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agent_routes
         .insert(agent_id.clone(), cid.clone());
     if let Some(model) = model {
-        h.prompt_runtime.models.insert(
+        h.prompt_coordination.prompt_runtime.models.insert(
             spid.parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
             model,
@@ -1631,7 +1697,8 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
 /// Pre-seed the per-conversation `ToolsRunning` state for tests that
 /// bypass the agent-response path and call tool handlers directly.
 fn seed_tools_running(h: &mut Harness, cid: &crate::AgentId, remaining: Vec<ToolCallId>) {
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(cid)
         .expect("conversation present")
@@ -1644,6 +1711,7 @@ fn seed_tools_running(h: &mut Harness, cid: &crate::AgentId, remaining: Vec<Tool
 /// emitted one or more tool calls for this conversation.
 fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&str, &str)]) {
     let agent_id = h
+        .agent_runtime
         .agent_registry
         .agents
         .get(cid)
@@ -1773,7 +1841,9 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
             panic!("timed out waiting for {target_call_id} to complete");
         }
         let event = h.expand_component_ingress_wake(
-            h.rx.recv_timeout(Duration::from_secs(1))
+            h.runtime_io
+                .rx
+                .recv_timeout(Duration::from_secs(1))
                 .expect("tool result should arrive"),
         );
         match event {
@@ -1819,14 +1889,16 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
 fn drive_harness_until_tool_turn_empty(h: &mut Harness) {
     let started = Instant::now();
     loop {
-        if h.tool_runtime.tool_turn.is_empty() {
+        if h.tool_routing.tool_runtime.tool_turn.is_empty() {
             return;
         }
         if started.elapsed() >= Duration::from_secs(3) {
             panic!("timed out waiting for tool turn to empty");
         }
         let event = h.expand_component_ingress_wake(
-            h.rx.recv_timeout(Duration::from_secs(1))
+            h.runtime_io
+                .rx
+                .recv_timeout(Duration::from_secs(1))
                 .expect("tool result should arrive"),
         );
         match event {
@@ -1875,7 +1947,8 @@ fn wait_for_session_unlock(state_dir: &Path, session_id: &str) {
 /// the cross-conversation regression test above to disambiguate
 /// nested-vs-outer side prompt ids.
 fn outer_side_cid_str(h: &Harness) -> &str {
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .iter()
         .find_map(|(cid, conv)| {
@@ -1899,6 +1972,7 @@ fn read_raw_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCrea
     let mut cursor = path_crate_event_log::EventLogSeq::new(0);
     loop {
         let entry = h
+            .runtime_io
             .event_log
             .get_next_from(cursor)
             .expect("prompt event in log");
@@ -1917,6 +1991,7 @@ fn read_nth_prompt_created(h: &Harness, index: usize) -> AgentPromptCreated {
     let mut seen = 0;
     loop {
         let entry = h
+            .runtime_io
             .event_log
             .get_next_from(cursor)
             .expect("prompt event in log");

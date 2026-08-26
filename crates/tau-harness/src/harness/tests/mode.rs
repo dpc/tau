@@ -176,7 +176,7 @@ fn ephemeral_harness_rejects_session_scoped_extension_data() {
         .run_extension_data_request(
             &crate::test_connection_id(&provider_connection),
             tau_proto::ExtensionDataScope::Session,
-            &h.current_session_id,
+            &h.session_runtime.current_session_id,
             tau_proto::ExtensionDataRequestOp::WriteFile {
                 path: tau_proto::ExtensionDataPath::from("notes.txt"),
                 contents: b"secret-ish session data".to_vec(),
@@ -236,7 +236,7 @@ fn session_extension_data_mismatch_rejects_before_root_selection() {
     );
     assert!(
         !tau_config::settings::sessions_dir_of(&sp)
-            .join(h.current_session_id.as_str())
+            .join(h.session_runtime.current_session_id.as_str())
             .join("ext")
             .exists(),
         "mismatch must fail before selecting or creating the current root"
@@ -365,7 +365,7 @@ fn memory_only_harness_rejects_all_extension_data_without_state_roots() {
             .run_extension_data_request(
                 &crate::test_connection_id(&provider_connection),
                 scope,
-                &h.current_session_id,
+                &h.session_runtime.current_session_id,
                 tau_proto::ExtensionDataRequestOp::WriteFile {
                     path: tau_proto::ExtensionDataPath::from("notes.txt"),
                     contents: b"must remain memory-only".to_vec(),
@@ -457,7 +457,8 @@ fn ephemeral_agent_uses_memory_only_agent_and_membership_stores() {
         "ephemeral agent must not create an agent directory"
     );
     assert!(
-        h.store
+        h.session_runtime
+            .store
             .session_events("s1")
             .expect("durable session events")
             .into_iter()
@@ -469,7 +470,8 @@ fn ephemeral_agent_uses_memory_only_agent_and_membership_stores() {
         "ephemeral agent membership must not be durable"
     );
     assert!(
-        !h.agent_store
+        !h.session_runtime
+            .agent_store
             .agent_events(agent_id.as_str())
             .expect("memory replay events")
             .is_empty(),
@@ -534,6 +536,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         })
         .expect("ephemeral agent");
     let cid = h
+        .agent_runtime
         .agent_registry
         .agent_routes
         .get(agent_id.as_str())
@@ -567,7 +570,8 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         }),
     );
     let tool_call_id = ToolCallId::from("ephemeral-debug-tool-call");
-    h.tool_runtime
+    h.tool_routing
+        .tool_runtime
         .tool_agents
         .insert(tool_call_id.clone(), cid.clone());
     let progress_owner = "ephemeral-progress-owner";
@@ -577,7 +581,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         "configured-progress-owner",
         tau_proto::ClientKind::Tool,
     );
-    h.tool_runtime.pending_tool_providers.insert(
+    h.tool_routing.tool_runtime.pending_tool_providers.insert(
         tool_call_id.clone(),
         crate::test_connection_id(progress_owner),
     );
@@ -639,15 +643,18 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         .parse::<tau_proto::AgentPromptId>()
         .expect("known-safe AgentPromptId must be valid");
     seed_agent_thinking(&mut h, &cid, provider_prompt_id.as_str());
-    h.prompt_runtime
+    h.prompt_coordination
+        .prompt_runtime
         .agents
         .insert(provider_prompt_id.clone(), cid.clone());
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("ephemeral agent")
         .in_flight_prompt = Some(provider_prompt_id.clone());
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("ephemeral agent")
@@ -745,7 +752,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
             "ephemeral-provider-finished-secret",
         ));
     h.remove_agent(&cid);
-    assert!(!h.agent_registry.agents.contains_key(&cid));
+    assert!(!h.agent_runtime.agent_registry.agents.contains_key(&cid));
     h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(provider),
         tau_proto::HarnessInputMessage::emit_transient(finished.clone()),
@@ -872,13 +879,17 @@ fn tool_backed_start_agent_request_targets_ephemeral_agent() {
         })
         .expect("ephemeral agent");
     let cid = h
+        .agent_runtime
         .agent_registry
         .agent_routes
         .get(agent_id.as_str())
         .cloned()
         .expect("ephemeral route");
     let tool_call_id = ToolCallId::from("ephemeral-delegate-tool-call");
-    h.tool_runtime.tool_agents.insert(tool_call_id.clone(), cid);
+    h.tool_routing
+        .tool_runtime
+        .tool_agents
+        .insert(tool_call_id.clone(), cid);
 
     assert!(
         h.event_targets_ephemeral_agent(
@@ -934,6 +945,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
         })
         .expect("ephemeral agent");
     let cid = h
+        .agent_runtime
         .agent_registry
         .agent_routes
         .get(agent_id.as_str())
@@ -942,7 +954,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
     let sync = path_crate_harness::interception::ConversationHeadSync {
         cid,
         agent_id: Some(agent_id),
-        session_generation: h.current_session_generation,
+        session_generation: h.session_runtime.current_session_generation,
         fold_parent: None,
         suppress_activation_dispatch: false,
         continuation: None,
@@ -1447,6 +1459,7 @@ fn embedded_deterministic_tool_round_clears_prompt_lifecycle() {
     );
     assert!(
         harness
+            .agent_runtime
             .agent_registry
             .agents
             .values()
@@ -1560,13 +1573,16 @@ fn harness_startup_eagerly_initializes_eager_session() {
     let h = echo_harness(&sp).expect("start");
 
     assert!(
-        h.context_discovery.initialized_sessions.contains("s1"),
+        h.prompt_coordination
+            .context_discovery
+            .initialized_sessions
+            .contains("s1"),
         "eager init should mark the bound session as initialized at startup; \
          `initialized_sessions` was {:?}",
-        h.context_discovery.initialized_sessions
+        h.prompt_coordination.context_discovery.initialized_sessions
     );
     assert!(
-        matches!(h.turn_state, TurnState::Idle),
+        matches!(h.session_runtime.turn_state, TurnState::Idle),
         "turn state should be Idle after eager init completes"
     );
 }
@@ -1588,7 +1604,7 @@ fn resumed_startup_publishes_resume_session_started() {
 
     let mut next_seq = path_crate_event_log::EventLogSeq::new(0);
     let mut session_started_reason = None;
-    while let Some(entry) = h.event_log.get_next_from(next_seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(next_seq) {
         next_seq = entry.seq.next();
         if let Event::SessionStarted(started) = entry.event
             && started.session_id.as_str() == "s1"

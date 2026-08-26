@@ -74,7 +74,8 @@ fn action_result(invocation_id: &str, text: &str) -> tau_proto::ActionResult {
 }
 
 fn subscribe_to_actions(h: &mut Harness, client_id: &str) {
-    h.bus
+    h.runtime_io
+        .bus
         .set_subscriptions(
             &crate::test_connection_id(client_id),
             Vec::new(),
@@ -133,7 +134,8 @@ fn action_schema_publish_is_owner_stamped_and_broadcast() {
         _ => unreachable!("matched above"),
     }
     assert!(
-        h.action_registry
+        h.tool_routing
+            .action_registry
             .has_schema_for_connection(&crate::test_connection_id("email-ext"))
     );
     let declaration_index = events
@@ -175,7 +177,8 @@ fn action_schema_declaration_requires_action_provider_capability() {
     publish_action_schema(&mut h, "plain-tool", "email.list");
 
     assert!(
-        !h.action_registry
+        !h.tool_routing
+            .action_registry
             .has_schema_for_connection(&crate::test_connection_id("plain-tool"))
     );
     assert!(ui.lock().expect("ui sink").is_empty());
@@ -220,12 +223,14 @@ fn action_schema_snapshots_replace_withdraw_and_deduplicate() {
     .expect("empty snapshot should withdraw Actions");
 
     assert!(
-        h.action_registry
+        h.tool_routing
+            .action_registry
             .schema_for_connection(&crate::test_connection_id("email-ext"))
             .is_some_and(|snapshot| snapshot.schema.roots.is_empty())
     );
     assert!(
-        h.action_registry
+        h.tool_routing
+            .action_registry
             .route_action_invoke(&action_invoke("withdrawn", "email-ext"))
             .is_err()
     );
@@ -279,7 +284,8 @@ fn dropped_startup_action_schema_releases_activation_reservation() {
             .contains_key("email-ext")
     );
     assert!(
-        !h.action_registry
+        !h.tool_routing
+            .action_registry
             .has_schema_for_connection(&crate::test_connection_id("email-ext"))
     );
 }
@@ -467,7 +473,7 @@ fn external_message_peer_cannot_reach_ui_or_action_handlers() {
         }),
     )
     .expect("dedicated peer hello");
-    let selected_role = h.selected_role.clone();
+    let selected_role = h.config.selected_role.clone();
 
     for event in [
         Event::UiRoleSelect(tau_proto::UiRoleSelect {
@@ -485,7 +491,7 @@ fn external_message_peer_cannot_reach_ui_or_action_handlers() {
         .expect("denied generic emission");
     }
 
-    assert_eq!(h.selected_role, selected_role);
+    assert_eq!(h.config.selected_role, selected_role);
     assert!(extension.lock().expect("extension sink").is_empty());
 }
 
@@ -648,7 +654,8 @@ fn action_provider_disconnect_unregisters_and_fails_pending_invocations() {
     h.handle_disconnect(&crate::test_connection_id("email-ext"));
 
     assert!(
-        !h.action_registry
+        !h.tool_routing
+            .action_registry
             .has_schema_for_connection(&crate::test_connection_id("email-ext"))
     );
     let ui_events = ui.lock().expect("ui sink");

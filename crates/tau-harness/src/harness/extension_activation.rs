@@ -11,7 +11,7 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
         request: tau_proto::GetAgentPromptCreated,
     ) {
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             connection_id,
             None,
             HarnessOutputMessage::AgentPromptCreatedResult(Box::new(
@@ -240,10 +240,11 @@ impl Harness {
         let internal_name = registration.tool.name.clone();
         let visible_name = self.tool_model_visible_name(&registration.tool).clone();
         let was_available = !self
+            .tool_routing
             .registry
             .providers_for(internal_name.as_str())
             .is_empty();
-        let report = self.registry.register_with_prompt_fragment(
+        let report = self.tool_routing.registry.register_with_prompt_fragment(
             source_id,
             tau_core::ToolRegistration {
                 tool: registration.tool.clone(),
@@ -287,6 +288,7 @@ impl Harness {
     pub(super) fn ensure_tool_started_subscription(&mut self, source_id: &tau_proto::ConnectionId) {
         let selector = EventSelector::Exact(tau_proto::EventName::TOOL_STARTED);
         let mut selectors = self
+            .runtime_io
             .bus
             .live_subscriptions(source_id)
             .map_or_else(Vec::new, |s| s.to_vec());
@@ -295,10 +297,15 @@ impl Harness {
         }
         selectors.push(selector);
         let historical = self
+            .runtime_io
             .bus
             .historical_subscriptions(source_id)
             .map_or_else(Vec::new, |s| s.to_vec());
-        if let Err(error) = self.bus.set_subscriptions(source_id, historical, selectors) {
+        if let Err(error) = self
+            .runtime_io
+            .bus
+            .set_subscriptions(source_id, historical, selectors)
+        {
             tracing::warn!(
                 target: "tau_harness",
                 connection_id = %source_id,
@@ -316,12 +323,15 @@ impl Harness {
         let component_name = self
             .authenticated_source_name(source_id)
             .expect("authenticated extension source must retain its canonical name");
-        self.publication.interceptors.replace_for_connection(
-            source_id,
-            component_name,
-            intercept.selectors,
-            intercept.priority,
-        );
+        self.runtime_io
+            .publication
+            .interceptors
+            .replace_for_connection(
+                source_id,
+                component_name,
+                intercept.selectors,
+                intercept.priority,
+            );
     }
 
     pub(super) fn apply_extension_prompt_fragment(
@@ -330,7 +340,8 @@ impl Harness {
         publish: tau_proto::ExtPromptFragmentPublish,
     ) {
         let contributor = source_id.clone();
-        self.context_discovery
+        self.prompt_coordination
+            .context_discovery
             .prompt_fragments
             .entry(contributor)
             .or_default()
@@ -481,7 +492,7 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         snapshot: tau_proto::ExtensionSessionDiscoverySnapshotDeclared,
     ) {
-        if snapshot.session_id != self.current_session_id {
+        if snapshot.session_id != self.session_runtime.current_session_id {
             return;
         }
         let Some((skills, agents_files)) =
@@ -490,9 +501,9 @@ impl Harness {
             return;
         };
         replace_discovery_source(
-            &mut self.context_discovery.skill_candidates,
-            &mut self.context_discovery.skills,
-            &mut self.context_discovery.agents_files,
+            &mut self.prompt_coordination.context_discovery.skill_candidates,
+            &mut self.prompt_coordination.context_discovery.skills,
+            &mut self.prompt_coordination.context_discovery.agents_files,
             source_id,
             skills,
             agents_files,
@@ -506,10 +517,11 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         snapshot: tau_proto::ExtensionAgentDiscoverySnapshotDeclared,
     ) {
-        if snapshot.session_id != self.current_session_id {
+        if snapshot.session_id != self.session_runtime.current_session_id {
             return;
         }
         let Some(pending) = self
+            .prompt_coordination
             .context_discovery
             .pending_agents
             .get(&snapshot.agent_id)
@@ -525,6 +537,7 @@ impl Harness {
             return;
         };
         let Some(pending) = self
+            .prompt_coordination
             .context_discovery
             .pending_agents
             .get_mut(&snapshot.agent_id)
@@ -543,10 +556,10 @@ impl Harness {
 
     pub(super) fn publish_session_skills_projection(&mut self) {
         let snapshot = tau_proto::HarnessSessionSkillsAvailable {
-            session_id: self.current_session_id.clone(),
-            skills: effective_skills(&self.context_discovery.skills),
+            session_id: self.session_runtime.current_session_id.clone(),
+            skills: effective_skills(&self.prompt_coordination.context_discovery.skills),
         };
-        self.context_discovery.session_skills = snapshot.clone();
+        self.prompt_coordination.context_discovery.session_skills = snapshot.clone();
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::HarnessSessionSkillsAvailable(snapshot),
@@ -576,7 +589,8 @@ impl Harness {
             return;
         }
         let pending =
-            self.agent_registry
+            self.agent_runtime
+                .agent_registry
                 .agents
                 .iter()
                 .filter_map(|(cid, agent)| match &agent.activation_dispatch {
@@ -623,6 +637,7 @@ impl Harness {
                 });
             if !self.activation_successor_matches_selected_head(&event)
                 || !self
+                    .prompt_coordination
                     .compaction_runtime
                     .enqueued_inference_checkpoints
                     .insert(key)
@@ -655,6 +670,7 @@ impl Harness {
         schema: tau_actions::ActionSchema,
     ) {
         if self
+            .tool_routing
             .action_registry
             .schema_for_connection(source_id)
             .is_some_and(|current| {
@@ -665,7 +681,7 @@ impl Harness {
         {
             return;
         }
-        if let Err(error) = self.action_registry.register_schema(
+        if let Err(error) = self.tool_routing.action_registry.register_schema(
             source_id,
             extension_name.clone(),
             instance_id,
@@ -690,7 +706,8 @@ impl Harness {
         &mut self,
         source_id: &tau_proto::ConnectionId,
     ) {
-        self.context_discovery
+        self.prompt_coordination
+            .context_discovery
             .agent_context_providers
             .insert(source_id.clone());
     }
@@ -699,7 +716,8 @@ impl Harness {
         &mut self,
         source_id: &tau_proto::ConnectionId,
     ) {
-        self.context_discovery
+        self.prompt_coordination
+            .context_discovery
             .session_context_providers
             .insert(source_id.clone());
     }
@@ -717,29 +735,36 @@ impl Harness {
             value,
         } = publish;
         let matches_pending = self
+            .prompt_coordination
             .context_discovery
             .pending_agents
             .get(&agent_id)
             .is_some_and(|pending| pending.initialization_id == agent_initialization_id);
         let matches_frozen = self
+            .prompt_coordination
             .context_discovery
             .frozen_agents
             .get(&agent_id)
             .is_some_and(|frozen| frozen.initialization_id == agent_initialization_id);
-        if session_id != self.current_session_id || !(matches_pending || matches_frozen) {
+        if session_id != self.session_runtime.current_session_id
+            || !(matches_pending || matches_frozen)
+        {
             return;
         }
         let contributor = source_id.clone();
         let extension_name = self
             .authenticated_source_name(&contributor)
             .expect("authenticated extension source must retain its canonical name");
-        self.context_discovery.agent_context.publish(
-            agent_id,
-            key,
-            contributor,
-            extension_name.to_string(),
-            value,
-        );
+        self.prompt_coordination
+            .context_discovery
+            .agent_context
+            .publish(
+                agent_id,
+                key,
+                contributor,
+                extension_name.to_string(),
+                value,
+            );
     }
 
     pub(super) fn apply_extension_context_ready(
@@ -762,8 +787,8 @@ impl Harness {
         &self,
         admission: &ExtensionFrameAdmission,
     ) -> bool {
-        admission.session_id == self.current_session_id
-            && admission.session_generation == self.current_session_generation
+        admission.session_id == self.session_runtime.current_session_id
+            && admission.session_generation == self.session_runtime.current_session_generation
     }
 
     pub(super) fn activate_staged_extension_capabilities(
@@ -1012,6 +1037,7 @@ impl Harness {
                     .then_with(|| a.connection_id.cmp(&b.connection_id))
             });
             let internal_owner = self
+                .tool_routing
                 .registry
                 .providers_for(tool_name.as_str())
                 .into_iter()
@@ -1366,8 +1392,8 @@ impl Harness {
 
     pub(super) fn current_extension_frame_admission(&self) -> ExtensionFrameAdmission {
         ExtensionFrameAdmission {
-            session_id: self.current_session_id.clone(),
-            session_generation: self.current_session_generation,
+            session_id: self.session_runtime.current_session_id.clone(),
+            session_generation: self.session_runtime.current_session_generation,
         }
     }
 
@@ -1687,7 +1713,7 @@ impl Harness {
                 && entry.connection_id == *source_id)
                 .then(|| entry.name.clone())
         })?;
-        if self.storage_mode.is_ephemeral() {
+        if self.session_runtime.storage_mode.is_ephemeral() {
             return None;
         }
         let session_dir = self.sessions_dir().join(capture.session_id.as_str());

@@ -134,7 +134,8 @@ fn restore_replay_does_not_project_extension_provenance_as_connection_source() {
                 query_id: format!("query-{index}"),
             },
         });
-        h.store
+        h.session_runtime
+            .store
             .append_session_restore_event_at(
                 "s1",
                 Some(tau_core::PersistedEventSource::Extension(
@@ -334,7 +335,11 @@ fn fallback_message_fact_live_and_restart_replay_are_exact() {
                 Some(crate::test_connection_id(HARNESS_CONNECTION_ID)),
             ]
         );
-        let records = h.store.session_events("s1").expect("fallback records");
+        let records = h
+            .session_runtime
+            .store
+            .session_events("s1")
+            .expect("fallback records");
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].event, fact);
         assert_eq!(records[1].event, fact);
@@ -442,6 +447,7 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
         })
         .expect("ephemeral agent id");
     let cid = h
+        .agent_runtime
         .agent_registry
         .agent_routes
         .get(agent_id.as_str())
@@ -507,7 +513,11 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
     }));
     drop(frames);
 
-    let durable_session_events = h.store.session_events("s1").expect("durable events");
+    let durable_session_events = h
+        .session_runtime
+        .store
+        .session_events("s1")
+        .expect("durable events");
     assert!(durable_session_events.iter().all(|record| {
         !matches!(
             &record.event,
@@ -586,7 +596,8 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
         })
         .expect("target agent");
     assert!(
-        h.agent_registry
+        h.agent_runtime
+            .agent_registry
             .agent_routes
             .contains_key(agent_id.as_str())
     );
@@ -617,7 +628,8 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
         "valid incoming fact should request one inference activation"
     );
     assert!(matches!(
-        h.agent_store
+        h.session_runtime
+            .agent_store
             .agent(agent_id.as_str())
             .expect("projected tree")
             .nodes()
@@ -718,12 +730,14 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
     );
 
     let cid = h
+        .agent_runtime
         .agent_registry
         .agent_routes
         .get(agent_id.as_str())
         .cloned()
         .expect("target conversation");
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("target runtime")
@@ -753,7 +767,8 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
         "terminating target must retain the projection without waking"
     );
     assert!(matches!(
-        h.agent_store
+        h.session_runtime
+            .agent_store
             .agent(agent_id.as_str())
             .expect("terminating target tree")
             .nodes()
@@ -769,9 +784,9 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
 fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    h.selected_model = Some("test/model".into());
+    h.config.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agent_registry.agents[&cid]
+    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .map(crate::parse_agent_id)
@@ -800,7 +815,8 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
     );
 
     assert!(
-        h.agent_store
+        h.session_runtime
+            .agent_store
             .agent(agent_id.as_str())
             .expect("agent tree")
             .nodes()
@@ -809,7 +825,9 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
         "fact projection must remain pending while tool adjacency is open"
     );
     assert!(matches!(
-        h.agent_registry.agents[&cid].pending_message_wakes.front(),
+        h.agent_runtime.agent_registry.agents[&cid]
+            .pending_message_wakes
+            .front(),
         Some(crate::agent::PendingMessageWake {
             source: crate::agent::PendingMessageWakeSource::MessageFact { .. },
             node_id: None,
@@ -885,7 +903,11 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
 fn metadata_only_offline_agent_message_fact_uses_session_journal() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    let ghost_dir = h.agent_store.agents_dir().join("offline-agent");
+    let ghost_dir = h
+        .session_runtime
+        .agent_store
+        .agents_dir()
+        .join("offline-agent");
     std::fs::create_dir_all(&ghost_dir).expect("create legacy ghost dir");
     std::fs::write(
         ghost_dir.join("meta.json"),
@@ -913,7 +935,8 @@ fn metadata_only_offline_agent_message_fact_uses_session_journal() {
 
     assert!(!ghost_dir.join("events.cbor").exists());
     assert!(
-        h.store
+        h.session_runtime
+            .store
             .session_events("s1")
             .expect("session records")
             .iter()
@@ -936,8 +959,9 @@ fn agent_message_fact_replay_rebuilds_uncovered_wake() {
     let agent_id = tau_proto::AgentId::parse("offline-agent").expect("agent id");
     let live_projection = {
         let mut h = quiet_provider_harness(&state_dir).expect("start");
-        append_agent_creation(&mut h.agent_store, agent_id.as_str());
-        h.store
+        append_agent_creation(&mut h.session_runtime.agent_store, agent_id.as_str());
+        h.session_runtime
+            .store
             .append_session_event(
                 "s1",
                 None,
@@ -974,6 +998,7 @@ fn agent_message_fact_replay_rebuilds_uncovered_wake() {
             )),
         );
         let projection = h
+            .session_runtime
             .agent_store
             .agent(agent_id.as_str())
             .expect("live transcript")
@@ -990,10 +1015,12 @@ fn agent_message_fact_replay_rebuilds_uncovered_wake() {
         quiet_provider_harness_with_start_reason(&state_dir, tau_proto::SessionStartReason::Resume)
             .expect("resume");
     resumed
+        .session_runtime
         .agent_store
         .agent_events(agent_id.as_str())
         .expect("load replayed agent journal");
     let replayed_projection = resumed
+        .session_runtime
         .agent_store
         .agent(agent_id.as_str())
         .expect("replayed transcript")
@@ -1031,11 +1058,12 @@ fn received_agent_message_replay_restores_context_and_activation() {
     let (agent_id, live_projection) = {
         let mut h = quiet_provider_harness(&state_dir).expect("start");
         let cid = ensure_test_user_agent(&mut h);
-        let agent_id = h.agent_registry.agents[&cid]
+        let agent_id = h.agent_runtime.agent_registry.agents[&cid]
             .agent_id
             .clone()
             .expect("agent id");
-        h.agent_registry
+        h.agent_runtime
+            .agent_registry
             .agents
             .get_mut(&cid)
             .expect("agent")
@@ -1060,8 +1088,14 @@ fn received_agent_message_replay_restores_context_and_activation() {
                 message: "persisted <message>& body".to_owned(),
             }),
         );
-        assert_eq!(h.agent_registry.agents[&cid].pending_message_wakes.len(), 1);
+        assert_eq!(
+            h.agent_runtime.agent_registry.agents[&cid]
+                .pending_message_wakes
+                .len(),
+            1
+        );
         let projection = h
+            .session_runtime
             .agent_store
             .agent(agent_id.as_str())
             .expect("live tree")
@@ -1079,10 +1113,12 @@ fn received_agent_message_replay_restores_context_and_activation() {
         quiet_provider_harness_with_start_reason(&state_dir, tau_proto::SessionStartReason::Resume)
             .expect("resume");
     resumed
+        .session_runtime
         .agent_store
         .agent_events(agent_id.as_str())
         .expect("load replayed journal");
     let tree = resumed
+        .session_runtime
         .agent_store
         .agent(agent_id.as_str())
         .expect("replayed tree");
@@ -1091,19 +1127,22 @@ fn received_agent_message_replay_restores_context_and_activation() {
         live_projection
     );
     let cid = resumed
+        .agent_runtime
         .agent_registry
         .agent_routes
         .get(agent_id.as_str())
         .expect("restored route");
     assert!(
-        resumed.agent_registry.agents[cid]
+        resumed.agent_runtime.agent_registry.agents[cid]
             .pending_message_wakes
             .is_empty()
     );
-    let context =
-        crate::prompt::assemble_prompt_context_from(tree, resumed.agent_registry.agents[cid].head)
-            .context
-            .flatten();
+    let context = crate::prompt::assemble_prompt_context_from(
+        tree,
+        resumed.agent_runtime.agent_registry.agents[cid].head,
+    )
+    .context
+    .flatten();
     assert!(context.iter().any(|item| {
         matches!(
             item,
@@ -1129,7 +1168,8 @@ fn member_agent_message_fact_uses_agent_journal() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     let agent_id = tau_proto::AgentId::parse("member-agent").expect("agent id");
-    h.store
+    h.session_runtime
+        .store
         .append_session_event(
             "s1",
             None,
@@ -1145,7 +1185,7 @@ fn member_agent_message_fact_uses_agent_journal() {
             }),
         )
         .expect("seed membership");
-    append_agent_creation(&mut h.agent_store, agent_id.as_str());
+    append_agent_creation(&mut h.session_runtime.agent_store, agent_id.as_str());
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::parse("configured-bridge")
             .expect("canonical publisher id must satisfy the identifier grammar"),
@@ -1166,7 +1206,8 @@ fn member_agent_message_fact_uses_agent_journal() {
     );
 
     assert_eq!(
-        h.agent_store
+        h.session_runtime
+            .agent_store
             .agent_events(agent_id.as_str())
             .expect("member agent records")[1]
             .event,
@@ -1182,7 +1223,8 @@ fn live_route_only_message_fact_uses_agent_journal() {
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid).clone();
-    h.store
+    h.session_runtime
+        .store
         .append_session_event(
             "s1",
             None,
@@ -1194,9 +1236,13 @@ fn live_route_only_message_fact_uses_agent_journal() {
             }),
         )
         .expect("remove membership");
-    h.agent_store =
+    h.session_runtime.agent_store =
         AgentStore::open(td.path().join("isolated-agent-store")).expect("empty agent store");
-    assert!(!h.agent_store.agent_exists(agent_id.as_str()));
+    assert!(
+        !h.session_runtime
+            .agent_store
+            .agent_exists(agent_id.as_str())
+    );
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::parse("configured-bridge")
             .expect("canonical publisher id must satisfy the identifier grammar"),
@@ -1217,7 +1263,8 @@ fn live_route_only_message_fact_uses_agent_journal() {
     );
 
     assert_eq!(
-        h.agent_store
+        h.session_runtime
+            .agent_store
             .agent_events(agent_id.as_str())
             .expect("live-route agent records")[0]
             .event,
@@ -1269,7 +1316,8 @@ fn known_agent_message_fact_storage_failure_prevents_delivery() {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("start");
-    h.agent_store
+    h.session_runtime
+        .agent_store
         .append_agent_event(
             "offline-agent",
             None,
@@ -1320,7 +1368,8 @@ fn known_agent_message_fact_storage_failure_prevents_delivery() {
 
     assert!(message_deliveries(&live_sink, false).is_empty());
     assert!(
-        h.store
+        h.session_runtime
+            .store
             .session_events("s1")
             .expect("session records")
             .iter()
@@ -1337,7 +1386,8 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
     let state_dir = td.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("start");
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
-    h.store
+    h.session_runtime
+        .store
         .append_session_event(
             "s1",
             None,
@@ -1353,7 +1403,8 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
             }),
         )
         .expect("cache loaded membership");
-    h.agent_store
+    h.session_runtime
+        .agent_store
         .record_agent_meta(agent_id.as_str())
         .expect("reserve agent");
     h.commit_message_fact(
@@ -1428,8 +1479,9 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("start");
-    append_agent_creation(&mut h.agent_store, "agent-1");
-    h.store
+    append_agent_creation(&mut h.session_runtime.agent_store, "agent-1");
+    h.session_runtime
+        .store
         .append_session_event(
             "s1",
             None,
@@ -1445,7 +1497,8 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
             }),
         )
         .expect("load agent in session");
-    h.agent_store
+    h.session_runtime
+        .agent_store
         .append_agent_event(
             "agent-1",
             None,
@@ -1811,11 +1864,15 @@ fn restore_rejects_membership_without_committed_agent_creation() {
             echo_harness_with_start_reason("s1", &state_dir, tau_proto::SessionStartReason::Resume)
                 .expect("resume");
         assert!(
-            !h.agent_registry.agent_routes.contains_key("orphan"),
+            !h.agent_runtime
+                .agent_registry
+                .agent_routes
+                .contains_key("orphan"),
             "{journal_kind} journal became routable"
         );
         assert!(
-            !h.agent_registry
+            !h.agent_runtime
+                .agent_registry
                 .agents
                 .contains_key(&crate::parse_agent_id("orphan"))
         );
@@ -2019,8 +2076,8 @@ fn resume_repairs_unresolved_tool_call_before_next_prompt_context() {
             let cid = test_user_agent(&h);
             panic!(
                 "deferred input did not dispatch after repair: state={:?}, wakes={:?}",
-                h.agent_registry.agents[&cid].turn_state,
-                h.agent_registry.agents[&cid].pending_message_wakes
+                h.agent_runtime.agent_registry.agents[&cid].turn_state,
+                h.agent_runtime.agent_registry.agents[&cid].pending_message_wakes
             )
         });
     let repaired = prompt_tool_result(&prompt, "interrupted-call")
@@ -2121,7 +2178,8 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.store
+    h.session_runtime
+        .store
         .append_session_event(
             "s1",
             Some(tau_core::PersistedEventSource::Connection(
@@ -2139,7 +2197,8 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
             }),
         )
         .expect("seed session membership");
-    h.agent_store
+    h.session_runtime
+        .agent_store
         .append_agent_event(
             "agent-1",
             Some(tau_core::PersistedEventSource::Connection(
@@ -2164,6 +2223,7 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
         .expect("read timeout");
     h.accept_client(server_end).expect("accept");
     let ui_conn = h
+        .runtime_io
         .bus
         .connections()
         .into_iter()
@@ -2249,6 +2309,7 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         .expect("read timeout");
     h.accept_client(server_end).expect("accept");
     let ui_conn = h
+        .runtime_io
         .bus
         .connections()
         .into_iter()
@@ -2554,18 +2615,26 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
     let mut agent = path_crate_agent::Agent::new(
         cid.clone(),
         1,
-        h.current_session_id.clone(),
+        h.session_runtime.current_session_id.clone(),
         tau_proto::PromptOriginator::User,
         None,
         None,
     );
     agent.agent_id = Some(agent_id.to_string());
-    h.agent_registry.agents.insert(cid.clone(), agent);
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .insert(cid.clone(), agent);
+    h.agent_runtime
+        .agent_registry
         .agent_routes
         .insert(agent_id.to_string(), cid.clone());
-    h.agent_registry.session_loaded.insert(agent_id.clone());
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
+        .session_loaded
+        .insert(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
         .navigation_modes
         .insert(agent_id.clone(), tau_proto::AgentNavigationMode::Active);
 
@@ -2880,7 +2949,11 @@ fn queued_and_recalled_prompt_lifecycle_is_not_durable() {
         }),
     );
 
-    let events = h.store.session_events("s1").expect("session events");
+    let events = h
+        .session_runtime
+        .store
+        .session_events("s1")
+        .expect("session events");
     assert!(
         events.iter().all(|entry| !matches!(
             entry.event,
@@ -2905,8 +2978,13 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     let agent_id = h
         .ensure_agent_id_for_agent(&cid)
         .expect("default conversation has an agent id");
-    let session_id = h.agent_registry.agents[&cid].session_id.clone();
-    h.prompt_runtime.agents.insert(spid.clone(), cid.clone());
+    let session_id = h.agent_runtime.agent_registry.agents[&cid]
+        .session_id
+        .clone();
+    h.prompt_coordination
+        .prompt_runtime
+        .agents
+        .insert(spid.clone(), cid.clone());
     h.publish_event(
         None,
         Event::AgentPromptQueued(AgentPromptQueued {
@@ -2989,6 +3067,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
         .expect("read timeout");
     h.accept_client(server_end).expect("accept");
     let ui_conn = h
+        .runtime_io
         .bus
         .connections()
         .into_iter()
@@ -3040,7 +3119,8 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
     let agent_id = h
         .ensure_agent_id_for_agent(&cid)
         .expect("default conversation has an agent id");
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("default conversation")
@@ -3055,6 +3135,7 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
         .expect("read timeout");
     h.accept_client(server_end).expect("accept");
     let ui_conn = h
+        .runtime_io
         .bus
         .connections()
         .into_iter()
@@ -3265,6 +3346,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
         .expect("read timeout");
     h.accept_client(server_end).expect("accept");
     let ui_conn = h
+        .runtime_io
         .bus
         .connections()
         .into_iter()
@@ -3345,7 +3427,7 @@ fn resumed_harness_replays_persisted_session_history() {
 
     {
         let mut h = echo_harness_for("s1", &sp).expect("start");
-        h.selected_model = Some("test/model".into());
+        h.config.selected_model = Some("test/model".into());
 
         h.submit_user_prompt(
             "s1".parse::<tau_proto::SessionId>()
@@ -3354,6 +3436,7 @@ fn resumed_harness_replays_persisted_session_history() {
         )
         .expect("submit first prompt");
         let spid = h
+            .prompt_coordination
             .prompt_runtime
             .agents
             .keys()
@@ -3361,12 +3444,14 @@ fn resumed_harness_replays_persisted_session_history() {
             .expect("first session prompt id")
             .clone();
         let cid = h
+            .prompt_coordination
             .prompt_runtime
             .agents
             .get(&spid)
             .expect("first prompt conversation")
             .clone();
         let agent_id = h
+            .agent_runtime
             .agent_registry
             .agents
             .get(&cid)
@@ -3406,7 +3491,7 @@ fn resumed_harness_replays_persisted_session_history() {
     let mut resumed =
         echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
             .expect("resume");
-    resumed.selected_model = Some("test/model".into());
+    resumed.config.selected_model = Some("test/model".into());
 
     resumed
         .submit_user_prompt(
@@ -3416,6 +3501,7 @@ fn resumed_harness_replays_persisted_session_history() {
         )
         .expect("submit resumed prompt");
     let spid = resumed
+        .prompt_coordination
         .prompt_runtime
         .agents
         .keys()
@@ -3454,8 +3540,9 @@ fn resumed_harness_replays_context_size_alert_at_delivery_position() {
     {
         let mut h = echo_harness_for("s1", &state).expect("start");
         let cid = ensure_test_user_agent(&mut h);
-        h.available_roles
-            .get_mut(&h.selected_role)
+        h.config
+            .available_roles
+            .get_mut(&h.config.selected_role)
             .expect("selected role")
             .context_size_alerts
             .insert(
@@ -3496,8 +3583,9 @@ fn resumed_harness_replays_context_size_alert_at_delivery_position() {
         ))
         .expect("finish alert response");
 
-        h.available_roles
-            .get_mut(&h.selected_role)
+        h.config
+            .available_roles
+            .get_mut(&h.config.selected_role)
             .expect("selected role")
             .context_size_alerts
             .insert(
@@ -3518,7 +3606,7 @@ fn resumed_harness_replays_context_size_alert_at_delivery_position() {
                 remaining_calls: vec!["replay-alert-tool".into()],
             },
         );
-        let alerts = h.available_roles[&h.selected_role]
+        let alerts = h.config.available_roles[&h.config.selected_role]
             .context_size_alerts
             .clone();
         h.queue_crossed_context_size_alerts(&cid, Some(201), &alerts);
@@ -3625,7 +3713,7 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    h.selected_model = Some("test/model".into());
+    h.config.selected_model = Some("test/model".into());
 
     append_user_message_via_event(&mut h, "s1", "first");
 
@@ -3681,7 +3769,7 @@ fn resumed_session_init_catches_up_subscribers_that_joined_before_init() {
     let past_text = "remembered before resume";
     {
         let mut h = echo_harness_for("s1", &sp).expect("start");
-        h.selected_model = Some("test/model".into());
+        h.config.selected_model = Some("test/model".into());
         h.send_user_message("s1", past_text, None)
             .expect("seed past message");
         h.shutdown().expect("shutdown");

@@ -17,7 +17,7 @@ use crate::{discovery as path_crate_discovery, event_log as path_crate_event_log
 /// committed — no need to pump the bus.
 fn find_mandatory_warning_notice(h: &Harness, needle: &str) -> Option<String> {
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::HarnessNotice(info) = &entry.event
             && info.level == NoticeLevel::Warning
@@ -31,7 +31,7 @@ fn find_mandatory_warning_notice(h: &Harness, needle: &str) -> Option<String> {
 
 fn find_info(h: &Harness, needle: &str) -> Option<String> {
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::HarnessNotice(info) = &entry.event
             && info.message.contains(needle)
@@ -323,7 +323,7 @@ fn provider_models_snapshot_updates_available_models() {
     let mut saw_harness_models = false;
     let mut saw_harness_roles = false;
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         match entry.event {
             Event::ProviderModelsDeclared(update)
@@ -455,7 +455,7 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
 
     let mut warning = None;
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::HarnessNotice(notice) = entry.event
             && notice.level == NoticeLevel::Warning
@@ -501,7 +501,7 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
     )
     .expect("replace second provider snapshot");
     let mut bounded_warning = None;
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::HarnessNotice(notice) = entry.event
             && notice.message.contains("duplicate provider-qualified")
@@ -548,7 +548,7 @@ fn provider_model_declaration_from_non_provider_is_ignored() {
     assert!(!h.provider_runtime.model_info.contains_key(&model_id));
     assert!(!h.provider_runtime.model_routes.contains_key(&model_id));
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         assert!(
             !matches!(entry.event, Event::ProviderModelsDeclared(_))
@@ -581,7 +581,7 @@ fn provider_models_snapshot_from_ui_client_is_ignored() {
     assert!(!h.provider_runtime.model_info.contains_key(&model_id));
     assert!(!h.provider_runtime.model_routes.contains_key(&model_id));
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         assert!(
             !matches!(entry.event, Event::ProviderModelsDeclared(_))
@@ -686,7 +686,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     h.extensions.pending_connects = 1;
-    assert!(h.selected_model.is_none());
+    assert!(h.config.selected_model.is_none());
 
     assert_eq!(
         h.submit_user_prompt(
@@ -698,7 +698,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
         PromptSubmission::Queued,
     );
     assert_eq!(
-        h.agent_registry.agents[&test_user_agent(&h)]
+        h.agent_runtime.agent_registry.agents[&test_user_agent(&h)]
             .pending_prompts
             .len(),
         1,
@@ -714,9 +714,9 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     )
     .expect("handle provider snapshot");
 
-    assert_eq!(h.selected_model.as_ref(), Some(&model_id));
+    assert_eq!(h.config.selected_model.as_ref(), Some(&model_id));
     assert_eq!(h.selected_model_params().effort, Effort::High);
-    let conv = &h.agent_registry.agents[&test_user_agent(&h)];
+    let conv = &h.agent_runtime.agent_registry.agents[&test_user_agent(&h)];
     assert!(conv.pending_prompts.is_empty());
     assert!(matches!(
         conv.turn_state,
@@ -744,7 +744,12 @@ fn settled_empty_model_inventory_rejects_queued_prompt_and_later_recovers() {
         PromptSubmission::Queued,
     );
     let cid = test_user_agent(&h);
-    assert_eq!(h.agent_registry.agents[&cid].pending_prompts.len(), 1);
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .pending_prompts
+            .len(),
+        1
+    );
     assert!(
         event_log_events(&h)
             .iter()
@@ -754,7 +759,11 @@ fn settled_empty_model_inventory_rejects_queued_prompt_and_later_recovers() {
     h.extensions.pending_connects = 0;
     h.try_advance_queue();
 
-    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .pending_prompts
+            .is_empty()
+    );
     let rejected = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
@@ -789,9 +798,13 @@ fn settled_empty_model_inventory_rejects_queued_prompt_and_later_recovers() {
     )
     .expect("submit recovery prompt");
 
-    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .pending_prompts
+            .is_empty()
+    );
     assert!(matches!(
-        h.agent_registry.agents[&cid].turn_state,
+        h.agent_runtime.agent_registry.agents[&cid].turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
     assert_eq!(
@@ -818,8 +831,8 @@ fn settled_empty_model_inventory_fails_queued_initial_prompt_once() {
         &crate::test_connection_id("empty-model-create-ui"),
         tau_proto::UiCreateAgent {
             request_id: "empty-model-create".to_owned(),
-            session_id: h.current_session_id.clone(),
-            role: h.selected_role.clone(),
+            session_id: h.session_runtime.current_session_id.clone(),
+            role: h.config.selected_role.clone(),
             model_override: None,
             metadata: Vec::new(),
             initial_prompt: Some("initial prompt".to_owned()),
@@ -833,11 +846,16 @@ fn settled_empty_model_inventory_fails_queued_initial_prompt_once() {
     )
     .expect("create agent");
     let cid = test_user_agent(&h);
-    let agent_id = h.agent_registry.agents[&cid]
+    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("created durable agent");
-    assert_eq!(h.agent_registry.agents[&cid].pending_prompts.len(), 1);
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .pending_prompts
+            .len(),
+        1
+    );
 
     h.extensions.pending_connects = 0;
     h.try_advance_queue();
@@ -869,9 +887,13 @@ fn settled_empty_model_inventory_fails_queued_initial_prompt_once() {
             .iter()
             .all(|event| !matches!(event, Event::AgentPromptCreated(_)))
     );
-    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .pending_prompts
+            .is_empty()
+    );
     assert!(matches!(
-        h.agent_registry.agents[&cid].turn_state,
+        h.agent_runtime.agent_registry.agents[&cid].turn_state,
         AgentTurnState::Idle
     ));
 }
@@ -886,7 +908,7 @@ fn settled_empty_model_inventory_terminalizes_message_wake_and_later_recovers() 
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agent_registry.agents[&cid]
+    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .map(crate::parse_agent_id)
@@ -923,10 +945,15 @@ fn settled_empty_model_inventory_terminalizes_message_wake_and_later_recovers() 
     h.try_advance_queue();
 
     assert!(!h.has_ready_message_wake_on_selected_branch(&cid));
-    assert!(h.replayable_harness_notices.iter().any(|notice| {
-        notice.purpose == tau_proto::NoticePurpose::Alert
-            && notice.message.contains("tau provider list")
-    }));
+    assert!(
+        h.runtime_io
+            .replayable_harness_notices
+            .iter()
+            .any(|notice| {
+                notice.purpose == tau_proto::NoticePurpose::Alert
+                    && notice.message.contains("tau provider list")
+            })
+    );
     assert!(
         event_log_events(&h)
             .iter()
@@ -944,7 +971,7 @@ fn settled_empty_model_inventory_terminalizes_message_wake_and_later_recovers() 
     publish_message(&mut h, "recovery-message", "providers recovered");
 
     assert!(matches!(
-        h.agent_registry.agents[&cid].turn_state,
+        h.agent_runtime.agent_registry.agents[&cid].turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
     assert!(
@@ -963,13 +990,13 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     let mut h = echo_harness(td.path()).expect("harness");
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
-    let role = h.selected_role.clone();
+    let role = h.config.selected_role.clone();
     let cid = h.create_durable_user_agent(
         "s1".parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
         &role,
     );
-    let agent_id = h.agent_registry.agents[&cid]
+    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("durable agent id");
@@ -999,14 +1026,19 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     )
     .expect("handle model select");
 
-    let conv = &h.agent_registry.agents[&cid];
+    let conv = &h.agent_runtime.agent_registry.agents[&cid];
     assert_eq!(conv.role.as_deref(), Some(role.as_str()));
     assert_eq!(conv.model_override.as_ref(), Some(&selected_model));
     assert_eq!(h.model_for_agent_role(conv), Some(selected_model.clone()));
 
-    h.agent_registry.agents.get_mut(&cid).expect("agent").role = None;
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .role = None;
     assert_eq!(
-        h.model_for_agent_role(&h.agent_registry.agents[&cid]),
+        h.model_for_agent_role(&h.agent_runtime.agent_registry.agents[&cid]),
         Some(selected_model)
     );
 }
@@ -1020,7 +1052,7 @@ fn ui_create_agent_applies_initial_model_override() {
     let mut h = echo_harness(td.path()).expect("harness");
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
-    let role = h.selected_role.clone();
+    let role = h.config.selected_role.clone();
     let default_model: ModelId = "test/default".parse().expect("model id");
     let selected_model: ModelId = "test/selected".parse().expect("model id");
     h.handle_extension_event(
@@ -1056,7 +1088,7 @@ fn ui_create_agent_applies_initial_model_override() {
     .expect("create agent");
 
     let cid = test_user_agent(&h);
-    let conv = &h.agent_registry.agents[&cid];
+    let conv = &h.agent_runtime.agent_registry.agents[&cid];
     assert_eq!(conv.model_override.as_ref(), Some(&selected_model));
     assert_eq!(h.model_for_agent_role(conv), Some(selected_model));
     let created = read_nth_prompt_created(&h, 0);
@@ -1074,9 +1106,9 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
     h.provider_runtime.model_routes.clear();
     h.provider_runtime.model_info.clear();
     h.provider_runtime.available_models.clear();
-    h.selected_model = None;
+    h.config.selected_model = None;
     h.extensions.pending_connects = 1;
-    let role = h.selected_role.clone();
+    let role = h.config.selected_role.clone();
     let selected_model: ModelId = "test/cold-selected".parse().expect("model id");
 
     h.handle_ui_create_agent_from(
@@ -1102,7 +1134,9 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
 
     let cid = test_user_agent(&h);
     assert_eq!(
-        h.agent_registry.agents[&cid].model_override.as_ref(),
+        h.agent_runtime.agent_registry.agents[&cid]
+            .model_override
+            .as_ref(),
         Some(&selected_model)
     );
     assert!(
@@ -1159,7 +1193,7 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
         };
 
     let mut h = echo_harness(td.path()).expect("harness");
-    h.context_discovery.skills.insert(
+    h.prompt_coordination.context_discovery.skills.insert(
         tau_proto::SkillName::new("same"),
         make_skill(baseline_path, "baseline"),
     );
@@ -1173,7 +1207,7 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
             session_id: "s1"
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
-            role: h.selected_role.clone(),
+            role: h.config.selected_role.clone(),
             model_override: None,
             metadata: Vec::new(),
             initial_prompt: Some(":skill same args".to_owned()),
@@ -1187,12 +1221,13 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
 
     let cid = test_user_agent(&h);
     let agent_id = crate::parse_agent_id(
-        h.agent_registry.agents[&cid]
+        h.agent_runtime.agent_registry.agents[&cid]
             .agent_id
             .as_deref()
             .expect("agent id"),
     );
     let frozen = h
+        .prompt_coordination
         .context_discovery
         .frozen_agents
         .get_mut(&agent_id)
@@ -1236,7 +1271,7 @@ fn unavailable_agent_model_override_falls_back_to_role_model() {
     let mut h = echo_harness(td.path()).expect("harness");
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
-    let role = h.selected_role.clone();
+    let role = h.config.selected_role.clone();
     let cid = h.create_durable_user_agent(
         "s1".parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
@@ -1251,14 +1286,15 @@ fn unavailable_agent_model_override_falls_back_to_role_model() {
     )
     .expect("handle provider snapshot");
 
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("agent")
         .model_override = Some("test/missing".parse().expect("model id"));
 
     assert_eq!(
-        h.model_for_agent_role(&h.agent_registry.agents[&cid]),
+        h.model_for_agent_role(&h.agent_runtime.agent_registry.agents[&cid]),
         Some(role_model)
     );
 }
@@ -1272,7 +1308,7 @@ fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
     let mut h = echo_harness(td.path()).expect("harness");
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
-    let role = h.selected_role.clone();
+    let role = h.config.selected_role.clone();
     let first = h.create_durable_user_agent(
         "s1".parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
@@ -1304,8 +1340,16 @@ fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
     )
     .expect("handle model select");
 
-    assert!(h.agent_registry.agents[&first].model_override.is_none());
-    assert!(h.agent_registry.agents[&second].model_override.is_none());
+    assert!(
+        h.agent_runtime.agent_registry.agents[&first]
+            .model_override
+            .is_none()
+    );
+    assert!(
+        h.agent_runtime.agent_registry.agents[&second]
+            .model_override
+            .is_none()
+    );
 }
 
 /// A role with an explicit model that no provider advertised is a terminal
@@ -1321,17 +1365,17 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     connect_provider_source(&mut h, "provider-ext");
     h.extensions.pending_connects = 1;
     assert!(h.provider_runtime.model_info.is_empty());
-    assert!(h.selected_model.is_none());
+    assert!(h.config.selected_model.is_none());
 
     let missing_model: ModelId = "missing/provider-model".parse().expect("model id");
-    h.available_roles.insert(
+    h.config.available_roles.insert(
         "assistant".to_owned(),
         tau_config::settings::AgentRole {
             model: Some(missing_model),
             ..Default::default()
         },
     );
-    h.selected_role = "assistant".to_owned();
+    h.config.selected_role = "assistant".to_owned();
 
     assert_eq!(
         h.submit_user_prompt(
@@ -1343,7 +1387,7 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
         PromptSubmission::Queued,
     );
     assert_eq!(
-        h.agent_registry.agents[&test_user_agent(&h)]
+        h.agent_runtime.agent_registry.agents[&test_user_agent(&h)]
             .pending_prompts
             .len(),
         1
@@ -1359,7 +1403,7 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     )
     .expect("handle provider snapshot");
 
-    let conv = &h.agent_registry.agents[&test_user_agent(&h)];
+    let conv = &h.agent_runtime.agent_registry.agents[&test_user_agent(&h)];
     assert!(conv.pending_prompts.is_empty());
     assert!(matches!(conv.turn_state, AgentTurnState::Idle));
     assert!(
@@ -1395,9 +1439,12 @@ agents:
         state_dir: Some(state_dir.clone()),
     };
     let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("start aliased harness");
-    let role = h.selected_role.clone();
+    let role = h.config.selected_role.clone();
     let canonical: ModelId = "canonical/published".parse().expect("canonical model");
-    assert_eq!(h.available_roles[&role].model.as_ref(), Some(&canonical));
+    assert_eq!(
+        h.config.available_roles[&role].model.as_ref(),
+        Some(&canonical)
+    );
 
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
@@ -1408,11 +1455,11 @@ agents:
         })),
     )
     .expect("publish only canonical target");
-    assert_eq!(h.selected_model.as_ref(), Some(&canonical));
+    assert_eq!(h.config.selected_model.as_ref(), Some(&canonical));
     h.publish_current_model_state();
     let mut sequence = path_crate_event_log::EventLogSeq::new(0);
     let mut published = Vec::new();
-    while let Some(entry) = h.event_log.get_next_from(sequence) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(sequence) {
         sequence = entry.seq.next();
         if let Event::HarnessRoleSelected(selected) = entry.event {
             published.push(selected.model);
@@ -1434,10 +1481,10 @@ agents:
     )
     .expect("apply literal runtime role edit");
     assert_eq!(
-        h.available_roles[&role].model.as_ref(),
+        h.config.available_roles[&role].model.as_ref(),
         Some(&literal_runtime)
     );
-    assert!(h.selected_model.is_none());
+    assert!(h.config.selected_model.is_none());
     assert_eq!(
         h.submit_user_prompt(
             "s1".parse::<tau_proto::SessionId>().expect("session id"),
@@ -1470,8 +1517,8 @@ fn provider_model_metadata_drives_selection_state() {
     )
     .expect("handle provider snapshot");
 
-    assert_eq!(h.selected_role, "engineer");
-    assert_eq!(h.selected_model.as_ref(), Some(&model_id));
+    assert_eq!(h.config.selected_role, "engineer");
+    assert_eq!(h.config.selected_model.as_ref(), Some(&model_id));
     assert_eq!(h.selected_model_params().effort, Effort::High);
     assert_eq!(h.selected_model_params().verbosity, Verbosity::Low);
     assert_eq!(
@@ -1481,7 +1528,7 @@ fn provider_model_metadata_drives_selection_state() {
 
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
     let mut selected = None;
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::HarnessRoleSelected(event) = entry.event
             && event.model.as_ref() == Some(&model_id)
@@ -1531,7 +1578,7 @@ fn provider_model_metadata_drives_selection_state() {
 
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
     let mut selected = None;
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::HarnessRoleSelected(event) = entry.event
             && event.model.as_ref() == Some(&model_id)
@@ -2034,7 +2081,7 @@ fn runtime_role_and_model_baselines_use_accepted_startup_snapshot() {
         state_dir: Some(state_dir.clone()),
     };
     let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("start harness");
-    let role = h.selected_role.clone();
+    let role = h.config.selected_role.clone();
     std::fs::write(&config_path, "agents: [malformed\n").expect("invalidate source after startup");
 
     h.handle_ui_role_update(
@@ -2055,12 +2102,12 @@ fn runtime_role_and_model_baselines_use_accepted_startup_snapshot() {
         },
     )
     .expect("reset role to accepted startup baseline");
-    assert_eq!(h.available_roles[&role].effort, Some(Effort::Low));
+    assert_eq!(h.config.available_roles[&role].effort, Some(Effort::Low));
 
     h.publish_current_model_state();
     let mut sequence = path_crate_event_log::EventLogSeq::new(0);
     let mut live = None;
-    while let Some(entry) = h.event_log.get_next_from(sequence) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(sequence) {
         sequence = entry.seq.next();
         if let Event::HarnessRoleSelected(selected) = entry.event {
             live = Some(selected);
@@ -2178,9 +2225,9 @@ fn missing_required_skill_disables_role_and_emits_notice() {
 
     let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
 
-    assert!(!h.available_roles.contains_key("reviewer"));
+    assert!(!h.config.available_roles.contains_key("reviewer"));
     assert!(
-        h.disabled_role_reasons.contains_key("reviewer"),
+        h.config.disabled_role_reasons.contains_key("reviewer"),
         "disabled role reason should be retained for later UI/delegation errors"
     );
     let message = find_mandatory_warning_notice(&h, "role `reviewer` disabled")
@@ -2261,7 +2308,7 @@ fn available_required_skill_keeps_role_enabled() {
     .expect("write harness config");
 
     let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
-    assert!(h.available_roles.contains_key("reviewer"));
+    assert!(h.config.available_roles.contains_key("reviewer"));
 }
 
 /// A misspelled startup default must be visible instead of silently selecting a
@@ -2290,7 +2337,7 @@ fn missing_default_role_emits_mandatory_warning_notice_and_falls_back() {
     .expect("write harness config");
 
     let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
-    assert_eq!(h.selected_role, "engineer-junior");
+    assert_eq!(h.config.selected_role, "engineer-junior");
     let message = find_mandatory_warning_notice(&h, "default_role `ghost`")
         .expect("expected mandatory warning HarnessNotice about missing default_role");
     assert!(

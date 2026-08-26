@@ -19,7 +19,7 @@ fn user_var(value: &str) -> Event {
 /// Return whether one source committed an event matching the predicate.
 fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
             return true;
@@ -31,7 +31,7 @@ fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> boo
 /// Connect one socket-origin UI peer for direct client-intake testing.
 fn connect_socket_ui(h: &mut Harness, id: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let events = Arc::new(Mutex::new(Vec::new()));
-    h.bus.connect(Connection::new(
+    h.runtime_io.bus.connect(Connection::new(
         PendingConnectionMetadata {
             id: Some(crate::test_connection_id(id)),
             name: crate::test_extension_name(id),
@@ -48,7 +48,8 @@ fn connect_socket_ui(h: &mut Harness, id: &str) -> Arc<Mutex<Vec<RoutedFrame>>> 
 /// Subscribe one observer to live terminal-output delivery.
 fn connect_terminal_observer(h: &mut Harness, id: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let sink = connect_test_client(h, id, tau_proto::ClientKind::Ui);
-    h.bus
+    h.runtime_io
+        .bus
         .set_subscriptions(
             &crate::test_connection_id(id),
             Vec::new(),

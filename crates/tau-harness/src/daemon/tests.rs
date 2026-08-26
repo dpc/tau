@@ -560,7 +560,7 @@ fn post_accept_startup_error_cancels_a_blocked_socket_writer() {
         .set_nonblocking(false)
         .expect("restore blocking writes");
 
-    let event_log = Arc::clone(&harness.event_log);
+    let event_log = Arc::clone(&harness.runtime_io.event_log);
     let baseline_consumers = event_log.consumer_count();
     let client_id = harness.accept_client(server_end).expect("accept client");
     assert_eq!(event_log.consumer_count(), baseline_consumers + 1);

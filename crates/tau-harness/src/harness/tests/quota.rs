@@ -71,7 +71,7 @@ fn quota_replace_report(epoch: &str, used_basis_points: u16) -> Event {
 fn committed_quota_events(harness: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = harness.event_log.get_next_from(seq) {
+    while let Some(entry) = harness.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches!(
             entry.event,

@@ -12,20 +12,24 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
     ) {
         let disconnected = connection_id.clone();
-        self.context_discovery
+        self.prompt_coordination
+            .context_discovery
             .prompt_fragments
             .remove(&disconnected);
-        self.context_discovery
+        self.prompt_coordination
+            .context_discovery
             .agent_context
             .remove_contributor(&disconnected);
-        self.context_discovery
+        self.prompt_coordination
+            .context_discovery
             .agent_context_providers
             .remove(&disconnected);
-        self.context_discovery
+        self.prompt_coordination
+            .context_discovery
             .session_context_providers
             .remove(&disconnected);
         let mut finalize = Vec::new();
-        for (agent_id, pending) in &mut self.context_discovery.pending_agents {
+        for (agent_id, pending) in &mut self.prompt_coordination.context_discovery.pending_agents {
             replace_discovery_source(
                 &mut pending.skill_candidates,
                 &mut pending.skills,
@@ -48,10 +52,22 @@ impl Harness {
     }
 
     pub(super) fn clear_session_agent_context(&mut self) {
-        self.context_discovery.agent_context.clear();
-        self.context_discovery.pending_agents.clear();
-        self.context_discovery.frozen_agents.clear();
-        self.context_discovery.initialized_agent_context.clear();
+        self.prompt_coordination
+            .context_discovery
+            .agent_context
+            .clear();
+        self.prompt_coordination
+            .context_discovery
+            .pending_agents
+            .clear();
+        self.prompt_coordination
+            .context_discovery
+            .frozen_agents
+            .clear();
+        self.prompt_coordination
+            .context_discovery
+            .initialized_agent_context
+            .clear();
     }
 
     pub(super) fn disable_optional_extension(
@@ -94,11 +110,11 @@ impl Harness {
                 ..
             } => requester == connection_id,
         });
-        let meta = self.bus.connection(connection_id).cloned();
+        let meta = self.runtime_io.bus.connection(connection_id).cloned();
         let is_extension = meta.as_ref().is_some_and(|meta| {
             meta.origin == ConnectionOrigin::Supervised || meta.origin == ConnectionOrigin::InMemory
         });
-        let disconnected_meta = self.bus.disconnect(connection_id);
+        let disconnected_meta = self.runtime_io.bus.disconnect(connection_id);
         if meta
             .as_ref()
             .is_some_and(|meta| meta.origin == ConnectionOrigin::Supervised)
@@ -158,16 +174,20 @@ impl Harness {
         // readiness and dispatch a prompt snapshot.
         self.remove_extension_context_for_connection(connection_id);
         self.clear_agent_runtime_indicators_for_source(connection_id);
-        self.publication
+        self.runtime_io
+            .publication
             .suspended_interceptor_connections
             .remove(&connection_id.clone());
-        self.publication
+        self.runtime_io
+            .publication
             .interceptors
             .remove_connection(connection_id);
         self.fail_pending_intercept_for_disconnect(connection_id);
         if is_extension {
             self.unregister_connection_tools_for_disconnect(connection_id);
-            self.action_registry.unregister_connection(connection_id);
+            self.tool_routing
+                .action_registry
+                .unregister_connection(connection_id);
         }
 
         self.fail_pending_action_invocations_for_connection(connection_id);
@@ -180,7 +200,7 @@ impl Harness {
             .collect();
         for (request_id, pending) in failed_retries {
             self.ui_runtime.pending_retry_prompts.remove(&request_id);
-            let _ = self.bus.send_to(
+            let _ = self.runtime_io.bus.send_to(
                 &pending.requester_client_id,
                 None,
                 HarnessOutputMessage::deliver(Event::UiRetryPromptResult(
@@ -214,31 +234,43 @@ impl Harness {
             .pending_prompts
             .retain(|_, provider_id| provider_id != connection_id);
         for prompt_id in lost_provider_prompts {
-            let Some(cid) = self.prompt_runtime.agents.get(&prompt_id).cloned() else {
+            let Some(cid) = self
+                .prompt_coordination
+                .prompt_runtime
+                .agents
+                .get(&prompt_id)
+                .cloned()
+            else {
                 continue;
             };
-            let deferred_activation = self.agent_registry.agents.get(&cid).is_some_and(|agent| {
-                agent
-                    .pending_message_wakes
-                    .iter()
-                    .any(|wake| wake.node_id.is_none())
-                    || agent
-                        .agent_id
-                        .as_deref()
-                        .and_then(|agent_id| self.agent_store.agent(agent_id))
-                        .is_some_and(|tree| {
-                            tree.marked_inference_has_deferred_prompt_activation(&prompt_id)
-                        })
-            });
+            let deferred_activation = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(&cid)
+                .is_some_and(|agent| {
+                    agent
+                        .pending_message_wakes
+                        .iter()
+                        .any(|wake| wake.node_id.is_none())
+                        || agent
+                            .agent_id
+                            .as_deref()
+                            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
+                            .is_some_and(|tree| {
+                                tree.marked_inference_has_deferred_prompt_activation(&prompt_id)
+                            })
+                });
             let checkpoint = self
+                .agent_runtime
                 .agent_registry
                 .agents
                 .get(&cid)
                 .and_then(|agent| agent.agent_id.as_deref())
-                .and_then(|agent_id| self.agent_store.agent(agent_id))
+                .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
                 .and_then(|tree| tree.marked_inference_checkpoint(&prompt_id).cloned());
             if let Some(checkpoint) = checkpoint {
-                if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
+                if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                     agent.activation_dispatch =
                         path_crate_agent::ActivationDispatchState::DispatchUncertain {
                             owner: path_crate_agent::InferenceCheckpointOwner::Inference,
@@ -251,8 +283,12 @@ impl Harness {
                     agent.in_flight_prompt = None;
                 }
                 if deferred_activation
-                    && let Some((agent_id, originator)) =
-                        self.agent_registry.agents.get(&cid).and_then(|agent| {
+                    && let Some((agent_id, originator)) = self
+                        .agent_runtime
+                        .agent_registry
+                        .agents
+                        .get(&cid)
+                        .and_then(|agent| {
                             Some((
                                 crate::parse_agent_id(agent.agent_id.as_deref()?),
                                 agent.originator.clone(),
@@ -345,6 +381,7 @@ impl Harness {
         }
         if !self.extensions.resolving_initial_collisions {
             if self
+                .runtime_io
                 .publication
                 .disconnect_terminal_batch_pending
                 .is_empty()
@@ -505,11 +542,13 @@ impl Harness {
             .release_connection(connection_id);
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ProviderRotated);
         let removing_tools: Vec<(ToolName, ToolName)> = self
+            .tool_routing
             .registry
             .all_tool_names()
             .into_iter()
             .filter_map(|tool_name| {
-                self.registry
+                self.tool_routing
+                    .registry
                     .providers_for(tool_name.as_str())
                     .into_iter()
                     .find(|provider| provider.connection_id == *connection_id)
@@ -522,9 +561,13 @@ impl Harness {
             })
             .collect();
 
-        let _ = self.registry.unregister_connection(connection_id);
+        let _ = self
+            .tool_routing
+            .registry
+            .unregister_connection(connection_id);
         for (internal_name, visible_name) in removing_tools {
             if self
+                .tool_routing
                 .registry
                 .providers_for(internal_name.as_str())
                 .is_empty()
@@ -546,7 +589,7 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         event_name: &tau_proto::EventName,
     ) -> bool {
-        match self.bus.connection(source_id) {
+        match self.runtime_io.bus.connection(source_id) {
             Some(metadata) if metadata.kind == ClientKind::Provider => true,
             Some(metadata) => {
                 tracing::warn!(
@@ -607,6 +650,7 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
     ) -> Vec<(ToolCallId, AgentId)> {
         let mut failed_call_ids: Vec<ToolCallId> = self
+            .tool_routing
             .tool_runtime
             .pending_tool_providers
             .iter()
@@ -623,23 +667,40 @@ impl Harness {
         // Queued work is drained only after the whole batch below.
         failed_call_ids.sort_by_key(|call_id| {
             (
-                !self.tool_runtime.tool_turn.is_backgrounded(call_id),
+                !self
+                    .tool_routing
+                    .tool_runtime
+                    .tool_turn
+                    .is_backgrounded(call_id),
                 call_id.clone(),
             )
         });
         let foreground_batch = failed_call_ids
             .iter()
-            .filter(|call_id| !self.tool_runtime.tool_turn.is_backgrounded(call_id))
+            .filter(|call_id| {
+                !self
+                    .tool_routing
+                    .tool_runtime
+                    .tool_turn
+                    .is_backgrounded(call_id)
+            })
             .cloned()
             .collect::<Vec<_>>();
-        self.publication
+        self.runtime_io
+            .publication
             .disconnect_terminal_batch_pending
             .extend(foreground_batch);
 
         let completed_foreground_calls: Vec<(ToolCallId, AgentId)> = Vec::new();
 
         for call_id in failed_call_ids {
-            let Some(tool) = self.tool_runtime.pending_tools.get(&call_id).cloned() else {
+            let Some(tool) = self
+                .tool_routing
+                .tool_runtime
+                .pending_tools
+                .get(&call_id)
+                .cloned()
+            else {
                 continue;
             };
             let mut error = ToolError {
@@ -653,9 +714,19 @@ impl Harness {
 
                 display: None,
             };
-            if self.tool_runtime.tool_turn.is_backgrounded(&call_id) {
+            if self
+                .tool_routing
+                .tool_runtime
+                .tool_turn
+                .is_backgrounded(&call_id)
+            {
                 error.message = extension_disconnected_background_tool_call_error_message(&call_id);
-                if self.tool_runtime.tool_agents.contains_key(call_id.as_str()) {
+                if self
+                    .tool_routing
+                    .tool_runtime
+                    .tool_agents
+                    .contains_key(call_id.as_str())
+                {
                     self.handle_background_tool_error_inner(
                         Some(crate::harness::harness_connection_id()),
                         error,
@@ -681,7 +752,12 @@ impl Harness {
             // handling unregisters the dead provider first, then drains
             // the scheduler and completes turns after all interrupted calls
             // have been terminalized.
-            let owner = self.tool_runtime.tool_agents.get(call_id.as_str()).cloned();
+            let owner = self
+                .tool_routing
+                .tool_runtime
+                .tool_agents
+                .get(call_id.as_str())
+                .cloned();
             if let Some(cid) = owner.as_ref() {
                 self.publish_terminal_tool_error_with_cause(
                     Some(cid),
@@ -711,7 +787,7 @@ impl Harness {
         action_id: String,
         message: String,
     ) {
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             client_id,
             Some(crate::harness::harness_connection_id()),
             HarnessOutputMessage::deliver(Event::ActionError(ActionError {
@@ -729,6 +805,7 @@ impl Harness {
         invoke: ActionInvoke,
     ) -> Result<bool, HarnessError> {
         if self
+            .runtime_io
             .bus
             .connection(client_id)
             .is_none_or(|metadata| metadata.kind != ClientKind::Ui)
@@ -741,14 +818,14 @@ impl Harness {
             );
             return Ok(true);
         }
-        if invoke.session_id != self.current_session_id {
+        if invoke.session_id != self.session_runtime.current_session_id {
             self.send_action_error_to_client(
                 client_id,
                 invoke.invocation_id,
                 invoke.action_id,
                 format!(
                     "action invocation targets session `{}` but current session is `{}`",
-                    invoke.session_id, self.current_session_id
+                    invoke.session_id, self.session_runtime.current_session_id
                 ),
             );
             return Ok(true);
@@ -771,7 +848,11 @@ impl Harness {
             return Ok(true);
         }
 
-        let provider_connection_id = match self.action_registry.route_action_invoke(&invoke) {
+        let provider_connection_id = match self
+            .tool_routing
+            .action_registry
+            .route_action_invoke(&invoke)
+        {
             Ok(provider_connection_id) => provider_connection_id,
             Err(error) => {
                 self.send_action_error_to_client(
@@ -784,11 +865,12 @@ impl Harness {
             }
         };
         let provider = self
+            .tool_routing
             .action_registry
             .schema_for_connection(&provider_connection_id)
             .expect("routed Action provider must retain its schema");
 
-        match self.bus.send_to(
+        match self.runtime_io.bus.send_to(
             &provider_connection_id,
             Some(client_id),
             HarnessOutputMessage::deliver(Event::ActionInvoke(invoke.clone())),
@@ -855,7 +937,7 @@ impl Harness {
         if pending.provider_connection_id != *source_id
             || pending.owner_name != publisher.publisher
             || pending.owner_instance_id != publisher.instance_id
-            || pending.session_id != self.current_session_id
+            || pending.session_id != self.session_runtime.current_session_id
             || pending.action_id != result.action_id
         {
             tracing::warn!(
@@ -875,7 +957,7 @@ impl Harness {
         self.ui_runtime
             .completed_action_invocations
             .insert(result.invocation_id.clone());
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             &pending.requester_client_id,
             Some(crate::harness::harness_connection_id()),
             HarnessOutputMessage::deliver(Event::ActionResult(result)),
@@ -899,7 +981,7 @@ impl Harness {
         if pending.provider_connection_id != *source_id
             || pending.owner_name != publisher.publisher
             || pending.owner_instance_id != publisher.instance_id
-            || pending.session_id != self.current_session_id
+            || pending.session_id != self.session_runtime.current_session_id
             || pending.action_id != error.action_id
         {
             tracing::warn!(
@@ -919,7 +1001,7 @@ impl Harness {
         self.ui_runtime
             .completed_action_invocations
             .insert(error.invocation_id.clone());
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             &pending.requester_client_id,
             Some(crate::harness::harness_connection_id()),
             HarnessOutputMessage::deliver(Event::ActionError(error)),
@@ -1010,13 +1092,13 @@ impl Harness {
             }),
         );
 
-        let log_path = if self.storage_mode.is_ephemeral() {
+        let log_path = if self.session_runtime.storage_mode.is_ephemeral() {
             None
         } else {
             Some(
                 extension_stderr_log_path(
                     &self.sessions_dir(),
-                    self.current_session_id.as_str(),
+                    self.session_runtime.current_session_id.as_str(),
                     &config.name,
                 )
                 .map_err(|error| HarnessError::Participant(error.to_string()))?,
@@ -1026,11 +1108,12 @@ impl Harness {
             &config,
             kind.clone(),
             log_path,
-            &self.tx,
-            &self.component_ingress_tx,
-            &self.state_dir,
-            self.storage_mode.is_memory_only(),
-            self.provider_settings_snapshots
+            &self.runtime_io.tx,
+            &self.runtime_io.component_ingress_tx,
+            &self.session_runtime.state_dir,
+            self.session_runtime.storage_mode.is_memory_only(),
+            self.config
+                .provider_settings_snapshots
                 .get(config.name.as_str())
                 .unwrap_or(&BTreeMap::new()),
         )?;
@@ -1097,7 +1180,7 @@ impl Harness {
     /// that does not have an owning agent. Agent-owned tool calls are tracked
     /// through the prompt/tool routing path instead.
     pub(super) fn track_extension_tool_request_metadata(&mut self, request: &ToolRequest) {
-        self.tool_runtime.pending_tools.insert(
+        self.tool_routing.tool_runtime.pending_tools.insert(
             request.call_id.clone(),
             PendingTool {
                 name: request.tool_name.clone(),
@@ -1109,8 +1192,12 @@ impl Harness {
     }
 
     pub(super) fn clear_prompt_tool_snapshot(&mut self, agent_prompt_id: &AgentPromptId) {
-        self.prompt_runtime.tool_specs.remove(agent_prompt_id);
-        self.prompt_runtime
+        self.prompt_coordination
+            .prompt_runtime
+            .tool_specs
+            .remove(agent_prompt_id);
+        self.prompt_coordination
+            .prompt_runtime
             .tool_call_prompts
             .retain(|_, prompt_id| prompt_id != agent_prompt_id);
     }
@@ -1121,32 +1208,47 @@ impl Harness {
     /// runtime metadata.
     pub(crate) fn clear_tool_call_tracking(&mut self, call_id: &str) {
         let owner = self
+            .tool_routing
             .tool_runtime
             .tool_agents
             .get(call_id)
-            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
+            .or_else(|| {
+                self.tool_routing
+                    .tool_runtime
+                    .peer_internal_tool_agents
+                    .get(call_id)
+            })
             .cloned();
         if owner
             .as_ref()
-            .and_then(|cid| self.agent_registry.agents.get(cid))
+            .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
             .is_some_and(|agent| agent.persistence.is_ephemeral())
         {
-            self.tool_runtime
+            self.tool_routing
+                .tool_runtime
                 .completed_ephemeral_tool_calls
                 .insert(call_id.into());
         }
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .completed_tool_calls
             .insert(call_id.into());
-        self.tool_runtime.peer_tool_requests.remove(call_id);
-        self.tool_runtime.peer_internal_tool_agents.remove(call_id);
+        self.tool_routing
+            .tool_runtime
+            .peer_tool_requests
+            .remove(call_id);
+        self.tool_routing
+            .tool_runtime
+            .peer_internal_tool_agents
+            .remove(call_id);
         if let Some(owner) = owner {
-            self.tool_runtime
+            self.tool_routing
+                .tool_runtime
                 .completed_tool_agents
                 .insert(call_id.into(), owner);
         }
-        self.tool_runtime.tool_agents.remove(call_id);
-        self.tool_runtime.pending_tools.remove(call_id);
+        self.tool_routing.tool_runtime.tool_agents.remove(call_id);
+        self.tool_routing.tool_runtime.pending_tools.remove(call_id);
         self.provider_runtime
             .cache_refresh_tool_window_calls
             .remove(call_id);
@@ -1158,28 +1260,46 @@ impl Harness {
             let cancellations = self.provider_runtime.cache_residency.close_window();
             self.send_cache_refresh_cancellations(cancellations);
         }
-        self.tool_runtime.pending_tool_providers.remove(call_id);
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
+            .pending_tool_providers
+            .remove(call_id);
+        self.tool_routing
+            .tool_runtime
             .pending_terminal_observations
             .remove(call_id);
-        self.tool_runtime.pending_wait_settlements.remove(call_id);
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
+            .pending_wait_settlements
+            .remove(call_id);
+        self.tool_routing
+            .tool_runtime
             .post_commit_runtime_only_tool_terminals
             .remove(call_id);
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .pending_background_completion_modes
             .remove(call_id);
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .pending_cancellation_observations
             .remove(call_id);
-        if let Some(prompt_id) = self.prompt_runtime.tool_call_prompts.remove(call_id)
+        if let Some(prompt_id) = self
+            .prompt_coordination
+            .prompt_runtime
+            .tool_call_prompts
+            .remove(call_id)
             && !self
+                .prompt_coordination
                 .prompt_runtime
                 .tool_call_prompts
                 .values()
                 .any(|other_prompt_id| other_prompt_id == &prompt_id)
         {
-            self.prompt_runtime.tool_specs.remove(&prompt_id);
+            self.prompt_coordination
+                .prompt_runtime
+                .tool_specs
+                .remove(&prompt_id);
         }
     }
 
@@ -1188,7 +1308,12 @@ impl Harness {
         call_id: &ToolCallId,
         source_id: &tau_proto::ConnectionId,
     ) -> bool {
-        match self.tool_runtime.pending_tool_providers.get(call_id) {
+        match self
+            .tool_routing
+            .tool_runtime
+            .pending_tool_providers
+            .get(call_id)
+        {
             Some(provider_id) => provider_id == source_id,
             None if self.is_harness_owned_tool_call(call_id) => {
                 source_id == harness_connection_id()
@@ -1287,13 +1412,18 @@ impl Harness {
     }
 
     pub(super) fn is_harness_owned_tool_call(&self, call_id: &ToolCallId) -> bool {
-        self.tool_runtime.tool_agents.contains_key(call_id)
+        self.tool_routing
+            .tool_runtime
+            .tool_agents
+            .contains_key(call_id)
             && self
+                .tool_routing
                 .tool_runtime
                 .pending_tools
                 .get(call_id)
                 .is_some_and(|tool| {
-                    self.internal_tool_handlers
+                    self.tool_routing
+                        .internal_tool_handlers
                         .iter()
                         .any(|handler| handler.handles(&tool.internal_name))
                 })
@@ -1315,7 +1445,8 @@ impl Harness {
             .get(source_id)
             .map(|entry| entry.name.clone())
             .or_else(|| {
-                self.bus
+                self.runtime_io
+                    .bus
                     .connection(source_id)
                     .map(|metadata| metadata.name.clone())
             })
@@ -1344,7 +1475,8 @@ impl Harness {
             .find_extension_by_name(extension_name)
             .map(|e| (e.instance_id, e.pid))
             .unwrap_or((0.into(), None));
-        self.lifecycle_messages
+        self.session_runtime
+            .lifecycle_messages
             .push(format!("extension {extension_name} starting"));
         self.publish_lifecycle_event(Event::ExtensionStarting(tau_proto::ExtensionStarting {
             instance_id: iid,
@@ -1360,7 +1492,8 @@ impl Harness {
         let name = ext.name.clone();
         let iid = ext.instance_id;
         let pid = ext.pid;
-        self.lifecycle_messages
+        self.session_runtime
+            .lifecycle_messages
             .push(format!("extension {name} ready"));
         self.publish_lifecycle_event(Event::ExtensionReady(tau_proto::ExtensionReady {
             instance_id: iid,
@@ -1374,7 +1507,8 @@ impl Harness {
             .find_extension_by_name(extension_name)
             .map(|e| (e.instance_id, e.pid))
             .unwrap_or((0.into(), None));
-        self.lifecycle_messages
+        self.session_runtime
+            .lifecycle_messages
             .push(format!("extension {extension_name} exited"));
         self.publish_lifecycle_event(Event::ExtensionExited(tau_proto::ExtensionExited {
             instance_id: iid,
@@ -1424,11 +1558,14 @@ impl Harness {
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
         let secrets = entry.secrets.clone();
         let tool_prefix = entry.tool_prefix.clone();
-        let state_dir = if self.storage_mode.is_memory_only() {
+        let state_dir = if self.session_runtime.storage_mode.is_memory_only() {
             None
         } else {
             Some(
-                match tau_config::settings::extension_state_dir_of(&self.state_dir, &entry.name) {
+                match tau_config::settings::extension_state_dir_of(
+                    &self.session_runtime.state_dir,
+                    &entry.name,
+                ) {
                     Ok(state_dir) => state_dir,
                     Err(error) => {
                         tracing::warn!(
@@ -1436,7 +1573,7 @@ impl Harness {
                             error = %error,
                             "refusing to configure extension with unsafe state directory name"
                         );
-                        let _ = self.bus.send_to(
+                        let _ = self.runtime_io.bus.send_to(
                             source_id,
                             None,
                             HarnessOutputMessage::Disconnect(Disconnect {
@@ -1452,7 +1589,8 @@ impl Harness {
             if entry.supervised_config.is_none() || entry.kind != ClientKind::Provider {
                 BTreeMap::new()
             } else {
-                self.provider_settings_snapshots
+                self.config
+                    .provider_settings_snapshots
                     .get(entry.name.as_str())
                     .cloned()
                     .unwrap_or_default()
@@ -1483,7 +1621,7 @@ impl Harness {
         let configure_fits = tau_proto::encode_harness_output_to_vec(&configure)
             .is_ok_and(|encoded| encoded.len() as u64 <= tau_proto::MAX_PROTOCOL_MESSAGE_BYTES);
         if !configure_fits {
-            let _ = self.bus.send_to(
+            let _ = self.runtime_io.bus.send_to(
                 source_id,
                 None,
                 HarnessOutputMessage::Disconnect(Disconnect {
@@ -1492,7 +1630,7 @@ impl Harness {
             );
             return;
         }
-        let _ = self.bus.send_to(source_id, None, configure);
+        let _ = self.runtime_io.bus.send_to(source_id, None, configure);
     }
 
     pub(crate) fn emit_info(&mut self, message: &str) {
@@ -1581,7 +1719,9 @@ impl Harness {
         let is_alert =
             purpose == tau_proto::NoticePurpose::Alert || level == tau_proto::NoticeLevel::Critical;
         if is_alert {
-            self.replayable_harness_notices.push(notice.clone());
+            self.runtime_io
+                .replayable_harness_notices
+                .push(notice.clone());
         }
         self.enqueue_publish(
             Some(crate::harness::harness_connection_id()),
@@ -1635,10 +1775,15 @@ impl Harness {
         automatic_compaction_decision: Option<tau_proto::AutomaticCompactionDecision>,
         source: Option<&tau_proto::ConnectionId>,
     ) {
-        let cid = self.prompt_runtime.agents.get(&agent_prompt_id).cloned();
+        let cid = self
+            .prompt_coordination
+            .prompt_runtime
+            .agents
+            .get(&agent_prompt_id)
+            .cloned();
         let agent_id = crate::parse_agent_id(
             cid.as_ref()
-                .and_then(|cid| self.agent_registry.agents.get(cid))
+                .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
                 .and_then(|conv| conv.agent_id.clone())
                 .expect("agent has durable id"),
         );
@@ -1658,6 +1803,7 @@ impl Harness {
 
     pub(super) fn remove_discovered_context(&mut self, source_id: &tau_proto::ConnectionId) {
         let affected_names = self
+            .prompt_coordination
             .context_discovery
             .skill_candidates
             .iter_mut()
@@ -1670,27 +1816,36 @@ impl Harness {
                 (candidates.len() != old_len).then(|| name.clone())
             })
             .collect::<Vec<_>>();
-        self.context_discovery
+        self.prompt_coordination
+            .context_discovery
             .skill_candidates
             .retain(|_, candidates| !candidates.is_empty());
         for name in affected_names {
             self.recompute_discovered_skill_winner(&name);
         }
-        self.context_discovery
+        self.prompt_coordination
+            .context_discovery
             .agents_files
             .retain(|file| file.source_id != *source_id);
     }
 
     pub(super) fn recompute_discovered_skill_winner(&mut self, name: &tau_proto::SkillName) {
         let winner = self
+            .prompt_coordination
             .context_discovery
             .skill_candidates
             .get(name)
             .and_then(|candidates| selected_skill_candidate(candidates).cloned());
         if let Some(winner) = winner {
-            self.context_discovery.skills.insert(name.clone(), winner);
+            self.prompt_coordination
+                .context_discovery
+                .skills
+                .insert(name.clone(), winner);
         } else {
-            self.context_discovery.skills.remove(name);
+            self.prompt_coordination
+                .context_discovery
+                .skills
+                .remove(name);
         }
     }
 
@@ -1698,13 +1853,14 @@ impl Harness {
         &self,
     ) -> std::collections::HashSet<tau_proto::ConnectionId> {
         let event = Event::SessionStarted(tau_proto::SessionStarted {
-            session_id: self.current_session_id.clone(),
-            reason: self.current_session_start_reason,
+            session_id: self.session_runtime.current_session_id.clone(),
+            reason: self.session_runtime.current_session_start_reason,
         });
         self.tool_connections_subscribed_to(&event)
             .into_iter()
             .filter(|connection_id| {
-                self.context_discovery
+                self.prompt_coordination
+                    .context_discovery
                     .session_context_providers
                     .contains(connection_id)
             })
@@ -1717,7 +1873,7 @@ impl Harness {
         agent_initialization_id: tau_proto::AgentInitializationId,
     ) -> HashSet<tau_proto::ConnectionId> {
         let event = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-            session_id: self.current_session_id.clone(),
+            session_id: self.session_runtime.current_session_id.clone(),
             ephemeral: self.agent_is_ephemeral(&agent_id),
             agent_id,
             agent_initialization_id,
@@ -1725,7 +1881,8 @@ impl Harness {
         self.tool_connections_subscribed_to(&event)
             .into_iter()
             .filter(|connection_id| {
-                self.context_discovery
+                self.prompt_coordination
+                    .context_discovery
                     .agent_context_providers
                     .contains(connection_id)
             })
@@ -1733,12 +1890,15 @@ impl Harness {
     }
 
     pub(super) fn mint_agent_initialization_id(&mut self) -> tau_proto::AgentInitializationId {
-        let next = self.agent_registry.next_initialization_id;
-        self.agent_registry.next_initialization_id =
-            self.agent_registry.next_initialization_id.saturating_add(1);
+        let next = self.agent_runtime.agent_registry.next_initialization_id;
+        self.agent_runtime.agent_registry.next_initialization_id = self
+            .agent_runtime
+            .agent_registry
+            .next_initialization_id
+            .saturating_add(1);
         agent_initialization_id(
-            &self.agent_registry.accounting_runtime_id,
-            self.current_session_generation,
+            &self.agent_runtime.agent_registry.accounting_runtime_id,
+            self.session_runtime.current_session_generation,
             next,
         )
     }
@@ -1747,13 +1907,15 @@ impl Harness {
         &self,
         event: &Event,
     ) -> HashSet<tau_proto::ConnectionId> {
-        self.bus
+        self.runtime_io
+            .bus
             .connections()
             .into_iter()
             .filter(|connection| {
                 connection.kind == ClientKind::Tool
                     && connection.origin != ConnectionOrigin::Socket
                     && self
+                        .runtime_io
                         .bus
                         .live_subscriptions(&connection.id)
                         .is_some_and(|selectors| selector_matches_event(selectors, event))
@@ -1763,13 +1925,15 @@ impl Harness {
     }
 
     pub(crate) fn session_initialized(&self, session_id: &SessionId) -> bool {
-        self.context_discovery
+        self.prompt_coordination
+            .context_discovery
             .initialized_sessions
             .contains(session_id)
     }
 
     pub(crate) fn agent_context_ready_for(&self, cid: &AgentId) -> bool {
         let Some(agent_id) = self
+            .agent_runtime
             .agent_registry
             .agents
             .get(cid)
@@ -1785,6 +1949,7 @@ impl Harness {
     /// generation that its eager initial prompt must render against.
     pub(crate) fn agent_initialization_ready_for(&self, cid: &AgentId) -> bool {
         let Some(agent_id) = self
+            .agent_runtime
             .agent_registry
             .agents
             .get(cid)
@@ -1793,8 +1958,12 @@ impl Harness {
         else {
             return false;
         };
-        self.context_discovery.frozen_agents.contains_key(&agent_id)
+        self.prompt_coordination
+            .context_discovery
+            .frozen_agents
+            .contains_key(&agent_id)
             && !self
+                .prompt_coordination
                 .context_discovery
                 .pending_agents
                 .contains_key(&agent_id)
@@ -1803,11 +1972,12 @@ impl Harness {
     /// Returns whether the durable agent tree has one unfinished foreground
     /// provider tool round on any branch.
     pub(crate) fn agent_has_open_foreground_tool_round(&self, cid: &AgentId) -> bool {
-        self.agent_registry
+        self.agent_runtime
+            .agent_registry
             .agents
             .get(cid)
             .and_then(|agent| agent.agent_id.as_deref())
-            .and_then(|agent_id| self.agent_store.agent(agent_id))
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
             .is_some_and(tau_core::AgentTree::has_open_foreground_tool_round)
     }
 
@@ -1815,8 +1985,20 @@ impl Harness {
         &self,
         agent_id: &tau_proto::AgentId,
     ) -> bool {
-        !self.agent_registry.session_loaded.contains(agent_id)
-            || (self.context_discovery.frozen_agents.contains_key(agent_id)
-                && !self.context_discovery.pending_agents.contains_key(agent_id))
+        !self
+            .agent_runtime
+            .agent_registry
+            .session_loaded
+            .contains(agent_id)
+            || (self
+                .prompt_coordination
+                .context_discovery
+                .frozen_agents
+                .contains_key(agent_id)
+                && !self
+                    .prompt_coordination
+                    .context_discovery
+                    .pending_agents
+                    .contains_key(agent_id))
     }
 }

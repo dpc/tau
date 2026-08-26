@@ -75,7 +75,8 @@ impl Harness {
     /// Missing registration metadata uses the protocol default of
     /// `MinForegroundSeconds(2)`.
     pub(super) fn resolve_tool_background_support(&self, name: &str) -> BackgroundSupport {
-        self.registry
+        self.tool_routing
+            .registry
             .resolve_provider(name)
             .and_then(|provider| provider.tool.background_support)
             .unwrap_or_else(BackgroundSupport::default_effective)
@@ -83,11 +84,18 @@ impl Harness {
 
     /// Drain scheduler-selected tool invocations into harness side effects.
     pub(super) fn drain_pending_tool_invocations(&mut self) -> Result<(), HarnessError> {
-        while let Some(next) = self.tool_runtime.tool_turn.next_dispatchable().cloned() {
+        while let Some(next) = self
+            .tool_routing
+            .tool_runtime
+            .tool_turn
+            .next_dispatchable()
+            .cloned()
+        {
             if self.tool_call_waits_for_staged_registration(
                 &next.conversation_id,
                 &next.invocation.name,
-                self.prompt_runtime
+                self.prompt_coordination
+                    .prompt_runtime
                     .tool_call_prompts
                     .get(&next.invocation.id),
             ) {
@@ -102,7 +110,11 @@ impl Harness {
                     turn_categories: _,
                 },
                 foreground_action,
-            )) = self.tool_runtime.tool_turn.pop_dispatchable(Instant::now())
+            )) = self
+                .tool_routing
+                .tool_runtime
+                .tool_turn
+                .pop_dispatchable(Instant::now())
             else {
                 break;
             };
@@ -121,7 +133,10 @@ impl Harness {
             if let Err(error) =
                 self.execute_agent_tool_call_from(&conversation_id, &invocation, source.as_ref())
             {
-                self.tool_runtime.tool_turn.rollback_dispatch(&call_id);
+                self.tool_routing
+                    .tool_runtime
+                    .tool_turn
+                    .rollback_dispatch(&call_id);
                 return Err(error);
             }
             self.apply_foreground_action(foreground_action);
@@ -133,7 +148,12 @@ impl Harness {
         match action {
             ForegroundAction::None => {}
             ForegroundAction::Background { call_id } => {
-                if self.tool_runtime.tool_turn.begin_backgrounding(&call_id) {
+                if self
+                    .tool_routing
+                    .tool_runtime
+                    .tool_turn
+                    .begin_backgrounding(&call_id)
+                {
                     self.observe_tool_backgrounded(&call_id);
                     self.publish_synthetic_background_result(&call_id);
                 }
@@ -159,10 +179,16 @@ impl Harness {
             return;
         };
         let Some(owner) = self
+            .tool_routing
             .tool_runtime
             .tool_agents
             .get(call_id)
-            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
+            .or_else(|| {
+                self.tool_routing
+                    .tool_runtime
+                    .peer_internal_tool_agents
+                    .get(call_id)
+            })
             .cloned()
         else {
             return;
@@ -184,15 +210,27 @@ impl Harness {
         result: CborValue,
     ) {
         let Some(cid) = self
+            .tool_routing
             .tool_runtime
             .tool_agents
             .get(call_id)
-            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
+            .or_else(|| {
+                self.tool_routing
+                    .tool_runtime
+                    .peer_internal_tool_agents
+                    .get(call_id)
+            })
             .cloned()
         else {
             return;
         };
-        let Some(tool) = self.tool_runtime.pending_tools.get(call_id).cloned() else {
+        let Some(tool) = self
+            .tool_routing
+            .tool_runtime
+            .pending_tools
+            .get(call_id)
+            .cloned()
+        else {
             return;
         };
         let result = ToolResult {
@@ -208,6 +246,7 @@ impl Harness {
             display: None,
         };
         if self
+            .tool_routing
             .tool_runtime
             .peer_internal_tool_agents
             .contains_key(call_id)
@@ -228,10 +267,22 @@ impl Harness {
         call_id: &ToolCallId,
         agent_ids: Option<(&str, &str)>,
     ) {
-        let Some(cid) = self.tool_runtime.tool_agents.get(call_id).cloned() else {
+        let Some(cid) = self
+            .tool_routing
+            .tool_runtime
+            .tool_agents
+            .get(call_id)
+            .cloned()
+        else {
             return;
         };
-        let Some(tool) = self.tool_runtime.pending_tools.get(call_id).cloned() else {
+        let Some(tool) = self
+            .tool_routing
+            .tool_runtime
+            .pending_tools
+            .get(call_id)
+            .cloned()
+        else {
             return;
         };
         let agent_id_headers = agent_ids
@@ -259,8 +310,13 @@ impl Harness {
     }
 
     pub(super) fn process_background_deadlines_at(&mut self, now: Instant) {
-        for call_id in self.tool_runtime.tool_turn.background_due(now) {
-            if self.tool_runtime.tool_turn.begin_backgrounding(&call_id) {
+        for call_id in self.tool_routing.tool_runtime.tool_turn.background_due(now) {
+            if self
+                .tool_routing
+                .tool_runtime
+                .tool_turn
+                .begin_backgrounding(&call_id)
+            {
                 self.observe_tool_backgrounded(&call_id);
                 self.publish_synthetic_background_result(&call_id);
             }
@@ -268,7 +324,12 @@ impl Harness {
     }
 
     pub(crate) fn on_tool_call_foreground_complete(&mut self, call_id: &str) {
-        let owner = self.tool_runtime.tool_agents.get(call_id).cloned();
+        let owner = self
+            .tool_routing
+            .tool_runtime
+            .tool_agents
+            .get(call_id)
+            .cloned();
         if let Some(cid) = owner.as_ref() {
             self.emit_agent_stats_updated(cid);
         }
@@ -305,15 +366,18 @@ impl Harness {
         completion_prompt_mode: BackgroundCompletionPromptMode,
     ) {
         let peer_internal = self
+            .tool_routing
             .tool_runtime
             .peer_internal_tool_agents
             .contains_key(&result.call_id);
         let Some(cid) = self
+            .tool_routing
             .tool_runtime
             .tool_agents
             .get(&result.call_id)
             .or_else(|| {
-                self.tool_runtime
+                self.tool_routing
+                    .tool_runtime
                     .peer_internal_tool_agents
                     .get(&result.call_id)
             })
@@ -322,7 +386,12 @@ impl Harness {
             return;
         };
         let call_id = result.call_id.clone();
-        if let Some(tool) = self.tool_runtime.pending_tools.get(&result.call_id) {
+        if let Some(tool) = self
+            .tool_routing
+            .tool_runtime
+            .pending_tools
+            .get(&result.call_id)
+        {
             tool.restore_terminal_result_metadata(&mut result);
         }
         let background = ToolBackgroundResult {
@@ -345,7 +414,8 @@ impl Harness {
             return;
         }
         self.observe_tool_terminal(&cid, &call_id, tau_proto::ToolTerminalCause::Completed);
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .pending_background_completion_modes
             .insert(call_id, completion_prompt_mode);
         self.publish_for_agent_from(
@@ -374,6 +444,7 @@ impl Harness {
         cancelled: ToolCancelled,
     ) {
         let cause = self
+            .tool_routing
             .tool_runtime
             .pending_cancellation_observations
             .get(&cancelled.call_id)
@@ -406,15 +477,18 @@ impl Harness {
         cause: tau_proto::ToolTerminalCause,
     ) {
         let peer_internal = self
+            .tool_routing
             .tool_runtime
             .peer_internal_tool_agents
             .contains_key(&error.call_id);
         let Some(cid) = self
+            .tool_routing
             .tool_runtime
             .tool_agents
             .get(&error.call_id)
             .or_else(|| {
-                self.tool_runtime
+                self.tool_routing
+                    .tool_runtime
                     .peer_internal_tool_agents
                     .get(&error.call_id)
             })
@@ -423,7 +497,12 @@ impl Harness {
             return;
         };
         let call_id = error.call_id.clone();
-        if let Some(tool) = self.tool_runtime.pending_tools.get(&error.call_id) {
+        if let Some(tool) = self
+            .tool_routing
+            .tool_runtime
+            .pending_tools
+            .get(&error.call_id)
+        {
             error.tool_name = tool.name.clone();
             error.tool_type = tool.tool_type;
         }
@@ -445,7 +524,8 @@ impl Harness {
             return;
         }
         self.observe_tool_terminal(&cid, &call_id, cause);
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .pending_background_completion_modes
             .insert(call_id, completion_prompt_mode);
         self.publish_for_agent_from(&cid, source, Event::ToolBackgroundError(background));
@@ -459,7 +539,8 @@ impl Harness {
         call_id: &ToolCallId,
         completion_prompt_mode: BackgroundCompletionPromptMode,
     ) {
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .background_completion_targets
             .insert(call_id.clone(), cid.clone());
         self.reset_loop_guard_for_progress(cid);
@@ -530,6 +611,7 @@ impl Harness {
         make_prompt: impl FnOnce(String) -> PendingPrompt,
     ) {
         if self
+            .tool_routing
             .tool_runtime
             .suppressed_background_completion_prompts
             .contains(call_id)
@@ -538,7 +620,7 @@ impl Harness {
         }
         let prompt = background_completion_prompt(call_id);
         let activation = tau_proto::ObservationId::random();
-        let queued = if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
+        let queued = if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             if conv
                 .pending_prompts
                 .iter()
@@ -573,10 +655,12 @@ impl Harness {
         &mut self,
         call_id: &ToolCallId,
     ) {
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .suppressed_background_completion_prompts
             .remove(call_id);
         if let Some(cid) = self
+            .tool_routing
             .tool_runtime
             .background_completion_targets
             .get(call_id)
@@ -587,21 +671,24 @@ impl Harness {
     }
 
     pub(super) fn suppress_background_completion_prompt(&mut self, call_id: ToolCallId) {
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .suppressed_background_completion_prompts
             .insert(call_id.clone());
         let prompt = background_completion_prompt(&call_id);
-        for conv in self.agent_registry.agents.values_mut() {
+        for conv in self.agent_runtime.agent_registry.agents.values_mut() {
             conv.pending_prompts
                 .retain(|pending| pending.text != prompt);
         }
     }
 
     pub(super) fn unsuppress_background_completion_prompt(&mut self, call_id: ToolCallId) {
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .suppressed_background_completion_prompts
             .remove(&call_id);
         if let Some(cid) = self
+            .tool_routing
             .tool_runtime
             .background_completion_targets
             .get(&call_id)
@@ -623,10 +710,12 @@ impl Harness {
 
     pub(super) fn discard_background_completion_target_before_teardown(&mut self, cid: &AgentId) {
         for call_id in self.background_completion_call_ids_for_teardown(cid) {
-            self.tool_runtime
+            self.tool_routing
+                .tool_runtime
                 .suppressed_background_completion_prompts
                 .remove(&call_id);
-            self.tool_runtime
+            self.tool_routing
+                .tool_runtime
                 .background_completion_targets
                 .remove(&call_id);
             self.clear_tool_call_tracking(call_id.as_str());
@@ -641,23 +730,37 @@ impl Harness {
         cid: &AgentId,
     ) -> HashSet<ToolCallId> {
         let mut call_ids: HashSet<ToolCallId> = self
+            .tool_routing
             .tool_runtime
             .tool_turn
             .backgrounded_calls_for(cid)
             .into_iter()
-            .filter(|call_id| self.tool_runtime.peer_internal_tool_agents.get(call_id) != Some(cid))
+            .filter(|call_id| {
+                self.tool_routing
+                    .tool_runtime
+                    .peer_internal_tool_agents
+                    .get(call_id)
+                    != Some(cid)
+            })
             .collect();
         call_ids.extend(
-            self.tool_runtime
+            self.tool_routing
+                .tool_runtime
                 .tool_agents
                 .iter()
                 .filter_map(|(call_id, owner)| {
-                    (owner == cid && self.tool_runtime.tool_turn.is_backgrounded(call_id))
-                        .then_some(call_id.clone())
+                    (owner == cid
+                        && self
+                            .tool_routing
+                            .tool_runtime
+                            .tool_turn
+                            .is_backgrounded(call_id))
+                    .then_some(call_id.clone())
                 }),
         );
         call_ids.extend(
-            self.tool_runtime
+            self.tool_routing
+                .tool_runtime
                 .background_completion_targets
                 .iter()
                 .filter_map(|(call_id, owner)| (owner == cid).then_some(call_id.clone())),
@@ -686,15 +789,23 @@ impl Harness {
 
     pub(super) fn finish_tool_call_runtime_state(&mut self, call_id: &str) -> Option<AgentId> {
         let owned: ToolCallId = call_id.to_owned().into();
-        self.tool_runtime.tool_turn.mark_complete(&owned);
+        self.tool_routing
+            .tool_runtime
+            .tool_turn
+            .mark_complete(&owned);
         // `tool_agents` is still populated here: the call
         // sites clear it *after* this function returns. Decrement
         // the agent's in-flight counter and surface the new
         // state to any UI watching this agent before the
         // mapping is cleared.
-        let owner = self.tool_runtime.tool_agents.get(call_id).cloned();
+        let owner = self
+            .tool_routing
+            .tool_runtime
+            .tool_agents
+            .get(call_id)
+            .cloned();
         if let Some(cid) = owner.as_ref()
-            && let Some(conv) = self.agent_registry.agents.get_mut(cid)
+            && let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid)
         {
             conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
         }
@@ -709,7 +820,7 @@ impl Harness {
     /// the moment an agent starts a new call rather than waiting for
     /// completion.
     pub(crate) fn bump_tools_started_for(&mut self, cid: &AgentId) {
-        if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
+        if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             conv.tools_in_flight = conv.tools_in_flight.saturating_add(1);
             conv.tools_total = conv.tools_total.saturating_add(1);
         }
@@ -718,6 +829,7 @@ impl Harness {
 
     pub(super) fn maybe_complete_agent_turn(&mut self, completed_call_id: &str) {
         let Some(cid) = self
+            .tool_routing
             .tool_runtime
             .tool_agents
             .get(completed_call_id)
@@ -729,7 +841,8 @@ impl Harness {
     }
 
     pub(super) fn maybe_complete_agent_turn_for(&mut self, cid: &AgentId, completed_call_id: &str) {
-        let should_send = if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
+        let should_send = if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid)
+        {
             if let AgentTurnState::ToolsRunning { remaining_calls } = &mut conv.turn_state {
                 remaining_calls.retain(|id| id.as_str() != completed_call_id);
                 if remaining_calls.is_empty() {
@@ -746,19 +859,29 @@ impl Harness {
         };
         if should_send {
             self.queue_working_reminder_if_needed(cid);
-            let pending_ui = self.compaction_runtime.pending_ui_after_wait.remove(cid);
+            let pending_ui = self
+                .prompt_coordination
+                .compaction_runtime
+                .pending_ui_after_wait
+                .remove(cid);
             if let Some(pending) = pending_ui {
                 let remains_valid = pending.wait_call_id.as_str() == completed_call_id
-                    && pending.session_generation == self.current_session_generation
-                    && self.agent_registry.agents.get(cid).is_some_and(|agent| {
-                        !agent.terminating
-                            && agent.agent_id.as_deref() == Some(pending.agent_id.as_str())
-                            && matches!(agent.turn_state, AgentTurnState::Idle)
-                    });
+                    && pending.session_generation
+                        == self.session_runtime.current_session_generation
+                    && self
+                        .agent_runtime
+                        .agent_registry
+                        .agents
+                        .get(cid)
+                        .is_some_and(|agent| {
+                            !agent.terminating
+                                && agent.agent_id.as_deref() == Some(pending.agent_id.as_str())
+                                && matches!(agent.turn_state, AgentTurnState::Idle)
+                        });
                 if remains_valid {
                     self.handle_compact_request(
                         &pending.requester_client_id,
-                        self.current_session_id.clone(),
+                        self.session_runtime.current_session_id.clone(),
                         Some(pending.agent_id.as_str()),
                     );
                     return;
@@ -769,12 +892,14 @@ impl Harness {
                 );
             }
             let deferred_request = self
+                .agent_runtime
                 .agent_registry
                 .agents
                 .get(cid)
                 .and_then(|agent| agent.agent_id.as_deref())
                 .and_then(|agent_id| {
-                    self.compaction_runtime
+                    self.prompt_coordination
+                        .compaction_runtime
                         .accepted_manual_tools
                         .iter()
                         .find_map(|(request_id, accepted)| {
@@ -791,11 +916,12 @@ impl Harness {
             self.resolve_materialized_message_wakes(cid);
             let has_ready_message_wake = self.has_ready_message_wake_on_selected_branch(cid);
             if self
+                .agent_runtime
                 .agent_registry
                 .agents
                 .get(cid)
                 .is_some_and(|conv| conv.loop_guard.stop_automatic_continuation())
-                && let Some(conv) = self.agent_registry.agents.get_mut(cid)
+                && let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid)
             {
                 conv.pending_prompts
                     .retain(|prompt| !prompt.is_loop_guard());
@@ -827,17 +953,25 @@ impl Harness {
         cid: &AgentId,
         completed_call_id: &ToolCallId,
     ) {
-        let projected_running =
-            self.agent_registry.agents.get(cid).is_some_and(|agent| {
-                matches!(agent.turn_state, AgentTurnState::ToolsRunning { .. })
-            });
-        let live_foreground_call = self
-            .tool_runtime
-            .tool_agents
-            .iter()
-            .any(|(call_id, owner)| {
-                owner == cid && !self.tool_runtime.tool_turn.is_backgrounded(call_id)
-            });
+        let projected_running = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .is_some_and(|agent| matches!(agent.turn_state, AgentTurnState::ToolsRunning { .. }));
+        let live_foreground_call =
+            self.tool_routing
+                .tool_runtime
+                .tool_agents
+                .iter()
+                .any(|(call_id, owner)| {
+                    owner == cid
+                        && !self
+                            .tool_routing
+                            .tool_runtime
+                            .tool_turn
+                            .is_backgrounded(call_id)
+                });
         if !projected_running
             || live_foreground_call
             || self.agent_has_open_foreground_tool_round(cid)
@@ -851,7 +985,7 @@ impl Harness {
             call_id = %completed_call_id,
             "repairing closed foreground tool round left in the runtime projection"
         );
-        if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             agent.turn_state = AgentTurnState::ToolsRunning {
                 remaining_calls: vec![completed_call_id.clone()],
             };
@@ -862,7 +996,7 @@ impl Harness {
     /// Fold one pending Working reminder into the complete foreground
     /// tool-round continuation after every parallel terminal has settled.
     pub(super) fn queue_working_reminder_if_needed(&mut self, cid: &AgentId) {
-        let Some(agent) = self.agent_registry.agents.get_mut(cid) else {
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
             return;
         };
         if agent.lifecycle_notification_only_turn {
@@ -888,6 +1022,7 @@ impl Harness {
         for (index, prompt) in prompts.into_iter().enumerate() {
             self.promote_lifecycle_notification_turn(cid);
             let agent_id = self
+                .agent_runtime
                 .agent_registry
                 .agents
                 .get(cid)
@@ -935,6 +1070,7 @@ impl Harness {
                 notify_watchers,
             );
             if self
+                .prompt_coordination
                 .prompt_runtime
                 .pending_publish_completions
                 .contains_key(cid)
@@ -968,6 +1104,7 @@ impl Harness {
         completion: Option<AgentPublishCompletion>,
     ) -> bool {
         let mut pending: Vec<PendingPrompt> = self
+            .agent_runtime
             .agent_registry
             .agents
             .get_mut(cid)
@@ -993,7 +1130,7 @@ impl Harness {
                 }
             }
             if !passive.is_empty()
-                && let Some(conv) = self.agent_registry.agents.get_mut(cid)
+                && let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid)
             {
                 for prompt in passive.into_iter().rev() {
                     conv.pending_prompts.push_front(prompt);
@@ -1069,12 +1206,14 @@ impl Harness {
         source: Option<&tau_proto::ConnectionId>,
     ) {
         let call_id: ToolCallId = call.id.clone();
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .tool_agents
             .insert(call_id.clone(), cid.clone());
         self.bump_tools_started_for(cid);
         if !complete_turn && !self.tool_terminal_has_open_durable_owner(cid, &call_id) {
-            self.tool_runtime
+            self.tool_routing
+                .tool_runtime
                 .post_commit_runtime_only_tool_terminals
                 .insert(call_id.clone());
         }
@@ -1096,7 +1235,8 @@ impl Harness {
     }
 
     pub(super) fn tool_owner_agent_id(&self, cid: &AgentId) -> AgentId {
-        self.agent_registry
+        self.agent_runtime
+            .agent_registry
             .agents
             .get(cid)
             .and_then(|conv| conv.agent_id.clone())
@@ -1105,7 +1245,8 @@ impl Harness {
     }
 
     pub(super) fn tool_owner_originator(&self, cid: &AgentId) -> PromptOriginator {
-        self.agent_registry
+        self.agent_runtime
+            .agent_registry
             .agents
             .get(cid)
             .map(|conv| conv.originator.clone())
@@ -1113,7 +1254,7 @@ impl Harness {
     }
 
     pub(super) fn reset_loop_guard_for_progress(&mut self, cid: &AgentId) {
-        if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
+        if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             conv.loop_guard.reset_for_progress();
             conv.pending_prompts
                 .retain(|prompt| !prompt.is_loop_guard());
@@ -1125,7 +1266,7 @@ impl Harness {
         cid: &AgentId,
         signature: LoopTurnSignature,
     ) -> Option<LoopGuardTrigger> {
-        let conv = self.agent_registry.agents.get_mut(cid)?;
+        let conv = self.agent_runtime.agent_registry.agents.get_mut(cid)?;
         let guard = &mut conv.loop_guard;
         guard.push_recent(signature.clone(), LOOP_GUARD_RECENT_LIMIT);
 
@@ -1179,7 +1320,7 @@ impl Harness {
         cycle_key: String,
         reason: String,
     ) {
-        let Some(conv) = self.agent_registry.agents.get_mut(cid) else {
+        let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
             return;
         };
         if let Some(state) = conv.loop_guard.cycle_state(&cycle_key) {
@@ -1218,7 +1359,7 @@ impl Harness {
     }
 
     pub(super) fn mark_loop_guard_breakers_dispatched(&mut self, cid: &AgentId) {
-        let Some(conv) = self.agent_registry.agents.get_mut(cid) else {
+        let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
             return;
         };
         conv.loop_guard.mark_pending_breakers_dispatched();
@@ -1229,7 +1370,7 @@ impl Harness {
         cid: &AgentId,
         call: &AgentToolCall,
     ) {
-        let Some(conv) = self.agent_registry.agents.get_mut(cid) else {
+        let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
             return;
         };
         let signature = format!(
@@ -1252,7 +1393,8 @@ impl Harness {
         cid: &AgentId,
         call_id: &ToolCallId,
     ) -> Option<String> {
-        self.agent_registry
+        self.agent_runtime
+            .agent_registry
             .agents
             .get_mut(cid)?
             .loop_guard
@@ -1278,7 +1420,7 @@ impl Harness {
             "{call_signature}:{}",
             bounded_loop_text(&error.message, LOOP_GUARD_TOOL_ERROR_CHARS)
         );
-        if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
+        if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             conv.loop_guard
                 .push_tool_failure(failure.clone(), LOOP_GUARD_RECENT_LIMIT);
         }
@@ -1308,7 +1450,12 @@ impl Harness {
         let role_name = self.role_name_for_agent_id(cid).to_owned();
         self.remember_tool_call_loop_signature(cid, call);
 
-        let prompt_id = self.prompt_runtime.tool_call_prompts.get(&call.id).cloned();
+        let prompt_id = self
+            .prompt_coordination
+            .prompt_runtime
+            .tool_call_prompts
+            .get(&call.id)
+            .cloned();
         let prompt_tool_spec = prompt_id
             .as_ref()
             .map(|prompt_id| self.resolve_enabled_tool_spec_for_prompt(&tool_name, prompt_id));
@@ -1331,10 +1478,11 @@ impl Harness {
             let call_id: ToolCallId = call.id.clone();
             let owner_agent_id = self.tool_owner_agent_id(cid);
             let owner_originator = self.tool_owner_originator(cid);
-            self.tool_runtime
+            self.tool_routing
+                .tool_runtime
                 .tool_agents
                 .insert(call_id.clone(), cid.clone());
-            self.tool_runtime.pending_tools.insert(
+            self.tool_routing.tool_runtime.pending_tools.insert(
                 call_id.clone(),
                 PendingTool {
                     name: tool_name.clone(),
@@ -1379,6 +1527,7 @@ impl Harness {
             .any(|tag| tag.as_str() == "provider-content:image");
         let mut arguments = call.arguments.clone();
         if self
+            .tool_routing
             .registry
             .resolve_provider(&internal_tool_name)
             .is_some()
@@ -1409,7 +1558,12 @@ impl Harness {
                 let mut message = format!("invalid arguments for tool `{tool_name}`: {error}");
                 if let Some(hint) = tool_example_hint(tool_spec, &arguments) {
                     let key = (cid.clone(), visible_tool_name.clone(), hint.clone());
-                    if self.prompt_runtime.shown_tool_failure_examples.insert(key) {
+                    if self
+                        .prompt_coordination
+                        .prompt_runtime
+                        .shown_tool_failure_examples
+                        .insert(key)
+                    {
                         message.push_str(&hint);
                     }
                 }
@@ -1431,10 +1585,11 @@ impl Harness {
         // Track conversation attribution before publishing the runtime
         // `ToolRequest`; terminal tool facts use this metadata to fold into the
         // owning agent transcript.
-        self.tool_runtime
+        self.tool_routing
+            .tool_runtime
             .tool_agents
             .insert(call_id.clone(), cid.clone());
-        self.tool_runtime.pending_tools.insert(
+        self.tool_routing.tool_runtime.pending_tools.insert(
             call_id.clone(),
             PendingTool {
                 name: visible_tool_name.clone(),
@@ -1463,11 +1618,16 @@ impl Harness {
             originator: owner_originator.clone(),
         };
 
-        match self.registry.route_tool_request(request) {
+        match self.tool_routing.registry.route_tool_request(request) {
             Ok(route) => {
                 let status_was_available = prompt_id
                     .as_ref()
-                    .and_then(|prompt_id| self.prompt_runtime.tool_specs.get(prompt_id))
+                    .and_then(|prompt_id| {
+                        self.prompt_coordination
+                            .prompt_runtime
+                            .tool_specs
+                            .get(prompt_id)
+                    })
                     .is_some_and(|specs| {
                         specs
                             .iter()
@@ -1475,11 +1635,12 @@ impl Harness {
                     });
                 if !matches!(visible_tool_name.as_str(), "status" | "wait")
                     && self
+                        .agent_runtime
                         .agent_registry
                         .agents
                         .get(cid)
                         .is_some_and(|agent| !agent.lifecycle_notification_only_turn)
-                    && let Some(agent) = self.agent_registry.agents.get_mut(cid)
+                    && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid)
                 {
                     if status_was_available {
                         agent.work_status.record_substantive_tool_admission();
@@ -1494,7 +1655,8 @@ impl Harness {
                     }
                     ToolRouteTarget::Extension(provider_connection_id) => {
                         self.ensure_tool_started_subscription(&provider_connection_id);
-                        self.tool_runtime
+                        self.tool_routing
+                            .tool_runtime
                             .pending_tool_providers
                             .insert(call_id.clone(), provider_connection_id);
                         self.publish_for_agent_from(cid, source, Event::ToolStarted(started));

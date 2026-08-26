@@ -88,8 +88,10 @@ fn watched_agent_retirement_waits_for_intercepted_lifecycle_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path().join("state")).expect("harness");
     let watched_cid = ensure_test_user_agent(&mut h);
-    let watcher_cid =
-        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watcher_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid);
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
     h.set_agent_watch(
@@ -124,7 +126,8 @@ fn watched_agent_retirement_waits_for_intercepted_lifecycle_commit() {
             .any(|id| id == watcher_id.as_str())
     );
     assert!(
-        h.agent_watch
+        h.agent_runtime
+            .agent_watch
             .pending_retirements
             .contains_key(watched_id.as_str())
     );
@@ -137,11 +140,16 @@ fn watched_agent_retirement_waits_for_intercepted_lifecycle_commit() {
     )
     .expect("release lifecycle");
     assert!(
-        !h.agent_watch
+        !h.agent_runtime
+            .agent_watch
             .pending_retirements
             .contains_key(watched_id.as_str()),
         "barrier remained after committed lifecycle: {:?}",
-        h.agent_watch.pending_retirements.keys().collect::<Vec<_>>()
+        h.agent_runtime
+            .agent_watch
+            .pending_retirements
+            .keys()
+            .collect::<Vec<_>>()
     );
     assert!(h.watchers_for_agent(watched_id.as_str()).is_empty());
     assert_eq!(
@@ -167,8 +175,10 @@ fn unloading_watcher_settles_intercepted_lifecycle_as_failed() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path().join("state")).expect("harness");
     let watched_cid = ensure_test_user_agent(&mut h);
-    let watcher_cid =
-        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watcher_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid);
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
     h.set_agent_watch(
@@ -198,7 +208,8 @@ fn unloading_watcher_settles_intercepted_lifecycle_as_failed() {
                 && message.recipient_id == watcher_id
     ));
     assert!(
-        h.agent_watch
+        h.agent_runtime
+            .agent_watch
             .pending_retirements
             .contains_key(watched_id.as_str())
     );
@@ -206,7 +217,8 @@ fn unloading_watcher_settles_intercepted_lifecycle_as_failed() {
     h.remove_agent(&watcher_cid);
 
     assert!(
-        !h.agent_watch
+        !h.agent_runtime
+            .agent_watch
             .pending_retirements
             .contains_key(watched_id.as_str())
     );
@@ -245,7 +257,8 @@ fn challenged_working_final_drop_is_overridden_until_post_commit() {
     let prompt_id =
         tau_proto::AgentPromptId::parse("working-final-drop").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
-    h.prompt_runtime
+    h.prompt_coordination
+        .prompt_runtime
         .agents
         .insert(prompt_id.clone(), cid.clone());
     let interceptor = connect_test_tool(&mut h, "working-final-drop-owner");
@@ -264,7 +277,11 @@ fn challenged_working_final_drop_is_overridden_until_post_commit() {
     h.handle_provider_response_finished(provider_text_response(&prompt_id, agent_id, "candidate"))
         .expect("park candidate");
     let _ = intercepted_payload(&interceptor);
-    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .pending_prompts
+            .is_empty()
+    );
 
     h.handle_extension_event(
         "working-final-drop-owner",
@@ -274,7 +291,7 @@ fn challenged_working_final_drop_is_overridden_until_post_commit() {
     )
     .expect("drop is overridden");
     assert!(matches!(
-        h.agent_registry.agents[&cid].turn_state,
+        h.agent_runtime.agent_registry.agents[&cid].turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
     h.shutdown().expect("shutdown");
@@ -296,10 +313,15 @@ fn delayed_working_final_release_retains_exact_root_parent() {
             "pre-existing child",
         )),
     );
-    let child = h.agent_registry.agents[&cid]
+    let child = h.agent_runtime.agent_registry.agents[&cid]
         .head
         .expect("pre-existing child");
-    h.agent_registry.agents.get_mut(&cid).expect("agent").head = None;
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .head = None;
     h.report_agent_work_status(
         &cid,
         crate::WorkStatusReport::new(
@@ -312,7 +334,8 @@ fn delayed_working_final_release_retains_exact_root_parent() {
     let prompt_id =
         tau_proto::AgentPromptId::parse("delayed-parent-final").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
-    h.prompt_runtime
+    h.prompt_coordination
+        .prompt_runtime
         .agents
         .insert(prompt_id.clone(), cid.clone());
     let interceptor = connect_test_tool(&mut h, "delayed-parent-owner");
@@ -330,7 +353,12 @@ fn delayed_working_final_release_retains_exact_root_parent() {
     h.handle_provider_response_finished(provider_text_response(&prompt_id, agent_id, "candidate"))
         .expect("park candidate");
     let (parked, _) = intercepted_payload(&interceptor);
-    h.agent_registry.agents.get_mut(&cid).expect("agent").head = Some(child);
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .head = Some(child);
     h.handle_extension_event(
         "delayed-parent-owner",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -340,11 +368,16 @@ fn delayed_working_final_release_retains_exact_root_parent() {
     .expect("release candidate");
 
     assert!(
-        h.prompt_runtime
+        h.prompt_coordination
+            .prompt_runtime
             .pending_publish_completions
             .contains_key(&cid)
     );
-    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .pending_prompts
+            .is_empty()
+    );
     assert_eq!(
         event_log_events(&h)
             .iter()
@@ -386,11 +419,12 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
     let prompt_id =
         tau_proto::AgentPromptId::parse("working-final-append").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
-    let owning_head = h.agent_registry.agents[&cid]
+    let owning_head = h.agent_runtime.agent_registry.agents[&cid]
         .head
         .map(tau_proto::AgentHead::Node)
         .unwrap_or(tau_proto::AgentHead::Root);
-    h.prompt_runtime
+    h.prompt_coordination
+        .prompt_runtime
         .agents
         .insert(prompt_id.clone(), cid.clone());
     let interceptor = connect_test_tool(&mut h, "working-final-append-owner");
@@ -426,15 +460,25 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
     )
     .expect("release into append failure");
     assert!(
-        h.prompt_runtime
+        h.prompt_coordination
+            .prompt_runtime
             .pending_publish_completions
             .contains_key(&cid)
     );
-    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .pending_prompts
+            .is_empty()
+    );
 
     std::fs::remove_dir(&journal_path).expect("remove append blocker");
     std::fs::rename(&backup_path, &journal_path).expect("restore journal");
-    h.agent_registry.agents.get_mut(&cid).expect("agent").head = None;
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .head = None;
     h.handle_extension_event(
         "working-final-append-owner",
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
@@ -444,12 +488,18 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
     )
     .expect("off-branch runtime progress");
     assert!(
-        h.prompt_runtime
+        h.prompt_coordination
+            .prompt_runtime
             .pending_publish_completions
             .contains_key(&cid),
         "off-branch progress must retain the original response"
     );
-    h.agent_registry.agents.get_mut(&cid).expect("agent").head = owning_head.as_option();
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .head = owning_head.as_option();
     h.handle_extension_event(
         "working-final-append-owner",
         TestProtocolItem::Message(TestMessage::ConfigError(tau_proto::ConfigError {
@@ -458,12 +508,13 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
     )
     .expect("owning-branch runtime progress retries retained append");
     assert!(
-        !h.prompt_runtime
+        !h.prompt_coordination
+            .prompt_runtime
             .pending_publish_completions
             .contains_key(&cid)
     );
     assert!(matches!(
-        h.agent_registry.agents[&cid].turn_state,
+        h.agent_runtime.agent_registry.agents[&cid].turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
     h.shutdown().expect("shutdown");
@@ -478,8 +529,10 @@ fn ordinary_final_append_failure_does_not_project_watch_response() {
     let state_dir = tmp.path().join("state");
     let mut h = echo_harness(&state_dir).expect("harness");
     let watched_cid = ensure_test_user_agent(&mut h);
-    let watcher_cid =
-        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watcher_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid);
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
     finish_test_agent_context_wait(&mut h, &watcher_id);
@@ -492,7 +545,8 @@ fn ordinary_final_append_failure_does_not_project_watch_response() {
     let prompt_id =
         tau_proto::AgentPromptId::parse("ordinary-final-append").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &watched_cid, prompt_id.as_str());
-    h.prompt_runtime
+    h.prompt_coordination
+        .prompt_runtime
         .agents
         .insert(prompt_id.clone(), watched_cid.clone());
     let interceptor = connect_test_tool(&mut h, "ordinary-final-append-owner");
@@ -575,7 +629,7 @@ fn initial_prompt_submission_append_failure_publishes_correlated_terminal() {
         &crate::test_connection_id("initial-prompt-ui"),
         tau_proto::UiCreateAgent {
             request_id: "create-append-failure".to_owned(),
-            session_id: h.current_session_id.clone(),
+            session_id: h.session_runtime.current_session_id.clone(),
             role: "engineer".to_owned(),
             model_override: None,
             metadata: Vec::new(),
@@ -591,6 +645,7 @@ fn initial_prompt_submission_append_failure_publishes_correlated_terminal() {
     .expect("create agent");
     let (parked, _) = intercepted_payload(&interceptor);
     let agent_id = h
+        .agent_runtime
         .agent_registry
         .agents
         .values()
@@ -621,7 +676,12 @@ fn initial_prompt_submission_append_failure_publishes_correlated_terminal() {
                 && failed.ctx_id == "prompt-append-failure"
                 && failed.stage == tau_proto::AgentPromptFailureStage::Submission
     )));
-    assert!(h.prompt_runtime.pending_publish_completions.is_empty());
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty()
+    );
 
     std::fs::remove_dir(&journal_path).expect("remove append blocker");
     std::fs::rename(&backup_path, &journal_path).expect("restore journal");
@@ -669,27 +729,36 @@ fn retained_working_final_rejects_root_and_descendant_head_drift() {
         h.selected_head_for_agent(&cid),
         Some(tau_proto::AgentHead::Root)
     );
-    h.prompt_runtime.pending_publish_completions.insert(
-        cid.clone(),
-        make_completion(tau_proto::AgentHead::Root, "root"),
-    );
+    h.prompt_coordination
+        .prompt_runtime
+        .pending_publish_completions
+        .insert(
+            cid.clone(),
+            make_completion(tau_proto::AgentHead::Root, "root"),
+        );
     publish_child(&mut h, "after-root");
     h.retry_pending_agent_publish_completion(&cid);
     assert!(
-        h.prompt_runtime
+        h.prompt_coordination
+            .prompt_runtime
             .pending_publish_completions
             .contains_key(&cid)
     );
 
-    h.prompt_runtime.pending_publish_completions.remove(&cid);
+    h.prompt_coordination
+        .prompt_runtime
+        .pending_publish_completions
+        .remove(&cid);
     let captured = h.selected_head_for_agent(&cid).expect("captured child");
-    h.prompt_runtime
+    h.prompt_coordination
+        .prompt_runtime
         .pending_publish_completions
         .insert(cid.clone(), make_completion(captured, "descendant"));
     publish_child(&mut h, "later-descendant");
     h.retry_pending_agent_publish_completion(&cid);
     assert!(
-        h.prompt_runtime
+        h.prompt_coordination
+            .prompt_runtime
             .pending_publish_completions
             .contains_key(&cid)
     );
@@ -700,7 +769,7 @@ fn retained_working_final_rejects_root_and_descendant_head_drift() {
 fn committed_provider_model_events(h: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         let relevant = match &entry.event {
             Event::ProviderModelsDeclared(_) => entry.source.as_deref() == Some("model-provider"),
@@ -749,7 +818,8 @@ fn dropping_provider_model_declaration_prevents_canonical_state() {
     )
     .expect("declare models");
     assert!(matches!(
-        h.publication
+        h.runtime_io
+            .publication
             .pending_intercept
             .as_ref()
             .map(|pending| &pending.event),
@@ -926,7 +996,8 @@ fn provider_prefix_interception_protects_canonical_model_state() {
     )
     .expect("commit declaration");
     assert!(matches!(
-        h.publication
+        h.runtime_io
+            .publication
             .pending_intercept
             .as_ref()
             .map(|pending| &pending.event),
@@ -1017,7 +1088,7 @@ fn provider_disconnect_rewrites_parked_canonical_state_to_empty() {
     )
     .expect("commit declaration");
     assert!(matches!(
-        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.runtime_io.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::ProviderModelsUpdated(update)) if !update.models.is_empty()
     ));
     let model: tau_proto::ModelId = "declared/disconnected".into();
@@ -1025,7 +1096,7 @@ fn provider_disconnect_rewrites_parked_canonical_state_to_empty() {
 
     h.handle_disconnect(&crate::test_connection_id("model-provider"));
     assert!(matches!(
-        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.runtime_io.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::ProviderModelsUpdated(update))
             if update.publisher_extension_id.as_str() == "configured-provider"
                 && update.models.is_empty()
@@ -1191,7 +1262,7 @@ fn parked_old_generation_drop_cannot_activate_same_id_replacement() {
         Some(&1)
     );
     assert!(matches!(
-        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.runtime_io.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::ProviderModelsDeclared(update))
             if update.models[0].id.to_string() == "declared/new-generation"
     ));
@@ -1240,7 +1311,7 @@ fn assert_message_report_is_intercepted(selector: EventSelector, intercepts_cano
     )
     .expect("message report intake");
 
-    assert!(h.publication.pending_intercept.is_some());
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
     assert!(
         interceptor_sink
             .lock()
@@ -1254,7 +1325,8 @@ fn assert_message_report_is_intercepted(selector: EventSelector, intercepts_cano
         "message report must enter ordinary interception"
     );
     assert!(
-        h.store
+        h.session_runtime
+            .store
             .session_events("s1")
             .expect("fallback records")
             .is_empty(),
@@ -1268,7 +1340,7 @@ fn assert_message_report_is_intercepted(selector: EventSelector, intercepts_cano
     )
     .expect("commit report");
     if intercepts_canonical {
-        assert!(h.publication.pending_intercept.is_some());
+        assert!(h.runtime_io.publication.pending_intercept.is_some());
         h.handle_extension_event(
             "message-interceptor",
             TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -1277,8 +1349,12 @@ fn assert_message_report_is_intercepted(selector: EventSelector, intercepts_cano
         )
         .expect("protected canonical fact survives drop");
     }
-    assert!(h.publication.pending_intercept.is_none());
-    let records = h.store.session_events("s1").expect("fallback records");
+    assert!(h.runtime_io.publication.pending_intercept.is_none());
+    let records = h
+        .session_runtime
+        .store
+        .session_events("s1")
+        .expect("fallback records");
     assert_eq!(records.len(), 1);
     assert!(matches!(
         &records[0].event,
@@ -1334,7 +1410,13 @@ fn dropping_message_report_produces_no_canonical_fact() {
         })),
     )
     .expect("drop report");
-    assert!(h.store.session_events("s1").expect("journal").is_empty());
+    assert!(
+        h.session_runtime
+            .store
+            .session_events("s1")
+            .expect("journal")
+            .is_empty()
+    );
     assert!(event_log_events(&h).iter().all(|event| {
         !matches!(
             event,
@@ -1405,7 +1487,7 @@ fn rollover_message_report_is_observation_only() {
                 if fact.message_id.as_str() == "rollover-message"
         )
     }));
-    assert!(h.publication.idle_dispatches.is_empty());
+    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
 }
 
 /// Downstream canonicalization consumes the committed same-name replacement,
@@ -1440,7 +1522,7 @@ fn replacing_message_report_canonicalizes_replacement() {
     )
     .expect("replace report");
     assert!(matches!(
-        h.store.session_events("s1").expect("journal").as_slice(),
+        h.session_runtime.store.session_events("s1").expect("journal").as_slice(),
         [tau_core::PersistedSessionEvent {
             event: Event::MessageDelivered(fact),
             ..
@@ -1486,7 +1568,7 @@ fn parked_message_report_survives_bridge_disconnect() {
     )
     .expect("pass report");
     assert!(matches!(
-        h.store.session_events("s1").expect("journal").as_slice(),
+        h.session_runtime.store.session_events("s1").expect("journal").as_slice(),
         [tau_core::PersistedSessionEvent {
             source: Some(source),
             event: Event::MessageDelivered(fact),
@@ -1527,7 +1609,7 @@ fn message_report_preserves_deferred_publish_fifo() {
     )
     .expect("subscribe observer");
     h.publish_event(None, draft_event("held"));
-    assert!(h.publication.pending_intercept.is_some());
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
 
     h.handle_extension_event_inner_with_persist(
         &crate::test_connection_id("bridge-connection"),
@@ -1536,7 +1618,8 @@ fn message_report_preserves_deferred_publish_fifo() {
     )
     .expect("queue message report");
     assert!(
-        h.store
+        h.session_runtime
+            .store
             .session_events("s1")
             .expect("fallback records")
             .is_empty()
@@ -1551,7 +1634,8 @@ fn message_report_preserves_deferred_publish_fifo() {
     .expect("release intercepted publish");
 
     assert_eq!(
-        h.store
+        h.session_runtime
+            .store
             .session_events("s1")
             .expect("fallback records")
             .len(),
@@ -1589,7 +1673,7 @@ fn message_report_preserves_deferred_publish_fifo() {
 fn prompt_created_count(h: &Harness) -> u64 {
     let mut cursor = path_crate_event_log::EventLogSeq::new(0);
     let mut count = 0;
-    while let Some(entry) = h.event_log.get_next_from(cursor) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(cursor) {
         cursor = entry.seq.next();
         if matches!(entry.event, Event::AgentPromptCreated(_)) {
             count += 1;
@@ -1619,7 +1703,7 @@ fn queue_intercepted_peer_receive(
         .insert(connection_id.clone());
     let result = h.complete_external_agent_message_auth(
         connection_id.clone(),
-        h.current_session_generation,
+        h.session_runtime.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: format!("peer-request-{suffix}"),
             message_id: tau_proto::AgentMessageId::parse(format!("peer-message-{suffix}"))
@@ -1629,7 +1713,7 @@ fn queue_intercepted_peer_receive(
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: h.current_session_id.clone(),
+            recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::Exact(recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
             message: "peer body".to_owned(),
@@ -1832,10 +1916,12 @@ fn local_peer_oversized_message_rejects_before_auto_start() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let sender = ensure_test_user_agent(&mut h);
-    let peer_role = h.available_roles["engineer"].clone();
-    h.available_roles.insert("peer".to_owned(), peer_role);
+    let peer_role = h.config.available_roles["engineer"].clone();
+    h.config
+        .available_roles
+        .insert("peer".to_owned(), peer_role);
     configure_inter_session_receivers(&mut h, &[("peer", true)]);
-    let agents_before = h.agent_registry.agents.len();
+    let agents_before = h.agent_runtime.agent_registry.agents.len();
 
     let error = h
         .publish_peer_entrypoint_message_from_agent(
@@ -1848,7 +1934,7 @@ fn local_peer_oversized_message_rejects_before_auto_start() {
         .expect_err("oversized local peer message rejected");
 
     assert_eq!(error, "peer message exceeds the 64 KiB limit");
-    assert_eq!(h.agent_registry.agents.len(), agents_before);
+    assert_eq!(h.agent_runtime.agent_registry.agents.len(), agents_before);
     assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
 }
 
@@ -1859,8 +1945,10 @@ fn local_peer_auto_start_reports_started_only_after_receive_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let sender = ensure_test_user_agent(&mut h);
-    let peer_role = h.available_roles["engineer"].clone();
-    h.available_roles.insert("peer".to_owned(), peer_role);
+    let peer_role = h.config.available_roles["engineer"].clone();
+    h.config
+        .available_roles
+        .insert("peer".to_owned(), peer_role);
     configure_inter_session_receivers(&mut h, &[("peer", true)]);
     let _interceptor = connect_test_tool(&mut h, "local-auto-start-interceptor");
     h.handle_extension_event(
@@ -1892,11 +1980,12 @@ fn local_peer_auto_start_reports_started_only_after_receive_commit() {
     assert!(pending.started);
     let recipient_id = pending.recipient_id.clone();
     let recipient_cid = h
+        .agent_runtime
         .agent_registry
         .agent_routes
         .get(recipient_id.as_str())
         .expect("auto-started route");
-    let recipient = &h.agent_registry.agents[recipient_cid];
+    let recipient = &h.agent_runtime.agent_registry.agents[recipient_cid];
     assert_eq!(recipient.role.as_deref(), Some("peer"));
     assert_eq!(recipient.parent_agent_id, None);
     assert!(
@@ -1928,8 +2017,10 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let sender = ensure_test_user_agent(&mut h);
-    let peer_role = h.available_roles["engineer"].clone();
-    h.available_roles.insert("peer".to_owned(), peer_role);
+    let peer_role = h.config.available_roles["engineer"].clone();
+    h.config
+        .available_roles
+        .insert("peer".to_owned(), peer_role);
     configure_inter_session_receivers(&mut h, &[("peer", true)]);
     let _interceptor = connect_test_tool(&mut h, "coalesce-interceptor");
     h.handle_extension_event(
@@ -1965,7 +2056,7 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
         .insert(connection_id.clone());
     let remote = h.complete_external_agent_message_auth(
         connection_id,
-        h.current_session_generation,
+        h.session_runtime.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: "coalesce-remote".to_owned(),
             message_id: tau_proto::AgentMessageId::parse("coalesce-remote-message")
@@ -1975,7 +2066,7 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: h.current_session_id.clone(),
+            recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
             kind: tau_proto::AgentMessageKind::Message,
             message: "remote second".to_owned(),
@@ -1985,7 +2076,7 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
 
     assert!(remote.is_none());
     assert_eq!(
-        h.agent_registry.agents.len(),
+        h.agent_runtime.agent_registry.agents.len(),
         2,
         "sender plus exactly one peer endpoint"
     );
@@ -2022,7 +2113,7 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
         sender_id: crate::parse_agent_id("sender_agent"),
-        recipient_session_id: h.current_session_id.clone(),
+        recipient_session_id: h.session_runtime.current_session_id.clone(),
         recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
         kind: tau_proto::AgentMessageKind::Message,
         message: "must not create".to_owned(),
@@ -2031,7 +2122,7 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
     let result = h
         .complete_external_agent_message_auth(
             crate::test_connection_id("peer-client"),
-            h.current_session_generation,
+            h.session_runtime.current_session_generation,
             request,
             Err("external message authentication failed".to_owned()),
         )
@@ -2041,7 +2132,7 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
         result.failure,
         Some(tau_proto::ExternalAgentMessageFailure::Rejected)
     );
-    assert!(h.agent_registry.agents.is_empty());
+    assert!(h.agent_runtime.agent_registry.agents.is_empty());
     assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
 }
 
@@ -2052,7 +2143,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     configure_inter_session_receivers(&mut h, &[("engineer", true)]);
-    let target_session = h.current_session_id.clone();
+    let target_session = h.session_runtime.current_session_id.clone();
     let request = |suffix: &str| tau_proto::ExternalAgentMessageRequest {
         request_id: format!("stale-auth-{suffix}"),
         message_id: tau_proto::AgentMessageId::parse(format!("stale-auth-message-{suffix}"))
@@ -2072,7 +2163,9 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
     let stale = h
         .complete_external_agent_message_auth(
             peer.clone(),
-            h.current_session_generation.saturating_add(1),
+            h.session_runtime
+                .current_session_generation
+                .saturating_add(1),
             request("generation"),
             Ok(()),
         )
@@ -2081,7 +2174,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
     let disconnected = h
         .complete_external_agent_message_auth(
             peer,
-            h.current_session_generation,
+            h.session_runtime.current_session_generation,
             request("disconnect"),
             Ok(()),
         )
@@ -2095,7 +2188,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
         disconnected.failure,
         Some(tau_proto::ExternalAgentMessageFailure::Rejected)
     );
-    assert!(h.agent_registry.agents.is_empty());
+    assert!(h.agent_runtime.agent_registry.agents.is_empty());
     assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
 }
 
@@ -2109,7 +2202,8 @@ fn local_peer_parked_across_rollover_has_no_stale_terminal() {
     configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     let cid = ensure_test_user_agent(&mut h);
     let call_id: ToolCallId = "local-rollover-call".into();
-    h.tool_runtime
+    h.tool_routing
+        .tool_runtime
         .tool_agents
         .insert(call_id.clone(), cid.clone());
     let _interceptor = connect_test_tool(&mut h, "local-rollover-interceptor");
@@ -2183,7 +2277,7 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
         .insert(connection_id.clone());
     let result = h.complete_external_agent_message_auth(
         connection_id,
-        h.current_session_generation,
+        h.session_runtime.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: "bare-revoke".to_owned(),
             message_id: tau_proto::AgentMessageId::parse("bare-revoke-message")
@@ -2193,7 +2287,7 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: h.current_session_id.clone(),
+            recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
             kind: tau_proto::AgentMessageKind::Message,
             message: "peer body".to_owned(),
@@ -2202,7 +2296,7 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
     );
     assert!(result.is_none());
 
-    h.inter_session_receivers.clear();
+    h.config.inter_session_receivers.clear();
     h.handle_extension_event(
         "bare-revoke-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -2260,7 +2354,7 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
         .insert(connection_id.clone());
     let result = h.complete_external_agent_message_auth(
         connection_id,
-        h.current_session_generation,
+        h.session_runtime.current_session_generation,
         tau_proto::ExternalAgentMessageRequest {
             request_id: "bare-reselect".to_owned(),
             message_id: tau_proto::AgentMessageId::parse("bare-reselect-message")
@@ -2270,7 +2364,7 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: h.current_session_id.clone(),
+            recipient_session_id: h.session_runtime.current_session_id.clone(),
             recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
             kind: tau_proto::AgentMessageKind::Message,
             message: "peer body".to_owned(),
@@ -2287,6 +2381,7 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
         .recipient_id
         .clone();
     let original_cid = h
+        .agent_runtime
         .agent_registry
         .agent_routes
         .get(original.as_str())
@@ -2313,6 +2408,7 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
         .clone();
     assert_ne!(replacement, original);
     let replacement_cid = h
+        .agent_runtime
         .agent_registry
         .agent_routes
         .get(replacement.as_str())
@@ -2331,7 +2427,7 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
     assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert!(committed_peer_receives(&h).is_empty());
     assert!(
-        h.agent_registry.agent_routes.is_empty(),
+        h.agent_runtime.agent_registry.agent_routes.is_empty(),
         "second invalidation must not reselect"
     );
     let peer_results = peer_results.lock().expect("peer results");
@@ -2432,7 +2528,7 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
         "post-stale-resumption",
     );
     assert!(
-        h.publication.pending_intercept.is_some(),
+        h.runtime_io.publication.pending_intercept.is_some(),
         "interception must resume after consuming exactly one stale reply"
     );
     assert_eq!(h.peer_messaging.pending_external_receive_acks.len(), 1);
@@ -2458,8 +2554,10 @@ fn intercepted_final_response_cannot_fan_out_after_watched_agent_unload() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let watched_cid = ensure_test_user_agent(&mut h);
-    let watcher_cid =
-        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watcher_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
     h.set_agent_watch(
@@ -2541,7 +2639,8 @@ fn intercepted_inference_checkpoint_pins_materialized_model() {
         panic!("checkpoint intercepted");
     };
     assert_eq!(checkpoint.model, Some("echo/model".into()));
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("agent")
@@ -2569,7 +2668,8 @@ fn intercepted_inference_checkpoint_fails_before_unroutable_send() {
     let cid = ensure_test_user_agent(&mut h);
     let provider_observer =
         connect_test_client(&mut h, "unowned-provider", tau_proto::ClientKind::Provider);
-    h.bus
+    h.runtime_io
+        .bus
         .set_subscriptions(
             &crate::test_connection_id("unowned-provider"),
             Vec::new(),
@@ -2639,7 +2739,8 @@ fn intercepted_prompt_start_append_failure_prevents_provider_delivery() {
         "append-fault-observer",
         tau_proto::ClientKind::Provider,
     );
-    h.bus
+    h.runtime_io
+        .bus
         .set_subscriptions(
             &crate::test_connection_id("append-fault-observer"),
             Vec::new(),
@@ -2684,12 +2785,14 @@ fn intercepted_prompt_start_append_failure_prevents_provider_delivery() {
     std::fs::rename(&backup_path, &journal_path).expect("restore agent journal");
 
     assert!(
-        !h.prompt_runtime
+        !h.prompt_coordination
+            .prompt_runtime
             .pending_dispatches
             .contains(&started.agent_prompt_id)
     );
     assert!(
-        !h.agent_store
+        !h.session_runtime
+            .agent_store
             .agent_events(agent_id.as_str())
             .expect("agent events")
             .iter()
@@ -2723,7 +2826,8 @@ fn intercepted_prompt_rejects_changed_runtime_incarnation() {
     let cid = ensure_test_user_agent(&mut h);
     let provider_observer =
         connect_test_client(&mut h, "runtime-observer", tau_proto::ClientKind::Provider);
-    h.bus
+    h.runtime_io
+        .bus
         .set_subscriptions(
             &crate::test_connection_id("runtime-observer"),
             Vec::new(),
@@ -2750,7 +2854,8 @@ fn intercepted_prompt_rejects_changed_runtime_incarnation() {
     let Event::AgentPromptCreated(prompt) = parked else {
         panic!("full prompt intercepted");
     };
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("agent")
@@ -2764,7 +2869,8 @@ fn intercepted_prompt_rejects_changed_runtime_incarnation() {
     .expect("release full prompt");
 
     assert!(
-        !h.prompt_runtime
+        !h.prompt_coordination
+            .prompt_runtime
             .pending_dispatches
             .contains(&prompt.agent_prompt_id)
     );
@@ -2804,13 +2910,37 @@ fn assert_unload_disposes_parked_prompt(selector: tau_proto::EventName, owner: &
         Event::AgentPromptCreated(value) => value.agent_prompt_id,
         other => panic!("unexpected parked event {}", other.name()),
     };
-    assert_eq!(h.current_session_state.token_usage.total.requests, 1);
+    assert_eq!(
+        h.session_runtime
+            .current_session_state
+            .token_usage
+            .total
+            .requests,
+        1
+    );
 
     h.remove_agent(&cid);
 
-    assert!(h.prompt_runtime.pending_dispatches.contains(&prompt_id));
-    assert!(h.prompt_runtime.agents.contains_key(prompt_id.as_str()));
-    assert_eq!(h.current_session_state.token_usage.total.requests, 1);
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_dispatches
+            .contains(&prompt_id)
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .agents
+            .contains_key(prompt_id.as_str())
+    );
+    assert_eq!(
+        h.session_runtime
+            .current_session_state
+            .token_usage
+            .total
+            .requests,
+        1
+    );
     h.handle_extension_event(
         owner,
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -2818,12 +2948,39 @@ fn assert_unload_disposes_parked_prompt(selector: tau_proto::EventName, owner: &
         })),
     )
     .expect("release parked prompt before durable unload closure");
-    assert!(!h.prompt_runtime.pending_dispatches.contains(&prompt_id));
-    assert!(!h.prompt_runtime.agents.contains_key(prompt_id.as_str()));
-    assert!(!h.prompt_runtime.models.contains_key(&prompt_id));
-    assert!(!h.prompt_runtime.operations.contains_key(&prompt_id));
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .pending_dispatches
+            .contains(&prompt_id)
+    );
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .agents
+            .contains_key(prompt_id.as_str())
+    );
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .models
+            .contains_key(&prompt_id)
+    );
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .operations
+            .contains_key(&prompt_id)
+    );
     assert!(!h.provider_runtime.pending_prompts.contains_key(&prompt_id));
-    assert_eq!(h.current_session_state.token_usage.total.requests, 0);
+    assert_eq!(
+        h.session_runtime
+            .current_session_state
+            .token_usage
+            .total
+            .requests,
+        0
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -2863,7 +3020,12 @@ fn intercepted_compaction_start_pins_materialized_model() {
             .expect("model");
         info.supports_standalone_compaction = true;
         info.standalone_compaction_threshold = Some(1);
-        let agent = h.agent_registry.agents.get_mut(&cid).expect("agent");
+        let agent = h
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent");
         agent.context_input_tokens = Some(1);
         agent.context_usage_head = agent.head;
         agent.context_usage_model = Some("echo/model".into());
@@ -2886,7 +3048,8 @@ fn intercepted_compaction_start_pins_materialized_model() {
         panic!("compaction start intercepted");
     };
     assert_eq!(started.model, tau_proto::ModelId::from("echo/model"));
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("agent")
@@ -2925,7 +3088,12 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
             .expect("model");
         info.supports_standalone_compaction = true;
         info.standalone_compaction_threshold = Some(1);
-        let agent = h.agent_registry.agents.get_mut(&cid).expect("agent");
+        let agent = h
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent");
         agent.context_input_tokens = Some(1);
         agent.context_usage_head = agent.head;
         agent.context_usage_model = Some("test/model".into());
@@ -2944,7 +3112,8 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
         })
         .expect("standalone transaction");
 
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("agent")
@@ -3008,7 +3177,7 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
     )
     .expect("release first steer");
     assert!(matches!(
-        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.runtime_io.publication.pending_intercept.as_ref().map(|pending| &pending.event),
         Some(Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
             text, ..
         }))
@@ -3120,9 +3289,14 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
             &"test/model".into(),
             "ct-steer-retry",
         );
-    h.compaction_runtime.enqueued_inference_checkpoints.clear();
-    let watcher_cid =
-        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    h.prompt_coordination
+        .compaction_runtime
+        .enqueued_inference_checkpoints
+        .clear();
+    let watcher_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
     h.set_agent_watch(
         watcher_id.as_str(),
@@ -3137,7 +3311,8 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
                 && message.kind == tau_proto::AgentMessageKind::WatchPrompt
         })
         .count();
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("agent")
@@ -3213,13 +3388,14 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
     )
     .expect("release approved replacement into append failure");
     assert!(
-        h.prompt_runtime
+        h.prompt_coordination
+            .prompt_runtime
             .pending_publish_completions
             .contains_key(&cid),
         "clean storage failure retains the exact retry envelope"
     );
     assert!(matches!(
-        h.agent_registry.agents[&cid].activation_dispatch,
+        h.agent_runtime.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Running { .. }
     ));
     assert_eq!(prompt_created_count(&h), 0);
@@ -3244,7 +3420,7 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
             head: batch_parent,
         }),
     );
-    assert!(h.publication.pending_intercept.is_some());
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
     h.handle_extension_event(
         "retry-replacement-owner",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -3252,9 +3428,10 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
         })),
     )
     .expect("release retained retry");
-    assert!(h.publication.pending_intercept.is_none());
+    assert!(h.runtime_io.publication.pending_intercept.is_none());
     assert!(
-        !h.prompt_runtime
+        !h.prompt_coordination
+            .prompt_runtime
             .pending_publish_completions
             .contains_key(&cid)
     );
@@ -3286,8 +3463,12 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
             &"test/model".into(),
             "ct-envelope-ownership",
         );
-    h.compaction_runtime.enqueued_inference_checkpoints.clear();
-    h.agent_registry
+    h.prompt_coordination
+        .compaction_runtime
+        .enqueued_inference_checkpoints
+        .clear();
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("agent")
@@ -3355,7 +3536,8 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
         }),
     );
     assert!(
-        h.publication
+        h.runtime_io
+            .publication
             .pending_intercept
             .as_ref()
             .is_some_and(|pending| {
@@ -3392,9 +3574,9 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
             .then_some(node.id)
         })
         .expect("independent activation node");
-    assert_eq!(h.publication.idle_dispatches.len(), 1);
+    assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
     assert_eq!(
-        h.publication.idle_dispatches[0].activation_through,
+        h.runtime_io.publication.idle_dispatches[0].activation_through,
         Some(tau_proto::AgentHead::Node(independent_node))
     );
 }
@@ -3406,7 +3588,10 @@ fn completion_batch_purge_is_scoped_by_agent_and_transaction() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let cid_a = ensure_test_user_agent(&mut h);
-    let cid_b = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let cid_b = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
     let agent_a = durable_agent_id_for_conversation(&h, &cid_a);
     let agent_b = durable_agent_id_for_conversation(&h, &cid_b);
     let _interceptor = connect_test_tool(&mut h, "batch-collision-owner");
@@ -3464,13 +3649,13 @@ fn completion_batch_purge_is_scoped_by_agent_and_transaction() {
         );
     }
     h.discard_deferred_agent_publish_batch(&cid_a, &completion_a);
-    assert!(h.publication.deferred.iter().all(|publish| {
+    assert!(h.runtime_io.publication.deferred.iter().all(|publish| {
         !matches!(
             publish.event(),
             Event::AgentPromptSteered(steered) if steered.agent_id == agent_a
         )
     }));
-    assert!(h.publication.deferred.iter().any(|publish| {
+    assert!(h.runtime_io.publication.deferred.iter().any(|publish| {
         matches!(
             publish.event(),
             Event::AgentPromptSteered(steered) if steered.agent_id == agent_b
@@ -3486,7 +3671,10 @@ fn unloading_intercepted_checkpoint_preserves_other_agent_deferred_publish() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let cid_a = ensure_test_user_agent(&mut h);
-    let cid_b = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let cid_b = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
     let agent_a = durable_agent_id_for_conversation(&h, &cid_a);
     let agent_b = durable_agent_id_for_conversation(&h, &cid_b);
     let _interceptor = connect_test_tool(&mut h, "unload-completion-owner");
@@ -3502,7 +3690,8 @@ fn unloading_intercepted_checkpoint_preserves_other_agent_deferred_publish() {
     .expect("register completion interceptor");
     let agent_prompt_id = tau_proto::AgentPromptId::parse("ap-unload-a")
         .expect("known-safe AgentPromptId must be valid");
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid_a)
         .expect("agent A")
@@ -3528,7 +3717,7 @@ fn unloading_intercepted_checkpoint_preserves_other_agent_deferred_publish() {
             output_length_continuation: None,
         });
     h.publish_for_agent(&cid_a, old_checkpoint.clone());
-    assert!(h.publication.pending_intercept.is_some());
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
     h.publish_for_agent(
         &cid_b,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
@@ -3536,16 +3725,17 @@ fn unloading_intercepted_checkpoint_preserves_other_agent_deferred_publish() {
             head: tau_proto::AgentHead::Root,
         }),
     );
-    assert_eq!(h.publication.deferred.len(), 1);
+    assert_eq!(h.runtime_io.publication.deferred.len(), 1);
 
     h.remove_agent(&cid_a);
 
-    assert!(h.publication.pending_intercept.is_none());
-    assert!(h.publication.deferred.is_empty());
-    assert!(h.agent_registry.agents.contains_key(&cid_b));
+    assert!(h.runtime_io.publication.pending_intercept.is_none());
+    assert!(h.runtime_io.publication.deferred.is_empty());
+    assert!(h.agent_runtime.agent_registry.agents.contains_key(&cid_b));
     assert!(!event_log_events(&h).contains(&old_checkpoint));
     assert_eq!(
-        h.agent_store
+        h.session_runtime
+            .agent_store
             .agent(agent_b.as_str())
             .expect("other agent tree")
             .head(),
@@ -3569,7 +3759,7 @@ fn unloading_intercepted_checkpoint_preserves_other_agent_deferred_publish() {
     .expect("replace suspended interceptor registration");
     let surviving_event = draft_event("surviving post-unload event");
     h.publish_event(None, surviving_event.clone());
-    assert!(h.publication.pending_intercept.is_none());
+    assert!(h.runtime_io.publication.pending_intercept.is_none());
     h.handle_extension_event(
         "unload-completion-owner",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -3604,7 +3794,8 @@ fn suspended_interceptor_disconnect_reconnects_unsuspended() {
     .expect("register checkpoint interceptor");
     let agent_prompt_id = tau_proto::AgentPromptId::parse("ap-suspended-reconnect")
         .expect("known-safe AgentPromptId must be valid");
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("agent")
@@ -3631,18 +3822,20 @@ fn suspended_interceptor_disconnect_reconnects_unsuspended() {
             output_length_continuation: None,
         }),
     );
-    assert!(h.publication.pending_intercept.is_some());
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
 
     h.remove_agent(&cid);
     let typed_connection_id = crate::test_connection_id(connection_id);
     assert!(
-        h.publication
+        h.runtime_io
+            .publication
             .suspended_interceptor_connections
             .contains(&typed_connection_id)
     );
     h.handle_disconnect(&crate::test_connection_id(connection_id));
     assert!(
-        !h.publication
+        !h.runtime_io
+            .publication
             .suspended_interceptor_connections
             .contains(&typed_connection_id)
     );
@@ -3662,7 +3855,8 @@ fn suspended_interceptor_disconnect_reconnects_unsuspended() {
     let (intercepted, _) = intercepted_payload(&reconnected);
     assert_eq!(intercepted, after_reconnect);
     assert_eq!(
-        h.publication
+        h.runtime_io
+            .publication
             .pending_intercept
             .as_ref()
             .map(|pending| pending.conn_id.as_str()),
@@ -3725,7 +3919,7 @@ fn rollover_commits_deferred_default_mandatory_compaction_terminal() {
             resume_through: None,
         }),
     );
-    assert!(h.publication.pending_intercept.is_some());
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
     assert!(!event_log_events(&h).into_iter().any(|event| {
         matches!(
             event,
@@ -3778,7 +3972,8 @@ fn intercepted_reactive_drift_terminalization_never_dispatches() {
     let mut planned = context_overflow_response(&inference);
     planned.recovery_disposition = tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
     h.publish_for_agent(&cid, Event::ProviderResponseFinished(planned));
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("agent")
@@ -3799,7 +3994,7 @@ fn intercepted_reactive_drift_terminalization_never_dispatches() {
     .expect("register interceptor");
     h.reconcile_pending_context_recoveries(false);
     assert!(matches!(
-        h.agent_registry.agents[&cid].activation_dispatch,
+        h.agent_runtime.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::ContextRecoveryClaimPending { .. }
     ));
     assert_eq!(
@@ -3821,7 +4016,12 @@ fn intercepted_reactive_drift_terminalization_never_dispatches() {
         })),
     )
     .expect("release start");
-    assert!(h.compaction_runtime.suppressed_dispatches.is_empty());
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .suppressed_dispatches
+            .is_empty()
+    );
     assert_eq!(
         event_log_events(&h)
             .iter()
@@ -3834,7 +4034,7 @@ fn intercepted_reactive_drift_terminalization_never_dispatches() {
         0
     );
     assert!(matches!(
-        h.agent_registry.agents[&cid].activation_dispatch,
+        h.agent_runtime.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
     h.shutdown().expect("shutdown");
@@ -4148,7 +4348,7 @@ fn connect_named_test_tool(
     component_name: &str,
 ) -> Arc<Mutex<Vec<RoutedFrame>>> {
     let events = Arc::new(Mutex::new(Vec::new()));
-    h.bus.connect(Connection::new(
+    h.runtime_io.bus.connect(Connection::new(
         PendingConnectionMetadata {
             id: Some(crate::test_connection_id(connection_id)),
             name: crate::test_extension_name(component_name),
@@ -4163,7 +4363,7 @@ fn connect_named_test_tool(
 }
 
 fn connect_failing_test_tool(h: &mut Harness, name: &str) {
-    h.bus.connect(Connection::new(
+    h.runtime_io.bus.connect(Connection::new(
         PendingConnectionMetadata {
             id: Some(crate::test_connection_id(name)),
             name: crate::test_extension_name(name),
@@ -4179,7 +4379,7 @@ fn interception_exact_selector_intercepts_before_log() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let interceptor = connect_test_tool(&mut h, "interceptor");
-    let start_seq = h.event_log.next_seq();
+    let start_seq = h.runtime_io.event_log.next_seq();
 
     h.handle_extension_event(
         "interceptor",
@@ -4189,14 +4389,14 @@ fn interception_exact_selector_intercepts_before_log() {
         })),
     )
     .expect("intercept registration");
-    let after_registration_seq = h.event_log.next_seq();
+    let after_registration_seq = h.runtime_io.event_log.next_seq();
 
     h.publish_event(None, draft_event("held"));
 
     let (event, persist) = intercepted_payload(&interceptor);
     assert_eq!(event, draft_event("held"));
     assert!(!persist, "UiPromptDraft defaults to `persist=false`");
-    assert_eq!(h.event_log.next_seq(), after_registration_seq);
+    assert_eq!(h.runtime_io.event_log.next_seq(), after_registration_seq);
     assert!(after_registration_seq.get() < start_seq.get() + 2);
 }
 
@@ -4213,7 +4413,7 @@ fn interception_drop_prevents_final_delivery() {
         })),
     )
     .expect("intercept registration");
-    let after_registration_seq = h.event_log.next_seq();
+    let after_registration_seq = h.runtime_io.event_log.next_seq();
 
     // UiPromptDraft is not on the must-pass list, so an explicit Drop
     // really does drop it.
@@ -4226,7 +4426,7 @@ fn interception_drop_prevents_final_delivery() {
     )
     .expect("drop reply");
 
-    assert_eq!(h.event_log.next_seq(), after_registration_seq);
+    assert_eq!(h.runtime_io.event_log.next_seq(), after_registration_seq);
 }
 
 #[test]
@@ -4242,7 +4442,7 @@ fn interception_pass_through_reaches_log_after_last_interceptor() {
         })),
     )
     .expect("intercept registration");
-    let after_registration_seq = h.event_log.next_seq();
+    let after_registration_seq = h.runtime_io.event_log.next_seq();
 
     h.publish_event(None, draft_event("released"));
     h.handle_extension_event(
@@ -4254,6 +4454,7 @@ fn interception_pass_through_reaches_log_after_last_interceptor() {
     .expect("pass reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(after_registration_seq)
         .expect("released event in log");
@@ -4273,7 +4474,7 @@ fn interception_reply_can_modify_event() {
         })),
     )
     .expect("intercept registration");
-    let after_registration_seq = h.event_log.next_seq();
+    let after_registration_seq = h.runtime_io.event_log.next_seq();
 
     h.publish_event(None, draft_event("original"));
     h.handle_extension_event(
@@ -4285,6 +4486,7 @@ fn interception_reply_can_modify_event() {
     .expect("modifying reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(after_registration_seq)
         .expect("modified event in log");
@@ -4307,7 +4509,7 @@ fn interception_cannot_modify_mandatory_harness_notice() {
         })),
     )
     .expect("intercept registration");
-    let after_registration_seq = h.event_log.next_seq();
+    let after_registration_seq = h.runtime_io.event_log.next_seq();
 
     h.emit_info_important("extension core-shell rejected its config");
     h.handle_extension_event(
@@ -4326,6 +4528,7 @@ fn interception_cannot_modify_mandatory_harness_notice() {
     .expect("mutating reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(after_registration_seq)
         .expect("important info in log");
@@ -4350,7 +4553,7 @@ fn interception_cannot_modify_critical_harness_notice() {
         })),
     )
     .expect("intercept registration");
-    let after_registration_seq = h.event_log.next_seq();
+    let after_registration_seq = h.runtime_io.event_log.next_seq();
 
     h.emit_notice(
         "test.critical",
@@ -4374,6 +4577,7 @@ fn interception_cannot_modify_critical_harness_notice() {
     .expect("mutating reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(after_registration_seq)
         .expect("critical notice in log");
@@ -4400,7 +4604,7 @@ fn interception_cannot_drop_critical_harness_notice() {
         })),
     )
     .expect("intercept registration");
-    let after_registration_seq = h.event_log.next_seq();
+    let after_registration_seq = h.runtime_io.event_log.next_seq();
 
     h.emit_notice(
         "test.critical",
@@ -4417,6 +4621,7 @@ fn interception_cannot_drop_critical_harness_notice() {
     .expect("drop reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(after_registration_seq)
         .expect("critical notice in log");
@@ -4443,7 +4648,7 @@ fn interception_cannot_escalate_non_mandatory_harness_notice() {
         })),
     )
     .expect("intercept registration");
-    let after_registration_seq = h.event_log.next_seq();
+    let after_registration_seq = h.runtime_io.event_log.next_seq();
 
     h.emit_info("ordinary notice");
     h.handle_extension_event(
@@ -4462,6 +4667,7 @@ fn interception_cannot_escalate_non_mandatory_harness_notice() {
     .expect("mutating reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(after_registration_seq)
         .expect("notice in log");
@@ -4703,7 +4909,7 @@ fn interception_defers_subsequent_publishes_until_reply() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     // Publish two: the first parks in interception (matches the
     // selector); the second does NOT match and so would, in the
@@ -4720,7 +4926,7 @@ fn interception_defers_subsequent_publishes_until_reply() {
     );
     // Neither has committed yet — interception is in flight on the
     // first, the second is sitting in `deferred_publishes`.
-    assert_eq!(h.event_log.next_seq(), baseline_seq);
+    assert_eq!(h.runtime_io.event_log.next_seq(), baseline_seq);
 
     // Reply: pass-through. Both events should now commit, in order.
     h.handle_extension_event(
@@ -4732,11 +4938,13 @@ fn interception_defers_subsequent_publishes_until_reply() {
     .expect("pass reply");
 
     let first = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("first event committed");
     assert_eq!(first.event, draft_event("held"));
     let second = h
+        .runtime_io
         .event_log
         .get_next_from(first.seq.next())
         .expect("second event committed");
@@ -4752,8 +4960,9 @@ fn interception_defers_subsequent_publishes_until_reply() {
 fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.current_session_id.clone();
-    h.context_discovery
+    let session_id = h.session_runtime.current_session_id.clone();
+    h.prompt_coordination
+        .context_discovery
         .initialized_sessions
         .insert(session_id.clone());
     let cid = ensure_test_user_agent(&mut h);
@@ -4763,10 +4972,11 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     let agent_id = h
         .ensure_agent_id_for_agent(&cid)
         .expect("default conversation has an agent id");
-    h.tool_runtime
+    h.tool_routing
+        .tool_runtime
         .tool_agents
         .insert(call_id.clone(), cid.clone());
-    h.tool_runtime.pending_tools.insert(
+    h.tool_routing.tool_runtime.pending_tools.insert(
         call_id.clone(),
         PendingTool {
             name: tool_name.clone(),
@@ -4775,7 +4985,8 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
             allows_provider_image: false,
         },
     );
-    h.tool_runtime
+    h.tool_routing
+        .tool_runtime
         .pending_tool_providers
         .insert(call_id.clone(), crate::test_connection_id("tool-provider"));
     let _provider = connect_ready_configured_extension(
@@ -4831,7 +5042,7 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     .expect("intercept registration");
     h.publish_event(None, draft_event("held"));
     assert!(
-        h.publication.pending_intercept.is_some(),
+        h.runtime_io.publication.pending_intercept.is_some(),
         "draft publish should be parked in interception"
     );
 
@@ -4852,7 +5063,10 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     )
     .expect("defer tool result");
     assert!(
-        h.tool_runtime.tool_agents.contains_key(&call_id),
+        h.tool_routing
+            .tool_runtime
+            .tool_agents
+            .contains_key(&call_id),
         "tool call tracking must remain until the deferred report commits"
     );
 
@@ -4864,7 +5078,10 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     )
     .expect("intercept reply");
     assert!(
-        !h.tool_runtime.tool_agents.contains_key(&call_id),
+        !h.tool_routing
+            .tool_runtime
+            .tool_agents
+            .contains_key(&call_id),
         "post-commit terminal processing clears routed-call tracking"
     );
 
@@ -4901,7 +5118,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let prompt = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
         inference_activation: true,
@@ -4925,6 +5142,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
     .expect("drop reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("must-pass event still committed despite Drop");
@@ -4945,7 +5163,8 @@ fn agent_started_event(role: &str) -> Event {
 }
 
 fn persisted_agent_started_events(h: &Harness) -> Vec<Event> {
-    h.agent_store
+    h.session_runtime
+        .agent_store
         .agent_events("agent-started-test")
         .expect("agent.started durable log")
         .into_iter()
@@ -4968,7 +5187,7 @@ fn interception_drop_of_agent_started_is_overridden() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let started = agent_started_event("engineer");
     h.publish_event(None, started.clone());
@@ -4981,6 +5200,7 @@ fn interception_drop_of_agent_started_is_overridden() {
     .expect("drop reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("agent.started still committed despite Drop");
@@ -5003,7 +5223,7 @@ fn interception_replacement_of_agent_started_publishes_original() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let started = agent_started_event("engineer");
     h.publish_event(None, started.clone());
@@ -5016,6 +5236,7 @@ fn interception_replacement_of_agent_started_publishes_original() {
     .expect("replacement reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("agent.started committed");
@@ -5181,7 +5402,7 @@ fn discovery_canonical_events_are_protected() {
         tau_proto::ClientKind::Ui,
         ConnectionOrigin::Socket,
     );
-    let baseline = h.event_log.next_seq();
+    let baseline = h.runtime_io.event_log.next_seq();
     for event in &events {
         let emit = TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit::with_persist(
             event.clone(),
@@ -5192,7 +5413,7 @@ fn discovery_canonical_events_are_protected() {
         h.handle_client_event("attached-ui", emit)
             .expect("attached UI forged event is ignored");
     }
-    assert!(h.event_log.get_next_from(baseline).is_none());
+    assert!(h.runtime_io.event_log.get_next_from(baseline).is_none());
 
     let interceptor = connect_test_tool(&mut h, "discovery-interceptor");
     h.handle_extension_event(
@@ -5208,7 +5429,7 @@ fn discovery_canonical_events_are_protected() {
     .expect("register discovery interceptor");
 
     for event in events {
-        let baseline = h.event_log.next_seq();
+        let baseline = h.runtime_io.event_log.next_seq();
         h.publish_event(None, event.clone());
         let (intercepted, _) = intercepted_payload(&interceptor);
         assert_eq!(intercepted, event);
@@ -5220,7 +5441,8 @@ fn discovery_canonical_events_are_protected() {
         )
         .expect("drop is overridden");
         assert_eq!(
-            h.event_log
+            h.runtime_io
+                .event_log
                 .get_next_from(baseline)
                 .expect("must-pass event committed")
                 .event,
@@ -5228,7 +5450,7 @@ fn discovery_canonical_events_are_protected() {
         );
 
         interceptor.lock().expect("interceptor frames").clear();
-        let baseline = h.event_log.next_seq();
+        let baseline = h.runtime_io.event_log.next_seq();
         h.publish_event(None, event.clone());
         let _ = intercepted_payload(&interceptor);
         let mut replacement = event.clone();
@@ -5258,7 +5480,8 @@ fn discovery_canonical_events_are_protected() {
         )
         .expect("same-variant mutation is rejected");
         assert_eq!(
-            h.event_log
+            h.runtime_io
+                .event_log
                 .get_next_from(baseline)
                 .expect("immutable event committed")
                 .event,
@@ -5301,7 +5524,7 @@ fn outer_turn_accounting_facts_are_immutable_and_must_pass() {
         })),
     )
     .expect("drop start");
-    let prompt_id = h.agent_registry.agents[&cid]
+    let prompt_id = h.agent_runtime.agent_registry.agents[&cid]
         .in_flight_prompt
         .clone()
         .expect("first prompt continued after start");
@@ -5330,6 +5553,7 @@ fn outer_turn_accounting_facts_are_immutable_and_must_pass() {
     .expect("replace finish");
 
     let records = h
+        .session_runtime
         .agent_store
         .agent_events(agent_id.as_str())
         .expect("agent records");
@@ -5348,7 +5572,8 @@ fn outer_turn_accounting_facts_are_immutable_and_must_pass() {
         .expect("forbidden peer emit is ignored");
     }
     assert_eq!(
-        h.agent_store
+        h.session_runtime
+            .agent_store
             .agent_events(agent_id.as_str())
             .expect("records after peer emits")
             .len(),
@@ -5365,18 +5590,20 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
     let mut h = echo_harness(tmp.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h
+        .agent_runtime
         .agent_registry
         .agents
         .get(&cid)
         .and_then(|agent| agent.agent_id.clone())
         .expect("agent id");
     let parsed_agent_id = crate::parse_agent_id(&agent_id);
-    h.agent_registry.navigation_modes.insert(
+    h.agent_runtime.agent_registry.navigation_modes.insert(
         parsed_agent_id.clone(),
         tau_proto::AgentNavigationMode::Suspended,
     );
     let observer = connect_test_client(&mut h, "interaction-observer", tau_proto::ClientKind::Ui);
-    h.bus
+    h.runtime_io
+        .bus
         .set_subscriptions(
             &crate::test_connection_id("interaction-observer"),
             Vec::new(),
@@ -5402,7 +5629,7 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
         crate::harness::harness_connection_id(),
         tau_proto::UiPromptSubmitted {
             literal: false,
-            session_id: h.current_session_id.clone(),
+            session_id: h.session_runtime.current_session_id.clone(),
             text: "park me".to_owned(),
             agent_id: parsed_agent_id.clone(),
             message_class: tau_proto::PromptMessageClass::User,
@@ -5413,10 +5640,11 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
     .expect("accept visible prompt");
 
     assert!(
-        h.publication.pending_intercept.is_some(),
+        h.runtime_io.publication.pending_intercept.is_some(),
         "prompt remains parked"
     );
     let interactions: Vec<_> = h
+        .session_runtime
         .agent_store
         .agent_events(&agent_id)
         .expect("agent journal")
@@ -5426,7 +5654,10 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
     assert_eq!(interactions.len(), 1);
     assert_ne!(interactions[0].recorded_at.get(), 0);
     assert_eq!(
-        h.agent_registry.navigation_modes.get(&parsed_agent_id),
+        h.agent_runtime
+            .agent_registry
+            .navigation_modes
+            .get(&parsed_agent_id),
         Some(&tau_proto::AgentNavigationMode::Active)
     );
     assert!(
@@ -5484,7 +5715,7 @@ fn interception_drop_of_session_agent_loaded_is_overridden() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let loaded = session_agent_loaded_event("agent-loaded-original");
     h.publish_event(None, loaded.clone());
@@ -5497,11 +5728,13 @@ fn interception_drop_of_session_agent_loaded_is_overridden() {
     .expect("drop reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("session.agent_loaded still committed despite Drop");
     assert_eq!(entry.event, loaded);
     let membership = h
+        .session_runtime
         .store
         .session("session-intercept")
         .expect("session membership");
@@ -5529,7 +5762,7 @@ fn interception_replacement_of_session_agent_unloaded_publishes_original() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let unloaded = session_agent_unloaded_event("agent-unloaded-original");
     h.publish_event(None, unloaded.clone());
@@ -5544,11 +5777,13 @@ fn interception_replacement_of_session_agent_unloaded_publishes_original() {
     .expect("replacement reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("session.agent_unloaded committed");
     assert_eq!(entry.event, unloaded);
     let events = h
+        .session_runtime
         .store
         .session_events("session-intercept")
         .expect("session events")
@@ -5619,7 +5854,7 @@ fn interception_drop_of_session_started_is_overridden() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let started = session_started_event("session-lifecycle-original");
     h.publish_event(None, started.clone());
@@ -5632,6 +5867,7 @@ fn interception_drop_of_session_started_is_overridden() {
     .expect("drop reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("session.started still committed despite Drop");
@@ -5653,7 +5889,7 @@ fn interception_replacement_of_session_shutdown_publishes_original() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let shutdown = session_shutdown_event("session-lifecycle-original");
     h.publish_event(None, shutdown.clone());
@@ -5668,6 +5904,7 @@ fn interception_replacement_of_session_shutdown_publishes_original() {
     .expect("replacement reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("session.shutdown committed");
@@ -5691,7 +5928,7 @@ fn interception_drop_of_agent_message_sent_is_overridden() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let sent = agent_message_sent_event("hello");
     h.publish_event(None, sent.clone());
@@ -5704,6 +5941,7 @@ fn interception_drop_of_agent_message_sent_is_overridden() {
     .expect("drop reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("agent.message_sent still committed despite Drop");
@@ -5727,7 +5965,7 @@ fn interception_replacement_of_agent_message_received_publishes_original() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let received = agent_message_received_event("agent-message-recipient");
     h.publish_event(None, received.clone());
@@ -5742,6 +5980,7 @@ fn interception_replacement_of_agent_message_received_publishes_original() {
     .expect("replacement reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("agent.message_received committed");
@@ -5788,7 +6027,7 @@ fn interception_replacement_of_tool_result_publishes_original() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let result = tool_result_event("call-original", "ok");
     h.publish_event(None, result.clone());
@@ -5804,6 +6043,7 @@ fn interception_replacement_of_tool_result_publishes_original() {
     .expect("replacement reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("tool.result committed");
@@ -5824,7 +6064,7 @@ fn interception_drop_of_tool_cancelled_is_overridden() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let cancelled = tool_cancelled_event("call-cancelled");
     h.publish_event(None, cancelled.clone());
@@ -5837,6 +6077,7 @@ fn interception_drop_of_tool_cancelled_is_overridden() {
     .expect("drop reply");
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("tool.cancelled still committed despite Drop");
@@ -5858,20 +6099,22 @@ fn failed_intercept_request_delivery_skips_interceptor_and_drains_publishes() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     let first = draft_event("first");
     let second = draft_event("second");
     h.publish_event(None, first.clone());
     h.publish_event(None, second.clone());
 
-    assert!(h.publication.pending_intercept.is_none());
+    assert!(h.runtime_io.publication.pending_intercept.is_none());
     let first_entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("first draft committed");
     assert_eq!(first_entry.event, first);
     let second_entry = h
+        .runtime_io
         .event_log
         .get_next_from(first_entry.seq.next())
         .expect("second draft committed");
@@ -5893,7 +6136,7 @@ fn interception_disconnect_mid_reply_publishes_original() {
         })),
     )
     .expect("intercept registration");
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
 
     h.publish_event(None, draft_event("inflight"));
     // Disconnect before the interceptor replies. The harness should
@@ -5901,6 +6144,7 @@ fn interception_disconnect_mid_reply_publishes_original() {
     h.handle_disconnect(&crate::test_connection_id("interceptor"));
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(baseline_seq)
         .expect("event committed after disconnect");
@@ -5914,8 +6158,9 @@ fn interception_disconnect_mid_reply_publishes_original() {
 fn interception_user_prompt_dispatch_waits_for_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.current_session_id.clone();
-    h.context_discovery
+    let session_id = h.session_runtime.current_session_id.clone();
+    h.prompt_coordination
+        .context_discovery
         .initialized_sessions
         .insert(session_id.clone());
 
@@ -5932,7 +6177,12 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
     .expect("intercept registration");
 
     let cid = ensure_test_user_agent(&mut h);
-    let head_before_dispatch = h.agent_registry.agents.get(&cid).and_then(|c| c.head);
+    let head_before_dispatch = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get(&cid)
+        .and_then(|c| c.head);
     let prompts_before = prompt_created_count(&h);
 
     // Drive the user-prompt path. The publish parks in interception.
@@ -5948,12 +6198,17 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
         "agent dispatch must wait until the prompt commits"
     );
     assert_eq!(
-        h.agent_registry.agents.get(&cid).and_then(|c| c.head),
+        h.agent_runtime
+            .agent_registry
+            .agents
+            .get(&cid)
+            .and_then(|c| c.head),
         head_before_dispatch,
         "c.head must not advance while the prompt is parked"
     );
     assert!(
-        h.publication
+        h.runtime_io
+            .publication
             .pending_intercept
             .as_ref()
             .is_some_and(|pending| {
@@ -5975,13 +6230,14 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
     )
     .expect("intercept reply");
 
-    assert!(h.publication.pending_intercept.is_none());
+    assert!(h.runtime_io.publication.pending_intercept.is_none());
     assert_eq!(
         prompt_created_count(&h),
         prompts_before + 1,
         "agent dispatch fires once the prompt commits"
     );
     let head_after = h
+        .agent_runtime
         .agent_registry
         .agents
         .get(&cid)
@@ -6013,9 +6269,12 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     // publish batch and dispatch only after both intercepted submissions pass.
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.current_session_id.clone();
-    h.context_discovery.initialized_sessions.insert(session_id);
-    h.selected_model = Some("echo/model".into());
+    let session_id = h.session_runtime.current_session_id.clone();
+    h.prompt_coordination
+        .context_discovery
+        .initialized_sessions
+        .insert(session_id);
+    h.config.selected_model = Some("echo/model".into());
     let info = h
         .provider_runtime
         .model_info
@@ -6039,14 +6298,20 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
 
     let cid = ensure_test_user_agent(&mut h);
     {
-        let conv = h.agent_registry.agents.get_mut(&cid).expect("conversation");
+        let conv = h
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("conversation");
         conv.context_input_tokens = Some(900);
         conv.context_usage_head = conv.head;
         conv.context_usage_model = Some("echo/model".into());
         conv.context_cached_tokens = Some(450);
     }
     let passive_text = background_completion_prompt(&"passive-intercept-bg".into());
-    h.agent_registry
+    h.agent_runtime
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("conversation")
@@ -6060,9 +6325,13 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
         .expect("dispatch user prompt with passive notice");
 
     assert_eq!(prompt_created_count(&h), prompts_before);
-    assert!(h.publication.pending_intercept.is_some());
-    assert_eq!(h.publication.idle_dispatches.len(), 1);
-    assert!(!h.publication.idle_dispatches[0].obligation.is_committed());
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
+    assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
+    assert!(
+        !h.runtime_io.publication.idle_dispatches[0]
+            .obligation
+            .is_committed()
+    );
 
     h.handle_extension_event(
         "interceptor-passive-batch",
@@ -6078,7 +6347,8 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
         "provider dispatch must still wait for the real user prompt"
     );
     assert!(
-        h.publication
+        h.runtime_io
+            .publication
             .pending_intercept
             .as_ref()
             .is_some_and(|pending| matches!(
@@ -6089,8 +6359,12 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
                 })
             ))
     );
-    assert_eq!(h.publication.idle_dispatches.len(), 1);
-    assert!(!h.publication.idle_dispatches[0].obligation.is_committed());
+    assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
+    assert!(
+        !h.runtime_io.publication.idle_dispatches[0]
+            .obligation
+            .is_committed()
+    );
 
     h.handle_extension_event(
         "interceptor-passive-batch",
@@ -6100,8 +6374,8 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     )
     .expect("pass user prompt");
 
-    assert!(h.publication.pending_intercept.is_none());
-    assert!(h.publication.idle_dispatches.is_empty());
+    assert!(h.runtime_io.publication.pending_intercept.is_none());
+    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
     assert_eq!(prompt_created_count(&h), prompts_before + 1);
     let compact = read_nth_prompt_created(&h, prompts_before as usize);
     assert_eq!(
@@ -6113,7 +6387,7 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
             .into_iter()
             .any(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
     );
-    let active_head = h.agent_registry.agents[&cid]
+    let active_head = h.agent_runtime.agent_registry.agents[&cid]
         .head
         .expect("active prompt head");
     let active_parent = default_agent_node(&h, active_head)
@@ -6149,9 +6423,12 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
 fn intercepted_activation_navigation_keeps_original_branch_dormant() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.current_session_id.clone();
-    h.context_discovery.initialized_sessions.insert(session_id);
-    h.selected_model = Some("echo/model".into());
+    let session_id = h.session_runtime.current_session_id.clone();
+    h.prompt_coordination
+        .context_discovery
+        .initialized_sessions
+        .insert(session_id);
+    h.config.selected_model = Some("echo/model".into());
     let _interceptor = connect_test_tool(&mut h, "interceptor-branch-activation");
     h.handle_extension_event(
         "interceptor-branch-activation",
@@ -6169,7 +6446,8 @@ fn intercepted_activation_navigation_keeps_original_branch_dormant() {
     h.dispatch_prompt_for_agent(&cid, "branch A activation".to_owned())
         .expect("intercept activation");
     assert!(
-        h.publication
+        h.runtime_io
+            .publication
             .pending_intercept
             .as_ref()
             .is_some_and(|pending| {
@@ -6218,13 +6496,13 @@ fn intercepted_activation_navigation_keeps_original_branch_dormant() {
         })
         .map(|node| node.id)
         .expect("activation node");
-    assert_eq!(h.agent_registry.agents[&cid].head, None);
+    assert_eq!(h.agent_runtime.agent_registry.agents[&cid].head, None);
     assert_eq!(prompt_created_count(&h), 0);
     assert!(matches!(
-        h.agent_registry.agents[&cid].activation_dispatch,
+        h.agent_runtime.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
-    assert_eq!(h.publication.idle_dispatches.len(), 1);
+    assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
 
     h.publish_for_agent(
         &cid,
@@ -6234,7 +6512,7 @@ fn intercepted_activation_navigation_keeps_original_branch_dormant() {
         }),
     );
     assert_eq!(prompt_created_count(&h), 1);
-    assert!(h.publication.idle_dispatches.is_empty());
+    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
 }
 
 /// Two intercepted same-agent activations separated onto sibling branches
@@ -6243,9 +6521,12 @@ fn intercepted_activation_navigation_keeps_original_branch_dormant() {
 fn intercepted_sibling_activations_retain_distinct_obligations() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.current_session_id.clone();
-    h.context_discovery.initialized_sessions.insert(session_id);
-    h.selected_model = Some("echo/model".into());
+    let session_id = h.session_runtime.current_session_id.clone();
+    h.prompt_coordination
+        .context_discovery
+        .initialized_sessions
+        .insert(session_id);
+    h.config.selected_model = Some("echo/model".into());
     let _interceptor = connect_test_tool(&mut h, "interceptor-sibling-activations");
     h.handle_extension_event(
         "interceptor-sibling-activations",
@@ -6271,15 +6552,21 @@ fn intercepted_sibling_activations_retain_distinct_obligations() {
     );
     h.dispatch_prompt_for_agent(&cid, "branch B activation".to_owned())
         .expect("queue branch B");
-    assert!(h.publication.pending_intercept.is_some());
-    assert!(h.publication.deferred.iter().any(|publish| matches!(
-        publish.event(),
-        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-            inference_activation: true,
-            text,
-            ..
-        }) if text == "branch B activation"
-    )));
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
+    assert!(
+        h.runtime_io
+            .publication
+            .deferred
+            .iter()
+            .any(|publish| matches!(
+                publish.event(),
+                Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                    inference_activation: true,
+                    text,
+                    ..
+                }) if text == "branch B activation"
+            ))
+    );
 
     h.handle_extension_event(
         "interceptor-sibling-activations",
@@ -6288,8 +6575,8 @@ fn intercepted_sibling_activations_retain_distinct_obligations() {
         })),
     )
     .expect("commit branch A and park branch B");
-    assert!(h.publication.pending_intercept.is_some());
-    assert_eq!(h.publication.idle_dispatches.len(), 1);
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
+    assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
     h.handle_extension_event(
         "interceptor-sibling-activations",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -6322,8 +6609,11 @@ fn intercepted_sibling_activations_retain_distinct_obligations() {
     let branch_b = nodes["branch B activation"];
     assert_ne!(branch_a, branch_b);
     let branch_b_prompt = read_nth_prompt_created(&h, 0);
-    assert_eq!(h.agent_registry.agents[&cid].head, Some(branch_b));
-    assert_eq!(h.publication.idle_dispatches.len(), 1);
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid].head,
+        Some(branch_b)
+    );
+    assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
     assert!(event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::AgentInferenceDispatchStarted(started)
@@ -6352,8 +6642,8 @@ fn intercepted_sibling_activations_retain_distinct_obligations() {
             if started.agent_prompt_id == branch_a_prompt.agent_prompt_id
                 && started.through == tau_proto::AgentHead::Node(branch_a)
     )));
-    assert!(h.publication.pending_intercept.is_none());
-    assert!(h.publication.idle_dispatches.is_empty());
+    assert!(h.runtime_io.publication.pending_intercept.is_none());
+    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
 }
 
 /// An activating fact rejected by the agent journal leaves no detached
@@ -6387,8 +6677,13 @@ fn rejected_activating_append_leaves_no_stale_dispatch() {
             ctx_id: None,
         }),
     );
-    assert!(h.publication.idle_dispatches.is_empty());
-    let conv = h.agent_registry.agents.get(&cid).expect("agent");
+    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
+    let conv = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("agent");
     assert!(
         conv.pending_prompts
             .iter()
@@ -6396,15 +6691,20 @@ fn rejected_activating_append_leaves_no_stale_dispatch() {
     );
     assert_eq!(conv.loop_guard.consecutive_tool_failures(), 0);
     assert!(!conv.loop_guard.stop_automatic_continuation());
-    assert!(h.tool_runtime.pending_tools.is_empty());
-    assert!(h.tool_runtime.tool_agents.is_empty());
-    assert!(h.tool_runtime.peer_internal_tool_agents.is_empty());
+    assert!(h.tool_routing.tool_runtime.pending_tools.is_empty());
+    assert!(h.tool_routing.tool_runtime.tool_agents.is_empty());
+    assert!(
+        h.tool_routing
+            .tool_runtime
+            .peer_internal_tool_agents
+            .is_empty()
+    );
     std::fs::remove_dir(&event_path).expect("remove append blocker");
     std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("committed activation".to_owned()))
         .expect("dispatch later activation");
-    assert!(h.publication.idle_dispatches.is_empty());
+    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
     assert_eq!(prompt_created_count(&h), 1);
 }
 
@@ -6419,8 +6719,9 @@ fn interception_mutating_prompt_reaches_agent() {
     // end.
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.current_session_id.clone();
-    h.context_discovery
+    let session_id = h.session_runtime.current_session_id.clone();
+    h.prompt_coordination
+        .context_discovery
         .initialized_sessions
         .insert(session_id.clone());
 
@@ -6442,6 +6743,7 @@ fn interception_mutating_prompt_reaches_agent() {
 
     // Interceptor replies with the mutated event.
     let agent_id = h
+        .agent_runtime
         .agent_registry
         .agents
         .get(&cid)
@@ -6472,6 +6774,7 @@ fn interception_mutating_prompt_reaches_agent() {
     // c.head points at it (see `interception_user_prompt_dispatch_
     // waits_for_commit` for the dispatch-side assertion).
     let head = h
+        .agent_runtime
         .agent_registry
         .agents
         .get(&cid)
@@ -6504,12 +6807,13 @@ fn publish_for_agent_does_not_emit_navigate_tree() {
     // stamps the conversation's `head` directly.
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.current_session_id.clone();
-    h.context_discovery
+    let session_id = h.session_runtime.current_session_id.clone();
+    h.prompt_coordination
+        .context_discovery
         .initialized_sessions
         .insert(session_id.clone());
 
-    let baseline_seq = h.event_log.next_seq();
+    let baseline_seq = h.runtime_io.event_log.next_seq();
     let cid = ensure_test_user_agent(&mut h);
 
     // Two prompts in a row on the same conversation. Either would
@@ -6523,7 +6827,7 @@ fn publish_for_agent_does_not_emit_navigate_tree() {
     let mut navigates = 0;
     let mut user_msgs = 0;
     let mut id = baseline_seq;
-    while let Some(entry) = h.event_log.get_next_from(id) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(id) {
         match &entry.event {
             Event::UiNavigateTree(_) => navigates += 1,
             Event::AgentPromptSubmitted(_) => user_msgs += 1,
@@ -6552,11 +6856,12 @@ fn interception_disconnect_clears_registration() {
     )
     .expect("intercept registration");
     h.handle_disconnect(&crate::test_connection_id("interceptor"));
-    let after_disconnect_seq = h.event_log.next_seq();
+    let after_disconnect_seq = h.runtime_io.event_log.next_seq();
 
     h.publish_event(None, draft_event("not intercepted"));
 
     let entry = h
+        .runtime_io
         .event_log
         .get_next_from(after_disconnect_seq)
         .expect("event reaches log");
@@ -6581,7 +6886,10 @@ fn agent_metadata_set_and_unset_events_are_interceptable() {
     .expect("intercept registration");
 
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_registry.session_loaded.insert(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
+        .session_loaded
+        .insert(agent_id.clone());
     let key = tau_proto::AgentMetadataKey::new("ext_core-shell_cwd");
     let set = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
         agent_id: agent_id.clone(),
@@ -6659,7 +6967,10 @@ fn rollover_commits_deferred_mutation_correlated_metadata_set() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let agent_id = tau_proto::AgentId::parse("metadata-rollover-agent").expect("agent id");
-    h.agent_registry.session_loaded.insert(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
+        .session_loaded
+        .insert(agent_id.clone());
     let _interceptor = connect_test_tool(&mut h, "metadata-rollover-blocker");
     h.handle_extension_event(
         "metadata-rollover-blocker",
@@ -6761,12 +7072,14 @@ fn rollover_commits_deferred_peer_observations_without_semantic_effects() {
     let source = tau_proto::ConnectionId::parse("observation-owner")
         .expect("test connection id must satisfy the identifier grammar");
     assert!(
-        !h.context_discovery
+        !h.prompt_coordination
+            .context_discovery
             .agent_context_providers
             .contains(&source)
     );
     assert!(
-        !h.context_discovery
+        !h.prompt_coordination
+            .context_discovery
             .session_context_providers
             .contains(&source)
     );
@@ -6924,7 +7237,8 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
     )
     .expect("intercept registration");
     let ui = connect_test_client(&mut h, "shell-terminal-ui", tau_proto::ClientKind::Ui);
-    h.bus
+    h.runtime_io
+        .bus
         .set_subscriptions(
             &crate::test_connection_id("shell-terminal-ui"),
             Vec::new(),
@@ -6933,13 +7247,13 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
         .expect("subscribe ui");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = crate::parse_agent_id(
-        h.agent_registry.agents[&cid]
+        h.agent_runtime.agent_registry.agents[&cid]
             .agent_id
             .as_deref()
             .expect("durable agent id"),
     );
     let command = tau_proto::UiShellCommand {
-        session_id: h.current_session_id.clone(),
+        session_id: h.session_runtime.current_session_id.clone(),
         command_id: tau_proto::ShellCommandId::parse("parked-ui-id")
             .expect("test identifier must satisfy its grammar"),
         command: "pwd".to_owned(),
@@ -6947,7 +7261,7 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
         target_agent_id: Some(agent_id.clone()),
     };
     h.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
-    let provider_id = super::super::ui_shell_provider_ids(&h.registry)
+    let provider_id = super::super::ui_shell_provider_ids(&h.tool_routing.registry)
         .into_iter()
         .next()
         .expect("shell provider");
@@ -7074,7 +7388,10 @@ fn invalid_metadata_interceptor_replacements_fall_back_to_original() {
     .expect("intercept registration");
 
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_registry.session_loaded.insert(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
+        .session_loaded
+        .insert(agent_id.clone());
     let original = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
         agent_id: agent_id.clone(),
         key: tau_proto::AgentMetadataKey::new("valid"),

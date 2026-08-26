@@ -9,12 +9,12 @@ use super::*;
 impl Harness {
     /// Record the runtime harness metadata path stem owned by the daemon.
     pub(crate) fn set_runtime_harness_path(&mut self, path: PathBuf) {
-        self.runtime_harness_path = Some(path);
+        self.session_runtime.runtime_harness_path = Some(path);
     }
 
     /// Return whether this harness accepts bare inter-session messages.
     pub(crate) fn has_peer_entrypoint(&self) -> bool {
-        !self.inter_session_receivers.is_empty()
+        !self.config.inter_session_receivers.is_empty()
     }
 
     pub(super) fn accept_initial_client(
@@ -56,7 +56,7 @@ impl Harness {
                 _ => ClientKind::Tool,
             };
 
-            let log_path = if self.storage_mode.is_ephemeral() {
+            let log_path = if self.session_runtime.storage_mode.is_ephemeral() {
                 None
             } else {
                 Some(
@@ -68,11 +68,12 @@ impl Harness {
                 ext_config,
                 kind.clone(),
                 log_path,
-                &self.tx,
-                &self.component_ingress_tx,
-                &self.state_dir,
-                self.storage_mode.is_memory_only(),
-                self.provider_settings_snapshots
+                &self.runtime_io.tx,
+                &self.runtime_io.component_ingress_tx,
+                &self.session_runtime.state_dir,
+                self.session_runtime.storage_mode.is_memory_only(),
+                self.config
+                    .provider_settings_snapshots
                     .get(ext_config.name.as_str())
                     .unwrap_or(&BTreeMap::new()),
             ) {
@@ -203,6 +204,7 @@ impl Harness {
         if matches!(event, HarnessEvent::ComponentIngressReady) {
             let started = Instant::now();
             let taken = self
+                .runtime_io
                 .component_ingress
                 .take_ready_with_diagnostic()
                 .expect("component ingress wake must own one payload");
@@ -244,7 +246,7 @@ impl Harness {
                         .min(remaining)
                 })
                 .unwrap_or(remaining);
-            match self.rx.recv_timeout(wait) {
+            match self.runtime_io.rx.recv_timeout(wait) {
                 Ok(event) => return Ok(self.expand_component_ingress_wake(event)),
                 Err(mpsc::RecvTimeoutError::Timeout)
                     if Instant::now() < deadline && self.next_runtime_deadline().is_some() =>
@@ -284,7 +286,11 @@ impl Harness {
             self.take_pending_publish_error()?;
             return Ok(false);
         }
-        let origin = self.bus.connection(connection_id).map(|m| m.origin.clone());
+        let origin = self
+            .runtime_io
+            .bus
+            .connection(connection_id)
+            .map(|m| m.origin.clone());
         let subscribed = match origin {
             Some(ConnectionOrigin::Socket) => {
                 let detach_requested =
@@ -334,6 +340,7 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
     ) -> Result<(), HarnessError> {
         let name = self
+            .runtime_io
             .bus
             .connection(connection_id)
             .map(|m| m.name.clone())
@@ -342,6 +349,7 @@ impl Harness {
                     .expect("allocated connection id must satisfy the extension-name grammar")
             });
         let was_socket = self
+            .runtime_io
             .bus
             .connection(connection_id)
             .is_some_and(|m| m.origin == ConnectionOrigin::Socket);
@@ -398,7 +406,7 @@ impl Harness {
         if self.debug_harness_event_targets_ephemeral_agent(harness_event) {
             return;
         }
-        if let Some(log) = &mut self.debug_log {
+        if let Some(log) = &mut self.runtime_io.debug_log {
             let result = log.log_harness_event(harness_event);
             self.observe_debug_log_result(result);
         }
@@ -412,8 +420,8 @@ impl Harness {
     ) {
         if let Err(error) = result {
             if error.disables_logging() {
-                self.debug_log_poisoned = true;
-                self.debug_log = None;
+                self.runtime_io.debug_log_poisoned = true;
+                self.runtime_io.debug_log = None;
             }
             if error.should_report() {
                 tracing::warn!(
@@ -443,6 +451,7 @@ impl Harness {
             }
             tau_proto::HarnessInputMessage::InterceptReply(reply) => {
                 let Some(pending) = self
+                    .runtime_io
                     .publication
                     .pending_intercept
                     .as_ref()
@@ -470,6 +479,7 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         self.extensions.pending_connects += 1;
         if self
+            .runtime_io
             .tx
             .send(HarnessEvent::Command(HarnessCommand::ConnectExtension(
                 Box::new(command),
@@ -494,10 +504,15 @@ impl Harness {
                 self.peer_messaging
                     .pending_external_message_auth
                     .remove(&command.auth_message_id);
-                if command.session_generation != self.current_session_generation
-                    || self.tool_runtime.tool_agents.get(&command.call_id)
+                if command.session_generation != self.session_runtime.current_session_generation
+                    || self
+                        .tool_routing
+                        .tool_runtime
+                        .tool_agents
+                        .get(&command.call_id)
                         != Some(&command.conversation_id)
                     || !self
+                        .agent_runtime
                         .agent_registry
                         .agents
                         .contains_key(&command.conversation_id)
@@ -507,7 +522,7 @@ impl Harness {
                         conversation_id = %command.conversation_id,
                         call_id = %command.call_id,
                         completion_generation = command.session_generation,
-                        current_generation = self.current_session_generation,
+                        current_generation = self.session_runtime.current_session_generation,
                         "dropping stale external message tool completion"
                     );
                     return Ok(());
@@ -572,7 +587,7 @@ impl Harness {
             }
             HarnessCommand::ExternalMessageAuthCompleted(command) => {
                 let client_id = command.client_id.clone();
-                if command.session_generation != self.current_session_generation
+                if command.session_generation != self.session_runtime.current_session_generation
                     || !self
                         .peer_messaging
                         .external_message_peers
@@ -590,7 +605,7 @@ impl Harness {
                     command.request,
                     command.result,
                 ) {
-                    let _ = self.bus.send_to(
+                    let _ = self.runtime_io.bus.send_to(
                         &client_id,
                         None,
                         HarnessOutputMessage::ExternalAgentMessageResult(result),
@@ -598,10 +613,15 @@ impl Harness {
                 }
             }
             HarnessCommand::SessionDiscoveryCompleted(command) => {
-                if command.session_generation != self.current_session_generation
-                    || self.tool_runtime.tool_agents.get(&command.call_id)
+                if command.session_generation != self.session_runtime.current_session_generation
+                    || self
+                        .tool_routing
+                        .tool_runtime
+                        .tool_agents
+                        .get(&command.call_id)
                         != Some(&command.conversation_id)
                     || !self
+                        .agent_runtime
                         .agent_registry
                         .agents
                         .contains_key(&command.conversation_id)
@@ -644,12 +664,12 @@ impl Harness {
 
         let sink = ChannelSink::new(
             &writer_tx,
-            path_std_sync::Arc::clone(&self.event_log),
-            self.tx.clone(),
+            path_std_sync::Arc::clone(&self.runtime_io.event_log),
+            self.runtime_io.tx.clone(),
             connection_id.clone(),
         )
         .map_err(|error| HarnessError::Io(io::Error::other(error)))?;
-        let connected_id = self.bus.connect(Connection::new(
+        let connected_id = self.runtime_io.bus.connect(Connection::new(
             PendingConnectionMetadata {
                 id: Some(connection_id.clone()),
                 name: name.clone(),

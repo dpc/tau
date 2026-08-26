@@ -34,7 +34,7 @@ fn committed_tool_lifecycle_events(
 ) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         let relevant = match &entry.event {
             Event::ToolRegistrationDeclared(declaration) => {
@@ -92,7 +92,12 @@ fn dropping_tool_registration_declaration_prevents_canonical_state() {
     )
     .expect("drop declaration");
 
-    assert!(h.registry.providers_for("declared_drop").is_empty());
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("declared_drop")
+            .is_empty()
+    );
     assert!(committed_tool_lifecycle_events(&h, "declared_drop").is_empty());
 }
 
@@ -157,7 +162,12 @@ fn parked_startup_tool_declaration_blocks_ready_until_commit() {
         h.extensions.entries["tool-provider"].state,
         crate::extension::ExtensionState::Ready
     );
-    assert!(!h.registry.providers_for("declared_startup").is_empty());
+    assert!(
+        !h.tool_routing
+            .registry
+            .providers_for("declared_startup")
+            .is_empty()
+    );
     assert!(matches!(
         committed_tool_lifecycle_events(&h, "declared_startup").as_slice(),
         [
@@ -207,7 +217,12 @@ fn startup_register_then_unregister_exposes_no_intermediate_tool_state() {
     )
     .expect("activate empty stage");
 
-    assert!(h.registry.providers_for("declared_cancelled").is_empty());
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("declared_cancelled")
+            .is_empty()
+    );
     let events = committed_tool_lifecycle_events(&h, "declared_cancelled");
     assert!(matches!(
         events.as_slice(),
@@ -281,7 +296,12 @@ fn required_intercepted_tool_replacement_overflow_fails_startup() {
     let stage = &h.extensions.activation_staging["tool-provider"];
     assert_eq!(stage.retained_message_count, 0);
     assert_eq!(stage.retained_message_bytes, 0);
-    assert!(h.registry.providers_for("declared_oversized").is_empty());
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("declared_oversized")
+            .is_empty()
+    );
     assert!(
         committed_tool_lifecycle_events(&h, "declared_oversized")
             .iter()
@@ -348,7 +368,12 @@ fn intercepted_tool_resolution_propagates_initial_tool_collision() {
         )
         .expect_err("required collision must fail startup");
     assert!(error.to_string().contains("required extensions"));
-    assert!(h.registry.providers_for("declared_collision").is_empty());
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("declared_collision")
+            .is_empty()
+    );
     assert_eq!(
         h.extensions.entries["required-a"].state,
         crate::extension::ExtensionState::Handshaking
@@ -402,7 +427,12 @@ fn parked_tool_declaration_cannot_mutate_after_disconnect() {
     )
     .expect("commit stale declaration");
 
-    assert!(h.registry.providers_for("declared_stale").is_empty());
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("declared_stale")
+            .is_empty()
+    );
     assert!(matches!(
         committed_tool_lifecycle_events(&h, "declared_stale").as_slice(),
         [(_, Event::ToolRegistrationDeclared(_))]
@@ -438,7 +468,12 @@ fn rollover_applies_deferred_tool_declaration_for_current_generation() {
         Some(false),
     )
     .expect("defer declaration");
-    assert!(h.registry.providers_for("rollover_tool").is_empty());
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("rollover_tool")
+            .is_empty()
+    );
 
     h.switch_session(
         "replacement"
@@ -449,7 +484,7 @@ fn rollover_applies_deferred_tool_declaration_for_current_generation() {
     .expect("switch session");
 
     assert_eq!(
-        h.registry.providers_for("rollover_tool")[0]
+        h.tool_routing.registry.providers_for("rollover_tool")[0]
             .tool
             .description
             .as_deref(),
@@ -519,7 +554,7 @@ fn replaced_tool_registration_declaration_drives_canonical_state() {
             && register.publisher_instance_id == tau_proto::ExtensionInstanceId::new(42)
     ));
     assert_eq!(
-        h.registry.providers_for("declared_replace")[0]
+        h.tool_routing.registry.providers_for("declared_replace")[0]
             .tool
             .description
             .as_deref(),
@@ -572,8 +607,18 @@ fn replaced_tool_registration_is_revalidated_against_assigned_prefix() {
     )
     .expect("commit invalid replacement");
 
-    assert!(h.registry.providers_for("work_valid").is_empty());
-    assert!(h.registry.providers_for("outside_prefix").is_empty());
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("work_valid")
+            .is_empty()
+    );
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("outside_prefix")
+            .is_empty()
+    );
     assert!(event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::HarnessNotice(notice)
@@ -622,6 +667,7 @@ fn tool_prefix_interception_protects_canonical_registration() {
     )
     .expect("commit declaration");
     let Some(Event::ToolRegister(mut forged)) = h
+        .runtime_io
         .publication
         .pending_intercept
         .as_ref()
@@ -638,7 +684,12 @@ fn tool_prefix_interception_protects_canonical_registration() {
     )
     .expect("canonical rewrite is rejected");
 
-    assert!(!h.registry.providers_for("declared_protected").is_empty());
+    assert!(
+        !h.tool_routing
+            .registry
+            .providers_for("declared_protected")
+            .is_empty()
+    );
     assert!(matches!(
         committed_tool_lifecycle_events(&h, "declared_protected").as_slice(),
         [
@@ -710,7 +761,12 @@ fn committed_tool_unregistration_enforces_ownership_and_canonicalizes() {
         Some(false),
     )
     .expect("reject non-owner unregistration");
-    assert!(!h.registry.providers_for("declared_withdraw").is_empty());
+    assert!(
+        !h.tool_routing
+            .registry
+            .providers_for("declared_withdraw")
+            .is_empty()
+    );
     h.handle_extension_event_inner_with_persist(
         &crate::test_connection_id("tool-provider"),
         declaration.clone(),
@@ -724,7 +780,12 @@ fn committed_tool_unregistration_enforces_ownership_and_canonicalizes() {
     )
     .expect("repeat unknown unregistration");
 
-    assert!(h.registry.providers_for("declared_withdraw").is_empty());
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("declared_withdraw")
+            .is_empty()
+    );
     let events = committed_tool_lifecycle_events(&h, "declared_withdraw");
     assert_eq!(
         events
@@ -807,6 +868,7 @@ fn canonical_tool_unregistration_is_immutable_and_must_pass() {
     )
     .expect("declare first withdrawal");
     let Some(Event::ToolUnregister(mut forged)) = h
+        .runtime_io
         .publication
         .pending_intercept
         .as_ref()
@@ -840,7 +902,7 @@ fn canonical_tool_unregistration_is_immutable_and_must_pass() {
     .expect("override canonical withdrawal Drop");
 
     for tool_name in ["withdraw_rewrite", "withdraw_drop"] {
-        assert!(h.registry.providers_for(tool_name).is_empty());
+        assert!(h.tool_routing.registry.providers_for(tool_name).is_empty());
         assert!(matches!(
             committed_tool_lifecycle_events(&h, tool_name).as_slice(),
             [
@@ -878,7 +940,7 @@ fn tool_declaration_and_canonical_authorship_fail_closed() {
             Some(false),
         )
         .expect("reject unauthorized declaration");
-        assert!(h.registry.providers_for(source).is_empty());
+        assert!(h.tool_routing.registry.providers_for(source).is_empty());
     }
     connect_test_tool(&mut h, "unconfigured-tool");
     h.handle_extension_event_inner_with_persist(
@@ -924,7 +986,7 @@ fn tool_declaration_and_canonical_authorship_fail_closed() {
         "forged_canonical",
         "forged_canonical_unregistration",
     ] {
-        assert!(h.registry.providers_for(name).is_empty());
+        assert!(h.tool_routing.registry.providers_for(name).is_empty());
         assert!(committed_tool_lifecycle_events(&h, name).is_empty());
     }
 }

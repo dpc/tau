@@ -60,7 +60,7 @@ impl Harness {
         let prompt_ctx_id = req.ctx_id.clone();
         let parent_ephemeral = parent_cid
             .as_ref()
-            .and_then(|cid| self.agent_registry.agents.get(cid))
+            .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
             .is_some_and(|agent| agent.persistence.is_ephemeral());
         let persistence = if req.ephemeral || parent_ephemeral {
             tau_core::AgentPersistenceMode::Ephemeral
@@ -109,7 +109,7 @@ impl Harness {
             );
             return Ok(true);
         }
-        if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
+        if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
             conv.next_ctx_id = prompt_ctx_id.clone();
             conv.model_override = req.model_override;
         }
@@ -184,7 +184,7 @@ impl Harness {
             tau_proto::UiCreateAgentInitialPrompt::Queued,
         );
         if self.dispatch_blocked_for(cid) || !self.session_initialized(&session_id) {
-            if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
+            if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
                 conv.pending_prompts.push_back(prompt.clone());
             }
             self.publish_event(
@@ -270,10 +270,10 @@ impl Harness {
                 "initial prompt correlation id must contain 1 through 128 bytes".to_owned(),
             );
         }
-        if req.session_id != self.current_session_id {
+        if req.session_id != self.session_runtime.current_session_id {
             let message = format!(
                 "harness is bound to session `{}`; create-agent for `{}` rejected",
-                self.current_session_id.as_str(),
+                self.session_runtime.current_session_id.as_str(),
                 req.session_id.as_str()
             );
             return reject(
@@ -282,8 +282,9 @@ impl Harness {
                 message,
             );
         }
-        if !self.available_roles.contains_key(&req.role) {
+        if !self.config.available_roles.contains_key(&req.role) {
             let message = self
+                .config
                 .disabled_role_reasons
                 .get(&req.role)
                 .map(|reason| reason.message.clone())
@@ -304,6 +305,7 @@ impl Harness {
         }
         let parent_cid = if let Some(agent_id) = req.parent_agent.as_ref() {
             let Some(cid) = self
+                .agent_runtime
                 .agent_registry
                 .agent_routes
                 .get(agent_id.as_str())
@@ -332,7 +334,7 @@ impl Harness {
         agent_id: tau_proto::AgentId,
         initial_prompt: tau_proto::UiCreateAgentInitialPrompt,
     ) {
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             client_id,
             None,
             HarnessOutputMessage::deliver(Event::UiCreateAgentResult(
@@ -356,11 +358,12 @@ impl Harness {
         message: &str,
     ) {
         if let Some(cid) = self
+            .agent_runtime
             .agent_registry
             .agent_routes
             .get(correlation.agent_id.as_str())
             .cloned()
-            && let Some(agent) = self.agent_registry.agents.get_mut(&cid)
+            && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
             && agent.next_ctx_id.as_deref() == Some(correlation.ctx_id.as_str())
         {
             agent.next_ctx_id = None;
@@ -385,6 +388,7 @@ impl Harness {
         message: &str,
     ) {
         let mut correlations = self
+            .agent_runtime
             .agent_registry
             .agents
             .get_mut(cid)
@@ -396,7 +400,12 @@ impl Harness {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        correlations.extend(self.prompt_runtime.pending_initial_correlations.remove(cid));
+        correlations.extend(
+            self.prompt_coordination
+                .prompt_runtime
+                .pending_initial_correlations
+                .remove(cid),
+        );
         for correlation in correlations {
             self.publish_initial_prompt_failed(correlation, stage, message);
         }
@@ -404,7 +413,12 @@ impl Harness {
 
     /// Terminate one submitted initial prompt before provider materialization.
     pub(super) fn fail_initial_prompt_materialization(&mut self, cid: &AgentId, message: &str) {
-        if let Some(correlation) = self.prompt_runtime.pending_initial_correlations.remove(cid) {
+        if let Some(correlation) = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_initial_correlations
+            .remove(cid)
+        {
             self.retire_deferred_activation(cid, correlation.activation_through);
             self.publish_initial_prompt_failed(
                 correlation,
@@ -433,7 +447,7 @@ impl Harness {
         message: String,
         agent_id: Option<tau_proto::AgentId>,
     ) {
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             client_id,
             None,
             HarnessOutputMessage::deliver(Event::UiCreateAgentResult(

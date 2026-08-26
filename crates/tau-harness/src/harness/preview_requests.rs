@@ -67,7 +67,9 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
         request: tau_proto::GetRenderedPrompt,
     ) {
-        let role = request.role.unwrap_or_else(|| self.selected_role.clone());
+        let role = request
+            .role
+            .unwrap_or_else(|| self.config.selected_role.clone());
         self.queue_rendered_prompt(PendingRenderedPrompt::Prompt {
             connection_id: connection_id.clone(),
             request_id: request.request_id,
@@ -82,12 +84,12 @@ impl Harness {
             | PendingRenderedPrompt::Prompt { role, .. }
             | PendingRenderedPrompt::Tools { role, .. } => role.clone(),
         };
-        if !self.available_roles.contains_key(&role) {
+        if !self.config.available_roles.contains_key(&role) {
             self.send_rendered_preview_error(request, format!("unknown role: {role}"));
             return;
         }
         let agent = match self.try_create_user_agent_with_parent(
-            self.current_session_id.clone(),
+            self.session_runtime.current_session_id.clone(),
             &role,
             None,
             Vec::new(),
@@ -99,26 +101,35 @@ impl Harness {
                 return;
             }
         };
-        let agent_id = self.agent_registry.agents[&agent]
+        let agent_id = self.agent_runtime.agent_registry.agents[&agent]
             .agent_id
             .as_deref()
             .map(crate::parse_agent_id)
             .expect("new preview agent has an id");
-        self.context_discovery.pending_rendered_prompts.insert(
-            agent_id.clone(),
-            PendingRenderedPreview {
-                requests: vec![request],
-                deadline: Instant::now() + RENDERED_PREVIEW_CONTEXT_TIMEOUT,
-            },
-        );
+        self.prompt_coordination
+            .context_discovery
+            .pending_rendered_prompts
+            .insert(
+                agent_id.clone(),
+                PendingRenderedPreview {
+                    requests: vec![request],
+                    deadline: Instant::now() + RENDERED_PREVIEW_CONTEXT_TIMEOUT,
+                },
+            );
         self.complete_rendered_previews(&agent_id);
     }
     /// Responds once a preview agent has the complete runtime template context.
     pub(super) fn complete_rendered_previews(&mut self, agent_id: &tau_proto::AgentId) {
-        if !self.context_discovery.frozen_agents.contains_key(agent_id) {
+        if !self
+            .prompt_coordination
+            .context_discovery
+            .frozen_agents
+            .contains_key(agent_id)
+        {
             return;
         }
         let Some(pending) = self
+            .prompt_coordination
             .context_discovery
             .pending_rendered_prompts
             .remove(agent_id)
@@ -134,7 +145,7 @@ impl Harness {
             };
             let model = model_for_role(
                 &self.provider_runtime.model_info,
-                &self.available_roles,
+                &self.config.available_roles,
                 &role,
             );
             let specs = self.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
@@ -230,7 +241,7 @@ impl Harness {
     ) {
         let (prompt, error) =
             result.map_or_else(|error| (None, Some(error)), |prompt| (Some(prompt), None));
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             connection_id,
             None,
             HarnessOutputMessage::RenderedSystemPromptResult(Box::new(
@@ -252,13 +263,24 @@ impl Harness {
     ) {
         let result = result.map(|system_prompt| {
             let agents_context = (enable_agents_md
-                && !self.context_discovery.agents_files.is_empty())
-            .then(|| render_agents_context_message(self.context_discovery.agents_files.iter()));
+                && !self
+                    .prompt_coordination
+                    .context_discovery
+                    .agents_files
+                    .is_empty())
+            .then(|| {
+                render_agents_context_message(
+                    self.prompt_coordination
+                        .context_discovery
+                        .agents_files
+                        .iter(),
+                )
+            });
             render_effective_prompt_message(&system_prompt, agents_context.as_deref())
         });
         let (prompt, error) =
             result.map_or_else(|error| (None, Some(error)), |prompt| (Some(prompt), None));
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             connection_id,
             None,
             HarnessOutputMessage::RenderedPromptResult(Box::new(tau_proto::RenderedPromptResult {
@@ -277,7 +299,7 @@ impl Harness {
     ) {
         let (tools, error) =
             result.map_or_else(|error| (None, Some(error)), |tools| (Some(tools), None));
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             connection_id,
             None,
             HarnessOutputMessage::RenderedToolDefinitionsResult(Box::new(
@@ -297,12 +319,15 @@ impl Harness {
         self.queue_rendered_prompt(PendingRenderedPrompt::Tools {
             connection_id: connection_id.clone(),
             request_id: request.request_id,
-            role: request.role.unwrap_or_else(|| self.selected_role.clone()),
+            role: request
+                .role
+                .unwrap_or_else(|| self.config.selected_role.clone()),
         });
     }
     /// Fails expired previews and unloads their context agents.
     pub(super) fn process_rendered_preview_deadlines(&mut self, now: Instant) {
         let expired = self
+            .prompt_coordination
             .context_discovery
             .pending_rendered_prompts
             .iter()
@@ -310,6 +335,7 @@ impl Harness {
             .collect::<Vec<_>>();
         for agent_id in expired {
             if let Some(pending) = self
+                .prompt_coordination
                 .context_discovery
                 .pending_rendered_prompts
                 .remove(&agent_id)
@@ -360,24 +386,25 @@ impl Harness {
                 },
             ));
         }
-        let _ = self.bus.send_to(connection_id, None, message);
+        let _ = self.runtime_io.bus.send_to(connection_id, None, message);
     }
     pub(super) fn build_session_agent_list(
         &self,
         session_id: &SessionId,
         scope: tau_proto::SessionAgentListScope,
     ) -> Result<Vec<tau_proto::SessionAgentListEntry>, tau_proto::SessionAgentListError> {
-        if session_id != &self.current_session_id {
+        if session_id != &self.session_runtime.current_session_id {
             return Err(session_agent_list_error(
                 tau_proto::SessionAgentListErrorKind::StaleSession,
                 "the harness is bound to a different session",
             ));
         }
-        if !self.agent_registry.roster_valid
+        if !self.agent_runtime.agent_registry.roster_valid
             || !self
+                .agent_runtime
                 .agent_registry
                 .roster_loaded
-                .is_subset(&self.agent_registry.roster_ever_loaded)
+                .is_subset(&self.agent_runtime.agent_registry.roster_ever_loaded)
         {
             return Err(session_agent_list_error(
                 tau_proto::SessionAgentListErrorKind::SessionRead,
@@ -385,8 +412,12 @@ impl Harness {
             ));
         }
         let source = match scope {
-            tau_proto::SessionAgentListScope::Current => &self.agent_registry.roster_loaded,
-            tau_proto::SessionAgentListScope::History => &self.agent_registry.roster_ever_loaded,
+            tau_proto::SessionAgentListScope::Current => {
+                &self.agent_runtime.agent_registry.roster_loaded
+            }
+            tau_proto::SessionAgentListScope::History => {
+                &self.agent_runtime.agent_registry.roster_ever_loaded
+            }
         };
         if source.len() > MAX_SESSION_AGENT_LIST_ENTRIES {
             return Err(session_agent_list_error(
@@ -395,21 +426,23 @@ impl Harness {
             ));
         }
 
-        let loaded = &self.agent_registry.roster_loaded;
+        let loaded = &self.agent_runtime.agent_registry.roster_loaded;
         let mut agent_ids = source.iter().cloned().collect::<Vec<_>>();
         agent_ids.sort();
         let live_agents = self
+            .agent_runtime
             .agent_registry
             .agents
             .iter()
             .filter(|(_, agent)| {
                 !agent.terminating
-                    && agent.session_id == self.current_session_id
+                    && agent.session_id == self.session_runtime.current_session_id
                     && agent.agent_id.is_some()
             })
             .filter_map(|(cid, agent)| {
                 let agent_id = AgentId::parse(agent.agent_id.as_deref()?).ok()?;
                 let navigation_mode = self
+                    .agent_runtime
                     .agent_registry
                     .navigation_modes
                     .get(&agent_id)
@@ -438,6 +471,7 @@ impl Harness {
                 None => tau_proto::SessionAgentLifecycle::Unloaded,
             };
             let facts = self
+                .session_runtime
                 .agent_store
                 .agent_creation_facts(
                     &agent_id,
@@ -476,7 +510,7 @@ impl Harness {
                 }
             };
             let work_status = matches!(&lifecycle, tau_proto::SessionAgentLifecycle::Live { .. })
-                .then(|| self.agent_registry.agents.get(&agent_id))
+                .then(|| self.agent_runtime.agent_registry.agents.get(&agent_id))
                 .flatten()
                 .map(|agent| {
                     tau_proto::SessionAgentWorkStatus::new(
@@ -489,6 +523,7 @@ impl Harness {
                 agent_id: agent_id.clone(),
                 lifecycle,
                 persistence: if self
+                    .session_runtime
                     .agent_store
                     .agent_persistence(agent_id.as_str())
                     .is_ephemeral()
@@ -510,7 +545,7 @@ impl Harness {
         request_id: String,
         result: tau_proto::ExtensionDataResultPayload,
     ) {
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             connection_id,
             None,
             HarnessOutputMessage::ExtensionDataResult(Box::new(tau_proto::ExtensionDataResult {
@@ -556,7 +591,7 @@ impl Harness {
         op: tau_proto::ExtensionDataRequestOp,
     ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
         if scope == tau_proto::ExtensionDataScope::Session
-            && expected_session_id != &self.current_session_id
+            && expected_session_id != &self.session_runtime.current_session_id
         {
             return Err(ExtensionDataError::new(
                 tau_proto::ExtensionDataErrorKind::SessionMismatch,
@@ -668,7 +703,7 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
         scope: tau_proto::ExtensionDataScope,
     ) -> Result<PathBuf, ExtensionDataError> {
-        if self.storage_mode.is_memory_only() {
+        if self.session_runtime.storage_mode.is_memory_only() {
             return Err(ExtensionDataError::new(
                 tau_proto::ExtensionDataErrorKind::Permission,
                 "extension data is unavailable in memory-only harnesses",
@@ -695,25 +730,29 @@ impl Harness {
         })?;
         match scope {
             tau_proto::ExtensionDataScope::Session => {
-                if self.storage_mode.is_ephemeral() {
+                if self.session_runtime.storage_mode.is_ephemeral() {
                     return Err(ExtensionDataError::new(
                         tau_proto::ExtensionDataErrorKind::Permission,
                         "session-scoped extension data is unavailable in ephemeral sessions",
                     ));
                 }
-                Ok(tau_config::settings::sessions_dir_of(&self.state_dir)
-                    .join(self.current_session_id.as_str())
-                    .join("ext")
-                    .join("data")
-                    .join(name))
+                Ok(
+                    tau_config::settings::sessions_dir_of(&self.session_runtime.state_dir)
+                        .join(self.session_runtime.current_session_id.as_str())
+                        .join("ext")
+                        .join("data")
+                        .join(name),
+                )
             }
-            tau_proto::ExtensionDataScope::User => tau_config::settings::extension_state_dir_of(
-                &self.state_dir,
-                name,
-            )
-            .map_err(|error| {
-                ExtensionDataError::new(tau_proto::ExtensionDataErrorKind::Io, error.to_string())
-            }),
+            tau_proto::ExtensionDataScope::User => {
+                tau_config::settings::extension_state_dir_of(&self.session_runtime.state_dir, name)
+                    .map_err(|error| {
+                        ExtensionDataError::new(
+                            tau_proto::ExtensionDataErrorKind::Io,
+                            error.to_string(),
+                        )
+                    })
+            }
             tau_proto::ExtensionDataScope::Cache => dirs::cache_dir()
                 .map(|dir| dir.join("tau").join("ext").join(name))
                 .ok_or_else(|| {
@@ -722,13 +761,15 @@ impl Harness {
                         "could not determine user cache directory",
                     )
                 }),
-            tau_proto::ExtensionDataScope::Secret => tau_config::settings::extension_secret_dir_of(
-                &self.state_dir,
-                name,
-            )
-            .map_err(|error| {
-                ExtensionDataError::new(tau_proto::ExtensionDataErrorKind::Io, error.to_string())
-            }),
+            tau_proto::ExtensionDataScope::Secret => {
+                tau_config::settings::extension_secret_dir_of(&self.session_runtime.state_dir, name)
+                    .map_err(|error| {
+                        ExtensionDataError::new(
+                            tau_proto::ExtensionDataErrorKind::Io,
+                            error.to_string(),
+                        )
+                    })
+            }
         }
     }
     /// Cancels preview requests and unloads their ephemeral agents before their
@@ -738,6 +779,7 @@ impl Harness {
         mut cancel: impl FnMut(&PendingRenderedPrompt) -> bool,
     ) {
         let agent_ids = self
+            .prompt_coordination
             .context_discovery
             .pending_rendered_prompts
             .iter()
@@ -750,7 +792,8 @@ impl Harness {
             })
             .collect::<Vec<_>>();
         for agent_id in agent_ids {
-            self.context_discovery
+            self.prompt_coordination
+                .context_discovery
                 .pending_rendered_prompts
                 .remove(&agent_id);
             if let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str())) {

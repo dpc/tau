@@ -109,14 +109,14 @@ fn policy_harness_for_model(
         crate::HarnessStorageMode::Durable,
     )
     .expect("harness");
-    harness.available_roles = HashMap::from([(ROLE.to_owned(), role)]);
+    harness.config.available_roles = HashMap::from([(ROLE.to_owned(), role)]);
     let model = ModelId::new(ProviderName::new("provider"), ModelName::new(model_name));
     harness.provider_runtime.model_info =
         HashMap::from([(model.clone(), model_info(&model, model_tags))]);
     harness.provider_runtime.model_routes =
         HashMap::from([(model.clone(), crate::test_connection_id("provider"))]);
-    harness.selected_role = ROLE.to_owned();
-    harness.selected_model = Some(model.clone());
+    harness.config.selected_role = ROLE.to_owned();
+    harness.config.selected_model = Some(model.clone());
     let group = ToolGroup {
         name: ToolGroupName::new("shell"),
         prompt_fragment: None,
@@ -142,7 +142,7 @@ fn policy_harness_for_model(
         tagged_tool("workdir", true, &["shell:workdir"]),
         tagged_tool("dir_lock", true, &["shell:lock"]),
     ] {
-        harness.registry.register_with_prompt_fragment(
+        harness.tool_routing.registry.register_with_prompt_fragment(
             &crate::test_connection_id("tools"),
             ToolRegistration {
                 tool: spec,
@@ -169,7 +169,7 @@ fn policy_harness_for_model(
             ][..],
         ),
     ] {
-        harness.registry.register_with_prompt_fragment(
+        harness.tool_routing.registry.register_with_prompt_fragment(
             &crate::test_connection_id("harness"),
             ToolRegistration {
                 tool: tagged_tool(name, enabled_by_default, tags),
@@ -195,7 +195,7 @@ fn register_swarm_tools(harness: &mut Harness, prefix: Option<&str>) {
         prompt_fragment: None,
     };
     for name in ["task_info", "task_update", "task_blocker"] {
-        harness.registry.register_with_prompt_fragment(
+        harness.tool_routing.registry.register_with_prompt_fragment(
             &crate::test_connection_id("swarm"),
             ToolRegistration {
                 tool: tagged_tool(&scoped_name(name), false, &[]),
@@ -224,7 +224,7 @@ fn register_rostra_tools(harness: &mut Harness) {
         "rostra_vote",
         "rostra_notifications",
     ] {
-        harness.registry.register_with_prompt_fragment(
+        harness.tool_routing.registry.register_with_prompt_fragment(
             &crate::test_connection_id("rostra"),
             ToolRegistration {
                 tool: tagged_tool(name, true, &[]),
@@ -243,6 +243,7 @@ fn image_tool_requires_exact_route_modalities() {
     let mut policy = policy_harness(&[], AgentRole::default());
     let model = policy
         .harness
+        .config
         .selected_model
         .clone()
         .expect("selected model");
@@ -295,7 +296,7 @@ fn effective_tool_names(harness: &Harness) -> Vec<String> {
         "rostra_vote",
         "rostra_notifications",
     ];
-    let model = harness.selected_model.as_ref();
+    let model = harness.config.selected_model.as_ref();
     harness
         .gather_effective_tool_specs_for_role_model(ROLE, model)
         .into_iter()
@@ -348,7 +349,7 @@ fn shell_tool_style_selectors_override_exact_text_default() {
 
     let mut global_override =
         policy_harness_for_model("arbitrary-model", &[], AgentRole::default());
-    global_override.harness.tool_policy = ToolPolicy {
+    global_override.harness.config.tool_policy = ToolPolicy {
         default_shell_tool_style: Some(ShellToolStyle::Edit),
         ..ToolPolicy::default()
     };
@@ -362,7 +363,7 @@ fn shell_tool_style_selectors_override_exact_text_default() {
 #[test]
 fn configured_shell_tool_style_overrides_model_default() {
     let mut policy = policy_harness(&["shell:tool-style:replace"], AgentRole::default());
-    policy.harness.tool_policy = ToolPolicy {
+    policy.harness.config.tool_policy = ToolPolicy {
         default_shell_tool_style: Some(ShellToolStyle::Edit),
         ..ToolPolicy::default()
     };
@@ -378,7 +379,7 @@ fn configured_shell_tool_style_overrides_model_default() {
 #[test]
 fn forced_codex_requires_custom_support_and_style_tags_cannot_conflict() {
     let mut forced = policy_harness(&["shell:tool-style:codex"], AgentRole::default());
-    let model = forced.harness.selected_model.clone().expect("model");
+    let model = forced.harness.config.selected_model.clone().expect("model");
     assert_eq!(
         forced.harness.shell_tool_style_error(Some(&model)),
         Some("Codex shell tool style requires Custom tool support".to_owned())
@@ -408,11 +409,16 @@ fn forced_codex_requires_custom_support_and_style_tags_cannot_conflict() {
         &["shell:tool-style:codex", "shell:tool-style:replace"],
         AgentRole::default(),
     );
-    conflicting.harness.tool_policy = ToolPolicy {
+    conflicting.harness.config.tool_policy = ToolPolicy {
         default_shell_tool_style: Some(ShellToolStyle::Edit),
         ..ToolPolicy::default()
     };
-    let model = conflicting.harness.selected_model.as_ref().expect("model");
+    let model = conflicting
+        .harness
+        .config
+        .selected_model
+        .as_ref()
+        .expect("model");
     assert_eq!(
         conflicting.harness.shell_tool_style_error(Some(model)),
         Some("conflicting shell tool style tags".to_owned())
@@ -435,7 +441,7 @@ fn duplicate_identical_shell_style_tags_select_one_surface() {
     assert_eq!(
         policy
             .harness
-            .shell_tool_style_error(policy.harness.selected_model.as_ref()),
+            .shell_tool_style_error(policy.harness.config.selected_model.as_ref()),
         None
     );
 }
@@ -479,9 +485,10 @@ fn compaction_defaults_and_groups_are_independent() {
 fn swarm_tools_require_group_or_exact_role_opt_in() {
     let mut default = policy_harness(&[], AgentRole::default());
     register_swarm_tools(&mut default.harness, None);
-    let default_tools = default
-        .harness
-        .gather_effective_tool_specs_for_role_model(ROLE, default.harness.selected_model.as_ref());
+    let default_tools = default.harness.gather_effective_tool_specs_for_role_model(
+        ROLE,
+        default.harness.config.selected_model.as_ref(),
+    );
     assert!(!default_tools.iter().any(|tool| tool.name == "task_info"));
     assert!(!default_tools.iter().any(|tool| tool.name == "task_update"));
     assert!(!default_tools.iter().any(|tool| tool.name == "task_blocker"));
@@ -498,7 +505,7 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
         .harness
         .gather_effective_tool_specs_for_role_model(
             ROLE,
-            group_enabled.harness.selected_model.as_ref(),
+            group_enabled.harness.config.selected_model.as_ref(),
         );
     assert!(group_tools.iter().any(|tool| tool.name == "task_info"));
     assert!(group_tools.iter().any(|tool| tool.name == "task_update"));
@@ -518,7 +525,7 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
         .harness
         .gather_effective_tool_specs_for_role_model(
             ROLE,
-            exact_enabled.harness.selected_model.as_ref(),
+            exact_enabled.harness.config.selected_model.as_ref(),
         );
     assert!(exact_tools.iter().any(|tool| tool.name == "task_info"));
     assert!(!exact_tools.iter().any(|tool| tool.name == "task_update"));
@@ -532,9 +539,10 @@ fn swarm_tools_require_group_or_exact_role_opt_in() {
         },
     );
     register_swarm_tools(&mut prefixed.harness, Some("work"));
-    let prefixed_tools = prefixed
-        .harness
-        .gather_effective_tool_specs_for_role_model(ROLE, prefixed.harness.selected_model.as_ref());
+    let prefixed_tools = prefixed.harness.gather_effective_tool_specs_for_role_model(
+        ROLE,
+        prefixed.harness.config.selected_model.as_ref(),
+    );
     assert!(
         prefixed_tools
             .iter()
@@ -632,15 +640,20 @@ fn compaction_prompt_snapshot_survives_later_role_changes() {
     let prompt_id: tau_proto::AgentPromptId = "prompt-compaction"
         .parse::<tau_proto::AgentPromptId>()
         .expect("known-safe AgentPromptId must be valid");
-    policy.harness.prompt_runtime.tool_specs.insert(
-        prompt_id.clone(),
-        vec![tagged_tool(
-            "compact",
-            false,
-            &["harness:compaction", "harness:compaction:self"],
-        )],
-    );
-    policy.harness.available_roles.insert(
+    policy
+        .harness
+        .prompt_coordination
+        .prompt_runtime
+        .tool_specs
+        .insert(
+            prompt_id.clone(),
+            vec![tagged_tool(
+                "compact",
+                false,
+                &["harness:compaction", "harness:compaction:self"],
+            )],
+        );
+    policy.harness.config.available_roles.insert(
         ROLE.to_owned(),
         AgentRole {
             enable_tools: vec![ToolName::new("agent_compact")],
@@ -669,16 +682,21 @@ fn provider_supported_tool_types_filter_effective_snapshot() {
     let mut policy = policy_harness(&[], AgentRole::default());
     let mut custom = tagged_tool("custom_text", true, &[]);
     custom.tool_type = ToolType::Custom;
-    policy.harness.registry.register_with_prompt_fragment(
-        &crate::test_connection_id("tools"),
-        ToolRegistration {
-            tool: custom,
-            tool_group: None,
-            prompt_fragment: None,
-        },
-    );
+    policy
+        .harness
+        .tool_routing
+        .registry
+        .register_with_prompt_fragment(
+            &crate::test_connection_id("tools"),
+            ToolRegistration {
+                tool: custom,
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        );
     let model = policy
         .harness
+        .config
         .selected_model
         .clone()
         .expect("selected model");
@@ -803,6 +821,7 @@ fn user_can_disable_builtin_chatgpt_shell_policy() {
     let mut policy = policy_harness(&["shell:chatgpt"], AgentRole::default());
     policy
         .harness
+        .config
         .tool_policy
         .rules
         .entry("builtin.chatgpt-shell".to_owned())
@@ -823,7 +842,7 @@ fn user_can_disable_builtin_chatgpt_shell_policy() {
 #[test]
 fn custom_policy_rule_disables_and_enables_tool_tags() {
     let mut policy = policy_harness(&[], AgentRole::default());
-    policy.harness.tool_policy = serde_json::from_str::<ToolPolicy>(
+    policy.harness.config.tool_policy = serde_json::from_str::<ToolPolicy>(
         r#"{
   "rules": {
     "custom.shell-cwd-only": {
@@ -867,11 +886,16 @@ fn prompt_snapshot_lookup_is_strict_and_survives_role_changes() {
     let prompt_id: tau_proto::AgentPromptId = "prompt-1"
         .parse::<tau_proto::AgentPromptId>()
         .expect("known-safe AgentPromptId must be valid");
-    policy.harness.prompt_runtime.tool_specs.insert(
-        prompt_id.clone(),
-        vec![tagged_tool("edit", true, &["shell:edit:line"])],
-    );
-    policy.harness.available_roles.insert(
+    policy
+        .harness
+        .prompt_coordination
+        .prompt_runtime
+        .tool_specs
+        .insert(
+            prompt_id.clone(),
+            vec![tagged_tool("edit", true, &["shell:edit:line"])],
+        );
+    policy.harness.config.available_roles.insert(
         ROLE.to_owned(),
         AgentRole {
             enable_tools: vec![ToolName::new("apply_patch")],
@@ -901,12 +925,18 @@ fn prompt_snapshot_cleanup_removes_call_backreferences() {
     let prompt_id: tau_proto::AgentPromptId = "prompt-cleanup"
         .parse::<tau_proto::AgentPromptId>()
         .expect("known-safe AgentPromptId must be valid");
-    policy.harness.prompt_runtime.tool_specs.insert(
-        prompt_id.clone(),
-        vec![tagged_tool("edit", true, &["shell:edit:line"])],
-    );
     policy
         .harness
+        .prompt_coordination
+        .prompt_runtime
+        .tool_specs
+        .insert(
+            prompt_id.clone(),
+            vec![tagged_tool("edit", true, &["shell:edit:line"])],
+        );
+    policy
+        .harness
+        .prompt_coordination
         .prompt_runtime
         .tool_call_prompts
         .insert("call-1".into(), prompt_id.clone());
@@ -916,11 +946,19 @@ fn prompt_snapshot_cleanup_removes_call_backreferences() {
     assert!(
         !policy
             .harness
+            .prompt_coordination
             .prompt_runtime
             .tool_specs
             .contains_key(&prompt_id)
     );
-    assert!(policy.harness.prompt_runtime.tool_call_prompts.is_empty());
+    assert!(
+        policy
+            .harness
+            .prompt_coordination
+            .prompt_runtime
+            .tool_call_prompts
+            .is_empty()
+    );
 }
 
 /// Effective alias validation is snapshot-local: duplicates are diagnosed only
@@ -960,7 +998,12 @@ fn role_cannot_enable_both_shell_editors_with_shared_visible_name() {
             ..AgentRole::default()
         },
     );
-    let model = policy.harness.selected_model.as_ref().expect("model");
+    let model = policy
+        .harness
+        .config
+        .selected_model
+        .as_ref()
+        .expect("model");
     let specs = policy
         .harness
         .gather_effective_tool_specs_for_role_model(ROLE, Some(model));
@@ -989,20 +1032,27 @@ fn policy_exclusive_alias_builds_and_routes_but_joint_surface_fails() {
     };
     policy
         .harness
+        .tool_routing
         .registry
         .register_internal(&crate::test_connection_id("harness"), aliased("internal_a"));
     policy
         .harness
+        .tool_routing
         .registry
         .register_internal(&crate::test_connection_id("harness"), aliased("internal_b"));
-    policy.harness.available_roles.insert(
+    policy.harness.config.available_roles.insert(
         ROLE.to_owned(),
         AgentRole {
             enable_tools: vec![ToolName::new("internal_a")],
             ..AgentRole::default()
         },
     );
-    let model = policy.harness.selected_model.as_ref().expect("model");
+    let model = policy
+        .harness
+        .config
+        .selected_model
+        .as_ref()
+        .expect("model");
     let exclusive = policy
         .harness
         .gather_effective_tool_specs_for_role_model(ROLE, Some(model));
@@ -1020,6 +1070,7 @@ fn policy_exclusive_alias_builds_and_routes_but_joint_surface_fails() {
     assert_eq!(visible.as_str(), "shared_alias");
     let route = policy
         .harness
+        .tool_routing
         .registry
         .route_tool_request(tau_proto::ToolRequest {
             call_id: "alias-call".into(),
@@ -1032,7 +1083,7 @@ fn policy_exclusive_alias_builds_and_routes_but_joint_surface_fails() {
         .expect("route exclusive alias owner");
     assert_eq!(route.target, tau_core::ToolRouteTarget::Internal);
 
-    policy.harness.available_roles.insert(
+    policy.harness.config.available_roles.insert(
         ROLE.to_owned(),
         AgentRole {
             enable_tools: vec![ToolName::new("internal_a"), ToolName::new("internal_b")],
@@ -1063,6 +1114,7 @@ fn prompt_alias_resolution_does_not_prefer_an_internal_name() {
         .expect("known-safe AgentPromptId must be valid");
     policy
         .harness
+        .prompt_coordination
         .prompt_runtime
         .tool_specs
         .insert(prompt_id.clone(), vec![aliased, other]);

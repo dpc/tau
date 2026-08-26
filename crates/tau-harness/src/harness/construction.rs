@@ -29,57 +29,16 @@ pub(crate) struct InProcessTool {
     pub(crate) runner: fn(UnixStream, UnixStream, PathBuf) -> Result<(), String>,
 }
 struct HarnessBaseParts {
-    /// Sender side of the harness event channel.
-    tx: Sender<HarnessEvent>,
-    /// Receiver side of the harness event channel.
-    rx: Receiver<HarnessEvent>,
-    /// Producer side of the bounded component-ingress lane.
-    component_ingress_tx: ComponentIngressSender,
-    /// Harness-owned bounded component-ingress receiver.
-    component_ingress: ComponentIngress,
-    /// Event bus for live connections and subscriptions.
-    bus: EventBus,
-    /// Runtime state directory for this harness.
-    state_dir: PathBuf,
-    /// Complete accepted startup settings retained as the runtime baseline.
-    harness_settings: tau_config::settings::HarnessSettings,
-    /// Session membership store, with the eager session already loaded.
-    store: SessionStore,
-    /// Per-agent transcript store.
-    agent_store: AgentStore,
-    /// Immutable policy for semantic stores, diagnostics, retention, and
-    /// delegated extension storage.
-    storage_mode: crate::HarnessStorageMode,
-    /// Absolute canonical startup root for this harness.
-    project_root: PathBuf,
-    /// Session id the harness is initially bound to.
-    current_session_id: SessionId,
-    /// Reason associated with the initial session binding.
-    current_session_start_reason: tau_proto::SessionStartReason,
-    /// Roles available after applying harness settings.
-    available_roles: HashMap<String, tau_config::settings::AgentRole>,
-    /// Role groups available for navigation and UI display.
-    available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
-    /// Receiver-capable roles in deterministic configured order.
-    inter_session_receivers: Vec<crate::model::InterSessionReceiverRole>,
-    /// Reusable prompt templates loaded from effective harness settings.
-    custom_prompts: Vec<tau_proto::HarnessCustomPrompt>,
-    /// Runtime role overrides loaded from settings.
-    role_overrides: HashMap<String, tau_config::settings::AgentRole>,
-    /// Harness-owned declarative tool tag policy.
-    tool_policy: tau_config::settings::ToolPolicy,
+    /// Fully initialized central runtime I/O ownership.
+    runtime_io: RuntimeIoState,
+    /// Fully initialized session binding and persistence ownership.
+    session_runtime: SessionRuntimeState,
+    /// Effective startup configuration retained by the harness.
+    config: HarnessConfigState,
     /// Inclusive effective bounds for activating-input `wait` calls.
     input_wait_timeout_bounds: (u64, u64),
     /// Approved disabled-by-default Provider cache refresh policy.
     provider_cache_refresh: tau_config::settings::ProviderCacheRefresh,
-    /// Initially selected role name.
-    selected_role: String,
-    /// Initially selected model, if any provider metadata can resolve one.
-    selected_model: Option<ModelId>,
-    /// Template used to mint new agent ids.
-    agent_id_template: String,
-    /// Template used to display newly created agents.
-    agent_display_name_template: Option<String>,
     /// Loaded system prompt templates keyed by template name.
     system_prompt_templates: HashMap<String, String>,
 }
@@ -136,100 +95,66 @@ impl Harness {
     #[cfg(any(test, feature = "echo-agent"))]
     pub(crate) fn enable_echo_tool_for_tests(&mut self) {
         let echo = tau_proto::ToolName::new("echo");
-        for role in self.available_roles.values_mut() {
+        for role in self.config.available_roles.values_mut() {
             if !role.enable_tools.iter().any(|tool| tool == &echo) {
                 role.enable_tools.push(echo.clone());
             }
         }
     }
     fn from_base_parts(parts: HarnessBaseParts) -> Self {
-        let initial_session_id = parts.current_session_id.clone();
+        let initial_session_id = parts.session_runtime.current_session_id.clone();
         Self {
-            tx: parts.tx,
-            rx: parts.rx,
-            component_ingress_tx: parts.component_ingress_tx,
-            component_ingress: parts.component_ingress,
-            pending_runtime_event: None,
-            #[cfg(test)]
-            runtime_event_receive_cut: None,
-            bus: parts.bus,
-            registry: ToolRegistry::new(),
-            action_registry: ActionRegistry::new(),
-            internal_tool_handlers: Vec::new(),
-            state_dir: parts.state_dir,
-            provider_settings_snapshots: BTreeMap::new(),
-            accepted_harness_settings: parts.harness_settings,
-            store: parts.store,
-            agent_store: parts.agent_store,
-            storage_mode: parts.storage_mode,
-            runtime_harness_path: None,
-            project_root: parts.project_root,
-            current_session_id: parts.current_session_id,
-            current_session_generation: 0,
-            current_session_start_reason: parts.current_session_start_reason,
-            tool_runtime: ToolRuntimeState::default(),
-            event_log: EventLog::new(),
-            agent_registry: AgentRegistryState {
-                agents: HashMap::new(),
-                agent_routes: HashMap::new(),
-                next_runtime_incarnation: 1,
-                next_initialization_id: 1,
-                accounting_runtime_id: accounting_runtime_id(rand::random::<u64>()),
-                id_rng: StdRng::from_entropy(),
-                creator_topology: AgentCreatorTopology::default(),
-                cost_ledger: AgentCostLedger::default(),
-                precommitted_starts: HashSet::new(),
-                session_loaded: HashSet::new(),
-                session_ever_loaded: HashSet::new(),
-                roster_loaded: HashSet::new(),
-                roster_ever_loaded: HashSet::new(),
-                roster_valid: true,
-                navigation_modes: HashMap::new(),
-                stopped_ids: HashSet::new(),
-                restored_unavailable: HashMap::new(),
-                pending_builtin_delegates: HashMap::new(),
-                pending_start_requests: VecDeque::new(),
+            runtime_io: parts.runtime_io,
+            session_runtime: parts.session_runtime,
+            config: parts.config,
+            tool_routing: ToolRoutingState {
+                registry: ToolRegistry::new(),
+                action_registry: ActionRegistry::new(),
+                internal_tool_handlers: Vec::new(),
+                tool_runtime: ToolRuntimeState::default(),
+            },
+            agent_runtime: AgentRuntimeState {
+                agent_registry: AgentRegistryState {
+                    agents: HashMap::new(),
+                    agent_routes: HashMap::new(),
+                    next_runtime_incarnation: 1,
+                    next_initialization_id: 1,
+                    accounting_runtime_id: accounting_runtime_id(rand::random::<u64>()),
+                    id_rng: StdRng::from_entropy(),
+                    creator_topology: AgentCreatorTopology::default(),
+                    cost_ledger: AgentCostLedger::default(),
+                    precommitted_starts: HashSet::new(),
+                    session_loaded: HashSet::new(),
+                    session_ever_loaded: HashSet::new(),
+                    roster_loaded: HashSet::new(),
+                    roster_ever_loaded: HashSet::new(),
+                    roster_valid: true,
+                    navigation_modes: HashMap::new(),
+                    stopped_ids: HashSet::new(),
+                    restored_unavailable: HashMap::new(),
+                    pending_builtin_delegates: HashMap::new(),
+                    pending_start_requests: VecDeque::new(),
+                },
+                agent_watch: AgentWatchState::default(),
+                subagents: SubagentToolState::with_input_wait_timeout_bounds(
+                    parts.input_wait_timeout_bounds,
+                ),
+                agent_runtime_indicators: HashMap::new(),
+            },
+            prompt_coordination: PromptCoordinationState {
+                prompt_runtime: PromptRuntimeState::default(),
+                compaction_runtime: CompactionRuntimeState::default(),
+                context_discovery: ContextDiscoveryState::new(
+                    initial_session_id,
+                    parts.system_prompt_templates,
+                ),
+                pending_notices: PendingPromptNoticeState::default(),
+                canceled_prompts: HashSet::new(),
             },
             ui_runtime: UiRuntimeState::default(),
             peer_messaging: PeerMessagingState::default(),
-            lifecycle_messages: Vec::new(),
-            replayable_harness_notices: Vec::new(),
             extensions: ExtensionRuntimeState::default(),
-            prompt_runtime: PromptRuntimeState::default(),
-            user_interaction_order: HashMap::new(),
-            next_user_interaction_order: 1,
-            precommitted_user_interactions: HashMap::new(),
-            agent_watch: AgentWatchState::default(),
-            last_live_egress_lag_warning: None,
-            turn_state: TurnState::Idle,
-            session_init_progress_generation: SessionInitProgressGeneration::default(),
-            debug_log: None,
-            debug_log_poisoned: false,
-            publication: PublicationState::default(),
             provider_runtime: ProviderRuntimeState::new(parts.provider_cache_refresh),
-            available_roles: parts.available_roles,
-            disabled_role_reasons: HashMap::new(),
-            available_role_groups: parts.available_role_groups,
-            inter_session_receivers: parts.inter_session_receivers,
-            custom_prompts: parts.custom_prompts,
-            role_overrides: parts.role_overrides,
-            tool_policy: parts.tool_policy,
-            agent_id_template: parts.agent_id_template,
-            agent_display_name_template: parts.agent_display_name_template,
-            selected_role: parts.selected_role,
-            selected_model: parts.selected_model,
-            current_session_state: CurrentSessionState::default(),
-            compaction_runtime: CompactionRuntimeState::default(),
-            context_discovery: ContextDiscoveryState::new(
-                initial_session_id,
-                parts.system_prompt_templates,
-            ),
-            pending_notices: PendingPromptNoticeState::default(),
-            agent_runtime_indicators: HashMap::new(),
-            canceled_prompts: HashSet::new(),
-            subagents: SubagentToolState::with_input_wait_timeout_bounds(
-                parts.input_wait_timeout_bounds,
-            ),
         }
     }
     #[cfg(any(test, feature = "echo-agent"))]
@@ -449,33 +374,59 @@ impl Harness {
             vec![SessionId::parse(eager_session_id).expect("known-safe SessionId must be valid")],
         );
         let mut harness = Self::from_base_parts(HarnessBaseParts {
-            tx,
-            rx,
-            component_ingress_tx,
-            component_ingress,
-            bus,
-            state_dir: state_dir.clone(),
-            harness_settings: harness_settings.clone(),
-            store,
-            agent_store,
-            storage_mode,
-            project_root,
-            current_session_id: eager_session_id
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            current_session_start_reason: launch.reason,
-            available_roles,
-            available_role_groups,
-            inter_session_receivers,
-            custom_prompts,
-            role_overrides,
-            tool_policy: harness_settings.tool_policy.clone(),
+            runtime_io: RuntimeIoState {
+                tx,
+                rx,
+                component_ingress_tx,
+                component_ingress,
+                pending_runtime_event: None,
+                #[cfg(test)]
+                runtime_event_receive_cut: None,
+                bus,
+                event_log: EventLog::new(),
+                replayable_harness_notices: Vec::new(),
+                last_live_egress_lag_warning: None,
+                debug_log: None,
+                debug_log_poisoned: false,
+                publication: PublicationState::default(),
+            },
+            session_runtime: SessionRuntimeState {
+                state_dir: state_dir.clone(),
+                store,
+                agent_store,
+                storage_mode,
+                runtime_harness_path: None,
+                project_root,
+                current_session_id: eager_session_id
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
+                current_session_generation: 0,
+                current_session_start_reason: launch.reason,
+                lifecycle_messages: Vec::new(),
+                user_interaction_order: HashMap::new(),
+                next_user_interaction_order: 1,
+                precommitted_user_interactions: HashMap::new(),
+                turn_state: TurnState::Idle,
+                session_init_progress_generation: SessionInitProgressGeneration::default(),
+                current_session_state: CurrentSessionState::default(),
+            },
+            config: HarnessConfigState {
+                provider_settings_snapshots: BTreeMap::new(),
+                accepted_harness_settings: harness_settings.clone(),
+                available_roles,
+                disabled_role_reasons: HashMap::new(),
+                available_role_groups,
+                inter_session_receivers,
+                custom_prompts,
+                role_overrides,
+                tool_policy: harness_settings.tool_policy.clone(),
+                selected_role,
+                selected_model,
+                agent_id_template: harness_settings.agent_id_template.clone(),
+                agent_display_name_template: harness_settings.agent_display_name_template.clone(),
+            },
             input_wait_timeout_bounds: harness_settings.wait_timeout_bounds(),
             provider_cache_refresh: harness_settings.provider_cache_refresh,
-            selected_role,
-            selected_model,
-            agent_id_template: harness_settings.agent_id_template.clone(),
-            agent_display_name_template: harness_settings.agent_display_name_template.clone(),
             system_prompt_templates,
         });
 
@@ -816,7 +767,7 @@ impl Harness {
             roles,
             project_root,
         })?;
-        harness.provider_settings_snapshots = provider_settings_snapshots;
+        harness.config.provider_settings_snapshots = provider_settings_snapshots;
         harness.extensions.enabled_names = config
             .extensions
             .keys()
@@ -924,34 +875,63 @@ impl Harness {
             })
             .collect();
         Ok(Self::from_base_parts(HarnessBaseParts {
-            tx,
-            rx,
-            component_ingress_tx,
-            component_ingress,
-            bus,
-            state_dir: parts.state_dir,
-            harness_settings: parts.harness_settings.clone(),
-            store: parts.store,
-            agent_store: parts.agent_store,
-            storage_mode: parts.launch.storage_mode,
-            project_root: parts.project_root,
-            current_session_id: parts
-                .eager_session_id
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
-            current_session_start_reason: parts.launch.reason,
-            available_roles: parts.roles.available_roles,
-            available_role_groups: parts.roles.available_role_groups,
-            inter_session_receivers: parts.roles.inter_session_receivers,
-            custom_prompts,
-            role_overrides: parts.roles.role_overrides,
-            tool_policy: parts.harness_settings.tool_policy.clone(),
+            runtime_io: RuntimeIoState {
+                tx,
+                rx,
+                component_ingress_tx,
+                component_ingress,
+                pending_runtime_event: None,
+                #[cfg(test)]
+                runtime_event_receive_cut: None,
+                bus,
+                event_log: EventLog::new(),
+                replayable_harness_notices: Vec::new(),
+                last_live_egress_lag_warning: None,
+                debug_log: None,
+                debug_log_poisoned: false,
+                publication: PublicationState::default(),
+            },
+            session_runtime: SessionRuntimeState {
+                state_dir: parts.state_dir,
+                store: parts.store,
+                agent_store: parts.agent_store,
+                storage_mode: parts.launch.storage_mode,
+                runtime_harness_path: None,
+                project_root: parts.project_root,
+                current_session_id: parts
+                    .eager_session_id
+                    .parse::<tau_proto::SessionId>()
+                    .expect("known-safe SessionId must be valid"),
+                current_session_generation: 0,
+                current_session_start_reason: parts.launch.reason,
+                lifecycle_messages: Vec::new(),
+                user_interaction_order: HashMap::new(),
+                next_user_interaction_order: 1,
+                precommitted_user_interactions: HashMap::new(),
+                turn_state: TurnState::Idle,
+                session_init_progress_generation: SessionInitProgressGeneration::default(),
+                current_session_state: CurrentSessionState::default(),
+            },
+            config: HarnessConfigState {
+                provider_settings_snapshots: BTreeMap::new(),
+                accepted_harness_settings: parts.harness_settings.clone(),
+                available_roles: parts.roles.available_roles,
+                disabled_role_reasons: HashMap::new(),
+                available_role_groups: parts.roles.available_role_groups,
+                inter_session_receivers: parts.roles.inter_session_receivers,
+                custom_prompts,
+                role_overrides: parts.roles.role_overrides,
+                tool_policy: parts.harness_settings.tool_policy.clone(),
+                selected_role: parts.roles.selected_role,
+                selected_model: parts.roles.selected_model,
+                agent_id_template: parts.harness_settings.agent_id_template.clone(),
+                agent_display_name_template: parts
+                    .harness_settings
+                    .agent_display_name_template
+                    .clone(),
+            },
             input_wait_timeout_bounds: parts.harness_settings.wait_timeout_bounds(),
             provider_cache_refresh: parts.harness_settings.provider_cache_refresh,
-            selected_role: parts.roles.selected_role,
-            selected_model: parts.roles.selected_model,
-            agent_id_template: parts.harness_settings.agent_id_template.clone(),
-            agent_display_name_template: parts.harness_settings.agent_display_name_template.clone(),
             system_prompt_templates: load_system_prompt_templates(parts.dirs.config_dir.as_deref()),
         }))
     }
@@ -983,13 +963,15 @@ impl Harness {
         eager_session_id: &str,
         startup_started_at: Instant,
     ) -> Result<(), HarnessError> {
-        if self.storage_mode.is_ephemeral() {
+        if self.session_runtime.storage_mode.is_ephemeral() {
             return Ok(());
         }
         // Commit canonical existence before creating session-owned diagnostics.
         // The creating lock and directory remain incomplete scaffolding if this
         // replacement fails.
-        self.store.record_session_meta(eager_session_id)?;
+        self.session_runtime
+            .store
+            .record_session_meta(eager_session_id)?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session metadata recorded");
         let _ = self.enable_debug_log(&sessions_dir.join(eager_session_id))?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "debug event log enabled");

@@ -15,7 +15,7 @@ fn prompt_fragment(name: &str, template: &str) -> Event {
 /// Register the effective workdir capability required to consume the shared
 /// shell fragment from one test contributor.
 fn register_workdir_capability(h: &mut Harness, source: &str) {
-    h.registry.register(
+    h.tool_routing.registry.register(
         &crate::test_connection_id(source),
         tau_proto::ToolSpec {
             name: tau_proto::ToolName::new(format!("{}_workdir", source.replace('-', "_"))),
@@ -34,7 +34,8 @@ fn register_workdir_capability(h: &mut Harness, source: &str) {
 
 /// Return the current template for one source/name projection slot.
 fn projected_template<'a>(h: &'a Harness, source: &str, name: &str) -> Option<&'a str> {
-    h.context_discovery
+    h.prompt_coordination
+        .context_discovery
         .prompt_fragments
         .get(source)
         .and_then(|fragments| fragments.get(name))
@@ -45,7 +46,7 @@ fn projected_template<'a>(h: &'a Harness, source: &str, name: &str) -> Option<&'
 fn committed_fragments(h: &Harness, name: &str) -> Vec<(Option<tau_proto::ConnectionId>, String)> {
     let mut events = Vec::new();
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::ExtPromptFragmentPublish(publish) = entry.event
             && publish.fragment.name == name

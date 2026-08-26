@@ -103,7 +103,7 @@ fn committed_request_family(
 ) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut events = Vec::new();
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = harness.event_log.get_next_from(seq) {
+    while let Some(entry) = harness.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         let matches = match &entry.event {
             Event::ToolRequest(event) => event.call_id.as_str() == call_id,
@@ -173,6 +173,7 @@ fn committed_request_routes_after_publication_with_harness_derived_source() {
 
     assert_eq!(
         harness
+            .tool_routing
             .tool_runtime
             .pending_tool_providers
             .get("peer-success")
@@ -264,8 +265,9 @@ fn request_preserves_persistence_and_stable_restore_publisher() {
     }
 
     let restore = harness
+        .session_runtime
         .store
-        .session_restore_events(harness.current_session_id.as_str())
+        .session_restore_events(harness.session_runtime.current_session_id.as_str())
         .expect("load restore events");
     let peer_requests = restore
         .iter()
@@ -347,12 +349,14 @@ fn stale_parked_request_commits_without_routing() {
     ));
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("stale-request")
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .completed_tool_calls
             .contains("stale-request")
@@ -456,12 +460,14 @@ fn unavailable_request_closes_with_ordered_harness_outcomes() {
     ));
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("unavailable-request")
     );
     assert!(
         harness
+            .tool_routing
             .tool_runtime
             .completed_tool_calls
             .contains("unavailable-request")
@@ -524,7 +530,13 @@ fn request_authority_and_empty_call_id_fail_before_commit() {
     }
 
     assert!(committed_request_family(&harness, "wrong-kind-call").is_empty());
-    assert!(!harness.tool_runtime.pending_tools.contains_key(""));
+    assert!(
+        !harness
+            .tool_routing
+            .tool_runtime
+            .pending_tools
+            .contains_key("")
+    );
 }
 
 /// A non-transient request whose target cannot enter the session restore stream
@@ -564,8 +576,9 @@ fn unloaded_agent_restore_failure_aborts_request_commit() {
 
     assert!(
         !harness
+            .session_runtime
             .store
-            .session_restore_events(harness.current_session_id.as_str())
+            .session_restore_events(harness.session_runtime.current_session_id.as_str())
             .expect("load restore events")
             .iter()
             .any(|record| {
@@ -583,12 +596,14 @@ fn unloaded_agent_restore_failure_aborts_request_commit() {
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("unloaded-request")
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .completed_tool_calls
             .contains("unloaded-request")
@@ -675,12 +690,14 @@ fn internal_request_publication_does_not_route_as_peer_input() {
     ));
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("internal-observation")
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .completed_tool_calls
             .contains("internal-observation")
@@ -748,18 +765,21 @@ fn rollover_commits_deferred_request_without_semantic_effects() {
     ));
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("rollover-deferred-request")
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tool_providers
             .contains_key("rollover-deferred-request")
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .completed_tool_calls
             .contains("rollover-deferred-request")
@@ -855,12 +875,14 @@ fn routed_peer_requests_complete_from_terminal_reports() {
             .expect("commit wrong-owner report without closure");
         assert!(
             harness
+                .tool_routing
                 .tool_runtime
                 .pending_tools
                 .contains_key(call_id.as_str())
         );
         assert_eq!(
             harness
+                .tool_routing
                 .tool_runtime
                 .pending_tool_providers
                 .get(call_id.as_str())
@@ -901,18 +923,21 @@ fn routed_peer_requests_complete_from_terminal_reports() {
         }));
         assert!(
             !harness
+                .tool_routing
                 .tool_runtime
                 .pending_tools
                 .contains_key(call_id.as_str())
         );
         assert!(
             !harness
+                .tool_routing
                 .tool_runtime
                 .pending_tool_providers
                 .contains_key(call_id.as_str())
         );
         assert!(
             harness
+                .tool_routing
                 .tool_runtime
                 .completed_tool_calls
                 .contains(call_id.as_str())
@@ -971,24 +996,28 @@ fn routed_peer_request_owner_disconnect_closes_and_cleans_up() {
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("disconnect-request")
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tool_providers
             .contains_key("disconnect-request")
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .peer_tool_requests
             .contains("disconnect-request")
     );
     assert!(
         harness
+            .tool_routing
             .tool_runtime
             .completed_tool_calls
             .contains("disconnect-request")
@@ -1044,7 +1073,7 @@ fn ambient_indicator_declarations_replace_and_union_through_protocol_intake() {
     );
     let roster = harness
         .build_session_agent_list(
-            &harness.current_session_id.clone(),
+            &harness.session_runtime.current_session_id.clone(),
             tau_proto::SessionAgentListScope::Current,
         )
         .expect("live roster");
@@ -1180,13 +1209,20 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
     );
     assert_eq!(
         harness
+            .tool_routing
             .tool_runtime
             .peer_internal_tool_agents
             .get("peer-internal"),
         Some(&cid)
     );
-    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 1);
-    assert_eq!(harness.agent_registry.agents[&cid].tools_total, 1);
+    assert_eq!(
+        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        1
+    );
+    assert_eq!(
+        harness.agent_runtime.agent_registry.agents[&cid].tools_total,
+        1
+    );
     assert!(harness.wait_tracks_call_for_test(&"peer-internal".into()));
     let transcript_nodes = default_agent_tree(&harness).nodes().len();
 
@@ -1208,11 +1244,15 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("peer-internal")
     );
-    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
+    assert_eq!(
+        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        0
+    );
     assert_eq!(default_agent_tree(&harness).nodes().len(), transcript_nodes);
 
     harness
@@ -1239,14 +1279,18 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("peer-internal-error")
     );
-    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
+    assert_eq!(
+        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        0
+    );
     assert_eq!(default_agent_tree(&harness).nodes().len(), transcript_nodes);
 
-    let total_before_message = harness.agent_registry.agents[&cid].tools_total;
+    let total_before_message = harness.agent_runtime.agent_registry.agents[&cid].tools_total;
     harness
         .handle_extension_event(
             "requester",
@@ -1266,12 +1310,16 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
             .any(|(_, event)| matches!(event, Event::ToolError(_)))
     );
     assert_eq!(
-        harness.agent_registry.agents[&cid].tools_total,
+        harness.agent_runtime.agent_registry.agents[&cid].tools_total,
         total_before_message + 1
     );
-    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
+    assert_eq!(
+        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        0
+    );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .peer_internal_tool_agents
             .contains_key("peer-internal-message")
@@ -1294,18 +1342,21 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("peer-internal-unload")
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .peer_internal_tool_agents
             .contains_key("peer-internal-unload")
     );
     assert!(
         harness
+            .tool_routing
             .tool_runtime
             .completed_tool_calls
             .contains("peer-internal-unload")
@@ -1419,6 +1470,7 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
         .expect("background peer-internal request");
     assert!(
         harness
+            .tool_routing
             .tool_runtime
             .tool_turn
             .is_backgrounded(&"peer-internal-background".into())
@@ -1432,8 +1484,14 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
                     if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
             ))
     );
-    assert_eq!(harness.agent_registry.agents[&cid].tools_total, 1);
-    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 1);
+    assert_eq!(
+        harness.agent_runtime.agent_registry.agents[&cid].tools_total,
+        1
+    );
+    assert_eq!(
+        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        1
+    );
 
     harness.finish_prebuilt_internal_tool_result(tau_proto::ToolResult {
         presentation: Default::default(),
@@ -1451,39 +1509,47 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
         Event::ToolBackgroundResult(result)
             if result.call_id.as_str() == "peer-internal-background"
     )));
-    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
+    assert_eq!(
+        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        0
+    );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("peer-internal-background")
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .peer_internal_tool_agents
             .contains_key("peer-internal-background")
     );
     assert!(
         harness
+            .tool_routing
             .tool_runtime
             .completed_tool_calls
             .contains("peer-internal-background")
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .tool_turn
             .is_backgrounded(&"peer-internal-background".into())
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .background_completion_targets
             .contains_key("peer-internal-background")
     );
     assert!(
-        harness.agent_registry.agents[&cid]
+        harness.agent_runtime.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .all(|prompt| !prompt.is_activating_background_completion())
@@ -1518,15 +1584,20 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
         Event::ToolBackgroundError(error)
             if error.call_id.as_str() == "peer-internal-background-error"
     )));
-    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
+    assert_eq!(
+        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        0
+    );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("peer-internal-background-error")
     );
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .background_completion_targets
             .contains_key("peer-internal-background-error")
@@ -1559,12 +1630,14 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
     )));
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("peer-internal-background-unload")
     );
     assert!(
         harness
+            .tool_routing
             .tool_runtime
             .completed_tool_calls
             .contains("peer-internal-background-unload")
@@ -1701,6 +1774,7 @@ fn request_interception_replace_and_drop_control_downstream_work() {
     ));
     assert!(
         harness
+            .tool_routing
             .tool_runtime
             .completed_tool_calls
             .contains("replace-final")
@@ -1726,6 +1800,7 @@ fn request_interception_replace_and_drop_control_downstream_work() {
     assert!(committed_request_family(&harness, "dropped-request").is_empty());
     assert!(
         !harness
+            .tool_routing
             .tool_runtime
             .pending_tools
             .contains_key("dropped-request")

@@ -27,7 +27,7 @@ fn unset_request(agent_id: &tau_proto::AgentId) -> Event {
 fn metadata_commits(h: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)> {
     let mut commits = Vec::new();
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches!(
             entry.event,
@@ -49,7 +49,10 @@ fn configured_extension_request_precedes_canonical_fact() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_registry.session_loaded.insert(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
+        .session_loaded
+        .insert(agent_id.clone());
     connect_ready_configured_extension(
         &mut h,
         "requester",
@@ -94,7 +97,10 @@ fn rollover_metadata_request_is_observation_only() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_registry.session_loaded.insert(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
+        .session_loaded
+        .insert(agent_id.clone());
     connect_ready_configured_extension(
         &mut h,
         "requester",
@@ -142,7 +148,10 @@ fn metadata_authority_is_exact_and_canonical_facts_are_harness_owned() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_registry.session_loaded.insert(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
+        .session_loaded
+        .insert(agent_id.clone());
 
     let kinds = [
         tau_proto::ClientKind::Provider,
@@ -240,7 +249,10 @@ fn stale_extension_request_has_no_canonical_successor() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_registry.session_loaded.insert(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
+        .session_loaded
+        .insert(agent_id.clone());
     connect_ready_configured_extension(
         &mut h,
         "requester",
@@ -293,7 +305,10 @@ fn disconnected_ui_request_has_no_canonical_successor() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_registry.session_loaded.insert(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
+        .session_loaded
+        .insert(agent_id.clone());
     connect_test_client_with_origin(
         &mut h,
         "ui",
@@ -317,7 +332,9 @@ fn disconnected_ui_request_has_no_canonical_successor() {
         set_request(&agent_id, &crate::test_connection_id("stale-ui"), None),
     )
     .expect("park UI request");
-    h.bus.disconnect(&crate::test_connection_id("ui"));
+    h.runtime_io
+        .bus
+        .disconnect(&crate::test_connection_id("ui"));
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -375,7 +392,10 @@ fn invalid_request_replacement_commits_without_original_mutation() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_registry.session_loaded.insert(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
+        .session_loaded
+        .insert(agent_id.clone());
     connect_ready_configured_extension(
         &mut h,
         "requester",
@@ -431,7 +451,10 @@ fn tokened_request_preserves_identity_and_reaches_canonical_echo() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
     let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_registry.session_loaded.insert(agent_id.clone());
+    h.agent_runtime
+        .agent_registry
+        .session_loaded
+        .insert(agent_id.clone());
     connect_ready_configured_extension(
         &mut h,
         "requester",

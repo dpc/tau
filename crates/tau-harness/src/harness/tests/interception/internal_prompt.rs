@@ -31,7 +31,7 @@ fn connect_internal_prompt_interceptor(h: &mut Harness) {
 /// Return whether one source committed an event matching the predicate.
 fn source_committed(h: &Harness, source: &str, predicate: impl Fn(&Event) -> bool) -> bool {
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
             return true;
@@ -51,7 +51,7 @@ fn first_committed_matching(
     predicate: impl Fn(&Event) -> bool,
 ) -> crate::event_log::LogEntry {
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(seq) {
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if predicate(&entry.event) {
             return entry;
@@ -262,9 +262,10 @@ fn configured_kinds_have_authority_but_unconfigured_and_socket_do_not() {
         "socket-origin",
         tau_proto::ClientKind::Tool,
     );
-    h.bus
+    h.runtime_io
+        .bus
         .disconnect(&crate::test_connection_id("socket-origin"));
-    h.bus.connect(Connection::new(
+    h.runtime_io.bus.connect(Connection::new(
         PendingConnectionMetadata {
             id: Some(crate::test_connection_id("socket-origin")),
             name: crate::test_extension_name("socket-origin"),

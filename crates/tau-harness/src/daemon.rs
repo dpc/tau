@@ -634,7 +634,7 @@ fn run_embedded_message_with_options_and_internal_tools_inner(
         }
     };
     harness.shutdown()?;
-    outcome.lifecycle_messages = harness.lifecycle_messages.clone();
+    outcome.lifecycle_messages = harness.session_runtime.lifecycle_messages.clone();
     Ok(outcome)
 }
 
@@ -697,7 +697,7 @@ pub fn run_embedded_message_with_echo(
         }
     };
     harness.shutdown()?;
-    outcome.lifecycle_messages = harness.lifecycle_messages.clone();
+    outcome.lifecycle_messages = harness.session_runtime.lifecycle_messages.clone();
     Ok(outcome)
 }
 
@@ -737,7 +737,7 @@ pub fn run_embedded_message_with_test_provider(
         }
     };
     harness.shutdown()?;
-    outcome.lifecycle_messages = harness.lifecycle_messages.clone();
+    outcome.lifecycle_messages = harness.session_runtime.lifecycle_messages.clone();
     Ok(outcome)
 }
 
@@ -760,10 +760,26 @@ fn disable_echo_tool_context_gate_for_tests(harness: &mut Harness) {
     // Echo-mode harnesses use the shell extension only to satisfy deterministic
     // tool calls. Keep those helpers focused on provider/tool behavior instead
     // of deferring prompts for shell's cwd context acknowledgement.
-    harness.context_discovery.agent_context_providers.clear();
-    harness.context_discovery.pending_agents.clear();
-    harness.context_discovery.frozen_agents.clear();
-    harness.context_discovery.initialized_agent_context.clear();
+    harness
+        .prompt_coordination
+        .context_discovery
+        .agent_context_providers
+        .clear();
+    harness
+        .prompt_coordination
+        .context_discovery
+        .pending_agents
+        .clear();
+    harness
+        .prompt_coordination
+        .context_discovery
+        .frozen_agents
+        .clear();
+    harness
+        .prompt_coordination
+        .context_discovery
+        .initialized_agent_context
+        .clear();
 }
 
 /// Runs a foreground daemon that accepts socket clients.
@@ -847,7 +863,7 @@ pub fn run_daemon_with_internal_tools(
     // ast-grep-ignore: debug-assert-expression-must-not-mutate
     debug_assert!(initial_client_id.is_none());
 
-    let tx = harness.tx.clone();
+    let tx = harness.runtime_io.tx.clone();
     let forwarder = listener_handle.spawn_forwarder(tx)?;
 
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
@@ -893,7 +909,7 @@ pub fn run_daemon_with_echo(
     disable_echo_tool_context_gate_for_tests(&mut harness);
     harness.enable_echo_tool_for_tests();
 
-    let tx = harness.tx.clone();
+    let tx = harness.runtime_io.tx.clone();
     let forwarder = listener_handle.spawn_forwarder(tx)?;
 
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
@@ -1422,7 +1438,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     )?;
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "daemon ready markers written");
 
-    let tx = harness.tx.clone();
+    let tx = harness.runtime_io.tx.clone();
     let listener_handle = ListenerHandle::Bound(listener);
     let forwarder = notify_startup_error_after_accept(
         listener_handle.spawn_forwarder(tx),

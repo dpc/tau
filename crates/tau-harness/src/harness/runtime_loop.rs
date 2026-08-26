@@ -28,11 +28,13 @@ impl Harness {
     /// retroactively. See
     /// `SPEC-session-discovery-declarations-and-readiness`.
     pub(super) fn wait_for_session_init(&mut self) -> Result<(), HarnessError> {
-        if self.turn_state.is_idle() {
+        if self.session_runtime.turn_state.is_idle() {
             return Ok(());
         }
-        let deadline =
-            SessionInitDeadline::new(Instant::now(), self.session_init_progress_generation);
+        let deadline = SessionInitDeadline::new(
+            Instant::now(),
+            self.session_runtime.session_init_progress_generation,
+        );
         self.wait_for_session_init_with_deadline(deadline)
     }
 
@@ -45,7 +47,7 @@ impl Harness {
         &mut self,
         mut deadline: SessionInitDeadline,
     ) -> Result<(), HarnessError> {
-        while !self.turn_state.is_idle() {
+        while !self.session_runtime.turn_state.is_idle() {
             let harness_evt = self
                 .recv_session_init_event_until(deadline.next_deadline())
                 .map_err(|_| HarnessError::SessionInitTimeout)?;
@@ -84,11 +86,14 @@ impl Harness {
                 }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
-            let providers_outstanding = !self.turn_state.is_idle();
+            let providers_outstanding = !self.session_runtime.turn_state.is_idle();
             if !providers_outstanding {
                 return Ok(());
             }
-            deadline.observe_progress(received_at, self.session_init_progress_generation);
+            deadline.observe_progress(
+                received_at,
+                self.session_runtime.session_init_progress_generation,
+            );
             if deadline.expired(Instant::now()) {
                 return Err(HarnessError::SessionInitTimeout);
             }
@@ -108,7 +113,7 @@ impl Harness {
         deadline: Instant,
     ) -> Result<HarnessEvent, mpsc::RecvTimeoutError> {
         self.process_runtime_deadlines();
-        match self.rx.try_recv() {
+        match self.runtime_io.rx.try_recv() {
             Ok(event) => Ok(self.expand_component_ingress_wake(event)),
             Err(mpsc::TryRecvError::Empty) => self.recv_event_until(deadline),
             Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::RecvTimeoutError::Disconnected),
@@ -118,10 +123,18 @@ impl Harness {
     pub(super) fn ensure_selected_role_available_after_required_skill_validation(
         &self,
     ) -> Result<(), HarnessError> {
-        if self.available_roles.contains_key(&self.selected_role) {
+        if self
+            .config
+            .available_roles
+            .contains_key(&self.config.selected_role)
+        {
             return Ok(());
         }
-        if let Some(reason) = self.disabled_role_reasons.get(&self.selected_role) {
+        if let Some(reason) = self
+            .config
+            .disabled_role_reasons
+            .get(&self.config.selected_role)
+        {
             return Err(HarnessError::Participant(format!(
                 "{}; selected/default role is unavailable",
                 reason.message
@@ -129,7 +142,7 @@ impl Harness {
         }
         Err(HarnessError::Participant(format!(
             "selected/default role `{}` is unavailable",
-            self.selected_role
+            self.config.selected_role
         )))
     }
 
@@ -162,7 +175,7 @@ impl Harness {
                 .next_extension_startup_deadline()
                 .unwrap_or_else(|| Instant::now() + STARTUP_TIMEOUT);
             let harness_evt = if deadline <= Instant::now() {
-                match self.rx.try_recv() {
+                match self.runtime_io.rx.try_recv() {
                     Ok(event) => self.expand_component_ingress_wake(event),
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
                         return self.handle_extensions_startup_timeout();
@@ -452,11 +465,11 @@ impl Harness {
         {
             return RuntimeEventWait::DeadlineElapsed;
         }
-        if let Some(event) = self.pending_runtime_event.take() {
+        if let Some(event) = self.runtime_io.pending_runtime_event.take() {
             return RuntimeEventWait::Event(event);
         }
         if self.has_pending_long_wait_notifications() {
-            return match self.rx.try_recv() {
+            return match self.runtime_io.rx.try_recv() {
                 Ok(event) => RuntimeEventWait::Event(self.expand_component_ingress_wake(event)),
                 Err(mpsc::TryRecvError::Empty) => RuntimeEventWait::DeadlineElapsed,
                 Err(mpsc::TryRecvError::Disconnected) => RuntimeEventWait::Disconnected,
@@ -464,12 +477,13 @@ impl Harness {
         }
         if let Some(deadline) = self.next_runtime_deadline() {
             let timeout = deadline.saturating_duration_since(Instant::now());
-            match self.rx.recv_timeout(timeout) {
+            match self.runtime_io.rx.recv_timeout(timeout) {
                 Ok(event) => {
                     let event = self.expand_component_ingress_wake(event);
-                    self.pending_runtime_event = Some(event);
+                    self.runtime_io.pending_runtime_event = Some(event);
                     #[cfg(test)]
                     let now = self
+                        .runtime_io
                         .runtime_event_receive_cut
                         .take()
                         .unwrap_or_else(Instant::now);
@@ -483,7 +497,8 @@ impl Harness {
                         RuntimeEventWait::DeadlineElapsed
                     } else {
                         RuntimeEventWait::Event(
-                            self.pending_runtime_event
+                            self.runtime_io
+                                .pending_runtime_event
                                 .take()
                                 .expect("received event remains held"),
                         )
@@ -496,7 +511,8 @@ impl Harness {
                 Err(mpsc::RecvTimeoutError::Disconnected) => RuntimeEventWait::Disconnected,
             }
         } else {
-            self.rx
+            self.runtime_io
+                .rx
                 .recv()
                 .map(|event| RuntimeEventWait::Event(self.expand_component_ingress_wake(event)))
                 .unwrap_or(RuntimeEventWait::Disconnected)
@@ -508,32 +524,47 @@ impl Harness {
     }
 
     pub(super) fn process_runtime_deadlines_at(&mut self, now: Instant) {
-        let max_live_lag = self.event_log.max_consumer_lag();
+        let max_live_lag = self.runtime_io.event_log.max_consumer_lag();
         if LIVE_EGRESS_LAG_WARNING_POSITIONS <= max_live_lag
-            && self.last_live_egress_lag_warning.is_none_or(|last| {
-                LIVE_EGRESS_LAG_WARNING_INTERVAL <= now.saturating_duration_since(last)
-            })
+            && self
+                .runtime_io
+                .last_live_egress_lag_warning
+                .is_none_or(|last| {
+                    LIVE_EGRESS_LAG_WARNING_INTERVAL <= now.saturating_duration_since(last)
+                })
         {
-            self.last_live_egress_lag_warning = Some(now);
+            self.runtime_io.last_live_egress_lag_warning = Some(now);
             self.emit_info_important(&format!(
                 "a connected component is pathologically behind the live event stream ({max_live_lag} pending positions); delivery remains active and retention may grow"
             ));
         }
         // ast-grep-ignore: debug-assert-expression-must-not-mutate
-        debug_assert!(self.agent_watch.long_wait_materialization_budget.is_none());
-        self.agent_watch.long_wait_materialization_budget =
+        debug_assert!(
+            self.agent_runtime
+                .agent_watch
+                .long_wait_materialization_budget
+                .is_none()
+        );
+        self.agent_runtime
+            .agent_watch
+            .long_wait_materialization_budget =
             Some(subagents_tool::MAX_WORK_WAIT_THRESHOLDS_PER_RUNTIME_CYCLE);
         self.drain_pending_long_wait_notifications_for_scheduler();
         loop {
             // Drain one earliest deadline cohort at a time. Supplying that
             // cohort's deadline, rather than `now`, preserves deterministic
             // ordering when the event loop wakes after several classes are due.
-            let background = self.tool_runtime.tool_turn.next_background_deadline();
+            let background = self
+                .tool_routing
+                .tool_runtime
+                .tool_turn
+                .next_background_deadline();
             let input = self.next_input_wait_deadline();
             let work_wait = self.next_work_wait_threshold_deadline();
             let extension = self.next_extension_deadline();
             let cache = self.next_cache_refresh_deadline();
             let preview = self
+                .prompt_coordination
                 .context_discovery
                 .pending_rendered_prompts
                 .values()
@@ -548,6 +579,7 @@ impl Harness {
             };
             if work_wait == Some(deadline) {
                 let budget = self
+                    .agent_runtime
                     .agent_watch
                     .long_wait_materialization_budget
                     .unwrap_or_default();
@@ -569,17 +601,23 @@ impl Harness {
                 self.process_extension_deadlines_at(deadline, now);
             }
         }
-        self.agent_watch.long_wait_materialization_budget = None;
+        self.agent_runtime
+            .agent_watch
+            .long_wait_materialization_budget = None;
     }
 
     pub(super) fn next_runtime_deadline(&self) -> Option<Instant> {
         [
-            self.tool_runtime.tool_turn.next_background_deadline(),
+            self.tool_routing
+                .tool_runtime
+                .tool_turn
+                .next_background_deadline(),
             self.next_input_wait_deadline(),
             self.next_work_wait_threshold_deadline(),
             self.next_extension_deadline(),
             self.next_cache_refresh_deadline(),
-            self.context_discovery
+            self.prompt_coordination
+                .context_discovery
                 .pending_rendered_prompts
                 .values()
                 .map(|pending| pending.deadline)
@@ -605,7 +643,7 @@ impl Harness {
                 "dispatching bounded Provider cache refresh",
             );
             let refresh_id = refresh.request.refresh_id.clone();
-            let delivered = self.bus.send_to(
+            let delivered = self.runtime_io.bus.send_to(
                 &refresh.connection_id,
                 Some(crate::harness::harness_connection_id()),
                 HarnessOutputMessage::deliver(Event::AgentCacheRefreshRequested(refresh.request)),
@@ -623,7 +661,7 @@ impl Harness {
         cancellations: Vec<crate::provider_cache_residency::CacheRefreshCancel>,
     ) {
         for cancellation in cancellations {
-            let _ = self.bus.send_to(
+            let _ = self.runtime_io.bus.send_to(
                 &cancellation.connection_id,
                 Some(crate::harness::harness_connection_id()),
                 HarnessOutputMessage::deliver(Event::AgentCacheRefreshCancelRequested(
@@ -768,6 +806,7 @@ impl Harness {
             return Ok(());
         }
         let origin = self
+            .runtime_io
             .bus
             .connection(&connection_id)
             .map(|m| m.origin.clone());
@@ -821,6 +860,7 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let was_provider = self.is_provider_extension(&connection_id);
         let was_socket = self
+            .runtime_io
             .bus
             .connection(&connection_id)
             .is_some_and(|m| m.origin == ConnectionOrigin::Socket);
@@ -881,16 +921,16 @@ impl Harness {
                 crate::event::spawn_initial_stdio_writer_thread(write, None)
             }
         };
-        let conn_id = self.bus.reserve_connection_id();
+        let conn_id = self.runtime_io.bus.reserve_connection_id();
         let sink = ChannelSink::new(
             &writer_tx,
-            path_std_sync::Arc::clone(&self.event_log),
-            self.tx.clone(),
+            path_std_sync::Arc::clone(&self.runtime_io.event_log),
+            self.runtime_io.tx.clone(),
             conn_id.clone(),
         )
         .map_err(|error| HarnessError::Io(io::Error::other(error)))?;
         let consumer = sink.handle();
-        let connected_id = self.bus.connect(Connection::new(
+        let connected_id = self.runtime_io.bus.connect(Connection::new(
             PendingConnectionMetadata {
                 id: Some(conn_id.clone()),
                 name: tau_proto::ExtensionName::parse("socket-ui")
@@ -908,7 +948,11 @@ impl Harness {
         self.ui_runtime
             .client_writers
             .insert(conn_id.clone(), lifecycle);
-        spawn_reader_thread(conn_id.clone(), read, self.component_ingress_tx.clone());
+        spawn_reader_thread(
+            conn_id.clone(),
+            read,
+            self.runtime_io.component_ingress_tx.clone(),
+        );
         Ok(conn_id)
     }
 
@@ -920,7 +964,7 @@ impl Harness {
         let Some(client_id) = client_id else {
             return;
         };
-        let _ = self.bus.send_to(
+        let _ = self.runtime_io.bus.send_to(
             client_id,
             None,
             HarnessOutputMessage::Disconnect(Disconnect {

@@ -248,13 +248,14 @@ impl Harness {
         action: tau_proto::UiRoleUpdateAction,
     ) -> Option<tau_config::settings::AgentRole> {
         let mut next_role = self
+            .config
             .available_roles
             .get(role_name)
             .cloned()
             .unwrap_or_default();
         let effective_params = model_for_role(
             &self.provider_runtime.model_info,
-            &self.available_roles,
+            &self.config.available_roles,
             role_name,
         )
         .map(|model| self.params_for_role_model(role_name, &model))
@@ -344,21 +345,28 @@ impl Harness {
         Some(next_role)
     }
     pub(super) fn reconcile_selected_model_with_available(&mut self) {
-        let previous_model = self.selected_model.clone();
-        self.selected_model = select_model_for_role(
+        let previous_model = self.config.selected_model.clone();
+        self.config.selected_model = select_model_for_role(
             &self.provider_runtime.model_info,
-            &self.available_roles,
-            &self.selected_role,
+            &self.config.available_roles,
+            &self.config.selected_role,
         );
-        if previous_model != self.selected_model {
-            self.current_session_state.context_input_tokens = None;
-            self.current_session_state.context_cached_tokens = None;
-            self.current_session_state.context_percent_used = None;
+        if previous_model != self.config.selected_model {
+            self.session_runtime
+                .current_session_state
+                .context_input_tokens = None;
+            self.session_runtime
+                .current_session_state
+                .context_cached_tokens = None;
+            self.session_runtime
+                .current_session_state
+                .context_percent_used = None;
         }
     }
     pub(super) fn refresh_provider_models_and_publish_state(&mut self) {
         let had_provider_models = !self.provider_runtime.model_info.is_empty();
         let had_routable_model = self
+            .config
             .selected_model
             .as_ref()
             .is_some_and(|model| self.provider_runtime.model_routes.contains_key(model));
@@ -368,10 +376,11 @@ impl Harness {
         self.publish_available_model_state();
         let has_provider_models = !self.provider_runtime.model_info.is_empty();
         let has_routable_model = self
+            .config
             .selected_model
             .as_ref()
             .is_some_and(|model| self.provider_runtime.model_routes.contains_key(model));
-        if self.turn_state.is_idle()
+        if self.session_runtime.turn_state.is_idle()
             && ((!had_routable_model && has_routable_model)
                 || (!had_provider_models && has_provider_models))
         {
@@ -380,6 +389,7 @@ impl Harness {
     }
     pub(super) fn reconcile_agent_context_usage_models(&mut self) {
         let resolutions: Vec<_> = self
+            .agent_runtime
             .agent_registry
             .agents
             .iter()
@@ -409,7 +419,7 @@ impl Harness {
             }
             let context_window =
                 context_window_for_model(&self.provider_runtime.model_info, &usage_model);
-            if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
+            if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 conv.context_percent_used = match (context_window, conv.context_input_tokens) {
                     (Some(window), Some(tokens)) => Some(context_percent_used(tokens, window)),
                     _ => None,
@@ -429,11 +439,11 @@ impl Harness {
             Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
                 roles: role_infos(
                     &self.provider_runtime.model_info,
-                    &self.available_roles,
+                    &self.config.available_roles,
                     &self.provider_runtime.available_models,
                 ),
                 groups: self.current_role_groups(),
-                custom_prompts: self.custom_prompts.clone(),
+                custom_prompts: self.config.custom_prompts.clone(),
             }),
         );
         self.publish_delegate_roles_context();
@@ -442,17 +452,17 @@ impl Harness {
     pub(super) fn current_role_groups(&self) -> Vec<tau_proto::HarnessRoleGroup> {
         let mut grouped = HashSet::new();
         let mut groups = Vec::new();
-        for group in &self.available_role_groups {
+        for group in &self.config.available_role_groups {
             let mut roles: Vec<_> = group
                 .roles
                 .iter()
-                .filter(|role| self.available_roles.contains_key(*role))
+                .filter(|role| self.config.available_roles.contains_key(*role))
                 .inspect(|role| {
                     grouped.insert((*role).clone());
                 })
                 .cloned()
                 .collect();
-            crate::model::sort_role_group_roles(&self.available_roles, &mut roles);
+            crate::model::sort_role_group_roles(&self.config.available_roles, &mut roles);
             if !roles.is_empty() {
                 groups.push(tau_proto::HarnessRoleGroup {
                     name: group.name.clone(),
@@ -461,6 +471,7 @@ impl Harness {
             }
         }
         let mut ungrouped: Vec<_> = self
+            .config
             .available_roles
             .keys()
             .filter(|role| !grouped.contains(*role))
@@ -478,7 +489,7 @@ impl Harness {
         groups
     }
     pub(super) fn publish_current_model_state(&mut self) {
-        let selected_model = self.selected_model.clone();
+        let selected_model = self.config.selected_model.clone();
         let (effort_levels, verbosity_levels, thinking_levels) =
             if let Some(model) = selected_model.as_ref() {
                 (
@@ -492,9 +503,13 @@ impl Harness {
         let context_window = selected_model
             .as_ref()
             .and_then(|model| context_window_for_model(&self.provider_runtime.model_info, model));
-        self.current_session_state.context_percent_used = match (
+        self.session_runtime
+            .current_session_state
+            .context_percent_used = match (
             context_window,
-            self.current_session_state.context_input_tokens,
+            self.session_runtime
+                .current_session_state
+                .context_input_tokens,
         ) {
             (Some(context_window), Some(input_tokens)) => {
                 Some(context_percent_used(input_tokens, context_window))
@@ -506,27 +521,36 @@ impl Harness {
             Event::HarnessRoleSelected(HarnessRoleSelected {
                 baseline_params: selected_model.as_ref().map(|model| {
                     baseline_params_for_selection(
-                        &self.accepted_harness_settings,
+                        &self.config.accepted_harness_settings,
                         &self.provider_runtime.model_info,
-                        &self.selected_role,
+                        &self.config.selected_role,
                         model,
                     )
                 }),
                 model_params: selected_model
                     .as_ref()
-                    .map(|model| self.params_for_role_model(&self.selected_role, model))
+                    .map(|model| self.params_for_role_model(&self.config.selected_role, model))
                     .unwrap_or_default(),
                 model: selected_model,
                 context_window,
-                role: self.selected_role.clone(),
+                role: self.config.selected_role.clone(),
             }),
         );
         self.publish_event(
             None,
             Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
-                input_tokens: self.current_session_state.context_input_tokens,
-                cached_tokens: self.current_session_state.context_cached_tokens,
-                percent_used: self.current_session_state.context_percent_used,
+                input_tokens: self
+                    .session_runtime
+                    .current_session_state
+                    .context_input_tokens,
+                cached_tokens: self
+                    .session_runtime
+                    .current_session_state
+                    .context_cached_tokens,
+                percent_used: self
+                    .session_runtime
+                    .current_session_state
+                    .context_percent_used,
             }),
         );
         self.publish_event(
