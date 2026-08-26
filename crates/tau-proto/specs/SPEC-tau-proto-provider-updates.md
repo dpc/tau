@@ -26,6 +26,11 @@ it must not expose endpoints, credentials, accounts, or raw transport errors.
 `provider.response_finished.output_items` remains the complete durable response
 and replay source.
 
+The protocol preserves every canonical update and its order. A UI renderer may
+sample an already-delivered adjacent run into one projection without changing
+the DTO, transport, provider sampling, or durable terminal authority; such a
+consumer-local fold must preserve delta order and the first/last stats span.
+
 The same report/canonical split covers submitted, finished, cache-diagnostic, and
 directed retry-result payloads. The report variants reuse their canonical DTOs but have
 distinct `_reported` wire names; there is no canonical provider retry-result event. See

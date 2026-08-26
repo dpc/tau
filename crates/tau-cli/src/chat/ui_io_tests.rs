@@ -18,8 +18,9 @@ fn renderer_scheduler_channels(
 ) {
     let (wake_tx, wake_rx) = tau_blocking_notify_channel::channel();
     let (remote_tx, remote_rx) = RemoteRendererSender::channel(remote_capacity, wake_tx.clone());
-    let (local_tx, local_rx) = LocalRendererSender::channel(admitted, arbiter.clone(), wake_tx);
-    let scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter, wake_rx);
+    let (local_tx, local_rx) =
+        LocalRendererSender::channel(admitted.clone(), arbiter.clone(), wake_tx);
+    let scheduler = RendererCommandScheduler::new(remote_rx, local_rx, admitted, arbiter, wake_rx);
     (remote_tx, local_tx, scheduler)
 }
 
@@ -33,6 +34,7 @@ fn remote_bell(delivery_id: u64) -> RendererCmd {
         delivery_id,
         queue_bytes: 1,
         enqueued_at: Instant::now(),
+        folded_frames: Vec::new(),
     }
 }
 
@@ -113,6 +115,48 @@ fn renderer_byte_budget_blocks_and_releases_at_cap() {
     waiter.join().expect("byte waiter");
 }
 
+/// One folded projection releases and diagnoses every original item and byte
+/// permit exactly once, while the caller performs only one projection.
+#[test]
+fn folded_remote_release_accounts_for_every_original_frame_once() {
+    let budget = RendererByteBudget::new();
+    let queued_items = path_std_sync_atomic::AtomicUsize::new(3);
+    budget.acquire(2);
+    budget.acquire(3);
+    budget.acquire(5);
+    let mut diagnosed = Vec::new();
+    let mut projections = 0;
+
+    release_remote_queue_frames(
+        RendererQueueFrame {
+            delivery_id: 11,
+            queue_bytes: 2,
+            enqueued_at: Instant::now(),
+        },
+        vec![
+            RendererQueueFrame {
+                delivery_id: 12,
+                queue_bytes: 3,
+                enqueued_at: Instant::now(),
+            },
+            RendererQueueFrame {
+                delivery_id: 13,
+                queue_bytes: 5,
+                enqueued_at: Instant::now(),
+            },
+        ],
+        &queued_items,
+        &budget,
+        |delivery_id| diagnosed.push(delivery_id),
+    );
+    projections += 1;
+
+    assert_eq!(diagnosed, vec![11, 12, 13]);
+    assert_eq!(queued_items.load(Ordering::Acquire), 0);
+    assert_eq!(*budget.used.lock().expect(MUTEX_POISONED), 0);
+    assert_eq!(projections, 1);
+}
+
 /// A disconnect frame must consume the same byte and item permits as a
 /// delivery, including when it waits behind an exactly saturated budget.
 #[test]
@@ -160,6 +204,7 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
             delivery_id: 1,
             queue_bytes: 1,
             enqueued_at: Instant::now(),
+            folded_frames: Vec::new(),
         })
         .expect("remote delivery");
     remote_tx
@@ -239,14 +284,17 @@ fn renderer_admission_preserves_decoded_event_box() {
         &remote_admitted,
     ));
 
-    let (local_tx, local_rx) = LocalRendererSender::channel(
-        Arc::new(path_std_sync_atomic::AtomicU64::new(1)),
-        Arc::new(Mutex::new(())),
-        wake_tx,
-    );
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(1));
+    let (local_tx, local_rx) =
+        LocalRendererSender::channel(admitted.clone(), Arc::new(Mutex::new(())), wake_tx);
     drop(local_tx);
-    let mut scheduler =
-        RendererCommandScheduler::new(remote_rx, local_rx, Arc::new(Mutex::new(())), wake_rx);
+    let mut scheduler = RendererCommandScheduler::new(
+        remote_rx,
+        local_rx,
+        admitted,
+        Arc::new(Mutex::new(())),
+        wake_rx,
+    );
     let RendererCmd::Remote { event, .. } = scheduler
         .recv_timeout(Duration::from_millis(10))
         .expect("admitted remote delivery")
@@ -278,6 +326,7 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
             delivery_id: 1,
             queue_bytes: 1,
             enqueued_at: Instant::now(),
+            folded_frames: Vec::new(),
         })
         .expect("reserved remote");
 
@@ -314,6 +363,7 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
             delivery_id: 1,
             queue_bytes: 1,
             enqueued_at: Instant::now(),
+            folded_frames: Vec::new(),
         })
         .expect("later remote");
     let (start_tx, start_rx) = mpsc::channel();
@@ -493,8 +543,9 @@ fn renderer_scheduler_stale_wakes_cannot_extend_deadline() {
     let (wake_tx, wake_rx) = tau_blocking_notify_channel::channel();
     let (_remote_tx, remote_rx) = RemoteRendererSender::channel(1, wake_tx.clone());
     let (_local_tx, local_rx) =
-        LocalRendererSender::channel(admitted, arbiter.clone(), wake_tx.clone());
-    let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter, wake_rx);
+        LocalRendererSender::channel(admitted.clone(), arbiter.clone(), wake_tx.clone());
+    let mut scheduler =
+        RendererCommandScheduler::new(remote_rx, local_rx, admitted, arbiter, wake_rx);
     let mut hook_calls = 0;
     let mut before_each_wait = || {
         hook_calls += 1;
@@ -598,6 +649,7 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
             delivery_id: 1,
             queue_bytes: 1,
             enqueued_at: Instant::now(),
+            folded_frames: Vec::new(),
         })
         .expect("older remote");
     local_tx
@@ -617,6 +669,7 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
             delivery_id: 2,
             queue_bytes: 1,
             enqueued_at: Instant::now(),
+            folded_frames: Vec::new(),
         })
         .expect("later result");
 
@@ -662,6 +715,7 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
                 delivery_id,
                 queue_bytes: 1,
                 enqueued_at: Instant::now(),
+                folded_frames: Vec::new(),
             })
             .expect("remote delivery");
     }
@@ -714,6 +768,7 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
             delivery_id: 1,
             queue_bytes: RENDERER_QUEUE_MAX_BYTES,
             enqueued_at: Instant::now(),
+            folded_frames: Vec::new(),
         })
         .expect("fill real remote queue");
     let blocked_budget = budget.clone();
@@ -736,6 +791,7 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
                 delivery_id: 2,
                 queue_bytes: 1,
                 enqueued_at: Instant::now(),
+                folded_frames: Vec::new(),
             })
             .expect("blocked producer admitted");
     });

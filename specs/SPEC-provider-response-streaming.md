@@ -24,6 +24,13 @@ cadence, decides when to publish an update.
 
 `provider.response_finished.output_items` is the complete durable replacement and replay source. Consumers clear transient state when an attempt restarts or repetition is rejected, and replace rather than append that state when the terminal response arrives. A valid update observed after late subscription may create an ellipsis-prefixed transient block for an otherwise unknown live prompt. Stale, already-finished, or invalid prompt updates do not create transcript state.
 
+Transient delivery does not require a UI to draw every accepted intermediate
+sample. A renderer may immediately fold an already-delivered adjacent run for
+one prompt, provided it preserves delta order and stats endpoints and does not
+cross status, compaction, lifecycle, UI-control, or ordering barriers. This is a
+consumer-local projection choice; it does not change provider cadence,
+canonical publication, persistence, or wire delivery.
+
 Providers own transport-byte accounting and publish content-free previous/current cumulative `response_stats`; `previous` is the last sample actually emitted. The harness validates provider source and prompt ownership, derives the public agent id from harness state, and broadcasts accepted updates without becoming the accounting authority. Provider-authored errors, bodies, headers, prompt text, tool data, account identifiers, and secrets never enter public stats.
 
 Providers may also publish an immutable first-semantic-output duration in those

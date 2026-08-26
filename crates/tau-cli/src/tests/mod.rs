@@ -768,5 +768,6 @@ mod agent_navigation;
 mod cli_parsing;
 mod event_projection;
 mod prompt_input;
+mod renderer_update_folding;
 mod tool_status_rendering;
 mod transcript_rendering;

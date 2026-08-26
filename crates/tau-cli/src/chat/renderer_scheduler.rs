@@ -4,7 +4,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use tau_proto::{Event, ProviderResponseStats};
+
 use super::RendererCmd;
+use super::cold_attach_stager::RendererPresentation;
+
+#[cfg(test)]
+#[path = "renderer_scheduler/tests.rs"]
+mod tests;
 
 /// Bounded socket-to-renderer sender that wakes the shared command scheduler.
 pub(super) struct RemoteRendererSender {
@@ -139,12 +146,16 @@ impl Drop for LocalRendererSender {
 pub(super) struct RendererCommandScheduler {
     /// Bounded socket-to-renderer FIFO.
     remote_rx: mpsc::Receiver<RendererCmd>,
+    /// Count of remote commands that have reserved FIFO admission.
+    remote_admitted: Arc<AtomicU64>,
     /// Local commands carrying captured remote watermarks.
     local_rx: LocalRendererReceiver,
     /// Whether the remote producer has closed.
     remote_closed: bool,
     /// Number of remote commands returned to the renderer.
     remote_processed: u64,
+    /// One non-foldable command read while inspecting an adjacent run.
+    pending_remote: Option<RendererCmd>,
     /// Local command waiting for its captured remote prefix.
     pending_local: Option<LocalRendererCmd>,
     /// Serializes local enqueue with nonblocking cross-channel selection.
@@ -158,14 +169,17 @@ impl RendererCommandScheduler {
     pub(super) fn new(
         remote_rx: mpsc::Receiver<RendererCmd>,
         local_rx: LocalRendererReceiver,
+        remote_admitted: Arc<AtomicU64>,
         arbiter: Arc<Mutex<()>>,
         wake: tau_blocking_notify_channel::Receiver,
     ) -> Self {
         Self {
             remote_rx,
+            remote_admitted,
             local_rx,
             remote_closed: false,
             remote_processed: 0,
+            pending_remote: None,
             pending_local: None,
             arbiter,
             wake,
@@ -249,8 +263,8 @@ impl RendererCommandScheduler {
             }
 
             if self.pending_local.is_some() {
-                match self.remote_rx.try_recv() {
-                    Ok(cmd) => return Ok(self.record_remote(cmd)),
+                match self.try_recv_remote() {
+                    Ok(cmd) => return Ok(self.dequeue_remote(cmd)),
                     Err(mpsc::TryRecvError::Disconnected) => {
                         self.remote_closed = true;
                         continue;
@@ -271,8 +285,8 @@ impl RendererCommandScheduler {
                 hook();
             }
             if !self.remote_closed {
-                match self.remote_rx.try_recv() {
-                    Ok(cmd) => return Ok(self.record_remote(cmd)),
+                match self.try_recv_remote() {
+                    Ok(cmd) => return Ok(self.dequeue_remote(cmd)),
                     Err(mpsc::TryRecvError::Disconnected) => {
                         self.remote_closed = true;
                         continue;
@@ -301,9 +315,145 @@ impl RendererCommandScheduler {
         }
     }
 
-    /// Records one remote command returned to the renderer.
-    fn record_remote(&mut self, cmd: RendererCmd) -> RendererCmd {
+    /// Returns a retained lookahead command before reading the bounded FIFO.
+    fn try_recv_remote(&mut self) -> Result<RendererCmd, mpsc::TryRecvError> {
+        self.pending_remote
+            .take()
+            .map_or_else(|| self.remote_rx.try_recv(), Ok)
+    }
+
+    /// Records and opportunistically folds one already-admitted pure update
+    /// run.
+    fn dequeue_remote(&mut self, mut cmd: RendererCmd) -> RendererCmd {
         self.remote_processed = self.remote_processed.saturating_add(1);
+        let captured = self.remote_admitted.load(Ordering::Acquire);
+        let fold_before = self
+            .pending_local
+            .as_ref()
+            .map_or(captured, |local| captured.min(local.remote_watermark));
+        while self.remote_processed < fold_before && is_pure_provider_update(&cmd) {
+            let next = match self.try_recv_remote() {
+                Ok(next) => next,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.remote_closed = true;
+                    break;
+                }
+            };
+            match fold_provider_update(cmd, next) {
+                (folded, None) => {
+                    cmd = folded;
+                    self.remote_processed = self.remote_processed.saturating_add(1);
+                }
+                (current, Some(barrier)) => {
+                    cmd = current;
+                    self.pending_remote = Some(barrier);
+                    break;
+                }
+            }
+        }
         cmd
+    }
+}
+
+/// Returns whether a command carries an ordinary status-free provider update.
+fn is_pure_provider_update(cmd: &RendererCmd) -> bool {
+    matches!(
+        cmd,
+        RendererCmd::Remote {
+            event,
+            presentation: RendererPresentation::Ordinary,
+            abandoned_shell_starts,
+            ..
+        } if abandoned_shell_starts.is_empty()
+            && matches!(event.as_ref(), Event::ProviderResponseUpdated(update)
+                if update.status.is_none() && update.compaction.is_none())
+    )
+}
+
+/// Folds a matching adjacent update or returns both commands unchanged.
+fn fold_provider_update(
+    mut current: RendererCmd,
+    next: RendererCmd,
+) -> (RendererCmd, Option<RendererCmd>) {
+    let RendererCmd::Remote {
+        event: next_event,
+        presentation: RendererPresentation::Ordinary,
+        abandoned_shell_starts: next_abandoned,
+        folded_frames: next_folded,
+        ..
+    } = &next
+    else {
+        return (current, Some(next));
+    };
+    if !next_abandoned.is_empty() || !next_folded.is_empty() {
+        return (current, Some(next));
+    }
+    let Event::ProviderResponseUpdated(next_update) = next_event.as_ref() else {
+        return (current, Some(next));
+    };
+    if next_update.status.is_some() || next_update.compaction.is_some() {
+        return (current, Some(next));
+    }
+    let RendererCmd::Remote { event, .. } = &current else {
+        return (current, Some(next));
+    };
+    let Event::ProviderResponseUpdated(update) = event.as_ref() else {
+        return (current, Some(next));
+    };
+    if update.agent_id != next_update.agent_id
+        || update.agent_prompt_id != next_update.agent_prompt_id
+        || update.originator != next_update.originator
+    {
+        return (current, Some(next));
+    }
+    let RendererCmd::Remote {
+        event: next_event,
+        delivery_id,
+        queue_bytes,
+        enqueued_at,
+        ..
+    } = next
+    else {
+        unreachable!("validated remote update");
+    };
+    let Event::ProviderResponseUpdated(mut next_update) = *next_event else {
+        unreachable!("validated provider response update");
+    };
+    let RendererCmd::Remote {
+        event,
+        folded_frames,
+        ..
+    } = &mut current
+    else {
+        unreachable!("validated current remote update");
+    };
+    let Event::ProviderResponseUpdated(update) = event.as_mut() else {
+        unreachable!("validated current provider response update");
+    };
+    update.deltas.append(&mut next_update.deltas);
+    fold_response_stats(&mut update.response_stats, next_update.response_stats);
+    folded_frames.push(super::RendererQueueFrame {
+        delivery_id,
+        queue_bytes,
+        enqueued_at,
+    });
+    (current, None)
+}
+
+/// Spans emitted samples while retaining the first observed semantic duration.
+fn fold_response_stats(
+    current: &mut Option<ProviderResponseStats>,
+    next: Option<ProviderResponseStats>,
+) {
+    match (current.as_mut(), next) {
+        (Some(current), Some(next)) => {
+            current.current = next.current;
+            current.first_semantic_output_elapsed_micros = current
+                .first_semantic_output_elapsed_micros
+                .or(next.first_semantic_output_elapsed_micros);
+        }
+        (None, Some(next)) => *current = Some(next),
+        (_, None) => {}
     }
 }

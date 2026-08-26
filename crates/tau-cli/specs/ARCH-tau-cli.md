@@ -225,6 +225,13 @@ the exact renderer sampling deadline. Input routing mirrors selection before
 enqueue, and renderer queue pressure never blocks the input thread's direct
 harness uplink.
 
+When dequeuing remote work, the scheduler captures the current admission
+watermark and may fold only the queued contiguous prefix of pure, matching
+provider response updates before the next semantic, UI, disconnect, or local
+watermark barrier. It does not wait for a suffix. Every original frame keeps
+independent byte/item release and delivery diagnostics even though the folded
+run performs one response projection.
+
 During initial cold attach, the UI retains the replay marker through socket
 decoding and stages visible replayed prompt/response transcript rows until the
 non-replay `session.replay_complete` boundary. Replay-marked current-state rows

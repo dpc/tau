@@ -945,6 +945,7 @@ fn enqueue_remote_delivery(
         delivery_id,
         queue_bytes,
         enqueued_at: Instant::now(),
+        folded_frames: Vec::new(),
     };
     let enqueue_started = Instant::now();
     tracing::trace!(
@@ -973,6 +974,40 @@ fn enqueue_remote_delivery(
         "renderer event enqueued"
     );
     true
+}
+
+/// Releases and diagnoses every original frame represented by one projection.
+fn release_remote_queue_frames(
+    first: RendererQueueFrame,
+    folded: Vec<RendererQueueFrame>,
+    queued_remote_items: &path_std_sync_atomic::AtomicUsize,
+    renderer_byte_budget: &RendererByteBudget,
+    mut observe_delivery: impl FnMut(u64),
+) {
+    for frame in std::iter::once(first).chain(folded) {
+        let queue_items = queued_remote_items.fetch_sub(1, Ordering::AcqRel) - 1;
+        let remaining_bytes = renderer_byte_budget.release(frame.queue_bytes);
+        let queue_age = frame.enqueued_at.elapsed();
+        tracing::trace!(
+            target: "tau_cli::frontend_progress",
+            delivery_id = frame.delivery_id,
+            queue_age_ms = queue_age.as_millis(),
+            queue_items,
+            queue_bytes = remaining_bytes,
+            "renderer event dequeued"
+        );
+        observe_delivery(frame.delivery_id);
+        if Duration::from_millis(500) <= queue_age && admit_queue_stall_warning(Instant::now()) {
+            tracing::warn!(
+                target: "tau_cli::frontend_progress",
+                delivery_id = frame.delivery_id,
+                queue_age_ms = queue_age.as_millis(),
+                queue_items,
+                queue_bytes = remaining_bytes,
+                "renderer queue stalled"
+            );
+        }
+    }
 }
 
 pub(crate) fn run_chat(
@@ -1372,6 +1407,7 @@ pub(crate) fn run_chat(
         let mut scheduler = RendererCommandScheduler::new(
             remote_rx,
             renderer_rx,
+            remote_admitted,
             renderer_arbiter,
             renderer_wake_rx,
         );
@@ -1388,31 +1424,19 @@ pub(crate) fn run_chat(
                             delivery_id,
                             queue_bytes,
                             enqueued_at,
+                            folded_frames,
                         } => {
-                            let queue_items =
-                                queued_remote_items.fetch_sub(1, Ordering::AcqRel) - 1;
-                            let remaining_bytes = renderer_byte_budget.release(queue_bytes);
-                            let queue_age = enqueued_at.elapsed();
-                            tracing::trace!(
-                                target: "tau_cli::frontend_progress",
-                                delivery_id,
-                                queue_age_ms = queue_age.as_millis(),
-                                queue_items,
-                                queue_bytes = remaining_bytes,
-                                "renderer event dequeued"
-                            );
-                            if Duration::from_millis(500) <= queue_age
-                                && admit_queue_stall_warning(Instant::now())
-                            {
-                                tracing::warn!(
-                                    target: "tau_cli::frontend_progress",
+                            release_remote_queue_frames(
+                                RendererQueueFrame {
                                     delivery_id,
-                                    queue_age_ms = queue_age.as_millis(),
-                                    queue_items,
-                                    queue_bytes = remaining_bytes,
-                                    "renderer queue stalled"
-                                );
-                            }
+                                    queue_bytes,
+                                    enqueued_at,
+                                },
+                                folded_frames,
+                                &queued_remote_items,
+                                &renderer_byte_budget,
+                                |_| {},
+                            );
                             renderer.abandon_shell_starts(&abandoned_shell_starts);
                             match presentation {
                                 cold_attach_stager::RendererPresentation::Ordinary => {
@@ -1839,6 +1863,8 @@ enum RendererCmd {
         queue_bytes: usize,
         /// Monotonic queue admission time.
         enqueued_at: Instant,
+        /// Accounting receipts for original frames folded into this projection.
+        folded_frames: Vec<RendererQueueFrame>,
     },
     ToolTimerTick,
     /// The harness disconnected after every earlier remote FIFO item.
@@ -1852,6 +1878,16 @@ enum RendererCmd {
         /// Monotonic queue admission time.
         enqueued_at: Instant,
     },
+}
+
+/// Queue accounting retained for each frame absorbed into a folded projection.
+struct RendererQueueFrame {
+    /// Process-local content-free stage correlation.
+    delivery_id: u64,
+    /// Encoded frame bytes charged to the queue budget.
+    queue_bytes: usize,
+    /// Monotonic queue admission time.
+    enqueued_at: Instant,
 }
 
 struct TerminalInputLoopCtx {
