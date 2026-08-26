@@ -27,7 +27,7 @@ use terminal_oracles::*;
 use super::gate_fixture::GateFixture;
 use super::headless_process::HeadlessProcess;
 use super::observer::SideObserver;
-use super::pty_process::{PtyArtifacts, PtyProcess, TerminalSize};
+use super::pty_process::{PtyArtifacts, PtyProcess, PtyReadGeneration, TerminalSize};
 use super::{DEADLINE, FAKE_PROVIDER, discover_daemon};
 
 const HARNESS_DAEMON: &str = env!("CARGO_BIN_EXE_tau-e2e-harness-daemon");
@@ -202,16 +202,37 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
     first.wait_ready_for(identities.main.as_str(), deadline)?;
     second.send_line(&format!(":agent switch {}", identities.main))?;
     second.wait_ready_for(identities.main.as_str(), deadline)?;
+    let first_worker_switch = first.read_generation()?;
     first.send_line(&format!(":agent switch {}", identities.worker))?;
-    first.wait_for("This active-auto agent is idle", deadline)?;
+    wait_for_worker_frame(
+        &first,
+        first_worker_switch,
+        &identities.worker,
+        &identities,
+        deadline,
+    )?;
     second.send_line(":agent")?;
     let second_still_main = second.wait_for(&format!("current: {}", identities.main), deadline)?;
     assert_transcript_rows(&second_still_main, &identities.main, &identities)?;
 
+    let first_worker_switch = first.read_generation()?;
     first.send_line(&format!(":agent switch {}", identities.worker))?;
-    first.wait_for("This active-auto agent is idle", deadline)?;
+    wait_for_worker_frame(
+        &first,
+        first_worker_switch,
+        &identities.worker,
+        &identities,
+        deadline,
+    )?;
+    let second_worker_switch = second.read_generation()?;
     second.send_line(&format!(":agent switch {}", identities.worker))?;
-    second.wait_for("This active-auto agent is idle", deadline)?;
+    wait_for_worker_frame(
+        &second,
+        second_worker_switch,
+        &identities.worker,
+        &identities,
+        deadline,
+    )?;
     second.send_line(&format!(":agent switch {}", identities.main))?;
     second.wait_ready_for(identities.main.as_str(), deadline)?;
     first.send_line(":agent")?;
@@ -408,6 +429,22 @@ fn repaint_barrier(
     terminal.wait_for_absence_after(canary, generation, deadline)
 }
 
+/// Waits for a newer selected-worker frame with its exact compact idle row and
+/// transcript.
+fn wait_for_worker_frame(
+    terminal: &PtyProcess,
+    before_switch: PtyReadGeneration,
+    agent_id: &AgentId,
+    identities: &Identities,
+    deadline: Instant,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let compact_idle_row = worker_compact_idle_row(agent_id);
+    terminal.wait_for_frame_after(before_switch, deadline, |frame| {
+        frame.contains(&compact_idle_row)
+            && assert_transcript_rows(frame, agent_id, identities).is_ok()
+    })
+}
+
 /// Selects both stable IDs and returns semantic transcript rows keyed by ID.
 fn select_all_agents(
     terminal: &mut PtyProcess,
@@ -417,11 +454,12 @@ fn select_all_agents(
 ) -> Result<BTreeMap<AgentId, Vec<String>>, Box<dyn std::error::Error>> {
     let mut rows = BTreeMap::new();
     for agent_id in order {
+        let before_switch = terminal.read_generation()?;
         terminal.send_line(&format!(":agent switch {agent_id}"))?;
         let frame = if agent_id == &identities.main {
             terminal.wait_ready_for(agent_id.as_str(), deadline)?
         } else {
-            terminal.wait_for("This active-auto agent is idle", deadline)?
+            wait_for_worker_frame(terminal, before_switch, agent_id, identities, deadline)?
         };
         rows.insert(
             agent_id.clone(),
@@ -519,8 +557,15 @@ fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn s
     observer_b.drain_available()?;
     assert_final_pre_input_replay(&observer_b.events, &session_id, &identities)?;
 
+    let worker_switch = boot_b.read_generation()?;
     boot_b.send_line(&format!(":agent switch {}", identities.worker))?;
-    let restored_worker = boot_b.wait_for("This active-auto agent is idle", deadline)?;
+    let restored_worker = wait_for_worker_frame(
+        &boot_b,
+        worker_switch,
+        &identities.worker,
+        &identities,
+        deadline,
+    )?;
     assert_worker_restored_frame(&restored_worker)?;
     boot_b.start_tool_monitoring()?;
     boot_b.require_no_tool_violation()?;
@@ -531,8 +576,15 @@ fn public_terminal_cold_resume_selects_main_and_worker() -> Result<(), Box<dyn s
     assert_main_terminal_frame(&main_frame)?;
     boot_b.require_no_tool_violation()?;
 
+    let worker_switch = boot_b.read_generation()?;
     boot_b.send_line(&format!(":agent switch {}", identities.worker))?;
-    let restored_worker = boot_b.wait_for("This active-auto agent is idle", deadline)?;
+    let restored_worker = wait_for_worker_frame(
+        &boot_b,
+        worker_switch,
+        &identities.worker,
+        &identities,
+        deadline,
+    )?;
     assert_worker_restored_frame(&restored_worker)?;
     boot_b.require_no_tool_violation()?;
     boot_b.send_line(&format!(":agent resume {}", identities.worker))?;

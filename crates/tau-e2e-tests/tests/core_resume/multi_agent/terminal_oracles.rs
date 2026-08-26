@@ -7,6 +7,11 @@ use super::{
     WORKER_PROMPT, WORKER_RESPONSE,
 };
 
+/// Returns the exact compact idle row for the selected worker.
+pub(super) fn worker_compact_idle_row(agent_id: &AgentId) -> String {
+    format!("❓💤 @{agent_id}")
+}
+
 /// Projects stable agent-owned prompt/response rows and rejects output owned
 /// exclusively by the other selected transcript.
 pub(super) fn assert_transcript_rows(
