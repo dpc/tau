@@ -1,0 +1,109 @@
+//! Owns watch status classification and user/assistant notification fanout.
+//!
+//! Registry membership and publication commit authority remain separate.
+
+use super::*;
+
+/// Dedupe projection for one provider status notification.
+///
+/// Attempts and retry delays intentionally do not participate: repeated
+/// same-category retries update the snapshot without prompting again.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum AgentWatchProviderDeliveryKind {
+    /// Retrying with the enclosed sanitized category.
+    Retrying(tau_proto::AgentWatchProviderCategory),
+    /// Recovering from a context-window rejection.
+    RecoveringContext,
+    /// Blocked with the enclosed sanitized category.
+    Blocked(tau_proto::AgentWatchProviderCategory),
+    /// Dispatch is uncertain for the enclosed sanitized category.
+    DispatchUncertain(tau_proto::AgentWatchProviderCategory),
+    /// Terminal with the enclosed sanitized failure kind.
+    TerminalError(tau_proto::ProviderFailureKind),
+    /// Terminal incomplete output with the enclosed sanitized category.
+    TerminalIncomplete(tau_proto::AgentWatchProviderCategory),
+}
+
+impl From<&tau_proto::AgentWatchProviderState> for AgentWatchProviderDeliveryKind {
+    fn from(state: &tau_proto::AgentWatchProviderState) -> Self {
+        match state {
+            tau_proto::AgentWatchProviderState::Retrying { category, .. } => {
+                Self::Retrying(*category)
+            }
+            tau_proto::AgentWatchProviderState::RecoveringContext { .. } => Self::RecoveringContext,
+            tau_proto::AgentWatchProviderState::Blocked { category } => Self::Blocked(*category),
+            tau_proto::AgentWatchProviderState::DispatchUncertain { category } => {
+                Self::DispatchUncertain(*category)
+            }
+            tau_proto::AgentWatchProviderState::TerminalError { failure_kind, .. } => {
+                Self::TerminalError(*failure_kind)
+            }
+            tau_proto::AgentWatchProviderState::TerminalIncomplete { category, .. } => {
+                Self::TerminalIncomplete(*category)
+            }
+        }
+    }
+}
+
+pub(super) fn watch_category_for_retry(
+    category: tau_proto::ProviderRetryCategory,
+) -> tau_proto::AgentWatchProviderCategory {
+    match category {
+        tau_proto::ProviderRetryCategory::Transport => {
+            tau_proto::AgentWatchProviderCategory::Transport
+        }
+        tau_proto::ProviderRetryCategory::Overload => {
+            tau_proto::AgentWatchProviderCategory::Overload
+        }
+        tau_proto::ProviderRetryCategory::Throttle => {
+            tau_proto::AgentWatchProviderCategory::Throttle
+        }
+        tau_proto::ProviderRetryCategory::UsageWindow => {
+            tau_proto::AgentWatchProviderCategory::UsageWindow
+        }
+        tau_proto::ProviderRetryCategory::Account => tau_proto::AgentWatchProviderCategory::Account,
+        tau_proto::ProviderRetryCategory::Auth => tau_proto::AgentWatchProviderCategory::Auth,
+        tau_proto::ProviderRetryCategory::Unknown => tau_proto::AgentWatchProviderCategory::Unknown,
+    }
+}
+
+impl Harness {
+    pub(super) fn notify_agent_watchers_about_user_prompt(&mut self, agent_id: &str, text: &str) {
+        for watcher_id in self.watchers_for_agent(agent_id) {
+            let Some(sender_cid) = self.agent_routes.get(agent_id).cloned() else {
+                return;
+            };
+            if self
+                .publish_agent_delivery_from_agent(
+                    &sender_cid,
+                    watcher_id.clone(),
+                    text.to_owned(),
+                    tau_proto::AgentMessageKind::WatchPrompt,
+                )
+                .is_err()
+            {
+                self.prune_agent_watch(&watcher_id, agent_id);
+            }
+        }
+    }
+
+    /// Publish one accepted ordinary final to each current watcher after the
+    /// provider response itself has committed.
+    pub(super) fn notify_agent_watchers_about_response(&mut self, cid: &AgentId, message: String) {
+        let Some(agent_id) = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.clone())
+        else {
+            return;
+        };
+        for watcher_id in self.watchers_for_agent(&agent_id) {
+            if self
+                .publish_agent_watch_response_from_agent(cid, watcher_id.clone(), message.clone())
+                .is_err()
+            {
+                self.prune_agent_watch(&watcher_id, &agent_id);
+            }
+        }
+    }
+}
