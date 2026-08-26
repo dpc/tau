@@ -92,7 +92,7 @@ impl Harness {
         // journals: rejected provider work must have no semantic side effects.
         let standalone_compaction = active_compaction_response
             || self
-                .prompt_operations
+                .prompt_runtime.operations
                 .get(&response.agent_prompt_id)
                 .is_some_and(|operation| {
                     operation.0 == tau_proto::PromptOperation::StandaloneCompaction
@@ -126,7 +126,7 @@ impl Harness {
             && self.agent_has_open_foreground_tool_round(&cid)
         {
             let standalone = self
-                .prompt_operations
+                .prompt_runtime.operations
                 .remove(&response.agent_prompt_id)
                 .is_some_and(|operation| {
                     operation.0 == tau_proto::PromptOperation::StandaloneCompaction
@@ -218,7 +218,7 @@ impl Harness {
             .map_or(1, |attempt| attempt.saturating_add(1));
         response.provider_attempt = tau_proto::ProviderAttempt::new(terminal_attempt)
             .expect("terminal attempt is one-based");
-        let terminal_model = self.prompt_models.get(&response.agent_prompt_id).cloned();
+        let terminal_model = self.prompt_runtime.models.get(&response.agent_prompt_id).cloned();
         self.attach_context_limit_telemetry(&mut response);
         let response_contains_compaction = response
             .output_items
@@ -256,17 +256,17 @@ impl Harness {
 
         let context_size_alerts = (!standalone_compaction || standalone_success)
             .then(|| {
-                self.prompt_context_size_alerts
+                self.prompt_runtime.context_size_alerts
                     .remove(&response.agent_prompt_id)
             })
             .flatten()
             .unwrap_or_default();
         let compaction_policies = self
-            .prompt_compaction_policies
+            .prompt_runtime.compaction_policies
             .remove(&response.agent_prompt_id)
             .unwrap_or_default();
         let projected_prompt_tokens = self
-            .prompt_compaction_projected_tokens
+            .prompt_runtime.compaction_projected_tokens
             .remove(&response.agent_prompt_id)
             .flatten();
         let projected_prompt_tokens = projected_prompt_tokens.or_else(|| {
@@ -293,7 +293,7 @@ impl Harness {
         {
             return Ok(());
         }
-        self.prompt_semantic_output
+        self.prompt_runtime.semantic_output
             .remove(&response.agent_prompt_id);
         let safe_failure_kind = response.failure_kind.or(response
             .error
@@ -342,7 +342,7 @@ impl Harness {
         );
         self.add_finished_response_estimated_cost(&cid, &mut response, source);
         let prompt_operation = self
-            .prompt_operations
+            .prompt_runtime.operations
             .remove(&response.agent_prompt_id)
             .unwrap_or_default();
         if prompt_operation.0 == tau_proto::PromptOperation::StandaloneCompaction
@@ -755,7 +755,7 @@ impl Harness {
         &mut self,
         response: &mut ProviderResponseFinished,
     ) {
-        let snapshot = self.prompt_context_limits.remove(&response.agent_prompt_id);
+        let snapshot = self.prompt_runtime.context_limits.remove(&response.agent_prompt_id);
         if response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded) {
             return;
         }
@@ -799,10 +799,10 @@ impl Harness {
             || response.stop_reason != ProviderStopReason::Error
             || !response.output_items.is_empty()
             || self
-                .prompt_semantic_output
+                .prompt_runtime.semantic_output
                 .contains(&response.agent_prompt_id)
             || self
-                .prompt_operations
+                .prompt_runtime.operations
                 .get(&response.agent_prompt_id)
                 .map(|operation| operation.0)
                 != Some(tau_proto::PromptOperation::Inference)
@@ -839,7 +839,7 @@ impl Harness {
         if checkpoint.transaction_id.is_some()
             || checkpoint.operation != Some(tau_proto::PromptOperation::Inference)
             || checkpoint.agent_prompt_id != response.agent_prompt_id
-            || self.prompt_models.get(&response.agent_prompt_id) != Some(&model)
+            || self.prompt_runtime.models.get(&response.agent_prompt_id) != Some(&model)
             || !selected_or_continuation_model_matches
             || !tree.is_ancestor_head(
                 checkpoint.through,
@@ -1416,11 +1416,11 @@ impl Harness {
         // but it must release the prompt-local snapshots allocated for dispatch.
         self.provider_runtime.cache_residency
             .drop_prompt(&response.agent_prompt_id);
-        self.prompt_context_size_alerts
+        self.prompt_runtime.context_size_alerts
             .remove(&response.agent_prompt_id);
-        self.prompt_compaction_policies
+        self.prompt_runtime.compaction_policies
             .remove(&response.agent_prompt_id);
-        self.prompt_compaction_projected_tokens
+        self.prompt_runtime.compaction_projected_tokens
             .remove(&response.agent_prompt_id);
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
@@ -1472,17 +1472,17 @@ impl Harness {
     ) {
         self.provider_runtime.cache_residency.drop_prompt(agent_prompt_id);
         self.remember_ephemeral_provider_prompt(agent_prompt_id);
-        self.prompt_context_limits.remove(agent_prompt_id);
-        self.prompt_context_size_alerts.remove(agent_prompt_id);
-        self.prompt_compaction_policies.remove(agent_prompt_id);
-        self.prompt_compaction_projected_tokens
+        self.prompt_runtime.context_limits.remove(agent_prompt_id);
+        self.prompt_runtime.context_size_alerts.remove(agent_prompt_id);
+        self.prompt_runtime.compaction_policies.remove(agent_prompt_id);
+        self.prompt_runtime.compaction_projected_tokens
             .remove(agent_prompt_id);
-        self.prompt_agents.remove(agent_prompt_id.as_str());
+        self.prompt_runtime.agents.remove(agent_prompt_id.as_str());
         self.provider_runtime.pending_prompts.remove(agent_prompt_id);
-        self.prompt_models.remove(agent_prompt_id);
-        self.prompt_estimated_cost_rates.remove(agent_prompt_id);
-        self.prompt_semantic_output.remove(agent_prompt_id);
-        self.prompt_operations.remove(agent_prompt_id);
+        self.prompt_runtime.models.remove(agent_prompt_id);
+        self.prompt_runtime.estimated_cost_rates.remove(agent_prompt_id);
+        self.prompt_runtime.semantic_output.remove(agent_prompt_id);
+        self.prompt_runtime.operations.remove(agent_prompt_id);
         self.clear_prompt_tool_snapshot(agent_prompt_id);
     }
 
@@ -1509,7 +1509,7 @@ impl Harness {
             .map(|agent| (agent.session_id.clone(), agent.originator.clone()))
         {
             if marked_owner {
-                self.pending_stale_provider_responses.insert(
+                self.prompt_runtime.pending_stale_provider_responses.insert(
                     response.agent_prompt_id.clone(),
                     PendingStaleProviderResponse {
                         response: response.clone(),
@@ -1552,18 +1552,18 @@ impl Harness {
 
     pub(super) fn clear_finished_response_prompt_route(&mut self, agent_prompt_id: &AgentPromptId) {
         self.remember_ephemeral_provider_prompt(agent_prompt_id);
-        self.prompt_agents.remove(agent_prompt_id.as_str());
+        self.prompt_runtime.agents.remove(agent_prompt_id.as_str());
         self.provider_runtime.pending_prompts.remove(agent_prompt_id);
     }
 
     pub(super) fn remember_ephemeral_provider_prompt(&mut self, agent_prompt_id: &AgentPromptId) {
         if self
-            .prompt_agents
+            .prompt_runtime.agents
             .get(agent_prompt_id)
             .and_then(|cid| self.agent_registry.agents.get(cid))
             .is_some_and(|agent| agent.persistence.is_ephemeral())
         {
-            self.ephemeral_provider_prompts
+            self.prompt_runtime.ephemeral_provider_prompts
                 .insert(agent_prompt_id.clone());
         }
     }
@@ -1579,8 +1579,8 @@ impl Harness {
         {
             return;
         }
-        self.ephemeral_provider_prompts.extend(
-            self.prompt_agents
+        self.prompt_runtime.ephemeral_provider_prompts.extend(
+            self.prompt_runtime.agents
                 .iter()
                 .filter_map(|(prompt_id, owner)| (owner == cid).then_some(prompt_id.clone())),
         );
@@ -1598,7 +1598,7 @@ impl Harness {
         // agents shouldn't clobber the user's status bar, but generic agent
         // stats still need their context usage.
         if let Some(cid) = response_cid {
-            let usage_model = self.prompt_models.get(agent_prompt_id).cloned();
+            let usage_model = self.prompt_runtime.models.get(agent_prompt_id).cloned();
             self.update_agent_context_usage(
                 cid,
                 usage_model.as_ref(),
@@ -1634,7 +1634,7 @@ impl Harness {
         let Some(input_tokens) = input_tokens else {
             return;
         };
-        let status_available = self.prompt_tool_specs.get(agent_prompt_id).map_or_else(
+        let status_available = self.prompt_runtime.tool_specs.get(agent_prompt_id).map_or_else(
             || {
                 self.agent_registry
                     .agents
@@ -1793,7 +1793,7 @@ impl Harness {
             .map(|conv| (conv.session_id.clone(), conv.originator.clone()))
         {
             if marked_owner {
-                self.pending_stale_provider_responses.insert(
+                self.prompt_runtime.pending_stale_provider_responses.insert(
                     response.agent_prompt_id.clone(),
                     PendingStaleProviderResponse {
                         response: response.clone(),
@@ -1851,7 +1851,7 @@ impl Harness {
         // again to anchor the stateful-chain state, and re-reading
         // `selected_model` later would lie if the user switched
         // models mid-turn.
-        let turn_model = self.prompt_models.remove(&response.agent_prompt_id);
+        let turn_model = self.prompt_runtime.models.remove(&response.agent_prompt_id);
         if let Some(ref model) = turn_model
             && (input_tokens.is_some() || cached_tokens.is_some() || output_tokens.is_some())
         {
@@ -1913,7 +1913,7 @@ impl Harness {
         source: Option<&tau_proto::ConnectionId>,
     ) {
         let captured_rates = self
-            .prompt_estimated_cost_rates
+            .prompt_runtime.estimated_cost_rates
             .remove(&response.agent_prompt_id);
         let Some(usage) = response.usage.as_ref() else {
             response.estimated_api_cost_rates = None;
@@ -2059,7 +2059,7 @@ impl Harness {
     ) -> NormalizedFinishedToolCall {
         let mut call = call.clone();
         normalization.normalize_call_id(index, &mut call);
-        self.prompt_tool_call_prompts
+        self.prompt_runtime.tool_call_prompts
             .insert(call.id.clone(), response.agent_prompt_id.clone());
         let background_support = self.resolve_tool_background_support(call.name.as_str());
         let turn_categories = self
@@ -2768,7 +2768,7 @@ impl Harness {
                     | ProviderStopReason::RepetitionDetected
             );
         let status_was_available = self
-            .prompt_tool_specs
+            .prompt_runtime.tool_specs
             .get(&response.agent_prompt_id)
             .is_some_and(|specs| {
                 specs

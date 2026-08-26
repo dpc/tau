@@ -1610,7 +1610,7 @@ impl Harness {
                 });
         owner_can_advance
             && !self
-                .pending_agent_publish_completions
+                .prompt_runtime.pending_publish_completions
                 .contains_key(&deferred.cid)
     }
 

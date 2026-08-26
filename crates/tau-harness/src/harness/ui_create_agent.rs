@@ -396,7 +396,7 @@ impl Harness {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        correlations.extend(self.pending_initial_prompt_correlations.remove(cid));
+        correlations.extend(self.prompt_runtime.pending_initial_correlations.remove(cid));
         for correlation in correlations {
             self.publish_initial_prompt_failed(correlation, stage, message);
         }
@@ -404,7 +404,7 @@ impl Harness {
 
     /// Terminate one submitted initial prompt before provider materialization.
     pub(super) fn fail_initial_prompt_materialization(&mut self, cid: &AgentId, message: &str) {
-        if let Some(correlation) = self.pending_initial_prompt_correlations.remove(cid) {
+        if let Some(correlation) = self.prompt_runtime.pending_initial_correlations.remove(cid) {
             self.retire_deferred_activation(cid, correlation.activation_through);
             self.publish_initial_prompt_failed(
                 correlation,

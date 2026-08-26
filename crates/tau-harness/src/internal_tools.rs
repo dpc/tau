@@ -611,7 +611,7 @@ impl<'a> InternalToolHost<'a> {
         let agent_id = tau_proto::AgentId::parse(agent.agent_id.as_deref()?).ok()?;
         let prompt_id = self
             .harness
-            .prompt_tool_call_prompts
+            .prompt_runtime.tool_call_prompts
             .get(&owner.call().id)?;
         let started = self
             .harness

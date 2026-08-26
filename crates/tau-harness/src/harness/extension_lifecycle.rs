@@ -200,7 +200,7 @@ impl Harness {
         self.provider_runtime.pending_prompts
             .retain(|_, provider_id| provider_id != connection_id);
         for prompt_id in lost_provider_prompts {
-            let Some(cid) = self.prompt_agents.get(&prompt_id).cloned() else {
+            let Some(cid) = self.prompt_runtime.agents.get(&prompt_id).cloned() else {
                 continue;
             };
             let deferred_activation = self.agent_registry.agents.get(&cid).is_some_and(|agent| {
@@ -1087,8 +1087,8 @@ impl Harness {
     }
 
     pub(super) fn clear_prompt_tool_snapshot(&mut self, agent_prompt_id: &AgentPromptId) {
-        self.prompt_tool_specs.remove(agent_prompt_id);
-        self.prompt_tool_call_prompts
+        self.prompt_runtime.tool_specs.remove(agent_prompt_id);
+        self.prompt_runtime.tool_call_prompts
             .retain(|_, prompt_id| prompt_id != agent_prompt_id);
     }
 
@@ -1143,13 +1143,13 @@ impl Harness {
         self.tool_runtime
             .pending_cancellation_observations
             .remove(call_id);
-        if let Some(prompt_id) = self.prompt_tool_call_prompts.remove(call_id)
+        if let Some(prompt_id) = self.prompt_runtime.tool_call_prompts.remove(call_id)
             && !self
-                .prompt_tool_call_prompts
+                .prompt_runtime.tool_call_prompts
                 .values()
                 .any(|other_prompt_id| other_prompt_id == &prompt_id)
         {
-            self.prompt_tool_specs.remove(&prompt_id);
+            self.prompt_runtime.tool_specs.remove(&prompt_id);
         }
     }
 
@@ -1605,7 +1605,7 @@ impl Harness {
         automatic_compaction_decision: Option<tau_proto::AutomaticCompactionDecision>,
         source: Option<&tau_proto::ConnectionId>,
     ) {
-        let cid = self.prompt_agents.get(&agent_prompt_id).cloned();
+        let cid = self.prompt_runtime.agents.get(&agent_prompt_id).cloned();
         let agent_id = crate::parse_agent_id(
             cid.as_ref()
                 .and_then(|cid| self.agent_registry.agents.get(cid))

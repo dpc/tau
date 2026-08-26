@@ -396,7 +396,7 @@ impl Harness {
             );
             return;
         }
-        let Some(initiating_agent_prompt_id) = self.prompt_tool_call_prompts.get(&call.id).cloned()
+        let Some(initiating_agent_prompt_id) = self.prompt_runtime.tool_call_prompts.get(&call.id).cloned()
         else {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,

@@ -750,7 +750,7 @@ impl Harness {
             return;
         }
         if self.agent_is_ephemeral(&target_agent_id) {
-            self.ephemeral_provider_retry_requests
+            self.prompt_runtime.ephemeral_provider_retry_requests
                 .insert(provider_request_id.clone());
         }
         self.ui_runtime.pending_retry_prompts.insert(
@@ -823,7 +823,7 @@ impl Harness {
             .is_some();
         if dormant_repair_exists {
             if matches!(
-                self.pending_agent_publish_completions.get(cid),
+                self.prompt_runtime.pending_publish_completions.get(cid),
                 Some(AgentPublishCompletion::OutputLengthDormantRepair { .. })
             ) {
                 self.retry_pending_agent_publish_completion(cid);
@@ -1073,13 +1073,13 @@ impl Harness {
                             )
                 )
             }) || self
-                .pending_agent_publish_completions
+                .prompt_runtime.pending_publish_completions
                 .get(cid)
                 .is_some_and(|completion| {
                     completion.owns_output_length_terminal(&canceled_prompt_id)
                 });
             if self
-                .local_route_failure_prompts
+                .prompt_runtime.local_route_failures
                 .contains(&canceled_prompt_id)
                 || terminal_write_pending
             {
@@ -1089,7 +1089,7 @@ impl Harness {
                 return;
             }
             let status_was_available =
-                self.prompt_tool_specs
+                self.prompt_runtime.tool_specs
                     .get(&canceled_prompt_id)
                     .is_some_and(|specs| {
                         specs
@@ -1101,17 +1101,17 @@ impl Harness {
                 agent.terminal_notice_eligible = false;
             }
             let automatic_compaction_decision = self
-                .prompt_models
+                .prompt_runtime.models
                 .get(&canceled_prompt_id)
                 .cloned()
                 .and_then(|model| {
                     let projected = self
-                        .prompt_compaction_projected_tokens
+                        .prompt_runtime.compaction_projected_tokens
                         .get(&canceled_prompt_id)
                         .copied()
                         .flatten();
                     let policies = self
-                        .prompt_compaction_policies
+                        .prompt_runtime.compaction_policies
                         .get(&canceled_prompt_id)
                         .cloned()
                         .unwrap_or_default();
@@ -1167,7 +1167,7 @@ impl Harness {
             return;
         }
         let status_was_available =
-            self.prompt_tool_specs
+            self.prompt_runtime.tool_specs
                 .get(&canceled_prompt_id)
                 .is_some_and(|specs| {
                     specs
@@ -1179,17 +1179,17 @@ impl Harness {
             agent.terminal_notice_eligible = false;
         }
         let cancellation_decision = self
-            .prompt_models
+            .prompt_runtime.models
             .get(&canceled_prompt_id)
             .cloned()
             .and_then(|model| {
                 let projected = self
-                    .prompt_compaction_projected_tokens
+                    .prompt_runtime.compaction_projected_tokens
                     .get(&canceled_prompt_id)
                     .copied()
                     .flatten();
                 let policies = self
-                    .prompt_compaction_policies
+                    .prompt_runtime.compaction_policies
                     .get(&canceled_prompt_id)
                     .cloned()
                     .unwrap_or_default();
@@ -1206,13 +1206,13 @@ impl Harness {
             return;
         }
         self.canceled_prompts.insert(canceled_prompt_id.clone());
-        self.prompt_operations.remove(&canceled_prompt_id);
-        self.prompt_context_limits.remove(&canceled_prompt_id);
-        self.prompt_context_size_alerts.remove(&canceled_prompt_id);
-        self.prompt_compaction_policies.remove(&canceled_prompt_id);
-        self.prompt_compaction_projected_tokens
+        self.prompt_runtime.operations.remove(&canceled_prompt_id);
+        self.prompt_runtime.context_limits.remove(&canceled_prompt_id);
+        self.prompt_runtime.context_size_alerts.remove(&canceled_prompt_id);
+        self.prompt_runtime.compaction_policies.remove(&canceled_prompt_id);
+        self.prompt_runtime.compaction_projected_tokens
             .remove(&canceled_prompt_id);
-        self.prompt_semantic_output.remove(&canceled_prompt_id);
+        self.prompt_runtime.semantic_output.remove(&canceled_prompt_id);
         self.fail_pending_initial_prompts(
             cid,
             tau_proto::AgentPromptFailureStage::Canceled,
@@ -1424,7 +1424,7 @@ impl Harness {
         self.cancel_pending_context_claim(cid);
         if let Some(spid) = spid {
             self.cancel_running_compaction(cid, &spid);
-            self.prompt_semantic_output.remove(&spid);
+            self.prompt_runtime.semantic_output.remove(&spid);
             self.canceled_prompts.insert(spid.clone());
             self.publish_prompt_terminated(
                 session_id.clone(),
@@ -1433,12 +1433,12 @@ impl Harness {
                 originator,
             );
             self.remember_ephemeral_provider_prompt(&spid);
-            self.prompt_agents.remove(&spid);
-            self.prompt_operations.remove(&spid);
-            self.prompt_context_limits.remove(&spid);
-            self.prompt_context_size_alerts.remove(&spid);
-            self.prompt_compaction_policies.remove(&spid);
-            self.prompt_compaction_projected_tokens.remove(&spid);
+            self.prompt_runtime.agents.remove(&spid);
+            self.prompt_runtime.operations.remove(&spid);
+            self.prompt_runtime.context_limits.remove(&spid);
+            self.prompt_runtime.context_size_alerts.remove(&spid);
+            self.prompt_runtime.compaction_policies.remove(&spid);
+            self.prompt_runtime.compaction_projected_tokens.remove(&spid);
             self.publish_event(
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {

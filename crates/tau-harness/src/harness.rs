@@ -152,6 +152,7 @@ use crate::harness::publication_state::PublicationState;
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
 use crate::harness::provider_startup::ProviderStartupSnapshot;
 use crate::harness::provider_runtime_state::ProviderRuntimeState;
+use crate::harness::prompt_runtime_state::PromptRuntimeState;
 use crate::harness::subagents_tool::SubagentToolState;
 use crate::harness::tool_runtime::ToolRuntimeState;
 use crate::harness::ui_runtime::UiRuntimeState;
@@ -1481,6 +1482,7 @@ mod extension_lifecycle;
 mod peer_messaging;
 mod peer_reports;
 mod prompt_materialization;
+mod prompt_runtime_state;
 mod provider_response;
 mod publication;
 mod publication_completion;
@@ -1746,18 +1748,8 @@ pub struct Harness {
     pub(crate) replayable_harness_notices: Vec<tau_proto::HarnessNotice>,
     /// Extension process lifecycle and pre-`Ready` activation state.
     pub(crate) extensions: ExtensionRuntimeState,
-    /// Maps agent_prompt_id → owning agent for in-flight
-    /// prompts. The conversation knows its `session_id`, so older
-    /// `prompt_sessions[spid]` lookups become two hops:
-    /// `prompt_agents[spid]` → `agent_registry.agents[cid].session_id`.
-    pub(crate) prompt_agents: std::collections::HashMap<AgentPromptId, AgentId>,
-    /// Prompt ids that belonged to ephemeral agents before their live route was
-    /// cleared. Retained only for the current session so late provider reports
-    /// cannot leak into durable debug logs.
-    ephemeral_provider_prompts: HashSet<AgentPromptId>,
-    /// Retry request ids that targeted ephemeral agents before one-shot
-    /// correlation was consumed.
-    ephemeral_provider_retry_requests: HashSet<tau_proto::RetryPromptRequestId>,
+    /// Prompt correlation, dispatch snapshots, stale handling, and replay state.
+    pub(crate) prompt_runtime: PromptRuntimeState,
     /// Harness-local acceptance order for visible user interactions.
     ///
     /// This is routing authority for untargeted live shell output; wall-clock
@@ -1792,8 +1784,6 @@ pub struct Harness {
     pub(crate) publication: PublicationState,
     /// Provider declarations, cache refresh, quota, and live route ownership.
     pub(crate) provider_runtime: ProviderRuntimeState,
-    /// Prompt ids that already own one live compact-fact continuation.
-    pending_prompt_dispatches: HashSet<AgentPromptId>,
     /// Available agent roles.
     pub(crate) available_roles: std::collections::HashMap<String, tau_config::settings::AgentRole>,
     /// Configured roles disabled because their required skills are unavailable.
@@ -1822,40 +1812,6 @@ pub struct Harness {
     /// Keep session-scoped counters here instead of as top-level
     /// harness fields, so `:session new` resets them with one assignment.
     pub(crate) current_session_state: CurrentSessionState,
-    /// Provider/model for each prompt sent to the provider, used to
-    /// attribute the corresponding finished response even if the user
-    /// switches models while it is in flight.
-    pub(crate) prompt_models: std::collections::HashMap<AgentPromptId, ModelId>,
-    /// Cost rates captured with each exact provider dispatch so later provider
-    /// metadata changes cannot reprice its usage.
-    prompt_estimated_cost_rates: HashMap<AgentPromptId, tau_proto::EstimatedApiCostRates>,
-    /// Immutable content-free context projection captured at provider dispatch.
-    prompt_context_limits: HashMap<AgentPromptId, PromptContextLimitSnapshot>,
-    /// Effective named context-size alerts captured for each provider prompt so
-    /// a mid-flight role switch cannot change response-time alert policy.
-    prompt_context_size_alerts:
-        HashMap<AgentPromptId, BTreeMap<String, tau_config::settings::ContextSizeAlert>>,
-    /// Effective named automatic-compaction policies frozen with each provider
-    /// prompt so later role changes cannot rewrite terminal behavior.
-    prompt_compaction_policies:
-        HashMap<AgentPromptId, BTreeMap<String, tau_config::settings::CompactionPolicy>>,
-    /// Captured proactive projection paired with `prompt_compaction_policies`.
-    prompt_compaction_projected_tokens: HashMap<AgentPromptId, Option<u64>>,
-    /// Prompts for which streaming exposed semantic output, making automatic
-    /// no-output recovery unsafe.
-    prompt_semantic_output: HashSet<AgentPromptId>,
-    /// Stale marked-owner reports retained until their durable closer commits.
-    pending_stale_provider_responses: HashMap<AgentPromptId, PendingStaleProviderResponse>,
-    /// Exact replay prompt activations held until runtime handlers are
-    /// installed.
-    pending_replay_prompt_activation_occurrences:
-        HashMap<AgentId, Vec<ReplayPromptActivationOccurrence>>,
-    /// Exact restored uncertain owners whose Stale closer waits until provider
-    /// and session startup can dispatch the materialized activating occurrence.
-    pending_replay_uncertain_stale: HashMap<AgentId, AgentPromptTerminated>,
-    /// Harness-synthesized route failures awaiting their durable terminal
-    /// response commit. Provider-authored error text never controls this state.
-    local_route_failure_prompts: HashSet<AgentPromptId>,
     /// Durable compaction starts whose post-commit reaction must not dispatch
     /// remote work because a correlated terminal failure is already queued.
     suppressed_compaction_dispatches:
@@ -1877,27 +1833,6 @@ pub struct Harness {
     /// Standalone inference checkpoints currently queued through publication.
     enqueued_standalone_inference_checkpoints:
         HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
-    /// Standalone continuations whose exact completion-bearing steer was
-    /// rejected before commit and must retry on branch reselection.
-    pending_agent_publish_completions: HashMap<AgentId, AgentPublishCompletion>,
-    /// Accepted initial prompts awaiting their first materialized provider
-    /// prompt.
-    pending_initial_prompt_correlations: HashMap<AgentId, InitialPromptCorrelation>,
-    /// Explicit provider operation and resume policy for each in-flight prompt.
-    pub(crate) prompt_operations:
-        std::collections::HashMap<AgentPromptId, (tau_proto::PromptOperation, bool)>,
-    /// Effective tool specs advertised for each in-flight prompt. Tool-call
-    /// validation uses this snapshot so mid-turn role/model switches cannot
-    /// change which tools the provider was allowed to call.
-    pub(crate) prompt_tool_specs:
-        std::collections::HashMap<AgentPromptId, Vec<tau_proto::ToolSpec>>,
-    /// Prompt snapshot owner for each provider-emitted tool call id.
-    pub(crate) prompt_tool_call_prompts: std::collections::HashMap<ToolCallId, AgentPromptId>,
-    /// Model-visible tool examples already shown after a failure in this agent
-    /// branch. Keyed by owning agent, tool, and rendered hint to avoid tight
-    /// repetition while allowing distinct branches to receive local repair
-    /// help.
-    pub(crate) shown_tool_failure_examples: HashSet<(AgentId, ToolName, String)>,
     /// Selected skill winners, keyed by name.
     pub(crate) discovered_skills: std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     /// All discovered skill candidates, keyed by name, so removing the winner

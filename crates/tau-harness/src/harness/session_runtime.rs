@@ -530,7 +530,7 @@ impl Harness {
             }
             self.cancel_pending_context_claim(cid);
             self.cancel_running_compaction(cid, spid);
-            self.prompt_semantic_output.remove(spid);
+            self.prompt_runtime.semantic_output.remove(spid);
             self.canceled_prompts.insert(spid.clone());
             self.fail_pending_initial_prompts(
                 cid,
@@ -550,12 +550,12 @@ impl Harness {
                 originator.clone(),
             );
             self.remember_ephemeral_provider_prompt(spid);
-            self.prompt_agents.remove(spid);
-            self.prompt_operations.remove(spid);
-            self.prompt_context_limits.remove(spid);
-            self.prompt_context_size_alerts.remove(spid);
-            self.prompt_compaction_policies.remove(spid);
-            self.prompt_compaction_projected_tokens.remove(spid);
+            self.prompt_runtime.agents.remove(spid);
+            self.prompt_runtime.operations.remove(spid);
+            self.prompt_runtime.context_limits.remove(spid);
+            self.prompt_runtime.context_size_alerts.remove(spid);
+            self.prompt_runtime.compaction_policies.remove(spid);
+            self.prompt_runtime.compaction_projected_tokens.remove(spid);
             self.emit_info(&format!(
                 "preempting side conv `{cid}` ({spid}) for incoming user prompt",
             ));
@@ -837,26 +837,26 @@ impl Harness {
             .completed_action_invocations
             .extend(self.ui_runtime.pending_action_invocations.keys().cloned());
         self.ui_runtime.pending_action_invocations.clear();
-        self.prompt_agents.clear();
-        self.ephemeral_provider_prompts.clear();
-        self.ephemeral_provider_retry_requests.clear();
+        self.prompt_runtime.agents.clear();
+        self.prompt_runtime.ephemeral_provider_prompts.clear();
+        self.prompt_runtime.ephemeral_provider_retry_requests.clear();
         self.provider_runtime.pending_prompts.clear();
-        self.pending_prompt_dispatches.clear();
-        self.prompt_models.clear();
-        self.prompt_estimated_cost_rates.clear();
-        self.prompt_context_limits.clear();
-        self.prompt_context_size_alerts.clear();
-        self.prompt_compaction_policies.clear();
-        self.prompt_compaction_projected_tokens.clear();
-        self.prompt_semantic_output.clear();
-        self.pending_stale_provider_responses.clear();
-        self.pending_replay_prompt_activation_occurrences.clear();
-        self.pending_replay_uncertain_stale.clear();
-        self.local_route_failure_prompts.clear();
-        self.prompt_operations.clear();
-        self.prompt_tool_specs.clear();
-        self.prompt_tool_call_prompts.clear();
-        self.shown_tool_failure_examples.clear();
+        self.prompt_runtime.pending_dispatches.clear();
+        self.prompt_runtime.models.clear();
+        self.prompt_runtime.estimated_cost_rates.clear();
+        self.prompt_runtime.context_limits.clear();
+        self.prompt_runtime.context_size_alerts.clear();
+        self.prompt_runtime.compaction_policies.clear();
+        self.prompt_runtime.compaction_projected_tokens.clear();
+        self.prompt_runtime.semantic_output.clear();
+        self.prompt_runtime.pending_stale_provider_responses.clear();
+        self.prompt_runtime.pending_replay_activation_occurrences.clear();
+        self.prompt_runtime.pending_replay_uncertain_stale.clear();
+        self.prompt_runtime.local_route_failures.clear();
+        self.prompt_runtime.operations.clear();
+        self.prompt_runtime.tool_specs.clear();
+        self.prompt_runtime.tool_call_prompts.clear();
+        self.prompt_runtime.shown_tool_failure_examples.clear();
         self.tool_runtime
             .suppressed_background_completion_prompts
             .clear();
@@ -941,7 +941,7 @@ impl Harness {
         // canceled, cancel transaction-owned checkpoints, and commit the queued
         // mandatory SessionShutdown before switching the bound session.
         self.quiesce_synchronized_publications_for_rollover();
-        self.pending_agent_publish_completions.clear();
+        self.prompt_runtime.pending_publish_completions.clear();
         self.enqueued_standalone_inference_checkpoints.clear();
         self.publication.idle_dispatches.clear();
         self.clear_session_agent_context();
@@ -2548,13 +2548,13 @@ impl Harness {
                 }
                 Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(checkpoint)) => {
                     let status_prompt_id = checkpoint.agent_prompt_id.clone();
-                    self.prompt_agents
+                    self.prompt_runtime.agents
                         .insert(status_prompt_id.clone(), cid.clone());
                     if let Some(model) = checkpoint.model.clone() {
-                        self.prompt_models.insert(status_prompt_id.clone(), model);
+                        self.prompt_runtime.models.insert(status_prompt_id.clone(), model);
                     }
                     if let Some(operation) = checkpoint.operation {
-                        self.prompt_operations
+                        self.prompt_runtime.operations
                             .insert(status_prompt_id.clone(), (operation, true));
                     }
                     let restored_lineage_owner =
@@ -2700,7 +2700,7 @@ impl Harness {
                 conv.pending_message_wakes = replay_message_wakes;
             }
             if derive_activations && !replay_prompt_activations.is_empty() {
-                self.pending_replay_prompt_activation_occurrences
+                self.prompt_runtime.pending_replay_activation_occurrences
                     .insert(cid.clone(), replay_prompt_activations);
             }
             let uncertain_prompt_activation = restored_inference.as_ref().is_some_and(|recovery| {
@@ -2737,7 +2737,7 @@ impl Harness {
                     .get(&cid)
                     .map(|agent| agent.originator.clone())
             {
-                self.pending_replay_uncertain_stale.insert(
+                self.prompt_runtime.pending_replay_uncertain_stale.insert(
                     cid.clone(),
                     AgentPromptTerminated {
                         automatic_compaction_decision: None,

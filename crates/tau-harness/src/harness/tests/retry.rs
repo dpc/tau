@@ -56,7 +56,7 @@ fn add_routed_prompt(h: &mut Harness, agent_id: &str, prompt_id: &str, provider_
     h.agent_registry
         .agent_routes
         .insert(agent_id.to_owned(), cid.clone());
-    h.prompt_agents.insert(
+    h.prompt_runtime.agents.insert(
         prompt_id
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -162,7 +162,7 @@ fn retry_routes_exact_prompt_and_trusts_only_correlated_provider_result() {
     );
 
     h.provider_runtime.pending_prompts.remove("prompt-b");
-    h.prompt_agents.remove("prompt-b");
+    h.prompt_runtime.agents.remove("prompt-b");
     h.handle_extension_event(
         "provider-b",
         TestProtocolItem::Event(retry_result(

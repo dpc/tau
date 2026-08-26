@@ -1586,7 +1586,7 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
         .model_for_agent_role(conv)
         .or_else(|| h.selected_model.clone());
     let tool_specs = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
-    h.prompt_tool_specs.insert(
+    h.prompt_runtime.tool_specs.insert(
         spid.parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         tool_specs,
@@ -1612,7 +1612,7 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
         .agent_routes
         .insert(agent_id.clone(), cid.clone());
     if let Some(model) = model {
-        h.prompt_models.insert(
+        h.prompt_runtime.models.insert(
             spid.parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
             model,

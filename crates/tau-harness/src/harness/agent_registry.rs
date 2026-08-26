@@ -1498,7 +1498,7 @@ impl Harness {
     /// Tear down runtime state only after any marked prompt closure committed.
     pub(super) fn remove_agent_after_prompt_closure(&mut self, cid: &AgentId) {
         self.tombstone_ephemeral_provider_prompts_for_agent(cid);
-        self.pending_agent_publish_completions.remove(cid);
+        self.prompt_runtime.pending_publish_completions.remove(cid);
         self.reject_pending_ui_compaction(
             cid,
             "compaction canceled because the target agent unloaded",

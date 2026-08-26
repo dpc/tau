@@ -191,7 +191,7 @@ impl Harness {
                 agent.originator.clone(),
             ))
         })?;
-        if self.pending_prompt_dispatches.contains(&owned_prompt_id) {
+        if self.prompt_runtime.pending_dispatches.contains(&owned_prompt_id) {
             return None;
         }
         let owned_model = match owned_model {
@@ -247,7 +247,7 @@ impl Harness {
         let agent_prompt_id = prompt.agent_prompt_id.clone();
         if agent_prompt_id != owned_prompt_id
             || !self
-                .pending_prompt_dispatches
+                .prompt_runtime.pending_dispatches
                 .insert(agent_prompt_id.clone())
         {
             self.terminalize_owned_dispatch_error(
@@ -363,7 +363,7 @@ impl Harness {
                     tree.prompt_started(&continuation.plan.agent_prompt_id)
                         .is_some()
                 });
-        self.local_route_failure_prompts
+        self.prompt_runtime.local_route_failures
             .insert(response.agent_prompt_id.clone());
         if prompt_start_committed {
             if self
@@ -372,7 +372,7 @@ impl Harness {
                 .get(cid)
                 .is_some_and(|agent| agent.pending_cancel.is_some())
             {
-                self.local_route_failure_prompts
+                self.prompt_runtime.local_route_failures
                     .remove(&response.agent_prompt_id);
                 self.finalize_canceled_in_flight_prompt(cid);
             } else {
@@ -503,7 +503,7 @@ impl Harness {
             _ => None,
         };
         if let Some(Event::ProviderResponseFinished(response)) = failure.as_ref() {
-            self.local_route_failure_prompts
+            self.prompt_runtime.local_route_failures
                 .insert(response.agent_prompt_id.clone());
             self.invalidate_working_status_after_unsuccessful_terminal(cid);
         }
@@ -562,7 +562,7 @@ impl Harness {
                 ..
             } => {
                 let agent_prompt_id = agent_prompt_id.clone();
-                self.local_route_failure_prompts
+                self.prompt_runtime.local_route_failures
                     .insert(agent_prompt_id.clone());
                 Event::ProviderResponseFinished(ProviderResponseFinished {
                     automatic_compaction_decision: None,
@@ -812,7 +812,7 @@ impl Harness {
                 AgentPromptId::parse(format!("ap-{durable_agent_id}-{prompt_index}"))
                     .expect("known-safe AgentPromptId must be valid")
             });
-        self.prompt_agents
+        self.prompt_runtime.agents
             .insert(agent_prompt_id.clone(), cid.clone());
         let ctx_id = self
             .agent_registry
@@ -830,14 +830,14 @@ impl Harness {
         );
 
         self.current_session_state.token_usage.start_request(&model);
-        self.prompt_models
+        self.prompt_runtime.models
             .insert(agent_prompt_id.clone(), model.clone());
         let context_limit_snapshot = self.prompt_context_limit_snapshot(cid, &model, operation);
-        self.prompt_compaction_projected_tokens.insert(
+        self.prompt_runtime.compaction_projected_tokens.insert(
             agent_prompt_id.clone(),
             context_limit_snapshot.projected_input_tokens,
         );
-        self.prompt_context_limits
+        self.prompt_runtime.context_limits
             .insert(agent_prompt_id.clone(), context_limit_snapshot);
         let role_name = self.role_name_for_agent_id(cid);
         let context_size_alerts = self
@@ -845,16 +845,16 @@ impl Harness {
             .get(&role_name)
             .map(|role| role.context_size_alerts.clone())
             .unwrap_or_default();
-        self.prompt_context_size_alerts
+        self.prompt_runtime.context_size_alerts
             .insert(agent_prompt_id.clone(), context_size_alerts);
         let compactions = self
             .available_roles
             .get(&role_name)
             .map(|role| role.compactions.clone())
             .unwrap_or_default();
-        self.prompt_compaction_policies
+        self.prompt_runtime.compaction_policies
             .insert(agent_prompt_id.clone(), compactions);
-        self.prompt_operations.insert(
+        self.prompt_runtime.operations.insert(
             agent_prompt_id.clone(),
             (
                 operation,
@@ -863,7 +863,7 @@ impl Harness {
                     .is_some_and(|(_, _, resume)| resume.is_some()),
             ),
         );
-        self.prompt_tool_specs
+        self.prompt_runtime.tool_specs
             .insert(agent_prompt_id.clone(), tool_specs);
         let session_id = self
             .agent_registry
@@ -1479,7 +1479,7 @@ impl Harness {
         // surface may have changed since the provider saw the prompt; suggesting
         // a current-role-only tool would steer the model toward a tool it could
         // not have selected in that turn.
-        let specs = self.prompt_tool_specs.get(agent_prompt_id)?;
+        let specs = self.prompt_runtime.tool_specs.get(agent_prompt_id)?;
         let names = specs
             .iter()
             .map(|spec| self.tool_model_visible_name(spec).as_str());
@@ -1759,7 +1759,7 @@ impl Harness {
         requested_name: &ToolName,
         agent_prompt_id: &AgentPromptId,
     ) -> Option<&tau_proto::ToolSpec> {
-        let specs = self.prompt_tool_specs.get(agent_prompt_id)?;
+        let specs = self.prompt_runtime.tool_specs.get(agent_prompt_id)?;
         specs
             .iter()
             .find(|spec| self.tool_model_visible_name(spec) == requested_name)

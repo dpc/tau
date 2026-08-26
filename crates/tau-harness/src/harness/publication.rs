@@ -8,7 +8,7 @@ use super::*;
 impl Harness {
     /// Agent id that owns a given in-flight prompt, if any.
     pub(super) fn agent_id_for_prompt(&self, spid: &AgentPromptId) -> Option<AgentId> {
-        self.prompt_agents.get(spid).cloned()
+        self.prompt_runtime.agents.get(spid).cloned()
     }
 
     /// If the agent's dedup map's "built for" cursor doesn't
@@ -589,7 +589,7 @@ impl Harness {
                     | tau_proto::ProviderStopReason::RepetitionDetected
             ) || finished.failure_kind.is_some()
                 || finished.error.is_some())
-            && let Some(correlation) = self.pending_initial_prompt_correlations.remove(cid)
+            && let Some(correlation) = self.prompt_runtime.pending_initial_correlations.remove(cid)
         {
             self.publish_initial_prompt_failed(
                 correlation,
@@ -691,15 +691,15 @@ impl Harness {
     }
 
     pub(super) fn note_agent_prompt_created(&mut self, prompt: &AgentPromptCreated) {
-        if let Some(cid) = self.prompt_agents.get(&prompt.agent_prompt_id).cloned() {
+        if let Some(cid) = self.prompt_runtime.agents.get(&prompt.agent_prompt_id).cloned() {
             if self
-                .pending_initial_prompt_correlations
+                .prompt_runtime.pending_initial_correlations
                 .get(&cid)
                 .is_some_and(|correlation| {
                     prompt.ctx_id.as_deref() == Some(correlation.ctx_id.as_str())
                 })
             {
-                self.pending_initial_prompt_correlations.remove(&cid);
+                self.prompt_runtime.pending_initial_correlations.remove(&cid);
             }
             if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 conv.last_prompt_id = Some(prompt.agent_prompt_id.clone());
@@ -740,7 +740,7 @@ impl Harness {
             });
         self.provider_runtime.pending_prompts
             .insert(agent_prompt_id.clone(), provider_connection_id);
-        self.prompt_estimated_cost_rates
+        self.prompt_runtime.estimated_cost_rates
             .insert(agent_prompt_id.clone(), rates);
     }
 
@@ -750,19 +750,19 @@ impl Harness {
         &mut self,
         agent_prompt_id: &AgentPromptId,
     ) -> Option<AgentId> {
-        self.pending_prompt_dispatches.remove(agent_prompt_id);
+        self.prompt_runtime.pending_dispatches.remove(agent_prompt_id);
         self.provider_runtime.cache_residency.drop_prompt(agent_prompt_id);
-        let cid = self.prompt_agents.remove(agent_prompt_id.as_str());
+        let cid = self.prompt_runtime.agents.remove(agent_prompt_id.as_str());
         self.provider_runtime.pending_prompts.remove(agent_prompt_id);
-        self.prompt_operations.remove(agent_prompt_id);
-        self.prompt_context_limits.remove(agent_prompt_id);
-        self.prompt_context_size_alerts.remove(agent_prompt_id);
-        self.prompt_compaction_policies.remove(agent_prompt_id);
-        self.prompt_compaction_projected_tokens
+        self.prompt_runtime.operations.remove(agent_prompt_id);
+        self.prompt_runtime.context_limits.remove(agent_prompt_id);
+        self.prompt_runtime.context_size_alerts.remove(agent_prompt_id);
+        self.prompt_runtime.compaction_policies.remove(agent_prompt_id);
+        self.prompt_runtime.compaction_projected_tokens
             .remove(agent_prompt_id);
-        self.prompt_estimated_cost_rates.remove(agent_prompt_id);
+        self.prompt_runtime.estimated_cost_rates.remove(agent_prompt_id);
         self.clear_prompt_tool_snapshot(agent_prompt_id);
-        if let Some(model) = self.prompt_models.remove(agent_prompt_id) {
+        if let Some(model) = self.prompt_runtime.models.remove(agent_prompt_id) {
             self.current_session_state.token_usage.total.requests = self
                 .current_session_state
                 .token_usage
@@ -802,7 +802,7 @@ impl Harness {
             return;
         };
         let agent_prompt_id = prompt.agent_prompt_id.clone();
-        let cid = self.prompt_agents.get(&agent_prompt_id).cloned();
+        let cid = self.prompt_runtime.agents.get(&agent_prompt_id).cloned();
         let failed_compaction = cid.as_ref().and_then(|cid| {
             self.agent_registry
                 .agents
@@ -866,7 +866,7 @@ impl Harness {
         if sync.session_generation != self.current_session_generation
             || continuation.started.session_id != self.current_session_id
             || !self
-                .pending_prompt_dispatches
+                .prompt_runtime.pending_dispatches
                 .contains(&continuation.started.agent_prompt_id)
             || self.provider_runtime.model_routes.get(&continuation.started.model)
                 != Some(&continuation.provider_connection_id)
@@ -999,7 +999,7 @@ impl Harness {
         let prompt_id = continuation.started.agent_prompt_id.clone();
         let prompt = Event::AgentPromptCreated((*continuation.prompt).clone());
         let provider_connection_id = continuation.provider_connection_id.clone();
-        self.pending_prompt_dispatches.remove(&prompt_id);
+        self.prompt_runtime.pending_dispatches.remove(&prompt_id);
         self.recover_failed_provider_prompt_route(&prompt, &provider_connection_id, reason);
     }
 
@@ -1801,7 +1801,7 @@ impl Harness {
             let _ = self.bus.publish_from(source, observer_frame);
         }
         if let Event::AgentPromptCreated(prompt) = &event {
-            self.pending_prompt_dispatches
+            self.prompt_runtime.pending_dispatches
                 .remove(&prompt.agent_prompt_id);
         }
         commit_timing.bus_enqueue = bus_enqueue_started.elapsed();

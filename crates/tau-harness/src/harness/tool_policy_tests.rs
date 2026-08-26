@@ -628,7 +628,7 @@ fn compaction_prompt_snapshot_survives_later_role_changes() {
     let prompt_id: tau_proto::AgentPromptId = "prompt-compaction"
         .parse::<tau_proto::AgentPromptId>()
         .expect("known-safe AgentPromptId must be valid");
-    policy.harness.prompt_tool_specs.insert(
+    policy.harness.prompt_runtime.tool_specs.insert(
         prompt_id.clone(),
         vec![tagged_tool(
             "compact",
@@ -862,7 +862,7 @@ fn prompt_snapshot_lookup_is_strict_and_survives_role_changes() {
     let prompt_id: tau_proto::AgentPromptId = "prompt-1"
         .parse::<tau_proto::AgentPromptId>()
         .expect("known-safe AgentPromptId must be valid");
-    policy.harness.prompt_tool_specs.insert(
+    policy.harness.prompt_runtime.tool_specs.insert(
         prompt_id.clone(),
         vec![tagged_tool("edit", true, &["shell:edit:line"])],
     );
@@ -896,19 +896,19 @@ fn prompt_snapshot_cleanup_removes_call_backreferences() {
     let prompt_id: tau_proto::AgentPromptId = "prompt-cleanup"
         .parse::<tau_proto::AgentPromptId>()
         .expect("known-safe AgentPromptId must be valid");
-    policy.harness.prompt_tool_specs.insert(
+    policy.harness.prompt_runtime.tool_specs.insert(
         prompt_id.clone(),
         vec![tagged_tool("edit", true, &["shell:edit:line"])],
     );
     policy
         .harness
-        .prompt_tool_call_prompts
+        .prompt_runtime.tool_call_prompts
         .insert("call-1".into(), prompt_id.clone());
 
     policy.harness.clear_prompt_tool_snapshot(&prompt_id);
 
-    assert!(!policy.harness.prompt_tool_specs.contains_key(&prompt_id));
-    assert!(policy.harness.prompt_tool_call_prompts.is_empty());
+    assert!(!policy.harness.prompt_runtime.tool_specs.contains_key(&prompt_id));
+    assert!(policy.harness.prompt_runtime.tool_call_prompts.is_empty());
 }
 
 /// Effective alias validation is snapshot-local: duplicates are diagnosed only
@@ -1051,7 +1051,7 @@ fn prompt_alias_resolution_does_not_prefer_an_internal_name() {
         .expect("known-safe AgentPromptId must be valid");
     policy
         .harness
-        .prompt_tool_specs
+        .prompt_runtime.tool_specs
         .insert(prompt_id.clone(), vec![aliased, other]);
 
     let resolved = policy

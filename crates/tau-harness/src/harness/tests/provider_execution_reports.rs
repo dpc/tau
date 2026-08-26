@@ -53,7 +53,7 @@ fn publish_terminal_accounting_report(
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "accounting-prompt");
-    harness.prompt_agents.insert(
+    harness.prompt_runtime.agents.insert(
         "accounting-prompt"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -65,13 +65,13 @@ fn publish_terminal_accounting_report(
             .expect("known-safe AgentPromptId must be valid"),
         crate::test_connection_id("provider"),
     );
-    harness.prompt_models.insert(
+    harness.prompt_runtime.models.insert(
         "accounting-prompt"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         "provider/model".into(),
     );
-    harness.prompt_estimated_cost_rates.insert(
+    harness.prompt_runtime.estimated_cost_rates.insert(
         "accounting-prompt"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -860,7 +860,7 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_agents.insert(
+    harness.prompt_runtime.agents.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -974,7 +974,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_agents.insert(
+    harness.prompt_runtime.agents.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -1130,7 +1130,7 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
         .expect("subscribe observer");
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_agents.insert(
+    harness.prompt_runtime.agents.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -1323,7 +1323,7 @@ fn stale_finished_report_termination_uses_harness_source() {
     );
     let cid = ensure_test_user_agent(&mut harness);
     seed_agent_thinking(&mut harness, &cid, "prompt-1");
-    harness.prompt_agents.insert(
+    harness.prompt_runtime.agents.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),

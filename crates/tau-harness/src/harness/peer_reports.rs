@@ -1453,7 +1453,7 @@ impl Harness {
             return;
         }
         if self.agent_is_ephemeral(&pending.target_agent_id) {
-            self.ephemeral_provider_retry_requests
+            self.prompt_runtime.ephemeral_provider_retry_requests
                 .insert(result.request_id.clone());
         }
         self.ui_runtime
@@ -1522,7 +1522,7 @@ impl Harness {
         let mut updated = updated.clone();
         updated.agent_id = agent_id;
         if !updated.deltas.is_empty() {
-            self.prompt_semantic_output
+            self.prompt_runtime.semantic_output
                 .insert(updated.agent_prompt_id.clone());
         }
         self.enrich_provider_response_updated_compaction(&mut updated);

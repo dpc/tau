@@ -245,7 +245,7 @@ fn challenged_working_final_drop_is_overridden_until_post_commit() {
     let prompt_id =
         tau_proto::AgentPromptId::parse("working-final-drop").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
-    h.prompt_agents.insert(prompt_id.clone(), cid.clone());
+    h.prompt_runtime.agents.insert(prompt_id.clone(), cid.clone());
     let interceptor = connect_test_tool(&mut h, "working-final-drop-owner");
     h.handle_extension_event(
         "working-final-drop-owner",
@@ -310,7 +310,7 @@ fn delayed_working_final_release_retains_exact_root_parent() {
     let prompt_id =
         tau_proto::AgentPromptId::parse("delayed-parent-final").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
-    h.prompt_agents.insert(prompt_id.clone(), cid.clone());
+    h.prompt_runtime.agents.insert(prompt_id.clone(), cid.clone());
     let interceptor = connect_test_tool(&mut h, "delayed-parent-owner");
     h.handle_extension_event(
         "delayed-parent-owner",
@@ -335,7 +335,7 @@ fn delayed_working_final_release_retains_exact_root_parent() {
     )
     .expect("release candidate");
 
-    assert!(h.pending_agent_publish_completions.contains_key(&cid));
+    assert!(h.prompt_runtime.pending_publish_completions.contains_key(&cid));
     assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
     assert_eq!(
         event_log_events(&h)
@@ -382,7 +382,7 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
         .head
         .map(tau_proto::AgentHead::Node)
         .unwrap_or(tau_proto::AgentHead::Root);
-    h.prompt_agents.insert(prompt_id.clone(), cid.clone());
+    h.prompt_runtime.agents.insert(prompt_id.clone(), cid.clone());
     let interceptor = connect_test_tool(&mut h, "working-final-append-owner");
     h.handle_extension_event(
         "working-final-append-owner",
@@ -415,7 +415,7 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
         })),
     )
     .expect("release into append failure");
-    assert!(h.pending_agent_publish_completions.contains_key(&cid));
+    assert!(h.prompt_runtime.pending_publish_completions.contains_key(&cid));
     assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
 
     std::fs::remove_dir(&journal_path).expect("remove append blocker");
@@ -430,7 +430,7 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
     )
     .expect("off-branch runtime progress");
     assert!(
-        h.pending_agent_publish_completions.contains_key(&cid),
+        h.prompt_runtime.pending_publish_completions.contains_key(&cid),
         "off-branch progress must retain the original response"
     );
     h.agent_registry.agents.get_mut(&cid).expect("agent").head = owning_head.as_option();
@@ -441,7 +441,7 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
         })),
     )
     .expect("owning-branch runtime progress retries retained append");
-    assert!(!h.pending_agent_publish_completions.contains_key(&cid));
+    assert!(!h.prompt_runtime.pending_publish_completions.contains_key(&cid));
     assert!(matches!(
         h.agent_registry.agents[&cid].turn_state,
         AgentTurnState::AgentThinking { .. }
@@ -472,7 +472,7 @@ fn ordinary_final_append_failure_does_not_project_watch_response() {
     let prompt_id =
         tau_proto::AgentPromptId::parse("ordinary-final-append").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &watched_cid, prompt_id.as_str());
-    h.prompt_agents
+    h.prompt_runtime.agents
         .insert(prompt_id.clone(), watched_cid.clone());
     let interceptor = connect_test_tool(&mut h, "ordinary-final-append-owner");
     h.handle_extension_event(
@@ -600,7 +600,7 @@ fn initial_prompt_submission_append_failure_publishes_correlated_terminal() {
                 && failed.ctx_id == "prompt-append-failure"
                 && failed.stage == tau_proto::AgentPromptFailureStage::Submission
     )));
-    assert!(h.pending_agent_publish_completions.is_empty());
+    assert!(h.prompt_runtime.pending_publish_completions.is_empty());
 
     std::fs::remove_dir(&journal_path).expect("remove append blocker");
     std::fs::rename(&backup_path, &journal_path).expect("restore journal");
@@ -648,21 +648,21 @@ fn retained_working_final_rejects_root_and_descendant_head_drift() {
         h.selected_head_for_agent(&cid),
         Some(tau_proto::AgentHead::Root)
     );
-    h.pending_agent_publish_completions.insert(
+    h.prompt_runtime.pending_publish_completions.insert(
         cid.clone(),
         make_completion(tau_proto::AgentHead::Root, "root"),
     );
     publish_child(&mut h, "after-root");
     h.retry_pending_agent_publish_completion(&cid);
-    assert!(h.pending_agent_publish_completions.contains_key(&cid));
+    assert!(h.prompt_runtime.pending_publish_completions.contains_key(&cid));
 
-    h.pending_agent_publish_completions.remove(&cid);
+    h.prompt_runtime.pending_publish_completions.remove(&cid);
     let captured = h.selected_head_for_agent(&cid).expect("captured child");
-    h.pending_agent_publish_completions
+    h.prompt_runtime.pending_publish_completions
         .insert(cid.clone(), make_completion(captured, "descendant"));
     publish_child(&mut h, "later-descendant");
     h.retry_pending_agent_publish_completion(&cid);
-    assert!(h.pending_agent_publish_completions.contains_key(&cid));
+    assert!(h.prompt_runtime.pending_publish_completions.contains_key(&cid));
     h.shutdown().expect("shutdown");
 }
 
@@ -2645,7 +2645,7 @@ fn intercepted_prompt_start_append_failure_prevents_provider_delivery() {
     std::fs::rename(&backup_path, &journal_path).expect("restore agent journal");
 
     assert!(
-        !h.pending_prompt_dispatches
+        !h.prompt_runtime.pending_dispatches
             .contains(&started.agent_prompt_id)
     );
     assert!(
@@ -2724,7 +2724,7 @@ fn intercepted_prompt_rejects_changed_runtime_incarnation() {
     .expect("release full prompt");
 
     assert!(
-        !h.pending_prompt_dispatches
+        !h.prompt_runtime.pending_dispatches
             .contains(&prompt.agent_prompt_id)
     );
     assert!(
@@ -2767,8 +2767,8 @@ fn assert_unload_disposes_parked_prompt(selector: tau_proto::EventName, owner: &
 
     h.remove_agent(&cid);
 
-    assert!(h.pending_prompt_dispatches.contains(&prompt_id));
-    assert!(h.prompt_agents.contains_key(prompt_id.as_str()));
+    assert!(h.prompt_runtime.pending_dispatches.contains(&prompt_id));
+    assert!(h.prompt_runtime.agents.contains_key(prompt_id.as_str()));
     assert_eq!(h.current_session_state.token_usage.total.requests, 1);
     h.handle_extension_event(
         owner,
@@ -2777,10 +2777,10 @@ fn assert_unload_disposes_parked_prompt(selector: tau_proto::EventName, owner: &
         })),
     )
     .expect("release parked prompt before durable unload closure");
-    assert!(!h.pending_prompt_dispatches.contains(&prompt_id));
-    assert!(!h.prompt_agents.contains_key(prompt_id.as_str()));
-    assert!(!h.prompt_models.contains_key(&prompt_id));
-    assert!(!h.prompt_operations.contains_key(&prompt_id));
+    assert!(!h.prompt_runtime.pending_dispatches.contains(&prompt_id));
+    assert!(!h.prompt_runtime.agents.contains_key(prompt_id.as_str()));
+    assert!(!h.prompt_runtime.models.contains_key(&prompt_id));
+    assert!(!h.prompt_runtime.operations.contains_key(&prompt_id));
     assert!(!h.provider_runtime.pending_prompts.contains_key(&prompt_id));
     assert_eq!(h.current_session_state.token_usage.total.requests, 0);
     h.shutdown().expect("shutdown");
@@ -3170,7 +3170,7 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
     )
     .expect("release approved replacement into append failure");
     assert!(
-        h.pending_agent_publish_completions.contains_key(&cid),
+        h.prompt_runtime.pending_publish_completions.contains_key(&cid),
         "clean storage failure retains the exact retry envelope"
     );
     assert!(matches!(
@@ -3208,7 +3208,7 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
     )
     .expect("release retained retry");
     assert!(h.publication.pending_intercept.is_none());
-    assert!(!h.pending_agent_publish_completions.contains_key(&cid));
+    assert!(!h.prompt_runtime.pending_publish_completions.contains_key(&cid));
     assert_eq!(prompt_created_count(&h), 2);
 }
 

@@ -2906,7 +2906,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
         .ensure_agent_id_for_agent(&cid)
         .expect("default conversation has an agent id");
     let session_id = h.agent_registry.agents[&cid].session_id.clone();
-    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.prompt_runtime.agents.insert(spid.clone(), cid.clone());
     h.publish_event(
         None,
         Event::AgentPromptQueued(AgentPromptQueued {
@@ -3354,13 +3354,13 @@ fn resumed_harness_replays_persisted_session_history() {
         )
         .expect("submit first prompt");
         let spid = h
-            .prompt_agents
+            .prompt_runtime.agents
             .keys()
             .next()
             .expect("first session prompt id")
             .clone();
         let cid = h
-            .prompt_agents
+            .prompt_runtime.agents
             .get(&spid)
             .expect("first prompt conversation")
             .clone();
@@ -3414,7 +3414,7 @@ fn resumed_harness_replays_persisted_session_history() {
         )
         .expect("submit resumed prompt");
     let spid = resumed
-        .prompt_agents
+        .prompt_runtime.agents
         .keys()
         .next()
         .expect("resumed session prompt id")

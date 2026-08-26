@@ -87,7 +87,7 @@ impl Harness {
             if self.tool_call_waits_for_staged_registration(
                 &next.conversation_id,
                 &next.invocation.name,
-                self.prompt_tool_call_prompts.get(&next.invocation.id),
+                self.prompt_runtime.tool_call_prompts.get(&next.invocation.id),
             ) {
                 break;
             }
@@ -925,7 +925,7 @@ impl Harness {
                 event_completion,
                 notify_watchers,
             );
-            if self.pending_agent_publish_completions.contains_key(cid) {
+            if self.prompt_runtime.pending_publish_completions.contains_key(cid) {
                 break;
             }
         }
@@ -1295,7 +1295,7 @@ impl Harness {
         let role_name = self.role_name_for_agent_id(cid).to_owned();
         self.remember_tool_call_loop_signature(cid, call);
 
-        let prompt_id = self.prompt_tool_call_prompts.get(&call.id).cloned();
+        let prompt_id = self.prompt_runtime.tool_call_prompts.get(&call.id).cloned();
         let prompt_tool_spec = prompt_id
             .as_ref()
             .map(|prompt_id| self.resolve_enabled_tool_spec_for_prompt(&tool_name, prompt_id));
@@ -1396,7 +1396,7 @@ impl Harness {
                 let mut message = format!("invalid arguments for tool `{tool_name}`: {error}");
                 if let Some(hint) = tool_example_hint(tool_spec, &arguments) {
                     let key = (cid.clone(), visible_tool_name.clone(), hint.clone());
-                    if self.shown_tool_failure_examples.insert(key) {
+                    if self.prompt_runtime.shown_tool_failure_examples.insert(key) {
                         message.push_str(&hint);
                     }
                 }
@@ -1454,7 +1454,7 @@ impl Harness {
             Ok(route) => {
                 let status_was_available = prompt_id
                     .as_ref()
-                    .and_then(|prompt_id| self.prompt_tool_specs.get(prompt_id))
+                    .and_then(|prompt_id| self.prompt_runtime.tool_specs.get(prompt_id))
                     .is_some_and(|specs| {
                         specs
                             .iter()

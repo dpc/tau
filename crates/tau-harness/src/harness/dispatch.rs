@@ -471,7 +471,7 @@ impl Harness {
     /// Activate exact replay occurrences after restore installed all runtime
     /// handlers and routes.
     pub(crate) fn activate_replayed_prompt_occurrences(&mut self) {
-        let pending_stale = std::mem::take(&mut self.pending_replay_uncertain_stale);
+        let pending_stale = std::mem::take(&mut self.prompt_runtime.pending_replay_uncertain_stale);
         for (cid, terminated) in pending_stale {
             self.publish_event_for_agent(
                 &cid,
@@ -479,7 +479,7 @@ impl Harness {
                 tau_proto::Event::AgentPromptTerminated(terminated),
             );
         }
-        let pending = std::mem::take(&mut self.pending_replay_prompt_activation_occurrences);
+        let pending = std::mem::take(&mut self.prompt_runtime.pending_replay_activation_occurrences);
         for (cid, occurrences) in pending {
             if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
                 agent.pending_replay_activation = false;
