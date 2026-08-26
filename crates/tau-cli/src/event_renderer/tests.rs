@@ -347,6 +347,8 @@ fn background_terminal_handlers_normalize_status() {
     );
 
     let headers = renderer
+        .transcript
+        .history
         .tool_history
         .iter()
         .map(|entry| rendered_tool_header(&entry.display))
@@ -356,7 +358,7 @@ fn background_terminal_handlers_normalize_status() {
         headers[1],
         "generic error-metadata 0s err: background-failure"
     );
-    assert!(renderer.tool_calls.is_empty());
+    assert!(renderer.transcript.runtime.tool_calls.is_empty());
 }
 
 /// Blocker action labels stay visible from the live start through each terminal
@@ -374,7 +376,7 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
         );
         assert_eq!(
             rendered_tool_header(
-                renderer.tool_calls["blocker-add"]
+                renderer.transcript.runtime.tool_calls["blocker-add"]
                     .live_display
                     .as_ref()
                     .expect("live blocker display"),
@@ -401,7 +403,7 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
             2,
         );
         let progress_header = rendered_tool_header(
-            renderer.tool_calls["blocker-add"]
+            renderer.transcript.runtime.tool_calls["blocker-add"]
                 .live_display
                 .as_ref()
                 .expect("progress blocker display"),
@@ -411,7 +413,7 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
         assert!(!progress_header.contains("private"));
         assert!(
             !rendered_tool_block_text(
-                renderer.tool_calls["blocker-add"]
+                renderer.transcript.runtime.tool_calls["blocker-add"]
                     .live_display
                     .as_ref()
                     .expect("progress blocker display"),
@@ -455,6 +457,8 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
         );
 
         let headers = renderer
+            .transcript
+            .history
             .tool_history
             .iter()
             .map(|entry| rendered_tool_header(&entry.display))
@@ -464,6 +468,8 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
         assert_eq!(headers[2], format!("{tool_name} list 0s ok"));
         assert!(
             renderer
+                .transcript
+                .history
                 .tool_history
                 .iter()
                 .all(|entry| !rendered_tool_block_text(&entry.display).contains("private"))
@@ -491,6 +497,8 @@ fn malformed_blocker_action_hides_all_descriptor_payloads() {
         );
         let header = rendered_tool_header(
             &renderer
+                .transcript
+                .history
                 .tool_history
                 .last()
                 .expect("completed malformed blocker")
@@ -570,6 +578,8 @@ fn reconstructed_blocker_start_preserves_action_for_replayed_completion() {
 
         assert_eq!(
             renderer
+                .transcript
+                .history
                 .tool_history
                 .last()
                 .expect("completed replayed blocker")
@@ -678,20 +688,21 @@ fn watched_agent_stats_keep_running_until_outer_turn_is_idle() {
 #[test]
 fn watched_agent_count_projects_recursive_activity() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.watched_agents = HashMap::from([
+    renderer.watches.watched_agents = HashMap::from([
         ("manager".to_owned(), vec!["reviewer".to_owned()]),
         ("reviewer".to_owned(), vec!["worker".to_owned()]),
     ]);
-    renderer.agent_watchers = HashMap::from([
+    renderer.watches.agent_watchers = HashMap::from([
         ("reviewer".to_owned(), vec!["manager".to_owned()]),
         ("worker".to_owned(), vec!["reviewer".to_owned()]),
     ]);
     renderer
+        .watches
         .active_agent_prompts
         .insert("worker".to_owned(), HashSet::from(["prompt".to_owned()]));
 
     assert_eq!(renderer.active_side_agent_count(), 2);
-    renderer.current_agent_id = Some("reviewer".to_owned());
+    renderer.selection.current_agent_id = Some("reviewer".to_owned());
     assert_eq!(
         renderer.active_side_agent_count(),
         1,
@@ -815,7 +826,7 @@ fn block_text(block: &tau_cli_term::StyledBlock) -> String {
 #[test]
 fn typed_internal_notice_classifications_resolve_italic_style() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.show_internal_prompts = true;
+    renderer.presentation.show_internal_prompts = true;
     let blocks = [
         (
             "context-size alert",
@@ -865,7 +876,7 @@ fn generated_multi_agent_load_avoids_hidden_terminal_snapshot_clones() {
         let agent_id = format!("worker-{agent_index}");
         if agent_index == 0 {
             for block_index in 0..6_250 {
-                renderer.handle.print_output(
+                renderer.resources.handle.print_output(
                     "generated-load",
                     tau_cli_term::StyledBlock::new(format!("{agent_id}:{block_index}")),
                 );
@@ -879,13 +890,13 @@ fn generated_multi_agent_load_avoids_hidden_terminal_snapshot_clones() {
                 tau_cli_term::StyledBlock::new(format!("{agent_id}:{block_index}")),
             );
         }
-        renderer.agents_ui_state.insert(agent_id, state);
+        renderer.selection.agents_ui_state.insert(agent_id, state);
     }
 
     let snapshots_before = handle.output_snapshot_count();
     let blocks_before = (1..8)
         .map(|agent_index| {
-            renderer.agents_ui_state[&format!("worker-{agent_index}")]
+            renderer.selection.agents_ui_state[&format!("worker-{agent_index}")]
                 .output
                 .block_count()
         })
@@ -901,7 +912,7 @@ fn generated_multi_agent_load_avoids_hidden_terminal_snapshot_clones() {
     assert_eq!(handle.output_snapshot_count(), snapshots_before);
     for (agent_index, blocks_before) in (1..8).zip(blocks_before) {
         assert_eq!(
-            renderer.agents_ui_state[&format!("worker-{agent_index}")]
+            renderer.selection.agents_ui_state[&format!("worker-{agent_index}")]
                 .output
                 .block_count(),
             blocks_before + 1
@@ -914,7 +925,7 @@ fn generated_multi_agent_load_avoids_hidden_terminal_snapshot_clones() {
 #[test]
 fn agent_id_for_event_routes_sent_message_to_sender() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.current_agent_id = Some("current-agent".to_owned());
+    renderer.selection.current_agent_id = Some("current-agent".to_owned());
 
     let resolved = renderer.agent_id_for_event_for_test(&agent_message(
         "sender-agent",
@@ -932,6 +943,7 @@ fn agent_id_for_event_routes_sent_message_to_sender() {
 fn agent_id_for_event_resolves_tool_metadata_and_started_fallback() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer
+        .event_owners
         .tool_agents
         .insert("known-call".to_owned(), "metadata-agent".to_owned());
 
@@ -974,8 +986,8 @@ fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
     });
     let mut ordinary = renderer_for_agent_id_tests();
     ordinary.handle_socket_delivery(&user_start, tau_proto::UnixMicros::new(1), 1);
-    assert_eq!(ordinary.current_agent_id, None);
-    assert_eq!(ordinary.displayed_agent_id, None);
+    assert_eq!(ordinary.selection.current_agent_id, None);
+    assert_eq!(ordinary.selection.displayed_agent_id, None);
 
     let mut reconstructed = renderer_for_agent_id_tests();
     reconstructed.handle_reconstructed_tool_start_socket_delivery(
@@ -985,11 +997,11 @@ fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
         1,
     );
     assert_eq!(
-        reconstructed.current_agent_id.as_deref(),
+        reconstructed.selection.current_agent_id.as_deref(),
         Some(owner.as_str())
     );
     assert_eq!(
-        reconstructed.displayed_agent_id.as_deref(),
+        reconstructed.selection.displayed_agent_id.as_deref(),
         Some(owner.as_str())
     );
 
@@ -1010,8 +1022,8 @@ fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
         tau_proto::UnixMicros::new(1),
         1,
     );
-    assert_eq!(extension.current_agent_id, None);
-    assert_eq!(extension.displayed_agent_id, None);
+    assert_eq!(extension.selection.current_agent_id, None);
+    assert_eq!(extension.selection.displayed_agent_id, None);
 }
 
 /// Shell progress can omit an explicit target and rely on metadata learned
@@ -1021,6 +1033,7 @@ fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
 fn agent_id_for_event_resolves_shell_progress_from_learned_metadata() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer
+        .event_owners
         .shell_agents
         .insert("cmd-1".to_owned(), "shell-agent".to_owned());
 
@@ -1265,7 +1278,7 @@ fn late_agent_name_updates_reproject_message_history() {
         renderer.agent_message_summary(&message),
         "Message from @agent-a to @agent-b (new task)"
     );
-    let stored = &renderer.message_history[0].event;
+    let stored = &renderer.transcript.history.message_history[0].event;
     assert_eq!(stored, &message);
     assert_eq!(
         super::EventRenderer::agent_message_body(stored),
@@ -1312,7 +1325,7 @@ fn selected_agent_messages_show_only_the_remote_endpoint() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.remember_agent_display_name("worker", "implementation");
     renderer.remember_agent_display_name("manager", "coordination");
-    renderer.displayed_agent_id = Some("manager".to_owned());
+    renderer.selection.displayed_agent_id = Some("manager".to_owned());
     let inbound = received_agent_message("worker", None, "manager", "inbound body");
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&inbound)),
@@ -1351,7 +1364,7 @@ fn external_message_facts_use_the_message_marker() {
 #[test]
 fn selected_inbound_message_matches_endpoints_with_session_scope() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.displayed_agent_id = Some("same".to_owned());
+    renderer.selection.displayed_agent_id = Some("same".to_owned());
     let inbound = received_agent_message("same", Some("remote-session"), "same", "remote body");
 
     assert_eq!(
@@ -1370,7 +1383,7 @@ fn overview_messages_show_both_endpoint_task_labels() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.remember_agent_display_name("worker", "implementation");
     renderer.remember_agent_display_name("manager", "coordination");
-    renderer.displayed_agent_id = None;
+    renderer.selection.displayed_agent_id = None;
     let message = agent_message("worker", "manager", "preserved body");
 
     assert_eq!(
@@ -1388,7 +1401,7 @@ fn overview_messages_show_both_endpoint_task_labels() {
 fn watch_work_status_renders_all_reportable_states() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.remember_agent_display_name("worker", "implementation");
-    renderer.show_messages = path_tau_config_settings::ShowMessages::None;
+    renderer.presentation.show_messages = path_tau_config_settings::ShowMessages::None;
     for (phase, label, symbol) in [
         (tau_proto::AgentWorkStatusPhase::Working, "working", "🚀"),
         (tau_proto::AgentWorkStatusPhase::Done, "done", "✅"),
@@ -1434,10 +1447,10 @@ fn watch_work_status_renders_all_reportable_states() {
 #[test]
 fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.current_session_id =
+    renderer.session.current_session_id =
         Some(tau_proto::SessionId::parse("session-1").expect("valid session ID"));
-    renderer.current_agent_id = Some("manager".to_owned());
-    renderer.displayed_agent_id = Some("manager".to_owned());
+    renderer.selection.current_agent_id = Some("manager".to_owned());
+    renderer.selection.displayed_agent_id = Some("manager".to_owned());
     renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: tau_proto::SessionId::parse("session-1").expect("valid session ID"),
@@ -1479,9 +1492,10 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
         tau_proto::UnixMicros::new(1),
         1,
     );
-    assert_eq!(renderer.message_history.len(), 0);
+    assert_eq!(renderer.transcript.history.message_history.len(), 0);
     assert_eq!(
         renderer
+            .watches
             .watched_agent_work_statuses
             .get("worker")
             .expect("initial snapshot cached")
@@ -1499,9 +1513,10 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
         tau_proto::UnixMicros::new(2),
         2,
     );
-    assert_eq!(renderer.message_history.len(), 1);
+    assert_eq!(renderer.transcript.history.message_history.len(), 1);
     assert_eq!(
         renderer
+            .watches
             .watched_agent_work_statuses
             .get("worker")
             .expect("explicit transition cached")
@@ -1509,7 +1524,10 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
         tau_proto::AgentWorkStatusPhase::Working
     );
     assert_eq!(
-        block_text(&renderer.render_agent_message_block(&renderer.message_history[0].event)),
+        block_text(
+            &renderer
+                .render_agent_message_block(&renderer.transcript.history.message_history[0].event)
+        ),
         "▤ Status update from @worker: 🚀 (implementation)"
     );
 }
@@ -2044,7 +2062,7 @@ fn embedded_tool_continuation_trace_renders_fully_idle() {
         })
         .expect("fixture agent");
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.current_session_id = Some(
+    renderer.session.current_session_id = Some(
         "s1".parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
     );
@@ -2060,11 +2078,11 @@ fn embedded_tool_continuation_trace_renders_fully_idle() {
     }
 
     let mut watched_renderer = renderer_for_agent_id_tests();
-    watched_renderer.current_session_id = Some(
+    watched_renderer.session.current_session_id = Some(
         "s1".parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
     );
-    watched_renderer.current_agent_id = Some("manager".to_owned());
+    watched_renderer.selection.current_agent_id = Some("manager".to_owned());
     watched_renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: "s1"
@@ -2117,7 +2135,7 @@ fn embedded_tool_continuation_trace_renders_fully_idle() {
 #[test]
 fn indexed_stream_join_preserves_order_and_reasoning_ownership() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.prompts.insert(
+    renderer.transcript.runtime.prompts.insert(
         "sp-indexed-ownership".to_owned(),
         super::PromptState::default(),
     );
@@ -2165,6 +2183,8 @@ fn indexed_stream_join_preserves_order_and_reasoning_ownership() {
     assert_eq!(response_update, super::MarkdownStreamUpdate::Replace);
     assert_eq!(thinking_update, super::MarkdownStreamUpdate::Replace);
     let retained_pointer = renderer
+        .transcript
+        .runtime
         .prompts
         .get("sp-indexed-ownership")
         .and_then(|state| state.thinking_text.as_ref())
@@ -2175,6 +2195,8 @@ fn indexed_stream_join_preserves_order_and_reasoning_ownership() {
         .update_live_thinking_block("sp-indexed-ownership", super::MarkdownStreamUpdate::Replace);
 
     let state = renderer
+        .transcript
+        .runtime
         .prompts
         .get("sp-indexed-ownership")
         .expect("prompt state");
@@ -2210,6 +2232,8 @@ fn indexed_stream_join_preserves_order_and_reasoning_ownership() {
     assert_eq!(thinking_update, super::MarkdownStreamUpdate::Replace);
     assert_eq!(
         renderer
+            .transcript
+            .runtime
             .prompts
             .get("sp-indexed-ownership")
             .and_then(|state| state.thinking_text.as_deref()),
@@ -2281,7 +2305,12 @@ fn indexed_stream_join_checks_capacity_and_bounds_large_chunk_retention() {
         (final_response, _, _) = renderer.accumulate_response_update(&update);
     }
 
-    let state = renderer.prompts.get("sp-large-join").expect("prompt state");
+    let state = renderer
+        .transcript
+        .runtime
+        .prompts
+        .get("sp-large-join")
+        .expect("prompt state");
     let expected_len = 64 * 1024;
     assert_eq!(final_response.len(), expected_len);
     assert_eq!(final_response.capacity(), expected_len);
