@@ -1,5 +1,7 @@
 //! Tests for transcript rendering behavior.
 
+use std::sync::Barrier;
+
 use super::super::markdown_render::markdown_block;
 use super::*;
 
@@ -45,7 +47,6 @@ fn renderer_starts_without_selected_or_default_agent() {
 fn agent_response_marker_tracks_streaming_and_completed_states() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = marker_test_renderer(handle.clone());
-
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
         "sp-marker",
         "s1",
@@ -69,6 +70,424 @@ fn agent_response_marker_tracks_streaming_and_completed_states() {
     sync(&handle);
     assert!(vt.screen_contains(80, "◆ marker answer"));
     assert!(!vt.screen_contains(80, "◇ marker answer"));
+}
+
+/// A visible final must coalesce all of its block, editor, and status redraw
+/// requests into one settled wake instead of exposing intermediate final state.
+#[test]
+fn visible_provider_final_requests_one_settled_redraw() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.apply_setting("show-thinking", "true");
+    renderer.apply_setting("show-turn-stats", "true");
+    for index in 0..40 {
+        handle.print_output(
+            format!("atomic-history-{index}"),
+            format!("history {index}"),
+        );
+    }
+
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-atomic-final",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            test_agent_prompt_id("sp-atomic-final"),
+            "live answer",
+            Some("live reasoning".to_owned()),
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    sync(&handle);
+    let generation = vt.frame_generation();
+    let editor_context = renderer.editor_context();
+    let staging = Arc::new(Barrier::new(2));
+    let unrelated = handle.clone();
+    let producer_staging = staging.clone();
+    let producer = std::thread::spawn(move || {
+        producer_staging.wait();
+        unrelated.print_output("unrelated-final-race", "unrelated output");
+        unrelated.redraw();
+    });
+    let hook_staging = staging.clone();
+    let hook_vt = vt.clone();
+    let staging_editor = editor_context.clone();
+    renderer.set_finished_staging_hook(Arc::new(move || {
+        assert!(
+            staging_editor
+                .lock()
+                .expect("staging editor")
+                .last_response
+                .is_none()
+        );
+        hook_staging.wait();
+        hook_vt.wait_for_frame_containing_after(generation, "unrelated output");
+    }));
+    let commit_barrier = Arc::new(Barrier::new(2));
+    let commit_producer_barrier = commit_barrier.clone();
+    let commit_handle = handle.clone();
+    let commit_producer = std::thread::spawn(move || {
+        commit_producer_barrier.wait();
+        commit_handle.print_output("unrelated-during-commit", "commit output");
+        commit_handle.redraw_sync();
+        commit_producer_barrier.wait();
+    });
+    let hook_commit_barrier = commit_barrier.clone();
+    let commit_editor = editor_context.clone();
+    renderer.set_finished_commit_hook(Arc::new(move || {
+        assert!(
+            commit_editor
+                .lock()
+                .expect("commit editor")
+                .last_response
+                .is_none()
+        );
+        hook_commit_barrier.wait();
+        hook_commit_barrier.wait();
+    }));
+    let published_editor = editor_context.clone();
+    renderer.set_finished_published_hook(Arc::new(move || {
+        let editor = published_editor.lock().expect("published editor");
+        let response = editor.last_response.as_deref().expect("published response");
+        assert!(response.contains("first settled item"));
+        assert!(response.contains("settled answer"));
+    }));
+
+    let mut finished =
+        finished_response_with_usage("sp-atomic-final", "main", 120, 40, 12, "settled answer");
+    finished.output_items = vec![
+        ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Summary,
+            text: "settled reasoning".to_owned(),
+        }),
+        assistant_message_item("first settled item"),
+        assistant_message_item("settled answer"),
+        ContextItem::Compaction(OpaqueProviderItem::new(CborValue::Map(vec![]))),
+        ContextItem::ToolCall(ToolCallItem {
+            call_id: "atomic-placeholder".into(),
+            name: tau_proto::ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        }),
+        ContextItem::ToolCall(ToolCallItem {
+            call_id: "atomic-placeholder-second".into(),
+            name: tau_proto::ToolName::new("search"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        }),
+    ];
+    finished.stop_reason = ProviderStopReason::ToolCalls;
+    renderer.handle(&Event::ProviderResponseFinished(finished));
+    producer.join().expect("unrelated producer");
+    commit_producer.join().expect("commit producer");
+
+    let settled_generation = vt.wait_for_frame_containing_after(generation, "◆ settled answer");
+    let frames = vt.frames.0.lock().expect("frames");
+    for frame in &frames[generation..settled_generation] {
+        let text = frame.join("\n");
+        let complete_live = text.contains("◇ live answer")
+            && text.contains("live reasoning")
+            && !text.contains("◆ settled answer")
+            && !text.contains("◆ first settled item")
+            && !text.contains("settled reasoning")
+            && !text.contains("compact ok")
+            && !text.contains(" ↑120 ↓12")
+            && !text.contains("%0/2");
+        let complete_settled = text.contains("◆ settled answer")
+            && text.contains("◆ first settled item")
+            && text.contains("settled reasoning")
+            && text.contains("compact ok")
+            && text.contains(" ↑120 ↓12")
+            && text.contains("@main")
+            && text.contains("%0/2")
+            && !text.contains("◇ live answer")
+            && !text.contains("live reasoning");
+        assert!(
+            complete_live || complete_settled,
+            "frame mixed live and settled final state: {frame:?}"
+        );
+    }
+    assert!(
+        frames[settled_generation - 1]
+            .iter()
+            .any(|row| row.contains("unrelated output"))
+    );
+    assert!(
+        frames[settled_generation - 1]
+            .iter()
+            .any(|row| row.contains("commit output"))
+    );
+    drop(frames);
+    let editor = editor_context.lock().expect("editor");
+    let response = editor.last_response.as_deref().expect("last response");
+    assert!(response.contains("first settled item"));
+    assert!(response.contains("settled answer"));
+    drop(editor);
+    assert_eq!(renderer.test_active_tool_count(), 2);
+    let placeholder_ids = renderer
+        .tool_placeholder_ids_for_test(&["atomic-placeholder", "atomic-placeholder-second"]);
+    assert_eq!(placeholder_ids[1], placeholder_ids[0] + 1);
+    assert!(vt.scrollback_contains(80, 40, "history 0"));
+}
+
+/// A final routed into a detached transcript must remain off-screen and must
+/// not wake the visible terminal; selecting it later reveals the settled
+/// projection.
+#[test]
+fn hidden_provider_final_stays_off_screen_without_redraw() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-hidden-final",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            test_agent_prompt_id("sp-hidden-final"),
+            "hidden live answer",
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        query_id: "q-visible-worker".to_owned(),
+        agent_id: agent_id("visible-worker"),
+    }));
+    renderer.switch_agent("visible-worker".to_owned());
+    sync(&handle);
+    let redraw_requests = renderer.redraw_request_count_for_test();
+
+    let mut hidden_final =
+        finished_response_with_usage("sp-hidden-final", "main", 12, 4, 2, "hidden settled answer");
+    hidden_final
+        .output_items
+        .push(ContextItem::ToolCall(ToolCallItem {
+            call_id: "hidden-partial-tool".into(),
+            name: tau_proto::ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: Some("{".to_owned()),
+            responses_envelope: None,
+        }));
+    hidden_final.stop_reason = ProviderStopReason::Length;
+    renderer.handle(&Event::ProviderResponseFinished(hidden_final));
+    assert_eq!(renderer.redraw_request_count_for_test(), redraw_requests);
+    assert!(!vt.screen_contains(80, "hidden settled answer"));
+
+    renderer.switch_agent("main".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "◆ hidden settled answer"));
+    assert!(vt.screen_contains(
+        80,
+        "Model reached its output-token limit while producing a tool call"
+    ));
+    assert!(!vt.screen_contains(80, "◇ hidden live answer"));
+    assert!(vt.screen_contains(80, "✨ @main"));
+    assert!(!vt.screen_contains(80, "%0/"));
+    assert_eq!(renderer.test_active_tool_count(), 0);
+}
+
+/// Empty and output-length finals must replace the complete live frame together
+/// with their terminal placeholder rather than drawing either half first.
+#[test]
+fn empty_and_output_length_finals_publish_complete_frames() {
+    for (prompt_id, finished, final_markers) in [
+        (
+            "atomic-empty",
+            finished_response("atomic-empty", Vec::new()),
+            vec!["◆ (provider returned an empty response)"],
+        ),
+        (
+            "atomic-length",
+            {
+                let mut finished = finished_response(
+                    "atomic-length",
+                    vec![
+                        assistant_message_item("partial terminal"),
+                        ContextItem::ToolCall(ToolCallItem {
+                            call_id: "partial-atomic-tool".into(),
+                            name: tau_proto::ToolName::new("read"),
+                            tool_type: tau_proto::ToolType::Function,
+                            arguments: CborValue::Map(Vec::new()),
+                            raw_arguments_json: Some("{".to_owned()),
+                            responses_envelope: None,
+                        }),
+                    ],
+                );
+                finished.stop_reason = ProviderStopReason::Length;
+                finished
+            },
+            vec![
+                "◆ partial terminal",
+                "Model reached its output-token limit while producing a tool call",
+            ],
+        ),
+    ] {
+        let (_term, handle, vt) = setup(100, 12);
+        let mut renderer = marker_test_renderer(handle.clone());
+        renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+            prompt_id, "s1",
+        )));
+        renderer.handle(&Event::ProviderResponseUpdated(
+            provider_response_delta_update(
+                test_agent_prompt_id(prompt_id),
+                "old live terminal",
+                None,
+                tau_proto::PromptOriginator::User,
+            ),
+        ));
+        sync(&handle);
+        let generation = vt.frame_generation();
+        let commit_handle = handle.clone();
+        renderer.set_finished_commit_hook(Arc::new(move || {
+            commit_handle.redraw_sync();
+        }));
+
+        renderer.handle(&Event::ProviderResponseFinished(finished));
+        let final_generation = vt.wait_for_frame_containing_after(generation, final_markers[0]);
+        let frames = vt.frames.0.lock().expect("frames");
+        let final_status = if prompt_id == "atomic-length" {
+            "✨ @main"
+        } else {
+            "💤 @main"
+        };
+        for frame in &frames[generation..final_generation] {
+            let text = frame.join("\n");
+            let live = text.contains("◇ old live terminal")
+                && final_markers.iter().all(|marker| !text.contains(marker));
+            let settled = final_markers.iter().all(|marker| text.contains(marker))
+                && text.contains(final_status)
+                && !text.contains("%0/")
+                && !text.contains("◇ old live terminal")
+                && !text.contains("old live terminal");
+            assert!(live || settled, "partial terminal frame: {frame:?}");
+        }
+        assert_eq!(renderer.test_active_tool_count(), 0);
+    }
+}
+
+/// Deferred discovery catch-up must stage its terminal response after selection
+/// and then use the same live-or-settled frame cut as ordinary delivery.
+#[test]
+fn deferred_initial_discovery_final_uses_atomic_publication_cut() {
+    let (_term, handle, vt) = setup(100, 16);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.handle(&Event::HarnessAgentContextInitialized(
+        tau_proto::HarnessAgentContextInitialized {
+            session_id: test_session_id("s1"),
+            agent_id: agent_id("main"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("main-init")
+                .expect("initialization id"),
+            listed_skills: Vec::new(),
+            agents_files: Vec::new(),
+        },
+    ));
+    renderer.handle(&agent_message("main", "worker", "deferred overview once"));
+    renderer.handle(&Event::MessageDelivered(tau_proto::MessageDelivered::new(
+        tau_proto::MessagePublisherId::parse("deferred-bridge").expect("publisher id"),
+        tau_proto::MessageAgentTarget::new("main"),
+        tau_proto::MessageFactId::new("deferred-owned-fact"),
+        tau_proto::MessageParty {
+            stable_id: "deferred-sender".to_owned(),
+            display_name: None,
+            sender_auth: None,
+        },
+        None,
+        "deferred owned fact once",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            test_agent_prompt_id("deferred-final"),
+            "deferred live",
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    let finished = finished_response(
+        "deferred-final",
+        vec![assistant_message_item("deferred settled")],
+    );
+    renderer.handle(&Event::ProviderResponseFinished(finished));
+    sync(&handle);
+    let generation = vt.frame_generation();
+    let staging_handle = handle.clone();
+    let staging_vt = vt.clone();
+    renderer.set_finished_staging_hook(Arc::new(move || {
+        staging_handle.redraw_sync();
+        assert!(staging_vt.screen_contains(100, "deferred live"));
+        assert!(staging_vt.screen_contains(100, "✨ @main"));
+    }));
+    let commit_handle = handle.clone();
+    renderer.set_finished_commit_hook(Arc::new(move || commit_handle.redraw_sync()));
+    let deferred_editor = renderer.editor_context();
+    let published_editor = deferred_editor.clone();
+    renderer.set_finished_published_hook(Arc::new(move || {
+        assert_eq!(
+            published_editor
+                .lock()
+                .expect("published editor")
+                .last_response
+                .as_deref(),
+            Some("deferred settled")
+        );
+    }));
+
+    renderer.switch_agent("main".to_owned());
+    let final_generation = vt.wait_for_frame_containing_after(generation, "◆ deferred settled");
+    let frames = vt.frames.0.lock().expect("frames");
+    let mut saw_live = false;
+    for frame in &frames[generation..final_generation] {
+        let text = frame.join("\n");
+        let before_replay = (text.contains("@main") || text.contains("deferred overview once"))
+            && !text.contains("deferred live")
+            && !text.contains("deferred settled");
+        let live = text.contains("deferred live")
+            && text.contains("✨ @main")
+            && !text.contains("deferred settled");
+        let settled = text.contains("◆ deferred settled")
+            && text.contains("💤 @main")
+            && !text.contains("deferred live");
+        if live {
+            saw_live = true;
+        }
+        assert!(
+            (!saw_live && before_replay) || live || settled,
+            "mixed deferred final frame: {frame:?}"
+        );
+    }
+    drop(frames);
+    assert_eq!(
+        deferred_editor
+            .lock()
+            .expect("editor")
+            .last_response
+            .as_deref(),
+        Some("deferred settled")
+    );
+    let selected_text = vt.screen_text(100).join("\n");
+    assert_eq!(selected_text.matches("deferred overview once").count(), 1);
+    assert!(!selected_text.contains("deferred owned fact once"));
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert_eq!(
+        vt.screen_text(100)
+            .join("\n")
+            .matches("deferred overview once")
+            .count(),
+        1
+    );
+    assert_eq!(
+        vt.screen_text(100)
+            .join("\n")
+            .matches("deferred owned fact once")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -1123,14 +1542,36 @@ fn markdown_table_response_events_preserve_raw_text_and_replay_projection() {
         Some(source)
     );
 
-    let (_cold_term, cold_handle, cold_vt) = setup(160, 24);
+    let (_cold_term, cold_handle, cold_vt) = setup(160, 40);
     let mut cold_renderer = EventRenderer::new(
         cold_handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
+    let cold_generation = cold_vt.frame_generation();
     cold_renderer.handle(&Event::ProviderResponseFinished(finished));
-    sync(&cold_handle);
+    let cold_frame = cold_vt.wait_for_frame_containing_after(cold_generation, "◆ | Scope");
+    let cold_frames = cold_vt.frames.0.lock().expect("frames");
+    let settled = cold_frames[cold_frame - 1].join("\n");
+    assert!(settled.contains("                    Effort |"));
+    assert!(settled.contains("\n> "), "{settled}");
+    for frame in &cold_frames[cold_generation..cold_frame] {
+        let text = frame.join("\n");
+        assert!(
+            !text.contains("◆ | Scope") || text.contains("\n> "),
+            "cold replay published content without final status: {frame:?}"
+        );
+    }
+    drop(cold_frames);
+    assert_eq!(
+        cold_renderer
+            .editor_context()
+            .lock()
+            .expect("cold editor")
+            .last_response
+            .as_deref(),
+        Some(source)
+    );
     assert!(cold_vt.screen_contains(160, "◆ | Scope"));
     assert!(cold_vt.screen_contains(160, "                    Effort |"));
 }
@@ -3212,6 +3653,28 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     assert!(editor_context.current_response.is_none());
     assert!(editor_context.last_response.is_none());
     drop(editor_context);
+
+    let generation = vt.frame_generation();
+    let standalone_commit_handle = handle.clone();
+    renderer.set_finished_commit_hook(Arc::new(move || {
+        standalone_commit_handle.redraw_sync();
+    }));
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "ap-private",
+        Vec::new(),
+    )));
+    let mut next_generation = generation;
+    let provider_final_frame = loop {
+        let frame = vt.wait_for_frame_after(next_generation).join("\n");
+        next_generation += 1;
+        if !frame.contains("Compacting…") {
+            break frame;
+        }
+        assert!(!frame.contains("private compactor"));
+    };
+    assert!(!provider_final_frame.contains("Compacting…"));
+    assert!(!provider_final_frame.contains("private compactor"));
+    assert!(provider_final_frame.contains("💤 @main"));
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
         original_input_tokens: Some(tau_proto::CompactionTokenMeasurement {

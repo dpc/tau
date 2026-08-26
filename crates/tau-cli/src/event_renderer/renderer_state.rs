@@ -31,6 +31,23 @@ pub(crate) struct EventRenderer {
     pub(super) editor: EditorPublicationState,
     /// Renderer-wide activity notification state.
     pub(super) activity: RendererActivityState,
+    /// Ordinary selected final staged before its redraw-suppressed routing cut.
+    pub(super) staged_finished_response: Option<FinishedResponseProjection>,
+    /// Selected standalone final status staged before redraw suppression.
+    pub(super) staged_finished_status: Option<tau_cli_term::StyledBlock>,
+    /// Whether selected-final routing defers intermediate status projections.
+    pub(super) final_publication_in_progress: bool,
+    /// Whether hidden-final routing must avoid visible watched-row projection.
+    pub(super) hidden_finalization_in_progress: bool,
+    /// Test-only midpoint invoked after expensive ordinary-final projection.
+    #[cfg(test)]
+    pub(super) finished_staging_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Test-only midpoint after transient final blocks retire.
+    #[cfg(test)]
+    pub(super) finished_commit_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Test-only midpoint after complete final publication but before cut exit.
+    #[cfg(test)]
+    pub(super) finished_published_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Terminal handles, command completion state, and stable display resources.
@@ -193,7 +210,7 @@ pub(super) struct TranscriptHistoryState {
 }
 
 /// Status counters and activity owned by one transcript.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct TranscriptStatusState {
     /// Current model-context percentage.
     pub(super) current_context_percent: Option<u8>,

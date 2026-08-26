@@ -1,5 +1,9 @@
 # SPEC-tau-cli-provider-stream-rendering: Provider stream rendering
 
+## Record justification
+
+This record owns the non-local streaming-to-settled frame contract shared by provider event projection, transcript state, editor context, and terminal redraw scheduling.
+
 Constrained by [SPEC-provider-response-streaming](../../../specs/SPEC-provider-response-streaming.md).
 
 Terminal streaming accumulates `provider.response_updated.deltas` per prompt and provider output index. If a UI sees a delta for an unknown in-flight prompt, it may create a live block with an ellipsis prefix to indicate missed earlier transient deltas; the final `provider.response_finished` replaces live content with complete durable output. Provider status updates are rendered as transient status text and do not enter assistant response accumulation.
@@ -28,3 +32,22 @@ thinking, provider compaction status, assistant response, then active tool
 summary/tool-call blocks. New live response-side blocks must be inserted before
 active tool anchors rather than appended after them, so running tool UI remains
 pinned nearest the prompt while assistant text continues streaming.
+
+For an ordinary selected-transcript final, the CLI stages expensive terminal
+projection for a canonical `provider.response_finished` before publishing it. It then retires the
+live thinking, compaction, and response blocks; installs settled reasoning,
+assistant, compaction, statistics, and tool-placeholder history; and publishes
+editor and status state inside one redraw-suppressed transaction. A frame may
+therefore contain the complete preceding live state or the complete settled final
+state, but never a partial-final mixture. An already-started redraw may finish the
+preceding complete snapshot.
+
+A selected standalone-compaction final has no public provider projection to
+stage. Its corresponding final transaction atomically retires the private live
+prompt state and publishes any applicable content-free lifecycle state.
+
+This cut is terminal-frame atomicity, not global serialization. It does not wait
+for or synchronize tool starts, progress, or results, and it does not exclude
+mutations from unrelated cloned terminal handles. Such output may join the
+settled frame or a later frame. Hidden-transcript finalization stays off-screen
+and requests no redraw.

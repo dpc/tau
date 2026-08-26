@@ -1703,6 +1703,16 @@ impl EventRenderer {
                 tool_timer: None,
                 agent_in_progress: Arc::new(AtomicBool::new(false)),
             },
+            staged_finished_response: None,
+            staged_finished_status: None,
+            final_publication_in_progress: false,
+            hidden_finalization_in_progress: false,
+            #[cfg(test)]
+            finished_staging_hook: None,
+            #[cfg(test)]
+            finished_commit_hook: None,
+            #[cfg(test)]
+            finished_published_hook: None,
         }
     }
 
@@ -1715,11 +1725,36 @@ impl EventRenderer {
         self.activity.tool_timer = Some(timer);
     }
 
+    /// Installs a deterministic ordinary-final staging midpoint for frame
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn set_finished_staging_hook(&mut self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.finished_staging_hook = Some(hook);
+    }
+
+    /// Installs a deterministic selected-final commit midpoint for frame tests.
+    #[cfg(test)]
+    pub(crate) fn set_finished_commit_hook(&mut self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.finished_commit_hook = Some(hook);
+    }
+
+    /// Installs a selected-final publication-complete hook for frame tests.
+    #[cfg(test)]
+    pub(crate) fn set_finished_published_hook(&mut self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.finished_published_hook = Some(hook);
+    }
+
     /// Returns test-only generic tool bookkeeping without exposing a production
     /// inspection side channel.
     #[cfg(test)]
     pub(crate) fn test_active_tool_count(&self) -> usize {
         self.transcript.runtime.tool_calls.len()
+    }
+
+    /// Returns renderer-owned redraw requests for hidden-final tests.
+    #[cfg(test)]
+    pub(crate) fn redraw_request_count_for_test(&self) -> u64 {
+        self.resources.handle.redraw_request_count()
     }
 
     /// Returns the exact raw text retained for the latest submitted user
@@ -1850,6 +1885,7 @@ impl EventRenderer {
                 handle.redraw();
             }
         });
+        self.flush_pending_initial_discovery();
     }
 
     pub(crate) fn clear_selected_agent(&mut self) {
@@ -1925,7 +1961,6 @@ impl EventRenderer {
             self.adopt_visible_no_agent_owners(agent_id.as_str());
         }
         self.selection.displayed_agent_id = Some(agent_id);
-        self.flush_pending_initial_discovery();
     }
 
     /// Render initialization summaries deferred while no first agent was
@@ -1941,10 +1976,43 @@ impl EventRenderer {
             if let Event::HarnessAgentContextInitialized(initialized) = &event {
                 self.print_agent_context_initialized(initialized);
             } else {
-                self.handle_recorded_at_for_visible_agent(&event, recorded_at);
+                self.handle_deferred_visible_event(&event, recorded_at);
             }
         }
         self.update_agent_in_progress();
+    }
+
+    /// Publishes one metadata-deferred event after transcript
+    /// adoption.
+    fn handle_deferred_visible_event(&mut self, event: &Event, recorded_at: UnixMicros) {
+        let Event::ProviderResponseFinished(finished) = event else {
+            self.learn_agent_metadata(event);
+            self.handle_recorded_at_for_visible_agent(event, recorded_at);
+            return;
+        };
+        let is_standalone = self
+            .transcript
+            .runtime
+            .prompts
+            .get(finished.agent_prompt_id.as_str())
+            .is_some_and(|state| state.is_standalone_compaction);
+        if is_standalone {
+            self.staged_finished_status =
+                Some(self.stage_standalone_finished_status_block(finished));
+        } else {
+            self.staged_finished_response = Some(self.stage_finished_response(finished));
+        }
+        let handle = self.resources.handle.terminal_handle();
+        self.final_publication_in_progress = true;
+        handle.with_redraw_suppressed(|| {
+            self.learn_agent_metadata(event);
+            self.handle_recorded_at_for_visible_agent(event, recorded_at);
+        });
+        self.final_publication_in_progress = false;
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
+        debug_assert!(self.staged_finished_response.is_none());
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
+        debug_assert!(self.staged_finished_status.is_none());
     }
 
     fn adopt_visible_no_agent_owners(&mut self, agent_id: &str) {
@@ -2147,7 +2215,9 @@ impl EventRenderer {
                 .handle
                 .push_above_active_before_any(block_id, later_blocks);
         }
-        self.resources.handle.redraw();
+        if !self.hidden_finalization_in_progress {
+            self.resources.handle.redraw();
+        }
     }
 
     /// Returns queued-prompt blocks in their existing queue order.
@@ -2585,7 +2655,9 @@ impl EventRenderer {
     }
 
     fn render_model_status_if_present(&mut self) {
-        if self.transcript.runtime.model_status_block.is_some() {
+        if !self.final_publication_in_progress
+            && self.transcript.runtime.model_status_block.is_some()
+        {
             self.render_model_status();
         }
     }
@@ -2653,18 +2725,6 @@ impl EventRenderer {
             .runtime
             .editor_conversation_context
             .current_response = text;
-        self.publish_editor_conversation_context();
-    }
-
-    fn set_editor_last_response(&mut self, text: String) {
-        self.transcript
-            .runtime
-            .editor_conversation_context
-            .last_response = Some(text);
-        self.transcript
-            .runtime
-            .editor_conversation_context
-            .current_response = None;
         self.publish_editor_conversation_context();
     }
 
@@ -3703,7 +3763,7 @@ impl EventRenderer {
         }
     }
 
-    fn render_model_status(&mut self) {
+    fn build_model_status_block(&mut self) -> tau_cli_term::StyledBlock {
         use tau_cli_term::resolve::convert_color;
         use tau_cli_term::{PriorityLine, PriorityLineAlignment, StyledBlock};
         use tau_themes::{StyleName, names};
@@ -3969,10 +4029,19 @@ impl EventRenderer {
         if let Some(bg) = bg {
             block = block.bg(convert_color(bg));
         }
+        block
+    }
+
+    /// Builds and publishes the current terminal status projection.
+    fn render_model_status(&mut self) {
+        let block = self.build_model_status_block();
+        self.publish_model_status_block(block);
+    }
+
+    /// Publishes one already-built status projection.
+    fn publish_model_status_block(&mut self, block: tau_cli_term::StyledBlock) {
         match self.transcript.runtime.model_status_block {
-            Some(bid) => {
-                self.resources.handle.set_block(bid, block);
-            }
+            Some(bid) => self.resources.handle.set_block(bid, block),
             None => {
                 let bid = self.resources.handle.new_block("model-status", block);
                 self.resources.handle.push_below(bid);
@@ -4088,7 +4157,9 @@ impl EventRenderer {
             return;
         }
         self.transcript.status.main_tools_visible = visible;
-        if self.transcript.runtime.model_status_block.is_some() {
+        if !self.final_publication_in_progress
+            && self.transcript.runtime.model_status_block.is_some()
+        {
             self.render_model_status();
         }
     }
@@ -4596,11 +4667,59 @@ impl EventRenderer {
             self.set_current_agent_id(Some(target_agent_id.to_string()), true);
             self.refresh_prompt_placeholder();
             self.render_model_status();
+            self.flush_pending_initial_discovery();
         }
         self.handle_socket_delivery(event, recorded_at, delivery_id);
     }
 
     fn handle_recorded_delivery(
+        &mut self,
+        event: &Event,
+        recorded_at: UnixMicros,
+        delivery_id: Option<u64>,
+    ) {
+        if let Event::ProviderResponseFinished(finished) = event {
+            let selected = self.selection.displayed_agent_id.as_deref()
+                == Some(finished.agent_id.as_str())
+                || self.selection.current_agent_id.as_deref() == Some(finished.agent_id.as_str());
+            if selected {
+                let is_standalone = self
+                    .transcript
+                    .runtime
+                    .prompts
+                    .get(finished.agent_prompt_id.as_str())
+                    .is_some_and(|state| state.is_standalone_compaction);
+                if is_standalone {
+                    self.staged_finished_status =
+                        Some(self.stage_standalone_finished_status_block(finished));
+                }
+                self.staged_finished_response =
+                    (!is_standalone).then(|| self.stage_finished_response(finished));
+                let handle = self.resources.handle.terminal_handle();
+                self.final_publication_in_progress = true;
+                handle.with_redraw_suppressed(|| {
+                    self.handle_recorded_delivery_inner(event, recorded_at, delivery_id);
+                });
+                self.final_publication_in_progress = false;
+                // ast-grep-ignore: debug-assert-expression-must-not-mutate
+                debug_assert!(self.staged_finished_response.is_none());
+                // ast-grep-ignore: debug-assert-expression-must-not-mutate
+                debug_assert!(self.staged_finished_status.is_none());
+                return;
+            }
+            self.final_publication_in_progress = true;
+            self.hidden_finalization_in_progress = true;
+            self.handle_recorded_delivery_inner(event, recorded_at, delivery_id);
+            self.hidden_finalization_in_progress = false;
+            self.final_publication_in_progress = false;
+            return;
+        }
+        self.handle_recorded_delivery_inner(event, recorded_at, delivery_id);
+    }
+
+    /// Routes one delivery after any selected-final redraw cut has been
+    /// entered.
+    fn handle_recorded_delivery_inner(
         &mut self,
         event: &Event,
         recorded_at: UnixMicros,
@@ -4619,7 +4738,24 @@ impl EventRenderer {
             started_at: Instant::now(),
         };
         self.record_session_token_usage(event);
-        self.learn_agent_metadata(event);
+        let deferred_metadata_target = (!matches!(event, Event::HarnessAgentContextInitialized(_)))
+            .then(|| self.agent_id_for_event(event))
+            .flatten()
+            .filter(|target_agent_id| {
+                self.selection.current_agent_id.is_none()
+                    && self.selection.displayed_agent_id.is_none()
+                    && !self.selection.awaiting_new_agent_selection
+                    && !self.event_selects_agent_from_empty(event, target_agent_id)
+                    && self
+                        .discovery
+                        .pending_initial_discovery
+                        .contains_key(target_agent_id)
+            });
+        if deferred_metadata_target.is_none() {
+            self.learn_agent_metadata(event);
+        } else {
+            self.learn_deferred_routing_metadata(event);
+        }
         if let Event::HarnessAgentContextInitialized(initialized) = event
             && self.selection.current_agent_id.is_none()
             && self.selection.displayed_agent_id.is_none()
@@ -4669,10 +4805,7 @@ impl EventRenderer {
             self.update_agent_in_progress();
             return;
         };
-        if self.selection.current_agent_id.is_none()
-            && self.selection.displayed_agent_id.is_none()
-            && !self.selection.awaiting_new_agent_selection
-            && !self.event_selects_agent_from_empty(event, &target_agent_id)
+        if deferred_metadata_target.as_deref() == Some(target_agent_id.as_str())
             && let Some(events) = self
                 .discovery
                 .pending_initial_discovery
@@ -4690,6 +4823,7 @@ impl EventRenderer {
                 self.set_current_agent_id(Some(target_agent_id.clone()), true);
                 self.refresh_prompt_placeholder();
                 self.render_model_status();
+                self.flush_pending_initial_discovery();
                 self.handle_recorded_at_for_visible_agent(event, recorded_at);
                 self.update_agent_in_progress();
                 return;
@@ -5081,6 +5215,48 @@ impl EventRenderer {
             return;
         }
         self.learn_agent_message_metadata(event);
+    }
+
+    /// Retains only ownership correlations needed to route later events while
+    /// transcript-visible metadata waits for deferred discovery replay.
+    fn learn_deferred_routing_metadata(&mut self, event: &Event) {
+        match event {
+            Event::ProviderResponseUpdated(update) => {
+                self.event_owners.prompt_agents.insert(
+                    update.agent_prompt_id.to_string(),
+                    update.agent_id.to_string(),
+                );
+            }
+            Event::ProviderResponseFinished(finished) => {
+                let agent_id = finished.agent_id.to_string();
+                self.event_owners
+                    .prompt_agents
+                    .insert(finished.agent_prompt_id.to_string(), agent_id.clone());
+                for call in tool_calls_from_output_items(&finished.output_items) {
+                    self.event_owners
+                        .tool_agents
+                        .insert(call.call_id.to_string(), agent_id.clone());
+                }
+            }
+            Event::AgentPromptCreated(prompt) => {
+                self.event_owners.prompt_agents.insert(
+                    prompt.agent_prompt_id.to_string(),
+                    prompt.agent_id.to_string(),
+                );
+            }
+            Event::AgentPromptStarted(prompt) => {
+                self.event_owners.prompt_agents.insert(
+                    prompt.agent_prompt_id.to_string(),
+                    prompt.agent_id.to_string(),
+                );
+            }
+            Event::ToolStarted(started) => {
+                self.event_owners
+                    .tool_agents
+                    .insert(started.call_id.to_string(), started.agent_id.to_string());
+            }
+            _ => {}
+        }
     }
 
     fn learn_agent_lifecycle_metadata(&mut self, event: &Event) -> bool {
@@ -7485,420 +7661,6 @@ impl EventRenderer {
         }
     }
 
-    fn handle_provider_response_finished(
-        &mut self,
-        finished: &tau_proto::ProviderResponseFinished,
-    ) {
-        if self.finish_standalone_compaction_prompt(finished.agent_prompt_id.as_str(), None, false)
-        {
-            return;
-        }
-        if finished.originator.is_user()
-            && tool_calls_from_output_items(&finished.output_items).is_empty()
-        {
-            self.clear_main_agent_turn_active_everywhere();
-        }
-        self.watches
-            .finished_provider_prompts
-            .insert(finished.agent_prompt_id.to_string());
-        let (prompt_state, turn_latency) = self.take_finished_prompt_state(finished);
-        let thinking =
-            reasoning_text_from_output_items(&finished.output_items).or(prompt_state.thinking_text);
-        self.finalize_finished_thinking_block(prompt_state.thinking_block_id, thinking);
-        self.finalize_finished_compaction_block(prompt_state.compaction_block_id);
-        self.finalize_finished_response_block(prompt_state.response_block_id);
-
-        let full_assistant_text = assistant_text_from_output_items(&finished.output_items);
-        self.record_finished_assistant_context(finished, full_assistant_text.as_deref());
-        self.record_finished_turn_stats(finished, turn_latency);
-        self.render_user_provider_response_items(finished);
-        self.render_model_status();
-    }
-
-    fn take_finished_prompt_state(
-        &mut self,
-        finished: &tau_proto::ProviderResponseFinished,
-    ) -> (PromptState, Option<Duration>) {
-        let spid = finished.agent_prompt_id.as_str();
-        // Drain the whole per-prompt state in one shot — every field tracked
-        // through the stream is consumed here.
-        let prompt_state = self
-            .transcript
-            .runtime
-            .prompts
-            .remove(spid)
-            .unwrap_or_default();
-        let turn_latency = prompt_state
-            .started_at
-            .map(|started_at| started_at.elapsed());
-        if let Some(latency) = turn_latency {
-            self.transcript.status.cumulative_agent_latency += latency;
-        }
-        (prompt_state, turn_latency)
-    }
-
-    fn finalize_finished_thinking_block(
-        &mut self,
-        thinking_block_id: Option<tau_cli_term::BlockId>,
-        thinking: Option<String>,
-    ) {
-        use tau_themes::names;
-
-        // Finalize the thinking block above the response, using the final
-        // item-model reasoning text or the latest streamed snapshot if one was
-        // captured.
-        if let Some(tbid) = thinking_block_id {
-            self.resources.handle.remove_block(tbid);
-        }
-        if (self.presentation.show_thinking || !self.presentation.verbose_mode)
-            && let Some(thinking) = thinking.filter(|t| !t.is_empty())
-        {
-            let display = if self.presentation.verbose_mode && self.presentation.show_thinking {
-                thinking.as_str()
-            } else {
-                ""
-            };
-            let bid = self.resources.handle.print_output(
-                "agent-thinking",
-                markdown_block_with_osc8(
-                    &self.resources.theme,
-                    names::AGENT_THINKING,
-                    display,
-                    self.presentation.osc8_links,
-                ),
-            );
-            self.transcript
-                .history
-                .thinking_history
-                .push(ThinkingBlockEntry {
-                    block_id: bid,
-                    text: thinking,
-                });
-        }
-    }
-
-    fn finalize_finished_compaction_block(
-        &mut self,
-        compaction_block_id: Option<tau_cli_term::BlockId>,
-    ) {
-        if let Some(block_id) = compaction_block_id {
-            self.resources.handle.remove_block(block_id);
-        }
-    }
-
-    fn finalize_finished_response_block(
-        &mut self,
-        response_block_id: Option<tau_cli_term::BlockId>,
-    ) {
-        if let Some(bid) = response_block_id {
-            self.resources.handle.remove_block(bid);
-        }
-    }
-
-    fn record_finished_assistant_context(
-        &mut self,
-        finished: &tau_proto::ProviderResponseFinished,
-        full_assistant_text: Option<&str>,
-    ) {
-        let Some(text) = full_assistant_text else {
-            return;
-        };
-        if finished.originator.is_user() {
-            self.set_editor_last_response(text.to_owned());
-        }
-    }
-
-    fn record_finished_turn_stats(
-        &mut self,
-        finished: &tau_proto::ProviderResponseFinished,
-        turn_latency: Option<Duration>,
-    ) {
-        let Some(usage) = finished.usage.clone() else {
-            return;
-        };
-        Self::add_finished_token_usage(
-            &mut self.transcript.status.cumulative_agent_token_usage,
-            &usage,
-        );
-        let cumulative_usage = self.transcript.status.cumulative_agent_token_usage;
-        let previous_usage = self
-            .transcript
-            .history
-            .turn_stats_history
-            .last()
-            .map(|entry| entry.usage.clone());
-        let block = if self.presentation.verbose_mode && self.presentation.show_turn_stats {
-            render_turn_stats_block_with_cumulative_usage(
-                &self.resources.theme,
-                &usage,
-                &cumulative_usage,
-                previous_usage.as_ref(),
-                turn_latency,
-                Some(self.transcript.status.cumulative_agent_latency),
-            )
-        } else {
-            Self::empty_block()
-        };
-        let bid = self.resources.handle.print_output("turn-stats", block);
-        self.transcript
-            .history
-            .turn_stats_history
-            .push(TurnStatsBlockEntry {
-                block_id: bid,
-                usage,
-                cumulative_usage,
-                previous_usage,
-                turn_latency,
-                total_latency: Some(self.transcript.status.cumulative_agent_latency),
-            });
-    }
-
-    /// Adds a durable terminal response's token delta to one UI-owned total.
-    fn add_finished_token_usage(
-        total: &mut tau_proto::TokenUsageCounts,
-        usage: &tau_proto::ProviderTokenUsage,
-    ) {
-        total.sent_tokens = total.sent_tokens.saturating_add(usage.prompt_sent_tokens);
-        total.cached_tokens = total
-            .cached_tokens
-            .saturating_add(usage.prompt_cached_tokens);
-        total.received_tokens = total
-            .received_tokens
-            .saturating_add(usage.response_received_tokens);
-    }
-
-    fn render_user_provider_response_items(
-        &mut self,
-        finished: &tau_proto::ProviderResponseFinished,
-    ) {
-        // The event has already been routed into the owning agent transcript.
-        // Only the main agent's tool calls land in the UI as their own blocks.
-        // Sub-agent activity is summarized through generic watched-agent stats,
-        // so the user sees one activity line per watched agent rather than a
-        // flood of nested invocations.
-        self.transcript.status.main_agent_turn_active = true;
-        if finished.output_items.is_empty() {
-            self.finish_prompt_tool_summary();
-            self.render_provider_response_placeholder(
-                finished
-                    .error
-                    .as_deref()
-                    .unwrap_or("(provider returned an empty response)"),
-            );
-            return;
-        }
-        let tool_calls = if finished.stop_reason == tau_proto::ProviderStopReason::Length {
-            Vec::new()
-        } else {
-            tool_calls_from_output_items(&finished.output_items)
-        };
-        self.transcript.status.main_tools_total += tool_calls.len() as u64;
-        self.set_main_tools_visible(!tool_calls.is_empty());
-        let summary_block_id = self.prepare_tool_summary_for_finished_calls(&tool_calls);
-        for item in &finished.output_items {
-            if finished.stop_reason == tau_proto::ProviderStopReason::Length
-                && matches!(item, ContextItem::ToolCall(_))
-            {
-                continue;
-            }
-            self.render_finished_context_item(item, summary_block_id, finished);
-        }
-        if finished.stop_reason == tau_proto::ProviderStopReason::Length {
-            let text = if matches!(
-                finished.output_length_disposition,
-                tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
-            ) {
-                "Output limit reached; continuing once from retained reasoning."
-            } else if finished
-                .output_items
-                .iter()
-                .any(|item| matches!(item, ContextItem::ToolCall(_)))
-            {
-                "Model reached its output-token limit while producing a tool call. The incomplete call was not executed."
-            } else if finished
-                .output_items
-                .iter()
-                .any(|item| matches!(item, ContextItem::Message(_)))
-            {
-                "Model reached its output-token limit before completing the turn. The displayed response may be incomplete."
-            } else {
-                "Model reached its output-token limit before completing the turn. No assistant answer or executable tool call was produced."
-            };
-            self.render_provider_response_placeholder(text);
-        }
-        self.resources.handle.redraw();
-    }
-
-    fn render_provider_response_placeholder(&mut self, text: &str) {
-        use tau_themes::names;
-
-        self.resources.handle.print_output(
-            "agent-response-placeholder",
-            markdown_prefixed_block_with_osc8(
-                &self.resources.theme,
-                names::AGENT_RESPONSE,
-                COMPLETED_AGENT_RESPONSE_PREFIX,
-                text,
-                self.presentation.osc8_links,
-            ),
-        );
-    }
-
-    fn prepare_tool_summary_for_finished_calls(
-        &mut self,
-        tool_calls: &[ToolCallItem],
-    ) -> Option<tau_cli_term::BlockId> {
-        if tool_calls.is_empty() {
-            self.finish_prompt_tool_summary();
-            return None;
-        }
-        if matches!(
-            self.presentation.show_tools,
-            tau_config::settings::ShowTools::SummarizePrompt
-        ) {
-            return Some(self.create_or_update_prompt_tool_summary(tool_calls.len() as u64));
-        }
-        Some(self.create_turn_tool_summary(tool_calls.len() as u64))
-    }
-
-    fn create_or_update_prompt_tool_summary(&mut self, total_delta: u64) -> tau_cli_term::BlockId {
-        if let Some(id) = self.transcript.status.prompt_tool_summary {
-            if let Some(summary) = self.transcript.status.tool_summaries.get_mut(&id) {
-                summary.total += total_delta;
-            }
-            if self.transcript.status.prompt_tool_summary_active {
-                self.update_tool_summary_block(id);
-                return id;
-            }
-            if let Some(summary) = self.transcript.status.tool_summaries.remove(&id) {
-                return self.create_prompt_tool_summary(summary);
-            }
-        }
-        let summary = ToolSummaryDisplay {
-            total: total_delta,
-            ..ToolSummaryDisplay::default()
-        };
-        self.create_prompt_tool_summary(summary)
-    }
-
-    fn create_prompt_tool_summary(&mut self, summary: ToolSummaryDisplay) -> tau_cli_term::BlockId {
-        let block = self.render_summary_block(&summary);
-        let id = self
-            .resources
-            .handle
-            .new_block("tool-summary:prompt", block);
-        self.resources.handle.push_above_active(id);
-        self.transcript.status.tool_summaries.insert(id, summary);
-        self.transcript.status.prompt_tool_summary = Some(id);
-        self.transcript.status.prompt_tool_summary_active = true;
-        id
-    }
-
-    fn finish_prompt_tool_summary(&mut self) {
-        let Some(block_id) = self.transcript.status.prompt_tool_summary.take() else {
-            self.transcript.status.prompt_tool_summary_active = false;
-            return;
-        };
-        self.transcript.status.prompt_tool_summary_active = false;
-        let Some(summary) = self.transcript.status.tool_summaries.remove(&block_id) else {
-            return;
-        };
-        self.resources.handle.remove_block(block_id);
-        let new_block_id = self
-            .resources
-            .handle
-            .print_output("tool-summary", self.render_summary_block(&summary));
-        self.transcript
-            .status
-            .tool_summaries
-            .insert(new_block_id, summary);
-    }
-
-    fn create_turn_tool_summary(&mut self, total: u64) -> tau_cli_term::BlockId {
-        let summary = ToolSummaryDisplay {
-            total,
-            ..ToolSummaryDisplay::default()
-        };
-        let block = self.render_summary_block(&summary);
-        let id = self.resources.handle.new_block("tool-summary:turn", block);
-        self.resources.handle.push_above_active(id);
-        self.transcript.status.tool_summaries.insert(id, summary);
-        id
-    }
-
-    fn render_finished_context_item(
-        &mut self,
-        item: &ContextItem,
-        summary_block_id: Option<tau_cli_term::BlockId>,
-        finished: &tau_proto::ProviderResponseFinished,
-    ) {
-        use tau_themes::names;
-
-        match item {
-            ContextItem::Message(message) => {
-                if let Some(text) = assistant_text_from_message_item(message) {
-                    self.resources.handle.print_output(
-                        "agent-response",
-                        markdown_prefixed_block_with_osc8(
-                            &self.resources.theme,
-                            names::AGENT_RESPONSE,
-                            COMPLETED_AGENT_RESPONSE_PREFIX,
-                            &text,
-                            self.presentation.osc8_links,
-                        ),
-                    );
-                }
-            }
-            ContextItem::ToolCall(call) => {
-                self.render_tool_call_placeholder(call, summary_block_id);
-            }
-            ContextItem::Compaction(_) => {
-                let status = Self::compaction_success_status(
-                    finished.compaction_original_input_tokens,
-                    finished.compaction_compacted_input_tokens,
-                );
-                self.resources.handle.print_output(
-                    "compaction-completed",
-                    render_compaction_block(
-                        &self.resources.theme,
-                        status,
-                        CompactionStatus::Success,
-                    ),
-                );
-            }
-            _ => {}
-        }
-    }
-
-    fn render_tool_call_placeholder(
-        &mut self,
-        call: &ToolCallItem,
-        summary_block_id: Option<tau_cli_term::BlockId>,
-    ) {
-        if self
-            .transcript
-            .runtime
-            .tool_calls
-            .contains_key(call.call_id.as_str())
-        {
-            return;
-        }
-        let history_id = self.resources.handle.new_block(
-            format!("tool-call-history:{}:{}", call.name, call.call_id),
-            Self::empty_block(),
-        );
-        self.resources.handle.push_history(history_id);
-        self.transcript.runtime.tool_calls.insert(
-            call.call_id.to_string(),
-            ToolCallState {
-                history_block_id: Some(history_id),
-                summary_block_id,
-                is_main_delegate: call.name.as_str() == AGENT_START_TOOL_NAME,
-                ..ToolCallState::default()
-            },
-        );
-    }
-
     fn handle_tool_started(&mut self, started: &tau_proto::ToolStarted, recorded_at: UnixMicros) {
         let call_id = started.call_id.to_string();
         self.event_owners
@@ -9529,7 +9291,9 @@ impl EventRenderer {
     }
 }
 
+mod finished_response_projection;
 mod renderer_state;
+use finished_response_projection::FinishedResponseProjection;
 use renderer_state::AgentUiState;
 pub(crate) use renderer_state::EventRenderer;
 

@@ -162,6 +162,14 @@ impl VtWriter {
         self.screen_text(w).iter().any(|r| r.contains(needle))
     }
 
+    fn scrollback_contains(&self, w: u16, rows: usize, needle: &str) -> bool {
+        let mut parser = self.parser.lock().expect("vt");
+        parser.screen_mut().set_scrollback(rows);
+        let contains = parser.screen().rows(0, w).any(|row| row.contains(needle));
+        parser.screen_mut().set_scrollback(0);
+        contains
+    }
+
     fn cell_style(&self, row: u16, col: u16) -> (vt100::Color, vt100::Color, bool) {
         let parser = self.parser.lock().expect("vt");
         let cell = parser

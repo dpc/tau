@@ -1,6 +1,11 @@
 //! Routes renderer output to the visible terminal or one detached transcript.
 
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use crate::MUTEX_POISONED;
 
@@ -14,6 +19,9 @@ pub(crate) struct RendererHandle {
     terminal: tau_cli_term::TermHandle,
     /// Current hidden-agent model while one event folds off-screen.
     detached: Option<Mutex<tau_cli_term::OutputSnapshot>>,
+    /// Renderer-owned redraw requests observed by unit tests.
+    #[cfg(test)]
+    redraw_request_count: Arc<AtomicU64>,
 }
 
 impl RendererHandle {
@@ -22,6 +30,8 @@ impl RendererHandle {
         Self {
             terminal,
             detached: None,
+            #[cfg(test)]
+            redraw_request_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -161,8 +171,16 @@ impl RendererHandle {
     /// Requests a redraw only when the current target is visible.
     pub(crate) fn redraw(&self) {
         if self.detached.is_none() {
+            #[cfg(test)]
+            self.redraw_request_count.fetch_add(1, Ordering::Relaxed);
             self.terminal.redraw();
         }
+    }
+
+    /// Returns renderer-owned redraw requests without counting sync barriers.
+    #[cfg(test)]
+    pub(crate) fn redraw_request_count(&self) -> u64 {
+        self.redraw_request_count.load(Ordering::Relaxed)
     }
 
     /// Invalidates the screen cache only when the current target is visible.

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use tau_proto::{AgentPromptId, ContextItem, ToolCallId};
 
 /// Session/agent lifecycle state used to decide whether Ctrl-D is safe.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct AgentActivity {
     /// User submissions seen before the harness assigns a prompt id.
     optimistic_submissions: usize,
