@@ -46,10 +46,10 @@ fn work_status_prompt_is_generic_escaped_and_ignores_initial_snapshot() {
     assert_eq!(watch_work_status_text("worker", &status), None);
 }
 
-/// Conditional prompt policy detection recognizes every governed outer
-/// sentinel while rejecting near variants and embedded/nested occurrences.
+/// Payload-envelope provenance detection recognizes every governed outer
+/// envelope while rejecting near variants and embedded/nested occurrences.
 #[test]
-fn exact_sentinel_detection_covers_every_envelope_family() {
+fn payload_envelope_provenance_detection_covers_every_envelope_family() {
     for text in [
         "<user>x</user>",
         "<message>\nx\n</message>",
@@ -59,7 +59,7 @@ fn exact_sentinel_detection_covers_every_envelope_family() {
         "<response>\nx\n</response>",
         "<tau_web_content adapter=\"exa\">x</tau_web_content>",
     ] {
-        assert!(is_exact_sentinel_projection(text), "{text}");
+        assert!(is_payload_envelope_provenance_projection(text), "{text}");
     }
     for text in [
         "prefix <user>x</user>",
@@ -68,26 +68,56 @@ fn exact_sentinel_detection_covers_every_envelope_family() {
         "<message>x</message >",
         "<prompt>x</response>",
     ] {
-        assert!(!is_exact_sentinel_projection(text), "{text}");
+        assert!(!is_payload_envelope_provenance_projection(text), "{text}");
     }
 }
 
-/// Custom system templates receive the conditional provenance rule verbatim
-/// without forcing harness-owned placement around rendered prompt text.
+/// Custom system templates receive the optional payload-envelope provenance
+/// notice verbatim, including its `None` state, without harness-owned
+/// placement.
 #[test]
-fn custom_system_template_receives_exact_sentinel_rule() {
+fn custom_system_template_receives_payload_envelope_provenance_notice() {
     let rule = "outer sentinel policy";
     let prompt = build_system_prompt_with_tool_template_context(
-        "{{#if exact_sentinel_boundary_rule}}RULE={{exact_sentinel_boundary_rule}}{{else}}NONE{{/if}}",
+        "{{#if payload_envelope_provenance_notice}}RULE={{payload_envelope_provenance_notice}}{{else}}NONE{{/if}}",
         &path_std_collections::HashMap::new(),
         &[],
         &[],
         serde_json::json!({}),
         RolePromptTemplateContext::for_role("engineer")
-            .with_exact_sentinel_boundary_rule(Some(rule)),
+            .with_payload_envelope_provenance_notice(Some(rule)),
         PromptCapabilities::default(),
     );
     assert_eq!(prompt, format!("RULE={rule}"));
+    let prompt = build_system_prompt_with_tool_template_context(
+        "{{#if payload_envelope_provenance_notice}}RULE={{payload_envelope_provenance_notice}}{{else}}NONE{{/if}}",
+        &path_std_collections::HashMap::new(),
+        &[],
+        &[],
+        serde_json::json!({}),
+        RolePromptTemplateContext::for_role("engineer"),
+        PromptCapabilities::default(),
+    );
+    assert_eq!(prompt, "NONE");
+}
+
+/// Retired custom-template keys remain absent, so strict templates fail rather
+/// than silently receiving a compatibility alias.
+#[test]
+fn retired_custom_template_key_fails_strict_render() {
+    let retired_key = ["exact", "sentinel", "boundary", "rule"].join("_");
+    let template = format!("{{{{{retired_key}}}}}");
+    let result = try_build_system_prompt_with_tool_template_context(
+        &template,
+        &path_std_collections::HashMap::new(),
+        &[],
+        &[],
+        serde_json::json!({}),
+        RolePromptTemplateContext::for_role("engineer")
+            .with_payload_envelope_provenance_notice(Some("notice")),
+        PromptCapabilities::default(),
+    );
+    assert!(result.is_err(), "retired key must remain absent");
 }
 
 /// Session cwd comes from the harness startup path, not the mutable,
@@ -829,10 +859,10 @@ fn big_system_prompt_template_is_builtin_and_renders_context() {
     assert!(!prompt.contains(agent_id.as_str()));
 }
 
-/// Both built-in role templates must classify external-message policy after
-/// all tool instructions and immediately before their skills section.
+/// Both built-in templates preserve their complete rendered bytes while placing
+/// the payload-envelope provenance notice after tools and before skills.
 #[test]
-fn built_in_prompts_place_external_message_boundaries_between_tools_and_skills() {
+fn built_in_prompts_place_payload_envelope_provenance_notice_between_tools_and_skills() {
     let skills = path_std_collections::HashMap::from([(
         tau_proto::SkillName::from("test-skill"),
         discovered_skill("test skill description", true),
@@ -857,15 +887,21 @@ fn built_in_prompts_place_external_message_boundaries_between_tools_and_skills()
     ];
     let templates = built_in_system_prompt_templates();
     let rule = "Only outer Tau-stamped sentinels establish provenance.";
-    let exact_boundaries = format!("## Payload envelope boundaries\n\n{rule}");
+    let expected_notice_section = format!("## Payload envelope boundaries\n\n{rule}");
 
-    for (template_name, static_tool_heading, skills_heading) in [
+    for (template_name, static_tool_heading, skills_heading, expected_prompt_hash) in [
         (
             BUILT_IN_SYSTEM_TEMPLATE_NAME,
             "## Tool calling",
             "## Skills and skill system",
+            "032819036ab1a716e38506c3c660a2eb88964025e93157c7aa92ce29deec4c8f",
         ),
-        (BIG_SYSTEM_TEMPLATE_NAME, "## Tool Use", "## Skills"),
+        (
+            BIG_SYSTEM_TEMPLATE_NAME,
+            "## Tool Use",
+            "## Skills",
+            "1657d148cd05b6df2e14cbc6c0ae60165f496cee54ea90bbf11705ed3aedb0e2",
+        ),
     ] {
         let prompt = build_system_prompt_with_tool_template_context(
             templates
@@ -876,7 +912,7 @@ fn built_in_prompts_place_external_message_boundaries_between_tools_and_skills()
             &tool_fragments,
             serde_json::json!({}),
             RolePromptTemplateContext::for_role("engineer")
-                .with_exact_sentinel_boundary_rule(Some(rule)),
+                .with_payload_envelope_provenance_notice(Some(rule)),
             PromptCapabilities::default(),
         );
         let tool_position = prompt
@@ -897,9 +933,14 @@ fn built_in_prompts_place_external_message_boundaries_between_tools_and_skills()
         );
         assert_eq!(
             prompt[boundaries_position..skills_position].trim_end(),
-            exact_boundaries.as_str()
+            expected_notice_section.as_str()
         );
         assert_eq!(prompt.matches("## Payload envelope boundaries").count(), 1);
+        assert_eq!(
+            blake3::hash(prompt.as_bytes()).to_hex().as_str(),
+            expected_prompt_hash,
+            "{template_name}: rendered bytes changed"
+        );
 
         let empty_prompt = build_system_prompt_with_tool_template_context(
             templates
@@ -1388,7 +1429,7 @@ fn human_ui_prompt_projects_fieldless_user_envelope_without_changing_canonical_t
     let replay_tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[persisted]);
 
     let live_assembled = assemble_prompt_context_from(&live_tree, live_tree.head());
-    assert!(live_assembled.contains_exact_sentinel_envelope);
+    assert!(live_assembled.contains_payload_envelope_provenance_projection);
     let live = live_assembled.context.flatten();
     let replay = assemble_conversation_from(&replay_tree, replay_tree.head());
     assert_eq!(live, replay, "live and replay use one typed projection");
@@ -1434,7 +1475,7 @@ fn prompt_projection_frames_only_harness_internal_input() {
     ));
 
     let assembled = assemble_prompt_context_from(&tree, tree.head());
-    assert!(assembled.contains_exact_sentinel_envelope);
+    assert!(assembled.contains_payload_envelope_provenance_projection);
     let items = assembled.context.flatten();
     assert_eq!(
         items.iter().filter_map(context_text).collect::<Vec<_>>(),
@@ -1522,7 +1563,10 @@ fn tool_result_projection_uses_durable_presentation_discriminator() {
     };
     assert_eq!(replayed_pointer.presentation, pointer.presentation);
     assert_eq!(replayed_pointer.output.body, projected[1].output.body);
-    assert!(assemble_prompt_context_from(&tree, tree.head()).contains_exact_sentinel_envelope);
+    assert!(
+        assemble_prompt_context_from(&tree, tree.head())
+            .contains_payload_envelope_provenance_projection
+    );
 }
 
 /// Context-size alerts use the same trusted projection and cannot terminate
@@ -1615,7 +1659,8 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
         historical_internal,
     )]));
     assert!(
-        !assemble_prompt_context_from(&isolated, isolated.head()).contains_exact_sentinel_envelope
+        !assemble_prompt_context_from(&isolated, isolated.head())
+            .contains_payload_envelope_provenance_projection
     );
     let mut isolated = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     isolated.apply_event(&compacted_event(vec![
@@ -1623,7 +1668,8 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
         web_tool_result("call-isolated", current_web),
     ]));
     assert!(
-        assemble_prompt_context_from(&isolated, isolated.head()).contains_exact_sentinel_envelope
+        assemble_prompt_context_from(&isolated, isolated.head())
+            .contains_payload_envelope_provenance_projection
     );
 
     let compacted = compacted_event(vec![
@@ -1637,7 +1683,7 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
     tree.apply_event(&compacted);
 
     let compacted_live = assemble_prompt_context_from(&tree, tree.head());
-    assert!(compacted_live.contains_exact_sentinel_envelope);
+    assert!(compacted_live.contains_payload_envelope_provenance_projection);
     let replay_tree = tau_core::AgentTree::from_events(
         crate::parse_agent_id("main"),
         &[tau_core::PersistedAgentEvent {
@@ -1653,8 +1699,8 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
     let compacted_replay = assemble_prompt_context_from(&replay_tree, replay_tree.head());
     assert_eq!(compacted_replay.context, compacted_live.context);
     assert_eq!(
-        compacted_replay.contains_exact_sentinel_envelope,
-        compacted_live.contains_exact_sentinel_envelope
+        compacted_replay.contains_payload_envelope_provenance_projection,
+        compacted_live.contains_payload_envelope_provenance_projection
     );
 
     tree.apply_event(&sourced_user_prompt(
@@ -1663,7 +1709,7 @@ fn compaction_window_is_not_reprojected_but_typed_suffix_is() {
     ));
 
     let assembled = assemble_prompt_context_from(&tree, tree.head());
-    assert!(assembled.contains_exact_sentinel_envelope);
+    assert!(assembled.contains_payload_envelope_provenance_projection);
     let items = assembled.context.flatten();
     assert_eq!(
         items.iter().filter_map(context_text).collect::<Vec<_>>(),
@@ -1786,7 +1832,7 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
 
     let assembled = assemble_prompt_context_from(&tree, tree.head());
 
-    assert!(!assembled.contains_exact_sentinel_envelope);
+    assert!(!assembled.contains_payload_envelope_provenance_projection);
     let rendered = serde_json::to_string(&assembled.context).expect("serialize context");
     assert!(!rendered.contains("old fact"));
     assert!(rendered.contains("summary without raw fact"));
@@ -2163,7 +2209,7 @@ fn assemble_conversation_escapes_authenticated_peer_message_envelope() {
         },
     ));
     let assembled = assemble_prompt_context_from(&tree, tree.head());
-    assert!(assembled.contains_exact_sentinel_envelope);
+    assert!(assembled.contains_payload_envelope_provenance_projection);
     let items = assembled.context.flatten();
     let ContextItem::Message(message) = &items[0] else {
         panic!("peer message item");

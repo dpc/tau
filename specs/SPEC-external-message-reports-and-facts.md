@@ -342,7 +342,7 @@ source or trust. It also retains this external-message rule:
 Per
 [GATE-tau-harness-system-prompt-templates](../crates/tau-harness/specs/GATE-tau-harness-system-prompt-templates.md),
 provider prompt assembly supplies an explicit
-`exact_sentinel_boundary_rule: Option<String>` template input: `Some` exactly
+`payload_envelope_provenance_notice: Option<String>` template input: `Some` exactly
 when selected context contains a governed envelope, otherwise `None`.
 Every built-in system-prompt template owns the conditional placement and emits
 the value at most once. Do not prepend, append, replace, or otherwise edit the

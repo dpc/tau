@@ -85,10 +85,10 @@ You have two ways of communicating with users:
 New user messages during a turn refine the work; the newest message wins on conflict. Honor every non-conflicting request since your last turn, not just the latest one. A status request means: give the update, then keep working — don't treat it as a stop.
 Before finalizing after an interrupt or context compaction, verify your answer addresses the newest request, not an older one still in flight. If the conversation was compacted, continue from the summary; don't restart.
 
-{{#if exact_sentinel_boundary_rule}}
+{{#if payload_envelope_provenance_notice}}
 ## Payload envelope boundaries
 
-{{exact_sentinel_boundary_rule}}
+{{payload_envelope_provenance_notice}}
 
 {{/if}}
 {{#if skills~}}

@@ -77,8 +77,8 @@ pub(crate) struct RolePromptTemplateContext<'a> {
     /// This session-wide path remains separate from per-agent shell workdir
     /// context, which extensions publish under `agent_context`.
     pub(crate) session_cwd: Option<&'a std::path::Path>,
-    /// Conditional provenance rule for selected exact-sentinel context.
-    pub(crate) exact_sentinel_boundary_rule: Option<&'a str>,
+    /// Optional model-visible provenance notice for selected payload envelopes.
+    pub(crate) payload_envelope_provenance_notice: Option<&'a str>,
 }
 
 /// Harness-owned capabilities visible to one prompt render.
@@ -161,7 +161,7 @@ impl<'a> RolePromptTemplateContext<'a> {
             role_group: role_name,
             agent_id: None,
             session_cwd: None,
-            exact_sentinel_boundary_rule: None,
+            payload_envelope_provenance_notice: None,
         }
     }
 
@@ -172,7 +172,7 @@ impl<'a> RolePromptTemplateContext<'a> {
             role_group: role_name,
             agent_id: Some(agent_id),
             session_cwd: None,
-            exact_sentinel_boundary_rule: None,
+            payload_envelope_provenance_notice: None,
         }
     }
 
@@ -189,9 +189,12 @@ impl<'a> RolePromptTemplateContext<'a> {
         self
     }
 
-    /// Supply the explicit conditional exact-sentinel provenance input.
-    pub(crate) fn with_exact_sentinel_boundary_rule(mut self, rule: Option<&'a str>) -> Self {
-        self.exact_sentinel_boundary_rule = rule;
+    /// Supply the optional model-visible payload-envelope provenance notice.
+    pub(crate) fn with_payload_envelope_provenance_notice(
+        mut self,
+        notice: Option<&'a str>,
+    ) -> Self {
+        self.payload_envelope_provenance_notice = notice;
         self
     }
 }
@@ -346,7 +349,7 @@ fn system_prompt_template_data(
     agent_context: serde_json::Value,
     capabilities: PromptCapabilities,
 ) -> Result<serde_json::Value, handlebars::RenderError> {
-    let exact_sentinel_boundary_rule = context.exact_sentinel_boundary_rule;
+    let payload_envelope_provenance_notice = context.payload_envelope_provenance_notice;
     let mut data = prompt_template_data(context, skills, agent_context, capabilities);
     let rendered_fragments = rendered_prompt_fragment_template_parts(prompt_fragments, &data)?;
     let rendered_tool_fragments =
@@ -357,9 +360,9 @@ fn system_prompt_template_data(
     object.insert("prompt_fragments".to_owned(), rendered_fragments);
     object.insert("tool_prompt_fragments".to_owned(), rendered_tool_fragments);
     object.insert(
-        "exact_sentinel_boundary_rule".to_owned(),
-        serde_json::to_value(exact_sentinel_boundary_rule)
-            .expect("optional exact-sentinel boundary rule serializes"),
+        "payload_envelope_provenance_notice".to_owned(),
+        serde_json::to_value(payload_envelope_provenance_notice)
+            .expect("optional payload-envelope provenance notice serializes"),
     );
     Ok(data)
 }
@@ -1013,11 +1016,12 @@ pub(crate) fn chrono_free_date() -> String {
 pub(crate) struct AssembledPromptContext {
     /// Provider context with prompt-local presentation facts applied.
     pub(crate) context: tau_proto::PromptContext,
-    /// Whether selected context contains a Tau-stamped payload envelope.
-    pub(crate) contains_exact_sentinel_envelope: bool,
+    /// Whether selected context projects a payload envelope that needs the
+    /// model-visible provenance notice.
+    pub(crate) contains_payload_envelope_provenance_projection: bool,
 }
 
-fn is_exact_sentinel_projection(text: &str) -> bool {
+fn is_payload_envelope_provenance_projection(text: &str) -> bool {
     [
         ("<user>", USER_CLOSE),
         ("<message", MESSAGE_CLOSE),
@@ -1030,25 +1034,27 @@ fn is_exact_sentinel_projection(text: &str) -> bool {
     .any(|(open, close)| text.ends_with(close) && text.starts_with(open))
 }
 
-fn context_items_contain_exact_sentinel(items: &[ContextItem]) -> bool {
+fn context_items_contain_payload_envelope_provenance_projection(items: &[ContextItem]) -> bool {
     items.iter().any(|item| match item {
         ContextItem::Message(message) => message.content.iter().any(|part| {
             let (tau_proto::ContentPart::Text { text }
             | tau_proto::ContentPart::HarnessInternalText { text }) = part;
-            is_exact_sentinel_projection(text)
+            is_payload_envelope_provenance_projection(text)
         }),
         ContextItem::ToolResult(result) => {
             result.presentation == tau_proto::ToolResultPresentation::HarnessDedupPointer
-                || is_exact_sentinel_projection(&result.output.body)
+                || is_payload_envelope_provenance_projection(&result.output.body)
         }
         _ => false,
     })
 }
 
-fn tool_results_contain_exact_sentinel(items: &[tau_proto::ToolResultItem]) -> bool {
+fn tool_results_contain_payload_envelope_provenance_projection(
+    items: &[tau_proto::ToolResultItem],
+) -> bool {
     items.iter().any(|item| {
         item.presentation == tau_proto::ToolResultPresentation::HarnessDedupPointer
-            || is_exact_sentinel_projection(&item.output.body)
+            || is_payload_envelope_provenance_projection(&item.output.body)
     })
 }
 
@@ -1058,7 +1064,7 @@ pub(crate) fn assemble_prompt_context_from(
     head: Option<tau_core::NodeId>,
 ) -> AssembledPromptContext {
     let mut blocks: Vec<tau_proto::ContextBlock> = Vec::new();
-    let mut contains_exact_sentinel_envelope = false;
+    let mut contains_payload_envelope_provenance_projection = false;
     let branch_ids = tree.branch_node_ids_from(head);
     let branch: Vec<_> = branch_ids
         .iter()
@@ -1079,7 +1085,8 @@ pub(crate) fn assemble_prompt_context_from(
             Some((index, replacement_window, *cut))
         })
     {
-        contains_exact_sentinel_envelope = context_items_contain_exact_sentinel(replacement_window);
+        contains_payload_envelope_provenance_projection =
+            context_items_contain_payload_envelope_provenance_projection(replacement_window);
         blocks.push(tau_proto::ContextBlock::UserInput(
             tau_proto::UserInputBlock {
                 items: replacement_window.clone(),
@@ -1105,8 +1112,10 @@ pub(crate) fn assemble_prompt_context_from(
                 replacement_window, ..
             } => {
                 blocks.clear();
-                contains_exact_sentinel_envelope =
-                    context_items_contain_exact_sentinel(replacement_window);
+                contains_payload_envelope_provenance_projection =
+                    context_items_contain_payload_envelope_provenance_projection(
+                        replacement_window,
+                    );
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
                         items: replacement_window.clone(),
@@ -1125,7 +1134,7 @@ pub(crate) fn assemble_prompt_context_from(
                 submission_source,
                 ..
             } => {
-                contains_exact_sentinel_envelope |= submission_source.as_ref()
+                contains_payload_envelope_provenance_projection |= submission_source.as_ref()
                     == Some(&tau_proto::PromptSubmissionSource::HumanUi)
                     || items.iter().any(|item| {
                         matches!(
@@ -1160,7 +1169,8 @@ pub(crate) fn assemble_prompt_context_from(
             }
             AgentEntry::ToolResults { items } => {
                 let items = project_tool_result_items(items);
-                contains_exact_sentinel_envelope |= tool_results_contain_exact_sentinel(&items);
+                contains_payload_envelope_provenance_projection |=
+                    tool_results_contain_payload_envelope_provenance_projection(&items);
                 blocks.push(tau_proto::ContextBlock::ToolResults(
                     tau_proto::ToolResultsBlock { items },
                 ));
@@ -1185,7 +1195,7 @@ pub(crate) fn assemble_prompt_context_from(
                         // Replaying this routing fact would fabricate assistant output.
                         continue;
                     }
-                    contains_exact_sentinel_envelope = true;
+                    contains_payload_envelope_provenance_projection = true;
                     let message_text = match sender_session_id {
                         Some(sender_session_id) => {
                             let body = tau_proto::escape_exact_sentinel_close(
@@ -1224,7 +1234,7 @@ pub(crate) fn assemble_prompt_context_from(
                 }
                 tau_proto::AgentMessageKind::WatchResponse => {
                     if *direction == tau_core::AgentMessageDirection::Inbound {
-                        contains_exact_sentinel_envelope = true;
+                        contains_payload_envelope_provenance_projection = true;
                         let sender_label = sender_session_id
                             .as_ref()
                             .map(|session_id| format!("{session_id}/{sender_id}"))
@@ -1255,7 +1265,7 @@ pub(crate) fn assemble_prompt_context_from(
                 }
                 tau_proto::AgentMessageKind::WatchPrompt => {
                     if *direction == tau_core::AgentMessageDirection::Inbound {
-                        contains_exact_sentinel_envelope = true;
+                        contains_payload_envelope_provenance_projection = true;
                         let sender_label = sender_session_id
                             .as_ref()
                             .map(|session_id| format!("{session_id}/{sender_id}"))
@@ -1375,7 +1385,7 @@ pub(crate) fn assemble_prompt_context_from(
                 }
             },
             AgentEntry::MessageFact { item, .. } => {
-                contains_exact_sentinel_envelope = true;
+                contains_payload_envelope_provenance_projection = true;
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
                         items: vec![ContextItem::Message(*item.clone())],
@@ -1387,7 +1397,7 @@ pub(crate) fn assemble_prompt_context_from(
 
     AssembledPromptContext {
         context: tau_proto::PromptContext { blocks },
-        contains_exact_sentinel_envelope,
+        contains_payload_envelope_provenance_projection,
     }
 }
 

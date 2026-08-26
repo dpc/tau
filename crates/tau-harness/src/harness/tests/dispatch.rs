@@ -1874,10 +1874,10 @@ fn duplicate_tool_surface_does_not_resurrect_failed_create_prompt() {
     h.shutdown().expect("shutdown");
 }
 
-/// A strict template error hidden in the message-fact-only branch must fail
-/// preflight before Tau commits an inference-dispatch checkpoint.
+/// A strict template error hidden behind the payload-envelope provenance notice
+/// must fail preflight before Tau commits an inference-dispatch checkpoint.
 #[test]
-fn message_fact_conditional_template_failure_precedes_dispatch_checkpoint() {
+fn message_fact_payload_envelope_notice_failure_precedes_dispatch_checkpoint() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     h.selected_model = Some("test/model".into());
@@ -1907,7 +1907,7 @@ fn message_fact_conditional_template_failure_precedes_dispatch_checkpoint() {
     h.agents.get_mut(&cid).expect("user agent").terminating = false;
     h.system_prompt_templates.insert(
         "message-fact-conditional".to_owned(),
-        "{{#if exact_sentinel_boundary_rule}}{{missing_strict_value}}{{else}}READY{{/if}}"
+        "{{#if payload_envelope_provenance_notice}}{{missing_strict_value}}{{else}}READY{{/if}}"
             .to_owned(),
     );
     let selected_role = h.selected_role.clone();
