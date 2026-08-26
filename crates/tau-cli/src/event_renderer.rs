@@ -285,6 +285,100 @@ impl Drop for HandlerProgress {
         }
     }
 }
+
+/// Selects canonical facts whose visible presentation can be flush-correlated.
+fn presentation_fact(event: &Event) -> Option<PresentationFactClass> {
+    presentation_fact_name(&event.name())
+}
+
+/// CLI-owned canonical selected-presentation fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(super) enum PresentationFactClass {
+    /// A prompt entered the visible queued state.
+    PromptQueued,
+    /// A queued prompt reached its visible submitted state.
+    PromptSubmitted,
+    /// A visible prompt accepted steering content.
+    PromptSteered,
+    /// A streaming response visibly advanced.
+    ResponseUpdated,
+    /// A response visibly reached its canonical terminal presentation.
+    ResponseFinished,
+    /// A prompt visibly ended through cancellation or supersession.
+    PromptTerminated,
+}
+
+impl PresentationFactClass {
+    /// Returns the one invariant event/class label written to operational
+    /// traces.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::PromptQueued => "agent.prompt_queued/prompt_queued",
+            Self::PromptSubmitted => "agent.prompt_submitted/prompt_submitted",
+            Self::PromptSteered => "agent.prompt_steered/prompt_steered",
+            Self::ResponseUpdated => "provider.response_updated/response_updated",
+            Self::ResponseFinished => "provider.response_finished/response_finished",
+            Self::PromptTerminated => "agent.prompt_terminated/prompt_terminated",
+        }
+    }
+
+    /// Returns this fact's opaque terminal-layer invalidation key.
+    fn key(self) -> tau_cli_term::PresentationObservationKey {
+        tau_cli_term::PresentationObservationKey::new(self as u8)
+            .expect("finite CLI presentation class must fit the raw invalidation mask")
+    }
+
+    /// Returns the opaque predecessor-key mask superseded by this fact.
+    fn invalidates(self) -> tau_cli_term::PresentationInvalidation {
+        let none = tau_cli_term::PresentationInvalidation::none();
+        match self {
+            Self::PromptSubmitted => none.with(Self::PromptQueued.key()),
+            Self::ResponseFinished => none.with(Self::ResponseUpdated.key()),
+            Self::PromptTerminated => none
+                .with(Self::PromptQueued.key())
+                .with(Self::PromptSubmitted.key())
+                .with(Self::ResponseUpdated.key()),
+            _ => none,
+        }
+    }
+
+    /// Builds the application-agnostic typed fact accepted by the raw layer.
+    pub(super) fn opaque_fact(self) -> tau_cli_term::OpaquePresentationFact {
+        tau_cli_term::OpaquePresentationFact::new(self.label(), self.key(), self.invalidates())
+    }
+
+    /// Returns whether mutation and registration require atomic capture
+    /// suppression.
+    const fn invalidates_pending(self) -> bool {
+        matches!(
+            self,
+            Self::PromptSubmitted | Self::ResponseFinished | Self::PromptTerminated
+        )
+    }
+}
+
+/// Maps stable canonical event names to content-free presentation classes.
+fn presentation_fact_name(event_name: &tau_proto::EventName) -> Option<PresentationFactClass> {
+    use PresentationFactClass as Class;
+    match event_name {
+        name if name == &tau_proto::EventName::AGENT_PROMPT_QUEUED => Some(Class::PromptQueued),
+        name if name == &tau_proto::EventName::AGENT_PROMPT_SUBMITTED => {
+            Some(Class::PromptSubmitted)
+        }
+        name if name == &tau_proto::EventName::AGENT_PROMPT_STEERED => Some(Class::PromptSteered),
+        name if name == &tau_proto::EventName::PROVIDER_RESPONSE_UPDATED => {
+            Some(Class::ResponseUpdated)
+        }
+        name if name == &tau_proto::EventName::PROVIDER_RESPONSE_FINISHED => {
+            Some(Class::ResponseFinished)
+        }
+        name if name == &tau_proto::EventName::AGENT_PROMPT_TERMINATED => {
+            Some(Class::PromptTerminated)
+        }
+        _ => None,
+    }
+}
 const COMPLETED_AGENT_RESPONSE_PREFIX: &str = "◆ ";
 const STREAMING_AGENT_RESPONSE_PREFIX: &str = "◇ ";
 /// Maximum rendered terminal columns for a supplemental agent message name.
@@ -4678,6 +4772,9 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         delivery_id: Option<u64>,
     ) {
+        let observation = delivery_id
+            .zip(presentation_fact(event))
+            .filter(|_| self.resources.handle.presentation_observation_interest());
         if let Event::ProviderResponseFinished(finished) = event {
             let selected = self.selection.displayed_agent_id.as_deref()
                 == Some(finished.agent_id.as_str())
@@ -4698,7 +4795,7 @@ impl EventRenderer {
                 let handle = self.resources.handle.terminal_handle();
                 self.final_publication_in_progress = true;
                 handle.with_redraw_suppressed(|| {
-                    self.handle_recorded_delivery_inner(event, recorded_at, delivery_id);
+                    self.handle_recorded_delivery_inner(event, recorded_at, observation);
                 });
                 self.final_publication_in_progress = false;
                 // ast-grep-ignore: debug-assert-expression-must-not-mutate
@@ -4709,17 +4806,50 @@ impl EventRenderer {
             }
             self.final_publication_in_progress = true;
             self.hidden_finalization_in_progress = true;
-            self.handle_recorded_delivery_inner(event, recorded_at, delivery_id);
+            self.handle_recorded_delivery_inner(event, recorded_at, observation);
             self.hidden_finalization_in_progress = false;
             self.final_publication_in_progress = false;
             return;
         }
-        self.handle_recorded_delivery_inner(event, recorded_at, delivery_id);
+        let invalidates_pending = observation.is_some_and(|(_, class)| class.invalidates_pending());
+        if invalidates_pending {
+            let handle = self.resources.handle.terminal_handle();
+            handle.with_redraw_suppressed(|| {
+                self.handle_recorded_delivery_inner(event, recorded_at, observation);
+            });
+        } else {
+            self.handle_recorded_delivery_inner(event, recorded_at, observation);
+        }
     }
 
     /// Routes one delivery after any selected-final redraw cut has been
     /// entered.
     fn handle_recorded_delivery_inner(
+        &mut self,
+        event: &Event,
+        recorded_at: UnixMicros,
+        observation: Option<(u64, PresentationFactClass)>,
+    ) {
+        self.resources
+            .handle
+            .begin_selected_delivery(observation.is_some());
+        self.handle_recorded_delivery_routed(
+            event,
+            recorded_at,
+            observation.map(|(delivery_id, _)| delivery_id),
+        );
+        let Some((delivery_id, class)) = observation else {
+            return;
+        };
+        if self.resources.handle.selected_delivery_mutated() {
+            self.resources
+                .handle
+                .observe_presentation_mutation(delivery_id, class);
+        }
+    }
+
+    /// Routes one delivery while retaining its process-local timing context.
+    fn handle_recorded_delivery_routed(
         &mut self,
         event: &Event,
         recorded_at: UnixMicros,
@@ -5040,6 +5170,9 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         target_agent_id: String,
     ) {
+        self.resources
+            .handle
+            .suppress_selected_delivery_observation();
         let refresh_visible_watch_activity = matches!(
             event,
             Event::AgentCompacted(_) | Event::AgentStandaloneCompactionFailed(_)
@@ -5081,6 +5214,9 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         is_global_message_fact: bool,
     ) {
+        self.resources
+            .handle
+            .suppress_selected_delivery_observation();
         self.update_hidden_no_agent_state(|this| {
             this.transcript.ownership.contains_global_message_fact |= is_global_message_fact;
             this.handle_recorded_at_for_visible_agent(event, recorded_at);

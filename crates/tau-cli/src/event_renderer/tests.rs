@@ -7,8 +7,8 @@ use tau_config::settings as path_tau_config_settings;
 
 use super::{
     AgentActivity, MessageRenderMode, QUEUED_PROJECTION_WINDOW_BYTES, RoleCompletionDetails,
-    bounded_queued_line_end, bounded_queued_line_start, queued_prompt_projection,
-    role_setting_value_completions,
+    bounded_queued_line_end, bounded_queued_line_start, presentation_fact_name,
+    queued_prompt_projection, role_setting_value_completions,
 };
 use crate::chat::{DraftSlot, queue_prompt_draft_snapshot};
 
@@ -29,6 +29,321 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
         tau_cli_term::CompletionData::new(),
         crate::tests::cli_test_theme(),
     )
+}
+
+/// Flush correlation admits every approved canonical presentation class while
+/// excluding local redraws and provider-reported ingress variants.
+#[test]
+fn presentation_fact_classes_are_exactly_the_canonical_visible_set() {
+    use super::PresentationFactClass as Class;
+
+    let expected = [
+        (
+            tau_proto::EventName::AGENT_PROMPT_QUEUED,
+            "agent.prompt_queued/prompt_queued",
+            Class::PromptQueued,
+        ),
+        (
+            tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            "agent.prompt_submitted/prompt_submitted",
+            Class::PromptSubmitted,
+        ),
+        (
+            tau_proto::EventName::AGENT_PROMPT_STEERED,
+            "agent.prompt_steered/prompt_steered",
+            Class::PromptSteered,
+        ),
+        (
+            tau_proto::EventName::PROVIDER_RESPONSE_UPDATED,
+            "provider.response_updated/response_updated",
+            Class::ResponseUpdated,
+        ),
+        (
+            tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+            "provider.response_finished/response_finished",
+            Class::ResponseFinished,
+        ),
+        (
+            tau_proto::EventName::AGENT_PROMPT_TERMINATED,
+            "agent.prompt_terminated/prompt_terminated",
+            Class::PromptTerminated,
+        ),
+    ];
+    for (event_name, stable_name, class) in expected {
+        assert_eq!(presentation_fact_name(&event_name), Some(class));
+        assert_eq!(class.label(), stable_name);
+    }
+    assert_eq!(
+        presentation_fact_name(&tau_proto::EventName::PROVIDER_RESPONSE_UPDATED_REPORTED),
+        None
+    );
+    assert_eq!(
+        presentation_fact_name(&tau_proto::EventName::UI_CANCEL_PROMPT),
+        None
+    );
+    assert_eq!(
+        presentation_fact_name(&tau_proto::EventName::TERM_BELL),
+        None
+    );
+}
+
+/// Selected user-visible prompt folds register mutations, while internal
+/// no-visible-change folds and off-screen agent folds remain ineligible.
+#[test]
+fn presentation_mutation_eligibility_excludes_hidden_and_no_change_folds() {
+    use super::PresentationFactClass as Class;
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer
+        .resources
+        .handle
+        .force_selected_delivery_tracking_for_test();
+    renderer.selection.current_agent_id = Some("visible".to_owned());
+    renderer.selection.displayed_agent_id = Some("visible".to_owned());
+    let queued = |agent: &str, message_class| {
+        tau_proto::Event::AgentPromptQueued(tau_proto::AgentPromptQueued {
+            agent_id: agent_id(agent),
+            text: "prompt".to_owned(),
+            message_class,
+        })
+    };
+
+    renderer.handle_socket_delivery(
+        &queued("visible", tau_proto::PromptMessageClass::User),
+        tau_proto::UnixMicros::new(1),
+        1,
+    );
+    assert!(renderer.resources.handle.selected_delivery_mutated());
+
+    renderer.handle_socket_delivery(
+        &queued("visible", tau_proto::PromptMessageClass::Internal),
+        tau_proto::UnixMicros::new(2),
+        2,
+    );
+    assert!(!renderer.resources.handle.selected_delivery_mutated());
+    let observations = renderer
+        .resources
+        .handle
+        .presentation_observations_for_test();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].delivery_id, 1);
+    assert_eq!(observations[0].class, Class::PromptQueued);
+
+    renderer.handle_socket_delivery(
+        &queued("hidden", tau_proto::PromptMessageClass::User),
+        tau_proto::UnixMicros::new(3),
+        3,
+    );
+    assert!(!renderer.resources.handle.selected_delivery_mutated());
+    let observations = renderer
+        .resources
+        .handle
+        .presentation_observations_for_test();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].delivery_id, 1);
+    assert_eq!(observations[0].class, Class::PromptQueued);
+}
+
+/// Without TRACE interest, socket delivery must bypass delta accounting and
+/// post-fold registration entirely.
+#[test]
+fn disabled_presentation_trace_bypasses_registration_seam() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.selection.current_agent_id = Some("visible".to_owned());
+    renderer.selection.displayed_agent_id = Some("visible".to_owned());
+    renderer.handle_socket_delivery(
+        &tau_proto::Event::AgentPromptQueued(tau_proto::AgentPromptQueued {
+            agent_id: agent_id("visible"),
+            text: "prompt".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+        }),
+        tau_proto::UnixMicros::new(1),
+        1,
+    );
+    assert!(!renderer.resources.handle.selected_delivery_mutated());
+    assert!(
+        renderer
+            .resources
+            .handle
+            .presentation_observations_for_test()
+            .is_empty()
+    );
+}
+
+/// Repeating an empty response update against an existing pending row must not
+/// claim a presentation delta merely because the renderer called `set_block`.
+#[test]
+fn presentation_mutation_eligibility_rejects_same_value_block_updates() {
+    use super::PresentationFactClass as Class;
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer
+        .resources
+        .handle
+        .force_selected_delivery_tracking_for_test();
+    renderer.selection.current_agent_id = Some("visible".to_owned());
+    renderer.selection.displayed_agent_id = Some("visible".to_owned());
+    let update = tau_proto::Event::ProviderResponseUpdated(tau_proto::ProviderResponseUpdated {
+        agent_prompt_id: tau_proto::AgentPromptId::parse("prompt-no-op").expect("valid prompt id"),
+        agent_id: agent_id("visible"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: None,
+        response_stats: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+
+    renderer.handle_socket_delivery(&update, tau_proto::UnixMicros::new(1), 1);
+    assert!(renderer.resources.handle.selected_delivery_mutated());
+    renderer.handle_socket_delivery(&update, tau_proto::UnixMicros::new(2), 2);
+    assert!(!renderer.resources.handle.selected_delivery_mutated());
+    let observations = renderer
+        .resources
+        .handle
+        .presentation_observations_for_test();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].class, Class::ResponseUpdated);
+}
+
+/// Every allowlisted canonical fact must drive the real selected renderer fold
+/// to an actual presentation delta; predecessor setup also exercises both
+/// invalidating prompt and response terminal shapes.
+#[test]
+fn presentation_mutation_eligibility_covers_every_canonical_fold() {
+    use tau_proto::{
+        AgentPromptId, AgentPromptSteered, AgentPromptSubmitted, AgentPromptTerminated,
+        AgentPromptTerminationReason, ContextRecoveryDisposition, OutputLengthDisposition,
+        PromptOriginator, PromptSubmissionSource, ProviderResponseFinished, ProviderStopReason,
+    };
+
+    use super::PresentationFactClass as Class;
+
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer
+        .resources
+        .handle
+        .force_selected_delivery_tracking_for_test();
+    renderer.selection.current_agent_id = Some("visible".to_owned());
+    renderer.selection.displayed_agent_id = Some("visible".to_owned());
+    let prompt_id = || AgentPromptId::parse("presentation-fold").expect("valid prompt id");
+    let queued = tau_proto::Event::AgentPromptQueued(tau_proto::AgentPromptQueued {
+        agent_id: agent_id("visible"),
+        text: "prompt".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+    });
+    let submitted = tau_proto::Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: agent_id("visible"),
+        text: "prompt".to_owned(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        originator: PromptOriginator::User,
+        submission_source: PromptSubmissionSource::HumanUi,
+        display_name: None,
+        ctx_id: None,
+    });
+    let steered = tau_proto::Event::AgentPromptSteered(AgentPromptSteered {
+        self_compaction_terminal: None,
+        inference_activation: false,
+        submission_source: PromptSubmissionSource::HumanUi,
+        agent_id: agent_id("visible"),
+        text: "steer".to_owned(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        ctx_id: None,
+    });
+    let update = tau_proto::Event::ProviderResponseUpdated(tau_proto::ProviderResponseUpdated {
+        agent_prompt_id: prompt_id(),
+        agent_id: agent_id("visible"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: None,
+        response_stats: None,
+        originator: PromptOriginator::User,
+    });
+    let finished = tau_proto::Event::ProviderResponseFinished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: prompt_id(),
+        agent_id: agent_id("visible"),
+        output_items: Vec::new(),
+        stop_reason: ProviderStopReason::EndTurn,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: ContextRecoveryDisposition::None,
+        output_length_disposition: OutputLengthDisposition::None,
+        originator: PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_attempt: Default::default(),
+        provider_response_id: None,
+        ws_pool_delta: None,
+    });
+    let terminated = tau_proto::Event::AgentPromptTerminated(AgentPromptTerminated {
+        automatic_compaction_decision: None,
+        agent_id: agent_id("visible"),
+        agent_prompt_id: AgentPromptId::parse("presentation-terminated").expect("valid prompt id"),
+        reason: AgentPromptTerminationReason::Canceled,
+        originator: PromptOriginator::User,
+    });
+
+    for (delivery_id, event) in [
+        (1, &queued),
+        (2, &submitted),
+        (3, &steered),
+        (4, &update),
+        (5, &finished),
+    ] {
+        renderer.handle_socket_delivery(
+            event,
+            tau_proto::UnixMicros::new(delivery_id),
+            delivery_id,
+        );
+        assert!(
+            renderer.resources.handle.selected_delivery_mutated(),
+            "{} must change selected presentation",
+            event.name()
+        );
+    }
+    let termination_update =
+        tau_proto::Event::ProviderResponseUpdated(tau_proto::ProviderResponseUpdated {
+            agent_prompt_id: AgentPromptId::parse("presentation-terminated")
+                .expect("valid prompt id"),
+            agent_id: agent_id("visible"),
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
+            response_stats: None,
+            originator: PromptOriginator::User,
+        });
+    renderer.handle_socket_delivery(&termination_update, tau_proto::UnixMicros::new(6), 6);
+    renderer.handle_socket_delivery(&terminated, tau_proto::UnixMicros::new(7), 7);
+    assert!(renderer.resources.handle.selected_delivery_mutated());
+    let observations = renderer
+        .resources
+        .handle
+        .presentation_observations_for_test();
+    let expected = [
+        (1, Class::PromptQueued, false),
+        (2, Class::PromptSubmitted, true),
+        (3, Class::PromptSteered, false),
+        (4, Class::ResponseUpdated, false),
+        (5, Class::ResponseFinished, true),
+        (6, Class::ResponseUpdated, false),
+        (7, Class::PromptTerminated, true),
+    ];
+    assert_eq!(observations.len(), expected.len());
+    for (observation, (delivery_id, class, capture_suppressed)) in observations.iter().zip(expected)
+    {
+        assert_eq!(observation.delivery_id, delivery_id);
+        assert_eq!(observation.class, class);
+        assert_eq!(observation.fact, class.opaque_fact());
+        assert_eq!(observation.capture_suppressed, capture_suppressed);
+    }
 }
 
 fn blocker_started(tool_name: &str, call_id: &str, action: &str) -> tau_proto::ToolStarted {

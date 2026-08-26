@@ -87,6 +87,26 @@ operations during the interval and redraws the whole pane at the end. For the
 intended full optimization, use current upstream containing commits `11b6e784`
 and `565db46`, or a later release containing both.
 
+## Process-local presentation correlation
+
+The selected transcript may attach a bounded, content-free observation to a
+redraw request. Redraw preparation captures those observations and the current
+presentation generation under the same shared-state lock used for layout.
+Successful trace records appear only after every frame write and the final
+`flush()` succeed. Enabled records use Tau's existing operational tracing
+transport, which may be an opt-in UI log, stderr, or a sink; this transport is
+not semantic persistence and promises no durability or replay. A record means
+only that Tau wrote and flushed a frame
+prepared at or after the mutation; it does not assert terminal receipt, paint,
+or human visibility.
+
+Delivery identities and observations never become wire identity, journal
+records, replay state, or other semantic persistence; enabled tracing may
+format them into its configured operational sink. Coalesced redraws can report
+several exact facts.
+Overflow reports only an omitted count, and write or flush failure reports an
+indeterminate pass without successful fact records.
+
 ## When mutations need a full redraw
 
 The diff renderer (Path 1) only repaints the **visible viewport** — the last

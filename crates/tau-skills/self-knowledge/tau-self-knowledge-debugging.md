@@ -231,6 +231,12 @@ payload values, paths, credentials, or durable observation identifiers.
   `write_us`, `flush_us`, `metering_us`, `total_hold_us`, `writer_wait_us`,
   `writer_total_hold_us`, and `writer_total_us`. Both writer records carry the
   same optional process-local `diagnostic_seq` as the prompt frame constructor.
+- `tau_cli_term_raw::frontend_progress` separates redraw notification, shared-state
+  lock, layout preparation, writer, and flush timing. For six selected canonical
+  transcript facts it may also report one invariant event/class label, the
+  CLI-local delivery id, mutation/frame generations, mutation-to-flush duration,
+  or count-only bounded overflow/indeterminate context. A success means only that
+  Tau wrote and flushed the frame; it does not prove terminal receipt or paint.
 - `tau_harness::prompt_ingress` reports fixed event/message classes, encoded
   bytes, `socket_wait_read_decode_us`, `ingress_wait_us`,
   `wake_to_take_ready_us`, exact one-slot occupancy, and the existing
@@ -255,14 +261,15 @@ payload values, paths, credentials, or durable observation identifiers.
   or authority. `agent_id` is the stable durable target identity and can support
   agent-level correlation; only timings are process-local diagnostics.
 
-All counters use existing bounded state. The one added correlation value is a
-wrapping fixed-size process-local sequence; it never enters wire or durable
-state. Durations use process-local monotonic clocks and cannot establish
-causality across processes or restarts. The instrumentation does not add
-queues, I/O, or change mutex, flush, wake,
-deadline, persistence, or dispatch ordering. Redraw flushes currently expose
-no submission-owned generation; asynchronous coalesced redraw state has no
-existing safe correlation, so these traces do not invent one.
+All counters use bounded state and wrapping fixed-size process-local sequences;
+none enters wire, journals, replay, or semantic persistence. Durations use
+process-local monotonic clocks and cannot establish causality across processes
+or restarts. Presentation correlation adds no queue and is disabled before
+delta accounting unless its TRACE target is enabled. To inspect it in an
+interactive UI, include `tau_cli_term_raw::frontend_progress=trace` in
+`TAU_LOG`; enabled records use that UI's `ui.log`. This operational sink has no
+durability guarantee, performs no durability sync, and could instead be stderr
+or a sink. It must not be interpreted as protocol identity or replay state.
 
 ### Debugging manual compaction
 

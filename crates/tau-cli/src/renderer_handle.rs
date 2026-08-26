@@ -1,5 +1,8 @@
 //! Routes renderer output to the visible terminal or one detached transcript.
 
+use std::cell::Cell;
+#[cfg(test)]
+use std::cell::RefCell;
 use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::{
@@ -19,6 +22,18 @@ pub(crate) struct RendererHandle {
     terminal: tau_cli_term::TermHandle,
     /// Current hidden-agent model while one event folds off-screen.
     detached: Option<Mutex<tau_cli_term::OutputSnapshot>>,
+    /// Whether the current socket handler changed the selected output model.
+    selected_delivery_mutated: Cell<bool>,
+    /// Whether the current handler should pay presentation-delta accounting.
+    selected_delivery_tracking: Cell<bool>,
+    /// Test-only override for exercising delta accounting without a subscriber.
+    #[cfg(test)]
+    force_selected_delivery_tracking: Cell<bool>,
+    /// Registered opaque facts retained for focused seam tests.
+    #[cfg(test)]
+    presentation_observations: RefCell<Vec<TestPresentationObservation>>,
+    /// Whether hidden routing disqualifies the current socket handler.
+    selected_delivery_suppressed: Cell<bool>,
     /// Renderer-owned redraw requests observed by unit tests.
     #[cfg(test)]
     redraw_request_count: Arc<AtomicU64>,
@@ -30,6 +45,13 @@ impl RendererHandle {
         Self {
             terminal,
             detached: None,
+            selected_delivery_mutated: Cell::new(false),
+            selected_delivery_tracking: Cell::new(false),
+            #[cfg(test)]
+            force_selected_delivery_tracking: Cell::new(false),
+            #[cfg(test)]
+            presentation_observations: RefCell::new(Vec::new()),
+            selected_delivery_suppressed: Cell::new(false),
             #[cfg(test)]
             redraw_request_count: Arc::new(AtomicU64::new(0)),
         }
@@ -63,6 +85,7 @@ impl RendererHandle {
         if let Some(output) = &self.detached {
             *output.lock().expect(MUTEX_POISONED) = snapshot;
         } else {
+            self.mark_selected_delivery_mutated();
             self.terminal.replace_output_snapshot(snapshot);
         }
     }
@@ -92,7 +115,13 @@ impl RendererHandle {
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).set_block(id, block);
         } else {
-            self.terminal.set_block(id, block);
+            if self.selected_delivery_tracking.get() {
+                if self.terminal.set_block_with_presentation_delta(id, block) {
+                    self.mark_selected_delivery_mutated();
+                }
+            } else {
+                self.terminal.set_block(id, block);
+            }
         }
     }
 
@@ -101,7 +130,13 @@ impl RendererHandle {
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).remove_block(id);
         } else {
-            self.terminal.remove_block(id);
+            if self.selected_delivery_tracking.get()
+                && self.terminal.remove_block_with_presentation_delta(id)
+            {
+                self.mark_selected_delivery_mutated();
+            } else if !self.selected_delivery_tracking.get() {
+                self.terminal.remove_block(id);
+            }
         }
     }
 
@@ -110,7 +145,12 @@ impl RendererHandle {
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).push_history(id);
         } else {
-            self.terminal.push_history(id);
+            if self.selected_delivery_tracking.get() {
+                self.terminal.push_history(id);
+                self.mark_selected_delivery_mutated();
+            } else {
+                self.terminal.push_history(id);
+            }
         }
     }
 
@@ -119,7 +159,13 @@ impl RendererHandle {
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).push_above_active(id);
         } else {
-            self.terminal.push_above_active(id);
+            if self.selected_delivery_tracking.get()
+                && self.terminal.push_above_active_with_presentation_delta(id)
+            {
+                self.mark_selected_delivery_mutated();
+            } else if !self.selected_delivery_tracking.get() {
+                self.terminal.push_above_active(id);
+            }
         }
     }
 
@@ -134,7 +180,16 @@ impl RendererHandle {
                 .expect(MUTEX_POISONED)
                 .push_above_active_before_any(id, anchors);
         } else {
-            self.terminal.push_above_active_before_any(id, anchors);
+            if self.selected_delivery_tracking.get() {
+                if self
+                    .terminal
+                    .push_above_active_before_any_with_presentation_delta(id, anchors)
+                {
+                    self.mark_selected_delivery_mutated();
+                }
+            } else {
+                self.terminal.push_above_active_before_any(id, anchors);
+            }
         }
     }
 
@@ -143,7 +198,13 @@ impl RendererHandle {
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).push_below(id);
         } else {
-            self.terminal.push_below(id);
+            if self.selected_delivery_tracking.get()
+                && self.terminal.push_below_with_presentation_delta(id)
+            {
+                self.mark_selected_delivery_mutated();
+            } else if !self.selected_delivery_tracking.get() {
+                self.terminal.push_below(id);
+            }
         }
     }
 
@@ -159,6 +220,7 @@ impl RendererHandle {
                 .expect(MUTEX_POISONED)
                 .print_output(debug_id, block)
         } else {
+            self.mark_selected_delivery_mutated();
             self.terminal.print_output(debug_id, block)
         }
     }
@@ -166,6 +228,75 @@ impl RendererHandle {
     /// Resets the current target to an empty output model.
     pub(crate) fn clear_output(&self) {
         self.replace_output_snapshot(tau_cli_term::OutputSnapshot::default());
+    }
+
+    /// Starts mutation accounting for one socket-delivered renderer handler.
+    pub(crate) fn begin_selected_delivery(&self, track: bool) {
+        self.selected_delivery_mutated.set(false);
+        self.selected_delivery_suppressed.set(false);
+        #[cfg(test)]
+        let track = track || self.force_selected_delivery_tracking.get();
+        self.selected_delivery_tracking.set(track);
+    }
+
+    /// Forces presentation-delta accounting in focused renderer tests.
+    #[cfg(test)]
+    pub(crate) fn force_selected_delivery_tracking_for_test(&self) {
+        self.force_selected_delivery_tracking.set(true);
+    }
+
+    /// Returns whether the current delivery should pay observation costs.
+    pub(crate) fn presentation_observation_interest(&self) -> bool {
+        let enabled = tracing::enabled!(
+            target: "tau_cli_term_raw::frontend_progress",
+            tracing::Level::TRACE
+        );
+        #[cfg(test)]
+        let enabled = enabled || self.force_selected_delivery_tracking.get();
+        enabled
+    }
+
+    /// Registers one already-selected opaque fact with the raw terminal.
+    pub(crate) fn observe_presentation_mutation(
+        &self,
+        delivery_id: u64,
+        class: super::event_renderer::PresentationFactClass,
+    ) {
+        let fact = class.opaque_fact();
+        let _capture_suppressed = self
+            .terminal
+            .observe_presentation_mutation(delivery_id, fact);
+        #[cfg(test)]
+        self.presentation_observations
+            .borrow_mut()
+            .push(TestPresentationObservation {
+                delivery_id,
+                class,
+                fact,
+                capture_suppressed: _capture_suppressed,
+            });
+    }
+
+    /// Returns registered seam observations for focused tests.
+    #[cfg(test)]
+    pub(crate) fn presentation_observations_for_test(&self) -> Vec<TestPresentationObservation> {
+        self.presentation_observations.borrow().clone()
+    }
+
+    /// Excludes the current handler because its canonical fact folded
+    /// off-screen.
+    pub(crate) fn suppress_selected_delivery_observation(&self) {
+        self.selected_delivery_suppressed.set(true);
+    }
+
+    /// Returns whether the handler completed an eligible selected mutation.
+    pub(crate) fn selected_delivery_mutated(&self) -> bool {
+        self.selected_delivery_mutated.get() && !self.selected_delivery_suppressed.get()
+    }
+
+    /// Marks one selected output-model mutation during the current handler.
+    fn mark_selected_delivery_mutated(&self) {
+        self.selected_delivery_mutated.set(true);
     }
 
     /// Requests a redraw only when the current target is visible.
@@ -248,4 +379,18 @@ impl RendererHandle {
         self.terminal
             .print_osc1337_set_user_var(name, value, in_tmux);
     }
+}
+
+/// One actual post-fold registration retained by renderer seam tests.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TestPresentationObservation {
+    /// CLI-local delivery identity.
+    pub(crate) delivery_id: u64,
+    /// Canonical CLI-owned fact class.
+    pub(crate) class: super::event_renderer::PresentationFactClass,
+    /// Exact typed opaque fact handed to the raw terminal.
+    pub(crate) fact: tau_cli_term::OpaquePresentationFact,
+    /// Whether raw capture was suppressed during registration.
+    pub(crate) capture_suppressed: bool,
 }

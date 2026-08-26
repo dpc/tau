@@ -219,6 +219,28 @@ sequence is diagnostic correlation only: it never enters protocol messages,
 events, journals, settings, or persistence. These records must never include
 prompt or payload bodies, paths, credentials, durable observation identifiers,
 or protocol correlation identifiers.
+Opt-in trace logging may also carry bounded, content-free selected-presentation
+facts from CLI-local socket delivery through redraw generation and successful
+writer flush. It retains at most 64 exact facts per pass; additional facts
+become count-only overflow. The allowlist is exactly
+`agent.prompt_queued/prompt_queued`,
+`agent.prompt_submitted/prompt_submitted`,
+`agent.prompt_steered/prompt_steered`,
+`provider.response_updated/response_updated`,
+`provider.response_finished/response_finished`, and
+`agent.prompt_terminated/prompt_terminated`. Its finite field inventory is
+delivery id, that invariant label, wrapping mutation/frame generation,
+monotonic duration, omitted/indeterminate count, and output failure kind/stage.
+Counters saturate where they represent omitted work and wrap where they are
+process-local generations. The existing tracing subscriber is a
+transport-neutral operational diagnostic exception: an interactive UI currently
+writes enabled records to its `ui.log`, while other entry points may use stderr
+or a sink. These records do not enter event journals, settings, protocol
+messages, replay state, or semantic persistence and have no durability
+guarantee. The UI writer keeps one line-buffered descriptor behind a mutex; it
+drains complete lines into the OS cache but does not call `File::flush`,
+`fsync`, `fdatasync`, `sync_all`, or `sync_data`, and shutdown performs no
+explicit drain.
 The CLI socket-to-renderer FIFO is bounded at 1,024 items and 64 MiB, but
 backpressure can migrate backlog to the harness writer queue. These bounds
 therefore do not promise whole-process or end-to-end slow-client memory limits.

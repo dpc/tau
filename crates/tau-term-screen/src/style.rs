@@ -284,7 +284,7 @@ impl Cell {
 /// Spans are concatenated before grapheme segmentation so clusters may cross a
 /// span boundary. Keep style boundaries on grapheme-cluster boundaries when
 /// predictable per-cluster styling matters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
     /// Plain text belonging to this span.
     pub text: String,
@@ -331,7 +331,7 @@ impl Span {
 /// Layout concatenates all spans before grapheme segmentation. Splitting a
 /// grapheme cluster across spans is supported for width and wrapping, but the
 /// cluster uses the style active at its first scalar value.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StyledText {
     spans: Vec<Span>,
 }
@@ -440,7 +440,7 @@ pub enum Align {
 }
 
 /// Mutually exclusive content layout selected for one [`StyledBlock`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BlockLayout {
     /// Wrap [`StyledBlock::content`] and optionally attach right content.
     Ordinary,
@@ -460,7 +460,7 @@ pub(crate) enum BlockLayout {
 /// When rendered, the block's content is wrapped at the available
 /// terminal-column width (after subtracting margins), aligned within that
 /// space, and the block's background color fills remaining content-area cells.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StyledBlock {
     /// Primary content rendered when ordinary layout is selected.
     pub content: StyledText,

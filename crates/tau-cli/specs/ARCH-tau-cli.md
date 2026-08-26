@@ -161,6 +161,12 @@ has already selected quit or detach, so cleanup errors are unreported and do
 not retroactively change daemon disposition. If a live redraw already
 fail-stopped, the redraw owner has exited and Drop performs no final repaint or
 normal-frame retry.
+Content-free selected-transcript trace correlation is active only when its trace
+target is enabled. It ends at successful local writer flush and uses the
+existing operational tracing subscriber, not protocol or replay state. The
+interactive file sink keeps one line-buffered descriptor and performs no
+durability sync; alternate entry points may route the same records to stderr or
+a sink.
 
 Agent-selection input routing is mirrored immediately on the input thread so a
 prompt submitted during renderer handoff reaches the new target. The renderer

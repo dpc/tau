@@ -7,7 +7,7 @@ use crate::{Cell, StyledText, layout_lines};
 /// Callers must bound the prefix, excerpts, candidate lists, and optional
 /// unabridged content. Layout work scales with the supplied values and does not
 /// impose its own source-size limit.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TwoLineElision {
     /// Styled prefix shown before the first excerpt, such as a prompt marker.
     pub prefix: StyledText,

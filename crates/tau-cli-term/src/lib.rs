@@ -32,7 +32,8 @@ pub use completion::{
 #[cfg(test)]
 pub(crate) use tau_cli_term_raw::RawEvent as TestRawEvent;
 pub use tau_cli_term_raw::{
-    Align, BlockId, Cell, Color, CursorShape, OutputSnapshot, PriorityLine, PriorityLineAlignment,
+    Align, BlockId, Cell, Color, CursorShape, OpaquePresentationFact, OutputSnapshot,
+    PresentationInvalidation, PresentationObservationKey, PriorityLine, PriorityLineAlignment,
     PriorityLinePriority, PriorityLineTruncation, Span, Style, StyledBlock, StyledText, TermHandle,
     TerminalOptions, TwoLineElision, is_output_failure, sanitize_hyperlink_target,
 };

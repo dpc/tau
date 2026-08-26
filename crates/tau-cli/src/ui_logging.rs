@@ -1,9 +1,9 @@
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, LineWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::{EnvFilter, fmt as path_tracing_subscriber_fmt};
 
 use crate::mint_short_id;
@@ -27,27 +27,6 @@ pub fn init_stderr_from_env(default_filter: &str) {
         .with_timer(path_tracing_subscriber_fmt::time::SystemTime)
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
-}
-
-/// File-backed tracing writer for one terminal UI instance.
-#[derive(Clone)]
-struct UiLogWriter {
-    path: PathBuf,
-}
-
-impl<'a> MakeWriter<'a> for UiLogWriter {
-    type Writer = Box<dyn Write + Send + 'a>;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        match OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        {
-            Ok(file) => Box::new(file),
-            Err(_) => Box::new(io::sink()),
-        }
-    }
 }
 
 /// Metadata for the current terminal UI instance log.
@@ -99,9 +78,9 @@ pub fn init(state_dir: &Path) -> io::Result<UiLogging> {
         .map_err(io::Error::other)?;
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(UiLogWriter {
-            path: log_path.clone(),
-        })
+        // Keep one descriptor and coalesce formatter fragments through each
+        // newline. This is best-effort OS-cache I/O: no path flushes or syncs.
+        .with_writer(Mutex::new(LineWriter::new(file)))
         .with_ansi(false)
         .with_timer(path_tracing_subscriber_fmt::time::SystemTime)
         .finish();

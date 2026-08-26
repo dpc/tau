@@ -14,6 +14,7 @@
 //!   replays the capped log/history suffix plus fixed tail without rubber
 
 mod block_layout_state;
+mod presentation_observation_state;
 mod prompt_editor_state;
 mod terminal_runtime_state;
 
@@ -68,6 +69,12 @@ use crossterm::event::{
 };
 use crossterm::style::Print;
 use crossterm::{QueueableCommand, terminal};
+use presentation_observation_state::{
+    CapturedPresentationObservations, PresentationObservationState,
+};
+pub use presentation_observation_state::{
+    OpaquePresentationFact, PresentationInvalidation, PresentationObservationKey,
+};
 use prompt_editor_state::PromptEditorState;
 pub use tau_term_screen::{
     Align, BlockId, Cell, Color, PriorityLine, PriorityLineAlignment, PriorityLinePriority,
@@ -273,6 +280,11 @@ struct SharedState {
     editor: PromptEditorState,
     /// Terminal dimensions, redraw coordination, and lifecycle flags.
     terminal: TerminalRuntimeState,
+    /// Bounded selected-mutation correlation captured with redraw preparation.
+    presentation_observations: PresentationObservationState,
+    /// Actual redraw-loop failure timing retained for focused test assertions.
+    #[cfg(test)]
+    presentation_failure_test_records: Vec<(&'static str, u128, usize, u64)>,
 }
 
 impl SharedState {
@@ -281,6 +293,9 @@ impl SharedState {
             layout: BlockLayoutState::new(),
             editor: PromptEditorState::new(left_prompt),
             terminal: TerminalRuntimeState::new(width, height),
+            presentation_observations: PresentationObservationState::new(),
+            #[cfg(test)]
+            presentation_failure_test_records: Vec::new(),
         }
     }
 
@@ -333,6 +348,15 @@ impl SharedState {
 
     fn block_in_history(&self, id: BlockId) -> bool {
         self.layout.history_refs.contains_key(&id)
+    }
+
+    /// Returns whether a block contributes to any rendered output zone.
+    fn block_is_visible(&self, id: BlockId) -> bool {
+        self.block_in_history(id)
+            || self.layout.above_active.contains(&id)
+            || self.layout.above_sticky.contains(&id)
+            || self.layout.suggestions.contains(&id)
+            || self.layout.below.contains(&id)
     }
 
     fn current_snapshot(&self) -> PromptSnapshot {
@@ -1155,6 +1179,59 @@ impl TermHandle {
         self.notify_redraw();
     }
 
+    /// Registers one completed selected-transcript mutation for flush
+    /// correlation.
+    ///
+    /// The caller must establish raw frontend-progress TRACE interest before
+    /// calling. The delivery identity and caller-owned opaque label remain
+    /// process-local and content-free. A caller whose typed opaque fact
+    /// invalidates a visible predecessor must suppress redraw
+    /// capture across both its presentation mutation and this registration.
+    /// Returns `true` exactly when redraw capture was suppressed while the
+    /// registration held shared terminal state; `false` means capture was not
+    /// suppressed. The return value does not report notification delivery or
+    /// eventual writer success.
+    pub fn observe_presentation_mutation(
+        &self,
+        delivery_id: u64,
+        fact: OpaquePresentationFact,
+    ) -> bool {
+        self.observe_presentation_mutation_enabled(delivery_id, fact)
+    }
+
+    /// Registers a fact after the caller has established trace interest.
+    fn observe_presentation_mutation_enabled(
+        &self,
+        delivery_id: u64,
+        fact: OpaquePresentationFact,
+    ) -> bool {
+        let observed_at = path_std_time::Instant::now();
+        let (notify, capture_suppressed) = {
+            let mut st = self.lock();
+            st.presentation_observations
+                .register(delivery_id, fact, observed_at);
+            (
+                Self::request_redraw_locked(&mut st),
+                st.terminal.redraw_suppression != 0,
+            )
+        };
+        if notify {
+            self.redraw.notify();
+        }
+        capture_suppressed
+    }
+
+    /// Registers a presentation fact without requiring a global test
+    /// subscriber.
+    #[cfg(test)]
+    fn observe_presentation_mutation_for_test(
+        &self,
+        delivery_id: u64,
+        fact: OpaquePresentationFact,
+    ) -> bool {
+        self.observe_presentation_mutation_enabled(delivery_id, fact)
+    }
+
     /// Returns how many asynchronous redraw requests this handle has made.
     ///
     /// This excludes synchronous redraw barriers, which directly notify the
@@ -1331,14 +1408,36 @@ impl TermHandle {
         id
     }
 
-    /// Updates the content of an existing block (or inserts it at
-    /// the given id).
+    /// Updates the content of an existing block (or inserts it at the given
+    /// id).
     pub fn set_block(&self, id: BlockId, block: impl Into<StyledBlock>) {
+        self.set_block_inner(id, block, false);
+    }
+
+    /// Updates a block and reports whether an already-rendered reference
+    /// changed.
+    pub fn set_block_with_presentation_delta(
+        &self,
+        id: BlockId,
+        block: impl Into<StyledBlock>,
+    ) -> bool {
+        self.set_block_inner(id, block, true)
+    }
+
+    /// Applies one block update with optional presentation comparison.
+    fn set_block_inner(
+        &self,
+        id: BlockId,
+        block: impl Into<StyledBlock>,
+        observe_delta: bool,
+    ) -> bool {
         let _transaction = self.output_transaction_barrier();
         let block = block.into();
         let content_empty = block.is_empty();
         let mut st = self.lock();
         let affects_history = st.block_in_history(id);
+        let changed = observe_delta && st.layout.blocks.get(&id) != Some(&block);
+        let presentation_changed = changed && st.block_is_visible(id);
         st.layout.blocks.insert(id, block);
         st.layout
             .block_debug_ids
@@ -1348,13 +1447,25 @@ impl TermHandle {
             st.mark_history_dirty_from(0);
         }
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, content_empty, "set block");
+        presentation_changed
     }
 
-    /// Removes a block from the central store **and** from every zone
-    /// list that references it.
+    /// Removes a block from the central store and every zone that references
+    /// it.
     pub fn remove_block(&self, id: BlockId) {
+        self.remove_block_inner(id, false);
+    }
+
+    /// Removes a block and reports whether any rendered zone referenced it.
+    pub fn remove_block_with_presentation_delta(&self, id: BlockId) -> bool {
+        self.remove_block_inner(id, true)
+    }
+
+    /// Applies one removal with optional presentation inspection.
+    fn remove_block_inner(&self, id: BlockId, observe_delta: bool) -> bool {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
+        let presentation_changed = observe_delta && st.block_is_visible(id);
         let existed = st.layout.blocks.remove(&id).is_some();
         let debug_id = st.layout.block_debug_ids.remove(&id);
         let removed_history_refs = remove_all_from_zone(&mut st.layout.history, id);
@@ -1367,6 +1478,7 @@ impl TermHandle {
         st.layout.suggestions.retain(|&x| x != id);
         st.layout.below.retain(|&x| x != id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, ?debug_id, existed, "remove block");
+        presentation_changed
     }
 
     // --- Zone lists ---
@@ -1382,11 +1494,24 @@ impl TermHandle {
     /// Appends a block id to the above-active zone (if not already
     /// present).
     pub fn push_above_active(&self, id: BlockId) {
+        self.push_above_active_inner(id);
+    }
+
+    /// Adds an active block and reports whether its rendered zone changed.
+    pub fn push_above_active_with_presentation_delta(&self, id: BlockId) -> bool {
+        self.push_above_active_inner(id)
+    }
+
+    /// Applies one active-zone insertion and reports its exact delta.
+    fn push_above_active_inner(&self, id: BlockId) -> bool {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
         if !st.layout.above_active.contains(&id) {
             st.layout.above_active.push(id);
             tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_active", "push block zone");
+            true
+        } else {
+            false
         }
     }
 
@@ -1400,9 +1525,35 @@ impl TermHandle {
     where
         I: IntoIterator<Item = BlockId>,
     {
+        self.push_above_active_before_any_inner(id, anchors, false);
+    }
+
+    /// Reorders an active block and reports whether the rendered order changed.
+    pub fn push_above_active_before_any_with_presentation_delta<I>(
+        &self,
+        id: BlockId,
+        anchors: I,
+    ) -> bool
+    where
+        I: IntoIterator<Item = BlockId>,
+    {
+        self.push_above_active_before_any_inner(id, anchors, true)
+    }
+
+    /// Applies one active-zone reorder with optional comparison.
+    fn push_above_active_before_any_inner<I>(
+        &self,
+        id: BlockId,
+        anchors: I,
+        observe_delta: bool,
+    ) -> bool
+    where
+        I: IntoIterator<Item = BlockId>,
+    {
         let _transaction = self.output_transaction_barrier();
         let anchors = anchors.into_iter().collect::<HashSet<_>>();
         let mut st = self.lock();
+        let previous = observe_delta.then(|| st.layout.above_active.clone());
         st.layout.above_active.retain(|&x| x != id);
         let insert_at = st
             .layout
@@ -1412,6 +1563,7 @@ impl TermHandle {
             .unwrap_or(st.layout.above_active.len());
         st.layout.above_active.insert(insert_at, id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_active", "insert block zone");
+        previous.is_some_and(|previous| st.layout.above_active != previous)
     }
 
     /// Removes a block id from the above-active zone.
@@ -1459,11 +1611,24 @@ impl TermHandle {
 
     /// Appends a block id to the below zone (if not already present).
     pub fn push_below(&self, id: BlockId) {
+        self.push_below_inner(id);
+    }
+
+    /// Adds a below-prompt block and reports whether its rendered zone changed.
+    pub fn push_below_with_presentation_delta(&self, id: BlockId) -> bool {
+        self.push_below_inner(id)
+    }
+
+    /// Applies one below-zone insertion and reports its exact delta.
+    fn push_below_inner(&self, id: BlockId) -> bool {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
         if !st.layout.below.contains(&id) {
             st.layout.below.push(id);
             tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "below", "push block zone");
+            true
+        } else {
+            false
         }
     }
 
@@ -3795,6 +3960,8 @@ struct RedrawPass {
     pending_raw: Vec<String>,
     redraw_history_size: usize,
     frame: RenderFrame,
+    /// Bounded opaque observations captured with this frame's layout.
+    presentation_observations: Option<CapturedPresentationObservations>,
 }
 
 struct FullRenderMark {
@@ -3846,7 +4013,6 @@ fn redraw_loop(
             break;
         }
 
-        let prepare_started = path_std_time::Instant::now();
         tracing::trace!(
             target: "tau_cli_term_raw::frontend_progress",
             "redraw prepare started"
@@ -3862,12 +4028,6 @@ fn redraw_loop(
             Some(pass) => pass,
             None => continue,
         };
-        let prepare_elapsed = prepare_started.elapsed();
-        tracing::trace!(
-            target: "tau_cli_term_raw::frontend_progress",
-            prepare_us = prepare_elapsed.as_micros(),
-            "redraw prepared"
-        );
         let write_started = path_std_time::Instant::now();
         tracing::trace!(
             target: "tau_cli_term_raw::frontend_progress",
@@ -3882,18 +4042,22 @@ fn redraw_loop(
             &pass,
         );
         let write_elapsed = write_started.elapsed();
-
+        if let Err(error) = render_result {
+            trace_failed_presentation_observations(&state, &pass, "write", write_elapsed, &error);
+            fail_terminal_output(&state, &input_tx, sync_condvar, error);
+            discard_failed_output(writer);
+            return;
+        }
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            write_us = write_elapsed.as_micros(),
+            "terminal write finished; flush started"
+        );
         let flush_started = path_std_time::Instant::now();
-        let output_result = render_result.and_then(|()| {
-            tracing::trace!(
-                target: "tau_cli_term_raw::frontend_progress",
-                write_us = write_elapsed.as_micros(),
-                "terminal write finished; flush started"
-            );
-            writer.flush()
-        });
+        let output_result = writer.flush();
         let flush_elapsed = flush_started.elapsed();
         if let Err(error) = output_result {
+            trace_failed_presentation_observations(&state, &pass, "flush", flush_elapsed, &error);
             fail_terminal_output(&state, &input_tx, sync_condvar, error);
             discard_failed_output(writer);
             return;
@@ -3904,6 +4068,7 @@ fn redraw_loop(
             flush_us = flush_elapsed.as_micros(),
             "terminal write and flush finished"
         );
+        trace_flushed_presentation_observations(&state, &pass);
         if (Duration::from_millis(500) <= write_elapsed
             || Duration::from_millis(500) <= flush_elapsed)
             && admit_stall_warning()
@@ -3977,12 +4142,34 @@ fn wait_for_redraw_or_sync(
 ) -> bool {
     // If a sync was requested but not yet completed, skip blocking on recv and
     // render immediately. Otherwise block until the next notification arrives.
+    let trace_enabled = tracing::enabled!(
+        target: "tau_cli_term_raw::frontend_progress",
+        tracing::Level::TRACE
+    );
+    let lock_started = trace_enabled.then(path_std_time::Instant::now);
     let st = state.lock().expect("term state mutex poisoned");
+    if let Some(lock_started) = lock_started {
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            lock_wait_us = lock_started.elapsed().as_micros(),
+            stage = "notification_check",
+            "terminal shared state acquired"
+        );
+    }
     if st.terminal.sync_completed < st.terminal.sync_requested {
         return true;
     }
     drop(st);
-    notify_rx.recv().is_ok()
+    let notification_started = trace_enabled.then(path_std_time::Instant::now);
+    let result = notify_rx.recv().is_ok();
+    if let Some(notification_started) = notification_started {
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            notification_wait_us = notification_started.elapsed().as_micros(),
+            "redraw notification wait finished"
+        );
+    }
+    result
 }
 
 fn prepare_redraw_pass(
@@ -3993,7 +4180,20 @@ fn prepare_redraw_pass(
     prev_height: usize,
     sync_condvar: &std::sync::Condvar,
 ) -> Option<RedrawPass> {
+    let trace_enabled = tracing::enabled!(
+        target: "tau_cli_term_raw::frontend_progress",
+        tracing::Level::TRACE
+    );
+    let lock_started = trace_enabled.then(path_std_time::Instant::now);
     let mut st = state.lock().expect("term state mutex poisoned");
+    if let Some(lock_started) = lock_started {
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            lock_wait_us = lock_started.elapsed().as_micros(),
+            stage = "redraw_prepare",
+            "terminal shared state acquired"
+        );
+    }
     if st.terminal.redraw_suppression != 0 {
         // The notification that woke this pass has been consumed. Preserve it
         // for the outermost suppression guard so a no-op transaction cannot
@@ -4019,7 +4219,10 @@ fn prepare_redraw_pass(
     let sync_gen = st.terminal.sync_requested;
     let pending_raw = std::mem::take(&mut st.terminal.pending_raw);
     let redraw_history_size = st.terminal.redraw_history_size;
+    let presentation_observations =
+        (!st.presentation_observations.is_empty()).then(|| st.presentation_observations.capture());
 
+    let preparation_started = trace_enabled.then(path_std_time::Instant::now);
     history_cache.refresh(&mut st);
     let tail = layout_tail(&st, history_cache.lines.len());
     let log_height = history_cache.lines.len() + tail.active_height;
@@ -4039,7 +4242,7 @@ fn prepare_redraw_pass(
             layout: layout_all_from_cached_history(history_cache, tail),
         }
     };
-    Some(RedrawPass {
+    let pass = RedrawPass {
         width,
         height,
         size_changed,
@@ -4048,7 +4251,83 @@ fn prepare_redraw_pass(
         pending_raw,
         redraw_history_size,
         frame,
-    })
+        presentation_observations,
+    };
+    if let Some(preparation_started) = preparation_started {
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            preparation_us = preparation_started.elapsed().as_micros(),
+            "redraw layout prepared"
+        );
+    }
+    Some(pass)
+}
+
+/// Reports only successful frame correlation after every pass write and flush.
+fn trace_flushed_presentation_observations(_state: &Arc<Mutex<SharedState>>, pass: &RedrawPass) {
+    let Some(observations) = &pass.presentation_observations else {
+        return;
+    };
+    let flushed_at = path_std_time::Instant::now();
+    for fact in &observations.facts {
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            delivery_id = fact.delivery_id,
+            fact = fact.fact,
+            mutation_generation = fact.generation,
+            frame_generation = observations.generation,
+            mutation_to_flush_us = flushed_at.duration_since(fact.observed_at).as_micros(),
+            "selected presentation mutation frame written and flushed"
+        );
+    }
+    if observations.omitted != 0 {
+        tracing::trace!(
+            target: "tau_cli_term_raw::frontend_progress",
+            frame_generation = observations.generation,
+            omitted = observations.omitted,
+            "selected presentation flush observations omitted"
+        );
+    }
+    #[cfg(test)]
+    _state
+        .lock()
+        .expect("term state mutex poisoned")
+        .presentation_observations
+        .record_success_for_test(observations);
+}
+
+/// Reports bounded failed-pass context without making a successful-frame claim.
+fn trace_failed_presentation_observations(
+    _state: &Arc<Mutex<SharedState>>,
+    pass: &RedrawPass,
+    stage: &'static str,
+    stage_elapsed: Duration,
+    error: &io::Error,
+) {
+    let Some(observations) = &pass.presentation_observations else {
+        return;
+    };
+    #[cfg(test)]
+    _state
+        .lock()
+        .expect("term state mutex poisoned")
+        .presentation_failure_test_records
+        .push((
+            stage,
+            stage_elapsed.as_micros(),
+            observations.facts.len(),
+            observations.omitted,
+        ));
+    tracing::trace!(
+        target: "tau_cli_term_raw::frontend_progress",
+        stage,
+        stage_us = stage_elapsed.as_micros(),
+        frame_generation = observations.generation,
+        indeterminate_facts = observations.facts.len(),
+        omitted = observations.omitted,
+        error_kind = ?error.kind(),
+        "selected presentation redraw pass failed or is indeterminate"
+    );
 }
 
 fn render_redraw_pass(

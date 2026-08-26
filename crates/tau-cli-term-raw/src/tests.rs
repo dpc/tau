@@ -2,6 +2,20 @@ use std::{cell as path_std_cell, io as path_std_io, sync as path_std_sync, time 
 
 use super::*;
 
+/// Builds one typed opaque fact for raw-layer correlation tests.
+fn opaque_fact(label: &'static str, key: u8, invalidates: &[u8]) -> OpaquePresentationFact {
+    let key =
+        PresentationObservationKey::new(key).expect("test key must fit the invalidation mask");
+    let mut mask = PresentationInvalidation::none();
+    for invalidated in invalidates {
+        mask = mask.with(
+            PresentationObservationKey::new(*invalidated)
+                .expect("test invalidation key must fit the mask"),
+        );
+    }
+    OpaquePresentationFact::new(label, key, mask)
+}
+
 /// Helper: builds Cell lines from plain strings.
 fn plain_lines(texts: &[&str]) -> Vec<Vec<Cell>> {
     texts
@@ -3716,6 +3730,486 @@ fn synchronized_update_stops_after_begin_error() {
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     assert!(!body_called.get());
     assert!(writer.bytes.is_empty());
+}
+
+/// One successful flush may establish several exact selected-presentation
+/// facts, and local redraw requests must not fabricate additional remote facts.
+#[test]
+fn successful_flush_reports_exact_coalesced_presentation_facts() {
+    let buffer = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(40, 5, "> ", Box::new(buffer.clone()), CursorShape::Bar);
+    handle.redraw_sync();
+    let _ = buffer.drain_bytes();
+    handle.with_redraw_suppressed(|| {
+        handle
+            .observe_presentation_mutation_for_test(11, opaque_fact("agent.prompt_queued", 0, &[]));
+        handle.print_output("queued", "queued");
+        handle.observe_presentation_mutation_for_test(
+            12,
+            opaque_fact("agent.prompt_steered", 2, &[]),
+        );
+        handle.print_output("steered", "steered");
+    });
+    handle.redraw_sync();
+
+    let successful = handle
+        .lock()
+        .presentation_observations
+        .successful_test_passes
+        .clone();
+    assert!(
+        successful
+            .iter()
+            .any(|pass| pass.iter().map(|fact| fact.0).collect::<Vec<_>>() == [11, 12])
+    );
+    let reported_before_local_redraw = successful.iter().map(Vec::len).sum::<usize>();
+    handle.redraw_sync();
+    let reported_after_local_redraw = handle
+        .lock()
+        .presentation_observations
+        .successful_test_passes
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>();
+    assert_eq!(reported_after_local_redraw, reported_before_local_redraw);
+    handle.with_redraw_suppressed(|| handle.redraw());
+    handle.redraw_sync();
+    {
+        let mut state = handle.state.lock().expect("term state");
+        state.terminal.width += 1;
+    }
+    handle.redraw_sync();
+    let reported_after_suppression_and_resize = handle
+        .lock()
+        .presentation_observations
+        .successful_test_passes
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>();
+    assert_eq!(
+        reported_after_suppression_and_resize,
+        reported_before_local_redraw
+    );
+    drop(term);
+}
+
+/// Opaque keys outside the fixed invalidation mask must fail validation rather
+/// than silently dropping or corrupting a registered fact.
+#[test]
+fn presentation_observation_keys_validate_mask_bounds() {
+    assert!(PresentationObservationKey::new(63).is_some());
+    assert!(PresentationObservationKey::new(64).is_none());
+}
+
+/// Mutation latency starts before contending for shared terminal state, so a
+/// layout lock wait cannot disappear from mutation-to-flush timing.
+#[test]
+fn presentation_observation_timestamp_precedes_registration_lock_wait() {
+    let (_term, handle, _input) =
+        Term::new_virtual(80, 24, "> ", Box::new(io::sink()), CursorShape::Bar);
+    let barrier = Arc::new(path_std_sync::Barrier::new(2));
+    let mut guard = handle.state.lock().expect("term state");
+    guard.terminal.external_paused = true;
+    let observing_handle = handle.clone();
+    let observing_barrier = barrier.clone();
+    let observer = std::thread::spawn(move || {
+        observing_barrier.wait();
+        observing_handle.observe_presentation_mutation_for_test(
+            1,
+            opaque_fact("provider.response_updated", 3, &[]),
+        );
+    });
+    barrier.wait();
+    std::thread::sleep(Duration::from_millis(20));
+    drop(guard);
+    observer.join().expect("observer");
+
+    let fact = handle
+        .state
+        .lock()
+        .expect("term state")
+        .presentation_observations
+        .capture()
+        .facts
+        .pop()
+        .expect("registered fact");
+    assert!(fact.observed_at.elapsed() >= Duration::from_millis(10));
+}
+
+/// A mutation registered after an earlier frame was prepared belongs to the
+/// next pass rather than the in-flight successful receipt.
+#[test]
+fn presentation_mutation_during_flush_moves_to_next_pass() {
+    let state = Arc::new(Mutex::new(SharedState::new(40, 5, "> ".into())));
+    state
+        .lock()
+        .expect("term state mutex poisoned")
+        .presentation_observations
+        .register(
+            21,
+            opaque_fact("provider.response_updated", 3, &[]),
+            path_std_time::Instant::now(),
+        );
+    let mut history_cache = HistoryLayoutCache::default();
+    let terminal_model = TerminalModel::default();
+    let first = prepare_redraw_pass(
+        &state,
+        &mut history_cache,
+        &terminal_model,
+        40,
+        5,
+        &path_std_sync::Condvar::new(),
+    )
+    .expect("first pass");
+
+    state
+        .lock()
+        .expect("term state mutex poisoned")
+        .presentation_observations
+        .register(
+            22,
+            opaque_fact("agent.prompt_steered", 2, &[]),
+            path_std_time::Instant::now(),
+        );
+    trace_flushed_presentation_observations(&state, &first);
+    let second = prepare_redraw_pass(
+        &state,
+        &mut history_cache,
+        &terminal_model,
+        40,
+        5,
+        &path_std_sync::Condvar::new(),
+    )
+    .expect("second pass");
+    trace_flushed_presentation_observations(&state, &second);
+
+    let exact_passes = state
+        .lock()
+        .expect("term state mutex poisoned")
+        .presentation_observations
+        .successful_test_passes
+        .iter()
+        .filter(|pass| !pass.is_empty())
+        .map(|pass| pass.iter().map(|fact| fact.0).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    assert_eq!(exact_passes, vec![vec![21], vec![22]]);
+}
+
+/// An invalidating fold keeps redraw capture suppressed through registration,
+/// so a frame containing the successor cannot claim the removed predecessor.
+#[test]
+fn invalidating_observation_cannot_race_redraw_capture() {
+    let state = Arc::new(Mutex::new(SharedState::new(40, 5, "> ".into())));
+    {
+        let mut guard = state.lock().expect("term state");
+        guard.presentation_observations.register(
+            1,
+            opaque_fact("agent.prompt_queued", 0, &[]),
+            path_std_time::Instant::now(),
+        );
+        guard.terminal.redraw_suppression = 1;
+    }
+    let mut history_cache = HistoryLayoutCache::default();
+    assert!(
+        prepare_redraw_pass(
+            &state,
+            &mut history_cache,
+            &TerminalModel::default(),
+            40,
+            5,
+            &path_std_sync::Condvar::new(),
+        )
+        .is_none()
+    );
+    {
+        let mut guard = state.lock().expect("term state");
+        guard.presentation_observations.register(
+            2,
+            opaque_fact("agent.prompt_submitted", 1, &[0]),
+            path_std_time::Instant::now(),
+        );
+        guard.terminal.redraw_suppression = 0;
+    }
+    let pass = prepare_redraw_pass(
+        &state,
+        &mut history_cache,
+        &TerminalModel::default(),
+        40,
+        5,
+        &path_std_sync::Condvar::new(),
+    )
+    .expect("successor pass");
+    assert_eq!(
+        pass.presentation_observations
+            .as_ref()
+            .expect("captured observations")
+            .facts
+            .iter()
+            .map(|fact| fact.delivery_id)
+            .collect::<Vec<_>>(),
+        [2]
+    );
+}
+
+/// Pending correlation has a deterministic fixed bound and reports only an
+/// omitted count; terminal classes also discard superseded ephemeral facts.
+#[test]
+fn presentation_observation_bound_and_supersession_are_conservative() {
+    let mut observations = PresentationObservationState::new();
+    for delivery_id in
+        0..presentation_observation_state::MAX_PENDING_PRESENTATION_OBSERVATIONS as u64 + 3
+    {
+        observations.register(
+            delivery_id,
+            opaque_fact("agent.prompt_steered", 2, &[]),
+            path_std_time::Instant::now(),
+        );
+    }
+    let captured = observations.capture();
+    assert_eq!(
+        captured.facts.len(),
+        presentation_observation_state::MAX_PENDING_PRESENTATION_OBSERVATIONS
+    );
+    assert_eq!(captured.omitted, 3);
+
+    for delivery_id in
+        100..100 + presentation_observation_state::MAX_PENDING_PRESENTATION_OBSERVATIONS as u64 + 3
+    {
+        observations.register(
+            delivery_id,
+            opaque_fact("provider.response_updated", 3, &[]),
+            path_std_time::Instant::now(),
+        );
+    }
+    observations.register(
+        200,
+        opaque_fact("provider.response_updated", 3, &[]),
+        path_std_time::Instant::now(),
+    );
+    observations.register(
+        201,
+        opaque_fact("provider.response_finished", 4, &[3]),
+        path_std_time::Instant::now(),
+    );
+    let captured = observations.capture();
+    assert_eq!(captured.facts.len(), 1);
+    assert_eq!(captured.facts[0].delivery_id, 201);
+    assert_eq!(captured.omitted, 0);
+
+    for (delivery_id, fact) in [
+        (300, opaque_fact("queued", 0, &[])),
+        (301, opaque_fact("submitted", 1, &[0])),
+        (302, opaque_fact("updated", 3, &[])),
+        (303, opaque_fact("steered", 2, &[])),
+        (304, opaque_fact("terminated", 5, &[0, 1, 3])),
+    ] {
+        observations.register(delivery_id, fact, path_std_time::Instant::now());
+    }
+    let captured = observations.capture();
+    assert_eq!(
+        captured
+            .facts
+            .iter()
+            .map(|fact| fact.delivery_id)
+            .collect::<Vec<_>>(),
+        [303, 304]
+    );
+}
+
+/// Process-local correlation changes no terminal bytes for an otherwise
+/// byte-identical redraw.
+#[test]
+fn presentation_observation_does_not_change_vt_output() {
+    fn render(observe: bool) -> Vec<u8> {
+        let buffer = SharedBuffer::new();
+        let (term, handle, _input_tx) =
+            Term::new_virtual(40, 5, "> ", Box::new(buffer.clone()), CursorShape::Bar);
+        handle.redraw_sync();
+        let _ = buffer.drain_bytes();
+        if observe {
+            handle.observe_presentation_mutation_for_test(
+                31,
+                opaque_fact("agent.prompt_submitted", 1, &[0]),
+            );
+        }
+        handle.print_output("same", "same");
+        handle.redraw_sync();
+        let bytes = buffer.drain_bytes();
+        drop(term);
+        bytes
+    }
+
+    assert_eq!(render(false), render(true));
+}
+
+/// Write and flush failures retain only failed-pass context and never create a
+/// successful selected-presentation receipt.
+#[test]
+fn presentation_observations_never_succeed_on_write_or_flush_error() {
+    /// Writer that accepts bytes but rejects the pass-ending flush.
+    struct RejectFlush;
+
+    impl Write for RejectFlush {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("injected flush failure"))
+        }
+    }
+
+    fn prepared_observation() -> (
+        Arc<Mutex<SharedState>>,
+        HistoryLayoutCache,
+        TerminalModel,
+        RedrawPass,
+    ) {
+        let state = Arc::new(Mutex::new(SharedState::new(40, 5, "> ".into())));
+        state
+            .lock()
+            .expect("term state mutex poisoned")
+            .presentation_observations
+            .register(
+                41,
+                opaque_fact("agent.prompt_queued", 0, &[]),
+                path_std_time::Instant::now(),
+            );
+        let mut history_cache = HistoryLayoutCache::default();
+        let terminal_model = TerminalModel::default();
+        let pass = prepare_redraw_pass(
+            &state,
+            &mut history_cache,
+            &terminal_model,
+            40,
+            5,
+            &path_std_sync::Condvar::new(),
+        )
+        .expect("prepared observation");
+        (state, history_cache, terminal_model, pass)
+    }
+
+    let (state, history_cache, mut terminal_model, pass) = prepared_observation();
+    let error = render_redraw_pass(
+        &state,
+        &mut rejecting_buffer(),
+        &mut Screen::new(40),
+        &history_cache,
+        &mut terminal_model,
+        &pass,
+    )
+    .expect_err("write should fail");
+    trace_failed_presentation_observations(&state, &pass, "write", Duration::ZERO, &error);
+    assert!(
+        state
+            .lock()
+            .expect("term state mutex poisoned")
+            .presentation_observations
+            .successful_test_passes
+            .is_empty()
+    );
+
+    let (state, history_cache, mut terminal_model, pass) = prepared_observation();
+    let mut writer: BufWriter<Box<dyn Write + Send>> = BufWriter::new(Box::new(RejectFlush));
+    render_redraw_pass(
+        &state,
+        &mut writer,
+        &mut Screen::new(40),
+        &history_cache,
+        &mut terminal_model,
+        &pass,
+    )
+    .expect("frame should buffer");
+    let error = writer.flush().expect_err("flush should fail");
+    trace_failed_presentation_observations(&state, &pass, "flush", Duration::ZERO, &error);
+    assert!(
+        state
+            .lock()
+            .expect("term state mutex poisoned")
+            .presentation_observations
+            .successful_test_passes
+            .is_empty()
+    );
+    discard_failed_output(writer);
+}
+
+/// The real redraw loop must report write and flush failures with distinct
+/// stage timing while preserving attachment fail-stop.
+#[test]
+fn redraw_loop_records_stage_specific_presentation_failures() {
+    /// Writer that rejects exactly one selected output stage.
+    struct RejectStage {
+        /// Output stage rejected by this writer.
+        stage: &'static str,
+    }
+
+    impl Write for RejectStage {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.stage == "write" {
+                Err(io::Error::other("injected write failure"))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.stage == "flush" {
+                Err(io::Error::other("injected flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    for stage in ["write", "flush"] {
+        let (term, handle, _input) = Term::new_virtual(
+            40,
+            5,
+            "> ",
+            Box::new(RejectStage { stage }),
+            CursorShape::Bar,
+        );
+        handle.with_redraw_suppressed(|| {
+            handle.observe_presentation_mutation_for_test(
+                1,
+                opaque_fact("agent.prompt_queued", 0, &[]),
+            );
+            handle.print_output(
+                "failure-trigger",
+                if stage == "write" {
+                    "x".repeat(16 * 1024)
+                } else {
+                    "x".to_owned()
+                },
+            );
+        });
+        let error = match term.get_next_event() {
+            Ok(_) => panic!("redraw output must fail"),
+            Err(error) => error,
+        };
+        assert!(is_output_failure(&error));
+        let records = handle
+            .state
+            .lock()
+            .expect("term state")
+            .presentation_failure_test_records
+            .clone();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, stage);
+        assert_eq!(records[0].2, 1);
+        assert_eq!(records[0].3, 0);
+        assert!(
+            handle
+                .state
+                .lock()
+                .expect("term state")
+                .presentation_observations
+                .successful_test_passes
+                .iter()
+                .all(Vec::is_empty)
+        );
+    }
 }
 
 /// A recoverable body-write failure must still attempt ESU so a terminal does

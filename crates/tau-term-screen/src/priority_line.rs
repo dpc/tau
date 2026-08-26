@@ -81,7 +81,7 @@ pub enum PriorityLineAlignment {
 }
 
 /// One independently hideable item in a [`PriorityLine`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct PriorityLineItem {
     /// Styled content retained or hidden as one unit.
     content: StyledText,
@@ -139,7 +139,7 @@ pub(crate) struct PriorityLineLayout {
 /// Callers may mark an essential priority band with [`Self::require_through`].
 /// If any accepted item in that band cannot survive, the line becomes empty
 /// instead of presenting only part of the essential meaning.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PriorityLine {
     /// Items in stable visual and equal-priority order.
     items: Vec<PriorityLineItem>,
