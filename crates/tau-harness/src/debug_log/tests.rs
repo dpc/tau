@@ -768,9 +768,101 @@ fn large_malformed_config_error_debug_projection_matches_legacy_json() {
     );
 }
 
+/// Keeps strings at or below the byte threshold in their original JSON
+/// allocation while compacting only longer strings with the established marker.
 #[test]
-fn compact_debug_string_keeps_short_strings() {
-    assert_eq!(compact_debug_string(&"x".repeat(100)), "x".repeat(100));
+fn compact_debug_json_strings_keeps_short_allocations_and_compacts_long_strings() {
+    let ascii_99 = "a".repeat(99);
+    let ascii_100 = "b".repeat(100);
+    let unicode_100 = "é".repeat(50);
+    let unicode_split_edges = format!("{}é{}é{}", "a".repeat(19), "b".repeat(60), "c".repeat(19));
+    let mut value = serde_json::json!({
+        "ascii_99": ascii_99,
+        "ascii_100": ascii_100,
+        "ascii_101": "c".repeat(101),
+        "unicode_100": unicode_100,
+        "unicode_102": "é".repeat(51),
+        "unicode_split_edges": unicode_split_edges,
+    });
+
+    let ascii_99_ptr = value["ascii_99"].as_str().expect("string").as_ptr();
+    let ascii_100_ptr = value["ascii_100"].as_str().expect("string").as_ptr();
+    let unicode_100_ptr = value["unicode_100"].as_str().expect("string").as_ptr();
+
+    compact_debug_json_strings(&mut value);
+
+    assert_eq!(value["ascii_99"], serde_json::json!("a".repeat(99)));
+    assert_eq!(value["ascii_100"], serde_json::json!("b".repeat(100)));
+    assert_eq!(value["unicode_100"], serde_json::json!("é".repeat(50)));
+    assert_eq!(
+        value["ascii_99"].as_str().expect("string").as_ptr(),
+        ascii_99_ptr
+    );
+    assert_eq!(
+        value["ascii_100"].as_str().expect("string").as_ptr(),
+        ascii_100_ptr
+    );
+    assert_eq!(
+        value["unicode_100"].as_str().expect("string").as_ptr(),
+        unicode_100_ptr
+    );
+
+    let expected = serde_json::json!({
+        "ascii_99": "a".repeat(99),
+        "ascii_100": "b".repeat(100),
+        "ascii_101": format!("{}┄total 101┄{}", "c".repeat(20), "c".repeat(20)),
+        "unicode_100": "é".repeat(50),
+        "unicode_102": format!("{}┄total 102┄{}", "é".repeat(10), "é".repeat(10)),
+        "unicode_split_edges": format!("{}┄total 102┄{}", "a".repeat(19), "c".repeat(19)),
+    });
+    assert_eq!(value, expected);
+    assert_eq!(
+        serde_json::to_vec(&value).expect("serialize compacted JSON"),
+        serde_json::to_vec(&expected).expect("serialize expected JSON"),
+        "long-string JSON bytes must retain the established compaction shape"
+    );
+}
+
+/// Recurses through arrays and maps without replacing short values already
+/// redacted by the debug projection.
+#[test]
+fn compact_debug_json_strings_recurses_without_replacing_redacted_values() {
+    let mut value = serde_json::json!({
+        "nested": [
+            {
+                "already_redacted": "<redacted>",
+                "long": "x".repeat(101),
+            },
+            ["é".repeat(51)],
+        ],
+    });
+    let redacted_ptr = value["nested"][0]["already_redacted"]
+        .as_str()
+        .expect("redacted string")
+        .as_ptr();
+
+    compact_debug_json_strings(&mut value);
+
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "nested": [
+                {
+                    "already_redacted": "<redacted>",
+                    "long": format!("{}┄total 101┄{}", "x".repeat(20), "x".repeat(20)),
+                },
+                [format!("{}┄total 102┄{}", "é".repeat(10), "é".repeat(10))],
+            ],
+        })
+    );
+    assert_eq!(
+        value["nested"][0]["already_redacted"]
+            .as_str()
+            .expect("redacted string")
+            .as_ptr(),
+        redacted_ptr,
+        "redaction precedes compaction and short redacted values stay in place"
+    );
 }
 
 /// Full provider prompts become a bounded content-free summary before JSON

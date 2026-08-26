@@ -1018,7 +1018,9 @@ fn redact_debug_event(value: &mut serde_json::Value) {
 fn compact_debug_json_strings(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(s) => {
-            *s = compact_debug_string(s);
+            if s.len() > DEBUG_STRING_COMPACT_THRESHOLD {
+                *s = compact_debug_string(s);
+            }
         }
         serde_json::Value::Array(values) => {
             for value in values {
