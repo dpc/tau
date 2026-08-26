@@ -63,9 +63,8 @@ fn admit_stall_warning() -> bool {
 use block_layout_state::BlockLayoutState;
 use crossterm::cursor::{MoveToColumn, MoveUp, SetCursorStyle};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, DisableMouseCapture, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::style::Print;
 use crossterm::{QueueableCommand, terminal};
@@ -157,9 +156,9 @@ pub struct TerminalOptions {
     pub cursor_shape: CursorShape,
     /// Whether mouse activity remains enabled for the CLI UI.
     ///
-    /// When false, the raw terminal layer captures and discards mouse events
-    /// while Tau owns the terminal. This prevents terminals from translating
-    /// wheel input into prompt-history navigation.
+    /// When false, the raw terminal layer explicitly disables terminal mouse
+    /// reporting while Tau owns the terminal. The terminal then handles mouse
+    /// activity natively instead of sending it to Tau.
     pub mouse: bool,
 }
 
@@ -3170,7 +3169,7 @@ fn write_external_resume_features(
     terminal_options: TerminalOptions,
 ) -> io::Result<()> {
     if !terminal_options.mouse {
-        crossterm::execute!(writer, EnableMouseCapture)?;
+        crossterm::execute!(writer, DisableMouseCapture)?;
     }
     crossterm::execute!(
         writer,
@@ -3187,9 +3186,9 @@ fn initialize_terminal_features(
     terminal_options: TerminalOptions,
 ) -> io::Result<()> {
     if let Err(error) = write_external_resume_features(writer, cursor_shape, terminal_options) {
-        // A failed write may have reached the terminal after enabling mouse
-        // capture. While Tau still owns this terminal, best-effort cleanup
-        // prevents that partial acquisition from leaking to the caller.
+        // A failed write may have reached the terminal after changing a
+        // feature. While Tau still owns this terminal, best-effort cleanup
+        // restores the external-program-safe terminal state.
         let _ = write_external_pause_features(writer, terminal_options);
         return Err(error);
     }

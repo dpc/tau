@@ -142,10 +142,11 @@ fn external_pause_disables_and_resume_enables_focus_reporting() {
     assert!(resume.contains("\u{1b}[?1004h"), "resume: {resume:?}");
 }
 
-/// A disabled mouse setting must acquire discardable mouse events at every Tau
-/// terminal acquisition and release them before each handoff or normal cleanup.
+/// A disabled mouse setting must explicitly disable terminal mouse reporting
+/// during every acquisition, handoff, and normal cleanup. This keeps wheel,
+/// selection, and link handling terminal-native after Tau reacquires a pane.
 #[test]
-fn mouse_disabled_balances_capture_across_terminal_lifecycle() {
+fn mouse_disabled_disables_reporting_across_terminal_lifecycle() {
     let options = TerminalOptions {
         mouse: false,
         ..TerminalOptions::default()
@@ -160,7 +161,7 @@ fn mouse_disabled_balances_capture_across_terminal_lifecycle() {
 
     assert_eq!(
         mouse_capture_transitions(&bytes),
-        ["enable", "disable", "enable", "disable"]
+        ["disable", "disable", "disable", "disable"]
     );
 }
 
@@ -183,8 +184,8 @@ fn mouse_enabled_emits_no_capture_sequences() {
     );
 }
 
-/// Initial feature setup must release mouse capture after a write fails because
-/// the terminal may have accepted the preceding enable sequence.
+/// Initial feature setup must disable mouse reporting again after a write fails
+/// because the terminal may have accepted the preceding feature sequence.
 #[test]
 fn mouse_disabled_setup_failure_releases_partial_capture() {
     let options = TerminalOptions {
@@ -201,7 +202,7 @@ fn mouse_disabled_setup_failure_releases_partial_capture() {
 
     assert_eq!(
         mouse_capture_transitions(&writer.bytes),
-        ["enable", "disable"]
+        ["disable", "disable"]
     );
 }
 

@@ -214,10 +214,10 @@ pub struct CliSettings {
     /// Whether the CLI UI responds to mouse activity.
     ///
     /// This static `cli.yaml` setting defaults to true. When false, the CLI
-    /// captures and discards mouse input only while it owns the terminal, so
-    /// mouse activity cannot navigate the prompt history or drive another UI
-    /// action. It is not a runtime `:set` option because terminal feature
-    /// ownership is acquired when the CLI starts.
+    /// disables terminal mouse reporting while it owns the terminal, so the
+    /// terminal handles wheel scrolling, selection, and links natively. It is
+    /// not a runtime `:set` option because terminal feature ownership is
+    /// acquired when the CLI starts.
     pub mouse: bool,
     /// Whether prompt-draft liveness events include the current prompt buffer.
     ///

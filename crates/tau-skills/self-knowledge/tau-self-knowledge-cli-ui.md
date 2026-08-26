@@ -29,9 +29,10 @@ including wheel-driven prompt-history navigation, set this static option in
 mouse: false
 ```
 
-Tau captures and discards mouse events only while it owns the terminal, then
-releases that capture before external editors and pickers run. This option is
-not a `:set` toggle and does not affect the harness, project state, or session.
+Tau explicitly disables terminal mouse reporting while it owns the terminal, so
+the terminal keeps native wheel scrolling, text selection, and link activation.
+This option is not a `:set` toggle and does not affect the harness, project
+state, or session.
 
 ## Agent message labels
 

@@ -2,9 +2,8 @@
 # greeting: true
 # show_logo: true
 # bar_cursor: true
-# Disable all mouse handling in the CLI UI. Tau captures and discards mouse
-# events while it owns the terminal so the terminal does not turn wheel input
-# into prompt-history navigation.
+# Disable terminal mouse reporting while Tau owns the CLI UI. The terminal keeps
+# wheel scrolling, text selection, and link handling native.
 # mouse: false
 # Send full prompt buffers in ui.prompt_draft liveness events. Disabled by
 # default so live subscribers and best-effort events.jsonl do not receive
