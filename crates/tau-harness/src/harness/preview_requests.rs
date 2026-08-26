@@ -102,6 +102,7 @@ impl Harness {
             }
         };
         let agent_id = self.agent_runtime.agent_registry.agents[&agent]
+            .identity
             .agent_id
             .as_deref()
             .map(crate::parse_agent_id)
@@ -435,12 +436,12 @@ impl Harness {
             .agents
             .iter()
             .filter(|(_, agent)| {
-                !agent.terminating
-                    && agent.session_id == self.session_runtime.current_session_id
-                    && agent.agent_id.is_some()
+                !agent.dispatch.terminating
+                    && agent.identity.session_id == self.session_runtime.current_session_id
+                    && agent.identity.agent_id.is_some()
             })
             .filter_map(|(cid, agent)| {
-                let agent_id = AgentId::parse(agent.agent_id.as_deref()?).ok()?;
+                let agent_id = AgentId::parse(agent.identity.agent_id.as_deref()?).ok()?;
                 let navigation_mode = self
                     .agent_runtime
                     .agent_registry
@@ -449,7 +450,11 @@ impl Harness {
                     .copied()?;
                 Some((
                     agent_id,
-                    (agent.published_runtime_state, navigation_mode, cid.clone()),
+                    (
+                        agent.turn.published_runtime_state,
+                        navigation_mode,
+                        cid.clone(),
+                    ),
                 ))
             })
             .collect::<HashMap<_, _>>();
@@ -514,8 +519,8 @@ impl Harness {
                 .flatten()
                 .map(|agent| {
                     tau_proto::SessionAgentWorkStatus::new(
-                        agent.work_status.phase(),
-                        agent.work_status.title().map(ToOwned::to_owned),
+                        agent.turn.work_status.phase(),
+                        agent.turn.work_status.title().map(ToOwned::to_owned),
                     )
                     .expect("harness work status is canonical")
                 });

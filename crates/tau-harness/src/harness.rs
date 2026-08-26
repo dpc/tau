@@ -2098,14 +2098,14 @@ impl Harness {
             .agents
             .values()
             .find(|agent| {
-                agent.session_id == target_session_id
-                    && agent.originator.is_user()
-                    && agent.agent_id.is_some()
+                agent.identity.session_id == target_session_id
+                    && agent.identity.originator.is_user()
+                    && agent.identity.agent_id.is_some()
             })
             .and_then(|agent| {
                 Some((
-                    crate::parse_agent_id(agent.agent_id.as_deref()?),
-                    agent.outer_turn.active_id().cloned(),
+                    crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
+                    agent.turn.outer_turn.active_id().cloned(),
                 ))
             })
             .ok_or_else(|| {
@@ -2992,7 +2992,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(&cid)
-            .map(|agent| agent.session_id.clone())
+            .map(|agent| agent.identity.session_id.clone())
         else {
             self.emit_info(&format!(
                 "extension prompt submit rejected: unloaded agent `{agent_id}`"

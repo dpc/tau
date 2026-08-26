@@ -127,7 +127,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.agent_id.clone())
+            .and_then(|agent| agent.identity.agent_id.clone())
         else {
             return;
         };

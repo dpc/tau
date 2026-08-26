@@ -103,6 +103,7 @@ fn long_wait_thresholds_use_fake_monotonic_deadlines_without_late_replay() {
     let start = Instant::now() + Duration::from_secs(60);
     assert_eq!(
         harness.agent_runtime.agent_registry.agents[&watched_cid]
+            .turn
             .work_status
             .phase(),
         tau_proto::AgentWorkStatusPhase::Unreported
@@ -114,6 +115,7 @@ fn long_wait_thresholds_use_fake_monotonic_deadlines_without_late_replay() {
             .agents
             .get_mut(&watched_cid)
             .expect("watched agent")
+            .turn
             .work_status
             .report_at(
                 crate::WorkStatusReport::new(
@@ -193,6 +195,7 @@ fn long_wait_thresholds_use_fake_monotonic_deadlines_without_late_replay() {
     assert_eq!(thresholds_for(&late_id), [120, 240, 360, 480]);
     assert!(
         harness.agent_runtime.agent_registry.agents[&watched_cid]
+            .dispatch
             .pending_prompts
             .is_empty()
     );
@@ -224,6 +227,7 @@ fn overlapping_waits_accumulate_until_the_last_wait_settles() {
             .agents
             .get_mut(&cid)
             .expect("agent")
+            .turn
             .work_status
             .report_at(
                 crate::WorkStatusReport::new(
@@ -271,6 +275,7 @@ fn claimed_wait_keeps_accounting_until_rollback_or_commit() {
             .agents
             .get_mut(&cid)
             .expect("agent")
+            .turn
             .work_status
             .report_at(
                 crate::WorkStatusReport::new(
@@ -391,6 +396,7 @@ fn installed_waits_feed_the_combined_runtime_deadline_scheduler() {
     assert_eq!(harness.next_input_wait_deadline(), Some(input_deadline));
     assert!(
         harness.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
             .pending_prompts
             .is_empty()
     );
@@ -413,6 +419,7 @@ fn agent_unload_cancels_semantic_wait_deadline() {
                 .agents
                 .get_mut(&cid)
                 .expect("agent")
+                .turn
                 .work_status
                 .report_at(
                     crate::WorkStatusReport::new(
@@ -454,6 +461,7 @@ fn agent_unload_retires_ordinary_wait_without_notification() {
             .agents
             .get_mut(&cid)
             .expect("agent")
+            .turn
             .work_status
             .report_at(
                 crate::WorkStatusReport::new(
@@ -505,6 +513,7 @@ fn overdue_wait_threshold_catchup_is_bounded_per_scheduler_cycle() {
             .agents
             .get_mut(&cid)
             .expect("agent")
+            .turn
             .work_status
             .report_at(
                 crate::WorkStatusReport::new(
@@ -591,6 +600,7 @@ fn pruning_partial_long_wait_batch_preserves_exactly_once_cursor() {
             .agents
             .get_mut(&watched_cid)
             .expect("watched")
+            .turn
             .work_status
             .report_at(
                 crate::WorkStatusReport::new(
@@ -688,6 +698,7 @@ fn received_event_at_threshold_equality_drains_deadline_first() {
             .agents
             .get_mut(&cid)
             .expect("agent")
+            .turn
             .work_status
             .report_at(
                 crate::WorkStatusReport::new(
@@ -765,6 +776,7 @@ fn cold_resume_replays_long_wait_context_without_runtime_state() {
                 .agents
                 .get_mut(&watched_cid)
                 .expect("watched")
+                .turn
                 .work_status
                 .report_at(
                     crate::WorkStatusReport::new(
@@ -809,6 +821,7 @@ fn cold_resume_replays_long_wait_context_without_runtime_state() {
         .expect("restored watcher");
     assert!(
         resumed.agent_runtime.agent_registry.agents[&watcher_cid]
+            .dispatch
             .pending_prompts
             .is_empty()
     );
@@ -846,6 +859,7 @@ fn session_rollover_discards_semantic_wait_deadlines() {
             .agents
             .get_mut(&cid)
             .expect("agent")
+            .turn
             .work_status
             .report_at(
                 crate::WorkStatusReport::new(

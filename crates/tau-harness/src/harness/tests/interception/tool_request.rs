@@ -1216,11 +1216,15 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
         Some(&cid)
     );
     assert_eq!(
-        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        harness.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_in_flight,
         1
     );
     assert_eq!(
-        harness.agent_runtime.agent_registry.agents[&cid].tools_total,
+        harness.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_total,
         1
     );
     assert!(harness.wait_tracks_call_for_test(&"peer-internal".into()));
@@ -1250,7 +1254,9 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
             .contains_key("peer-internal")
     );
     assert_eq!(
-        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        harness.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_in_flight,
         0
     );
     assert_eq!(default_agent_tree(&harness).nodes().len(), transcript_nodes);
@@ -1285,12 +1291,16 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
             .contains_key("peer-internal-error")
     );
     assert_eq!(
-        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        harness.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_in_flight,
         0
     );
     assert_eq!(default_agent_tree(&harness).nodes().len(), transcript_nodes);
 
-    let total_before_message = harness.agent_runtime.agent_registry.agents[&cid].tools_total;
+    let total_before_message = harness.agent_runtime.agent_registry.agents[&cid]
+        .execution
+        .tools_total;
     harness
         .handle_extension_event(
             "requester",
@@ -1310,11 +1320,15 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
             .any(|(_, event)| matches!(event, Event::ToolError(_)))
     );
     assert_eq!(
-        harness.agent_runtime.agent_registry.agents[&cid].tools_total,
+        harness.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_total,
         total_before_message + 1
     );
     assert_eq!(
-        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        harness.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_in_flight,
         0
     );
     assert!(
@@ -1485,11 +1499,15 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
             ))
     );
     assert_eq!(
-        harness.agent_runtime.agent_registry.agents[&cid].tools_total,
+        harness.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_total,
         1
     );
     assert_eq!(
-        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        harness.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_in_flight,
         1
     );
 
@@ -1510,7 +1528,9 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
             if result.call_id.as_str() == "peer-internal-background"
     )));
     assert_eq!(
-        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        harness.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_in_flight,
         0
     );
     assert!(
@@ -1550,6 +1570,7 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
     );
     assert!(
         harness.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
             .pending_prompts
             .iter()
             .all(|prompt| !prompt.is_activating_background_completion())
@@ -1585,7 +1606,9 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
             if error.call_id.as_str() == "peer-internal-background-error"
     )));
     assert_eq!(
-        harness.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        harness.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_in_flight,
         0
     );
     assert!(

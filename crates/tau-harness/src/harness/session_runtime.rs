@@ -279,9 +279,9 @@ impl Harness {
             .agents
             .iter()
             .find_map(|(cid, conv)| {
-                (conv.session_id == session_id
-                    && conv.originator.is_user()
-                    && conv.agent_id.is_some())
+                (conv.identity.session_id == session_id
+                    && conv.identity.originator.is_user()
+                    && conv.identity.agent_id.is_some())
                 .then_some(cid.clone())
             })
             .map(Ok)
@@ -300,7 +300,7 @@ impl Harness {
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 let mut prompt = PendingPrompt::user(text);
                 prompt.activation_observation = Some(activation);
-                conv.pending_prompts.push_back(prompt);
+                conv.dispatch.pending_prompts.push_back(prompt);
             }
             self.append_activation_queued(
                 &cid,
@@ -319,7 +319,7 @@ impl Harness {
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 let mut prompt = PendingPrompt::user(text);
                 prompt.activation_observation = Some(activation);
-                conv.pending_prompts.push_back(prompt);
+                conv.dispatch.pending_prompts.push_back(prompt);
             }
             self.append_activation_queued(
                 &cid,
@@ -377,7 +377,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(&cid)
-            .is_none_or(|agent| agent.terminating)
+            .is_none_or(|agent| agent.dispatch.terminating)
         {
             let reason = format!("agent `{agent_id}` is terminating");
             return Ok(PromptSubmission::Rejected { reason });
@@ -396,7 +396,7 @@ impl Harness {
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 let mut queued_prompt = prompt.clone();
                 queued_prompt.activation_observation = activation;
-                conv.pending_prompts.push_back(queued_prompt);
+                conv.dispatch.pending_prompts.push_back(queued_prompt);
             }
             if let Some(activation) = activation {
                 self.append_prompt_activation_queued(&cid, activation, activation_kind, &prompt);
@@ -425,7 +425,7 @@ impl Harness {
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 let mut queued_prompt = prompt.clone();
                 queued_prompt.activation_observation = activation;
-                conv.pending_prompts.push_back(queued_prompt);
+                conv.dispatch.pending_prompts.push_back(queued_prompt);
             }
             if let Some(activation) = activation {
                 self.append_prompt_activation_queued(&cid, activation, activation_kind, &prompt);
@@ -478,17 +478,17 @@ impl Harness {
             .agents
             .iter()
             .filter_map(|(cid, conv)| {
-                if conv.parent_tool_call_id.is_some() {
+                if conv.identity.parent_tool_call_id.is_some() {
                     return None;
                 }
                 if !matches!(
-                    conv.originator,
+                    conv.identity.originator,
                     tau_proto::PromptOriginator::Extension { .. }
                 ) {
                     return None;
                 }
-                let in_flight = conv.in_flight_prompt.clone().or_else(|| {
-                    match &conv.activation_dispatch {
+                let in_flight = conv.dispatch.in_flight_prompt.clone().or_else(|| {
+                    match &conv.dispatch.activation_dispatch {
                         path_crate_agent::ActivationDispatchState::ContextRecoveryClaimPending {
                             checkpoint,
                             ..
@@ -498,9 +498,9 @@ impl Harness {
                 })?;
                 Some((
                     cid.clone(),
-                    conv.session_id.clone(),
+                    conv.identity.session_id.clone(),
                     in_flight,
-                    conv.originator.clone(),
+                    conv.identity.originator.clone(),
                 ))
             })
             .collect();
@@ -515,7 +515,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(cid)
-                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent| agent.identity.agent_id.as_deref())
                 .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
                 .and_then(|tree| tree.marked_inference_through(spid))
                 .is_some();
@@ -553,8 +553,8 @@ impl Harness {
                 "initial prompt was canceled",
             );
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-                conv.in_flight_prompt = None;
-                conv.pending_prompts.clear();
+                conv.dispatch.in_flight_prompt = None;
+                conv.dispatch.pending_prompts.clear();
             }
             self.set_agent_turn_state(cid, AgentTurnState::Idle);
             self.release_start_agent_request(cid);
@@ -646,7 +646,7 @@ impl Harness {
                     .agent_registry
                     .agents
                     .get(&cid)
-                    .and_then(|conv| conv.head);
+                    .and_then(|conv| conv.identity.head);
                 let mut lines = Vec::new();
                 let root_marker = if selected_head.is_none() { '*' } else { ' ' };
                 lines.push(format!(
@@ -842,7 +842,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&cid)
-                .and_then(|agent| agent.in_flight_prompt.clone())
+                .and_then(|agent| agent.dispatch.in_flight_prompt.clone())
             {
                 self.cancel_running_compaction(&cid, &prompt_id);
             }
@@ -852,8 +852,8 @@ impl Harness {
                 "session switch discarded initial prompt",
             );
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                conv.pending_prompts.clear();
-                conv.in_flight_prompt = None;
+                conv.dispatch.pending_prompts.clear();
+                conv.dispatch.in_flight_prompt = None;
             }
             self.set_agent_turn_state(&cid, AgentTurnState::Idle);
         }
@@ -1466,11 +1466,12 @@ impl Harness {
                 .get(cid)
                 .map(|conv| {
                     let agent_id = conv
+                        .identity
                         .agent_id
                         .as_deref()
                         .map(crate::parse_agent_id)
                         .unwrap_or_else(|| cid.clone());
-                    (conv.session_id.clone(), agent_id)
+                    (conv.identity.session_id.clone(), agent_id)
                 })
         else {
             return Vec::new();
@@ -1533,15 +1534,15 @@ impl Harness {
         };
         let mut prompts = Vec::new();
         let mut remaining =
-            path_std_collections::VecDeque::with_capacity(conv.pending_prompts.len());
-        while let Some(prompt) = conv.pending_prompts.pop_front() {
+            path_std_collections::VecDeque::with_capacity(conv.dispatch.pending_prompts.len());
+        while let Some(prompt) = conv.dispatch.pending_prompts.pop_front() {
             if prompt.is_passive_background_completion() {
                 prompts.push(prompt);
             } else {
                 remaining.push_back(prompt);
             }
         }
-        conv.pending_prompts = remaining;
+        conv.dispatch.pending_prompts = remaining;
         prompts
     }
 
@@ -1559,7 +1560,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&cid)
-                .and_then(|conv| conv.agent_id.as_deref())
+                .and_then(|conv| conv.identity.agent_id.as_deref())
                 .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
                 .map(|tree| {
                     tree.unresolved_foreground_tool_calls()
@@ -1624,7 +1625,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .map(|conv| conv.head)
+            .map(|conv| conv.identity.head)
         else {
             return Vec::new();
         };
@@ -1633,7 +1634,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|conv| conv.agent_id.as_deref())
+            .and_then(|conv| conv.identity.agent_id.as_deref())
         else {
             return Vec::new();
         };
@@ -1657,7 +1658,8 @@ impl Harness {
             .agents
             .iter()
             .filter_map(|(cid, conv)| {
-                (conv.session_id == *session_id && conv.agent_id.is_some()).then_some(cid.clone())
+                (conv.identity.session_id == *session_id && conv.identity.agent_id.is_some())
+                    .then_some(cid.clone())
             })
             .collect()
     }
@@ -1701,7 +1703,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&cid)
-                .map(|conv| conv.head)
+                .map(|conv| conv.identity.head)
             else {
                 continue;
             };
@@ -1710,7 +1712,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&cid)
-                .and_then(|conv| conv.agent_id.as_deref())
+                .and_then(|conv| conv.identity.agent_id.as_deref())
             else {
                 continue;
             };
@@ -2088,6 +2090,7 @@ impl Harness {
             .iter()
             .filter_map(|(cid, agent)| {
                 agent
+                    .identity
                     .agent_id
                     .clone()
                     .map(|agent_id| (cid.clone(), agent_id))
@@ -2636,15 +2639,15 @@ impl Harness {
                     )
                 });
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                conv.agent_id = Some(agent_id_string.clone());
-                conv.head = head;
-                conv.originator = originator;
-                conv.source_connection =
+                conv.identity.agent_id = Some(agent_id_string.clone());
+                conv.identity.head = head;
+                conv.identity.originator = originator;
+                conv.identity.source_connection =
                     tool_backed_start.then(|| crate::harness::harness_connection_id().clone());
-                conv.role = role.clone();
-                conv.display_name = display_name.clone();
-                conv.persistence = persistence;
-                conv.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
+                conv.identity.role = role.clone();
+                conv.identity.display_name = display_name.clone();
+                conv.identity.persistence = persistence;
+                conv.identity.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
             } else {
                 let runtime_incarnation = self.mint_agent_runtime_incarnation();
                 let mut conv = Agent::new(
@@ -2655,11 +2658,11 @@ impl Harness {
                     head,
                     tool_backed_start.then(|| crate::harness::harness_connection_id().clone()),
                 );
-                conv.agent_id = Some(agent_id_string.clone());
-                conv.role = role.clone();
-                conv.display_name = display_name.clone();
-                conv.persistence = persistence;
-                conv.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
+                conv.identity.agent_id = Some(agent_id_string.clone());
+                conv.identity.role = role.clone();
+                conv.identity.display_name = display_name.clone();
+                conv.identity.persistence = persistence;
+                conv.identity.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
                 self.agent_runtime
                     .agent_registry
                     .agents
@@ -2669,13 +2672,13 @@ impl Harness {
                 restored_parent_edges.push((cid.clone(), parent_agent));
             }
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                conv.restored_tool_backed_start = tool_backed_start;
+                conv.identity.restored_tool_backed_start = tool_backed_start;
                 if dormant_output_length_repair.is_none()
                     && let Some(outer_turn_id) = restored_output_length_spent
                 {
-                    conv.outer_turn =
+                    conv.turn.outer_turn =
                         path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id.clone());
-                    conv.output_length_continuation =
+                    conv.turn.output_length_continuation =
                         path_crate_agent::OutputLengthContinuationState::Spent { outer_turn_id };
                 }
                 if let Some(restored) = restored_output_length {
@@ -2703,7 +2706,7 @@ impl Harness {
                         && let (Some(model), Some(operation), Some(activation_cut)) =
                             (source.model, source.operation, source.activation_cut)
                     {
-                        conv.outer_turn =
+                        conv.turn.outer_turn =
                             path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id.clone());
                         let plan = path_crate_agent::OutputLengthContinuationPlan {
                             agent_prompt_id: successor_agent_prompt_id,
@@ -2719,16 +2722,16 @@ impl Harness {
                             },
                         };
                         if let Some(through) = through {
-                            conv.output_length_continuation =
+                            conv.turn.output_length_continuation =
                                 path_crate_agent::OutputLengthContinuationState::OwnerReady(
                                     path_crate_agent::OutputLengthContinuationDispatch {
                                         plan,
                                         through,
                                     },
                                 );
-                            conv.pending_replay_activation = true;
+                            conv.dispatch.pending_replay_activation = true;
                         } else {
-                            conv.output_length_continuation =
+                            conv.turn.output_length_continuation =
                                 path_crate_agent::OutputLengthContinuationState::Planned(plan);
                             restored_output_length_steers.push(cid.clone());
                         }
@@ -2746,21 +2749,21 @@ impl Harness {
             }
             let restored_next_prompt_index = self.next_prompt_index_from_log(agent_id.as_str());
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
-                && !conv.prompt_index_initialized
+                && !conv.dispatch.prompt_index_initialized
             {
-                conv.next_prompt_index = restored_next_prompt_index;
-                conv.prompt_index_initialized = true;
+                conv.dispatch.next_prompt_index = restored_next_prompt_index;
+                conv.dispatch.prompt_index_initialized = true;
             }
             self.clear_agent_context_usage(&cid);
             let restored_context_usage = self.restored_agent_context_usage(agent_id.as_str());
             if let Some((model, input_tokens, cached_tokens, usage_head)) = restored_context_usage
                 && let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
             {
-                conv.context_input_tokens = Some(input_tokens);
-                conv.context_cached_tokens = Some(cached_tokens);
-                conv.context_usage_head = usage_head;
-                conv.context_usage_model = Some(model.clone());
-                conv.context_percent_used =
+                conv.execution.context_input_tokens = Some(input_tokens);
+                conv.execution.context_cached_tokens = Some(cached_tokens);
+                conv.execution.context_usage_head = usage_head;
+                conv.execution.context_usage_model = Some(model.clone());
+                conv.execution.context_percent_used =
                     context_window_for_model(&self.provider_runtime.model_info, &model)
                         .map(|window| context_percent_used(input_tokens, window));
             }
@@ -2790,10 +2793,10 @@ impl Harness {
                     ..
                 }) => {
                     if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                        conv.pending_automatic_compaction_decision =
+                        conv.turn.pending_automatic_compaction_decision =
                             Some(decision.transaction_id.clone());
                         if !finish_committed {
-                            conv.outer_turn =
+                            conv.turn.outer_turn =
                                 path_crate_agent::OuterTurnRuntimeState::FinishInFlight(
                                     decision.outer_turn_id.clone(),
                                 );
@@ -2805,7 +2808,7 @@ impl Harness {
                     compact_prompt_id,
                 }) => {
                     if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                        conv.activation_dispatch =
+                        conv.dispatch.activation_dispatch =
                             path_crate_agent::ActivationDispatchState::Blocked {
                                 failed_id: failed.transaction_id,
                                 cut: failed.cut,
@@ -2842,12 +2845,12 @@ impl Harness {
                             through,
                             dispatch,
                             ..
-                        } = &conv.activation_dispatch
+                        } = &conv.dispatch.activation_dispatch
                     {
-                        conv.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
+                        conv.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
                             owner.outer_turn_id.clone(),
                         );
-                        conv.output_length_continuation =
+                        conv.turn.output_length_continuation =
                             path_crate_agent::OutputLengthContinuationState::Active(
                                 path_crate_agent::OutputLengthContinuationDispatch {
                                     plan: path_crate_agent::OutputLengthContinuationPlan {
@@ -2893,10 +2896,10 @@ impl Harness {
                                 checkpoint.activation_cut,
                             )
                         {
-                            conv.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
+                            conv.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
                                 owner.outer_turn_id.clone(),
                             );
-                            conv.output_length_continuation =
+                            conv.turn.output_length_continuation =
                                 path_crate_agent::OutputLengthContinuationState::Active(
                                     path_crate_agent::OutputLengthContinuationDispatch {
                                         plan: path_crate_agent::OutputLengthContinuationPlan {
@@ -2913,7 +2916,7 @@ impl Harness {
                                     },
                                 );
                         }
-                        conv.activation_dispatch =
+                        conv.dispatch.activation_dispatch =
                             path_crate_agent::ActivationDispatchState::DispatchUncertain {
                                 owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
                                     id: checkpoint
@@ -2960,10 +2963,10 @@ impl Harness {
                         checkpoint.activation_cut,
                     )
                 {
-                    conv.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
+                    conv.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(
                         owner.outer_turn_id.clone(),
                     );
-                    conv.output_length_continuation =
+                    conv.turn.output_length_continuation =
                         path_crate_agent::OutputLengthContinuationState::Active(
                             path_crate_agent::OutputLengthContinuationDispatch {
                                 plan: path_crate_agent::OutputLengthContinuationPlan {
@@ -2979,7 +2982,7 @@ impl Harness {
                             },
                         );
                 }
-                conv.activation_dispatch =
+                conv.dispatch.activation_dispatch =
                     path_crate_agent::ActivationDispatchState::ContextRecoveryPending {
                         checkpoint,
                     };
@@ -2990,7 +2993,7 @@ impl Harness {
             {
                 let status_prompt_id = checkpoint.agent_prompt_id.clone();
                 if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                    conv.activation_dispatch =
+                    conv.dispatch.activation_dispatch =
                         path_crate_agent::ActivationDispatchState::DispatchUncertain {
                             owner: match checkpoint.transaction_id {
                                 Some(id) => {
@@ -3027,7 +3030,7 @@ impl Harness {
             let replay_prompt_activations =
                 self.derive_replay_prompt_activations(agent_id.as_str());
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                conv.pending_message_wakes = replay_message_wakes;
+                conv.dispatch.pending_message_wakes = replay_message_wakes;
             }
             if derive_activations && !replay_prompt_activations.is_empty() {
                 self.prompt_coordination
@@ -3062,6 +3065,7 @@ impl Harness {
                         .get(&cid)
                         .is_some_and(|agent| {
                             agent
+                                .dispatch
                                 .pending_message_wakes
                                 .iter()
                                 .any(|wake| wake.node_id.is_none())
@@ -3074,7 +3078,7 @@ impl Harness {
                     .agent_registry
                     .agents
                     .get(&cid)
-                    .map(|agent| agent.originator.clone())
+                    .map(|agent| agent.identity.originator.clone())
             {
                 self.prompt_coordination
                     .prompt_runtime
@@ -3124,7 +3128,7 @@ impl Harness {
                 && let Some(outer_turn_id) = finish_repair
             {
                 if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                    agent.outer_turn = path_crate_agent::OuterTurnRuntimeState::FinishInFlight(
+                    agent.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::FinishInFlight(
                         outer_turn_id.clone(),
                     );
                 }
@@ -3176,15 +3180,16 @@ impl Harness {
                 .cloned()
                 && let Some(child) = self.agent_runtime.agent_registry.agents.get_mut(&child_cid)
             {
-                child.parent_agent_id = Some(parent_cid);
+                child.identity.parent_agent_id = Some(parent_cid);
             }
         }
         for cid in restored_output_length_steers {
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 agent
+                    .dispatch
                     .pending_prompts
                     .push_back(PendingPrompt::output_length_continuation());
-                agent.turn_state = AgentTurnState::Idle;
+                agent.turn.turn_state = AgentTurnState::Idle;
             }
             self.fold_pending_prompts_as_steered(&cid);
             self.dispatch_activation_after_publish_idle(&cid);
@@ -3202,6 +3207,7 @@ impl Harness {
             .iter()
             .flat_map(|(cid, agent)| {
                 agent
+                    .identity
                     .agent_id
                     .as_deref()
                     .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))

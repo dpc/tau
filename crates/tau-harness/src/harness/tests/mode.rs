@@ -652,12 +652,14 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         .agents
         .get_mut(&cid)
         .expect("ephemeral agent")
+        .dispatch
         .in_flight_prompt = Some(provider_prompt_id.clone());
     h.agent_runtime
         .agent_registry
         .agents
         .get_mut(&cid)
         .expect("ephemeral agent")
+        .dispatch
         .last_prompt_id = Some(provider_prompt_id.clone());
     h.provider_runtime.pending_prompts.insert(
         provider_prompt_id.clone(),
@@ -1463,7 +1465,7 @@ fn embedded_deterministic_tool_round_clears_prompt_lifecycle() {
             .agent_registry
             .agents
             .values()
-            .all(|agent| agent.in_flight_prompt.is_none()),
+            .all(|agent| agent.dispatch.in_flight_prompt.is_none()),
         "committed continuation terminal must clear harness in-flight state"
     );
     harness.shutdown().expect("shutdown embedded harness");

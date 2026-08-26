@@ -238,7 +238,7 @@ impl<'a> InternalToolHost<'a> {
             .agent_registry
             .agents
             .get(conversation_id)
-            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent| agent.identity.agent_id.as_deref())
             .and_then(|agent_id| tau_proto::AgentId::parse(agent_id).ok())
             .and_then(|agent_id| {
                 self.harness
@@ -298,10 +298,11 @@ impl<'a> InternalToolHost<'a> {
             .agent_registry
             .agents
             .values()
-            .filter(|agent| !agent.terminating)
+            .filter(|agent| !agent.dispatch.terminating)
             .filter_map(|agent| {
-                let agent_id = agent.agent_id.clone()?;
+                let agent_id = agent.identity.agent_id.clone()?;
                 let role = agent
+                    .identity
                     .role
                     .clone()
                     .unwrap_or_else(|| self.harness.config.selected_role.clone());
@@ -309,7 +310,7 @@ impl<'a> InternalToolHost<'a> {
                     group: self.harness.role_group_name_for_role(&role),
                     role,
                     agent_id,
-                    state: match agent.published_runtime_state {
+                    state: match agent.turn.published_runtime_state {
                         tau_proto::AgentRuntimeState::Idle => InternalAgentState::Idle,
                         tau_proto::AgentRuntimeState::Running => InternalAgentState::Running,
                     },
@@ -635,7 +636,7 @@ impl<'a> InternalToolHost<'a> {
             .agent_registry
             .agents
             .get(owner.conversation_id())?;
-        let agent_id = tau_proto::AgentId::parse(agent.agent_id.as_deref()?).ok()?;
+        let agent_id = tau_proto::AgentId::parse(agent.identity.agent_id.as_deref()?).ok()?;
         let prompt_id = self
             .harness
             .prompt_coordination
@@ -659,17 +660,17 @@ impl<'a> InternalToolHost<'a> {
                     .session_runtime
                     .store
                     .sessions_dir()
-                    .join(agent.session_id.as_str())
+                    .join(agent.identity.session_id.as_str())
             });
         Some(InternalSelfInfo {
             agent_id,
-            session_id: agent.session_id.clone(),
+            session_id: agent.identity.session_id.clone(),
             session_dir,
             model: started.model.clone(),
             effort: model_params.effort,
             work_status: SessionAgentWorkStatus::new(
-                agent.work_status.phase(),
-                agent.work_status.title().map(ToOwned::to_owned),
+                agent.turn.work_status.phase(),
+                agent.turn.work_status.title().map(ToOwned::to_owned),
             )
             .expect("harness work status is canonical"),
         })

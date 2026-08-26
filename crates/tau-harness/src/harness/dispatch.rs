@@ -40,9 +40,9 @@ impl Harness {
             .agents
             .iter()
             .find_map(|(cid, conv)| {
-                (conv.session_id == session_id
-                    && conv.originator.is_user()
-                    && conv.agent_id.is_some())
+                (conv.identity.session_id == session_id
+                    && conv.identity.originator.is_user()
+                    && conv.identity.agent_id.is_some())
                 .then_some(cid.clone())
             })
             .map(Ok)
@@ -83,7 +83,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(agent_id)
-            .map(|c| c.originator.clone())
+            .map(|c| c.identity.originator.clone())
             .ok_or_else(|| {
                 HarnessError::Participant(format!(
                     "publish_pending_prompt_for_agent: unknown agent `{agent_id}`"
@@ -92,7 +92,7 @@ impl Harness {
         if prompt.ctx_id.is_some()
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(agent_id)
         {
-            agent.next_ctx_id = prompt.ctx_id.clone();
+            agent.dispatch.next_ctx_id = prompt.ctx_id.clone();
         }
         let notify_watchers = prompt.should_notify_watchers();
         let notification_text = notify_watchers.then(|| prompt.text.clone());
@@ -149,7 +149,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(agent_id)
-            .is_none_or(|agent| agent.terminating)
+            .is_none_or(|agent| agent.dispatch.terminating)
         {
             return Err(HarnessError::Participant(format!(
                 "agent `{agent_id}` is terminating"
@@ -185,17 +185,17 @@ impl Harness {
                 .agents
                 .get(agent_id)
                 .and_then(|agent| {
-                    if agent.in_flight_prompt.is_none()
+                    if agent.dispatch.in_flight_prompt.is_none()
                         && let path_crate_agent::ActivationDispatchState::DispatchUncertain {
                             owner: path_crate_agent::InferenceCheckpointOwner::Inference,
                             agent_prompt_id,
                             ..
-                        } = &agent.activation_dispatch
+                        } = &agent.dispatch.activation_dispatch
                     {
                         Some((
-                            agent.agent_id.clone()?,
+                            agent.identity.agent_id.clone()?,
                             agent_prompt_id.clone(),
-                            agent.originator.clone(),
+                            agent.identity.originator.clone(),
                         ))
                     } else {
                         None
@@ -209,7 +209,7 @@ impl Harness {
                 .is_some()
         {
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(agent_id) {
-                agent.pending_prompts.push_back(prompt);
+                agent.dispatch.pending_prompts.push_back(prompt);
             }
             self.publish_for_agent(
                 agent_id,
@@ -226,19 +226,19 @@ impl Harness {
         if prompt.creates_inference_activation()
             && !prompt.is_internal()
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(agent_id)
-            && agent.in_flight_prompt.is_none()
+            && agent.dispatch.in_flight_prompt.is_none()
             && matches!(
-                agent.activation_dispatch,
+                agent.dispatch.activation_dispatch,
                 crate::agent::ActivationDispatchState::DispatchUncertain {
                     owner: crate::agent::InferenceCheckpointOwner::Inference,
                     ..
                 }
             )
         {
-            agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
+            agent.dispatch.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
         }
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(agent_id) {
-            agent.lifecycle_notification_only_turn = false;
+            agent.turn.lifecycle_notification_only_turn = false;
         }
         if !prompt.is_internal() {
             self.reset_loop_guard_for_progress(agent_id);
@@ -299,7 +299,7 @@ impl Harness {
                 .values()
                 .any(|agent| {
                     matches!(
-                        agent.output_length_continuation,
+                        agent.turn.output_length_continuation,
                         path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
                     )
                 });
@@ -318,7 +318,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&agent_id)
-                .map(|c| c.session_id.clone())
+                .map(|c| c.identity.session_id.clone())
                 .expect("runnable agent exists");
 
             if !self.session_initialized(&session_id) {
@@ -336,6 +336,7 @@ impl Harness {
                 .get(&agent_id)
                 .is_some_and(|agent| {
                     agent
+                        .dispatch
                         .pending_prompts
                         .iter()
                         .find(|prompt| !prompt.is_passive_background_completion())
@@ -348,7 +349,7 @@ impl Harness {
                     .agents
                     .get(&agent_id)
                     .is_some_and(|agent| {
-                        agent.pending_replay_activation
+                        agent.dispatch.pending_replay_activation
                             || self.has_ready_message_wake_on_selected_branch(&agent_id)
                     });
             if has_durable_activation {
@@ -358,13 +359,13 @@ impl Harness {
                     .agent_registry
                     .agents
                     .get(&agent_id)
-                    .is_some_and(|agent| agent.pending_replay_activation)
+                    .is_some_and(|agent| agent.dispatch.pending_replay_activation)
                 {
                     let restore_prompts =
                         self.take_pending_restore_prompts_for_user_prompt(&agent_id);
                     if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&agent_id)
                     {
-                        agent.pending_prompts.extend(restore_prompts);
+                        agent.dispatch.pending_prompts.extend(restore_prompts);
                     }
                     self.fold_pending_prompts_as_steered(&agent_id);
                 }
@@ -375,7 +376,7 @@ impl Harness {
                     .get(&agent_id)
                     .is_some_and(|agent| {
                         matches!(
-                            agent.output_length_continuation,
+                            agent.turn.output_length_continuation,
                             path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
                         )
                     });
@@ -392,7 +393,7 @@ impl Harness {
                     self.selected_message_wake_activation_class(&agent_id)
                     && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&agent_id)
                 {
-                    agent.lifecycle_notification_only_turn = activation_class
+                    agent.turn.lifecycle_notification_only_turn = activation_class
                         == path_crate_agent::AgentMessageActivationClass::IsolatedWatchNotification;
                 }
                 let captured_activation_cut = self
@@ -401,8 +402,9 @@ impl Harness {
                     .agents
                     .get(&agent_id)
                     .and_then(|agent| {
-                        let durable_agent_id = agent.agent_id.as_deref()?;
+                        let durable_agent_id = agent.identity.agent_id.as_deref()?;
                         agent
+                            .identity
                             .head
                             .and_then(|head| {
                                 self.session_runtime
@@ -488,7 +490,7 @@ impl Harness {
                 // Reset the agent so it doesn't wedge as
                 // AgentThinking with no in-flight prompt.
                 if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&agent_id) {
-                    conv.in_flight_prompt = None;
+                    conv.dispatch.in_flight_prompt = None;
                 }
                 self.set_agent_turn_state(&agent_id, AgentTurnState::Idle);
             }
@@ -519,7 +521,7 @@ impl Harness {
         );
         for (cid, occurrences) in pending {
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                agent.pending_replay_activation = false;
+                agent.dispatch.pending_replay_activation = false;
             }
             for occurrence in occurrences {
                 self.enqueue_committed_activation_occurrence(
@@ -547,10 +549,11 @@ impl Harness {
                     .get(*agent_id)
                     .is_some_and(|agent| {
                         agent
+                            .dispatch
                             .pending_prompts
                             .iter()
                             .any(|prompt| !prompt.is_passive_background_completion())
-                            || agent.pending_replay_activation
+                            || agent.dispatch.pending_replay_activation
                             || self.has_ready_message_wake_on_selected_branch(agent_id)
                     })
             })
@@ -564,6 +567,7 @@ impl Harness {
                 .agents
                 .get_mut(&agent_id)
                 .expect("collected runnable agent must remain loaded")
+                .dispatch
                 .pending_prompts
                 .drain(..)
                 .collect::<Vec<_>>();
@@ -575,6 +579,7 @@ impl Harness {
                 .agents
                 .get_mut(&agent_id)
                 .expect("collected runnable agent must remain loaded")
+                .dispatch
                 .pending_prompts
                 .extend(passive);
 
@@ -602,7 +607,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&agent_id)
-                .is_some_and(|agent| agent.pending_replay_activation)
+                .is_some_and(|agent| agent.dispatch.pending_replay_activation)
                 || self.has_ready_message_wake_on_selected_branch(&agent_id);
             if rejects_message_activation {
                 let through = self
@@ -610,7 +615,7 @@ impl Harness {
                     .agent_registry
                     .agents
                     .get(&agent_id)
-                    .and_then(|agent| agent.head)
+                    .and_then(|agent| agent.identity.head)
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
                 self.acknowledge_message_wakes_through(&agent_id, through);
                 self.emit_harness_failure(NO_PROVIDER_MODELS_MESSAGE);
@@ -626,18 +631,20 @@ impl Harness {
             .iter()
             .filter(|(agent_id, conv)| {
                 (conv
+                    .dispatch
                     .pending_prompts
                     .iter()
                     .any(|prompt| !prompt.is_passive_background_completion())
                     || self.has_ready_message_wake_on_selected_branch(agent_id)
-                    || conv.pending_replay_activation)
-                    && matches!(conv.turn_state, AgentTurnState::Idle)
-                    && !conv.terminating
+                    || conv.dispatch.pending_replay_activation)
+                    && matches!(conv.turn.turn_state, AgentTurnState::Idle)
+                    && !conv.dispatch.terminating
                     && matches!(
-                        conv.activation_dispatch,
+                        conv.dispatch.activation_dispatch,
                         crate::agent::ActivationDispatchState::None
                     )
                     && (conv
+                        .dispatch
                         .pending_prompts
                         .iter()
                         .find(|prompt| !prompt.is_passive_background_completion())
@@ -651,7 +658,7 @@ impl Harness {
             .iter()
             .find(|(_, agent)| {
                 matches!(
-                    agent.output_length_continuation,
+                    agent.turn.output_length_continuation,
                     path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
                 )
             })
@@ -662,10 +669,11 @@ impl Harness {
     fn pop_next_runnable_prompt(&mut self, agent_id: &AgentId) -> Option<PendingPrompt> {
         let conv = self.agent_runtime.agent_registry.agents.get_mut(agent_id)?;
         let index = conv
+            .dispatch
             .pending_prompts
             .iter()
             .position(|prompt| !prompt.is_passive_background_completion())?;
-        conv.pending_prompts.remove(index)
+        conv.dispatch.pending_prompts.remove(index)
     }
 
     /// Project one accepted durable-agent activation into its session's
@@ -683,9 +691,10 @@ impl Harness {
             .get(agent_id)
             .and_then(|agent| {
                 agent
+                    .identity
                     .persistence
                     .is_durable()
-                    .then(|| agent.session_id.clone())
+                    .then(|| agent.identity.session_id.clone())
             })
         else {
             return;
@@ -729,13 +738,13 @@ impl Harness {
         }
         match self.agent_runtime.agent_registry.agents.get(agent_id) {
             Some(conv) => {
-                conv.terminating
-                    || conv.in_flight_prompt.is_some()
+                conv.dispatch.terminating
+                    || conv.dispatch.in_flight_prompt.is_some()
                     || !matches!(
-                        conv.activation_dispatch,
+                        conv.dispatch.activation_dispatch,
                         crate::agent::ActivationDispatchState::None
                     )
-                    || !matches!(conv.turn_state, AgentTurnState::Idle)
+                    || !matches!(conv.turn.turn_state, AgentTurnState::Idle)
                     || self.has_deferred_prompt_dispatch_for(agent_id)
                     || self.agent_has_open_foreground_tool_round(agent_id)
             }

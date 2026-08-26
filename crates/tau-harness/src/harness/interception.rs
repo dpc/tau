@@ -1280,7 +1280,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(cid)
-                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent| agent.identity.agent_id.as_deref())
                 .map(crate::parse_agent_id)
         });
         self.commit_event(
@@ -1498,7 +1498,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .map(|agent| agent.activation_dispatch.clone());
+            .map(|agent| agent.dispatch.activation_dispatch.clone());
         if matches!(
             state,
             Some(crate::agent::ActivationDispatchState::Running { .. })
@@ -1519,7 +1519,7 @@ impl Harness {
             .get(cid)
             .is_some_and(|agent| {
                 matches!(
-                    agent.output_length_continuation,
+                    agent.turn.output_length_continuation,
                     path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
                 )
             });
@@ -1576,7 +1576,7 @@ impl Harness {
             .get(&cid)
             .is_some_and(|agent| {
                 matches!(
-                    agent.output_length_continuation,
+                    agent.turn.output_length_continuation,
                     crate::agent::OutputLengthContinuationState::Planned(_)
                         | crate::agent::OutputLengthContinuationState::OwnerReady(_)
                 )
@@ -1616,18 +1616,18 @@ impl Harness {
                 .agents
                 .get(cid)
                 .is_some_and(|agent| {
-                    !agent.terminating
+                    !agent.dispatch.terminating
                         && matches!(
-                            agent.outer_turn,
+                            agent.turn.outer_turn,
                             path_crate_agent::OuterTurnRuntimeState::None
                                 | path_crate_agent::OuterTurnRuntimeState::Active(_)
                         )
                         && matches!(
-                            agent.activation_dispatch,
+                            agent.dispatch.activation_dispatch,
                             crate::agent::ActivationDispatchState::None
                         )
                         && !matches!(
-                            agent.turn_state,
+                            agent.turn.turn_state,
                             crate::agent::AgentTurnState::ToolsRunning { .. }
                         )
                         && !self.agent_has_open_foreground_tool_round(cid)
@@ -1666,9 +1666,9 @@ impl Harness {
             .get(&deferred.cid)
             .is_some_and(|agent| {
                 (matches!(
-                    agent.activation_dispatch,
+                    agent.dispatch.activation_dispatch,
                     crate::agent::ActivationDispatchState::Running { .. }
-                ) && !agent.terminating
+                ) && !agent.dispatch.terminating
                     && self.agent_context_ready_for(&deferred.cid))
                     || self.agent_can_start_deferred_inference_dispatch(&deferred.cid)
             });
@@ -1688,6 +1688,7 @@ impl Harness {
             .get(cid)
             .map(|agent| {
                 agent
+                    .identity
                     .head
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
             })
@@ -1702,6 +1703,7 @@ impl Harness {
             return false;
         };
         let Some(tree) = agent
+            .identity
             .agent_id
             .as_deref()
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
@@ -1709,6 +1711,7 @@ impl Harness {
             return false;
         };
         let selected = agent
+            .identity
             .head
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
         tree.is_ancestor_head(owner, selected)
@@ -1753,7 +1756,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&cid)
-                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent| agent.identity.agent_id.as_deref())
                 .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
                 .and_then(|tree| {
                     tree.node_for_durable_event_seq(source_seq)
@@ -1811,7 +1814,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent| agent.identity.agent_id.as_deref())
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id));
         let Some(tree) = tree else {
             return;
@@ -1865,16 +1868,18 @@ impl Harness {
         cid: &AgentId,
     ) -> Option<tau_proto::AgentHead> {
         let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
-        let head = agent.head?;
+        let head = agent.identity.head?;
         let tree = self
             .session_runtime
             .agent_store
-            .agent(agent.agent_id.as_deref()?)?;
+            .agent(agent.identity.agent_id.as_deref()?)?;
         let provisional = tree
             .node(head)?
             .parent_id
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-        Some(self.closed_provider_prefix_for_agent(agent.agent_id.as_deref()?, provisional))
+        Some(
+            self.closed_provider_prefix_for_agent(agent.identity.agent_id.as_deref()?, provisional),
+        )
     }
 
     /// Entry point for any publish call. Defers if interception is
@@ -2375,7 +2380,7 @@ impl Harness {
                         .agent_registry
                         .agents
                         .get(&cid)
-                        .and_then(|agent| agent.agent_id.as_deref())
+                        .and_then(|agent| agent.identity.agent_id.as_deref())
                         .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
                         .and_then(|tree| {
                             tree.node_for_durable_event_seq(source_seq)

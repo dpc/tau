@@ -250,10 +250,12 @@ impl Harness {
                 .get(&cid)
                 .is_some_and(|agent| {
                     agent
+                        .dispatch
                         .pending_message_wakes
                         .iter()
                         .any(|wake| wake.node_id.is_none())
                         || agent
+                            .identity
                             .agent_id
                             .as_deref()
                             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
@@ -266,12 +268,12 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&cid)
-                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent| agent.identity.agent_id.as_deref())
                 .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
                 .and_then(|tree| tree.marked_inference_checkpoint(&prompt_id).cloned());
             if let Some(checkpoint) = checkpoint {
                 if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                    agent.activation_dispatch =
+                    agent.dispatch.activation_dispatch =
                         path_crate_agent::ActivationDispatchState::DispatchUncertain {
                             owner: path_crate_agent::InferenceCheckpointOwner::Inference,
                             agent_prompt_id: prompt_id.clone(),
@@ -280,7 +282,7 @@ impl Harness {
                             operation: checkpoint.operation,
                             activation_cut: checkpoint.activation_cut,
                         };
-                    agent.in_flight_prompt = None;
+                    agent.dispatch.in_flight_prompt = None;
                 }
                 if deferred_activation
                     && let Some((agent_id, originator)) = self
@@ -290,8 +292,8 @@ impl Harness {
                         .get(&cid)
                         .and_then(|agent| {
                             Some((
-                                crate::parse_agent_id(agent.agent_id.as_deref()?),
-                                agent.originator.clone(),
+                                crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
+                                agent.identity.originator.clone(),
                             ))
                         })
                 {
@@ -1222,7 +1224,7 @@ impl Harness {
         if owner
             .as_ref()
             .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
-            .is_some_and(|agent| agent.persistence.is_ephemeral())
+            .is_some_and(|agent| agent.identity.persistence.is_ephemeral())
         {
             self.tool_routing
                 .tool_runtime
@@ -1784,7 +1786,7 @@ impl Harness {
         let agent_id = crate::parse_agent_id(
             cid.as_ref()
                 .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
-                .and_then(|conv| conv.agent_id.clone())
+                .and_then(|conv| conv.identity.agent_id.clone())
                 .expect("agent has durable id"),
         );
         let event = Event::AgentPromptTerminated(AgentPromptTerminated {
@@ -1937,7 +1939,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.agent_id.as_ref())
+            .and_then(|agent| agent.identity.agent_id.as_ref())
             .map(|agent_id| tau_proto::AgentId::parse(agent_id.as_str()).expect("agent id"))
         else {
             return true;
@@ -1953,7 +1955,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.agent_id.as_ref())
+            .and_then(|agent| agent.identity.agent_id.as_ref())
             .map(|agent_id| tau_proto::AgentId::parse(agent_id.as_str()).expect("agent id"))
         else {
             return false;
@@ -1976,7 +1978,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent| agent.identity.agent_id.as_deref())
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
             .is_some_and(tau_core::AgentTree::has_open_foreground_tool_round)
     }

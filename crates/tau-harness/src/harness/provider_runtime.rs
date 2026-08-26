@@ -394,13 +394,16 @@ impl Harness {
             .agents
             .iter()
             .filter_map(|(cid, conv)| {
-                conv.context_usage_model.as_ref().map(|usage_model| {
-                    (
-                        cid.clone(),
-                        usage_model.clone(),
-                        self.model_for_agent_role(conv),
-                    )
-                })
+                conv.execution
+                    .context_usage_model
+                    .as_ref()
+                    .map(|usage_model| {
+                        (
+                            cid.clone(),
+                            usage_model.clone(),
+                            self.model_for_agent_role(conv),
+                        )
+                    })
             })
             .collect();
         for (cid, usage_model, current_model) in resolutions {
@@ -420,10 +423,11 @@ impl Harness {
             let context_window =
                 context_window_for_model(&self.provider_runtime.model_info, &usage_model);
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                conv.context_percent_used = match (context_window, conv.context_input_tokens) {
-                    (Some(window), Some(tokens)) => Some(context_percent_used(tokens, window)),
-                    _ => None,
-                };
+                conv.execution.context_percent_used =
+                    match (context_window, conv.execution.context_input_tokens) {
+                        (Some(window), Some(tokens)) => Some(context_percent_used(tokens, window)),
+                        _ => None,
+                    };
             }
         }
     }

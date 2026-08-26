@@ -509,7 +509,7 @@ fn descendant_cost_increment_publishes_loaded_creator_snapshots() {
             None,
             None,
         );
-        agent.agent_id = Some(agent_id.to_string());
+        agent.identity.agent_id = Some(agent_id.to_string());
         harness
             .agent_runtime
             .agent_registry
@@ -617,7 +617,7 @@ fn existing_agent_load_reseeds_creator_cost_topology() {
         None,
         None,
     );
-    child_runtime.agent_id = Some(child.to_string());
+    child_runtime.identity.agent_id = Some(child.to_string());
     harness
         .agent_runtime
         .agent_registry
@@ -665,7 +665,7 @@ fn sparse_cold_restore_attaches_pending_creator_subtree_once() {
             None,
             None,
         );
-        runtime.agent_id = Some(agent_id.to_string());
+        runtime.identity.agent_id = Some(agent_id.to_string());
         harness
             .agent_runtime
             .agent_registry
@@ -1089,6 +1089,7 @@ pub(super) fn seed_restored_compaction_checkpoint(
 ) {
     let agent_id = crate::parse_agent_id(
         h.agent_runtime.agent_registry.agents[cid]
+            .identity
             .agent_id
             .as_deref()
             .expect("durable agent"),
@@ -1156,6 +1157,7 @@ pub(super) fn seed_restored_compaction_checkpoint(
         .agents
         .get_mut(cid)
         .expect("runtime agent")
+        .identity
         .head = through.as_option();
     let checkpoint_prompt_id = h
         .stage_restored_compaction_recovery(cid, &recovery)
@@ -1515,6 +1517,7 @@ fn ui_command_response_is_requester_only_and_not_logged() {
         .agents
         .get_mut(&cid)
         .expect("loaded agent")
+        .dispatch
         .pending_cancel = Some(crate::agent::PendingCancel {
         requester_client_id: requesting_ui_id.clone(),
         reason: "cancelled by user".to_owned(),
@@ -1533,6 +1536,7 @@ fn ui_command_response_is_requester_only_and_not_logged() {
     assert!(notice.message.contains("already pending"));
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
             .pending_cancel
             .as_ref()
             .expect("original cancellation retained")
@@ -6762,9 +6766,9 @@ fn extension_emit_and_start_agent_request_are_deferred_in_order_until_ready() {
         ]
     );
     assert!(h.agent_runtime.agent_registry.agents.iter().any(|(cid, conv)| {
-        conv.agent_id.as_deref() == Some(cid.as_str())
+        conv.identity.agent_id.as_deref() == Some(cid.as_str())
             && matches!(
-                &conv.originator,
+                &conv.identity.originator,
                 tau_proto::PromptOriginator::Extension { query_id, .. } if query_id == "q-staged"
             )
     }));
@@ -7047,8 +7051,8 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
         .agent_registry
         .agents
         .values()
-        .find(|agent| agent.originator.is_user())
-        .and_then(|agent| agent.agent_id.as_deref())
+        .find(|agent| agent.identity.originator.is_user())
+        .and_then(|agent| agent.identity.agent_id.as_deref())
         .expect("durable user agent")
         .to_owned();
     let initialization_id = h.prompt_coordination.context_discovery.pending_agents
@@ -7138,7 +7142,7 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
         .agent_registry
         .agents
         .values()
-        .find_map(|agent| agent.agent_id.clone())
+        .find_map(|agent| agent.identity.agent_id.clone())
         .map(|agent_id| tau_proto::AgentId::parse(&agent_id).expect("agent id"))
         .expect("loaded agent");
     let initialization_id = h.prompt_coordination.context_discovery.pending_agents[&agent_id]
@@ -7348,6 +7352,7 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
         .agents
         .get_mut(&cid)
         .expect("agent")
+        .identity
         .model_override = Some(current);
     let (agent_id, transaction_id, checkpoint_prompt_id, through) =
         seed_restored_compaction_checkpoint(&mut h, &cid, &captured, "ct-staged-captured-final");
@@ -7939,7 +7944,7 @@ fn disconnected_tool_completes_pending_call() {
         .tool_turn
         .record_unqueued_in_flight(cid.clone(), call_id.clone(), ToolTurnCategories::default());
     if let Some(conv) = h.agent_runtime.agent_registry.agents.get_mut(&cid) {
-        conv.turn_state = AgentTurnState::ToolsRunning {
+        conv.turn.turn_state = AgentTurnState::ToolsRunning {
             remaining_calls: vec![call_id.clone()],
         };
     }
@@ -7958,6 +7963,7 @@ fn disconnected_tool_completes_pending_call() {
             .agents
             .get(&test_user_agent(&h))
             .expect("default conversation")
+            .turn
             .turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
@@ -8386,6 +8392,7 @@ fn provider_prompt_route_failure_clears_prompt_bookkeeping() {
         .agents
         .get_mut(&cid)
         .expect("agent")
+        .identity
         .model_override = Some(model);
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("route failure".to_owned()))
@@ -8423,9 +8430,9 @@ fn provider_prompt_route_failure_clears_prompt_bookkeeping() {
         .agents
         .get(&cid)
         .expect("agent still loaded");
-    assert_eq!(conv.in_flight_prompt, None);
-    assert_eq!(conv.last_prompt_id, None);
-    assert!(matches!(conv.turn_state, AgentTurnState::Idle));
+    assert_eq!(conv.dispatch.in_flight_prompt, None);
+    assert_eq!(conv.dispatch.last_prompt_id, None);
+    assert!(matches!(conv.turn.turn_state, AgentTurnState::Idle));
     assert_eq!(
         h.session_runtime
             .current_session_state
@@ -8507,6 +8514,7 @@ fn terminating_agent_rejects_late_shell_output() {
         .agents
         .get_mut(&cid)
         .expect("agent")
+        .dispatch
         .terminating = true;
 
     for target_agent_id in [Some(agent_id.clone()), None] {
@@ -9199,6 +9207,7 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
             .agents
             .get(&cid)
             .expect("conversation")
+            .turn
             .turn_state,
         AgentTurnState::Idle
     ));
@@ -9311,6 +9320,7 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
             .agents
             .get(&cid)
             .expect("conversation")
+            .turn
             .turn_state,
         AgentTurnState::Idle
     ));
@@ -10368,7 +10378,7 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
     let completed_before = h.tool_routing.tool_runtime.completed_tool_calls.clone();
     let (in_flight_before, total_before) = {
         let agent = &h.agent_runtime.agent_registry.agents[&cid];
-        (agent.tools_in_flight, agent.tools_total)
+        (agent.execution.tools_in_flight, agent.execution.tools_total)
     };
 
     h.handle_extension_event(
@@ -10412,11 +10422,15 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
         completed_before
     );
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid].tools_in_flight,
+        h.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_in_flight,
         in_flight_before
     );
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid].tools_total,
+        h.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .tools_total,
         total_before
     );
     assert!(!event_log_events(&h).iter().any(|event| {
@@ -10636,6 +10650,7 @@ fn disconnect_unregisters_tools_before_advancing_queued_prompt() {
         .agents
         .get_mut(&cid)
         .expect("agent")
+        .dispatch
         .pending_prompts
         .push_back(PendingPrompt::user("run".to_owned()));
 
@@ -10687,6 +10702,7 @@ fn disconnect_session_init_completion_waits_until_tool_cleanup() {
         .agents
         .get_mut(&cid)
         .expect("agent")
+        .dispatch
         .pending_prompts
         .push_back(PendingPrompt::user("run".to_owned()));
 
@@ -10722,12 +10738,12 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        conv.originator = tau_proto::PromptOriginator::Extension {
+        conv.identity.originator = tau_proto::PromptOriginator::Extension {
             name: crate::test_extension_name("query-ext"),
             query_id: "query-1".into(),
         };
-        conv.source_connection = Some(crate::test_connection_id(HARNESS_CONNECTION_ID));
-        conv.parent_tool_call_id = None;
+        conv.identity.source_connection = Some(crate::test_connection_id(HARNESS_CONNECTION_ID));
+        conv.identity.parent_tool_call_id = None;
     }
     seed_agent_thinking(&mut h, &cid, "sp-query");
     h.prompt_coordination
@@ -10817,12 +10833,12 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        conv.originator = tau_proto::PromptOriginator::Extension {
+        conv.identity.originator = tau_proto::PromptOriginator::Extension {
             name: crate::test_extension_name("query-ext"),
             query_id: "query-2".into(),
         };
-        conv.source_connection = Some(crate::test_connection_id(HARNESS_CONNECTION_ID));
-        conv.parent_tool_call_id = None;
+        conv.identity.source_connection = Some(crate::test_connection_id(HARNESS_CONNECTION_ID));
+        conv.identity.parent_tool_call_id = None;
     }
     seed_agent_thinking(&mut h, &cid, "sp-query-pending");
     h.prompt_coordination
@@ -11040,7 +11056,7 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
     );
     assert!(h.agent_runtime.agent_registry.agents.values().any(|agent| {
         matches!(
-            agent.output_length_continuation,
+            agent.turn.output_length_continuation,
             crate::agent::OutputLengthContinuationState::Planned(_)
         )
     }));
@@ -11066,13 +11082,16 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
             .agent_registry
             .agents
             .values()
-            .any(|agent| agent.pending_cancel.is_some()),
+            .any(|agent| agent.dispatch.pending_cancel.is_some()),
         "states: {:?}",
         h.agent_runtime
             .agent_registry
             .agents
             .values()
-            .map(|agent| (&agent.output_length_continuation, &agent.turn_state))
+            .map(|agent| (
+                &agent.turn.output_length_continuation,
+                &agent.turn.turn_state
+            ))
             .collect::<Vec<_>>()
     );
     let journal_path = td
@@ -11255,7 +11274,7 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
             .agent_registry
             .agents
             .values()
-            .all(|agent| agent.pending_cancel.is_none()),
+            .all(|agent| agent.dispatch.pending_cancel.is_none()),
         "committed cancellation terminal must release runtime cancellation"
     );
     h.shutdown().expect("shutdown");
@@ -11327,6 +11346,7 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
         .agents
         .get_mut(&cid)
         .expect("source agent")
+        .identity
         .head = Some(sibling);
     h.publish_for_agent(
         &cid,
@@ -11540,23 +11560,26 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
         0
     );
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid].head,
+        h.agent_runtime.agent_registry.agents[&cid].identity.head,
         Some(sibling)
     );
     assert!(matches!(
-        h.agent_runtime.agent_registry.agents[&cid].output_length_continuation,
+        h.agent_runtime.agent_registry.agents[&cid]
+            .turn
+            .output_length_continuation,
         crate::agent::OutputLengthContinuationState::None
     ));
     assert!(
         matches!(
-            h.agent_runtime.agent_registry.agents[&cid].turn_state,
+            h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
             AgentTurnState::Idle
         ),
         "state: {:?}",
-        h.agent_runtime.agent_registry.agents[&cid].turn_state
+        h.agent_runtime.agent_registry.agents[&cid].turn.turn_state
     );
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
             .pending_cancel
             .is_none()
     );
@@ -11717,6 +11740,7 @@ fn output_length_dormant_repair_resumes_each_cold_cut() {
                 .agents
                 .get_mut(&cid)
                 .expect("source agent")
+                .identity
                 .head = Some(sibling);
             h.publish_for_agent(
                 &cid,
@@ -11875,7 +11899,9 @@ fn output_length_dormant_repair_resumes_each_cold_cut() {
             .get(source_agent_id.as_str())
             .expect("restored route");
         assert_eq!(
-            restored.agent_runtime.agent_registry.agents[restored_cid].head,
+            restored.agent_runtime.agent_registry.agents[restored_cid]
+                .identity
+                .head,
             Some(selected_sibling)
         );
         assert!(!records.iter().any(|record| matches!(
@@ -11947,6 +11973,7 @@ fn output_length_post_start_branch_move_waits_for_real_terminal() {
         .agents
         .get_mut(&cid)
         .expect("source agent")
+        .identity
         .head = Some(sibling);
     h.publish_for_agent(
         &cid,
@@ -11955,7 +11982,9 @@ fn output_length_post_start_branch_move_waits_for_real_terminal() {
             head: tau_proto::AgentHead::Node(sibling),
         }),
     );
-    let sibling_usage_before = h.agent_runtime.agent_registry.agents[&cid].context_input_tokens;
+    let sibling_usage_before = h.agent_runtime.agent_registry.agents[&cid]
+        .execution
+        .context_input_tokens;
     let _finish_interceptor = connect_test_tool(&mut h, "post-start-finish-interceptor");
     h.handle_extension_event(
         "post-start-finish-interceptor",
@@ -11988,7 +12017,9 @@ fn output_length_post_start_branch_move_waits_for_real_terminal() {
         Some(Event::AgentOuterTurnFinished(_))
     ));
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid].context_input_tokens,
+        h.agent_runtime.agent_registry.agents[&cid]
+            .execution
+            .context_input_tokens,
         sibling_usage_before
     );
 
@@ -12021,7 +12052,7 @@ fn output_length_post_start_branch_move_waits_for_real_terminal() {
                 )
     )));
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid].head,
+        h.agent_runtime.agent_registry.agents[&cid].identity.head,
         Some(sibling)
     );
     assert!(
@@ -12042,7 +12073,9 @@ fn output_length_post_start_branch_move_waits_for_real_terminal() {
         .cloned()
         .expect("restored route");
     assert_eq!(
-        restored.agent_runtime.agent_registry.agents[&restored_cid].context_input_tokens,
+        restored.agent_runtime.agent_registry.agents[&restored_cid]
+            .execution
+            .context_input_tokens,
         sibling_usage_before
     );
     assert!(
@@ -12363,6 +12396,7 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
         .agent_id_for_prompt(&first_successor.agent_prompt_id)
         .expect("runtime agent");
     let spent_head = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
         .head
         .expect("pre-action selected head");
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -12405,10 +12439,13 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
         Some("length-rearm-tool")
     );
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid].output_length_continuation,
+        h.agent_runtime.agent_registry.agents[&cid]
+            .turn
+            .output_length_continuation,
         OutputLengthContinuationState::None
     );
     let rearmed_head = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
         .head
         .expect("action response head");
     h.agent_runtime
@@ -12416,6 +12453,7 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
         .agents
         .get_mut(&cid)
         .expect("runtime agent")
+        .identity
         .head = Some(spent_head);
     h.publish_for_agent(
         &cid,
@@ -12425,7 +12463,7 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
         }),
     );
     assert!(matches!(
-        &h.agent_runtime.agent_registry.agents[&cid].output_length_continuation,
+        &h.agent_runtime.agent_registry.agents[&cid].turn.output_length_continuation,
         OutputLengthContinuationState::Spent { outer_turn_id }
             if *outer_turn_id == tau_proto::AgentOuterTurnId::for_prompt(&source.agent_prompt_id)
     ));
@@ -12434,6 +12472,7 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
         .agents
         .get_mut(&cid)
         .expect("runtime agent")
+        .identity
         .head = Some(rearmed_head);
     h.publish_for_agent(
         &cid,
@@ -12443,7 +12482,9 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
         }),
     );
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid].output_length_continuation,
+        h.agent_runtime.agent_registry.agents[&cid]
+            .turn
+            .output_length_continuation,
         OutputLengthContinuationState::None
     );
 
@@ -12606,10 +12647,13 @@ fn output_length_attempt_four_restores_late_watcher_terminal_incomplete() {
         .agents
         .get_mut(&live_watcher_cid)
         .expect("live watcher")
+        .turn
         .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("live-late-watcher"),
     };
-    let turn_generation = h.agent_runtime.agent_registry.agents[&source_cid].turn_generation;
+    let turn_generation = h.agent_runtime.agent_registry.agents[&source_cid]
+        .turn
+        .turn_generation;
     h.agent_runtime.agent_watch.provider_status.insert(
         public_id.to_string(),
         tau_proto::AgentWatchProviderStatusNotification {
@@ -12675,6 +12719,7 @@ fn output_length_attempt_four_restores_late_watcher_terminal_incomplete() {
     );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&source_cid]
+            .turn
             .work_status
             .phase(),
         tau_proto::AgentWorkStatusPhase::Unknown
@@ -12834,7 +12879,9 @@ fn output_length_reactive_compaction_terminalizes_exact_descendant() {
         tau_proto::AgentWatchProviderStatusNotification {
             session_id: test_session_id("s1"),
             subscription_id: String::new(),
-            turn_generation: h.agent_runtime.agent_registry.agents[&cid].turn_generation,
+            turn_generation: h.agent_runtime.agent_registry.agents[&cid]
+                .turn
+                .turn_generation,
             agent_prompt_id: successor.agent_prompt_id.clone(),
             state: tau_proto::AgentWatchProviderState::Retrying {
                 category: tau_proto::AgentWatchProviderCategory::Transport,
@@ -13104,12 +13151,16 @@ fn output_length_reactive_post_compaction_checkpoint_cut_is_cancellable() {
         .cloned()
         .expect("restored route");
     assert!(matches!(
-        restored.agent_runtime.agent_registry.agents[&cid].activation_dispatch,
+        restored.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .activation_dispatch,
         crate::agent::ActivationDispatchState::AwaitingCheckpoint { .. }
             | crate::agent::ActivationDispatchState::DispatchUncertain { .. }
     ));
     assert!(matches!(
-        restored.agent_runtime.agent_registry.agents[&cid].output_length_continuation,
+        restored.agent_runtime.agent_registry.agents[&cid]
+            .turn
+            .output_length_continuation,
         crate::agent::OutputLengthContinuationState::Active(_)
     ));
     restored.handle_cancel_prompt(
@@ -13262,7 +13313,7 @@ fn output_length_reactive_rejection_cancelled_before_commit_never_dispatches() {
             .agent_registry
             .agents
             .values()
-            .all(|agent| agent.pending_cancel.is_none())
+            .all(|agent| agent.dispatch.pending_cancel.is_none())
     );
     assert!(!event_log_events(&h).iter().any(|event| matches!(
         event,
@@ -13332,6 +13383,7 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
         .agents
         .get_mut(&cid)
         .expect("source agent")
+        .identity
         .head = Some(sibling);
     h.publish_for_agent(
         &cid,
@@ -13348,7 +13400,7 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
     )
     .expect("commit off-selected rejection");
     assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid].head,
+        h.agent_runtime.agent_registry.agents[&cid].identity.head,
         Some(sibling)
     );
     assert_eq!(
@@ -13455,6 +13507,7 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
         .agents
         .get_mut(&cid)
         .expect("source agent")
+        .identity
         .head = Some(sibling);
     h.handle_extension_event(
         "staged-response",
@@ -13533,6 +13586,7 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
     )));
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
             .pending_cancel
             .is_none()
     );
@@ -13598,10 +13652,10 @@ fn output_length_finish_append_failure_retries_before_new_work() {
         .agent_registry
         .agents
         .values()
-        .find_map(|agent| match &agent.outer_turn {
+        .find_map(|agent| match &agent.turn.outer_turn {
             OuterTurnRuntimeState::FinishRetry(outer_turn_id)
                 if matches!(
-                    agent.output_length_continuation,
+                    agent.turn.output_length_continuation,
                     OutputLengthContinuationState::Spent { .. }
                 ) =>
             {
@@ -13638,7 +13692,7 @@ fn output_length_finish_append_failure_retries_before_new_work() {
     assert!(
         h.agent_runtime.agent_registry.agents.values().all(|agent| {
             !matches!(
-                agent.outer_turn,
+                agent.turn.outer_turn,
                 crate::agent::OuterTurnRuntimeState::FinishInFlight(_)
                     | crate::agent::OuterTurnRuntimeState::FinishRetry(_)
             )
@@ -13648,7 +13702,10 @@ fn output_length_finish_append_failure_retries_before_new_work() {
             .agent_registry
             .agents
             .values()
-            .map(|agent| (&agent.outer_turn, &agent.output_length_continuation,))
+            .map(|agent| (
+                &agent.turn.outer_turn,
+                &agent.turn.output_length_continuation,
+            ))
             .collect::<Vec<_>>(),
         h.runtime_io.publication.pending_intercept.is_some()
     );
@@ -13909,10 +13966,11 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
             .agent_registry
             .agents
             .values()
-            .all(|agent| agent.pending_cancel.is_none())
+            .all(|agent| agent.dispatch.pending_cancel.is_none())
     );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&source_cid]
+            .turn
             .work_status
             .phase(),
         tau_proto::AgentWorkStatusPhase::Unknown
@@ -14020,10 +14078,11 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
             .agent_registry
             .agents
             .values()
-            .all(|agent| agent.pending_cancel.is_none())
+            .all(|agent| agent.dispatch.pending_cancel.is_none())
     );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&source_cid]
+            .turn
             .work_status
             .phase(),
         tau_proto::AgentWorkStatusPhase::Unknown
@@ -14114,11 +14173,16 @@ fn output_length_real_terminal_race_cancels_with_exact_accounting() {
     );
     assert!(
         h.agent_runtime.agent_registry.agents[&source_cid]
+            .dispatch
             .pending_prompts
             .is_empty()
-            && !h.agent_runtime.agent_registry.agents[&source_cid].pending_replay_activation,
+            && !h.agent_runtime.agent_registry.agents[&source_cid]
+                .dispatch
+                .pending_replay_activation,
         "cancellation must consume queued successor activations: {:?}",
-        h.agent_runtime.agent_registry.agents[&source_cid].pending_prompts
+        h.agent_runtime.agent_registry.agents[&source_cid]
+            .dispatch
+            .pending_prompts
     );
     assert_eq!(
         event_log_events(&h)
@@ -14179,12 +14243,14 @@ fn output_length_real_terminal_race_cancels_with_exact_accounting() {
     ));
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&source_cid]
+            .turn
             .work_status
             .phase(),
         tau_proto::AgentWorkStatusPhase::Unknown
     );
     assert!(
         h.agent_runtime.agent_registry.agents[&source_cid]
+            .dispatch
             .pending_prompts
             .iter()
             .all(|prompt| !prompt.text.contains("status"))
@@ -14383,7 +14449,7 @@ fn output_length_append_rejected_terminal_cancellation_repairs_once() {
             .agent_registry
             .agents
             .values()
-            .all(|agent| agent.pending_cancel.is_none())
+            .all(|agent| agent.dispatch.pending_cancel.is_none())
     );
     h.shutdown().expect("shutdown");
 }
@@ -14596,6 +14662,7 @@ fn reasoning_only_length_rejects_other_adapters_and_side_conversations() {
                 .agents
                 .get_mut(&cid)
                 .expect("source agent")
+                .identity
                 .originator = originator.clone();
         }
         h.handle_provider_response_finished(ProviderResponseFinished {
@@ -14875,6 +14942,7 @@ fn output_length_eligibility_matrix_is_exact() {
                 .agents
                 .get_mut(&cid)
                 .expect("source agent")
+                .identity
                 .originator = case.originator.clone();
         }
         h.handle_provider_response_finished(ProviderResponseFinished {

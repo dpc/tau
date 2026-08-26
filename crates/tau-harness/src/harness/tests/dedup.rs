@@ -172,6 +172,7 @@ fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_
     )));
 
     let agent_id = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
         .agent_id
         .as_deref()
         .expect("durable agent id");
@@ -312,7 +313,7 @@ fn run_tool_result(
         .agent_registry
         .agents
         .get(cid)
-        .and_then(|conv| conv.agent_id.as_deref())
+        .and_then(|conv| conv.identity.agent_id.as_deref())
         .expect("conversation agent id");
     let tree = h
         .session_runtime
@@ -392,7 +393,7 @@ fn run_tool_error(
         .agent_registry
         .agents
         .get(cid)
-        .and_then(|conv| conv.agent_id.as_deref())
+        .and_then(|conv| conv.identity.agent_id.as_deref())
         .expect("conversation agent id");
     let tree = h
         .session_runtime
@@ -553,6 +554,7 @@ fn pointer_entries_are_not_themselves_dedup_anchors() {
         .agents
         .get_mut(&cid)
         .expect("default conv")
+        .execution
         .result_dedup = path_crate_dedup::ResultDedupMap::new();
 
     let third = run_tool_result(&mut h, "s1", &cid, "call_third", "read", big.clone());
@@ -678,6 +680,7 @@ fn dedup_map_rebuilds_on_session_restore() {
             .agents
             .get(&cid)
             .expect("default conv")
+            .identity
             .head
             .is_some(),
         "resumed default conversation must have a non-empty branch head",
@@ -725,6 +728,7 @@ fn new_session_reset_does_not_dedup_against_previous_branch() {
             .agents
             .get(&cid)
             .expect("default conv")
+            .identity
             .head,
         None,
         "a :session new reset must start from a fresh branch head",

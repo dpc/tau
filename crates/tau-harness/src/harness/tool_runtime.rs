@@ -622,6 +622,7 @@ impl Harness {
         let activation = tau_proto::ObservationId::random();
         let queued = if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             if conv
+                .dispatch
                 .pending_prompts
                 .iter()
                 .any(|pending| pending.text == prompt)
@@ -631,7 +632,7 @@ impl Harness {
             let mut prompt = make_prompt(prompt);
             let inference_activation = prompt.creates_inference_activation();
             prompt.activation_observation = inference_activation.then_some(activation);
-            conv.pending_prompts.push_back(prompt);
+            conv.dispatch.pending_prompts.push_back(prompt);
             inference_activation
         } else {
             false
@@ -677,7 +678,8 @@ impl Harness {
             .insert(call_id.clone());
         let prompt = background_completion_prompt(&call_id);
         for conv in self.agent_runtime.agent_registry.agents.values_mut() {
-            conv.pending_prompts
+            conv.dispatch
+                .pending_prompts
                 .retain(|pending| pending.text != prompt);
         }
     }
@@ -807,7 +809,7 @@ impl Harness {
         if let Some(cid) = owner.as_ref()
             && let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid)
         {
-            conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
+            conv.execution.tools_in_flight = conv.execution.tools_in_flight.saturating_sub(1);
         }
         if let Some(cid) = owner.as_ref() {
             self.emit_agent_stats_updated(cid);
@@ -821,8 +823,8 @@ impl Harness {
     /// completion.
     pub(crate) fn bump_tools_started_for(&mut self, cid: &AgentId) {
         if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            conv.tools_in_flight = conv.tools_in_flight.saturating_add(1);
-            conv.tools_total = conv.tools_total.saturating_add(1);
+            conv.execution.tools_in_flight = conv.execution.tools_in_flight.saturating_add(1);
+            conv.execution.tools_total = conv.execution.tools_total.saturating_add(1);
         }
         self.emit_agent_stats_updated(cid);
     }
@@ -843,10 +845,10 @@ impl Harness {
     pub(super) fn maybe_complete_agent_turn_for(&mut self, cid: &AgentId, completed_call_id: &str) {
         let should_send = if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid)
         {
-            if let AgentTurnState::ToolsRunning { remaining_calls } = &mut conv.turn_state {
+            if let AgentTurnState::ToolsRunning { remaining_calls } = &mut conv.turn.turn_state {
                 remaining_calls.retain(|id| id.as_str() != completed_call_id);
                 if remaining_calls.is_empty() {
-                    conv.turn_state = AgentTurnState::Idle;
+                    conv.turn.turn_state = AgentTurnState::Idle;
                     true
                 } else {
                     false
@@ -874,9 +876,10 @@ impl Harness {
                         .agents
                         .get(cid)
                         .is_some_and(|agent| {
-                            !agent.terminating
-                                && agent.agent_id.as_deref() == Some(pending.agent_id.as_str())
-                                && matches!(agent.turn_state, AgentTurnState::Idle)
+                            !agent.dispatch.terminating
+                                && agent.identity.agent_id.as_deref()
+                                    == Some(pending.agent_id.as_str())
+                                && matches!(agent.turn.turn_state, AgentTurnState::Idle)
                         });
                 if remains_valid {
                     self.handle_compact_request(
@@ -896,7 +899,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(cid)
-                .and_then(|agent| agent.agent_id.as_deref())
+                .and_then(|agent| agent.identity.agent_id.as_deref())
                 .and_then(|agent_id| {
                     self.prompt_coordination
                         .compaction_runtime
@@ -920,12 +923,13 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(cid)
-                .is_some_and(|conv| conv.loop_guard.stop_automatic_continuation())
+                .is_some_and(|conv| conv.execution.loop_guard.stop_automatic_continuation())
                 && let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid)
             {
-                conv.pending_prompts
+                conv.dispatch
+                    .pending_prompts
                     .retain(|prompt| !prompt.is_loop_guard());
-                if conv.pending_prompts.is_empty() && !has_ready_message_wake {
+                if conv.dispatch.pending_prompts.is_empty() && !has_ready_message_wake {
                     return;
                 }
             }
@@ -958,7 +962,9 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .is_some_and(|agent| matches!(agent.turn_state, AgentTurnState::ToolsRunning { .. }));
+            .is_some_and(|agent| {
+                matches!(agent.turn.turn_state, AgentTurnState::ToolsRunning { .. })
+            });
         let live_foreground_call =
             self.tool_routing
                 .tool_runtime
@@ -986,7 +992,7 @@ impl Harness {
             "repairing closed foreground tool round left in the runtime projection"
         );
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            agent.turn_state = AgentTurnState::ToolsRunning {
+            agent.turn.turn_state = AgentTurnState::ToolsRunning {
                 remaining_calls: vec![completed_call_id.clone()],
             };
         }
@@ -999,14 +1005,15 @@ impl Harness {
         let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
             return;
         };
-        if agent.lifecycle_notification_only_turn {
-            agent.work_status.clear_working_reminder();
+        if agent.turn.lifecycle_notification_only_turn {
+            agent.turn.work_status.clear_working_reminder();
             return;
         }
-        if !agent.work_status.take_working_reminder() {
+        if !agent.turn.work_status.take_working_reminder() {
             return;
         }
         agent
+            .dispatch
             .pending_prompts
             .push_back(PendingPrompt::internal(STATUS_REMINDER.to_owned()));
     }
@@ -1026,7 +1033,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(cid)
-                .and_then(|conv| conv.agent_id.clone())
+                .and_then(|conv| conv.identity.agent_id.clone())
                 .expect("agent has durable id");
             let notify_watchers = prompt.should_notify_watchers();
             let inference_activation = prompt.creates_inference_activation();
@@ -1108,7 +1115,7 @@ impl Harness {
             .agent_registry
             .agents
             .get_mut(cid)
-            .map(|c| c.pending_prompts.drain(..).collect())
+            .map(|c| c.dispatch.pending_prompts.drain(..).collect())
             .unwrap_or_default();
         // These markers request a turn only; their payload is already folded by
         // the canonical incoming fact.
@@ -1133,7 +1140,7 @@ impl Harness {
                 && let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid)
             {
                 for prompt in passive.into_iter().rev() {
-                    conv.pending_prompts.push_front(prompt);
+                    conv.dispatch.pending_prompts.push_front(prompt);
                 }
             }
             pending = active;
@@ -1239,7 +1246,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|conv| conv.agent_id.clone())
+            .and_then(|conv| conv.identity.agent_id.clone())
             .map(crate::parse_agent_id)
             .unwrap_or_else(|| cid.clone())
     }
@@ -1249,14 +1256,15 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .map(|conv| conv.originator.clone())
+            .map(|conv| conv.identity.originator.clone())
             .unwrap_or_default()
     }
 
     pub(super) fn reset_loop_guard_for_progress(&mut self, cid: &AgentId) {
         if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            conv.loop_guard.reset_for_progress();
-            conv.pending_prompts
+            conv.execution.loop_guard.reset_for_progress();
+            conv.dispatch
+                .pending_prompts
                 .retain(|prompt| !prompt.is_loop_guard());
         }
     }
@@ -1267,7 +1275,7 @@ impl Harness {
         signature: LoopTurnSignature,
     ) -> Option<LoopGuardTrigger> {
         let conv = self.agent_runtime.agent_registry.agents.get_mut(cid)?;
-        let guard = &mut conv.loop_guard;
+        let guard = &mut conv.execution.loop_guard;
         guard.push_recent(signature.clone(), LOOP_GUARD_RECENT_LIMIT);
 
         let trigger = match &signature {
@@ -1323,11 +1331,11 @@ impl Harness {
         let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
             return;
         };
-        if let Some(state) = conv.loop_guard.cycle_state(&cycle_key) {
+        if let Some(state) = conv.execution.loop_guard.cycle_state(&cycle_key) {
             match state {
                 LoopCycleState::BreakerPending => return,
                 LoopCycleState::BreakerDispatched => {
-                    conv.loop_guard.mark_cycle_blocked(&cycle_key);
+                    conv.execution.loop_guard.mark_cycle_blocked(&cycle_key);
                     self.emit_notice(
                         tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
                         tau_proto::NoticeLevel::Warning,
@@ -1342,12 +1350,13 @@ impl Harness {
             return;
         }
 
-        conv.loop_guard
+        conv.execution
+            .loop_guard
             .remember_cycle_pending(cycle_key, LOOP_GUARD_CYCLE_LIMIT);
         let activation = tau_proto::ObservationId::random();
         let mut prompt = PendingPrompt::loop_guard(loop_guard_pivot_prompt(&reason));
         prompt.activation_observation = Some(activation);
-        conv.pending_prompts.push_back(prompt);
+        conv.dispatch.pending_prompts.push_back(prompt);
         self.append_activation_queued(
             cid,
             activation,
@@ -1362,7 +1371,7 @@ impl Harness {
         let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
             return;
         };
-        conv.loop_guard.mark_pending_breakers_dispatched();
+        conv.execution.loop_guard.mark_pending_breakers_dispatched();
     }
 
     pub(super) fn remember_tool_call_loop_signature(
@@ -1381,7 +1390,7 @@ impl Harness {
                 LOOP_GUARD_TOOL_ARGUMENT_CHARS
             )
         );
-        conv.loop_guard.push_tool_call_signature(
+        conv.execution.loop_guard.push_tool_call_signature(
             call.id.clone(),
             signature,
             LOOP_GUARD_RECENT_LIMIT,
@@ -1397,6 +1406,7 @@ impl Harness {
             .agent_registry
             .agents
             .get_mut(cid)?
+            .execution
             .loop_guard
             .take_tool_call_signature(call_id)
     }
@@ -1421,7 +1431,8 @@ impl Harness {
             bounded_loop_text(&error.message, LOOP_GUARD_TOOL_ERROR_CHARS)
         );
         if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            conv.loop_guard
+            conv.execution
+                .loop_guard
                 .push_tool_failure(failure.clone(), LOOP_GUARD_RECENT_LIMIT);
         }
         if let Some(trigger) =
@@ -1639,13 +1650,13 @@ impl Harness {
                         .agent_registry
                         .agents
                         .get(cid)
-                        .is_some_and(|agent| !agent.lifecycle_notification_only_turn)
+                        .is_some_and(|agent| !agent.turn.lifecycle_notification_only_turn)
                     && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid)
                 {
                     if status_was_available {
-                        agent.work_status.record_substantive_tool_admission();
+                        agent.turn.work_status.record_substantive_tool_admission();
                     } else {
-                        agent.work_status.record_substantive_tool_progress();
+                        agent.turn.work_status.record_substantive_tool_progress();
                     }
                 }
                 let started = route.invoke;

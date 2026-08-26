@@ -61,7 +61,7 @@ impl Harness {
         let parent_ephemeral = parent_cid
             .as_ref()
             .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
-            .is_some_and(|agent| agent.persistence.is_ephemeral());
+            .is_some_and(|agent| agent.identity.persistence.is_ephemeral());
         let persistence = if req.ephemeral || parent_ephemeral {
             tau_core::AgentPersistenceMode::Ephemeral
         } else {
@@ -110,8 +110,8 @@ impl Harness {
             return Ok(true);
         }
         if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-            conv.next_ctx_id = prompt_ctx_id.clone();
-            conv.model_override = req.model_override;
+            conv.dispatch.next_ctx_id = prompt_ctx_id.clone();
+            conv.identity.model_override = req.model_override;
         }
         if let Some(text) = initial_prompt {
             self.admit_created_initial_prompt(
@@ -185,7 +185,7 @@ impl Harness {
         );
         if self.dispatch_blocked_for(cid) || !self.session_initialized(&session_id) {
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-                conv.pending_prompts.push_back(prompt.clone());
+                conv.dispatch.pending_prompts.push_back(prompt.clone());
             }
             self.publish_event(
                 None,
@@ -364,9 +364,9 @@ impl Harness {
             .get(correlation.agent_id.as_str())
             .cloned()
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
-            && agent.next_ctx_id.as_deref() == Some(correlation.ctx_id.as_str())
+            && agent.dispatch.next_ctx_id.as_deref() == Some(correlation.ctx_id.as_str())
         {
-            agent.next_ctx_id = None;
+            agent.dispatch.next_ctx_id = None;
         }
         self.publish_event(
             None,
@@ -394,6 +394,7 @@ impl Harness {
             .get_mut(cid)
             .map(|agent| {
                 agent
+                    .dispatch
                     .pending_prompts
                     .iter_mut()
                     .filter_map(|prompt| prompt.initial_prompt_correlation.take())

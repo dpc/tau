@@ -30,9 +30,9 @@ impl Harness {
             self.send_ui_error_response(client_id, "target user agent is missing");
             return;
         };
-        if agent.terminating
+        if agent.dispatch.terminating
             || !matches!(
-                agent.activation_dispatch,
+                agent.dispatch.activation_dispatch,
                 crate::agent::ActivationDispatchState::None
                     | crate::agent::ActivationDispatchState::Blocked { .. }
             )
@@ -47,15 +47,20 @@ impl Harness {
             self.send_ui_error_response(client_id, "selected model does not support compaction");
             return;
         }
-        let Some(agent_id) = agent.agent_id.as_deref().map(crate::parse_agent_id) else {
+        let Some(agent_id) = agent
+            .identity
+            .agent_id
+            .as_deref()
+            .map(crate::parse_agent_id)
+        else {
             self.send_ui_error_response(client_id, "nothing to compact yet");
             return;
         };
-        if matches!(agent.turn_state, AgentTurnState::Idle) {
+        if matches!(agent.turn.turn_state, AgentTurnState::Idle) {
             self.start_admitted_manual_compaction(&cid);
             return;
         }
-        let AgentTurnState::ToolsRunning { remaining_calls } = &agent.turn_state else {
+        let AgentTurnState::ToolsRunning { remaining_calls } = &agent.turn.turn_state else {
             self.send_ui_error_response(
                 client_id,
                 "cannot compact while a prompt or tool turn is in flight",
@@ -153,6 +158,7 @@ impl Harness {
             .get(cid)
             .expect("admitted manual compaction has a loaded target");
         let agent_id = conv
+            .identity
             .agent_id
             .clone()
             .expect("admitted manual compaction has a durable target");
@@ -164,10 +170,12 @@ impl Harness {
         });
         if let Some(model) = standalone_model {
             let blocked_recovery = conv
+                .dispatch
                 .activation_dispatch
                 .blocked_recovery()
                 .map(|(failed_id, cut, resume)| (failed_id.clone(), cut, resume));
             let current_head = conv
+                .identity
                 .head
                 .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
             let normalized_blocked_cut =
@@ -198,17 +206,20 @@ impl Harness {
                     )
                 },
             );
-            let transaction_id =
-                tau_proto::CompactionTransactionId::parse(format!("ct-{}", conv.next_prompt_index))
-                    .expect("generated compaction transaction id is valid");
+            let transaction_id = tau_proto::CompactionTransactionId::parse(format!(
+                "ct-{}",
+                conv.dispatch.next_prompt_index
+            ))
+            .expect("generated compaction transaction id is valid");
             let compact_prompt_id = tau_proto::AgentPromptId::parse(format!(
                 "ap-{agent_id}-{}",
-                conv.next_prompt_index
+                conv.dispatch.next_prompt_index
             ))
             .expect("known-safe AgentPromptId must be valid");
-            let originator = conv.originator.clone();
+            let originator = conv.identity.originator.clone();
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-                agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+                agent.dispatch.next_prompt_index =
+                    agent.dispatch.next_prompt_index.saturating_add(1);
             }
             self.publish_for_agent(
                 cid,
@@ -233,7 +244,7 @@ impl Harness {
             cid,
             Event::AgentCompactionTriggered(tau_proto::AgentCompactionTriggered {
                 agent_id: crate::parse_agent_id(&agent_id),
-                originator: conv.originator.clone(),
+                originator: conv.identity.originator.clone(),
                 resume_inference: false,
             }),
         );
@@ -306,7 +317,7 @@ impl Harness {
             return;
         };
         let self_request = target_cid == *caller_cid;
-        let target_public_id = target.agent_id.clone();
+        let target_public_id = target.identity.agent_id.clone();
         if self
             .prompt_coordination
             .compaction_runtime
@@ -325,25 +336,26 @@ impl Harness {
             return;
         }
         let target_head = target
+            .identity
             .head
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
         let dispatch_uncertain = matches!(
-            target.activation_dispatch,
+            target.dispatch.activation_dispatch,
             crate::agent::ActivationDispatchState::DispatchUncertain { .. }
         );
         let already_pending = matches!(
-            target.activation_dispatch,
+            target.dispatch.activation_dispatch,
             crate::agent::ActivationDispatchState::Running { .. }
                 | crate::agent::ActivationDispatchState::ContextRecoveryPending { .. }
                 | crate::agent::ActivationDispatchState::ContextRecoveryClaimPending { .. }
         );
-        let valid_state = !target.terminating
+        let valid_state = !target.dispatch.terminating
             && if self_request {
-                matches!(target.turn_state, AgentTurnState::ToolsRunning { .. })
+                matches!(target.turn.turn_state, AgentTurnState::ToolsRunning { .. })
             } else {
-                matches!(target.turn_state, AgentTurnState::Idle)
+                matches!(target.turn.turn_state, AgentTurnState::Idle)
                     && matches!(
-                        target.activation_dispatch,
+                        target.dispatch.activation_dispatch,
                         crate::agent::ActivationDispatchState::None
                             | crate::agent::ActivationDispatchState::Blocked { .. }
                     )
@@ -462,7 +474,7 @@ impl Harness {
             && !self_request
             && self.has_matching_blocked_recovery(
                 target_public_id.as_str(),
-                &target.activation_dispatch,
+                &target.dispatch.activation_dispatch,
                 target_head,
             );
         if repeated_generation && !may_bypass_repeat_guard {
@@ -483,7 +495,7 @@ impl Harness {
             .map_or(0, |tree| tree.manual_compaction_recoveries().len());
         let request_id = tau_proto::CompactionRequestId::parse(format!(
             "cr-{}-{request_ordinal}",
-            target.next_prompt_index
+            target.dispatch.next_prompt_index
         ))
         .expect("generated request id");
         let request = tau_proto::AgentManualCompactionRequested {
@@ -608,10 +620,12 @@ impl Harness {
             return false;
         }
         let blocked_recovery = target
+            .dispatch
             .activation_dispatch
             .blocked_recovery()
             .map(|(failed_id, cut, resume)| (failed_id.clone(), cut, resume));
         let current_head = target
+            .identity
             .head
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
         let normalized_blocked_cut =
@@ -670,8 +684,8 @@ impl Harness {
             },
         );
         let target_public_id = accepted.request.target_agent_id.clone();
-        let next_prompt_index = target.next_prompt_index;
-        let originator = target.originator.clone();
+        let next_prompt_index = target.dispatch.next_prompt_index;
+        let originator = target.identity.originator.clone();
         let transaction_id =
             tau_proto::CompactionTransactionId::parse(format!("ct-{next_prompt_index}"))
                 .expect("generated transaction id");
@@ -679,7 +693,7 @@ impl Harness {
             tau_proto::AgentPromptId::parse(format!("ap-{target_public_id}-{next_prompt_index}"))
                 .expect("known-safe AgentPromptId must be valid");
         if let Some(target) = self.agent_runtime.agent_registry.agents.get_mut(target_cid) {
-            target.next_prompt_index = target.next_prompt_index.saturating_add(1);
+            target.dispatch.next_prompt_index = target.dispatch.next_prompt_index.saturating_add(1);
         }
         self.prompt_coordination
             .compaction_runtime
@@ -778,7 +792,7 @@ impl Harness {
         let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
-        let continuation_model = match &conv.output_length_continuation {
+        let continuation_model = match &conv.turn.output_length_continuation {
             path_crate_agent::OutputLengthContinuationState::Planned(continuation) => {
                 Some(continuation.dispatch.model.clone())
             }
@@ -884,7 +898,7 @@ impl Harness {
                 .agents
                 .get(cid)
                 .map_or(tau_proto::AgentWorkStatusPhase::Working, |agent| {
-                    agent.work_status.phase()
+                    agent.turn.work_status.phase()
                 })
         } else {
             tau_proto::AgentWorkStatusPhase::Working
@@ -932,7 +946,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.agent_id.clone())
+            .and_then(|agent| agent.identity.agent_id.clone())
         else {
             return false;
         };
@@ -959,12 +973,17 @@ impl Harness {
         }
         let fitting = self.fitting_automatic_compaction_cut(&agent_id, selected, budget);
         let cut = fitting.unwrap_or(selected);
-        let Some((next, originator)) = self
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get(cid)
-            .map(|agent| (agent.next_prompt_index, agent.originator.clone()))
+        let Some((next, originator)) =
+            self.agent_runtime
+                .agent_registry
+                .agents
+                .get(cid)
+                .map(|agent| {
+                    (
+                        agent.dispatch.next_prompt_index,
+                        agent.identity.originator.clone(),
+                    )
+                })
         else {
             return false;
         };
@@ -973,7 +992,7 @@ impl Harness {
         let compact_prompt_id = tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{next}"))
             .expect("known-safe AgentPromptId must be valid");
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
         }
         if fitting.is_none() {
             let key = (crate::parse_agent_id(&agent_id), transaction_id.clone());
@@ -1082,7 +1101,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent| agent.identity.agent_id.as_deref())
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
             .and_then(tau_core::AgentTree::standalone_compaction_recovery);
         if let Some(tau_core::StandaloneCompactionRecovery::AwaitingAutomaticStart {
@@ -1120,6 +1139,7 @@ impl Harness {
         let conv = self.agent_runtime.agent_registry.agents.get(cid)?;
         let projected_tokens = projected_tokens?;
         if conv
+            .identity
             .agent_id
             .as_deref()
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
@@ -1135,8 +1155,8 @@ impl Harness {
             return None;
         }
         let logical_status = Self::finalizing_outer_turn_policy_status(
-            conv.terminal_status_was_available,
-            conv.work_status.phase(),
+            conv.turn.terminal_status_was_available,
+            conv.turn.work_status.phase(),
         );
         let matches = policies
             .iter()
@@ -1175,12 +1195,14 @@ impl Harness {
             threshold,
             "coalesced outer-turn-finished automatic compaction policies"
         );
-        let outer_turn_id = conv.outer_turn.owned_id().cloned()?;
-        let transaction_id =
-            tau_proto::CompactionTransactionId::parse(format!("ct-{}", conv.next_prompt_index))
-                .expect("generated compaction transaction id is valid");
+        let outer_turn_id = conv.turn.outer_turn.owned_id().cloned()?;
+        let transaction_id = tau_proto::CompactionTransactionId::parse(format!(
+            "ct-{}",
+            conv.dispatch.next_prompt_index
+        ))
+        .expect("generated compaction transaction id is valid");
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
         }
         Some(tau_proto::AutomaticCompactionDecision {
             transaction_id,
@@ -1219,13 +1241,14 @@ impl Harness {
         let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
-        if conv.pending_automatic_compaction_start.as_ref() == Some(&decision.transaction_id) {
+        if conv.turn.pending_automatic_compaction_start.as_ref() == Some(&decision.transaction_id) {
             return true;
         }
-        let Some(agent_id) = conv.agent_id.clone() else {
+        let Some(agent_id) = conv.identity.agent_id.clone() else {
             return false;
         };
         let selected = conv
+            .identity
             .head
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
         if self
@@ -1235,7 +1258,8 @@ impl Harness {
             .is_some_and(|tree| !tree.is_ancestor_head(cut, selected))
         {
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-                agent.pending_automatic_compaction_start = Some(decision.transaction_id.clone());
+                agent.turn.pending_automatic_compaction_start =
+                    Some(decision.transaction_id.clone());
             }
             self.publish_for_agent(
                 cid,
@@ -1261,14 +1285,16 @@ impl Harness {
             Some(budget) => self.fitting_automatic_compaction_cut(&agent_id, cut, budget),
         };
         let cut = fitting_cut.unwrap_or(cut);
-        let compact_prompt_id =
-            tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{}", conv.next_prompt_index))
-                .expect("known-safe AgentPromptId must be valid");
-        let originator = conv.originator.clone();
+        let compact_prompt_id = tau_proto::AgentPromptId::parse(format!(
+            "ap-{agent_id}-{}",
+            conv.dispatch.next_prompt_index
+        ))
+        .expect("known-safe AgentPromptId must be valid");
+        let originator = conv.identity.originator.clone();
         let resume_through = (selected != cut).then_some(selected);
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
-            agent.pending_automatic_compaction_start = Some(decision.transaction_id.clone());
+            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
+            agent.turn.pending_automatic_compaction_start = Some(decision.transaction_id.clone());
         }
         if fitting_cut.is_none() {
             let key = (
@@ -1341,14 +1367,14 @@ impl Harness {
         let role = self.config.available_roles.get(&role_name);
         let status_available =
             if point == path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished {
-                conv.terminal_status_was_available
+                conv.turn.terminal_status_was_available
             } else {
                 self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model))
                     .iter()
                     .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
             };
         let logical_status = if status_available {
-            conv.work_status.phase()
+            conv.turn.work_status.phase()
         } else if point == path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished {
             tau_proto::AgentWorkStatusPhase::Done
         } else {
@@ -1394,19 +1420,21 @@ impl Harness {
                 .min()
         });
         if !matches!(
-            conv.activation_dispatch,
+            conv.dispatch.activation_dispatch,
             crate::agent::ActivationDispatchState::None
         ) {
             return false;
         }
-        let Some(agent_id) = conv.agent_id.clone() else {
+        let Some(agent_id) = conv.identity.agent_id.clone() else {
             return false;
         };
         let active_tokens = self
             .session_runtime
             .agent_store
             .agent(&agent_id)
-            .map(|tree| crate::prompt::assemble_prompt_context_from(tree, conv.head).context)
+            .map(|tree| {
+                crate::prompt::assemble_prompt_context_from(tree, conv.identity.head).context
+            })
             .and_then(|context| serde_json::to_vec(&context).ok())
             .and_then(|encoded| u64::try_from(encoded.len()).ok());
         let projected_tokens = active_tokens.unwrap_or(u64::MAX);
@@ -1414,10 +1442,12 @@ impl Harness {
             return false;
         }
         let selected_head = conv
+            .identity
             .head
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-        let resume_through = (committed_activation || !conv.pending_message_wakes.is_empty())
-            .then_some(selected_head);
+        let resume_through = (committed_activation
+            || !conv.dispatch.pending_message_wakes.is_empty())
+        .then_some(selected_head);
         let selected_message_cut = self.selected_message_activation_cut(cid);
         let activation_cut = if activation_cut.is_some() || selected_message_cut.is_some() {
             let Some(cut) = self.earliest_activation_cut(cid, activation_cut) else {
@@ -1432,11 +1462,12 @@ impl Harness {
                 self.session_runtime
                     .agent_store
                     .agent(&agent_id)
-                    .and_then(|tree| conv.head.and_then(|head| tree.node(head)))
+                    .and_then(|tree| conv.identity.head.and_then(|head| tree.node(head)))
                     .and_then(|node| node.parent_id)
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
             } else {
-                conv.head
+                conv.identity
+                    .head
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
             }
         });
@@ -1447,13 +1478,17 @@ impl Harness {
         let resume_through = (selected_head != cut)
             .then_some(selected_head)
             .or(resume_through);
-        let originator = conv.originator.clone();
-        let transaction_id =
-            tau_proto::CompactionTransactionId::parse(format!("ct-{}", conv.next_prompt_index))
-                .expect("generated compaction transaction id is valid");
-        let compact_prompt_id =
-            tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{}", conv.next_prompt_index))
-                .expect("known-safe AgentPromptId must be valid");
+        let originator = conv.identity.originator.clone();
+        let transaction_id = tau_proto::CompactionTransactionId::parse(format!(
+            "ct-{}",
+            conv.dispatch.next_prompt_index
+        ))
+        .expect("generated compaction transaction id is valid");
+        let compact_prompt_id = tau_proto::AgentPromptId::parse(format!(
+            "ap-{agent_id}-{}",
+            conv.dispatch.next_prompt_index
+        ))
+        .expect("known-safe AgentPromptId must be valid");
         if fitting_cut.is_none() {
             let key = (crate::parse_agent_id(&agent_id), transaction_id.clone());
             self.prompt_coordination
@@ -1469,7 +1504,7 @@ impl Harness {
                 );
         }
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
         }
         let trigger = fitting_cut.map_or_else(
             || tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
@@ -1505,7 +1540,7 @@ impl Harness {
             .agent_registry
             .agents
             .values()
-            .filter_map(|agent| agent.agent_id.as_deref())
+            .filter_map(|agent| agent.identity.agent_id.as_deref())
             .filter_map(|agent_id| self.session_runtime.agent_store.agent(agent_id))
             .flat_map(tau_core::AgentTree::manual_compaction_recoveries)
             .filter_map(|recovery| match recovery {
@@ -1535,7 +1570,7 @@ impl Harness {
             .agents
             .iter()
             .filter_map(|(cid, agent)| {
-                let agent_id = agent.agent_id.as_deref()?;
+                let agent_id = agent.identity.agent_id.as_deref()?;
                 let tree = self.session_runtime.agent_store.agent(agent_id)?;
                 let typed_failure = tree.manual_compaction_recoveries().into_iter().any(
                     |recovery| match recovery {
@@ -1558,7 +1593,7 @@ impl Harness {
                 );
                 (typed_failure
                     && matches!(
-                        agent.activation_dispatch,
+                        agent.dispatch.activation_dispatch,
                         crate::agent::ActivationDispatchState::Blocked { .. }
                     ))
                 .then_some(cid.clone())
@@ -1566,7 +1601,8 @@ impl Harness {
             .collect::<Vec<_>>();
         for cid in releasable {
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
+                agent.dispatch.activation_dispatch =
+                    path_crate_agent::ActivationDispatchState::None;
             }
         }
     }
@@ -1594,23 +1630,26 @@ impl Harness {
             return None;
         };
         let conv = self.agent_runtime.agent_registry.agents.get_mut(cid)?;
-        let agent_id = conv.agent_id.as_deref()?;
-        let prompt_id =
-            tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{}", conv.next_prompt_index))
-                .expect("known-safe AgentPromptId must be valid");
-        conv.next_prompt_index = conv.next_prompt_index.saturating_add(1);
-        conv.activation_dispatch = path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
-            owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
-                id: transaction_id.clone(),
-            },
-            agent_prompt_id: prompt_id.clone(),
-            through: *through,
-            dispatch: crate::agent::InferenceDispatchOwnership {
-                model: model.clone(),
-                operation: tau_proto::PromptOperation::Inference,
-                activation_cut: *cut,
-            },
-        };
+        let agent_id = conv.identity.agent_id.as_deref()?;
+        let prompt_id = tau_proto::AgentPromptId::parse(format!(
+            "ap-{agent_id}-{}",
+            conv.dispatch.next_prompt_index
+        ))
+        .expect("known-safe AgentPromptId must be valid");
+        conv.dispatch.next_prompt_index = conv.dispatch.next_prompt_index.saturating_add(1);
+        conv.dispatch.activation_dispatch =
+            path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+                owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
+                    id: transaction_id.clone(),
+                },
+                agent_prompt_id: prompt_id.clone(),
+                through: *through,
+                dispatch: crate::agent::InferenceDispatchOwnership {
+                    model: model.clone(),
+                    operation: tau_proto::PromptOperation::Inference,
+                    activation_cut: *cut,
+                },
+            };
         Some(prompt_id)
     }
 
@@ -1733,6 +1772,7 @@ impl Harness {
                             .get_mut(&caller_cid)
                         {
                             agent
+                                .dispatch
                                 .pending_prompts
                                 .push_back(self_compaction_terminal_pending_prompt(
                                 tau_proto::SelfCompactionTerminal {
@@ -1797,6 +1837,7 @@ impl Harness {
                         .get_mut(&caller_cid)
                     {
                         agent
+                            .dispatch
                             .pending_prompts
                             .push_back(self_compaction_terminal_pending_prompt(terminal));
                     }
@@ -1860,7 +1901,7 @@ impl Harness {
                             .agents
                             .get_mut(&target_cid)
                         {
-                            agent.pending_prompts.push_back(
+                            agent.dispatch.pending_prompts.push_back(
                                 self_compaction_terminal_pending_prompt(
                                     tau_proto::SelfCompactionTerminal {
                                         request_id: request.request_id.clone(),
@@ -1908,7 +1949,7 @@ impl Harness {
                             .agents
                             .get_mut(&caller_cid)
                         {
-                            agent.pending_prompts.push_back(
+                            agent.dispatch.pending_prompts.push_back(
                                 self_compaction_terminal_pending_prompt(
                                     tau_proto::SelfCompactionTerminal {
                                         request_id: request.request_id.clone(),
@@ -1997,14 +2038,15 @@ impl Harness {
             .agents
             .get(target_cid)
             .and_then(|agent| {
-                let agent_id = agent.agent_id.clone()?;
+                let agent_id = agent.identity.agent_id.clone()?;
                 Some((
                     tau_proto::AgentPromptId::parse(format!(
                         "ap-{agent_id}-{}",
-                        agent.next_prompt_index
+                        agent.dispatch.next_prompt_index
                     ))
                     .expect("known-safe AgentPromptId must be valid"),
                     agent
+                        .identity
                         .head
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
                 ))
@@ -2013,8 +2055,8 @@ impl Harness {
             return;
         };
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(target_cid) {
-            agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
-            agent.activation_dispatch =
+            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
+            agent.dispatch.activation_dispatch =
                 path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
                     owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
                         id: started.transaction_id.clone(),
@@ -2067,12 +2109,13 @@ impl Harness {
             .get(&caller_cid)
             .and_then(|agent| {
                 agent
+                    .identity
                     .agent_id
                     .as_deref()
                     .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
                     .map(|tree| {
                         tree.has_complete_tool_round_for(
-                            agent.head,
+                            agent.identity.head,
                             &accepted.request.initiating_tool_call_id,
                         )
                     })

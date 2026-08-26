@@ -625,13 +625,14 @@ impl Harness {
             .agents
             .iter()
             .flat_map(|(conversation_id, conversation)| {
-                if conversation.session_id != self.session_runtime.current_session_id {
+                if conversation.identity.session_id != self.session_runtime.current_session_id {
                     return Vec::new();
                 }
                 let Some(agent_id) = agent_by_conversation.get(conversation_id).cloned() else {
                     return Vec::new();
                 };
                 conversation
+                    .dispatch
                     .pending_prompts
                     .iter()
                     .map(|prompt| {
@@ -678,12 +679,12 @@ impl Harness {
             .agent_registry
             .agents
             .values()
-            .filter(|agent| agent.session_id == self.session_runtime.current_session_id)
+            .filter(|agent| agent.identity.session_id == self.session_runtime.current_session_id)
             .filter_map(|agent| {
-                let agent_id = agent.agent_id.as_ref()?;
+                let agent_id = agent.identity.agent_id.as_ref()?;
                 Some(Event::AgentState(tau_proto::AgentStateChanged {
                     agent_id: crate::parse_agent_id(agent_id),
-                    state: agent_runtime_state_for_turn(&agent.turn_state),
+                    state: agent_runtime_state_for_turn(&agent.turn.turn_state),
                 }))
             })
             .collect::<Vec<_>>();

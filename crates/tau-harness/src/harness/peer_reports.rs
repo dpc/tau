@@ -1579,7 +1579,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&updated.agent_id)
-                .is_some_and(|agent| agent.lifecycle_notification_only_turn)
+                .is_some_and(|agent| agent.turn.lifecycle_notification_only_turn)
             && let Some(public_id) = self.ensure_agent_id_for_agent(&updated.agent_id)
         {
             let turn_generation = self
@@ -1587,7 +1587,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&updated.agent_id)
-                .map_or(0, |agent| agent.turn_generation);
+                .map_or(0, |agent| agent.turn.turn_generation);
             self.update_agent_watch_provider_status(
                 &public_id,
                 tau_proto::AgentWatchProviderStatusNotification {
@@ -2461,8 +2461,8 @@ impl Harness {
                     .agents
                     .get(&cid)
                     .and_then(|agent| {
-                        let agent_id = agent.agent_id.clone()?;
-                        let parent = agent.head.map_or(
+                        let agent_id = agent.identity.agent_id.clone()?;
+                        let parent = agent.identity.head.map_or(
                             tau_core::AgentEventParent::Root,
                             tau_core::AgentEventParent::Under,
                         );

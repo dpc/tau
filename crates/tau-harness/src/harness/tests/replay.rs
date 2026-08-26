@@ -741,6 +741,7 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
         .agents
         .get_mut(&cid)
         .expect("target runtime")
+        .dispatch
         .terminating = true;
     h.commit_message_fact(
         None,
@@ -787,6 +788,7 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
     h.config.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
         .agent_id
         .as_deref()
         .map(crate::parse_agent_id)
@@ -826,6 +828,7 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
     );
     assert!(matches!(
         h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
             .pending_message_wakes
             .front(),
         Some(crate::agent::PendingMessageWake {
@@ -1059,6 +1062,7 @@ fn received_agent_message_replay_restores_context_and_activation() {
         let mut h = quiet_provider_harness(&state_dir).expect("start");
         let cid = ensure_test_user_agent(&mut h);
         let agent_id = h.agent_runtime.agent_registry.agents[&cid]
+            .identity
             .agent_id
             .clone()
             .expect("agent id");
@@ -1067,6 +1071,7 @@ fn received_agent_message_replay_restores_context_and_activation() {
             .agents
             .get_mut(&cid)
             .expect("agent")
+            .turn
             .turn_state = AgentTurnState::AgentThinking {
             agent_prompt_id: "live-message-before-crash"
                 .parse::<tau_proto::AgentPromptId>()
@@ -1090,6 +1095,7 @@ fn received_agent_message_replay_restores_context_and_activation() {
         );
         assert_eq!(
             h.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
                 .pending_message_wakes
                 .len(),
             1
@@ -1134,12 +1140,15 @@ fn received_agent_message_replay_restores_context_and_activation() {
         .expect("restored route");
     assert!(
         resumed.agent_runtime.agent_registry.agents[cid]
+            .dispatch
             .pending_message_wakes
             .is_empty()
     );
     let context = crate::prompt::assemble_prompt_context_from(
         tree,
-        resumed.agent_runtime.agent_registry.agents[cid].head,
+        resumed.agent_runtime.agent_registry.agents[cid]
+            .identity
+            .head,
     )
     .context
     .flatten();
@@ -2076,8 +2085,10 @@ fn resume_repairs_unresolved_tool_call_before_next_prompt_context() {
             let cid = test_user_agent(&h);
             panic!(
                 "deferred input did not dispatch after repair: state={:?}, wakes={:?}",
-                h.agent_runtime.agent_registry.agents[&cid].turn_state,
-                h.agent_runtime.agent_registry.agents[&cid].pending_message_wakes
+                h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
+                h.agent_runtime.agent_registry.agents[&cid]
+                    .dispatch
+                    .pending_message_wakes
             )
         });
     let repaired = prompt_tool_result(&prompt, "interrupted-call")
@@ -2620,7 +2631,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
         None,
         None,
     );
-    agent.agent_id = Some(agent_id.to_string());
+    agent.identity.agent_id = Some(agent_id.to_string());
     h.agent_runtime
         .agent_registry
         .agents
@@ -2979,6 +2990,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
         .ensure_agent_id_for_agent(&cid)
         .expect("default conversation has an agent id");
     let session_id = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
         .session_id
         .clone();
     h.prompt_coordination
@@ -3124,6 +3136,7 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
         .agents
         .get_mut(&cid)
         .expect("default conversation")
+        .dispatch
         .pending_prompts
         .push_back(path_crate_agent::PendingPrompt::user(
             "still queued".to_owned(),
@@ -3455,7 +3468,7 @@ fn resumed_harness_replays_persisted_session_history() {
             .agent_registry
             .agents
             .get(&cid)
-            .and_then(|conv| conv.agent_id.as_ref())
+            .and_then(|conv| conv.identity.agent_id.as_ref())
             .expect("first prompt agent id")
             .clone();
         h.handle_provider_response_finished(ProviderResponseFinished {

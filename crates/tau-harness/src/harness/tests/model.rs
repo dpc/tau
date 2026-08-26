@@ -700,6 +700,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&test_user_agent(&h)]
+            .dispatch
             .pending_prompts
             .len(),
         1,
@@ -718,9 +719,9 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     assert_eq!(h.config.selected_model.as_ref(), Some(&model_id));
     assert_eq!(h.selected_model_params().effort, Effort::High);
     let conv = &h.agent_runtime.agent_registry.agents[&test_user_agent(&h)];
-    assert!(conv.pending_prompts.is_empty());
+    assert!(conv.dispatch.pending_prompts.is_empty());
     assert!(matches!(
-        conv.turn_state,
+        conv.turn.turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
 }
@@ -747,6 +748,7 @@ fn settled_empty_model_inventory_rejects_queued_prompt_and_later_recovers() {
     let cid = test_user_agent(&h);
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
             .pending_prompts
             .len(),
         1
@@ -762,6 +764,7 @@ fn settled_empty_model_inventory_rejects_queued_prompt_and_later_recovers() {
 
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
             .pending_prompts
             .is_empty()
     );
@@ -801,11 +804,12 @@ fn settled_empty_model_inventory_rejects_queued_prompt_and_later_recovers() {
 
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
             .pending_prompts
             .is_empty()
     );
     assert!(matches!(
-        h.agent_runtime.agent_registry.agents[&cid].turn_state,
+        h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
     assert_eq!(
@@ -848,11 +852,13 @@ fn settled_empty_model_inventory_fails_queued_initial_prompt_once() {
     .expect("create agent");
     let cid = test_user_agent(&h);
     let agent_id = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
         .agent_id
         .clone()
         .expect("created durable agent");
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
             .pending_prompts
             .len(),
         1
@@ -890,11 +896,12 @@ fn settled_empty_model_inventory_fails_queued_initial_prompt_once() {
     );
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
             .pending_prompts
             .is_empty()
     );
     assert!(matches!(
-        h.agent_runtime.agent_registry.agents[&cid].turn_state,
+        h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
         AgentTurnState::Idle
     ));
 }
@@ -910,6 +917,7 @@ fn settled_empty_model_inventory_terminalizes_message_wake_and_later_recovers() 
     connect_provider_source(&mut h, "provider-ext");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
         .agent_id
         .as_deref()
         .map(crate::parse_agent_id)
@@ -972,7 +980,7 @@ fn settled_empty_model_inventory_terminalizes_message_wake_and_later_recovers() 
     publish_message(&mut h, "recovery-message", "providers recovered");
 
     assert!(matches!(
-        h.agent_runtime.agent_registry.agents[&cid].turn_state,
+        h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
     assert!(
@@ -998,6 +1006,7 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
         &role,
     );
     let agent_id = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
         .agent_id
         .clone()
         .expect("durable agent id");
@@ -1028,8 +1037,8 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     .expect("handle model select");
 
     let conv = &h.agent_runtime.agent_registry.agents[&cid];
-    assert_eq!(conv.role.as_deref(), Some(role.as_str()));
-    assert_eq!(conv.model_override.as_ref(), Some(&selected_model));
+    assert_eq!(conv.identity.role.as_deref(), Some(role.as_str()));
+    assert_eq!(conv.identity.model_override.as_ref(), Some(&selected_model));
     assert_eq!(h.model_for_agent_role(conv), Some(selected_model.clone()));
 
     h.agent_runtime
@@ -1037,6 +1046,7 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
         .agents
         .get_mut(&cid)
         .expect("agent")
+        .identity
         .role = None;
     assert_eq!(
         h.model_for_agent_role(&h.agent_runtime.agent_registry.agents[&cid]),
@@ -1090,7 +1100,7 @@ fn ui_create_agent_applies_initial_model_override() {
 
     let cid = test_user_agent(&h);
     let conv = &h.agent_runtime.agent_registry.agents[&cid];
-    assert_eq!(conv.model_override.as_ref(), Some(&selected_model));
+    assert_eq!(conv.identity.model_override.as_ref(), Some(&selected_model));
     assert_eq!(h.model_for_agent_role(conv), Some(selected_model));
     let created = read_nth_prompt_created(&h, 0);
     assert_eq!(created.model, "test/selected".parse().expect("model id"));
@@ -1136,6 +1146,7 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
     let cid = test_user_agent(&h);
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid]
+            .identity
             .model_override
             .as_ref(),
         Some(&selected_model)
@@ -1223,6 +1234,7 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
     let cid = test_user_agent(&h);
     let agent_id = crate::parse_agent_id(
         h.agent_runtime.agent_registry.agents[&cid]
+            .identity
             .agent_id
             .as_deref()
             .expect("agent id"),
@@ -1292,6 +1304,7 @@ fn unavailable_agent_model_override_falls_back_to_role_model() {
         .agents
         .get_mut(&cid)
         .expect("agent")
+        .identity
         .model_override = Some("test/missing".parse().expect("model id"));
 
     assert_eq!(
@@ -1343,11 +1356,13 @@ fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
 
     assert!(
         h.agent_runtime.agent_registry.agents[&first]
+            .identity
             .model_override
             .is_none()
     );
     assert!(
         h.agent_runtime.agent_registry.agents[&second]
+            .identity
             .model_override
             .is_none()
     );
@@ -1389,6 +1404,7 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&test_user_agent(&h)]
+            .dispatch
             .pending_prompts
             .len(),
         1
@@ -1405,8 +1421,8 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     .expect("handle provider snapshot");
 
     let conv = &h.agent_runtime.agent_registry.agents[&test_user_agent(&h)];
-    assert!(conv.pending_prompts.is_empty());
-    assert!(matches!(conv.turn_state, AgentTurnState::Idle));
+    assert!(conv.dispatch.pending_prompts.is_empty());
+    assert!(matches!(conv.turn.turn_state, AgentTurnState::Idle));
     assert!(
         find_info(&h, "role `assistant` has no available model").is_some(),
         "missing model should be visible instead of silently wedging"

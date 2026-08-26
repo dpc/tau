@@ -72,7 +72,7 @@ fn query_agent_count(h: &Harness, query_id: &str) -> usize {
         .values()
         .filter(|agent| {
             matches!(
-                &agent.originator,
+                &agent.identity.originator,
                 tau_proto::PromptOriginator::Extension {
                     query_id: candidate,
                     ..
@@ -582,7 +582,7 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
         .iter()
         .find_map(|(cid, agent)| {
             matches!(
-                &agent.originator,
+                &agent.identity.originator,
                 tau_proto::PromptOriginator::Extension { query_id, .. }
                     if query_id == "q-duplicate"
             )
@@ -590,6 +590,7 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
         })
         .expect("side agent");
     let side_agent_id = h.agent_runtime.agent_registry.agents[&side_cid]
+        .identity
         .agent_id
         .clone()
         .expect("public side agent id");
@@ -609,6 +610,7 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
     assert_eq!(query_agent_count(&h, "q-duplicate"), 1);
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&side_cid]
+            .identity
             .source_connection
             .as_deref(),
         Some("new-requester")

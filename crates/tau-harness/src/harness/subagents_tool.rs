@@ -423,7 +423,7 @@ impl Harness {
             .agent_registry
             .agents
             .values()
-            .filter_map(|agent| agent.agent_id.clone())
+            .filter_map(|agent| agent.identity.agent_id.clone())
             .collect();
         for agent_id in agent_ids {
             self.prompt_coordination
@@ -642,7 +642,7 @@ impl Harness {
             .wait_tracker
             .discard_owner(owner);
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(owner) {
-            agent.work_status.retire_wait_at(now);
+            agent.turn.work_status.retire_wait_at(now);
         }
         discarded
     }
@@ -681,7 +681,7 @@ impl Harness {
                 .tool_turn
                 .mark_complete(call_id);
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                agent.tools_in_flight = agent.tools_in_flight.saturating_sub(1);
+                agent.execution.tools_in_flight = agent.execution.tools_in_flight.saturating_sub(1);
             }
             self.emit_agent_stats_updated(&cid);
         } else {
@@ -733,7 +733,7 @@ impl Harness {
             .wait_tracker
             .discard_input_wait_for(owner);
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(owner) {
-            agent.work_status.retire_wait_at(Instant::now());
+            agent.turn.work_status.retire_wait_at(Instant::now());
         }
     }
 
@@ -768,6 +768,7 @@ impl Harness {
             .installed_wait_owners();
         for (cid, agent) in &mut self.agent_runtime.agent_registry.agents {
             agent
+                .turn
                 .work_status
                 .synchronize_wait_at(installed.contains(cid), now);
         }
@@ -779,7 +780,7 @@ impl Harness {
             .agent_registry
             .agents
             .values()
-            .filter_map(|agent| agent.work_status.next_wait_deadline())
+            .filter_map(|agent| agent.turn.work_status.next_wait_deadline())
             .min()
     }
 
@@ -798,14 +799,17 @@ impl Harness {
     fn capture_crossed_work_wait_thresholds_at(&mut self, now: Instant) {
         let mut captured = Vec::new();
         for agent in self.agent_runtime.agent_registry.agents.values_mut() {
-            let Some(thresholds) = agent.work_status.take_all_crossed_wait_thresholds_at(now)
+            let Some(thresholds) = agent
+                .turn
+                .work_status
+                .take_all_crossed_wait_thresholds_at(now)
             else {
                 continue;
             };
-            let Some(sender_id) = agent.agent_id.clone() else {
+            let Some(sender_id) = agent.identity.agent_id.clone() else {
                 continue;
             };
-            captured.push((sender_id, agent.work_status.epoch(), thresholds));
+            captured.push((sender_id, agent.turn.work_status.epoch(), thresholds));
         }
         captured.sort_by(|left, right| left.0.cmp(&right.0));
         for (sender_id, status_epoch, thresholds) in captured {
@@ -1733,11 +1737,11 @@ impl Harness {
             else {
                 return Err("status caller is no longer loaded".to_owned());
             };
-            let current = &mut agent.work_status;
+            let current = &mut agent.turn.work_status;
             if !current.report_at(report, now, wait_installed) {
                 return Ok(false);
             }
-            (true, agent.agent_id.clone())
+            (true, agent.identity.agent_id.clone())
         };
         if let Some(watched_agent_id) = watched_agent_id {
             for watcher_id in self.watchers_for_agent(&watched_agent_id) {
@@ -1773,7 +1777,7 @@ impl Harness {
             .agent_routes
             .get(watched_agent_id)
             .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
-            .map(|agent| agent.work_status.clone())
+            .map(|agent| agent.turn.work_status.clone())
             .unwrap_or_default();
         let sender_id = crate::parse_agent_id(watched_agent_id);
         self.publish_event(
@@ -1887,7 +1891,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .map_or(0, |agent| agent.turn_generation);
+            .map_or(0, |agent| agent.turn.turn_generation);
         self.update_agent_watch_provider_status(
             &watched_agent_id,
             tau_proto::AgentWatchProviderStatusNotification {
@@ -2460,14 +2464,15 @@ impl Harness {
             .agent_registry
             .agents
             .values()
-            .filter(|agent| !agent.terminating)
+            .filter(|agent| !agent.dispatch.terminating)
             .filter_map(|agent| {
-                let id = agent.agent_id.as_ref()?;
-                let role = agent.role.as_deref()?;
+                let id = agent.identity.agent_id.as_ref()?;
+                let role = agent.identity.role.as_deref()?;
                 role_available(role).then(|| {
                     (
                         usize::from(
-                            agent.published_runtime_state == tau_proto::AgentRuntimeState::Running,
+                            agent.turn.published_runtime_state
+                                == tau_proto::AgentRuntimeState::Running,
                         ),
                         self.peer_messaging
                             .peer_last_routed
@@ -2595,7 +2600,7 @@ impl Harness {
             .get(recipient_id.as_str())
             .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
             .into_iter()
-            .flat_map(|agent| &agent.pending_message_wakes)
+            .flat_map(|agent| &agent.dispatch.pending_message_wakes)
             .filter_map(|wake| wake.source.peer_admission_bytes());
         let pending_start_wake_bytes = self
             .agent_runtime
@@ -2681,9 +2686,9 @@ impl Harness {
             .agents
             .values()
             .any(|agent| {
-                !agent.terminating
-                    && agent.agent_id.as_deref() == Some(recipient_id.as_str())
-                    && agent.role.as_deref().is_some_and(role_available)
+                !agent.dispatch.terminating
+                    && agent.identity.agent_id.as_deref() == Some(recipient_id.as_str())
+                    && agent.identity.role.as_deref().is_some_and(role_available)
             })
             || self
                 .agent_runtime
@@ -2942,8 +2947,8 @@ impl Harness {
                 // prompt is ignored only when this exact/bare invocation can consume
                 // that prompt's call, preserving completion arbitration without
                 // hiding activating notices for other completed calls.
-                agent.pending_replay_activation
-                    || agent.pending_prompts.iter().any(|prompt| {
+                agent.dispatch.pending_replay_activation
+                    || agent.dispatch.pending_prompts.iter().any(|prompt| {
                         prompt.creates_inference_activation()
                             && (!prompt.is_activating_background_completion()
                                 || consumable_completion.is_none_or(|call_id| {
@@ -2961,11 +2966,12 @@ impl Harness {
     ) -> Option<tau_proto::ObservationId> {
         let agent = self.agent_runtime.agent_registry.agents.get(agent_id)?;
         agent
+            .dispatch
             .pending_message_wakes
             .iter()
             .find_map(|wake| wake.activation_observation)
             .or_else(|| {
-                agent.pending_prompts.iter().find_map(|prompt| {
+                agent.dispatch.pending_prompts.iter().find_map(|prompt| {
                     (prompt.creates_inference_activation()
                         && (!prompt.is_activating_background_completion()
                             || consumable_completion.is_none_or(|call_id| {
@@ -3210,7 +3216,7 @@ impl Harness {
                     .cloned();
                 if owner
                     .and_then(|owner| self.agent_runtime.agent_registry.agents.get_mut(&owner))
-                    .is_some_and(|agent| agent.work_status.record_input_wait_timeout())
+                    .is_some_and(|agent| agent.turn.work_status.record_input_wait_timeout())
                 {
                     reply.add_timeout_advice(
                         "Seems like you're waiting in a loop. Consider setting `status` to `waiting` and relying on a message or trigger to wake you.",

@@ -30,6 +30,7 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
         .agents
         .get_mut(&cid)
         .expect("live agent runtime")
+        .turn
         .work_status
         .report_at(
             path_crate_agent::WorkStatusReport::new(
@@ -79,6 +80,7 @@ fn roster_scope_distinguishes_live_and_unloaded_agents() {
         .agents
         .get_mut(&cid)
         .expect("live agent runtime")
+        .dispatch
         .terminating = true;
     let stopping = harness
         .build_session_agent_list(

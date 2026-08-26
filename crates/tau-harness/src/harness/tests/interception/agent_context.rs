@@ -942,7 +942,7 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
         .agent_registry
         .agents
         .values()
-        .find_map(|agent| agent.agent_id.clone())
+        .find_map(|agent| agent.identity.agent_id.clone())
         .map(|agent_id| tau_proto::AgentId::parse(&agent_id).expect("agent id"))
         .expect("loaded agent");
     let initialization_id = h.prompt_coordination.context_discovery.pending_agents[&agent_id]

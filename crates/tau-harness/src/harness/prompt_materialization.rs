@@ -19,7 +19,10 @@ impl Harness {
             .agent_registry
             .agents
             .iter()
-            .find(|(_, conv)| conv.session_id.as_str() == session_id && conv.originator.is_user())
+            .find(|(_, conv)| {
+                conv.identity.session_id.as_str() == session_id
+                    && conv.identity.originator.is_user()
+            })
             .map(|(cid, _)| cid.clone())
             .expect("test requires an existing user agent");
         self.dispatch_activation_after_publish_idle(&cid);
@@ -27,7 +30,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(&cid)
-            .and_then(|agent| agent.in_flight_prompt.clone())
+            .and_then(|agent| agent.dispatch.in_flight_prompt.clone())
             .expect("test prompt requires a selected model and durable dispatch owner")
     }
 
@@ -40,17 +43,17 @@ impl Harness {
             let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
             self.session_runtime
                 .agent_store
-                .agent(agent.agent_id.as_deref()?)
+                .agent(agent.identity.agent_id.as_deref()?)
                 .is_some_and(|tree| tree.outer_turn_is_open(&turn_id))
                 .then_some(turn_id)
         });
         if let Some(turn_id) = restored_turn {
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-                agent.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(turn_id);
-                agent.terminal_status_was_available = false;
-                agent.terminal_notice_eligible = false;
-                agent.terminal_notice_outer_turn_id = None;
-                agent.terminal_context_size_alerts.clear();
+                agent.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(turn_id);
+                agent.turn.terminal_status_was_available = false;
+                agent.turn.terminal_notice_eligible = false;
+                agent.turn.terminal_notice_outer_turn_id = None;
+                agent.turn.terminal_context_size_alerts.clear();
             }
             return;
         }
@@ -67,22 +70,22 @@ impl Harness {
             .and_then(|agent| {
                 let (activation, prompt_id) = activation?;
                 if !matches!(
-                    agent.outer_turn,
+                    agent.turn.outer_turn,
                     path_crate_agent::OuterTurnRuntimeState::None
                 ) {
                     return None;
                 }
-                let durable_agent_id = crate::parse_agent_id(agent.agent_id.as_deref()?);
+                let durable_agent_id = crate::parse_agent_id(agent.identity.agent_id.as_deref()?);
                 let outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&prompt_id);
-                agent.outer_turn =
+                agent.turn.outer_turn =
                     path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id.clone());
-                agent.terminal_status_was_available = false;
-                agent.terminal_notice_eligible = false;
-                agent.terminal_notice_outer_turn_id = None;
-                agent.terminal_context_size_alerts.clear();
+                agent.turn.terminal_status_was_available = false;
+                agent.turn.terminal_notice_eligible = false;
+                agent.turn.terminal_notice_outer_turn_id = None;
+                agent.turn.terminal_context_size_alerts.clear();
                 Some(tau_proto::AgentOuterTurnStarted {
                     agent_id: durable_agent_id,
-                    session_id: agent.session_id.clone(),
+                    session_id: agent.identity.session_id.clone(),
                     outer_turn_id,
                     agent_prompt_id: prompt_id,
                     runtime_id,
@@ -101,7 +104,7 @@ impl Harness {
         cid: &AgentId,
     ) -> Option<(tau_proto::AgentOuterTurnActivation, AgentPromptId)> {
         let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
-        let (through, cut, prompt_id) = match &agent.activation_dispatch {
+        let (through, cut, prompt_id) = match &agent.dispatch.activation_dispatch {
             path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
                 agent_prompt_id,
                 through,
@@ -122,7 +125,7 @@ impl Harness {
         let tree = self
             .session_runtime
             .agent_store
-            .agent(agent.agent_id.as_deref()?)?;
+            .agent(agent.identity.agent_id.as_deref()?)?;
         let path = tree.branch_node_ids_from(match through {
             tau_proto::AgentHead::Root => None,
             tau_proto::AgentHead::Node(node) => Some(node),
@@ -144,12 +147,12 @@ impl Harness {
     /// turn by emitting its delayed start before any eventual stop.
     pub(super) fn promote_lifecycle_notification_turn(&mut self, cid: &AgentId) {
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            if !agent.lifecycle_notification_only_turn
-                || agent.published_runtime_state != tau_proto::AgentRuntimeState::Running
+            if !agent.turn.lifecycle_notification_only_turn
+                || agent.turn.published_runtime_state != tau_proto::AgentRuntimeState::Running
             {
                 return;
             }
-            agent.lifecycle_notification_only_turn = false;
+            agent.turn.lifecycle_notification_only_turn = false;
         }
     }
 
@@ -180,7 +183,7 @@ impl Harness {
             .agents
             .get(cid)
             .and_then(|agent| {
-                let (prompt_id, model, operation) = match &agent.activation_dispatch {
+                let (prompt_id, model, operation) = match &agent.dispatch.activation_dispatch {
                     path_crate_agent::ActivationDispatchState::Running {
                         compact_prompt_id,
                         model,
@@ -206,9 +209,9 @@ impl Harness {
                     prompt_id,
                     model,
                     operation,
-                    agent.runtime_incarnation,
-                    crate::parse_agent_id(agent.agent_id.as_deref()?),
-                    agent.originator.clone(),
+                    agent.identity.runtime_incarnation,
+                    crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
+                    agent.identity.originator.clone(),
                 ))
             })?;
         if self
@@ -262,7 +265,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(cid)
-                .is_none_or(|agent| agent.outer_turn.active_id().is_none())
+                .is_none_or(|agent| agent.turn.outer_turn.active_id().is_none())
         {
             self.terminalize_owned_dispatch_error(
                 cid,
@@ -291,7 +294,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(cid)
-                .and_then(|agent| agent.outer_turn.active_id().cloned());
+                .and_then(|agent| agent.turn.outer_turn.active_id().cloned());
         }
         let provider_connection_id = self
             .provider_runtime
@@ -338,13 +341,13 @@ impl Harness {
             .get(cid)
             .and_then(|agent| {
                 let path_crate_agent::OutputLengthContinuationState::Active(continuation) =
-                    &agent.output_length_continuation
+                    &agent.turn.output_length_continuation
                 else {
                     return None;
                 };
                 Some((
-                    crate::parse_agent_id(agent.agent_id.as_deref()?),
-                    agent.originator.clone(),
+                    crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
+                    agent.identity.originator.clone(),
                     continuation.clone(),
                 ))
             })
@@ -408,7 +411,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(cid)
-                .is_some_and(|agent| agent.pending_cancel.is_some())
+                .is_some_and(|agent| agent.dispatch.pending_cancel.is_some())
             {
                 self.prompt_coordination
                     .prompt_runtime
@@ -473,16 +476,20 @@ impl Harness {
         let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return;
         };
-        let agent_id = agent.agent_id.as_deref().map(crate::parse_agent_id);
-        let originator = agent.originator.clone();
-        let output_length_owner = match &agent.output_length_continuation {
+        let agent_id = agent
+            .identity
+            .agent_id
+            .as_deref()
+            .map(crate::parse_agent_id);
+        let originator = agent.identity.originator.clone();
+        let output_length_owner = match &agent.turn.output_length_continuation {
             path_crate_agent::OutputLengthContinuationState::Active(continuation) => Some((
                 continuation.plan.agent_prompt_id.clone(),
                 continuation.plan.owner.clone(),
             )),
             _ => None,
         };
-        let failure = match &agent.activation_dispatch {
+        let failure = match &agent.dispatch.activation_dispatch {
             path_crate_agent::ActivationDispatchState::Running {
                 id,
                 cut,
@@ -580,11 +587,16 @@ impl Harness {
         let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return;
         };
-        let Some(agent_id) = agent.agent_id.as_deref().map(crate::parse_agent_id) else {
+        let Some(agent_id) = agent
+            .identity
+            .agent_id
+            .as_deref()
+            .map(crate::parse_agent_id)
+        else {
             return;
         };
-        let originator = agent.originator.clone();
-        let failure = match &agent.activation_dispatch {
+        let originator = agent.identity.originator.clone();
+        let failure = match &agent.dispatch.activation_dispatch {
             path_crate_agent::ActivationDispatchState::Running {
                 id,
                 cut,
@@ -648,7 +660,7 @@ impl Harness {
             .agent_registry
             .agents
             .get_mut(cid)
-            .is_some_and(|agent| agent.work_status.invalidate_working());
+            .is_some_and(|agent| agent.turn.work_status.invalidate_working());
         if changed {
             self.notify_work_status_transition(cid);
         }
@@ -669,9 +681,9 @@ impl Harness {
             .agents
             .get(cid)
             .expect("prepare_agent_prompt_for_dispatch: unknown agent id");
-        let originator = conv.originator.clone();
+        let originator = conv.identity.originator.clone();
         let role_name = self.role_name_for_agent(conv);
-        let (prompt_model, owned_operation) = match &conv.activation_dispatch {
+        let (prompt_model, owned_operation) = match &conv.dispatch.activation_dispatch {
             path_crate_agent::ActivationDispatchState::Running { model, .. } => (
                 Some(model.clone()),
                 tau_proto::PromptOperation::StandaloneCompaction,
@@ -711,10 +723,10 @@ impl Harness {
         // no-tools rule locally before dispatching any returned tool
         // calls.
         let is_non_tool_ext_query = matches!(
-            conv.originator,
+            conv.identity.originator,
             tau_proto::PromptOriginator::Extension { .. }
-        ) && conv.parent_tool_call_id.is_none()
-            && !conv.restored_tool_backed_start;
+        ) && conv.identity.parent_tool_call_id.is_none()
+            && !conv.identity.restored_tool_backed_start;
         let tool_choice = tau_proto::ToolChoice::Auto;
         // Legacy cache-sharing hint for older provider implementations. The
         // first-party ChatGPT/Codex provider now derives cache keys only from
@@ -728,7 +740,7 @@ impl Harness {
         // conversation lives". Reading from `conv.head` keeps the
         // assembled prompt scoped to this agent's history and
         // prevents orphan ToolUse blocks from cross-branch state.
-        let compaction_transaction = match &conv.activation_dispatch {
+        let compaction_transaction = match &conv.dispatch.activation_dispatch {
             path_crate_agent::ActivationDispatchState::Running {
                 id,
                 cut,
@@ -737,7 +749,7 @@ impl Harness {
             } => Some((id.clone(), *cut, *resume_through)),
             _ => None,
         };
-        let checkpointed_inference = match &conv.activation_dispatch {
+        let checkpointed_inference = match &conv.dispatch.activation_dispatch {
             path_crate_agent::ActivationDispatchState::DispatchUncertain {
                 owner,
                 agent_prompt_id,
@@ -756,7 +768,7 @@ impl Harness {
             }
             _ => None,
         };
-        let reserved_compact_prompt_id = match &conv.activation_dispatch {
+        let reserved_compact_prompt_id = match &conv.dispatch.activation_dispatch {
             path_crate_agent::ActivationDispatchState::Running {
                 compact_prompt_id: prompt_id,
                 ..
@@ -764,7 +776,7 @@ impl Harness {
             _ => None,
         };
         let head = conv.selected_prompt_context_head();
-        let standalone_window = match &conv.activation_dispatch {
+        let standalone_window = match &conv.dispatch.activation_dispatch {
             path_crate_agent::ActivationDispatchState::Running {
                 cut,
                 resume_through,
@@ -773,7 +785,7 @@ impl Harness {
             _ => None,
         };
 
-        let agent_id_for_tree = conv.agent_id.clone();
+        let agent_id_for_tree = conv.identity.agent_id.clone();
         let tree = agent_id_for_tree
             .as_deref()
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id));
@@ -871,9 +883,10 @@ impl Harness {
                     .agents
                     .get_mut(cid)
                     .expect("prepare_agent_prompt_for_dispatch: unknown agent id")
+                    .dispatch
                     .next_prompt_index;
                 if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-                    agent.next_prompt_index += 1;
+                    agent.dispatch.next_prompt_index += 1;
                 }
                 AgentPromptId::parse(format!("ap-{durable_agent_id}-{prompt_index}"))
                     .expect("known-safe AgentPromptId must be valid")
@@ -887,9 +900,9 @@ impl Harness {
             .agent_registry
             .agents
             .get_mut(cid)
-            .and_then(|c| c.next_ctx_id.take());
+            .and_then(|c| c.dispatch.next_ctx_id.take());
         if let Some(c) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            c.in_flight_prompt = Some(agent_prompt_id.clone());
+            c.dispatch.in_flight_prompt = Some(agent_prompt_id.clone());
         }
         self.set_agent_turn_state(
             cid,
@@ -958,6 +971,7 @@ impl Harness {
             .agents
             .get(cid)
             .expect("agent still exists")
+            .identity
             .session_id
             .clone();
         let agent_id: tau_proto::AgentId = crate::parse_agent_id(
@@ -991,7 +1005,7 @@ impl Harness {
             return false;
         };
         let role_name = self.role_name_for_agent(conv);
-        let model = match &conv.output_length_continuation {
+        let model = match &conv.turn.output_length_continuation {
             path_crate_agent::OutputLengthContinuationState::Planned(continuation) => {
                 Some(continuation.dispatch.model.clone())
             }
@@ -1009,10 +1023,10 @@ impl Harness {
             return true;
         };
         let is_non_tool_ext_query = matches!(
-            conv.originator,
+            conv.identity.originator,
             tau_proto::PromptOriginator::Extension { .. }
-        ) && conv.parent_tool_call_id.is_none()
-            && !conv.restored_tool_backed_start;
+        ) && conv.identity.parent_tool_call_id.is_none()
+            && !conv.identity.restored_tool_backed_start;
         if let Some(message) = self.shell_tool_style_error(Some(&model)) {
             self.emit_harness_failure(&message);
             self.fail_initial_prompt_materialization(
@@ -1037,8 +1051,9 @@ impl Harness {
         } else {
             specs.as_slice()
         };
-        let durable_agent_id = conv.agent_id.as_deref().map(crate::parse_agent_id);
+        let durable_agent_id = conv.identity.agent_id.as_deref().map(crate::parse_agent_id);
         let contains_payload_envelope_provenance_projection = conv
+            .identity
             .agent_id
             .as_deref()
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
@@ -1070,7 +1085,8 @@ impl Harness {
     }
 
     pub(super) fn role_name_for_agent(&self, conv: &Agent) -> String {
-        conv.role
+        conv.identity
+            .role
             .clone()
             .unwrap_or_else(|| self.config.selected_role.clone())
     }
@@ -1080,12 +1096,12 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|conv| conv.role.clone())
+            .and_then(|conv| conv.identity.role.clone())
             .unwrap_or_else(|| self.config.selected_role.clone())
     }
 
     pub(super) fn model_for_agent_role(&self, conv: &Agent) -> Option<ModelId> {
-        if let Some(model) = conv.model_override.clone()
+        if let Some(model) = conv.identity.model_override.clone()
             && self.provider_runtime.model_routes.contains_key(&model)
         {
             return Some(model);

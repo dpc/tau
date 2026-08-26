@@ -11,17 +11,25 @@
 //! `prompt_agents: HashMap<AgentPromptId, AgentId>` and
 //! `tool_agents: HashMap<ToolCallId, AgentId>`.
 
+mod dispatch_state;
+mod execution_state;
+mod identity_state;
 mod loop_guard;
+mod turn_runtime_state;
 mod work_status;
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
+pub(crate) use dispatch_state::AgentDispatchState;
+pub(crate) use execution_state::AgentExecutionState;
+pub(crate) use identity_state::AgentIdentityState;
 pub(crate) use loop_guard::{LoopCycleState, LoopGuardState, LoopGuardTrigger, LoopTurnSignature};
 use tau_core::{AgentPersistenceMode, NodeId};
 use tau_proto::{
     AgentId, AgentPromptId, ConnectionId, ModelId, PromptMessageClass, PromptOriginator, SessionId,
     ToolCallId, ToolUseStats,
 };
+pub(crate) use turn_runtime_state::AgentTurnRuntimeState;
 pub use work_status::WorkStatusReport;
 pub(crate) use work_status::{
     CrossedWaitThresholds, FinalStatusChallenge, FinalStatusDecision, FinalStatusInput, WorkStatus,
@@ -384,168 +392,15 @@ pub(crate) struct PendingCancel {
 /// for ephemeral agents).
 #[derive(Debug)]
 pub(crate) struct Agent {
-    /// Owning agent id. Duplicates the key in the harness's agent map, but
-    /// pinning it on the struct itself
-    /// lets future code carry a `&Agent` without also threading
-    /// the id through every call site.
-    #[allow(dead_code)]
-    pub(crate) id: AgentId,
-    /// Monotonic identity for this loaded runtime instance.
-    pub(crate) runtime_incarnation: u64,
-    pub(crate) session_id: SessionId,
-    pub(crate) originator: PromptOriginator,
-    /// Local cursor — where the *next* transcript event for this agent
-    /// should be parented in the owning agent tree. The tree's own `head`
-    /// is whichever loaded agent appended last; this field is what
-    /// `publish_for_agent` snaps the tree head back to before
-    /// emitting an event for this agent.
-    pub(crate) head: Option<NodeId>,
-    /// Increments on every explicit head move to invalidate asynchronous work.
-    pub(crate) branch_generation: u64,
-    /// For [`PromptOriginator::Extension`] agents: the
-    /// connection id of the extension that issued the
-    /// [`tau_proto::StartAgentRequest`], so the harness knows where to
-    /// route the matching [`tau_proto::StartAgentResult`].
-    pub(crate) source_connection: Option<ConnectionId>,
-    /// Agent prompt id of the prompt currently in flight for this agent, or
-    /// `None` if nothing is pending.
-    pub(crate) in_flight_prompt: Option<AgentPromptId>,
-    /// Per-agent prompt queue: prompts waiting to be dispatched once this
-    /// agent's `turn_state` returns to `Idle`. Other loaded agents dispatch
-    /// independently; the provider extension
-    /// serializes its own consumption of `AgentPromptCreated`.
-    pub(crate) pending_prompts: VecDeque<PendingPrompt>,
-    /// Canonical incoming facts waiting to activate one coalesced agent turn.
-    pub(crate) pending_message_wakes: VecDeque<PendingMessageWake>,
-    /// Replay found a committed activation after the latest completed dispatch.
-    pub(crate) pending_replay_activation: bool,
-    /// Whether terminal teardown has begun and new work must be rejected.
-    pub(crate) terminating: bool,
-    /// Durable standalone-compaction runtime projection.
-    pub(crate) activation_dispatch: ActivationDispatchState,
-    /// Pending user/control-plane request to stop this conversation at
-    /// the next stable turn boundary. Stored like queued prompts so
-    /// races between provider responses and UI cancel events are
-    /// resolved by the conversation state machine instead of by the UI
-    /// boundary.
-    pub(crate) pending_cancel: Option<PendingCancel>,
-    /// Most recent materialized prompt emitted for this conversation.
-    /// The next prompt can reference its message prefix instead of
-    /// repeating the full conversation history.
-    pub(crate) last_prompt_id: Option<AgentPromptId>,
-    /// Next per-agent index used when minting an [`AgentPromptId`] for this
-    /// conversation. Initialized from the known agent event stream when the
-    /// agent is loaded, then incremented for each materialized provider prompt.
-    pub(crate) next_prompt_index: u64,
-    /// Whether [`Self::next_prompt_index`] has been initialized from the loaded
-    /// agent state for this harness run.
-    pub(crate) prompt_index_initialized: bool,
-    /// Correlation tag carried in by a [`tau_proto::UiPromptSubmitted`]
-    /// and copied onto the next [`tau_proto::AgentPromptCreated`] this
-    /// conversation emits. Cleared once consumed. Queued prompt submissions
-    /// should carry their own [`PendingPrompt::ctx_id`] and copy it here only
-    /// when that exact prompt is dispatched.
-    pub(crate) next_ctx_id: Option<String>,
-    pub(crate) turn_state: AgentTurnState,
-    /// Last externally published runtime state, independent of internal
-    /// continuation bookkeeping that may temporarily use `Idle`.
-    pub(crate) published_runtime_state: tau_proto::AgentRuntimeState,
-    /// Runtime-scoped outer agent-turn generation used by provider-status
-    /// notifications.
-    pub(crate) turn_generation: u64,
-    /// Runtime-only semantic progress reported through the status tool.
-    pub(crate) work_status: WorkStatus,
-    /// Whether the final canonical prompt of the current outer turn exposed
-    /// status.
-    pub(crate) terminal_status_was_available: bool,
-    /// Whether the accepted terminal may create an outer-finish notice.
-    pub(crate) terminal_notice_eligible: bool,
-    /// Exact outer turn owning the current runtime-only notice candidate.
-    pub(crate) terminal_notice_outer_turn_id: Option<tau_proto::AgentOuterTurnId>,
-    /// Alert policy frozen with the final accepted prompt of that turn.
-    pub(crate) terminal_context_size_alerts:
-        BTreeMap<String, tau_config::settings::ContextSizeAlert>,
-    /// Durable eager decision committed by the current turn's terminal and owed
-    /// by its outer-turn finish.
-    pub(crate) pending_automatic_compaction_decision: Option<tau_proto::CompactionTransactionId>,
-    /// Protected eager start currently waiting on interception or persistence.
-    pub(crate) pending_automatic_compaction_start: Option<tau_proto::CompactionTransactionId>,
-    /// Typed runtime ownership of the open turn and its write-pending finish.
-    pub(crate) outer_turn: OuterTurnRuntimeState,
-    /// Named runtime state for the current reasoning-only run's continuation.
-    pub(crate) output_length_continuation: OutputLengthContinuationState,
-    /// Whether the current turn was caused only by lifecycle notifications.
-    pub(crate) lifecycle_notification_only_turn: bool,
-    /// For side agents spawned by a tool-implementing extension
-    /// (currently just `agent_start`): the parent agent's tool call id
-    /// that this conversation is fulfilling. Kept for teardown/routing of
-    /// tool-backed side agents. `None` for user agents and for non-tool
-    /// ext-queries (e.g. notifications' idle summary).
-    pub(crate) parent_tool_call_id: Option<ToolCallId>,
-    /// Direct parent resolved from a tool owner or an explicit-parent typed
-    /// start. Teardown uses it after tool routing disappears, and completed
-    /// parented starts use its presence to retain and detach the worker.
-    pub(crate) parent_agent_id: Option<AgentId>,
-    /// Cold restore proved that this extension-owned request came from the
-    /// built-in `agent_start` tool even though its transient tool-call id is
-    /// gone.
-    pub(crate) restored_tool_backed_start: bool,
-    /// Human-friendly name shown in UIs. Falls back to the stable agent id.
-    pub(crate) display_name: Option<String>,
-    /// Optional request task label surfaced in the UI for a side agent.
-    /// Populated independently of whether the request is tool-backed.
-    pub(crate) task_name: Option<String>,
-    /// Line and byte stats for the user-provided delegate prompt.
-    /// Excludes any hidden prefix added by the delegate extension.
-    pub(crate) delegate_input_stats: ToolUseStats,
-    /// Agent role used for this conversation. `None` means the conversation
-    /// follows the harness's globally selected interactive role.
-    pub(crate) role: Option<String>,
-    /// Model explicitly selected for this conversation. When set, future
-    /// prompts for this loaded agent use it instead of resolving the model
-    /// from the role.
-    pub(crate) model_override: Option<ModelId>,
-    /// Stable id assigned when this conversation first starts an agent turn.
-    pub(crate) agent_id: Option<String>,
-    /// Whether this agent's semantic transcript is durable or memory-only.
-    pub(crate) persistence: AgentPersistenceMode,
-    /// Durable semantic lifecycle marker for a peer-created entrypoint
-    /// endpoint.
-    pub(crate) peer_entrypoint_endpoint: bool,
-    /// Number of tool calls currently in flight on this conversation.
-    pub(crate) tools_in_flight: u32,
-    /// Cumulative tool calls this conversation has started (in-flight
-    /// + completed). Used in generic agent stats snapshots.
-    pub(crate) tools_total: u32,
-    /// Most recent input-token count this agent's agent
-    /// reported on a finished response. Used for generic agent stats snapshots.
-    pub(crate) context_input_tokens: Option<u64>,
-    /// Transcript head represented by `context_input_tokens`.
-    pub(crate) context_usage_head: Option<NodeId>,
-    /// Provider-qualified model that produced `context_input_tokens`.
-    pub(crate) context_usage_model: Option<ModelId>,
-    /// Most recent cached input-token count this agent's provider reported on
-    /// a finished response.
-    pub(crate) context_cached_tokens: Option<u64>,
-    /// Most recent percent-of-context-window this conversation's
-    /// agent has used. Computed from `context_input_tokens` and the
-    /// model's window size; `None` when the window is unknown.
-    pub(crate) context_percent_used: Option<u8>,
-    /// Named context-size alerts already emitted for the current usage climb.
-    /// An alert becomes eligible again after usage falls back to or below its
-    /// threshold or context accounting is reset.
-    pub(crate) fired_context_size_alerts: HashSet<String>,
-
-    /// Per-conversation map from tool-result-content hash to the first
-    /// `call_id` on this branch that produced that content. Consulted
-    /// at intake of every `ToolResult` / `ToolError` to collapse a
-    /// duplicate's payload into a short pointer that refers back to
-    /// the original. Branch-scoped: rebuilt from
-    /// [`Agent::head`] whenever the cursor moves
-    /// non-linearly. See `crate::dedup` for the full rationale.
-    pub(crate) result_dedup: ResultDedupMap,
-    /// Runtime-only conservative loop guard state for this agent branch.
-    pub(crate) loop_guard: LoopGuardState,
+    /// Load-scoped transcript ownership, routing, and conversation
+    /// configuration.
+    pub(crate) identity: AgentIdentityState,
+    /// Queued work and provider-prompt dispatch bookkeeping.
+    pub(crate) dispatch: AgentDispatchState,
+    /// State owned by the currently active outer turn.
+    pub(crate) turn: AgentTurnRuntimeState,
+    /// Per-branch execution counters, context telemetry, and guards.
+    pub(crate) execution: AgentExecutionState,
 }
 
 /// Where a queued prompt came from.
@@ -873,10 +728,10 @@ impl Agent {
     /// Return the immutable transcript head selected by current dispatch
     /// ownership.
     pub(crate) fn selected_prompt_context_head(&self) -> Option<NodeId> {
-        match &self.activation_dispatch {
+        match &self.dispatch.activation_dispatch {
             ActivationDispatchState::Running { cut, .. } => cut.as_option(),
             ActivationDispatchState::DispatchUncertain { through, .. } => through.as_option(),
-            _ => self.head,
+            _ => self.identity.head,
         }
     }
 
@@ -889,58 +744,66 @@ impl Agent {
         source_connection: Option<ConnectionId>,
     ) -> Self {
         Self {
-            id,
-            runtime_incarnation,
-            session_id,
-            originator,
-            head,
-            branch_generation: 0,
-            source_connection,
-            in_flight_prompt: None,
-            pending_prompts: VecDeque::new(),
-            pending_message_wakes: VecDeque::new(),
-            pending_replay_activation: false,
-            terminating: false,
-            activation_dispatch: ActivationDispatchState::None,
-            pending_cancel: None,
-            last_prompt_id: None,
-            next_prompt_index: 0,
-            prompt_index_initialized: false,
-            next_ctx_id: None,
-            turn_state: AgentTurnState::Idle,
-            published_runtime_state: tau_proto::AgentRuntimeState::Idle,
-            turn_generation: 0,
-            work_status: WorkStatus::default(),
-            terminal_status_was_available: false,
-            terminal_notice_eligible: false,
-            terminal_notice_outer_turn_id: None,
-            terminal_context_size_alerts: BTreeMap::new(),
-            pending_automatic_compaction_decision: None,
-            pending_automatic_compaction_start: None,
-            outer_turn: OuterTurnRuntimeState::None,
-            output_length_continuation: OutputLengthContinuationState::None,
-            lifecycle_notification_only_turn: false,
-            parent_tool_call_id: None,
-            parent_agent_id: None,
-            restored_tool_backed_start: false,
-            display_name: None,
-            task_name: None,
-            delegate_input_stats: ToolUseStats::default(),
-            role: None,
-            model_override: None,
-            agent_id: None,
-            persistence: AgentPersistenceMode::Durable,
-            peer_entrypoint_endpoint: false,
-            tools_in_flight: 0,
-            tools_total: 0,
-            context_input_tokens: None,
-            context_usage_head: None,
-            context_usage_model: None,
-            context_cached_tokens: None,
-            context_percent_used: None,
-            fired_context_size_alerts: HashSet::new(),
-            result_dedup: ResultDedupMap::new(),
-            loop_guard: LoopGuardState::default(),
+            identity: AgentIdentityState {
+                id,
+                runtime_incarnation,
+                session_id,
+                originator,
+                head,
+                branch_generation: 0,
+                source_connection,
+                parent_tool_call_id: None,
+                parent_agent_id: None,
+                restored_tool_backed_start: false,
+                display_name: None,
+                task_name: None,
+                delegate_input_stats: ToolUseStats::default(),
+                role: None,
+                model_override: None,
+                agent_id: None,
+                persistence: AgentPersistenceMode::Durable,
+                peer_entrypoint_endpoint: false,
+            },
+            dispatch: AgentDispatchState {
+                in_flight_prompt: None,
+                pending_prompts: VecDeque::new(),
+                pending_message_wakes: VecDeque::new(),
+                pending_replay_activation: false,
+                terminating: false,
+                activation_dispatch: ActivationDispatchState::None,
+                pending_cancel: None,
+                last_prompt_id: None,
+                next_prompt_index: 0,
+                prompt_index_initialized: false,
+                next_ctx_id: None,
+            },
+            turn: AgentTurnRuntimeState {
+                turn_state: AgentTurnState::Idle,
+                published_runtime_state: tau_proto::AgentRuntimeState::Idle,
+                turn_generation: 0,
+                work_status: WorkStatus::default(),
+                terminal_status_was_available: false,
+                terminal_notice_eligible: false,
+                terminal_notice_outer_turn_id: None,
+                terminal_context_size_alerts: BTreeMap::new(),
+                pending_automatic_compaction_decision: None,
+                pending_automatic_compaction_start: None,
+                outer_turn: OuterTurnRuntimeState::None,
+                output_length_continuation: OutputLengthContinuationState::None,
+                lifecycle_notification_only_turn: false,
+            },
+            execution: AgentExecutionState {
+                tools_in_flight: 0,
+                tools_total: 0,
+                context_input_tokens: None,
+                context_usage_head: None,
+                context_usage_model: None,
+                context_cached_tokens: None,
+                context_percent_used: None,
+                fired_context_size_alerts: HashSet::new(),
+                result_dedup: ResultDedupMap::new(),
+                loop_guard: LoopGuardState::default(),
+            },
         }
     }
 }

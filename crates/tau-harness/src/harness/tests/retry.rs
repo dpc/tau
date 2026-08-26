@@ -45,9 +45,9 @@ fn add_routed_prompt(h: &mut Harness, agent_id: &str, prompt_id: &str, provider_
         None,
         None,
     );
-    agent.agent_id = Some(agent_id.to_owned());
-    agent.display_name = Some(format!("{agent_id} label"));
-    agent.in_flight_prompt = Some(
+    agent.identity.agent_id = Some(agent_id.to_owned());
+    agent.identity.display_name = Some(format!("{agent_id} label"));
+    agent.dispatch.in_flight_prompt = Some(
         prompt_id
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -230,7 +230,7 @@ fn retry_rejects_invalid_targets_and_duplicate_request_ids() {
         None,
         None,
     );
-    idle_agent.agent_id = Some("idle-agent".to_owned());
+    idle_agent.identity.agent_id = Some("idle-agent".to_owned());
     h.agent_runtime
         .agent_registry
         .agents

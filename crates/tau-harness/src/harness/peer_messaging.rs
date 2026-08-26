@@ -177,7 +177,7 @@ impl Harness {
                     .agent_registry
                     .agents
                     .get(cid)
-                    .is_some_and(|agent| !agent.terminating)
+                    .is_some_and(|agent| !agent.dispatch.terminating)
             })
             || self
                 .agent_runtime
@@ -236,7 +236,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&cid)
-                .is_none_or(|agent| agent.terminating)
+                .is_none_or(|agent| agent.dispatch.terminating)
             {
                 return;
             }
@@ -244,8 +244,8 @@ impl Harness {
                 && let Some(node_id) = outcome.selected_head_id
                 && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
             {
-                agent.head = Some(node_id);
-                agent.result_dedup.note_head_advanced_to(node_id);
+                agent.identity.head = Some(node_id);
+                agent.execution.result_dedup.note_head_advanced_to(node_id);
             }
             let Some(activation_class) = agent_message_activation_class(message) else {
                 return;
@@ -256,7 +256,7 @@ impl Harness {
             }
             let activation = tau_proto::ObservationId::random();
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
-                && !agent.pending_message_wakes.iter().any(|wake| {
+                && !agent.dispatch.pending_message_wakes.iter().any(|wake| {
                     matches!(
                         wake.source,
                         crate::agent::PendingMessageWakeSource::AgentMessageReceived {
@@ -267,6 +267,7 @@ impl Harness {
                 })
             {
                 agent
+                    .dispatch
                     .pending_message_wakes
                     .push_back(crate::agent::PendingMessageWake {
                         source: path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
@@ -343,7 +344,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent| agent.identity.agent_id.as_deref())
         else {
             return;
         };
@@ -364,7 +365,7 @@ impl Harness {
             })
             .collect();
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            for wake in &mut agent.pending_message_wakes {
+            for wake in &mut agent.dispatch.pending_message_wakes {
                 if wake.node_id.is_none() {
                     wake.node_id = resolved_message_inputs
                         .get(&wake.source.durable_event_seq())
@@ -387,7 +388,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent| agent.identity.agent_id.as_deref())
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
             .map(|tree| {
                 tree.branch_node_ids_from(through.as_option())
@@ -396,8 +397,8 @@ impl Harness {
             })
             .unwrap_or_default();
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            agent.pending_replay_activation = false;
-            agent.pending_message_wakes.retain(|wake| {
+            agent.dispatch.pending_replay_activation = false;
+            agent.dispatch.pending_message_wakes.retain(|wake| {
                 wake.node_id
                     .is_none_or(|node_id| !branch.contains(&node_id))
             });
@@ -410,14 +411,17 @@ impl Harness {
         let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
-        let Some(agent_id) = agent.agent_id.as_deref() else {
+        let Some(agent_id) = agent.identity.agent_id.as_deref() else {
             return false;
         };
         let Some(tree) = self.session_runtime.agent_store.agent(agent_id) else {
             return false;
         };
-        let branch: HashSet<_> = tree.branch_node_ids_from(agent.head).into_iter().collect();
-        agent.pending_message_wakes.iter().any(|wake| {
+        let branch: HashSet<_> = tree
+            .branch_node_ids_from(agent.identity.head)
+            .into_iter()
+            .collect();
+        agent.dispatch.pending_message_wakes.iter().any(|wake| {
             wake.node_id
                 .is_some_and(|node_id| branch.contains(&node_id))
         })
@@ -436,6 +440,7 @@ impl Harness {
             .get(cid)
             .is_some_and(|agent| {
                 agent
+                    .dispatch
                     .pending_message_wakes
                     .iter()
                     .any(|wake| wake.node_id.is_none())
@@ -452,13 +457,14 @@ impl Harness {
         let tree = self
             .session_runtime
             .agent_store
-            .agent(agent.agent_id.as_deref()?)?;
+            .agent(agent.identity.agent_id.as_deref()?)?;
         let wake_nodes: HashSet<_> = agent
+            .dispatch
             .pending_message_wakes
             .iter()
             .filter_map(|wake| wake.node_id)
             .collect();
-        tree.branch_node_ids_from(agent.head)
+        tree.branch_node_ids_from(agent.identity.head)
             .into_iter()
             .find(|node_id| wake_nodes.contains(node_id))
     }
@@ -472,7 +478,7 @@ impl Harness {
         let tree = self
             .session_runtime
             .agent_store
-            .agent(agent.agent_id.as_deref()?)?;
+            .agent(agent.identity.agent_id.as_deref()?)?;
         let wake_node = tree.node(self.earliest_selected_message_wake_node(cid)?)?;
         Some(
             wake_node
@@ -490,10 +496,14 @@ impl Harness {
         cid: &AgentId,
     ) -> Option<crate::agent::AgentMessageActivationClass> {
         let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
-        let agent_id = agent.agent_id.as_deref()?;
+        let agent_id = agent.identity.agent_id.as_deref()?;
         let tree = self.session_runtime.agent_store.agent(agent_id)?;
-        let branch: HashSet<_> = tree.branch_node_ids_from(agent.head).into_iter().collect();
+        let branch: HashSet<_> = tree
+            .branch_node_ids_from(agent.identity.head)
+            .into_iter()
+            .collect();
         let mut classes = agent
+            .dispatch
             .pending_message_wakes
             .iter()
             .filter(|wake| {
@@ -519,7 +529,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(cid)
-                .and_then(|conv| match &conv.turn_state {
+                .and_then(|conv| match &conv.turn.turn_state {
                     AgentTurnState::ToolsRunning { remaining_calls } => {
                         Some(remaining_calls.clone())
                     }
@@ -578,7 +588,7 @@ impl Harness {
             .agents
             .get(cid)
             .is_some_and(|conv| {
-                conv.pending_message_wakes.iter().any(|wake| {
+                conv.dispatch.pending_message_wakes.iter().any(|wake| {
                     matches!(
                         wake.source,
                         crate::agent::PendingMessageWakeSource::AgentMessageReceived { .. }

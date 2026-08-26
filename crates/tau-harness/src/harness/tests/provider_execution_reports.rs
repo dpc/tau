@@ -938,6 +938,7 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
         .agents
         .get_mut(&cid)
         .expect("agent")
+        .dispatch
         .in_flight_prompt = Some(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
@@ -949,6 +950,7 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
         .agents
         .get_mut(&cid)
         .expect("agent")
+        .dispatch
         .last_prompt_id = Some(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
@@ -1059,6 +1061,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
         .agents
         .get_mut(&cid)
         .expect("agent")
+        .dispatch
         .in_flight_prompt = Some(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
@@ -1070,6 +1073,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
         .agents
         .get_mut(&cid)
         .expect("agent")
+        .dispatch
         .last_prompt_id = Some(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
@@ -1218,12 +1222,12 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        agent.in_flight_prompt = Some(
+        agent.dispatch.in_flight_prompt = Some(
             "prompt-1"
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
         );
-        agent.last_prompt_id = Some(
+        agent.dispatch.last_prompt_id = Some(
             "prompt-1"
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
@@ -1298,6 +1302,7 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
             .agents
             .get(&cid)
             .expect("agent")
+            .dispatch
             .in_flight_prompt
             .is_none()
     );
@@ -1422,12 +1427,12 @@ fn stale_finished_report_termination_uses_harness_source() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        agent.in_flight_prompt = Some(
+        agent.dispatch.in_flight_prompt = Some(
             "prompt-1"
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
         );
-        agent.last_prompt_id = Some(
+        agent.dispatch.last_prompt_id = Some(
             "newer-prompt"
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),

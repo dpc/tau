@@ -1010,7 +1010,7 @@ fn agent_tree_for_conversation<'a>(h: &'a Harness, cid: &AgentId) -> &'a AgentTr
         .agent_registry
         .agents
         .get(cid)
-        .and_then(|conv| conv.agent_id.as_deref())
+        .and_then(|conv| conv.identity.agent_id.as_deref())
         .expect("conversation has agent id");
     h.session_runtime
         .agent_store
@@ -1024,7 +1024,7 @@ pub(super) fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
         .agent_registry
         .agents
         .iter()
-        .find_map(|(cid, conv)| conv.originator.is_user().then_some(cid.clone()))
+        .find_map(|(cid, conv)| conv.identity.originator.is_user().then_some(cid.clone()))
         .unwrap_or_else(|| {
             let session_id = h.session_runtime.current_session_id.clone();
             let role = h.config.selected_role.clone();
@@ -1039,7 +1039,7 @@ pub(super) fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
         .agent_registry
         .agents
         .get(&cid)
-        .and_then(|conv| conv.agent_id.as_deref())
+        .and_then(|conv| conv.identity.agent_id.as_deref())
         .map(crate::parse_agent_id)
     {
         finish_test_agent_context_wait(h, &agent_id);
@@ -1052,7 +1052,7 @@ fn test_user_agent(h: &Harness) -> AgentId {
         .agent_registry
         .agents
         .iter()
-        .find_map(|(cid, conv)| conv.originator.is_user().then_some(cid.clone()))
+        .find_map(|(cid, conv)| conv.identity.originator.is_user().then_some(cid.clone()))
         .expect("test should create a user agent first")
 }
 
@@ -1062,7 +1062,7 @@ fn durable_agent_id_for_conversation(h: &Harness, cid: &AgentId) -> tau_proto::A
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|conv| conv.agent_id.clone())
+            .and_then(|conv| conv.identity.agent_id.clone())
             .expect("conversation has durable agent id"),
     )
 }
@@ -1078,7 +1078,7 @@ fn agent_branch_for_conversation<'a>(h: &'a Harness, cid: &AgentId) -> Vec<&'a A
         .agent_registry
         .agents
         .get(cid)
-        .and_then(|conv| conv.head);
+        .and_then(|conv| conv.identity.head);
     agent_tree_for_conversation(h, cid).branch_from(head)
 }
 
@@ -1675,9 +1675,9 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
         .and_then(|(_, index)| index.parse::<u64>().ok())
         .map(|index| index.saturating_add(1))
     {
-        conv.next_prompt_index = conv.next_prompt_index.max(next_index);
+        conv.dispatch.next_prompt_index = conv.dispatch.next_prompt_index.max(next_index);
     }
-    conv.turn_state = AgentTurnState::AgentThinking {
+    conv.turn.turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: spid
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -1703,6 +1703,7 @@ fn seed_tools_running(h: &mut Harness, cid: &crate::AgentId, remaining: Vec<Tool
         .agents
         .get_mut(cid)
         .expect("conversation present")
+        .turn
         .turn_state = AgentTurnState::ToolsRunning {
         remaining_calls: remaining,
     };
@@ -1716,7 +1717,7 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
         .agent_registry
         .agents
         .get(cid)
-        .and_then(|conv| conv.agent_id.clone())
+        .and_then(|conv| conv.identity.agent_id.clone())
         .unwrap_or_else(|| "main".to_owned());
     h.publish_for_agent(
         cid,
@@ -1954,7 +1955,7 @@ fn outer_side_cid_str(h: &Harness) -> &str {
         .iter()
         .find_map(|(cid, conv)| {
             matches!(
-                &conv.originator,
+                &conv.identity.originator,
                 tau_proto::PromptOriginator::Extension { query_id, .. }
                     if query_id == "q-outer"
             )
