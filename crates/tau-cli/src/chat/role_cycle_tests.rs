@@ -349,9 +349,11 @@ fn agent_cycle_dispatches_overview_and_agent_transitions() {
     ])));
     let suspended = Arc::new(Mutex::new(path_std_collections::HashSet::new()));
     let routing = routing_state(known, live, suspended);
+    let (wake_tx, _wake_rx) = tau_blocking_notify_channel::channel();
     let (renderer_tx, renderer_rx) = LocalRendererSender::channel(
         Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         Arc::new(Mutex::new(())),
+        wake_tx,
     );
 
     routing.set_selected_agent(Some("bravo".to_owned()));

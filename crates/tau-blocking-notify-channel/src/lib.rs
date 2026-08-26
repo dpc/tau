@@ -45,6 +45,7 @@ use std::cell::Cell;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 /// Creates a new notify channel, returning `(Sender, Receiver)`.
 pub fn channel() -> (Sender, Receiver) {
@@ -79,6 +80,26 @@ impl std::fmt::Display for Disconnected {
 }
 
 impl std::error::Error for Disconnected {}
+
+/// Error returned by [`Receiver::recv_timeout`] when no notification arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvTimeoutError {
+    /// The requested wait deadline elapsed without a pending notification.
+    Timeout,
+    /// Every sender was dropped and no pending notification remains.
+    Disconnected,
+}
+
+impl std::fmt::Display for RecvTimeoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout => f.write_str("timed out waiting on channel"),
+            Self::Disconnected => f.write_str("channel disconnected"),
+        }
+    }
+}
+
+impl std::error::Error for RecvTimeoutError {}
 
 /// Result status returned by [`Receiver::try_recv`] when the channel is still
 /// connected.
@@ -229,6 +250,49 @@ impl Receiver {
                 .condvar
                 .wait(state)
                 .expect("notify channel mutex poisoned");
+        }
+    }
+
+    /// Blocks until notified, disconnected, or the relative deadline elapses.
+    ///
+    /// Deadlines representable by [`Instant`] are exact. A larger duration is
+    /// treated as an effectively unbounded wait that still reacts to
+    /// notification and disconnection. A notification already pending at a
+    /// finite deadline takes priority over timeout, and a pending
+    /// notification still takes priority over disconnection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread panicked while holding the channel mutex.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<(), RecvTimeoutError> {
+        let deadline = Instant::now().checked_add(timeout);
+        let mut state = self.shared.lock();
+        loop {
+            if state.notified {
+                state.notified = false;
+                return Ok(());
+            }
+            if state.disconnected {
+                return Err(RecvTimeoutError::Disconnected);
+            }
+            let Some(deadline) = deadline else {
+                state = self
+                    .shared
+                    .condvar
+                    .wait(state)
+                    .expect("notify channel mutex poisoned");
+                continue;
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(RecvTimeoutError::Timeout);
+            }
+            let (next_state, _) = self
+                .shared
+                .condvar
+                .wait_timeout(state, remaining)
+                .expect("notify channel mutex poisoned");
+            state = next_state;
         }
     }
 

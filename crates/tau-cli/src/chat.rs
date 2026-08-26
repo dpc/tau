@@ -31,7 +31,7 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use cold_attach_stager::{ColdAttachStager, renderer_event_from_delivery};
-use renderer_scheduler::{LocalRendererSender, RendererCommandScheduler};
+use renderer_scheduler::{LocalRendererSender, RemoteRendererSender, RendererCommandScheduler};
 use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
@@ -927,7 +927,7 @@ fn encode_binding_action(action: &CliBindingAction) -> String {
 /// original decoded event box.
 fn enqueue_remote_delivery(
     delivery: cold_attach_stager::RendererDelivery,
-    remote_tx: &mpsc::SyncSender<RendererCmd>,
+    remote_tx: &RemoteRendererSender,
     renderer_byte_budget: &RendererByteBudget,
     queued_remote_items: &path_std_sync_atomic::AtomicUsize,
     renderer_arbiter: &Mutex<()>,
@@ -1028,9 +1028,14 @@ pub(crate) fn run_chat(
     // remote arrivals; socket disconnect stays at the FIFO tail.
     let remote_admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(0));
     let renderer_arbiter = Arc::new(Mutex::new(()));
-    let (event_tx, event_rx) =
-        LocalRendererSender::channel(remote_admitted.clone(), renderer_arbiter.clone());
-    let (remote_tx, remote_rx) = mpsc::sync_channel::<RendererCmd>(RENDERER_QUEUE_MAX_ITEMS);
+    let (renderer_wake_tx, renderer_wake_rx) = tau_blocking_notify_channel::channel();
+    let (event_tx, event_rx) = LocalRendererSender::channel(
+        remote_admitted.clone(),
+        renderer_arbiter.clone(),
+        renderer_wake_tx.clone(),
+    );
+    let (remote_tx, remote_rx) =
+        RemoteRendererSender::channel(RENDERER_QUEUE_MAX_ITEMS, renderer_wake_tx);
     let renderer_byte_budget = Arc::new(RendererByteBudget::new());
     let socket_renderer_byte_budget = renderer_byte_budget.clone();
     let queued_remote_items = Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
@@ -1364,10 +1369,14 @@ pub(crate) fn run_chat(
     let renderer_thread = std::thread::spawn(move || {
         let mut renderer = renderer;
         let mut ui_io_tracker = UiIoTracker::new(renderer_ui_io_meter);
-        let mut scheduler = RendererCommandScheduler::new(remote_rx, renderer_rx, renderer_arbiter);
+        let mut scheduler = RendererCommandScheduler::new(
+            remote_rx,
+            renderer_rx,
+            renderer_arbiter,
+            renderer_wake_rx,
+        );
         loop {
-            let cmd =
-                scheduler.recv_timeout(ui_io_tracker.recv_timeout().min(Duration::from_millis(10)));
+            let cmd = scheduler.recv_timeout(ui_io_tracker.recv_timeout());
             match cmd {
                 Ok(cmd) => {
                     match cmd {
@@ -1475,12 +1484,7 @@ pub(crate) fn run_chat(
                     ui_io_tracker.sample_if_due(&mut renderer);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => ui_io_tracker.sample_now(&mut renderer),
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    if scheduler.remote_closed() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
     });

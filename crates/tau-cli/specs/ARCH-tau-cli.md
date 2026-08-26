@@ -219,8 +219,11 @@ finite prefix, executes the local command, then resumes later remote arrivals;
 socket facts cannot be overtaken and continuous remote traffic cannot starve
 selection or action ownership. A shared admission arbiter linearizes remote
 reservations, local watermark capture, and the scheduler's nonblocking channel
-selection. Input routing mirrors selection before enqueue, and renderer queue
-pressure never blocks the input thread's direct harness uplink.
+selection. Successful enqueues signal one shared, payload-free, coalesced wake;
+the scheduler reruns the same arbiter after each wake and otherwise waits until
+the exact renderer sampling deadline. Input routing mirrors selection before
+enqueue, and renderer queue pressure never blocks the input thread's direct
+harness uplink.
 
 During initial cold attach, the UI retains the replay marker through socket
 decoding and stages visible replayed prompt/response transcript rows until the

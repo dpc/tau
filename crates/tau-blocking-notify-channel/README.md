@@ -11,6 +11,9 @@ When every sender is dropped, the channel becomes disconnected. A pending
 notification is still delivered before `recv` or `try_recv` reports
 `Disconnected`. Non-blocking receives use `TryRecvStatus::Notified` and
 `TryRecvStatus::Empty` to describe the connected channel state.
+`recv_timeout` waits until an exact relative deadline while preserving the same
+notification-before-disconnect priority. Durations beyond the platform
+`Instant` range behave as interruptible unbounded waits instead of panicking.
 
 The receiving half may be moved to another thread, but it is intentionally not
 `Sync`: clone `Sender` for multiple producers rather than sharing one receiver

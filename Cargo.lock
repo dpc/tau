@@ -5718,6 +5718,7 @@ dependencies = [
  "serde_toon_format",
  "socket2",
  "tau-actions",
+ "tau-blocking-notify-channel",
  "tau-cli-picker",
  "tau-cli-term",
  "tau-cli-term-raw",

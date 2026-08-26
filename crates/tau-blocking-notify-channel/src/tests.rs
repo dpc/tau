@@ -76,6 +76,73 @@ fn recv_blocks_until_notified() {
     handle.join().expect("receiver thread panicked");
 }
 
+/// Ensures timed receive consumes an already pending wake without consulting
+/// wall-clock delay.
+#[test]
+fn recv_timeout_consumes_pending_notification() {
+    let (tx, rx) = channel();
+    tx.notify();
+    assert_eq!(rx.recv_timeout(Duration::ZERO), Ok(()));
+    assert_eq!(
+        rx.recv_timeout(Duration::ZERO),
+        Err(RecvTimeoutError::Timeout)
+    );
+}
+
+/// Ensures a duration beyond the platform's finite `Instant` range behaves as
+/// an interruptible unbounded wait instead of panicking during deadline math.
+#[test]
+fn recv_timeout_accepts_duration_beyond_instant_range() {
+    let (tx, rx) = channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        ready_tx.send(()).expect("receiver readiness sent");
+        result_tx
+            .send(rx.recv_timeout(Duration::MAX))
+            .expect("receiver result sent");
+    });
+
+    assert_eq!(ready_rx.recv_timeout(RESULT_WAIT), Ok(()));
+    assert_eq!(
+        result_rx.recv_timeout(PRE_TRIGGER_WAIT),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+    tx.notify();
+    assert_eq!(result_rx.recv_timeout(RESULT_WAIT), Ok(Ok(())));
+    handle.join().expect("receiver thread panicked");
+}
+
+/// Ensures timed receive preserves pending-notification priority over channel
+/// disconnection.
+#[test]
+fn recv_timeout_delivers_pending_notification_before_disconnect() {
+    let (tx, rx) = channel();
+    tx.notify();
+    drop(tx);
+    assert_eq!(rx.recv_timeout(Duration::ZERO), Ok(()));
+    assert_eq!(
+        rx.recv_timeout(Duration::ZERO),
+        Err(RecvTimeoutError::Disconnected)
+    );
+}
+
+/// Ensures a timed waiter wakes promptly when a barrier-released producer
+/// notifies it rather than sleeping until its deadline.
+#[test]
+fn recv_timeout_wakes_on_notification() {
+    let (tx, rx) = channel();
+    let start = Arc::new(Barrier::new(2));
+    let sender_start = Arc::clone(&start);
+    let sender = thread::spawn(move || {
+        sender_start.wait();
+        tx.notify();
+    });
+    start.wait();
+    assert_eq!(rx.recv_timeout(RESULT_WAIT), Ok(()));
+    sender.join().expect("sender thread panicked");
+}
+
 /// Ensures a barrier-aligned sender cohort coalesces concurrent notifications
 /// and disconnects only after every clone drops.
 #[test]

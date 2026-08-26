@@ -1,10 +1,40 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::os::unix::net::UnixStream;
 use std::sync::{atomic as path_std_sync_atomic, mpsc};
 
 use tau_proto::HarnessOutputWriter;
 
 use super::*;
+
+/// Creates production-shaped renderer channels for focused scheduler tests.
+fn renderer_scheduler_channels(
+    remote_capacity: usize,
+    admitted: Arc<path_std_sync_atomic::AtomicU64>,
+    arbiter: Arc<Mutex<()>>,
+) -> (
+    RemoteRendererSender,
+    LocalRendererSender,
+    RendererCommandScheduler,
+) {
+    let (wake_tx, wake_rx) = tau_blocking_notify_channel::channel();
+    let (remote_tx, remote_rx) = RemoteRendererSender::channel(remote_capacity, wake_tx.clone());
+    let (local_tx, local_rx) = LocalRendererSender::channel(admitted, arbiter.clone(), wake_tx);
+    let scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter, wake_rx);
+    (remote_tx, local_tx, scheduler)
+}
+
+/// Builds one ordinary remote command for scheduler ordering tests.
+fn remote_bell(delivery_id: u64) -> RendererCmd {
+    RendererCmd::Remote {
+        abandoned_shell_starts: Vec::new(),
+        presentation: cold_attach_stager::RendererPresentation::Ordinary,
+        event: Box::new(Event::TermBell(tau_proto::TermBell {})),
+        recorded_at: UnixMicros::new(delivery_id),
+        delivery_id,
+        queue_bytes: 1,
+        enqueued_at: Instant::now(),
+    }
+}
 
 /// Admission retains buffered bytes so an acknowledgement coalesced with a
 /// later disconnect is still visible to the long-lived reader.
@@ -117,10 +147,10 @@ fn renderer_disconnect_waits_at_exact_byte_cap_and_releases_all_permits() {
 /// continue draining local work after the remote producer closes.
 #[test]
 fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
-    let (remote_tx, remote_rx) = mpsc::sync_channel(4);
     let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(2));
     let arbiter = Arc::new(Mutex::new(()));
-    let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
+    let (remote_tx, local_tx, mut scheduler) =
+        renderer_scheduler_channels(4, admitted.clone(), arbiter);
     remote_tx
         .send(RendererCmd::Remote {
             abandoned_shell_starts: Vec::new(),
@@ -153,7 +183,6 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
         })
         .expect("local action");
 
-    let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
     let remote = scheduler
         .recv_timeout(Duration::from_millis(10))
         .expect("remote delivery");
@@ -188,7 +217,8 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
 /// admission, and scheduler ownership.
 #[test]
 fn renderer_admission_preserves_decoded_event_box() {
-    let (remote_tx, remote_rx) = mpsc::sync_channel(1);
+    let (wake_tx, wake_rx) = tau_blocking_notify_channel::channel();
+    let (remote_tx, remote_rx) = RemoteRendererSender::channel(1, wake_tx.clone());
     let remote_admitted = path_std_sync_atomic::AtomicU64::new(0);
     let queued_items = path_std_sync_atomic::AtomicUsize::new(0);
     let arbiter = Mutex::new(());
@@ -212,10 +242,11 @@ fn renderer_admission_preserves_decoded_event_box() {
     let (local_tx, local_rx) = LocalRendererSender::channel(
         Arc::new(path_std_sync_atomic::AtomicU64::new(1)),
         Arc::new(Mutex::new(())),
+        wake_tx,
     );
     drop(local_tx);
     let mut scheduler =
-        RendererCommandScheduler::new(remote_rx, local_rx, Arc::new(Mutex::new(())));
+        RendererCommandScheduler::new(remote_rx, local_rx, Arc::new(Mutex::new(())), wake_rx);
     let RendererCmd::Remote { event, .. } = scheduler
         .recv_timeout(Duration::from_millis(10))
         .expect("admitted remote delivery")
@@ -229,10 +260,10 @@ fn renderer_admission_preserves_decoded_event_box() {
 /// overtaken even when its channel send completes after the local send.
 #[test]
 fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
-    let (remote_tx, remote_rx) = mpsc::sync_channel(2);
     let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(1));
     let arbiter = Arc::new(Mutex::new(()));
-    let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
+    let (remote_tx, local_tx, mut scheduler) =
+        renderer_scheduler_channels(2, admitted.clone(), arbiter);
     local_tx
         .send(RendererCmd::SwitchAgent {
             agent_id: "worker".to_owned(),
@@ -250,7 +281,6 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
         })
         .expect("reserved remote");
 
-    let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
     let mut next = || scheduler.recv_timeout(Duration::from_millis(10));
     assert!(matches!(
         next(),
@@ -271,10 +301,10 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
 /// arbiter.
 #[test]
 fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
-    let (remote_tx, remote_rx) = mpsc::sync_channel(1);
     let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(1));
     let arbiter = Arc::new(Mutex::new(()));
-    let (local_tx, local_rx) = LocalRendererSender::channel(admitted, arbiter.clone());
+    let (remote_tx, local_tx, mut scheduler) =
+        renderer_scheduler_channels(1, admitted, arbiter.clone());
     remote_tx
         .send(RendererCmd::Remote {
             abandoned_shell_starts: Vec::new(),
@@ -300,7 +330,6 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
         done_tx.send(()).expect("local enqueue done");
     });
 
-    let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
     let mut after_local_check = || {
         start_tx.send(()).expect("release local sender");
         attempting_rx
@@ -329,14 +358,237 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
     sender.join().expect("local sender");
 }
 
+/// A remote enqueue immediately after the scheduler's empty scan must leave a
+/// retained wake, not wait for the caller's deadline.
+#[test]
+fn renderer_scheduler_wakes_for_remote_arriving_after_empty_scan() {
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(0));
+    let arbiter = Arc::new(Mutex::new(()));
+    let (remote_tx, local_tx, mut scheduler) = renderer_scheduler_channels(1, admitted, arbiter);
+    let (result_tx, result_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let mut after_empty_scan = || remote_tx.send(remote_bell(1)).expect("remote arrival");
+        let result =
+            scheduler.recv_timeout_before_wait(Duration::from_secs(30), &mut after_empty_scan);
+        result_tx.send(result).expect("scheduler result");
+    });
+    let result = match result_rx.recv_timeout(Duration::from_secs(1)) {
+        Ok(result) => result,
+        Err(error) => {
+            local_tx
+                .send(RendererCmd::ClearSelectedAgent)
+                .expect("cleanup local wake");
+            worker.join().expect("scheduler worker");
+            panic!("remote arrival did not wake scheduler: {error}");
+        }
+    };
+    assert!(matches!(
+        result,
+        Ok(RendererCmd::Remote { delivery_id: 1, .. })
+    ));
+    worker.join().expect("scheduler worker");
+}
+
+/// A local enqueue immediately after the scheduler's empty scan must wake the
+/// same shared wait source while retaining local command order.
+#[test]
+fn renderer_scheduler_wakes_for_local_arriving_after_empty_scan() {
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(0));
+    let arbiter = Arc::new(Mutex::new(()));
+    let (remote_tx, local_tx, mut scheduler) = renderer_scheduler_channels(1, admitted, arbiter);
+    let (result_tx, result_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let mut after_empty_scan = || {
+            local_tx
+                .send(RendererCmd::ClearSelectedAgent)
+                .expect("local arrival");
+        };
+        let result =
+            scheduler.recv_timeout_before_wait(Duration::from_secs(30), &mut after_empty_scan);
+        result_tx.send(result).expect("scheduler result");
+    });
+    let result = match result_rx.recv_timeout(Duration::from_secs(1)) {
+        Ok(result) => result,
+        Err(error) => {
+            remote_tx.send(remote_bell(1)).expect("cleanup remote wake");
+            worker.join().expect("scheduler worker");
+            panic!("local arrival did not wake scheduler: {error}");
+        }
+    };
+    assert!(matches!(result, Ok(RendererCmd::ClearSelectedAgent)));
+    worker.join().expect("scheduler worker");
+}
+
+/// Coalesced simultaneous remote and local notifications must rerun the
+/// existing watermark arbiter, so reserved remote work cannot be overtaken.
+#[test]
+fn renderer_scheduler_coalesced_wake_preserves_remote_reservation() {
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(0));
+    let arbiter = Arc::new(Mutex::new(()));
+    let (remote_tx, local_tx, mut scheduler) =
+        renderer_scheduler_channels(1, admitted.clone(), arbiter);
+    let mut after_empty_scan = || {
+        admitted.fetch_add(1, Ordering::AcqRel);
+        remote_tx.send(remote_bell(1)).expect("reserved remote");
+        local_tx
+            .send(RendererCmd::ClearSelectedAgent)
+            .expect("watermarked local");
+    };
+
+    assert!(matches!(
+        scheduler.recv_timeout_before_wait(Duration::from_secs(1), &mut after_empty_scan),
+        Ok(RendererCmd::Remote { delivery_id: 1, .. })
+    ));
+    assert!(matches!(
+        scheduler.recv_timeout(Duration::ZERO),
+        Ok(RendererCmd::ClearSelectedAgent)
+    ));
+}
+
+/// Closing an idle remote source must neither spin nor hide later local work;
+/// the shared wake preserves the independent local channel lifetime.
+#[test]
+fn renderer_scheduler_remote_close_waits_for_local_or_deadline() {
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(0));
+    let arbiter = Arc::new(Mutex::new(()));
+    let (remote_tx, local_tx, mut scheduler) = renderer_scheduler_channels(1, admitted, arbiter);
+    drop(remote_tx);
+
+    assert!(matches!(
+        scheduler.recv_timeout(Duration::ZERO),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    local_tx
+        .send(RendererCmd::ClearSelectedAgent)
+        .expect("local after remote close");
+    assert!(matches!(
+        scheduler.recv_timeout(Duration::ZERO),
+        Ok(RendererCmd::ClearSelectedAgent)
+    ));
+}
+
+/// Dropping both producer families must wake the scheduler and report actual
+/// command-channel disconnection rather than treating wake closure as
+/// authority.
+#[test]
+fn renderer_scheduler_reports_disconnect_after_both_sources_close() {
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(0));
+    let arbiter = Arc::new(Mutex::new(()));
+    let (remote_tx, local_tx, mut scheduler) = renderer_scheduler_channels(1, admitted, arbiter);
+    drop(remote_tx);
+    drop(local_tx);
+
+    assert!(matches!(
+        scheduler.recv_timeout(Duration::ZERO),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    ));
+}
+
+/// Retained or repeated stale wakes must not extend the caller's deadline; the
+/// scheduler checks elapsed time after its final arbiter pass and before wait.
+#[test]
+fn renderer_scheduler_stale_wakes_cannot_extend_deadline() {
+    let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(0));
+    let arbiter = Arc::new(Mutex::new(()));
+    let (wake_tx, wake_rx) = tau_blocking_notify_channel::channel();
+    let (_remote_tx, remote_rx) = RemoteRendererSender::channel(1, wake_tx.clone());
+    let (_local_tx, local_rx) =
+        LocalRendererSender::channel(admitted, arbiter.clone(), wake_tx.clone());
+    let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter, wake_rx);
+    let mut hook_calls = 0;
+    let mut before_each_wait = || {
+        hook_calls += 1;
+        if hook_calls <= 2 {
+            wake_tx.notify();
+        }
+    };
+
+    assert!(matches!(
+        scheduler.recv_timeout_before_each_wait(Duration::ZERO, &mut before_each_wait),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(
+        hook_calls, 1,
+        "an elapsed deadline must return after one final arbiter pass"
+    );
+}
+
+/// Exhaustively models two enqueue-then-notify producers and a coalescing
+/// consumer to prevent reordering that can strand eligible work after parking.
+#[test]
+fn renderer_scheduler_enqueue_then_notify_model_has_no_lost_wake() {
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    enum Producer {
+        Idle,
+        NotificationOwed,
+        Done,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    struct State {
+        work: u8,
+        wake: bool,
+        parked: bool,
+        producers: [Producer; 2],
+    }
+
+    let initial = State {
+        work: 0,
+        wake: false,
+        parked: false,
+        producers: [Producer::Idle; 2],
+    };
+    let mut pending = VecDeque::from([initial]);
+    let mut visited = HashSet::new();
+    while let Some(state) = pending.pop_front() {
+        if !visited.insert(state) {
+            continue;
+        }
+        let notification_owed = state.producers.contains(&Producer::NotificationOwed);
+        assert!(
+            !(state.parked && state.work > 0 && !state.wake && !notification_owed),
+            "eligible work was stranded without a retained or owed wake: {state:?}"
+        );
+
+        for producer_index in 0..state.producers.len() {
+            let mut next = state;
+            match state.producers[producer_index] {
+                Producer::Idle => {
+                    next.work += 1;
+                    next.producers[producer_index] = Producer::NotificationOwed;
+                }
+                Producer::NotificationOwed => {
+                    next.wake = true;
+                    next.parked = false;
+                    next.producers[producer_index] = Producer::Done;
+                }
+                Producer::Done => continue,
+            }
+            pending.push_back(next);
+        }
+
+        let mut consumer = state;
+        if consumer.work > 0 {
+            consumer.work -= 1;
+            consumer.parked = false;
+        } else if consumer.wake {
+            consumer.wake = false;
+            consumer.parked = false;
+        } else {
+            consumer.parked = true;
+        }
+        pending.push_back(consumer);
+    }
+}
+
 /// An action ownership command must run after its captured older prefix
 /// but before a result delivery admitted later.
 #[test]
 fn renderer_scheduler_places_action_before_later_remote_result() {
-    let (remote_tx, remote_rx) = mpsc::sync_channel(4);
     let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(1));
     let arbiter = Arc::new(Mutex::new(()));
-    let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
+    let (remote_tx, local_tx, mut scheduler) =
+        renderer_scheduler_channels(4, admitted.clone(), arbiter);
     remote_tx
         .send(RendererCmd::Remote {
             abandoned_shell_starts: Vec::new(),
@@ -368,7 +620,6 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
         })
         .expect("later result");
 
-    let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
     let mut next = || scheduler.recv_timeout(Duration::from_millis(10));
     assert!(matches!(
         next(),
@@ -393,10 +644,10 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
 /// admission watermark has been drained.
 #[test]
 fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
-    let (remote_tx, remote_rx) = mpsc::sync_channel(8);
     let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(2));
     let arbiter = Arc::new(Mutex::new(()));
-    let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
+    let (remote_tx, local_tx, mut scheduler) =
+        renderer_scheduler_channels(8, admitted.clone(), arbiter);
     local_tx
         .send(RendererCmd::ClearSelectedAgent)
         .expect("local selection");
@@ -415,7 +666,6 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
             .expect("remote delivery");
     }
 
-    let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
     let mut next = || scheduler.recv_timeout(Duration::from_millis(10));
     assert!(matches!(
         next(),
@@ -451,10 +701,10 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
 fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
     let budget = Arc::new(RendererByteBudget::new());
     budget.acquire(RENDERER_QUEUE_MAX_BYTES);
-    let (remote_tx, remote_rx) = mpsc::sync_channel(1);
     let admitted = Arc::new(path_std_sync_atomic::AtomicU64::new(1));
     let arbiter = Arc::new(Mutex::new(()));
-    let (local_tx, local_rx) = LocalRendererSender::channel(admitted.clone(), arbiter.clone());
+    let (remote_tx, local_tx, mut scheduler) =
+        renderer_scheduler_channels(1, admitted.clone(), arbiter.clone());
     remote_tx
         .send(RendererCmd::Remote {
             abandoned_shell_starts: Vec::new(),
@@ -498,7 +748,6 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
         })
         .expect("local selection");
 
-    let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
     assert!(matches!(
         scheduler
             .recv_timeout(Duration::from_millis(10))
