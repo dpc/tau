@@ -19,6 +19,9 @@ The high-level terminal also exposes a syntax-agnostic operation that replaces
 its most recent search-history entry and the raw terminal's matching navigation
 entry together. This lets `tau-cli` substitute an approved safe presentation
 without teaching either terminal crate action-specific syntax.
+Each attachment retains independent newest suffixes of raw navigation and
+high-level search history (1,000 nonempty entries and 16 MiB of primary UTF-8
+text each); this in-process retention neither writes disk nor bounds active input.
 Routing and typed literal provenance belong to `tau-cli`, as specified by
 [`SPEC-tau-cli-command-mode`](../../tau-cli/specs/SPEC-tau-cli-command-mode.md).
 

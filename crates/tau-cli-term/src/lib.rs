@@ -97,6 +97,18 @@ const PROMPT_HISTORY_SEARCH_MAX_ROWS: usize = 200;
 const PROMPT_HISTORY_SUMMARY_MAX_CHARS: usize = 240;
 const PROMPT_HISTORY_PREVIEW_MAX_BYTES: usize = 64 * 1024;
 const PROMPT_HISTORY_PREVIEW_TOTAL_BYTES: usize = 1024 * 1024;
+/// Maximum number of nonempty search entries retained for one attachment.
+const PROMPT_HISTORY_MAX_ENTRIES: usize = 1000;
+/// Maximum primary UTF-8 text retained for one attachment's search entries.
+const PROMPT_HISTORY_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Independent HighTerm search-history retention limits for one attachment.
+#[derive(Clone, Copy)]
+struct PromptHistoryLimits {
+    /// Maximum retained nonempty search entries.
+    max_entries: usize,
+    /// Maximum retained primary UTF-8 bytes.
+    max_bytes: usize,
+}
 const COMPLETION_MENU_BLOCK_ID: BlockId = BlockId(u64::MAX);
 
 /// One width-aware picker presentation column.
@@ -275,6 +287,12 @@ pub struct HighTerm {
     /// from persistent history at startup and extended with submitted
     /// prompts from this process.
     prompt_history: Vec<String>,
+    /// Whether the most recently submitted prompt survived search-history
+    /// retention and can be replaced by its final redacted form.
+    last_submitted_prompt_retained: bool,
+    /// Optional small limits used by focused test-only history state machines.
+    #[cfg(test)]
+    prompt_history_limit_override: Option<PromptHistoryLimits>,
     completion_rules: CompletionRules,
     last_command_completion_token: Option<String>,
 }
@@ -335,6 +353,7 @@ impl HighTerm {
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
         let input_history: Vec<String> = input_history.into_iter().collect();
         let (mut term, handle) = tau_cli_term_raw::Term::new(left_prompt, terminal_options)?;
+        term.defer_submitted_input_history_limit();
         term.seed_input_history(input_history.clone());
         term.set_bindings(bindings);
         let handle_clone = handle.clone();
@@ -354,10 +373,15 @@ impl HighTerm {
                 editor_context: Arc::new(Mutex::new(EditorContext::default())),
                 external_editor,
                 menu_block_id: None,
-                prompt_history: input_history
-                    .into_iter()
-                    .filter(|entry| !entry.is_empty())
-                    .collect(),
+                prompt_history: bounded_seeded_prompt_history(
+                    input_history
+                        .into_iter()
+                        .filter(|entry| !entry.is_empty())
+                        .collect(),
+                ),
+                last_submitted_prompt_retained: false,
+                #[cfg(test)]
+                prompt_history_limit_override: None,
                 completion_rules,
                 last_command_completion_token: None,
             },
@@ -374,6 +398,7 @@ impl HighTerm {
         theme: Theme,
         bindings: impl IntoIterator<Item = (String, String)>,
     ) -> (Self, CompletionData) {
+        term.defer_submitted_input_history_limit();
         let data = CompletionData::new();
         let data_clone = data.clone();
         term.set_completion_source(Some(make_completion_source(
@@ -391,6 +416,8 @@ impl HighTerm {
                 external_editor: None,
                 menu_block_id: None,
                 prompt_history: Vec::new(),
+                last_submitted_prompt_retained: false,
+                prompt_history_limit_override: None,
                 completion_rules: CompletionRules::default(),
                 last_command_completion_token: None,
             },
@@ -434,8 +461,12 @@ impl HighTerm {
     /// form than the raw value that must remain available to the immediate
     /// routing stack.
     pub fn replace_last_submitted_prompt(&mut self, text: String) {
-        if let Some(last) = self.prompt_history.last_mut() {
-            *last = text.clone();
+        if self.last_submitted_prompt_retained {
+            if let Some(last) = self.prompt_history.last_mut() {
+                *last = text.clone();
+            }
+        } else if !text.is_empty() {
+            self.prompt_history.push(text.clone());
         }
         self.term.replace_last_submitted_input(text);
     }
@@ -831,7 +862,67 @@ impl HighTerm {
         }
         let history_line = canonical_literal_colon_prompt(line).unwrap_or_else(|| line.to_owned());
         self.prompt_history.push(history_line.clone());
+        self.last_submitted_prompt_retained = true;
         self.term.replace_last_submitted_input(history_line);
+    }
+
+    /// Bounds both histories after the input loop has finalized this
+    /// submission's canonical or redacted presentation.
+    pub fn finalize_last_submitted_prompt_history(&mut self) {
+        let history = std::mem::take(&mut self.prompt_history);
+        self.prompt_history = self.bounded_prompt_history_for_attachment(history);
+        self.last_submitted_prompt_retained = self.prompt_history.last().is_some();
+        self.term.finalize_submitted_input_history();
+    }
+
+    /// Returns an attachment-local bounded suffix using this instance's limits.
+    fn bounded_prompt_history_for_attachment(&self, prompt_history: Vec<String>) -> Vec<String> {
+        Self::bounded_prompt_history_with_limits(
+            prompt_history,
+            self.effective_prompt_history_limits(),
+        )
+    }
+
+    /// Returns the newest permitted suffix under explicit entry and byte
+    /// limits.
+    fn bounded_prompt_history_with_limits(
+        mut prompt_history: Vec<String>,
+        limits: PromptHistoryLimits,
+    ) -> Vec<String> {
+        prompt_history.retain(|entry| !entry.is_empty() && entry.len() <= limits.max_bytes);
+
+        let mut retained_bytes = 0;
+        let mut retained_start = prompt_history.len();
+        for (retained_entries, (index, entry)) in
+            prompt_history.iter().enumerate().rev().enumerate()
+        {
+            if retained_entries == limits.max_entries
+                || entry.len() > limits.max_bytes - retained_bytes
+            {
+                break;
+            }
+            retained_bytes += entry.len();
+            retained_start = index;
+        }
+        prompt_history.drain(..retained_start);
+        prompt_history
+    }
+
+    /// Returns the production HighTerm history limits.
+    fn prompt_history_limits() -> PromptHistoryLimits {
+        PromptHistoryLimits {
+            max_entries: PROMPT_HISTORY_MAX_ENTRIES,
+            max_bytes: PROMPT_HISTORY_MAX_BYTES,
+        }
+    }
+
+    /// Returns production limits or a focused test's explicit local limits.
+    fn effective_prompt_history_limits(&self) -> PromptHistoryLimits {
+        #[cfg(test)]
+        if let Some(limits) = self.prompt_history_limit_override {
+            return limits;
+        }
+        Self::prompt_history_limits()
     }
 
     fn maybe_run_command_completion(&mut self) -> io::Result<bool> {
@@ -879,6 +970,13 @@ impl HighTerm {
         );
         self.handle.print_output("prompt-action-error", block);
     }
+}
+
+/// Bounds startup-seeded history with production limits before an attachment
+/// owns it. Attachment mutations use
+/// [`HighTerm::bounded_prompt_history_for_attachment`].
+fn bounded_seeded_prompt_history(prompt_history: Vec<String>) -> Vec<String> {
+    HighTerm::bounded_prompt_history_with_limits(prompt_history, HighTerm::prompt_history_limits())
 }
 
 /// Returns canonical literal-colon prompt text for a line beginning with `::`.

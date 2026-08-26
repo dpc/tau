@@ -15,6 +15,7 @@ license.workspace = true
 workspace = true
 
 [features]
+history-retention-test-support = []
 redraw-test-counter = []
 
 [dependencies]

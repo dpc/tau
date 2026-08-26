@@ -2207,6 +2207,7 @@ trait RecordedLineHandlers {
 /// owners may retain only `presentation_text`.
 trait SubmittedLineHandlers: RecordedLineHandlers {
     fn replace_last_submitted_prompt(&mut self, text: String);
+    fn finalize_last_submitted_prompt_history(&mut self);
     fn record_prompt_line(&mut self, record: SubmittedLineRecord<'_>);
     fn is_known_command_or_action(&self, text: &str) -> bool;
     fn command_echo(&mut self, text: &str);
@@ -3813,6 +3814,10 @@ impl SubmittedLineHandlers for TerminalInputSession<'_> {
         self.term.replace_last_submitted_prompt(text);
     }
 
+    fn finalize_last_submitted_prompt_history(&mut self) {
+        self.term.finalize_last_submitted_prompt_history();
+    }
+
     fn record_prompt_line(&mut self, record: SubmittedLineRecord<'_>) {
         self.record_prompt_line_if_persistent_with_routing(
             record.history_fallback,
@@ -4336,6 +4341,7 @@ fn handle_submitted_line_with_handlers(
 ) -> Result<Option<InputLoopExit>, CliError> {
     let text = line.trim();
     if text.is_empty() {
+        handlers.finalize_last_submitted_prompt_history();
         return Ok(None);
     }
 
@@ -4355,7 +4361,9 @@ fn handle_submitted_line_with_handlers(
             presentation_text: &submitted_text,
             routing_text: text,
         });
-        return Ok(handlers.submit_literal_prompt(&submitted_text));
+        let result = handlers.submit_literal_prompt(&submitted_text);
+        handlers.finalize_last_submitted_prompt_history();
+        return Ok(result);
     }
 
     // Preserve the original side-effect order: every non-empty line is
@@ -4370,7 +4378,9 @@ fn handle_submitted_line_with_handlers(
     if handlers.is_known_command_or_action(text) {
         handlers.command_echo(&presentation_text);
     }
-    handle_recorded_line_with_handlers(text, handlers)
+    let result = handle_recorded_line_with_handlers(text, handlers);
+    handlers.finalize_last_submitted_prompt_history();
+    result
 }
 
 pub(crate) fn is_known_static_command(text: &str) -> bool {

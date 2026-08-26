@@ -30,4 +30,7 @@ which.workspace = true
 
 [dev-dependencies]
 crossterm.workspace = true
-tau-cli-term-raw = { workspace = true, features = ["redraw-test-counter"] }
+tau-cli-term-raw = { workspace = true, features = [
+  "history-retention-test-support",
+  "redraw-test-counter",
+] }

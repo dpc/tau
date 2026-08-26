@@ -22,7 +22,7 @@ pub(super) struct PromptEditorState {
     /// column. Cleared by any cursor change that isn't a vertical
     /// motion.
     pub(super) sticky_col: Option<usize>,
-    /// Append-only log of submitted lines. Each entry carries its own
+    /// Bounded newest suffix of submitted lines. Each entry carries its own
     /// undo/redo stacks so history navigation can preserve draft-local
     /// editing state.
     pub(super) input_history: Vec<PromptDraft>,
@@ -34,6 +34,8 @@ pub(super) struct PromptEditorState {
     pub(super) history_nav: Option<HistoryNav>,
     /// Source history entry edited by the most recently submitted line.
     pub(super) last_submitted_recalled_source: Option<usize>,
+    /// Whether the most recently submitted line survived history retention.
+    pub(super) last_submitted_input_retained: bool,
     /// Active completion menu, if any. Independent of `history_nav`.
     pub(super) completion: Option<CompletionMenu>,
     /// First visual input row rendered in the prompt-local capped viewport.
@@ -61,6 +63,7 @@ impl PromptEditorState {
             current_redo: Vec::new(),
             history_nav: None,
             last_submitted_recalled_source: None,
+            last_submitted_input_retained: false,
             completion: None,
             input_viewport_start: 0,
             show_prompt_scroll_indicator: true,

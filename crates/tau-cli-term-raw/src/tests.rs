@@ -28,6 +28,12 @@ fn line_text(line: &[Cell]) -> String {
     line.iter().map(|cell| cell.ch).collect()
 }
 
+fn skip_virtual_redraw_on_drop(term: &Term) {
+    term.handle.lock().terminal.external_paused = true;
+}
+
+const TEST_HISTORY_MAX_BYTES: usize = 64 * 1024;
+
 /// Helper: runs full_render into a vt100 parser and returns it.
 ///
 /// `history_lines` is the number of lines at the top of
@@ -701,6 +707,383 @@ fn input_history_navigates_submitted_and_draft_entries() {
         Event::BufferChanged
     ));
     assert_eq!(handle.get_buffer(), "draft");
+}
+
+/// Keeps raw navigation bounded to its newest entries, so long-lived
+/// attachments cannot retain an unbounded recalled-input prefix.
+#[test]
+fn input_history_retention_evicts_oldest_entries_before_navigation() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.seed_input_history((0..=INPUT_HISTORY_MAX_ENTRIES).map(|index| index.to_string()));
+
+    {
+        let state = handle.lock();
+        assert_eq!(state.editor.input_history.len(), INPUT_HISTORY_MAX_ENTRIES);
+        assert_eq!(
+            state
+                .editor
+                .input_history
+                .first()
+                .expect("entry cap retains newest history")
+                .buffer,
+            "1"
+        );
+        assert_eq!(
+            state
+                .editor
+                .input_history
+                .last()
+                .expect("entry cap retains newest history")
+                .buffer,
+            INPUT_HISTORY_MAX_ENTRIES.to_string()
+        );
+    }
+
+    term.trigger_history_step(-1);
+    assert_eq!(handle.get_buffer(), INPUT_HISTORY_MAX_ENTRIES.to_string());
+}
+
+/// Retains an exact primary-text byte limit, omits one larger submitted draft
+/// without evicting the prior suffix, and still routes that draft unchanged.
+#[test]
+fn input_history_retention_keeps_exact_bytes_and_routes_oversize_prompt() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.seed_input_history([String::from("é").repeat(INPUT_HISTORY_MAX_BYTES / 2)]);
+    assert_eq!(
+        handle
+            .lock()
+            .editor
+            .input_history
+            .first()
+            .expect("exact byte limit retains the entry")
+            .buffer
+            .len(),
+        INPUT_HISTORY_MAX_BYTES
+    );
+    skip_virtual_redraw_on_drop(&term);
+
+    let oversize = "x".repeat(INPUT_HISTORY_MAX_BYTES + 1);
+    {
+        let mut state = handle.lock();
+        state.editor.buffer = oversize.clone();
+        state.editor.cursor = oversize.len();
+    }
+    assert!(matches!(
+        term.submit_or_accept_completion(),
+        Event::Line(line) if line == oversize
+    ));
+    assert_eq!(
+        handle
+            .lock()
+            .editor
+            .input_history
+            .first()
+            .expect("oversize omission preserves prior history")
+            .buffer
+            .len(),
+        INPUT_HISTORY_MAX_BYTES
+    );
+}
+
+/// Evicts the oldest raw draft when individually valid entries overflow the
+/// aggregate primary-text byte budget.
+#[test]
+fn input_history_retention_evicts_oldest_entries_for_aggregate_bytes() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    let half_budget = "x".repeat(INPUT_HISTORY_MAX_BYTES / 2);
+    term.seed_input_history([
+        "old".to_owned() + &half_budget,
+        "new".to_owned() + &half_budget,
+        "latest".to_owned(),
+    ]);
+
+    let state = handle.lock();
+    assert_eq!(state.editor.input_history.len(), 2);
+    assert_eq!(
+        state
+            .editor
+            .input_history
+            .first()
+            .expect("aggregate cap retains newest raw draft")
+            .buffer,
+        format!("new{half_budget}")
+    );
+    assert_eq!(
+        state
+            .editor
+            .input_history
+            .last()
+            .expect("aggregate cap retains newest raw draft")
+            .buffer,
+        "latest"
+    );
+}
+
+/// Remaps a recalled source across omitted entries, so final redaction cannot
+/// leave an earlier raw source navigable after history cleanup.
+#[test]
+fn input_history_retention_remaps_recalled_source_before_redaction() {
+    const SENSITIVE: &str = ":email auth google finish account secret";
+    const REDACTED: &str = ":email auth google finish <redacted>";
+    let buf = SharedBuffer::new();
+    let (mut term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.seed_input_history(["discarded".to_owned(), SENSITIVE.to_owned()]);
+    {
+        let mut state = handle.lock();
+        state.editor.input_history[0].buffer.clear();
+        state.editor.last_submitted_recalled_source = Some(1);
+        state.limit_input_history();
+    }
+
+    term.replace_last_submitted_input(REDACTED.to_owned());
+    let state = handle.lock();
+    assert!(
+        state
+            .editor
+            .input_history
+            .iter()
+            .all(|draft| draft.buffer == REDACTED)
+    );
+}
+
+/// Omits an oversize raw-only draft when Down stashes it, without truncating
+/// the active buffer that the user can still edit or submit.
+#[test]
+fn input_history_retention_omits_oversize_stashed_draft() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    let oversize = "x".repeat(INPUT_HISTORY_MAX_BYTES + 1);
+    {
+        let mut state = handle.lock();
+        state.editor.buffer = oversize;
+        state.editor.cursor = state.editor.buffer.len();
+        assert!(state.push_current_as_history_entry(true));
+        assert!(state.editor.input_history.is_empty());
+    }
+    assert_eq!(handle.get_buffer(), "");
+    skip_virtual_redraw_on_drop(&term);
+}
+
+/// Defers aggregate eviction while a recalled draft is edited, so final
+/// redaction rewrites both the recalled source and its submitted copy.
+#[test]
+fn recalled_aggregate_overflow_is_redacted_before_retention() {
+    const REDACTED: &str = ":email auth google finish <redacted>";
+    let buf = SharedBuffer::new();
+    let (mut term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    skip_virtual_redraw_on_drop(&term);
+    handle.lock().input_history_limit_override = Some(InputHistoryLimits {
+        max_entries: INPUT_HISTORY_MAX_ENTRIES,
+        max_bytes: TEST_HISTORY_MAX_BYTES,
+    });
+    term.defer_submitted_input_history_limit();
+    term.seed_input_history([
+        "o".repeat(TEST_HISTORY_MAX_BYTES / 2),
+        "t".repeat(TEST_HISTORY_MAX_BYTES / 2),
+    ]);
+    {
+        let mut state = handle.lock();
+        assert!(state.enter_history_nav(0));
+        state.editor.buffer.push_str(" secret");
+        state.editor.cursor = state.editor.buffer.len();
+        state.sync_buffer_to_history_nav();
+    }
+    assert!(matches!(term.submit_or_accept_completion(), Event::Line(_)));
+
+    term.replace_last_submitted_input(REDACTED.to_owned());
+    term.finalize_submitted_input_history();
+    let state = term.handle.lock();
+    assert_eq!(state.editor.input_history.len(), 3);
+    assert!(
+        state
+            .editor
+            .input_history
+            .iter()
+            .all(|draft| draft.buffer == REDACTED || draft.buffer.starts_with('o'))
+    );
+    drop(state);
+    skip_virtual_redraw_on_drop(&term);
+}
+
+/// Enforces aggregate retention when leaving a recalled edit through empty WIP
+/// navigation, so an abandoned edit cannot strand an over-budget history.
+#[test]
+fn recalled_aggregate_overflow_is_bounded_when_navigation_exits() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    skip_virtual_redraw_on_drop(&term);
+    handle.lock().input_history_limit_override = Some(InputHistoryLimits {
+        max_entries: INPUT_HISTORY_MAX_ENTRIES,
+        max_bytes: TEST_HISTORY_MAX_BYTES,
+    });
+    term.seed_input_history([
+        "o".repeat(TEST_HISTORY_MAX_BYTES / 2),
+        "t".repeat(TEST_HISTORY_MAX_BYTES / 2),
+    ]);
+    {
+        let mut state = handle.lock();
+        assert!(state.enter_history_nav(0));
+        state.editor.buffer.push_str(" overflow");
+        state.editor.cursor = state.editor.buffer.len();
+        state.sync_buffer_to_history_nav();
+        assert!(state.advance_history_nav(1, 0));
+        assert!(!state.advance_history_nav(1, 0));
+    }
+
+    let state = handle.lock();
+    assert_eq!(state.editor.input_history.len(), 1);
+    assert!(
+        state.editor.input_history[0].buffer.starts_with('t'),
+        "newest edited draft remains after old-prefix eviction"
+    );
+    drop(state);
+    skip_virtual_redraw_on_drop(&term);
+}
+
+fn overbudget_recalled_navigation() -> (Term, TermHandle, path_std_sync::mpsc::Sender<RawEvent>) {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    skip_virtual_redraw_on_drop(&term);
+    handle.lock().input_history_limit_override = Some(InputHistoryLimits {
+        max_entries: INPUT_HISTORY_MAX_ENTRIES,
+        max_bytes: TEST_HISTORY_MAX_BYTES,
+    });
+    term.seed_input_history([
+        "o".repeat(TEST_HISTORY_MAX_BYTES / 2),
+        "t".repeat(TEST_HISTORY_MAX_BYTES / 2),
+    ]);
+    {
+        let mut state = handle.lock();
+        assert!(state.enter_history_nav(0));
+        state.editor.buffer.push_str(" overflow");
+        state.editor.cursor = state.editor.buffer.len();
+        state.sync_buffer_to_history_nav();
+    }
+    (term, handle, input_tx)
+}
+
+fn assert_recalled_overflow_was_bounded(handle: &TermHandle) {
+    let state = handle.lock();
+    assert_eq!(state.editor.input_history.len(), 1);
+    assert!(state.editor.input_history[0].buffer.starts_with('t'));
+}
+
+/// Enforces retention at every externally distinct path that abandons an
+/// active recalled edit, preventing stale over-budget draft copies.
+#[test]
+fn recalled_aggregate_overflow_is_bounded_on_every_navigation_exit_path() {
+    type ExitPath = fn(&Term, &TermHandle, &path_std_sync::mpsc::Sender<RawEvent>);
+    fn set_buffer(
+        _term: &Term,
+        handle: &TermHandle,
+        _input_tx: &path_std_sync::mpsc::Sender<RawEvent>,
+    ) {
+        handle.set_buffer("replacement".to_owned(), "replacement".len());
+    }
+    fn set_buffer_preserving_undo(
+        _term: &Term,
+        handle: &TermHandle,
+        _input_tx: &path_std_sync::mpsc::Sender<RawEvent>,
+    ) {
+        handle.set_buffer_preserving_undo("replacement".to_owned(), "replacement".len());
+    }
+    fn clear_prompt(
+        term: &Term,
+        _handle: &TermHandle,
+        _input_tx: &path_std_sync::mpsc::Sender<RawEvent>,
+    ) {
+        assert!(matches!(
+            term.trigger_named_action("clear-prompt"),
+            Some(Event::BufferChanged)
+        ));
+    }
+    fn clear_or_cancel_prompt(
+        term: &Term,
+        _handle: &TermHandle,
+        _input_tx: &path_std_sync::mpsc::Sender<RawEvent>,
+    ) {
+        assert!(matches!(
+            term.trigger_named_action("clear-or-cancel-prompt"),
+            Some(Event::BufferChanged)
+        ));
+    }
+    fn ctrl_c(term: &Term, _handle: &TermHandle, input_tx: &path_std_sync::mpsc::Sender<RawEvent>) {
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )))
+            .expect("clear recalled edit with Ctrl-C");
+        assert!(matches!(
+            term.get_next_event().expect("handle Ctrl-C"),
+            Event::BufferChanged
+        ));
+    }
+
+    for exit in [
+        set_buffer as ExitPath,
+        set_buffer_preserving_undo,
+        clear_prompt,
+        clear_or_cancel_prompt,
+        ctrl_c,
+    ] {
+        let (term, handle, input_tx) = overbudget_recalled_navigation();
+        exit(&term, &handle, &input_tx);
+        assert_recalled_overflow_was_bounded(&handle);
+        skip_virtual_redraw_on_drop(&term);
+    }
+}
+
+/// Keeps a recalled history source linked through queued-prompt recall, so
+/// final redaction updates both navigable copies after returning to the draft.
+#[test]
+fn queued_recall_preserves_source_identity_for_final_redaction() {
+    const SOURCE: &str = ":email auth google finish account";
+    const REDACTED: &str = ":email auth google finish <redacted>";
+    let buf = SharedBuffer::new();
+    let (mut term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.seed_input_history([SOURCE.to_owned()]);
+    {
+        let mut state = handle.lock();
+        assert!(state.enter_history_nav(0));
+    }
+    handle.recall_prompt_before_current("queued prompt".to_owned());
+    assert_eq!(handle.get_buffer(), "queued prompt");
+    {
+        let mut state = handle.lock();
+        assert!(state.advance_history_nav(1, 0));
+    }
+    assert_eq!(handle.get_buffer(), SOURCE);
+    {
+        let mut state = handle.lock();
+        state.editor.buffer.push_str(" secret");
+        state.editor.cursor = state.editor.buffer.len();
+        state.sync_buffer_to_history_nav();
+    }
+    assert!(matches!(term.submit_or_accept_completion(), Event::Line(_)));
+
+    term.replace_last_submitted_input(REDACTED.to_owned());
+    let state = handle.lock();
+    assert_eq!(state.editor.input_history.len(), 2);
+    assert!(
+        state
+            .editor
+            .input_history
+            .iter()
+            .all(|draft| draft.buffer == REDACTED)
+    );
 }
 /// Public buffer setters accept byte offsets from higher-level UI code; invalid
 /// offsets inside a Unicode grapheme must be normalized before edit operations

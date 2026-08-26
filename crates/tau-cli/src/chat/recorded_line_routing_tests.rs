@@ -186,6 +186,8 @@ struct SensitiveSubmissionHandlers {
     presentation: Vec<String>,
     /// Raw lines delivered to the simulated exact action owner.
     invokes: Vec<String>,
+    /// Number of terminal-history finalization requests.
+    history_finalizations: usize,
 }
 
 impl SensitiveSubmissionHandlers {
@@ -198,6 +200,7 @@ impl SensitiveSubmissionHandlers {
             persistent_history: Vec::new(),
             presentation: Vec::new(),
             invokes: Vec::new(),
+            history_finalizations: 0,
         }
     }
 }
@@ -237,6 +240,10 @@ impl SubmittedLineHandlers for SensitiveSubmissionHandlers {
         self.replacements.push(text);
     }
 
+    fn finalize_last_submitted_prompt_history(&mut self) {
+        self.history_finalizations += 1;
+    }
+
     fn record_prompt_line(&mut self, record: SubmittedLineRecord<'_>) {
         self.editor_context = Some(record.presentation_text.to_owned());
         if !self.ephemeral {
@@ -257,6 +264,21 @@ impl SubmittedLineHandlers for SensitiveSubmissionHandlers {
         self.presentation.push(format!("literal:{text}"));
         None
     }
+}
+
+/// Finalizes whitespace-only submitted history entries, which raw terminal
+/// submission records but command parsing otherwise returns before handling.
+#[test]
+fn whitespace_submission_finalizes_terminal_history() {
+    let mut handlers =
+        SensitiveSubmissionHandlers::new(SensitiveDynamicOutcome::StaleSchema, false);
+
+    assert_eq!(
+        handle_submitted_line_with_handlers("   ", &mut handlers).expect("handle whitespace"),
+        None
+    );
+    assert_eq!(handlers.history_finalizations, 1);
+    assert!(handlers.persistent_history.is_empty());
 }
 
 /// The production submitted-line orchestrator must keep raw Gmail OAuth

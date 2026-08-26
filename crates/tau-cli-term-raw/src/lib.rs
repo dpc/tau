@@ -29,9 +29,22 @@ use std::{sync as path_std_sync, time as path_std_time};
 use base64::engine as path_base64_engine;
 use crossterm::cursor as path_crossterm_cursor;
 const PROMPT_INPUT_MAX_HEIGHT_PERCENT: usize = 33;
+/// Maximum number of nonempty drafts retained for one terminal attachment.
+const INPUT_HISTORY_MAX_ENTRIES: usize = 1000;
+/// Maximum primary UTF-8 text retained for one terminal attachment's drafts.
+const INPUT_HISTORY_MAX_BYTES: usize = 16 * 1024 * 1024;
 const STALL_WARNING_INTERVAL: Duration = Duration::from_secs(5);
 static STALL_WARNING_LIMITER: Mutex<StallWarningLimiter> =
     Mutex::new(StallWarningLimiter { last: None });
+
+/// Independent raw-input history retention limits for one attachment.
+#[derive(Clone, Copy)]
+struct InputHistoryLimits {
+    /// Maximum retained nonempty drafts.
+    max_entries: usize,
+    /// Maximum retained primary UTF-8 bytes.
+    max_bytes: usize,
+}
 
 /// Limits repeated slow-stage warnings across terminal operations.
 struct StallWarningLimiter {
@@ -248,14 +261,22 @@ impl PromptDraft {
     }
 }
 
+/// One draft navigable through prompt history with its retained-source link.
+struct HistoryNavEntry {
+    /// Draft content and local undo/redo state shown at this navigation slot.
+    draft: PromptDraft,
+    /// Original retained history position, absent for queued and new WIP
+    /// drafts.
+    source_index: Option<usize>,
+}
+
 /// State for input-history navigation. Present only while Up/Down
 /// has recalled a previous line and the user hasn't submitted or
 /// dismissed yet.
 struct HistoryNav {
-    /// Snapshot of `input_history` plus the user's WIP buffer at
-    /// `entries.last()`. Editing in history mode mutates the entry
-    /// at `index`, including that entry's per-prompt undo history.
-    entries: Vec<PromptDraft>,
+    /// Snapshot of retained entries plus queued/WIP drafts. Editing in history
+    /// mode mutates the selected entry's draft and retained source.
+    entries: Vec<HistoryNavEntry>,
     /// Current position within `entries`.
     index: usize,
 }
@@ -284,6 +305,9 @@ struct SharedState {
     /// Actual redraw-loop failure timing retained for focused test assertions.
     #[cfg(test)]
     presentation_failure_test_records: Vec<(&'static str, u128, usize, u64)>,
+    /// Optional small retention limits for focused cross-crate tests.
+    #[cfg(any(test, feature = "history-retention-test-support"))]
+    input_history_limit_override: Option<InputHistoryLimits>,
 }
 
 impl SharedState {
@@ -295,6 +319,8 @@ impl SharedState {
             presentation_observations: PresentationObservationState::new(),
             #[cfg(test)]
             presentation_failure_test_records: Vec::new(),
+            #[cfg(any(test, feature = "history-retention-test-support"))]
+            input_history_limit_override: None,
         }
     }
 
@@ -374,6 +400,70 @@ impl SharedState {
         }
     }
 
+    /// Evicts the oldest draft prefix until the retained history is a bounded
+    /// newest suffix of nonempty primary prompt text.
+    fn limit_input_history(&mut self) {
+        let limits = self.input_history_limits();
+        let recalled_source = self.editor.last_submitted_recalled_source;
+        let mut retained_source = None;
+        let mut original_entries = 0;
+        let mut retained_entries = 0;
+        self.editor.input_history.retain(|draft| {
+            let retain = !draft.buffer.is_empty() && draft.buffer.len() <= limits.max_bytes;
+            if retain && recalled_source == Some(original_entries) {
+                retained_source = Some(retained_entries);
+            }
+            original_entries += 1;
+            retained_entries += usize::from(retain);
+            retain
+        });
+        if self.editor.input_history.len() != original_entries {
+            self.editor.history_nav = None;
+        }
+        self.editor.last_submitted_recalled_source = retained_source;
+
+        let mut retained_bytes = 0;
+        let mut retained_start = self.editor.input_history.len();
+        for (retained_entries, (index, draft)) in self
+            .editor
+            .input_history
+            .iter()
+            .enumerate()
+            .rev()
+            .enumerate()
+        {
+            if retained_entries == limits.max_entries
+                || draft.buffer.len() > limits.max_bytes - retained_bytes
+            {
+                break;
+            }
+            retained_bytes += draft.buffer.len();
+            retained_start = index;
+        }
+        if retained_start == 0 {
+            return;
+        }
+
+        self.editor.input_history.drain(..retained_start);
+        self.editor.history_nav = None;
+        self.editor.last_submitted_recalled_source = self
+            .editor
+            .last_submitted_recalled_source
+            .and_then(|index| index.checked_sub(retained_start));
+    }
+
+    /// Returns production limits or a focused test's intentionally small pair.
+    fn input_history_limits(&self) -> InputHistoryLimits {
+        #[cfg(any(test, feature = "history-retention-test-support"))]
+        if let Some(limits) = self.input_history_limit_override {
+            return limits;
+        }
+        InputHistoryLimits {
+            max_entries: INPUT_HISTORY_MAX_ENTRIES,
+            max_bytes: INPUT_HISTORY_MAX_BYTES,
+        }
+    }
+
     /// Takes the current undo state into a submitted history entry.
     ///
     /// Submission clears the live prompt, so moving these stacks preserves raw
@@ -407,9 +497,11 @@ impl SharedState {
     fn sync_buffer_to_history_nav(&mut self) {
         let draft = self.current_draft();
         if let Some(nav) = self.editor.history_nav.as_mut() {
-            nav.entries[nav.index] = draft.clone();
-            if nav.index < self.editor.input_history.len() {
-                self.editor.input_history[nav.index] = draft;
+            nav.entries[nav.index].draft = draft.clone();
+            if let Some(source_index) = nav.entries[nav.index].source_index
+                && let Some(source) = self.editor.input_history.get_mut(source_index)
+            {
+                *source = draft;
             }
         }
     }
@@ -502,14 +594,21 @@ impl SharedState {
     }
 
     /// Pushes the current prompt onto input history and resets to a
-    /// fresh empty prompt. No-op when the prompt is empty (and returns
-    /// `false`). Clears the sticky column via `write_cursor`.
-    fn push_current_as_history_entry(&mut self) -> bool {
+    /// fresh empty prompt. An empty prompt does not add an entry, but may
+    /// still enforce retention while leaving history navigation. Clears the
+    /// sticky column via `write_cursor`.
+    fn push_current_as_history_entry(&mut self, enforce_limit: bool) -> bool {
         if self.editor.buffer.is_empty() {
+            if enforce_limit {
+                self.limit_input_history();
+            }
             return false;
         }
         let draft = self.take_submitted_draft();
         self.editor.input_history.push(draft);
+        if enforce_limit {
+            self.limit_input_history();
+        }
         self.editor.buffer.clear();
         self.write_cursor(0);
         true
@@ -619,7 +718,7 @@ impl SharedState {
         let target_col = self.vertical_target_col();
         if self.editor.history_nav.is_none() {
             if 0 < delta {
-                return self.push_current_as_history_entry();
+                return self.push_current_as_history_entry(true);
             }
             return self.enter_history_nav(target_col);
         }
@@ -633,12 +732,25 @@ impl SharedState {
         if self.editor.input_history.is_empty() {
             return false;
         }
-        let mut entries = self.editor.input_history.clone();
-        entries.push(self.current_draft());
+        let mut entries: Vec<_> = self
+            .editor
+            .input_history
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(source_index, draft)| HistoryNavEntry {
+                draft,
+                source_index: Some(source_index),
+            })
+            .collect();
+        entries.push(HistoryNavEntry {
+            draft: self.current_draft(),
+            source_index: None,
+        });
         // The WIP buffer sits at `entries.last()`; the previous
         // history entry is one slot before it.
         let index = entries.len() - 2;
-        self.load_draft(entries[index].clone());
+        self.load_draft(entries[index].draft.clone());
         let new_cursor = self.cursor_byte_at(self.last_visual_row(), target_col);
         self.write_cursor_keep_sticky(new_cursor);
         self.editor.history_nav = Some(HistoryNav { entries, index });
@@ -647,11 +759,32 @@ impl SharedState {
 
     fn recall_prompt_before_current(&mut self, text: String) {
         let previous = self.current_draft();
-        let mut entries = self.editor.input_history.clone();
-        entries.push(PromptDraft::submitted(text));
-        entries.push(previous);
+        let previous_source = self.editor.history_nav.as_ref().and_then(|nav| {
+            nav.entries
+                .get(nav.index)
+                .and_then(|entry| entry.source_index)
+        });
+        let mut entries: Vec<_> = self
+            .editor
+            .input_history
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(source_index, draft)| HistoryNavEntry {
+                draft,
+                source_index: Some(source_index),
+            })
+            .collect();
+        entries.push(HistoryNavEntry {
+            draft: PromptDraft::submitted(text),
+            source_index: None,
+        });
+        entries.push(HistoryNavEntry {
+            draft: previous,
+            source_index: previous_source,
+        });
         let index = entries.len() - 2;
-        self.load_draft(entries[index].clone());
+        self.load_draft(entries[index].draft.clone());
         self.write_cursor(self.editor.buffer.len());
         self.editor.history_nav = Some(HistoryNav { entries, index });
         self.editor.completion = None;
@@ -673,19 +806,21 @@ impl SharedState {
             return false;
         }
         if new_index >= nav.entries.len() as isize {
-            let wip = nav.entries.last().cloned();
+            let wip = nav.entries.last().map(|entry| entry.draft.clone());
             self.editor.history_nav = None;
             if let Some(wip) = wip {
                 self.load_draft(wip);
             }
-            return self.push_current_as_history_entry();
+            return self.push_current_as_history_entry(true);
         }
-        nav.entries[nav.index] = current.clone();
-        if nav.index < self.editor.input_history.len() {
-            self.editor.input_history[nav.index] = current;
+        nav.entries[nav.index].draft = current.clone();
+        if let Some(source_index) = nav.entries[nav.index].source_index
+            && let Some(source) = self.editor.input_history.get_mut(source_index)
+        {
+            *source = current;
         }
         nav.index = new_index as usize;
-        let new_draft = nav.entries[nav.index].clone();
+        let new_draft = nav.entries[nav.index].draft.clone();
         self.load_draft(new_draft);
         let target_row = if delta < 0 { self.last_visual_row() } else { 0 };
         let new_cursor = self.cursor_byte_at(target_row, target_col);
@@ -1690,11 +1825,14 @@ impl TermHandle {
         let mut st = self.lock();
         let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
         st.editor.buffer = text;
-        st.editor.history_nav = None;
+        let abandoned_history_nav = st.editor.history_nav.take().is_some();
         st.editor.completion = None;
         st.editor.current_undo.clear();
         st.editor.current_redo.clear();
         st.write_cursor(new_cursor);
+        if abandoned_history_nav {
+            st.limit_input_history();
+        }
     }
 
     /// Recalls a queued prompt before the current draft, matching
@@ -1716,10 +1854,13 @@ impl TermHandle {
         let mut st = self.lock();
         let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
         st.editor.buffer = text;
-        st.editor.history_nav = None;
+        let abandoned_history_nav = st.editor.history_nav.take().is_some();
         st.editor.completion = None;
         st.editor.current_redo.clear();
         st.write_cursor(new_cursor);
+        if abandoned_history_nav {
+            st.limit_input_history();
+        }
     }
 
     /// Snapshot of the open completion menu, if any. Returns `None`
@@ -1914,6 +2055,9 @@ pub struct Term {
     completion_source: Option<Box<dyn CompletionSource>>,
     /// Plugged in by callers that want prompt key bindings.
     bindings: HashMap<KeyBinding, String>,
+    /// Whether a high-level owner will finalize each submitted entry before
+    /// its raw history can evict older entries.
+    defer_submitted_input_history_limit: bool,
 }
 
 impl std::ops::Deref for Term {
@@ -2007,6 +2151,7 @@ impl Term {
                 terminal_options,
                 completion_source: None,
                 bindings: HashMap::new(),
+                defer_submitted_input_history_limit: false,
             },
             handle,
         ))
@@ -2083,6 +2228,7 @@ impl Term {
             },
             completion_source: None,
             bindings: HashMap::new(),
+            defer_submitted_input_history_limit: false,
         };
 
         (term, handle, term_input_tx)
@@ -2093,6 +2239,30 @@ impl Term {
     /// `Deref<Target = TermHandle>` instead.
     pub fn handle(&self) -> &TermHandle {
         &self.handle
+    }
+
+    /// Defers submitted-input retention until the high-level owner has
+    /// canonicalized or redacted the entry.
+    pub fn defer_submitted_input_history_limit(&mut self) {
+        self.defer_submitted_input_history_limit = true;
+    }
+
+    /// Narrows raw-history bytes for a focused cross-crate test.
+    #[cfg(feature = "history-retention-test-support")]
+    #[doc(hidden)]
+    pub fn set_input_history_max_bytes_for_test(&mut self, max_bytes: usize) {
+        self.handle.lock().input_history_limit_override = Some(InputHistoryLimits {
+            max_entries: INPUT_HISTORY_MAX_ENTRIES,
+            max_bytes,
+        });
+    }
+
+    /// Applies the raw input-history limit after a deferred submitted entry has
+    /// reached its final canonical or redacted representation.
+    pub fn finalize_submitted_input_history(&mut self) {
+        let mut st = self.handle.lock();
+        st.limit_input_history();
+        st.editor.last_submitted_input_retained = st.editor.input_history.last().is_some();
     }
 
     /// Blocks until the next meaningful input event.
@@ -2267,7 +2437,9 @@ impl Term {
                 .filter(|buffer| !buffer.is_empty())
                 .map(PromptDraft::submitted),
         );
+        st.limit_input_history();
         st.editor.history_nav = None;
+        st.editor.last_submitted_input_retained = false;
     }
 
     /// Replaces the most recently submitted input-history entry and any
@@ -2283,9 +2455,23 @@ impl Term {
         {
             *source = PromptDraft::submitted(text.clone());
         }
-        if let Some(last) = st.editor.input_history.last_mut() {
-            *last = PromptDraft::submitted(text);
+        if st.editor.last_submitted_input_retained {
+            if let Some(last) = st.editor.input_history.last_mut() {
+                *last = PromptDraft::submitted(text.clone());
+            }
+        } else if !text.is_empty() {
+            st.editor
+                .input_history
+                .push(PromptDraft::submitted(text.clone()));
         }
+        if !self.defer_submitted_input_history_limit {
+            st.limit_input_history();
+        }
+        st.editor.last_submitted_input_retained = st
+            .editor
+            .input_history
+            .last()
+            .is_some_and(|draft| draft.buffer == text);
         st.editor.history_nav = None;
         st.editor.completion = None;
     }
@@ -2617,9 +2803,12 @@ impl Term {
             st.editor.ctrl_c_cancel_armed = false;
             st.record_undo();
             st.editor.buffer.clear();
-            st.editor.history_nav = None;
+            let abandoned_history_nav = st.editor.history_nav.take().is_some();
             st.editor.completion = None;
             st.write_cursor(0);
+            if abandoned_history_nav {
+                st.limit_input_history();
+            }
             true
         };
         self.refresh_completion();
@@ -2641,9 +2830,12 @@ impl Term {
         st.editor.ctrl_c_cancel_armed = false;
         st.record_undo();
         st.editor.buffer.clear();
-        st.editor.history_nav = None;
+        let abandoned_history_nav = st.editor.history_nav.take().is_some();
         st.editor.completion = None;
         st.write_cursor(0);
+        if abandoned_history_nav {
+            st.limit_input_history();
+        }
         drop(st);
         self.refresh_completion();
         Event::BufferChanged
@@ -2857,10 +3049,19 @@ impl Term {
             let mut st = self.handle.lock();
             st.editor.completion = None;
             st.editor.last_submitted_recalled_source =
-                st.editor.history_nav.as_ref().map(|nav| nav.index);
+                st.editor.history_nav.as_ref().and_then(|nav| {
+                    nav.entries
+                        .get(nav.index)
+                        .and_then(|entry| entry.source_index)
+                });
             st.editor.history_nav = None;
             let line = st.editor.buffer.clone();
-            st.push_current_as_history_entry();
+            st.push_current_as_history_entry(!self.defer_submitted_input_history_limit);
+            st.editor.last_submitted_input_retained = st
+                .editor
+                .input_history
+                .last()
+                .is_some_and(|draft| draft.buffer == line);
             line
         };
         tracing::trace!(
@@ -2938,9 +3139,12 @@ impl Term {
         st.editor.ctrl_c_cancel_armed = false;
         st.record_undo();
         st.editor.buffer.clear();
-        st.editor.history_nav = None;
+        let abandoned_history_nav = st.editor.history_nav.take().is_some();
         st.editor.completion = None;
         st.write_cursor(0);
+        if abandoned_history_nav {
+            st.limit_input_history();
+        }
         Event::BufferChanged
     }
 

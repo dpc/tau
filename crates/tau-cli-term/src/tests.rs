@@ -4,6 +4,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::*;
 
+const TEST_PROMPT_HISTORY_MAX_BYTES: usize = 64 * 1024;
+
 /// Unconfirmed foreground ownership disarms the outer resume guard so the
 /// interactive attachment cannot re-enable raw input or redraw.
 #[test]
@@ -181,6 +183,197 @@ fn submitted_prompt_replacement_rewrites_every_terminal_history_view() {
     assert_eq!(handle.get_buffer(), REDACTED);
     term.term.trigger_history_step(1);
     assert_eq!(handle.get_buffer(), "");
+}
+
+/// Keeps search history's independent newest suffix bounded, while raw
+/// navigation retains its own unrelated entries and the picker remains newest
+/// first.
+#[test]
+fn prompt_history_retention_evicts_oldest_entries_independently() {
+    let (mut term, handle, _input_tx) = new_test_term(vec![]);
+    term.term.seed_input_history(["raw-only".to_owned()]);
+    term.prompt_history = bounded_seeded_prompt_history(
+        (0..=PROMPT_HISTORY_MAX_ENTRIES)
+            .map(|index| index.to_string())
+            .collect(),
+    );
+
+    assert_eq!(term.prompt_history.len(), PROMPT_HISTORY_MAX_ENTRIES);
+    assert_eq!(
+        term.prompt_history
+            .first()
+            .expect("entry cap retains newest search history"),
+        "1"
+    );
+    assert_eq!(
+        term.prompt_history
+            .last()
+            .expect("entry cap retains newest search history"),
+        &PROMPT_HISTORY_MAX_ENTRIES.to_string()
+    );
+    assert_eq!(
+        prompt_history_search_rows(&term.prompt_history)
+            .lines()
+            .next()
+            .expect("nonempty history produces a picker row"),
+        format!(
+            "{}\t{PROMPT_HISTORY_MAX_ENTRIES}",
+            PROMPT_HISTORY_MAX_ENTRIES - 1
+        )
+    );
+    term.term.trigger_history_step(-1);
+    assert_eq!(handle.get_buffer(), "raw-only");
+}
+
+/// Retains an exact search-text byte limit but omits one larger finalized
+/// prompt without changing the raw line returned to routing.
+#[test]
+fn prompt_history_retention_keeps_exact_bytes_and_omits_oversize_prompt() {
+    let (mut term, handle, input_tx) = new_test_term(vec![]);
+    term.prompt_history =
+        bounded_seeded_prompt_history(vec![String::from("é").repeat(PROMPT_HISTORY_MAX_BYTES / 2)]);
+    assert_eq!(
+        term.prompt_history
+            .first()
+            .expect("exact byte limit retains the search entry")
+            .len(),
+        PROMPT_HISTORY_MAX_BYTES
+    );
+
+    term.prompt_history_limit_override = Some(PromptHistoryLimits {
+        max_entries: PROMPT_HISTORY_MAX_ENTRIES,
+        max_bytes: TEST_PROMPT_HISTORY_MAX_BYTES,
+    });
+    term.term
+        .set_input_history_max_bytes_for_test(TEST_PROMPT_HISTORY_MAX_BYTES);
+    term.prompt_history = vec![String::from("é").repeat(TEST_PROMPT_HISTORY_MAX_BYTES / 2)];
+    let oversize = "x".repeat(TEST_PROMPT_HISTORY_MAX_BYTES + 1);
+    handle.set_buffer(oversize.clone(), oversize.len());
+    send_submit(&input_tx);
+    assert!(matches!(
+        term.get_next_event().expect("route oversize prompt"),
+        Event::Line(line) if line == oversize
+    ));
+    term.finalize_last_submitted_prompt_history();
+    assert_eq!(
+        term.prompt_history
+            .first()
+            .expect("oversize omission preserves prior history")
+            .len(),
+        TEST_PROMPT_HISTORY_MAX_BYTES
+    );
+}
+
+/// Accounts after literal-colon canonicalization, so an escaped line that is
+/// one byte too large before normalization remains navigable and searchable.
+#[test]
+fn prompt_history_retention_uses_canonical_literal_bytes() {
+    let (mut term, _handle, _input_tx) = new_test_term(vec![]);
+    term.prompt_history_limit_override = Some(PromptHistoryLimits {
+        max_entries: PROMPT_HISTORY_MAX_ENTRIES,
+        max_bytes: TEST_PROMPT_HISTORY_MAX_BYTES,
+    });
+    let canonical = format!(":{}", "x".repeat(TEST_PROMPT_HISTORY_MAX_BYTES - 1));
+    let escaped = format!(":{canonical}");
+    term.record_submitted_prompt(&escaped);
+
+    term.finalize_last_submitted_prompt_history();
+    assert_eq!(term.prompt_history, [canonical]);
+    assert!(prompt_history_search_rows(&term.prompt_history).starts_with("0\t:"));
+}
+
+/// Applies retention after redaction, so an oversized sensitive routed line
+/// leaves only its small safe presentation in both history owners.
+#[test]
+fn prompt_history_retention_uses_redacted_final_form() {
+    const REDACTED: &str = ":email auth google finish <redacted>";
+    let (mut term, handle, input_tx) = new_test_term(vec![]);
+    term.prompt_history_limit_override = Some(PromptHistoryLimits {
+        max_entries: PROMPT_HISTORY_MAX_ENTRIES,
+        max_bytes: TEST_PROMPT_HISTORY_MAX_BYTES,
+    });
+    submit(&mut term, &handle, &input_tx, "prior");
+    term.finalize_last_submitted_prompt_history();
+    let sensitive = format!(
+        ":email auth google finish {}",
+        "x".repeat(TEST_PROMPT_HISTORY_MAX_BYTES)
+    );
+    handle.set_buffer(sensitive.clone(), sensitive.len());
+    send_submit(&input_tx);
+    assert!(matches!(
+        term.get_next_event().expect("route sensitive prompt"),
+        Event::Line(line) if line == sensitive
+    ));
+    term.replace_last_submitted_prompt(REDACTED.to_owned());
+    term.finalize_last_submitted_prompt_history();
+    assert_eq!(term.prompt_history, ["prior", REDACTED]);
+    term.term.trigger_history_step(-1);
+    assert_eq!(term.handle().get_buffer(), REDACTED);
+}
+
+/// Evicts the oldest search entry when several individually valid entries
+/// exceed the aggregate primary-text byte budget.
+#[test]
+fn prompt_history_retention_evicts_oldest_entries_for_aggregate_bytes() {
+    let half_budget = "x".repeat(PROMPT_HISTORY_MAX_BYTES / 2);
+    let history = bounded_seeded_prompt_history(vec![
+        "old".to_owned() + &half_budget,
+        "new".to_owned() + &half_budget,
+        "latest".to_owned(),
+    ]);
+
+    assert_eq!(history, [format!("new{half_budget}"), "latest".to_owned()]);
+}
+
+/// Preserves recalled-source identity through high-level input handling until
+/// redaction finalizes aggregate retention.
+#[test]
+fn recalled_aggregate_overflow_is_redacted_before_highterm_retention() {
+    const REDACTED: &str = ":email auth google finish <redacted>";
+    let (mut term, _handle, input_tx) = new_test_term(vec![]);
+    term.prompt_history_limit_override = Some(PromptHistoryLimits {
+        max_entries: PROMPT_HISTORY_MAX_ENTRIES,
+        max_bytes: TEST_PROMPT_HISTORY_MAX_BYTES,
+    });
+    term.term
+        .set_input_history_max_bytes_for_test(TEST_PROMPT_HISTORY_MAX_BYTES);
+    term.term.seed_input_history([
+        "o".repeat(TEST_PROMPT_HISTORY_MAX_BYTES / 2),
+        "t".repeat(TEST_PROMPT_HISTORY_MAX_BYTES / 2),
+    ]);
+    term.prompt_history = vec![
+        "o".repeat(TEST_PROMPT_HISTORY_MAX_BYTES / 2),
+        "t".repeat(TEST_PROMPT_HISTORY_MAX_BYTES / 2),
+    ];
+    term.term.trigger_history_step(-1);
+    input_tx
+        .send(TestRawEvent::Paste(" secret".to_owned()))
+        .expect("extend recalled draft");
+    assert!(matches!(
+        term.get_next_event().expect("edit recalled draft"),
+        Event::BufferChanged
+    ));
+    send_submit(&input_tx);
+    assert!(matches!(
+        term.get_next_event().expect("route recalled draft"),
+        Event::Line(_)
+    ));
+
+    term.replace_last_submitted_prompt(REDACTED.to_owned());
+    term.finalize_last_submitted_prompt_history();
+    term.term.trigger_history_step(-1);
+    assert_eq!(term.handle().get_buffer(), REDACTED);
+    term.term.trigger_history_step(-1);
+    assert_eq!(term.handle().get_buffer(), REDACTED);
+    term.term.trigger_history_step(-1);
+    assert!(term.handle().get_buffer().starts_with('o'));
+    assert_eq!(
+        term.prompt_history,
+        [
+            "t".repeat(TEST_PROMPT_HISTORY_MAX_BYTES / 2),
+            REDACTED.to_owned()
+        ]
+    );
 }
 
 fn send_submit(input_tx: &path_std_sync::mpsc::Sender<TestRawEvent>) {
