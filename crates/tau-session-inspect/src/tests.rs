@@ -1380,10 +1380,10 @@ fn agent_trace_rejects_missing_journal_without_mutating_source_tree() {
     );
 }
 
-/// Trace preparation rejects a locked writer's mismatched checkpoint boundary
-/// without mutating its durable source tree.
+/// Trace preparation rejects an active writer with its nonblocking lock error
+/// and leaves the durable source tree unchanged.
 #[test]
-fn agent_trace_rejects_checkpoint_boundary_mismatch_without_mutating_source_tree() {
+fn agent_trace_rejects_active_writer_without_mutating_source_tree() {
     let temp = tempfile::tempdir().expect("tempdir");
     let active_id = AgentId::parse("agent-active").expect("agent id");
     let mut active_store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
@@ -1402,16 +1402,6 @@ fn agent_trace_rejects_checkpoint_boundary_mismatch_without_mutating_source_tree
             }),
         )
         .expect("active creation");
-    let checkpoint_path = temp.path().join(active_id.as_str()).join("meta.json");
-    let mut checkpoint: serde_json::Value =
-        serde_json::from_slice(&path_std_fs::read(&checkpoint_path).expect("checkpoint"))
-            .expect("checkpoint JSON");
-    checkpoint["journal"]["boundary_blake3_128"] = serde_json::Value::String("0".repeat(32));
-    path_std_fs::write(
-        &checkpoint_path,
-        serde_json::to_vec(&checkpoint).expect("encode checkpoint"),
-    )
-    .expect("rewrite checkpoint");
 
     let before = source_tree_snapshot(temp.path()).expect("snapshot fixture");
     let error = match prepare_agent_trace(
@@ -1421,16 +1411,68 @@ fn agent_trace_rejects_checkpoint_boundary_mismatch_without_mutating_source_tree
         AgentTraceFormat::TauJsonl,
     ) {
         Err(error) => error,
-        Ok(_) => panic!("mismatched checkpoint boundary must be rejected"),
+        Ok(_) => panic!("active writer must be rejected"),
     };
-    let InspectError::AgentStore(tau_core::AgentStoreError::Read { path, source }) = error else {
-        panic!("checkpoint boundary must report its checkpoint read error: {error:?}");
+    let InspectError::AgentStore(tau_core::AgentStoreError::Open { path, source }) = error else {
+        panic!("active writer must report its lock error: {error:?}");
     };
-    assert_eq!(path, checkpoint_path);
-    assert_eq!(source.kind(), path_std_io::ErrorKind::InvalidData);
-    assert_eq!(source.to_string(), "checkpoint boundary mismatch");
+    assert_eq!(path, temp.path().join(active_id.as_str()).join("lock"));
+    assert_eq!(source.kind(), path_std_io::ErrorKind::WouldBlock);
     assert_eq!(
         source_tree_snapshot(temp.path()).expect("snapshot after rejection"),
+        before
+    );
+}
+
+/// Trace preparation selects a complete inactive journal EOF rather than a
+/// superseded malformed checkpoint and leaves its durable source tree
+/// unchanged.
+#[test]
+fn agent_trace_uses_complete_eof_over_malformed_checkpoint_without_mutation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_id = AgentId::parse("agent-complete-eof").expect("agent id");
+    let mut store = tau_core::AgentStore::open_lazy(temp.path()).expect("agent store");
+    store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: agent_id.clone(),
+                creator: Some(tau_proto::AgentCreator::User),
+                parent_agent: None,
+                role: "test".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("creation");
+    let checkpoint_path = temp.path().join(agent_id.as_str()).join("meta.json");
+    let mut checkpoint: serde_json::Value =
+        serde_json::from_slice(&path_std_fs::read(&checkpoint_path).expect("checkpoint"))
+            .expect("checkpoint JSON");
+    checkpoint["journal"]["boundary_blake3_128"] = serde_json::Value::String("0".repeat(32));
+    path_std_fs::write(
+        &checkpoint_path,
+        serde_json::to_vec(&checkpoint).expect("encode checkpoint"),
+    )
+    .expect("rewrite checkpoint");
+    drop(store);
+
+    let before = source_tree_snapshot(temp.path()).expect("snapshot fixture");
+    let output = export_trace(
+        temp.path(),
+        &agent_id,
+        DescendantSelection::RootOnly,
+        AgentTraceFormat::TauJsonl,
+    )
+    .expect("complete journal EOF must supersede malformed checkpoint");
+    assert!(
+        output.contains(agent_id.as_str()),
+        "the trace must include the complete journal"
+    );
+    assert_eq!(
+        source_tree_snapshot(temp.path()).expect("snapshot after export"),
         before
     );
 }

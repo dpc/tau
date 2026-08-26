@@ -1088,7 +1088,7 @@ fn journal_snapshot_rejects_lock_held_writer() {
 /// Inactive strict capture derives EOF without trusting a stale checkpoint
 /// witness.
 #[test]
-fn journal_snapshot_rejects_lock_held_checkpoint_boundary_mismatch() {
+fn journal_snapshot_uses_inactive_eof_despite_mismatched_checkpoint_boundary() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-active-boundary").expect("agent id");
     let mut store = AgentStore::open_lazy(temp.path()).expect("store");
