@@ -1,7 +1,7 @@
 //! Deterministic dual-PTY parity scenarios for dummy-tool presentation.
 
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{DurableSnapshot, ScenarioActionV2, ScenarioLaneV2, ScenarioV2};
 use tau_proto::{Event, ToolCallId};
@@ -54,7 +54,7 @@ fn attach_after_completed_dummy_round_preserves_exact_terminal_row()
     assert!(original_row.contains("ok"));
     assert!(!original_row.contains("pending"));
 
-    assert_round_facts(&fixture, &observer, &session_id, &agent_id, &ids)?;
+    assert_round_facts(&fixture, &observer, &session_id, &agent_id, &ids, deadline)?;
     finish_pair(fixture, observer, attached, original, &session_id)
 }
 
@@ -78,7 +78,10 @@ fn attach_during_dummy_round_preserves_pending_and_terminal_parity()
                             == Some("hold_until_success_release ready")
             )
     })?;
-    let pending_snapshot = DurableSnapshot::load(&fixture.tau_state(), &session_id)?;
+    let pending_snapshot =
+        wait_for_durable_snapshot(&fixture, &session_id, deadline, |snapshot| {
+            pending_durable_counts(snapshot, &ids.call_id) == (1, 0)
+        })?;
     assert_pending_durable(&pending_snapshot, &ids.call_id)?;
 
     let attached = PtyProcess::spawn(
@@ -118,7 +121,7 @@ fn attach_during_dummy_round_preserves_pending_and_terminal_parity()
     assert!(original_done_row.contains("ok"));
     assert_ne!(original_pending_row, original_done_row);
 
-    assert_round_facts(&fixture, &observer, &session_id, &agent_id, &ids)?;
+    assert_round_facts(&fixture, &observer, &session_id, &agent_id, &ids, deadline)?;
     finish_pair(fixture, observer, attached, original, &session_id)
 }
 
@@ -229,6 +232,17 @@ fn assert_pending_durable(
     snapshot: &DurableSnapshot,
     call_id: &ToolCallId,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let (calls, results) = pending_durable_counts(snapshot, call_id);
+    if (calls, results) != (1, 0) {
+        return Err(
+            format!("unexpected durable pending cut: calls={calls}, results={results}").into(),
+        );
+    }
+    Ok(())
+}
+
+/// Counts the exact durable provider call and result at the pending cut.
+fn pending_durable_counts(snapshot: &DurableSnapshot, call_id: &ToolCallId) -> (usize, usize) {
     let calls = snapshot
         .agent_events
         .iter()
@@ -248,12 +262,40 @@ fn assert_pending_durable(
                 if &result.call_id == call_id)
         })
         .count();
-    if (calls, results) != (1, 0) {
-        return Err(
-            format!("unexpected durable pending cut: calls={calls}, results={results}").into(),
+    (calls, results)
+}
+
+/// Polls the bounded semantic snapshot until the expected durable cut appears.
+///
+/// On deadline this returns the last complete snapshot so the caller's exact
+/// content assertion reports the missing or duplicate facts.
+fn wait_for_durable_snapshot(
+    fixture: &GateFixture,
+    session_id: &tau_proto::SessionId,
+    deadline: Instant,
+    ready: impl Fn(&DurableSnapshot) -> bool,
+) -> Result<DurableSnapshot, Box<dyn std::error::Error>> {
+    let mut last_snapshot = None;
+    let mut last_error = None;
+    loop {
+        match DurableSnapshot::load(&fixture.tau_state(), session_id) {
+            Ok(snapshot) if ready(&snapshot) => return Ok(snapshot),
+            Ok(snapshot) => last_snapshot = Some(snapshot),
+            Err(error) => last_error = Some(error),
+        }
+        let now = Instant::now();
+        if deadline <= now {
+            if let Some(snapshot) = last_snapshot {
+                return Ok(snapshot);
+            }
+            return Err(last_error.unwrap_or_else(|| "no durable snapshot was readable".into()));
+        }
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(10)),
         );
     }
-    Ok(())
 }
 
 /// Checks exact typed live facts, durable result sequence, extension readiness,
@@ -264,10 +306,13 @@ fn assert_round_facts(
     session_id: &tau_proto::SessionId,
     agent_id: &tau_proto::AgentId,
     ids: &ScenarioIds,
+    deadline: Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_exact_ready_set(&observer.events)?;
     assert_tool_admission(&observer.events, agent_id, &ids.call_id, false)?;
-    let snapshot = DurableSnapshot::load(&fixture.tau_state(), session_id)?;
+    let snapshot = wait_for_durable_snapshot(fixture, session_id, deadline, |snapshot| {
+        assert_durable_tool(snapshot, &ids.prompt, &ids.call_id, &ids.completion).is_ok()
+    })?;
     assert_durable_tool(&snapshot, &ids.prompt, &ids.call_id, &ids.completion)?;
     let completions = observer
         .events
