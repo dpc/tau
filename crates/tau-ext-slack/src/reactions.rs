@@ -187,24 +187,30 @@ impl PreparedReaction {
     /// Return whether this completion retains its exact reservation, target,
     /// configuration, and lifecycle authority.
     fn is_current(&self, state: &State, invoke: &ToolStarted) -> bool {
-        state.config_generation == self.generation
-            && state.reactions.epoch == self.epoch
+        state.configuration.config_generation == self.generation
+            && state.ingress.reactions.epoch == self.epoch
             && state
+                .ingress
                 .reactions
                 .in_flight
                 .get(&self.key)
                 .is_some_and(|current| current.token == self.reservation)
-            && state.config.as_ref().is_some_and(|current_cfg| {
-                state
-                    .reactions
-                    .targets
-                    .get(&self.message_ref)
-                    .is_some_and(|current_target| {
-                        current_target == &self.target
-                            && current_target.agent_id == invoke.agent_id
-                            && reaction_target_authorized(state, current_cfg, current_target)
-                    })
-            })
+            && state
+                .configuration
+                .config
+                .as_ref()
+                .is_some_and(|current_cfg| {
+                    state
+                        .ingress
+                        .reactions
+                        .targets
+                        .get(&self.message_ref)
+                        .is_some_and(|current_target| {
+                            current_target == &self.target
+                                && current_target.agent_id == invoke.agent_id
+                                && reaction_target_authorized(state, current_cfg, current_target)
+                        })
+                })
     }
 }
 
@@ -521,7 +527,7 @@ impl Extension {
         }
         {
             let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if let Some(attempt) = state.reactions.attempts.get(&invoke.call_id) {
+            if let Some(attempt) = state.ingress.reactions.attempts.get(&invoke.call_id) {
                 if attempt.agent_id != invoke.agent_id || attempt.arguments != invoke.arguments {
                     pending!(tool_error(
                         invoke,
@@ -562,7 +568,7 @@ impl Extension {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if self.output_failed.load(Ordering::Acquire)
                 || self.shutdown.is_requested()
-                || !state.session_active
+                || !state.socket.session_active
             {
                 pending!(self.finish_reaction_error_locked(
                     &mut state,
@@ -570,14 +576,14 @@ impl Extension {
                     "Slack message reference is unknown, stale, or unauthorized".to_owned(),
                 ));
             }
-            let Some(cfg) = state.config.clone() else {
+            let Some(cfg) = state.configuration.config.clone() else {
                 pending!(self.finish_reaction_error_locked(
                     &mut state,
                     invoke,
                     "Slack message reference is unknown, stale, or unauthorized".to_owned(),
                 ));
             };
-            let Some(target) = state.reactions.targets.get(&message_ref).cloned() else {
+            let Some(target) = state.ingress.reactions.targets.get(&message_ref).cloned() else {
                 pending!(self.finish_reaction_error_locked(
                     &mut state,
                     invoke,
@@ -593,7 +599,7 @@ impl Extension {
                     "Slack message reference is unknown, stale, or unauthorized".to_owned(),
                 ));
             }
-            if let Some(attempt) = state.reactions.attempts.get(&invoke.call_id) {
+            if let Some(attempt) = state.ingress.reactions.attempts.get(&invoke.call_id) {
                 if attempt.agent_id == invoke.agent_id && attempt.arguments == invoke.arguments {
                     pending!(reaction_coalesced(invoke));
                 }
@@ -602,8 +608,8 @@ impl Extension {
                     "slack_react call id was replayed with conflicting arguments".to_owned(),
                 ));
             }
-            if state.reactions.attempts.len() >= ATTEMPT_LIMIT
-                && state.reactions.attempts.values().all(|attempt| {
+            if state.ingress.reactions.attempts.len() >= ATTEMPT_LIMIT
+                && state.ingress.reactions.attempts.values().all(|attempt| {
                     matches!(attempt.disposition, ReactionAttemptDisposition::InFlight)
                 })
             {
@@ -617,7 +623,7 @@ impl Extension {
                 message_ts: target.message_ts.clone(),
                 emoji: emoji.clone(),
             };
-            if state.reactions.in_flight.contains_key(&key) {
+            if state.ingress.reactions.in_flight.contains_key(&key) {
                 pending!(self.finish_reaction_error_locked(
                     &mut state,
                     invoke,
@@ -625,6 +631,7 @@ impl Extension {
                 ));
             }
             let owner_agent = state
+                .ingress
                 .reactions
                 .owners
                 .get(&key)
@@ -643,8 +650,9 @@ impl Extension {
                         ));
                     }
                     if owner_agent.is_none()
-                        && state.reactions.owners.len()
+                        && state.ingress.reactions.owners.len()
                             + state
+                                .ingress
                                 .reactions
                                 .in_flight
                                 .values()
@@ -669,9 +677,10 @@ impl Extension {
                     }
                 }
             }
-            state.reactions.next_reservation = state.reactions.next_reservation.wrapping_add(1);
-            let reservation = state.reactions.next_reservation;
-            state.reactions.in_flight.insert(
+            state.ingress.reactions.next_reservation =
+                state.ingress.reactions.next_reservation.wrapping_add(1);
+            let reservation = state.ingress.reactions.next_reservation;
+            state.ingress.reactions.in_flight.insert(
                 key.clone(),
                 ReactionReservation {
                     agent_id: invoke.agent_id.clone(),
@@ -681,18 +690,19 @@ impl Extension {
                 },
             );
             let remembered = state
+                .ingress
                 .reactions
                 .remember_attempt(&invoke, ReactionAttemptDisposition::InFlight);
             // ast-grep-ignore: debug-assert-expression-must-not-mutate
             debug_assert!(remembered);
-            state.config_frozen = true;
+            state.configuration.config_frozen = true;
             PreparedReaction {
                 cfg,
                 target,
                 key,
                 message_ref,
-                generation: state.config_generation,
-                epoch: state.reactions.epoch,
+                generation: state.configuration.config_generation,
+                epoch: state.ingress.reactions.epoch,
                 reservation,
                 owned_before,
             }
@@ -713,17 +723,19 @@ impl Extension {
             let current = prepared.is_current(&state, &invoke);
             if !current {
                 if state
+                    .ingress
                     .reactions
                     .in_flight
                     .get(&prepared.key)
                     .is_some_and(|current| current.token == prepared.reservation)
                 {
-                    state.reactions.in_flight.remove(&prepared.key);
+                    state.ingress.reactions.in_flight.remove(&prepared.key);
                 }
                 drop(submission);
                 let message =
                     "Slack message reference is unknown, stale, or unauthorized".to_owned();
                 if state
+                    .ingress
                     .reactions
                     .attempts
                     .get(&invoke.call_id)
@@ -754,7 +766,7 @@ impl Extension {
                 _ => false,
             };
             if !successful_remote_outcome {
-                state.reactions.in_flight.remove(&prepared.key);
+                state.ingress.reactions.in_flight.remove(&prepared.key);
                 let message =
                     reaction_error_message(outcome.err(), action, current, prepared.owned_before);
                 drop(submission);
@@ -785,7 +797,7 @@ impl Extension {
             if prepared.is_current(&state, &invoke) {
                 match action {
                     ReactionActionKind::Add if !prepared.owned_before => {
-                        state.reactions.owners.insert(
+                        state.ingress.reactions.owners.insert(
                             prepared.key.clone(),
                             ReactionOwner {
                                 agent_id: invoke.agent_id.clone(),
@@ -794,12 +806,13 @@ impl Extension {
                         );
                     }
                     ReactionActionKind::Remove => {
-                        state.reactions.owners.remove(&prepared.key);
+                        state.ingress.reactions.owners.remove(&prepared.key);
                     }
                     ReactionActionKind::Add => {}
                 }
-                state.reactions.in_flight.remove(&prepared.key);
+                state.ingress.reactions.in_flight.remove(&prepared.key);
                 let remembered = state
+                    .ingress
                     .reactions
                     .remember_attempt(&invoke, ReactionAttemptDisposition::Success(result));
                 // ast-grep-ignore: debug-assert-expression-must-not-mutate
@@ -828,6 +841,7 @@ impl Extension {
         message: String,
     ) -> Event {
         if state
+            .ingress
             .reactions
             .remember_attempt(&invoke, ReactionAttemptDisposition::Error(message.clone()))
         {
@@ -873,7 +887,7 @@ pub(super) fn valid_outbound_emoji(value: &str) -> bool {
 
 /// Revalidate the exact current route authority for one cached target.
 fn reaction_target_authorized(state: &State, cfg: &RuntimeConfig, target: &ReactionTarget) -> bool {
-    if state.installation_team_id.as_deref() != Some(target.installation_team_id.as_str()) {
+    if state.socket.installation_team_id.as_deref() != Some(target.installation_team_id.as_str()) {
         return false;
     }
     match &target.authority {
@@ -881,14 +895,18 @@ fn reaction_target_authorized(state: &State, cfg: &RuntimeConfig, target: &React
             message_id,
             user_id,
         } => {
-            state.registered_agents.contains(&target.agent_id)
-                && state.reply_routes.get(message_id).is_some_and(|route| {
-                    route.agent_id == target.agent_id
-                        && route.user_id == *user_id
-                        && route.conversation == target.conversation
-                        && state.installation_team_id.as_deref()
-                            == Some(route.installation_team_id.as_str())
-                })
+            state.agents.registered_agents.contains(&target.agent_id)
+                && state
+                    .ingress
+                    .reply_routes
+                    .get(message_id)
+                    .is_some_and(|route| {
+                        route.agent_id == target.agent_id
+                            && route.user_id == *user_id
+                            && route.conversation == target.conversation
+                            && state.socket.installation_team_id.as_deref()
+                                == Some(route.installation_team_id.as_str())
+                    })
                 && is_route_authorized(state, cfg, &target.conversation, user_id)
         }
         ReactionAuthority::ConfiguredDestination { alias } => cfg

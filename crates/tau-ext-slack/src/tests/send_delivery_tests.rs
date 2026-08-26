@@ -160,8 +160,8 @@ fn invalid_agent_text_fails_before_installation_preflight() {
     apply_test_config(&ext, proactive_cfg());
     {
         let mut state = ext.state.lock().expect("state");
-        state.bot_user_id = None;
-        state.installation_team_id = None;
+        state.socket.bot_user_id = None;
+        state.socket.installation_team_id = None;
     }
     let invoke = tool(
         SEND_TOOL_NAME,
@@ -174,7 +174,7 @@ fn invalid_agent_text_fails_before_installation_preflight() {
     assert!(matches!(ext.handle_send(invoke), Some(Event::ToolError(_))));
     assert_eq!(*client.auth_count.lock().expect("auth count"), 0);
     assert!(client.sent_pairs().is_empty());
-    assert!(!ext.state.lock().expect("state").config_frozen);
+    assert!(!ext.state.lock().expect("state").configuration.config_frozen);
 }
 
 /// Proactive calls submit the sent report before the correlated
@@ -244,6 +244,7 @@ fn accepted_proactive_replay_returns_stable_result_without_reposting() {
         ext.state
             .lock()
             .expect("state")
+            .sends
             .send_ledger
             .get(&invoke.call_id)
             .map(|entry| &entry.disposition),
@@ -253,6 +254,7 @@ fn accepted_proactive_replay_returns_stable_result_without_reposting() {
         !ext.state
             .lock()
             .expect("state")
+            .ingress
             .reactions
             .targets
             .contains_key(&message_id)
@@ -285,6 +287,7 @@ fn accepted_proactive_replay_returns_stable_result_without_reposting() {
         !ext.state
             .lock()
             .expect("state")
+            .ingress
             .reactions
             .targets
             .contains_key(&message_id)
@@ -294,6 +297,7 @@ fn accepted_proactive_replay_returns_stable_result_without_reposting() {
         ext.state
             .lock()
             .expect("state")
+            .sends
             .send_ledger
             .get(&invoke.call_id)
             .map(|entry| &entry.disposition),
@@ -303,6 +307,7 @@ fn accepted_proactive_replay_returns_stable_result_without_reposting() {
         ext.state
             .lock()
             .expect("state")
+            .ingress
             .reactions
             .targets
             .contains_key(&message_id)
@@ -362,7 +367,16 @@ fn canonical_echo_during_result_submission_is_reconciled() {
             if matches!(emit.event.as_ref(), Event::ToolResultReported(_))
     ));
     wait_for_send_worker(&worker_released);
-    assert!(ext.state.lock().expect("state").reactions.targets.len() == 1);
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .ingress
+            .reactions
+            .targets
+            .len()
+            == 1
+    );
 }
 
 /// An early canonical echo cannot install authority when the later independent
@@ -412,9 +426,10 @@ fn canonical_echo_before_result_failure_installs_no_authority() {
     failure_rx.recv().expect("result failure boundary");
     {
         let state = ext.state.lock().expect("state");
-        assert!(state.reactions.targets.is_empty());
+        assert!(state.ingress.reactions.targets.is_empty());
         assert!(matches!(
             state
+                .sends
                 .send_ledger
                 .get(&call_id)
                 .map(|entry| &entry.disposition),
@@ -460,8 +475,8 @@ fn active_send_worker_capacity_rejects_before_freeze_or_io() {
     apply_test_config(&ext, proactive_cfg());
     {
         let mut state = ext.state.lock().expect("state");
-        state.active_send_workers = ACTIVE_SEND_WORKER_LIMIT;
-        state.config_frozen = false;
+        state.sends.active_send_workers = ACTIVE_SEND_WORKER_LIMIT;
+        state.configuration.config_frozen = false;
     }
     let event = ext.handle_send(tool(
         SEND_TOOL_NAME,
@@ -475,8 +490,8 @@ fn active_send_worker_capacity_rejects_before_freeze_or_io() {
         Some(Event::ToolError(error)) if error.message.contains("workers are busy")
     ));
     let state = ext.state.lock().expect("state");
-    assert!(!state.config_frozen);
-    assert!(state.send_ledger.is_empty());
+    assert!(!state.configuration.config_frozen);
+    assert!(state.sends.send_ledger.is_empty());
     assert!(client.sent_pairs().is_empty());
 }
 
@@ -644,6 +659,7 @@ fn retry_resuming_after_absolute_horizon_never_posts_again() {
     ext.state
         .lock()
         .expect("state")
+        .sends
         .send_ledger
         .get_mut(&invoke.call_id)
         .expect("ledger")
@@ -664,6 +680,7 @@ fn retry_resuming_after_absolute_horizon_never_posts_again() {
         ext.state
             .lock()
             .expect("state")
+            .sends
             .send_ledger
             .get(&invoke.call_id)
             .map(|entry| &entry.disposition),
@@ -707,6 +724,7 @@ fn definitive_send_failure_publishes_one_report_before_terminalizing_ledger() {
         ext.state
             .lock()
             .expect("state")
+            .sends
             .send_ledger
             .get(&invoke.call_id)
             .map(|entry| &entry.disposition),
@@ -760,6 +778,7 @@ fn lifecycle_cancelled_send_publishes_one_typed_error_report() {
         ext.state
             .lock()
             .expect("state")
+            .sends
             .send_ledger
             .get(&invoke.call_id)
             .map(|entry| &entry.disposition),
@@ -811,6 +830,7 @@ fn lifecycle_revocation_before_terminal_gate_reclassifies_failure() {
         ext.state
             .lock()
             .expect("state")
+            .sends
             .send_ledger
             .get(&invoke.call_id)
             .map(|entry| &entry.disposition),
@@ -849,6 +869,7 @@ fn failed_send_terminal_preserves_ledger_ownership_until_retirement() {
         ext.state
             .lock()
             .expect("state")
+            .sends
             .send_ledger
             .get(&invoke.call_id)
             .map(|entry| &entry.disposition),
@@ -977,7 +998,7 @@ fn deletion_writer_failure_retires_a_queued_send_retry() {
     release_tx.send(()).expect("release retired retry");
     let mut worker_exited = false;
     for _ in 0..100 {
-        if ext.state.lock().expect("state").active_send_workers == 0 {
+        if ext.state.lock().expect("state").sends.active_send_workers == 0 {
             worker_exited = true;
             break;
         }
@@ -985,7 +1006,14 @@ fn deletion_writer_failure_retires_a_queued_send_retry() {
     }
     assert!(worker_exited, "retired retry worker did not terminate");
     assert_eq!(client.bodies.lock().expect("bodies").len(), 1);
-    assert!(ext.state.lock().expect("state").send_ledger.is_empty());
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .sends
+            .send_ledger
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1007,6 +1035,7 @@ fn disconnect_and_eof_retire_before_a_reserved_initial_attempt() {
         ext.state
             .lock()
             .expect("state")
+            .sends
             .channel_attempt_deadlines
             .insert("C456".to_owned(), Instant::now() + Duration::from_secs(10));
         assert!(
@@ -1046,6 +1075,9 @@ fn disconnect_and_eof_retire_before_a_reserved_initial_attempt() {
             "worker did not release promptly after {boundary}"
         );
         assert!(client.bodies.lock().expect("bodies").is_empty());
-        assert_eq!(ext.state.lock().expect("state").active_send_workers, 0);
+        assert_eq!(
+            ext.state.lock().expect("state").sends.active_send_workers,
+            0
+        );
     }
 }

@@ -327,31 +327,43 @@ impl State {
             bot_user_id,
             installation_team_id,
         } = &prepared.authority;
-        if self.session_generation != *session_generation
-            || self.ingress_epoch != *ingress_epoch
-            || self.config_generation != *config_generation
+        if self.sends.session_generation != *session_generation
+            || self.ingress.ingress_epoch != *ingress_epoch
+            || self.configuration.config_generation != *config_generation
             || self.send_agent_generation(&prepared.invoke.agent_id) != *agent_generation
-            || self.instance_name.as_ref() != instance_name.as_ref()
-            || self.bot_user_id.as_deref() != Some(bot_user_id.as_str())
-            || self.installation_team_id.as_deref() != Some(installation_team_id.as_str())
+            || self.configuration.instance_name.as_ref() != instance_name.as_ref()
+            || self.socket.bot_user_id.as_deref() != Some(bot_user_id.as_str())
+            || self.socket.installation_team_id.as_deref() != Some(installation_team_id.as_str())
             || self
+                .sends
                 .send_ledger
                 .get(&prepared.invoke.call_id)
                 .is_none_or(|entry| entry.prepared.authority.token != *token)
         {
             return false;
         }
-        let Some(cfg) = self.config.as_ref() else {
+        let Some(cfg) = self.configuration.config.as_ref() else {
             return false;
         };
         match &prepared.authorization {
             SendAuthorization::Reply { message_id } => {
-                self.registered_agents.contains(&prepared.invoke.agent_id)
-                    && self.reply_routes.get(message_id).is_some_and(|route| {
-                        route.agent_id == prepared.invoke.agent_id
-                            && route.conversation == prepared.route
-                            && is_route_authorized(self, cfg, &route.conversation, &route.user_id)
-                    })
+                self.agents
+                    .registered_agents
+                    .contains(&prepared.invoke.agent_id)
+                    && self
+                        .ingress
+                        .reply_routes
+                        .get(message_id)
+                        .is_some_and(|route| {
+                            route.agent_id == prepared.invoke.agent_id
+                                && route.conversation == prepared.route
+                                && is_route_authorized(
+                                    self,
+                                    cfg,
+                                    &route.conversation,
+                                    &route.user_id,
+                                )
+                        })
             }
             SendAuthorization::ConfiguredDestination { alias } => {
                 cfg.proactive_aliases.contains(alias)
@@ -369,13 +381,14 @@ impl State {
     /// report, preserving an echo that races typed-result submission.
     pub(super) fn acknowledge_canonical_send(&mut self, fact: &MessageSent) {
         if self
+            .configuration
             .instance_name
             .as_ref()
             .is_none_or(|publisher| publisher.as_str() != fact.publisher_extension_id.as_str())
         {
             return;
         }
-        let call_id = self.send_ledger.iter().find_map(|(call_id, entry)| {
+        let call_id = self.sends.send_ledger.iter().find_map(|(call_id, entry)| {
             let message_id = match &entry.disposition {
                 SendLedgerDisposition::Submitting { message_id, .. } => message_id,
                 SendLedgerDisposition::PendingCanonical(pending) => &pending.message_id,
@@ -389,6 +402,7 @@ impl State {
             return;
         };
         let pending = match self
+            .sends
             .send_ledger
             .get_mut(&call_id)
             .map(|entry| &mut entry.disposition)
@@ -411,19 +425,20 @@ impl State {
     /// into its stable completed ledger state.
     fn complete_pending_canonical_send(&mut self, call_id: &tau_proto::ToolCallId) {
         let authority_current = self
+            .sends
             .send_ledger
             .get(call_id)
             .is_some_and(|entry| self.send_authority_is_current(&entry.prepared));
         if !authority_current {
             return;
         }
-        let Some(mut entry) = self.send_ledger.remove(call_id) else {
+        let Some(mut entry) = self.sends.send_ledger.remove(call_id) else {
             return;
         };
         let SendLedgerDisposition::PendingCanonical(pending) =
             std::mem::replace(&mut entry.disposition, SendLedgerDisposition::Reserved)
         else {
-            self.send_ledger.insert(call_id.clone(), entry);
+            self.sends.send_ledger.insert(call_id.clone(), entry);
             return;
         };
         let PendingCanonicalSend {
@@ -433,7 +448,7 @@ impl State {
             posted,
         } = pending;
         let prepared = &entry.prepared;
-        let _ = self.reactions.insert_target(
+        let _ = self.ingress.reactions.insert_target(
             message_id.clone(),
             ReactionTarget {
                 agent_id: prepared.invoke.agent_id.clone(),
@@ -443,7 +458,7 @@ impl State {
                 authority: prepared.reaction_authority.clone(),
             },
         );
-        self.posted_messages.insert(
+        self.ingress.posted_messages.insert(
             PostedMessageKey::new(&prepared.route.channel_id, &posted.ts),
             PostedMessageOwner {
                 agent_id: prepared.invoke.agent_id.clone(),
@@ -454,7 +469,7 @@ impl State {
             },
         );
         entry.disposition = SendLedgerDisposition::Completed { result, copies };
-        self.send_ledger.insert(call_id.clone(), entry);
+        self.sends.send_ledger.insert(call_id.clone(), entry);
     }
 }
 
@@ -466,28 +481,31 @@ impl Extension {
     fn ensure_send_installation(&self) -> Result<(), String> {
         let (cfg, generation) = {
             let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if state.installation_mismatch {
+            if state.socket.installation_mismatch {
                 return Err(
                     "Slack installation identity changed; restart Tau before sending".to_owned(),
                 );
             }
-            if state.bot_user_id.is_some() && state.installation_team_id.is_some() {
+            if state.socket.bot_user_id.is_some() && state.socket.installation_team_id.is_some() {
                 return Ok(());
             }
-            if state.bot_user_id.is_some() || state.installation_team_id.is_some() {
+            if state.socket.bot_user_id.is_some() || state.socket.installation_team_id.is_some() {
                 return Err("Slack installation identity is incomplete".to_owned());
             }
             (
                 state
+                    .configuration
                     .config
                     .clone()
                     .ok_or_else(|| "slack extension is not configured".to_owned())?,
-                state.config_generation,
+                state.configuration.config_generation,
             )
         };
         let installation = self.authenticated_installation(&cfg)?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.config_generation != generation || state.config.is_none() {
+        if state.configuration.config_generation != generation
+            || state.configuration.config.is_none()
+        {
             return Err("Slack installation preflight became stale".to_owned());
         }
         state
@@ -550,13 +568,13 @@ impl Extension {
                 SendReplay::Event(event) => return Some(*event),
             }
             drop(submission);
-            if state.send_ledger.len() >= SEND_LEDGER_LIMIT {
+            if state.sends.send_ledger.len() >= SEND_LEDGER_LIMIT {
                 return Some(tool_error(
                     invoke,
                     format!("{send_tool} delivery ledger is full for this session"),
                 ));
             }
-            let Some(cfg) = state.config.clone() else {
+            let Some(cfg) = state.configuration.config.clone() else {
                 return Some(tool_error(
                     invoke,
                     "slack extension is not configured".to_owned(),
@@ -568,7 +586,7 @@ impl Extension {
                     "`message` exceeds slack max_message_bytes".to_owned(),
                 ));
             }
-            if state.active_send_workers >= ACTIVE_SEND_WORKER_LIMIT {
+            if state.sends.active_send_workers >= ACTIVE_SEND_WORKER_LIMIT {
                 return Some(tool_error(
                     invoke,
                     format!("{send_tool} delivery workers are busy; try again later"),
@@ -582,14 +600,14 @@ impl Extension {
             }
             let (route, authorization, reaction_authority, source_mention) =
                 if let Some(reply_to) = &reply_to {
-                    if !state.registered_agents.contains(&invoke.agent_id) {
+                    if !state.agents.registered_agents.contains(&invoke.agent_id) {
                         let register = self.output.wire_tool_name(REGISTER_TOOL_NAME);
                         return Some(tool_error(
                             invoke,
                             format!("Slack reply requires {register}(enabled: true) first"),
                         ));
                     }
-                    let Some(route) = state.reply_routes.get(reply_to).cloned() else {
+                    let Some(route) = state.ingress.reply_routes.get(reply_to).cloned() else {
                         return Some(tool_error(
                             invoke,
                             format!("{send_tool} reply_to is unknown or stale"),
@@ -607,7 +625,7 @@ impl Extension {
                             format!("{send_tool} originating conversation is no longer authorized"),
                         ));
                     }
-                    if state.installation_team_id.as_deref()
+                    if state.socket.installation_team_id.as_deref()
                         != Some(route.installation_team_id.as_str())
                     {
                         return Some(tool_error(
@@ -617,7 +635,7 @@ impl Extension {
                     }
                     let source_mention = if mention_source_user {
                         if route.user_id == "USLACKBOT"
-                            || state.bot_user_id.as_deref() == Some(route.user_id.as_str())
+                            || state.socket.bot_user_id.as_deref() == Some(route.user_id.as_str())
                         {
                             return Some(tool_error(
                                 invoke,
@@ -689,41 +707,44 @@ impl Extension {
                 Err(error) => return Some(tool_error(invoke, error.to_string())),
             };
             let body = FrozenPostBody::new(&route.channel_id, route.thread_ts.as_deref(), &mode);
-            let (bot_user_id, installation_team_id) =
-                match (&state.bot_user_id, &state.installation_team_id) {
-                    (Some(bot_user_id), Some(installation_team_id)) => (
-                        ObservedSlackBotId::from_validated(bot_user_id),
-                        installation_team_id.clone(),
-                    ),
-                    (None, None) if !installation_preflight_attempted => {
-                        drop(state);
-                        if let Err(error) = self.ensure_send_installation() {
-                            return Some(tool_error(invoke, error));
-                        }
-                        installation_preflight_attempted = true;
-                        continue;
+            let (bot_user_id, installation_team_id) = match (
+                &state.socket.bot_user_id,
+                &state.socket.installation_team_id,
+            ) {
+                (Some(bot_user_id), Some(installation_team_id)) => (
+                    ObservedSlackBotId::from_validated(bot_user_id),
+                    installation_team_id.clone(),
+                ),
+                (None, None) if !installation_preflight_attempted => {
+                    drop(state);
+                    if let Err(error) = self.ensure_send_installation() {
+                        return Some(tool_error(invoke, error));
                     }
-                    (None, None) | (Some(_), None) | (None, Some(_)) => {
-                        return Some(tool_error(
-                            invoke,
-                            format!("{send_tool} installation identity is unavailable"),
-                        ));
-                    }
-                };
-            state.config_frozen = true;
-            state.next_send_reservation = state.next_send_reservation.wrapping_add(1);
+                    installation_preflight_attempted = true;
+                    continue;
+                }
+                (None, None) | (Some(_), None) | (None, Some(_)) => {
+                    return Some(tool_error(
+                        invoke,
+                        format!("{send_tool} installation identity is unavailable"),
+                    ));
+                }
+            };
+            state.configuration.config_frozen = true;
+            state.sends.next_send_reservation = state.sends.next_send_reservation.wrapping_add(1);
             let authority = FrozenSendAuthority {
-                token: state.next_send_reservation,
-                session_generation: state.session_generation,
-                ingress_epoch: state.ingress_epoch,
-                config_generation: state.config_generation,
+                token: state.sends.next_send_reservation,
+                session_generation: state.sends.session_generation,
+                ingress_epoch: state.ingress.ingress_epoch,
+                config_generation: state.configuration.config_generation,
                 agent_generation: state.send_agent_generation(&invoke.agent_id),
-                instance_name: state.instance_name.clone(),
+                instance_name: state.configuration.instance_name.clone(),
                 bot_user_id,
                 installation_team_id,
             };
             let prepared_at = Instant::now();
             state
+                .sends
                 .channel_send_queues
                 .entry(route.channel_id.clone())
                 .or_default()
@@ -744,8 +765,8 @@ impl Extension {
                     .unwrap_or(prepared_at),
                 authority,
             };
-            state.active_send_workers += 1;
-            state.send_ledger.insert(
+            state.sends.active_send_workers += 1;
+            state.sends.send_ledger.insert(
                 invoke.call_id.clone(),
                 SendLedgerEntry {
                     prepared: prepared.clone(),
@@ -765,7 +786,7 @@ impl Extension {
         invoke: &ToolStarted,
         send_tool: &tau_proto::ToolName,
     ) -> SendReplay {
-        let Some(entry) = state.send_ledger.get(&invoke.call_id) else {
+        let Some(entry) = state.sends.send_ledger.get(&invoke.call_id) else {
             return SendReplay::New;
         };
         if entry.prepared.invoke.agent_id != invoke.agent_id
@@ -914,9 +935,10 @@ impl SendDeliveryWorker {
     /// Release one bounded delivery-worker slot after spawn failure or exit.
     fn release_send_worker(&self, prepared: &PreparedSend) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        state.active_send_workers = state.active_send_workers.saturating_sub(1);
+        state.sends.active_send_workers = state.sends.active_send_workers.saturating_sub(1);
         let channel_id = &prepared.route.channel_id;
-        let remove_queue = if let Some(queue) = state.channel_send_queues.get_mut(channel_id) {
+        let remove_queue = if let Some(queue) = state.sends.channel_send_queues.get_mut(channel_id)
+        {
             queue.retain(|reservation| {
                 reservation.call_id != prepared.invoke.call_id
                     || reservation.token != prepared.authority.token
@@ -926,7 +948,7 @@ impl SendDeliveryWorker {
             false
         };
         if remove_queue {
-            state.channel_send_queues.remove(channel_id);
+            state.sends.channel_send_queues.remove(channel_id);
         }
         drop(state);
         self.wake.notify_progress();
@@ -1017,6 +1039,7 @@ impl SendDeliveryWorker {
             return BeginSendAttempt::Revoked;
         }
         if state
+            .sends
             .channel_send_queues
             .get(&prepared.route.channel_id)
             .and_then(|queue| queue.front())
@@ -1027,7 +1050,7 @@ impl SendDeliveryWorker {
         {
             return BeginSendAttempt::Revoked;
         }
-        let Some(entry) = state.send_ledger.get_mut(&prepared.invoke.call_id) else {
+        let Some(entry) = state.sends.send_ledger.get_mut(&prepared.invoke.call_id) else {
             return BeginSendAttempt::Revoked;
         };
         if entry.prepared.authority.token != prepared.authority.token {
@@ -1041,7 +1064,7 @@ impl SendDeliveryWorker {
             prior_copies,
         };
         let now = Instant::now();
-        state.channel_attempt_deadlines.insert(
+        state.sends.channel_attempt_deadlines.insert(
             prepared.route.channel_id.clone(),
             now.checked_add(MIN_RETRY_DELAY).unwrap_or(now),
         );
@@ -1101,6 +1124,7 @@ impl SendDeliveryWorker {
             let now = Instant::now();
             let candidate = now.checked_add(delay).unwrap_or(now);
             let deadline = state
+                .sends
                 .channel_attempt_deadlines
                 .get(&prepared.route.channel_id)
                 .copied()
@@ -1119,7 +1143,7 @@ impl SendDeliveryWorker {
                 );
                 return;
             }
-            let Some(entry) = state.send_ledger.get_mut(&prepared.invoke.call_id) else {
+            let Some(entry) = state.sends.send_ledger.get_mut(&prepared.invoke.call_id) else {
                 return;
             };
             entry.disposition = SendLedgerDisposition::RetryScheduled {
@@ -1215,6 +1239,7 @@ impl SendDeliveryWorker {
                 let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
                 state.send_authority_is_current(prepared)
                     && state
+                        .sends
                         .channel_send_queues
                         .get(&prepared.route.channel_id)
                         .and_then(|queue| queue.front())
@@ -1241,6 +1266,7 @@ impl SendDeliveryWorker {
     fn channel_attempt_barrier(&self, prepared: &PreparedSend) -> Instant {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state
+            .sends
             .channel_attempt_deadlines
             .get(&prepared.route.channel_id)
             .copied()
@@ -1341,7 +1367,7 @@ impl SendDeliveryWorker {
             .unwrap_or_else(|error| error.into_inner());
         let (message, terminal) = {
             let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            let Some(entry) = state.send_ledger.get(&prepared.invoke.call_id) else {
+            let Some(entry) = state.sends.send_ledger.get(&prepared.invoke.call_id) else {
                 return;
             };
             if entry.prepared.authority.token != prepared.authority.token {
@@ -1374,7 +1400,7 @@ impl SendDeliveryWorker {
             .report_tool_terminal(tool_error(prepared.invoke.clone(), message));
         if sent.is_ok() {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if let Some(entry) = state.send_ledger.get_mut(&prepared.invoke.call_id)
+            if let Some(entry) = state.sends.send_ledger.get_mut(&prepared.invoke.call_id)
                 && entry.prepared.authority.token == prepared.authority.token
                 && !matches!(
                     entry.disposition,
@@ -1451,28 +1477,30 @@ impl SendDeliveryWorker {
                 self.finish_send_cancelled(prepared, copies);
                 return;
             }
-            let Some(instance_name) = state.instance_name.as_ref().map(ToString::to_string) else {
+            let Some(instance_name) = state
+                .configuration
+                .instance_name
+                .as_ref()
+                .map(ToString::to_string)
+            else {
                 return;
             };
-            let recipient =
-                match &prepared.authorization {
-                    SendAuthorization::Reply { message_id } => state
-                        .reply_routes
-                        .get(message_id)
-                        .map(|route| MessageParty {
-                            stable_id: slack_sender_ref(
-                                &route.installation_team_id,
-                                &route.user_id,
-                            ),
-                            display_name: route
-                                .identity_alias
-                                .clone()
-                                .or_else(|| route.display_name.clone()),
-                            sender_auth: None,
-                        }),
-                    SendAuthorization::ConfiguredDestination { alias: _ } => None,
-                };
-            let Some(entry) = state.send_ledger.get_mut(&prepared.invoke.call_id) else {
+            let recipient = match &prepared.authorization {
+                SendAuthorization::Reply { message_id } => state
+                    .ingress
+                    .reply_routes
+                    .get(message_id)
+                    .map(|route| MessageParty {
+                        stable_id: slack_sender_ref(&route.installation_team_id, &route.user_id),
+                        display_name: route
+                            .identity_alias
+                            .clone()
+                            .or_else(|| route.display_name.clone()),
+                        sender_auth: None,
+                    }),
+                SendAuthorization::ConfiguredDestination { alias: _ } => None,
+            };
+            let Some(entry) = state.sends.send_ledger.get_mut(&prepared.invoke.call_id) else {
                 return;
             };
             if entry.prepared.authority.token != prepared.authority.token {
@@ -1511,7 +1539,7 @@ impl SendDeliveryWorker {
         if result_sent {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.send_authority_is_current(prepared)
-                && let Some(entry) = state.send_ledger.get_mut(&prepared.invoke.call_id)
+                && let Some(entry) = state.sends.send_ledger.get_mut(&prepared.invoke.call_id)
                 && entry.prepared.authority.token == prepared.authority.token
             {
                 let canonical_echoed = matches!(

@@ -723,9 +723,9 @@ fn extension() -> (
     ext.apply_config(cfg()).expect("config");
     {
         let mut state = ext.state.lock().expect("lock");
-        state.bot_user_id = Some("UBOT123".to_owned());
-        state.installation_team_id = Some("T123".to_owned());
-        state.instance_name = Some(test_extension_name("std-slack"));
+        state.socket.bot_user_id = Some("UBOT123".to_owned());
+        state.socket.installation_team_id = Some("T123".to_owned());
+        state.configuration.instance_name = Some(test_extension_name("std-slack"));
     }
     (ext, rx, client)
 }
@@ -740,10 +740,11 @@ fn admission_context(ext: &Extension) -> AdmissionContext {
             event_class: EventClass::Delete,
         },
         received_at: Instant::now(),
-        ingress_epoch: state.ingress_epoch,
-        config_generation: state.config_generation,
-        agent_generation: state.agent_generation,
+        ingress_epoch: state.ingress.ingress_epoch,
+        config_generation: state.configuration.config_generation,
+        agent_generation: state.agents.agent_generation,
         installation_team_id: state
+            .socket
             .installation_team_id
             .clone()
             .expect("installation identity"),
@@ -963,8 +964,11 @@ fn slack_edit(
 fn register_agent(ext: &Extension, agent: &str) {
     {
         let mut state = ext.state.lock().expect("lock");
-        state.registered_agents.insert(agent_id(agent));
-        state.agent_labels.insert(agent_id(agent), agent.to_owned());
+        state.agents.registered_agents.insert(agent_id(agent));
+        state
+            .agents
+            .agent_labels
+            .insert(agent_id(agent), agent.to_owned());
     }
 }
 
@@ -972,9 +976,10 @@ fn apply_test_config(ext: &Extension, mut config: RuntimeConfig) {
     reindex_receive_routes(&mut config);
     ext.apply_config(config).expect("test config");
     let mut state = ext.state.lock().expect("state");
-    state.bot_user_id = Some("UBOT123".to_owned());
-    state.installation_team_id = Some("T123".to_owned());
+    state.socket.bot_user_id = Some("UBOT123".to_owned());
+    state.socket.installation_team_id = Some("T123".to_owned());
     state
+        .configuration
         .instance_name
         .get_or_insert_with(|| test_extension_name("std-slack"));
 }
@@ -1064,7 +1069,7 @@ fn pending_report_fixture() -> (
 ) {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
-    ext.state.lock().expect("state").session_active = true;
+    ext.state.lock().expect("state").socket.session_active = true;
     let queue = AdmissionQueue::<AdmissionWork>::new();
     let context = admission_context(&ext);
     context
@@ -1097,7 +1102,12 @@ fn assert_pending_teardown(name: &str, teardown: impl FnOnce(&Extension)) {
     assert!(matches!(queue.reserve(), Err(ReserveError::Full)));
     teardown(&ext);
     assert!(
-        ext.state.lock().expect("state").pending_ingress.is_empty(),
+        ext.state
+            .lock()
+            .expect("state")
+            .ingress
+            .pending_ingress
+            .is_empty(),
         "{name} must clear pending ingress"
     );
     let released = queue.reserve().expect("teardown releases pending slot");
@@ -1106,6 +1116,7 @@ fn assert_pending_teardown(name: &str, teardown: impl FnOnce(&Extension)) {
         !ext.state
             .lock()
             .expect("state")
+            .ingress
             .reply_routes
             .contains_key(&message_id)
     );
@@ -1194,7 +1205,12 @@ fn assert_teardown_waits_for_ingress_output(action: PendingTeardownRace, replay:
         let _report = recv_message_report(&rx, "serialized delivered");
     }
     assert!(
-        ext.state.lock().expect("state").pending_ingress.is_empty(),
+        ext.state
+            .lock()
+            .expect("state")
+            .ingress
+            .pending_ingress
+            .is_empty(),
         "{action:?} must clear pending ingress (replay={replay})"
     );
 }
@@ -1251,14 +1267,20 @@ fn message_report_lifecycle_preserves_target_identity() {
     );
     {
         let state = ext.state.lock().expect("state");
-        assert!(!state.reply_routes.contains_key(&delivered.message_id));
-        assert_eq!(state.pending_ingress.len(), 1);
+        assert!(
+            !state
+                .ingress
+                .reply_routes
+                .contains_key(&delivered.message_id)
+        );
+        assert_eq!(state.ingress.pending_ingress.len(), 1);
     }
     acknowledge_message_report(&ext, &Event::MessageDeliveredReported(delivered.clone()));
     assert!(
         ext.state
             .lock()
             .expect("state")
+            .ingress
             .reply_routes
             .contains_key(&delivered.message_id)
     );
@@ -1272,16 +1294,21 @@ fn message_report_lifecycle_preserves_target_identity() {
     assert_eq!(edited.publisher_extension_id.as_str(), "std-slack");
     acknowledge_message_report(&ext, &Event::MessageEditedReported(edited.clone()));
 
-    ext.state.lock().expect("state").posted_messages.insert(
-        PostedMessageKey::new("C123", "9.0"),
-        PostedMessageOwner {
-            agent_id: agent_id("agent-a"),
-            message_id: delivered.message_id.clone(),
-            thread_ts: None,
-            conversation: slack_conversation("C123", None),
-            installation_team_id: "T123".to_owned(),
-        },
-    );
+    ext.state
+        .lock()
+        .expect("state")
+        .ingress
+        .posted_messages
+        .insert(
+            PostedMessageKey::new("C123", "9.0"),
+            PostedMessageOwner {
+                agent_id: agent_id("agent-a"),
+                message_id: delivered.message_id.clone(),
+                thread_ts: None,
+                conversation: slack_conversation("C123", None),
+                installation_team_id: "T123".to_owned(),
+            },
+        );
     ext.process_slack_reaction(slack_reaction(
         "reaction-1",
         "reaction_added",
@@ -1321,14 +1348,14 @@ fn message_report_lifecycle_preserves_target_identity() {
     };
     {
         let mut state = ext.state.lock().expect("state");
-        state.reactions.owners.insert(
+        state.ingress.reactions.owners.insert(
             reaction_key.clone(),
             ReactionOwner {
                 agent_id: agent_id("agent-a"),
                 message_ref: delivered.message_id.clone(),
             },
         );
-        state.reactions.in_flight.insert(
+        state.ingress.reactions.in_flight.insert(
             reaction_key,
             ReactionReservation {
                 agent_id: agent_id("agent-a"),
@@ -1352,14 +1379,32 @@ fn message_report_lifecycle_preserves_target_identity() {
     assert!(deleted.actor.is_none());
     {
         let state = ext.state.lock().expect("state");
-        assert!(!state.reply_routes.contains_key(&delivered.message_id));
-        assert!(!state.reactions.targets.contains_key(&delivered.message_id));
-        assert!(state.reactions.owners.is_empty());
-        assert!(state.reactions.in_flight.is_empty());
-        assert_eq!(state.pending_ingress.len(), 1);
+        assert!(
+            !state
+                .ingress
+                .reply_routes
+                .contains_key(&delivered.message_id)
+        );
+        assert!(
+            !state
+                .ingress
+                .reactions
+                .targets
+                .contains_key(&delivered.message_id)
+        );
+        assert!(state.ingress.reactions.owners.is_empty());
+        assert!(state.ingress.reactions.in_flight.is_empty());
+        assert_eq!(state.ingress.pending_ingress.len(), 1);
     }
     acknowledge_message_report(&ext, &Event::MessageDeletedReported(deleted));
-    assert!(ext.state.lock().expect("state").pending_ingress.is_empty());
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .ingress
+            .pending_ingress
+            .is_empty()
+    );
 }
 
 /// Ingress authority requires exact event type, target agent, configured
@@ -1410,13 +1455,23 @@ fn ingress_canonical_correlation_rejects_every_mismatch() {
 
     {
         let state = ext.state.lock().expect("state");
-        assert_eq!(state.pending_ingress.len(), 1);
-        assert!(!state.reply_routes.contains_key(&canonical.message_id));
+        assert_eq!(state.ingress.pending_ingress.len(), 1);
+        assert!(
+            !state
+                .ingress
+                .reply_routes
+                .contains_key(&canonical.message_id)
+        );
     }
     ext.apply_live_event(&Event::MessageDelivered(canonical.clone()));
     let state = ext.state.lock().expect("state");
-    assert!(state.pending_ingress.is_empty());
-    assert!(state.reply_routes.contains_key(&canonical.message_id));
+    assert!(state.ingress.pending_ingress.is_empty());
+    assert!(
+        state
+            .ingress
+            .reply_routes
+            .contains_key(&canonical.message_id)
+    );
 }
 
 /// A report keeps its pre-ACK admission slot until canonical confirmation, so
@@ -1426,7 +1481,7 @@ fn ingress_canonical_correlation_rejects_every_mismatch() {
 fn pending_ingress_holds_admission_capacity_until_canonical_echo() {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
-    ext.state.lock().expect("state").session_active = true;
+    ext.state.lock().expect("state").socket.session_active = true;
     let queue = AdmissionQueue::<AdmissionWork>::new();
     let context = admission_context(&ext);
     context
@@ -1519,7 +1574,7 @@ fn outgoing_message_delete_revokes_post_authority() {
     );
     {
         let mut state = ext.state.lock().expect("state");
-        assert!(state.reactions.insert_target(
+        assert!(state.ingress.reactions.insert_target(
             message_id.clone(),
             ReactionTarget {
                 agent_id: agent_id("agent-a"),
@@ -1531,7 +1586,7 @@ fn outgoing_message_delete_revokes_post_authority() {
                 },
             },
         ));
-        state.reactions.owners.insert(
+        state.ingress.reactions.owners.insert(
             ReactionKey {
                 channel_id: "C123".to_owned(),
                 message_ts: "9.0".to_owned(),
@@ -1558,12 +1613,13 @@ fn outgoing_message_delete_revokes_post_authority() {
     let state = ext.state.lock().expect("state");
     assert!(
         state
+            .ingress
             .posted_messages
             .get(&PostedMessageKey::new("C123", "9.0"))
             .is_none()
     );
-    assert!(!state.reactions.targets.contains_key(&message_id));
-    assert!(state.reactions.owners.is_empty());
+    assert!(!state.ingress.reactions.targets.contains_key(&message_id));
+    assert!(state.ingress.reactions.owners.is_empty());
 }
 
 /// Unregistering receive authority preserves proactive post provenance so a
@@ -1589,6 +1645,7 @@ fn outgoing_message_delete_survives_receive_unregister() {
         ext.state
             .lock()
             .expect("state")
+            .ingress
             .posted_messages
             .get(&PostedMessageKey::new("C123", "10.0"))
             .is_some()
@@ -1617,7 +1674,7 @@ fn outgoing_message_delete_survives_receive_unregister() {
 fn admitted_outgoing_delete_ignores_receive_registration_churn() {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
-    ext.state.lock().expect("state").session_active = true;
+    ext.state.lock().expect("state").socket.session_active = true;
     ext.remember_posted_message(
         slack_conversation("C123", None),
         PostedMessage {
@@ -1672,10 +1729,11 @@ fn admitted_incoming_delete_fails_closed_after_unregister() {
         ext.state
             .lock()
             .expect("state")
+            .ingress
             .incoming_messages
             .contains_key(&PostedMessageKey::new("C123", &message_ts))
     );
-    ext.state.lock().expect("state").session_active = true;
+    ext.state.lock().expect("state").socket.session_active = true;
     let admission = admission_context(&ext);
     assert!(matches!(
         ext.handle_register(tool(REGISTER_TOOL_NAME, "agent-a", bool_args(false))),
@@ -1705,11 +1763,11 @@ fn deletion_writer_failure_retires_all_remote_effect_authority() {
     ext.apply_config(cfg()).expect("config");
     {
         let mut state = ext.state.lock().expect("state");
-        state.bot_user_id = Some("UBOT123".to_owned());
-        state.installation_team_id = Some("T123".to_owned());
-        state.instance_name = Some(test_extension_name("std-slack"));
-        state.session_active = true;
-        state.registered_agents.insert(agent_id("agent-a"));
+        state.socket.bot_user_id = Some("UBOT123".to_owned());
+        state.socket.installation_team_id = Some("T123".to_owned());
+        state.configuration.instance_name = Some(test_extension_name("std-slack"));
+        state.socket.session_active = true;
+        state.agents.registered_agents.insert(agent_id("agent-a"));
     }
     ext.remember_posted_message(
         slack_conversation("C123", None),
@@ -1722,7 +1780,7 @@ fn deletion_writer_failure_retires_all_remote_effect_authority() {
     );
     {
         let mut state = ext.state.lock().expect("state");
-        assert!(state.reactions.insert_target(
+        assert!(state.ingress.reactions.insert_target(
             MessageFactId::new("slack-message:test-c123-12.0"),
             ReactionTarget {
                 agent_id: agent_id("agent-a"),
@@ -1746,11 +1804,11 @@ fn deletion_writer_failure_retires_all_remote_effect_authority() {
     assert!(ext.output_failed.load(Ordering::Acquire));
     assert!(ext.shutdown.is_requested());
     let state = ext.state.lock().expect("state");
-    assert!(!state.session_active);
-    assert!(state.send_ledger.is_empty());
-    assert!(state.reply_routes.is_empty());
-    assert!(state.reactions.targets.is_empty());
-    assert!(state.reactions.in_flight.is_empty());
+    assert!(!state.socket.session_active);
+    assert!(state.sends.send_ledger.is_empty());
+    assert!(state.ingress.reply_routes.is_empty());
+    assert!(state.ingress.reactions.targets.is_empty());
+    assert!(state.ingress.reactions.in_flight.is_empty());
     drop(state);
     let result = ext.handle_send(tool(
         SEND_TOOL_NAME,
@@ -1783,11 +1841,11 @@ fn deletion_writer_failure_rejects_late_reaction_completion() {
     ext.apply_config(proactive_cfg()).expect("config");
     {
         let mut state = ext.state.lock().expect("state");
-        state.bot_user_id = Some("UBOT123".to_owned());
-        state.installation_team_id = Some("T123".to_owned());
-        state.instance_name = Some(test_extension_name("std-slack"));
-        state.session_active = true;
-        assert!(state.reactions.insert_target(
+        state.socket.bot_user_id = Some("UBOT123".to_owned());
+        state.socket.installation_team_id = Some("T123".to_owned());
+        state.configuration.instance_name = Some(test_extension_name("std-slack"));
+        state.socket.session_active = true;
+        assert!(state.ingress.reactions.insert_target(
             MessageFactId::new("slack-message:test-c456-1.0"),
             ReactionTarget {
                 agent_id: agent_id("agent-a"),
@@ -1843,9 +1901,9 @@ fn deletion_writer_failure_rejects_late_reaction_completion() {
         Event::ToolError(_)
     ));
     let state = ext.state.lock().expect("state");
-    assert!(state.reactions.targets.is_empty());
-    assert!(state.reactions.owners.is_empty());
-    assert!(state.reactions.in_flight.is_empty());
+    assert!(state.ingress.reactions.targets.is_empty());
+    assert!(state.ingress.reactions.owners.is_empty());
+    assert!(state.ingress.reactions.in_flight.is_empty());
 }
 
 /// The early output-failure latch closes reaction and local-reply admission
@@ -1859,9 +1917,9 @@ fn output_failure_latch_blocks_new_remote_effects_before_retirement_lock() {
     ext.apply_config(cfg()).expect("config");
     {
         let mut state = ext.state.lock().expect("state");
-        state.bot_user_id = Some("UBOT123".to_owned());
-        state.installation_team_id = Some("T123".to_owned());
-        state.instance_name = Some(test_extension_name("std-slack"));
+        state.socket.bot_user_id = Some("UBOT123".to_owned());
+        state.socket.installation_team_id = Some("T123".to_owned());
+        state.configuration.instance_name = Some(test_extension_name("std-slack"));
     }
     register_agent(&ext, "agent-a");
     let message_ref = "slack-message:test-c123-13.0";
@@ -1917,7 +1975,7 @@ fn output_failure_latch_blocks_new_remote_effects_before_retirement_lock() {
 #[test]
 fn delete_submission_gate_revalidates_after_session_retirement() {
     let (ext, rx, _client) = extension();
-    ext.state.lock().expect("state").session_active = true;
+    ext.state.lock().expect("state").socket.session_active = true;
     ext.remember_posted_message(
         slack_conversation("C123", None),
         PostedMessage {
@@ -1957,8 +2015,8 @@ fn delete_submission_gate_revalidates_after_session_retirement() {
         .expect("deletion reached submission boundary");
     {
         let mut state = ext.state.lock().expect("state");
-        state.ingress_epoch = state.ingress_epoch.wrapping_add(1);
-        state.session_active = false;
+        state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_add(1);
+        state.socket.session_active = false;
     }
     release_tx.send(()).expect("release deletion");
     drop(submission);
@@ -1971,10 +2029,11 @@ fn delete_submission_gate_revalidates_after_session_retirement() {
 #[test]
 fn lax_unlinked_dm_has_no_ingress_or_reply_side_effects() {
     let (ext, rx, client) = extension();
-    ext.state.lock().expect("lock").config = Some(dm_cfg());
+    ext.state.lock().expect("lock").configuration.config = Some(dm_cfg());
     ext.state
         .lock()
         .expect("lock")
+        .configuration
         .config
         .as_mut()
         .expect("config")
@@ -2434,7 +2493,7 @@ async fn socket_worker_once_times_out_from_off_phase_pong_despite_other_traffic(
         .expect_err("non-pong traffic must not keep the connection alive");
     assert_eq!(error, SOCKET_HEARTBEAT_TIMEOUT_ERROR);
     assert_eq!(pong_at.elapsed(), Duration::from_secs(40));
-    assert!(!ext.state.lock().expect("state").worker_online);
+    assert!(!ext.state.lock().expect("state").socket.worker_online);
     server.abort();
 }
 
@@ -2509,6 +2568,7 @@ fn worker_connection_failure_notice_is_bounded_and_one_shot() {
         ext.state
             .lock()
             .expect("state")
+            .socket
             .worker_connection_failure_reported
     );
 }
@@ -2588,11 +2648,11 @@ async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
     let ext = Arc::new(Extension::new(client, output_tx));
     {
         let mut state = ext.state.lock().expect("state lock");
-        state.config = Some(cfg());
-        state.bot_user_id = Some("UBOT123".to_owned());
-        state.installation_team_id = Some("T123".to_owned());
-        state.registered_agents.insert(agent_id("agent-a"));
-        state.session_active = true;
+        state.configuration.config = Some(cfg());
+        state.socket.bot_user_id = Some("UBOT123".to_owned());
+        state.socket.installation_team_id = Some("T123".to_owned());
+        state.agents.registered_agents.insert(agent_id("agent-a"));
+        state.socket.session_active = true;
     }
     let queue = AdmissionQueue::new();
     let actor_ext = Arc::clone(&ext);
@@ -2683,7 +2743,7 @@ async fn saturated_admission_does_not_ack_supported_envelope() {
     });
     let (tx, _rx) = mpsc::channel();
     let ext = Extension::new(FakeClient::new(), tx);
-    ext.state.lock().expect("state").session_active = true;
+    ext.state.lock().expect("state").socket.session_active = true;
     let queue = AdmissionQueue::new();
     let reservations = (0..admission::CAPACITY)
         .map(|_| queue.reserve().expect("fill admission"))
@@ -2829,7 +2889,7 @@ fn install_source_reaction_target(ext: &Extension, message_ref: &str) {
     let message_id = MessageFactId::new(message_ref);
     let conversation = slack_conversation("C123", None);
     let mut state = ext.state.lock().expect("state");
-    state.session_active = true;
+    state.socket.session_active = true;
     state.insert_reply_route(
         message_id.clone(),
         ReplyRoute {
@@ -2841,7 +2901,7 @@ fn install_source_reaction_target(ext: &Extension, message_ref: &str) {
             installation_team_id: "T123".to_owned(),
         },
     );
-    assert!(state.reactions.insert_target(
+    assert!(state.ingress.reactions.insert_target(
         MessageFactId::new(message_ref),
         ReactionTarget {
             agent_id: agent_id("agent-a"),
@@ -3024,24 +3084,30 @@ fn run_reaction_writer_fixture(
             ext.apply_config(cfg()).expect("fixture config");
             {
                 let mut state = ext.state.lock().expect("state");
-                state.bot_user_id = Some("UBOT123".to_owned());
-                state.installation_team_id = Some("T123".to_owned());
-                state.instance_name = Some(test_extension_name("std-slack"));
+                state.socket.bot_user_id = Some("UBOT123".to_owned());
+                state.socket.installation_team_id = Some("T123".to_owned());
+                state.configuration.instance_name = Some(test_extension_name("std-slack"));
             }
             register_agent(&ext, "agent-a");
             install_source_reaction_target(&ext, message_ref);
             if action == ReactionActionKind::Remove {
-                ext.state.lock().expect("state").reactions.owners.insert(
-                    ReactionKey {
-                        channel_id: "C123".to_owned(),
-                        message_ts: "1.0".to_owned(),
-                        emoji: "eyes".to_owned(),
-                    },
-                    ReactionOwner {
-                        agent_id: agent_id("agent-a"),
-                        message_ref: MessageFactId::new(message_ref),
-                    },
-                );
+                ext.state
+                    .lock()
+                    .expect("state")
+                    .ingress
+                    .reactions
+                    .owners
+                    .insert(
+                        ReactionKey {
+                            channel_id: "C123".to_owned(),
+                            message_ts: "1.0".to_owned(),
+                            emoji: "eyes".to_owned(),
+                        },
+                        ReactionOwner {
+                            agent_id: agent_id("agent-a"),
+                            message_ref: MessageFactId::new(message_ref),
+                        },
+                    );
             }
             *probe_slot.lock().expect("probe") = Some(ReactionRunnerProbe {
                 state: Arc::clone(&ext.state),
@@ -3063,7 +3129,7 @@ fn reaction_ownership_capacity_is_enforced_before_io() {
     {
         let mut state = ext.state.lock().expect("state");
         for index in 0..reactions::OWNERSHIP_LIMIT {
-            state.reactions.owners.insert(
+            state.ingress.reactions.owners.insert(
                 ReactionKey {
                     channel_id: "C999".to_owned(),
                     message_ts: format!("{index}.0"),
@@ -3103,12 +3169,12 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
     };
     let mut state = State::default();
     for index in 0..reactions::TARGET_LIMIT {
-        assert!(state.reactions.insert_target(
+        assert!(state.ingress.reactions.insert_target(
             MessageFactId::new(format!("slack-message:test-c123-{index}.0")),
             target.clone()
         ));
     }
-    state.reactions.in_flight.insert(
+    state.ingress.reactions.in_flight.insert(
         ReactionKey {
             channel_id: "C123".to_owned(),
             message_ts: "0.0".to_owned(),
@@ -3121,33 +3187,39 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
             unowned_add: false,
         },
     );
-    assert!(state.reactions.insert_target(
+    assert!(state.ingress.reactions.insert_target(
         MessageFactId::new("slack-message:test-c123-new"),
         target.clone()
     ));
     assert!(
         state
+            .ingress
             .reactions
             .targets
             .contains_key(&MessageFactId::new("slack-message:test-c123-0.0"))
     );
     assert!(
         !state
+            .ingress
             .reactions
             .targets
             .contains_key(&MessageFactId::new("slack-message:test-c123-1.0"))
     );
-    assert_eq!(state.reactions.targets.len(), reactions::TARGET_LIMIT);
+    assert_eq!(
+        state.ingress.reactions.targets.len(),
+        reactions::TARGET_LIMIT
+    );
 
-    state.reactions.clear();
+    state.ingress.reactions.clear();
     for index in 0..reactions::TARGET_LIMIT {
         let message_ref = MessageFactId::new(format!("slack-message:test-c123-{index}.0"));
         assert!(
             state
+                .ingress
                 .reactions
                 .insert_target(message_ref.clone(), target.clone())
         );
-        state.reactions.owners.insert(
+        state.ingress.reactions.owners.insert(
             ReactionKey {
                 channel_id: "C123".to_owned(),
                 message_ts: format!("{index}.0"),
@@ -3159,12 +3231,12 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
             },
         );
     }
-    assert!(!state.reactions.insert_target(
+    assert!(!state.ingress.reactions.insert_target(
         MessageFactId::new("slack-message:test-c123-blocked"),
         target
     ));
 
-    state.reactions.clear();
+    state.ingress.reactions.clear();
     for index in 0..reactions::ATTEMPT_LIMIT {
         let invoke = tool_call(
             REACT_TOOL_NAME,
@@ -3172,7 +3244,7 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
             &format!("completed-{index}"),
             reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
         );
-        assert!(state.reactions.remember_attempt(
+        assert!(state.ingress.reactions.remember_attempt(
             &invoke,
             ReactionAttemptDisposition::Success(CborValue::Null),
         ));
@@ -3183,19 +3255,23 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
         "completed-new",
         reaction_args("slack-message:test-c123-1.0", "eyes", "add"),
     );
-    assert!(state.reactions.remember_attempt(
+    assert!(state.ingress.reactions.remember_attempt(
         &replacement,
         ReactionAttemptDisposition::Success(CborValue::Null),
     ));
-    assert_eq!(state.reactions.attempts.len(), reactions::ATTEMPT_LIMIT);
+    assert_eq!(
+        state.ingress.reactions.attempts.len(),
+        reactions::ATTEMPT_LIMIT
+    );
     assert!(
         !state
+            .ingress
             .reactions
             .attempts
             .contains_key(&tau_proto::ToolCallId::new("completed-0"))
     );
 
-    state.reactions.clear();
+    state.ingress.reactions.clear();
     for index in 0..reactions::ATTEMPT_LIMIT {
         let invoke = tool_call(
             REACT_TOOL_NAME,
@@ -3205,6 +3281,7 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
         );
         assert!(
             state
+                .ingress
                 .reactions
                 .remember_attempt(&invoke, ReactionAttemptDisposition::InFlight)
         );
@@ -3217,6 +3294,7 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
     );
     assert!(
         !state
+            .ingress
             .reactions
             .remember_attempt(&blocked, ReactionAttemptDisposition::InFlight)
     );
@@ -3333,7 +3411,15 @@ fn reaction_target_ownership_and_replay_are_enforced() {
         Event::ToolResult(_)
     ));
     assert_eq!(client.reactions.lock().expect("lock").len(), 2);
-    assert!(ext.state.lock().expect("state").reactions.owners.is_empty());
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .ingress
+            .reactions
+            .owners
+            .is_empty()
+    );
 }
 
 /// A confirmed same-call replay still emits its retained terminal through
@@ -3404,9 +3490,10 @@ fn reaction_success_commits_only_after_actual_writer_confirmation() {
     let probe = probe_slot.lock().expect("probe");
     let probe = probe.as_ref().expect("installed probe");
     let state = probe.state.lock().expect("state");
-    assert_eq!(state.reactions.owners.len(), 1);
+    assert_eq!(state.ingress.reactions.owners.len(), 1);
     assert!(
         state
+            .ingress
             .reactions
             .attempts
             .values()
@@ -3459,11 +3546,11 @@ fn reaction_writer_failure_retires_add_and_remove_without_compensation() {
         assert!(probe.output_failed.load(Ordering::Acquire));
         assert!(probe.shutdown.is_requested());
         let state = probe.state.lock().expect("state");
-        assert!(!state.session_active);
-        assert!(state.reactions.targets.is_empty());
-        assert!(state.reactions.owners.is_empty());
-        assert!(state.reactions.in_flight.is_empty());
-        assert!(state.reactions.attempts.is_empty());
+        assert!(!state.socket.session_active);
+        assert!(state.ingress.reactions.targets.is_empty());
+        assert!(state.ingress.reactions.owners.is_empty());
+        assert!(state.ingress.reactions.in_flight.is_empty());
+        assert!(state.ingress.reactions.attempts.is_empty());
     }
 }
 
@@ -3520,9 +3607,10 @@ fn reaction_confirmation_survives_actual_detached_output_overload() {
 
     let probe = probe_slot.lock().expect("probe");
     let state = probe.as_ref().expect("probe").state.lock().expect("state");
-    assert_eq!(state.reactions.owners.len(), 1);
+    assert_eq!(state.ingress.reactions.owners.len(), 1);
     assert!(
         state
+            .ingress
             .reactions
             .attempts
             .values()
@@ -3564,9 +3652,10 @@ fn reaction_result_boundary_serializes_lifecycle_without_restoring_authority() {
         .expect("confirmed output boundary");
     {
         let state = ext.state.lock().expect("state");
-        assert!(state.reactions.owners.is_empty());
+        assert!(state.ingress.reactions.owners.is_empty());
         assert!(
             state
+                .ingress
                 .reactions
                 .attempts
                 .values()
@@ -3592,9 +3681,9 @@ fn reaction_result_boundary_serializes_lifecycle_without_restoring_authority() {
             if matches!(emit.event.as_ref(), Event::ToolResultReported(_))
     ));
     let state = ext.state.lock().expect("state");
-    assert!(state.reactions.targets.is_empty());
-    assert!(state.reactions.owners.is_empty());
-    assert!(state.reactions.attempts.is_empty());
+    assert!(state.ingress.reactions.targets.is_empty());
+    assert!(state.ingress.reactions.owners.is_empty());
+    assert!(state.ingress.reactions.attempts.is_empty());
 }
 
 /// A successful remove keeps its existing owner and provisional replay through
@@ -3610,13 +3699,19 @@ fn reaction_remove_remains_provisional_until_result_confirmation() {
         message_ts: "1.0".to_owned(),
         emoji: "eyes".to_owned(),
     };
-    ext.state.lock().expect("state").reactions.owners.insert(
-        key.clone(),
-        ReactionOwner {
-            agent_id: agent_id("agent-a"),
-            message_ref: MessageFactId::new(message_ref),
-        },
-    );
+    ext.state
+        .lock()
+        .expect("state")
+        .ingress
+        .reactions
+        .owners
+        .insert(
+            key.clone(),
+            ReactionOwner {
+                agent_id: agent_id("agent-a"),
+                message_ref: MessageFactId::new(message_ref),
+            },
+        );
     let (reached_tx, reached_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     *ext.test_hooks
@@ -3641,9 +3736,10 @@ fn reaction_remove_remains_provisional_until_result_confirmation() {
         .expect("confirmed output boundary");
     {
         let state = ext.state.lock().expect("state");
-        assert!(state.reactions.owners.contains_key(&key));
+        assert!(state.ingress.reactions.owners.contains_key(&key));
         assert!(
             state
+                .ingress
                 .reactions
                 .attempts
                 .values()
@@ -3663,9 +3759,10 @@ fn reaction_remove_remains_provisional_until_result_confirmation() {
             if matches!(emit.event.as_ref(), Event::ToolResultReported(_))
     ));
     let state = ext.state.lock().expect("state");
-    assert!(!state.reactions.owners.contains_key(&key));
+    assert!(!state.ingress.reactions.owners.contains_key(&key));
     assert!(
         state
+            .ingress
             .reactions
             .attempts
             .values()
@@ -3691,7 +3788,15 @@ fn reaction_idempotency_errors_respect_local_ownership() {
         )),
         Event::ToolError(_)
     ));
-    assert!(ext.state.lock().expect("state").reactions.owners.is_empty());
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .ingress
+            .reactions
+            .owners
+            .is_empty()
+    );
 
     client.push_reaction_result(Ok(()));
     assert!(matches!(
@@ -3713,7 +3818,15 @@ fn reaction_idempotency_errors_respect_local_ownership() {
         )),
         Event::ToolResult(_)
     ));
-    assert!(ext.state.lock().expect("state").reactions.owners.is_empty());
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .ingress
+            .reactions
+            .owners
+            .is_empty()
+    );
 
     client.push_reaction_result(Err(ReactionApiError::OutcomeUnknown));
     assert!(matches!(
@@ -3725,7 +3838,15 @@ fn reaction_idempotency_errors_respect_local_ownership() {
         )),
         Event::ToolError(_)
     ));
-    assert!(ext.state.lock().expect("state").reactions.owners.is_empty());
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .ingress
+            .reactions
+            .owners
+            .is_empty()
+    );
 }
 
 /// Malformed fields, native selectors, unknown refs, and ambiguous failures
@@ -3783,13 +3904,16 @@ fn conversation_discovery_exposes_only_configured_model_facing_policy() {
     apply_test_config(&ext, config);
     {
         let mut state = ext.state.lock().expect("lock");
-        state.linked_dms.insert(
+        state.ingress.linked_dms.insert(
             "DSECRET".to_owned(),
             LinkedConversation {
                 user_id: "USECRET".to_owned(),
             },
         );
-        state.registered_agents.insert(agent_id("agent-secret"));
+        state
+            .agents
+            .registered_agents
+            .insert(agent_id("agent-secret"));
     }
     let event = ext.handle_conversations(tool(
         CONVERSATIONS_TOOL_NAME,
@@ -3894,8 +4018,8 @@ fn conversation_discovery_exposes_only_configured_model_facing_policy() {
         assert!(!text.contains(private), "discovery leaked {private}");
     }
     let state = ext.state.lock().expect("lock");
-    assert!(!state.config_frozen);
-    assert!(!state.worker_started);
+    assert!(!state.configuration.config_frozen);
+    assert!(!state.socket.worker_started);
 }
 
 /// A configuration containing only private dynamic-DM policy has no static
@@ -3928,8 +4052,8 @@ fn conversation_discovery_excludes_dynamic_only_policy() {
     );
     assert!(!format!("{:?}", result.result).contains(DYNAMIC_DM_LABEL));
     let state = ext.state.lock().expect("lock");
-    assert!(!state.worker_started);
-    assert!(!state.config_frozen);
+    assert!(!state.socket.worker_started);
+    assert!(!state.configuration.config_frozen);
 }
 
 /// Pagination enforces strict bounds, opaque current-config cursors, and exact
@@ -4209,14 +4333,14 @@ fn mutable_config_replacement_clears_installation_preflight() {
     let (ext, _rx, _client) = extension();
     {
         let state = ext.state.lock().expect("state");
-        assert_eq!(state.bot_user_id.as_deref(), Some("UBOT123"));
-        assert_eq!(state.installation_team_id.as_deref(), Some("T123"));
-        assert!(!state.config_frozen);
+        assert_eq!(state.socket.bot_user_id.as_deref(), Some("UBOT123"));
+        assert_eq!(state.socket.installation_team_id.as_deref(), Some("T123"));
+        assert!(!state.configuration.config_frozen);
     }
     ext.apply_config(cfg()).expect("replace mutable config");
     let state = ext.state.lock().expect("state");
-    assert_eq!(state.bot_user_id, None);
-    assert_eq!(state.installation_team_id, None);
+    assert_eq!(state.socket.bot_user_id, None);
+    assert_eq!(state.socket.installation_team_id, None);
 }
 
 /// Config validation requires both token secret names, non-empty resolved
@@ -4455,7 +4579,7 @@ fn config_rejects_unsafe_api_base_overrides() {
 #[test]
 fn config_after_worker_start_is_rejected() {
     let (ext, _rx, _client) = extension();
-    ext.state.lock().expect("lock").config_frozen = true;
+    ext.state.lock().expect("lock").configuration.config_frozen = true;
     let mut new_cfg = cfg();
     new_cfg
         .conversations
@@ -4465,11 +4589,17 @@ fn config_after_worker_start_is_rejected() {
     let err = ext.apply_config(new_cfg).expect_err("locked config");
     assert!(err.contains("restart Tau"));
     assert_eq!(
-        ext.state.lock().expect("lock").config.as_ref().map(|cfg| {
-            cfg.conversations
-                .values()
-                .any(|policy| policy.conversation_id == "C123")
-        }),
+        ext.state
+            .lock()
+            .expect("lock")
+            .configuration
+            .config
+            .as_ref()
+            .map(|cfg| {
+                cfg.conversations
+                    .values()
+                    .any(|policy| policy.conversation_id == "C123")
+            }),
         Some(true)
     );
 }
@@ -4491,10 +4621,11 @@ fn invalid_pre_start_reconfiguration_clears_inactive_state() {
     );
     ext.clear_config_after_error();
     let state = ext.state.lock().expect("lock");
-    assert!(state.config.is_none());
-    assert!(state.registered_agents.is_empty());
+    assert!(state.configuration.config.is_none());
+    assert!(state.agents.registered_agents.is_empty());
     assert!(
         state
+            .ingress
             .posted_messages
             .get(&PostedMessageKey::new("C123", "1.0"))
             .is_none()
@@ -4765,14 +4896,20 @@ fn slack_register_toggles_agent_and_starts_worker() {
     assert!(!encoded.contains("T123"));
     {
         let state = ext.state.lock().expect("lock");
-        assert!(state.worker_started);
-        assert!(state.config_frozen);
-        assert!(state.registered_agents.contains(&agent_id("agent-a")));
+        assert!(state.socket.worker_started);
+        assert!(state.configuration.config_frozen);
+        assert!(
+            state
+                .agents
+                .registered_agents
+                .contains(&agent_id("agent-a"))
+        );
     }
     assert!(ext.apply_config(cfg()).is_err());
     ext.state
         .lock()
         .expect("lock")
+        .agents
         .selected_agent_by_route
         .insert(
             SelectionRouteKey::StaticAlias("team".to_owned()),
@@ -4796,10 +4933,16 @@ fn slack_register_toggles_agent_and_starts_worker() {
         CborValue::Map(vec![example_field("status", example_text("unregistered"))])
     );
     let state = ext.state.lock().expect("lock");
-    assert!(!state.registered_agents.contains(&agent_id("agent-a")));
-    assert!(state.selected_agent_by_route.is_empty());
+    assert!(
+        !state
+            .agents
+            .registered_agents
+            .contains(&agent_id("agent-a"))
+    );
+    assert!(state.agents.selected_agent_by_route.is_empty());
     assert!(
         state
+            .ingress
             .posted_messages
             .get(&PostedMessageKey::new("C123", "1.0"))
             .is_some()
@@ -4840,6 +4983,7 @@ fn allowlisted_non_human_reaction_actor_is_rejected() {
     {
         let mut state = ext.state.lock().expect("lock");
         state
+            .configuration
             .config
             .as_mut()
             .expect("config")
@@ -5531,6 +5675,7 @@ fn dynamic_dm_wrong_user_has_no_ingress_control_or_local_effects() {
         ext.state
             .lock()
             .expect("state")
+            .agents
             .selected_agent_by_route
             .is_empty()
     );
@@ -5561,15 +5706,16 @@ fn dynamic_dm_capacity_and_proactive_only_collision_rules() {
         ext.state
             .lock()
             .expect("state")
+            .ingress
             .linked_dms
             .contains_key("D999")
     );
 
     {
         let mut state = ext.state.lock().expect("state");
-        state.linked_dms.clear();
+        state.ingress.linked_dms.clear();
         for index in 0..DYNAMIC_DM_LIMIT {
-            state.linked_dms.insert(
+            state.ingress.linked_dms.insert(
                 format!("D{index:03}"),
                 LinkedConversation {
                     user_id: "U123".to_owned(),
@@ -5579,9 +5725,9 @@ fn dynamic_dm_capacity_and_proactive_only_collision_rules() {
     }
     ext.process_slack_message(slack_message("DNEW", Some("im"), "start"));
     let state = ext.state.lock().expect("state");
-    assert_eq!(state.linked_dms.len(), DYNAMIC_DM_LIMIT);
-    assert!(!state.linked_dms.contains_key("DNEW"));
-    assert!(state.linked_dms.contains_key("D000"));
+    assert_eq!(state.ingress.linked_dms.len(), DYNAMIC_DM_LIMIT);
+    assert!(!state.ingress.linked_dms.contains_key("DNEW"));
+    assert!(state.ingress.linked_dms.contains_key("D000"));
     drop(state);
     assert!(
         client
@@ -5607,6 +5753,7 @@ fn static_fixed_dm_receive_blocks_dynamic_parent_link() {
         !ext.state
             .lock()
             .expect("state")
+            .ingress
             .linked_dms
             .contains_key("D777")
     );
@@ -5933,6 +6080,7 @@ fn all_messages_unmentioned_chatter_cannot_invoke_bridge_commands() {
     ext.state
         .lock()
         .expect("lock")
+        .configuration
         .config
         .as_mut()
         .expect("config")
@@ -6178,7 +6326,7 @@ fn dual_wrapper_commands_have_one_local_effect() {
             let (ext, rx, client) = extension();
             {
                 let mut state = ext.state.lock().expect("state");
-                let config = state.config.as_mut().expect("config");
+                let config = state.configuration.config.as_mut().expect("config");
                 config.conversations.get_mut("team").expect("team").receive =
                     Some(ReceiveMode::AllMessages);
                 if text.contains("deliberately too long") {
@@ -6210,6 +6358,7 @@ fn dual_wrapper_plain_routing_errors_have_one_local_effect() {
             ext.state
                 .lock()
                 .expect("state")
+                .configuration
                 .config
                 .as_mut()
                 .expect("config")
@@ -6243,6 +6392,7 @@ fn padded_leading_mention_retains_command_authority() {
         ext.state
             .lock()
             .expect("state")
+            .configuration
             .config
             .as_mut()
             .expect("config")
@@ -6292,6 +6442,7 @@ fn pending_duplicate_replays_original_target_after_selection_change() {
     ext.state
         .lock()
         .expect("state")
+        .agents
         .selected_agent_by_route
         .insert(
             SelectionRouteKey::StaticAlias("team".to_owned()),
@@ -6304,6 +6455,7 @@ fn pending_duplicate_replays_original_target_after_selection_change() {
     ext.state
         .lock()
         .expect("state")
+        .agents
         .selected_agent_by_route
         .insert(
             SelectionRouteKey::StaticAlias("team".to_owned()),
@@ -6330,7 +6482,7 @@ fn pending_duplicate_replays_original_target_after_selection_change() {
 fn pending_message_duplicate_replays_before_mutable_metadata_policy() {
     let (ext, rx, client) = extension();
     register_agent(&ext, "agent-a");
-    ext.state.lock().expect("state").session_active = true;
+    ext.state.lock().expect("state").socket.session_active = true;
     let queue = AdmissionQueue::<AdmissionWork>::new();
     let original_context = admission_context(&ext);
     original_context
@@ -6360,7 +6512,15 @@ fn pending_message_duplicate_replays_before_mutable_metadata_policy() {
         *client.identity_count.lock().expect("identity count"),
         identity_count
     );
-    assert_eq!(ext.state.lock().expect("state").pending_ingress.len(), 1);
+    assert_eq!(
+        ext.state
+            .lock()
+            .expect("state")
+            .ingress
+            .pending_ingress
+            .len(),
+        1
+    );
     let held = (1..admission::CAPACITY)
         .map(|_| queue.reserve().expect("remaining admission slot"))
         .collect::<Vec<_>>();
@@ -6422,7 +6582,14 @@ fn canonical_echo_between_duplicate_classification_and_replay_suppresses_output(
     let replay = std::thread::spawn(move || replaying.process_slack_message(message));
     reached_rx.recv().expect("pending replay classified");
     ext.apply_live_event(&canonical);
-    assert!(ext.state.lock().expect("state").pending_ingress.is_empty());
+    assert!(
+        ext.state
+            .lock()
+            .expect("state")
+            .ingress
+            .pending_ingress
+            .is_empty()
+    );
     release_tx.send(()).expect("release replay");
     replay.join().expect("replay worker");
     assert!(rx.try_recv().is_err(), "retired report must not replay");
@@ -6452,6 +6619,7 @@ fn pending_delete_replays_after_immediate_authority_revocation() {
         !ext.state
             .lock()
             .expect("state")
+            .ingress
             .incoming_messages
             .contains_key(&PostedMessageKey::new("C123", &message_ts))
     );
@@ -6634,11 +6802,11 @@ fn latency_markers_are_payload_free() {
         };
         let (ingress_epoch, config_generation, agent_generation) = {
             let mut state = ext.state.lock().expect("state");
-            state.installation_team_id = Some("T123".to_owned());
+            state.socket.installation_team_id = Some("T123".to_owned());
             (
-                state.ingress_epoch,
-                state.config_generation,
-                state.agent_generation,
+                state.ingress.ingress_epoch,
+                state.configuration.config_generation,
+                state.agents.agent_generation,
             )
         };
         let context = AdmissionContext {

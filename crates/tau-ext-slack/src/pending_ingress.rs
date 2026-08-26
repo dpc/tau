@@ -114,7 +114,8 @@ pub(super) enum OccurrenceDisposition {
 impl State {
     /// Release pending canonical reports owned by one retired agent.
     pub(super) fn remove_agent_pending_ingress(&mut self, agent_id: &AgentId) {
-        self.pending_ingress
+        self.ingress
+            .pending_ingress
             .retain(|_, pending| &pending.agent_id != agent_id);
     }
 
@@ -129,6 +130,7 @@ impl State {
         extension_data: &MessageExtensionData,
     ) {
         if self
+            .configuration
             .instance_name
             .as_ref()
             .is_none_or(|expected| expected.as_str() != publisher.as_str())
@@ -138,27 +140,31 @@ impl State {
         let Some(report_id) = SlackReportId::from_extension_data(extension_data) else {
             return;
         };
-        let matches = self.pending_ingress.get(&report_id).is_some_and(|pending| {
-            pending.kind == kind
-                && pending.agent_id.as_str() == agent_id.as_str()
-                && &pending.message_id == message_id
-        });
+        let matches = self
+            .ingress
+            .pending_ingress
+            .get(&report_id)
+            .is_some_and(|pending| {
+                pending.kind == kind
+                    && pending.agent_id.as_str() == agent_id.as_str()
+                    && &pending.message_id == message_id
+            });
         if !matches {
             return;
         }
-        let Some(pending) = self.pending_ingress.remove(&report_id) else {
+        let Some(pending) = self.ingress.pending_ingress.remove(&report_id) else {
             return;
         };
         let Some(authority) = pending.message_authority else {
             return;
         };
-        let current = self.ingress_epoch == pending.ingress_epoch
-            && self.config_generation == pending.config_generation
-            && self.agent_generation == pending.agent_generation
-            && self.registered_agents.contains(&pending.agent_id)
-            && self.installation_team_id.as_deref()
+        let current = self.ingress.ingress_epoch == pending.ingress_epoch
+            && self.configuration.config_generation == pending.config_generation
+            && self.agents.agent_generation == pending.agent_generation
+            && self.agents.registered_agents.contains(&pending.agent_id)
+            && self.socket.installation_team_id.as_deref()
                 == Some(authority.installation_team_id.as_str())
-            && self.config.as_ref().is_some_and(|cfg| {
+            && self.configuration.config.as_ref().is_some_and(|cfg| {
                 is_route_authorized(self, cfg, &authority.conversation, &authority.user_id)
             });
         if !current {
@@ -177,7 +183,7 @@ impl State {
         }
         self.insert_reply_route(pending.message_id.clone(), authority.reply_route);
         if let Some(message_ts) = authority.reaction_message_ts {
-            let _ = self.reactions.insert_target(
+            let _ = self.ingress.reactions.insert_target(
                 pending.message_id.clone(),
                 ReactionTarget {
                     agent_id: pending.agent_id,
