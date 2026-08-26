@@ -1366,9 +1366,11 @@ impl Harness {
         {
             self.dispose_prompt_dispatch_bookkeeping(&prompt_id);
         }
-        if Self::pending_external_receive_message_id(&event)
-            .is_some_and(|id| self.pending_external_receive_acks.contains_key(id))
-        {
+        if Self::pending_external_receive_message_id(&event).is_some_and(|id| {
+            self.peer_messaging
+                .pending_external_receive_acks
+                .contains_key(id)
+        }) {
             self.fail_pending_external_receive(
                 &event,
                 reason,
@@ -2150,9 +2152,11 @@ impl Harness {
                 }
             }
             InterceptAction::Drop => {
-                if Harness::pending_external_receive_message_id(&original_event)
-                    .is_some_and(|id| self.pending_external_receive_acks.contains_key(id))
-                {
+                if Harness::pending_external_receive_message_id(&original_event).is_some_and(|id| {
+                    self.peer_messaging
+                        .pending_external_receive_acks
+                        .contains_key(id)
+                }) {
                     self.fail_pending_external_receive(
                         &original_event,
                         "peer receive projection was rejected by interception",

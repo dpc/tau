@@ -1457,8 +1457,11 @@ impl Harness {
                 .remove(&unloading_agent_id_proto);
             self.enqueued_standalone_inference_checkpoints
                 .retain(|(agent_id, _)| agent_id != &unloading_agent_id_proto);
-            self.peer_input_rate.remove(&unloading_agent_id_proto);
-            self.uncommitted_peer_auto_starts
+            self.peer_messaging
+                .peer_input_rate
+                .remove(&unloading_agent_id_proto);
+            self.peer_messaging
+                .uncommitted_peer_auto_starts
                 .remove(&unloading_agent_id_proto);
             let requests: Vec<_> = self
                 .accepted_manual_compaction_tools

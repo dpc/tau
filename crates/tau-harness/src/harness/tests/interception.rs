@@ -1568,7 +1568,9 @@ fn queue_intercepted_peer_receive(
     recipient_id: tau_proto::AgentId,
     suffix: &str,
 ) {
-    h.external_message_peers.insert(connection_id.clone());
+    h.peer_messaging
+        .external_message_peers
+        .insert(connection_id.clone());
     let result = h.complete_external_agent_message_auth(
         connection_id.clone(),
         h.current_session_generation,
@@ -1629,7 +1631,7 @@ fn peer_receive_ack_waits_for_intercepted_projection_commit() {
 
     queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id, "commit");
 
-    assert_eq!(h.pending_external_receive_acks.len(), 1);
+    assert_eq!(h.peer_messaging.pending_external_receive_acks.len(), 1);
     assert!(committed_peer_receives(&h).is_empty());
     h.handle_extension_event(
         "peer-receive-interceptor",
@@ -1638,7 +1640,7 @@ fn peer_receive_ack_waits_for_intercepted_projection_commit() {
         })),
     )
     .expect("pass receive");
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert_eq!(committed_peer_receives(&h).len(), 1);
 }
 
@@ -1673,7 +1675,7 @@ fn peer_receive_interception_drop_never_acknowledges_or_commits() {
     )
     .expect("drop receive");
 
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert!(committed_peer_receives(&h).is_empty());
 }
 
@@ -1710,7 +1712,7 @@ fn peer_receive_target_disappearance_before_commit_fails() {
     )
     .expect("pass receive");
 
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert!(committed_peer_receives(&h).is_empty());
     let peer_results = peer_results.lock().expect("peer results");
     assert!(
@@ -1756,7 +1758,7 @@ fn local_peer_sent_projection_waits_for_receive_commit() {
     )
     .expect("queue local peer");
 
-    assert!(h.pending_external_receive_acks.len() == 1);
+    assert!(h.peer_messaging.pending_external_receive_acks.len() == 1);
     assert!(
         !event_log_events(&h)
             .iter()
@@ -1769,7 +1771,7 @@ fn local_peer_sent_projection_waits_for_receive_commit() {
         })),
     )
     .expect("pass receive");
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert!(
         event_log_events(&h)
             .iter()
@@ -1801,7 +1803,7 @@ fn local_peer_oversized_message_rejects_before_auto_start() {
 
     assert_eq!(error, "peer message exceeds the 64 KiB limit");
     assert_eq!(h.agents.len(), agents_before);
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
 }
 
 /// Current-session routing uses the same admission, auto-start, and post-commit
@@ -1836,6 +1838,7 @@ fn local_peer_auto_start_reports_started_only_after_receive_commit() {
     .expect("queue local auto-start");
 
     let pending = h
+        .peer_messaging
         .pending_external_receive_acks
         .values()
         .next()
@@ -1863,7 +1866,7 @@ fn local_peer_auto_start_reports_started_only_after_receive_commit() {
     )
     .expect("pass receive");
 
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert!(
         event_log_events(&h)
             .iter()
@@ -1901,6 +1904,7 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
     )
     .expect("queue local auto-start");
     let recipient = h
+        .peer_messaging
         .pending_external_receive_acks
         .values()
         .next()
@@ -1909,7 +1913,9 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
         .clone();
     let connection_id = tau_proto::ConnectionId::parse("coalesce-peer-client")
         .expect("test connection id must satisfy the identifier grammar");
-    h.external_message_peers.insert(connection_id.clone());
+    h.peer_messaging
+        .external_message_peers
+        .insert(connection_id.clone());
     let remote = h.complete_external_agent_message_auth(
         connection_id,
         h.current_session_generation,
@@ -1932,14 +1938,16 @@ fn parked_local_and_remote_peer_sends_coalesce_on_one_auto_start() {
 
     assert!(remote.is_none());
     assert_eq!(h.agents.len(), 2, "sender plus exactly one peer endpoint");
-    assert_eq!(h.pending_external_receive_acks.len(), 2);
+    assert_eq!(h.peer_messaging.pending_external_receive_acks.len(), 2);
     assert!(
-        h.pending_external_receive_acks
+        h.peer_messaging
+            .pending_external_receive_acks
             .values()
             .all(|pending| pending.recipient_id == recipient)
     );
     assert_eq!(
-        h.pending_external_receive_acks
+        h.peer_messaging
+            .pending_external_receive_acks
             .values()
             .filter(|pending| pending.started)
             .count(),
@@ -1983,7 +1991,7 @@ fn peer_auto_start_authentication_failure_precedes_spend() {
         Some(tau_proto::ExternalAgentMessageFailure::Rejected)
     );
     assert!(h.agents.is_empty());
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
 }
 
 /// A callback completion that outlives its session generation or peer socket is
@@ -2009,7 +2017,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
         message: "must not create".to_owned(),
     };
     let peer: tau_proto::ConnectionId = crate::test_connection_id("peer-client");
-    h.external_message_peers.insert(peer.clone());
+    h.peer_messaging.external_message_peers.insert(peer.clone());
     let stale = h
         .complete_external_agent_message_auth(
             peer.clone(),
@@ -2018,7 +2026,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
             Ok(()),
         )
         .expect("stale generation result");
-    h.external_message_peers.remove(&peer);
+    h.peer_messaging.external_message_peers.remove(&peer);
     let disconnected = h
         .complete_external_agent_message_auth(
             peer,
@@ -2037,7 +2045,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
         Some(tau_proto::ExternalAgentMessageFailure::Rejected)
     );
     assert!(h.agents.is_empty());
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
 }
 
 /// Rollover cancels a local continuation and suspends its responder until the
@@ -2088,7 +2096,7 @@ fn local_peer_parked_across_rollover_has_no_stale_terminal() {
     )
     .expect("consume stale old-receive reply");
 
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert!(!event_log_events(&h).iter().any(|event| {
         matches!(event, Event::AgentMessageSent(message) if message.message == "old-session peer body")
             || matches!(event, Event::AgentMessageReceived(message) if message.message == "old-session peer body")
@@ -2119,7 +2127,9 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
     let connection_id = tau_proto::ConnectionId::parse("peer-client")
         .expect("test connection id must satisfy the identifier grammar");
     let peer_results = connect_test_client(&mut h, "peer-client", tau_proto::ClientKind::External);
-    h.external_message_peers.insert(connection_id.clone());
+    h.peer_messaging
+        .external_message_peers
+        .insert(connection_id.clone());
     let result = h.complete_external_agent_message_auth(
         connection_id,
         h.current_session_generation,
@@ -2150,7 +2160,7 @@ fn peer_receive_bare_authority_revocation_before_commit_fails() {
     )
     .expect("pass receive");
 
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert!(committed_peer_receives(&h).is_empty());
     let peer_results = peer_results.lock().expect("peer results");
     assert!(
@@ -2194,7 +2204,9 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
     let connection_id = tau_proto::ConnectionId::parse("peer-client")
         .expect("test connection id must satisfy the identifier grammar");
     let peer_results = connect_test_client(&mut h, "peer-client", tau_proto::ClientKind::External);
-    h.external_message_peers.insert(connection_id.clone());
+    h.peer_messaging
+        .external_message_peers
+        .insert(connection_id.clone());
     let result = h.complete_external_agent_message_auth(
         connection_id,
         h.current_session_generation,
@@ -2216,6 +2228,7 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
     );
     assert!(result.is_none());
     let original = h
+        .peer_messaging
         .pending_external_receive_acks
         .values()
         .next()
@@ -2236,9 +2249,10 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
         })),
     )
     .expect("release stale receive");
-    assert_eq!(h.pending_external_receive_acks.len(), 1);
+    assert_eq!(h.peer_messaging.pending_external_receive_acks.len(), 1);
     assert!(committed_peer_receives(&h).is_empty());
     let replacement = h
+        .peer_messaging
         .pending_external_receive_acks
         .values()
         .next()
@@ -2261,7 +2275,7 @@ fn peer_receive_bare_target_loss_reselects_once_before_commit() {
     )
     .expect("release invalid replacement receive");
 
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert!(committed_peer_receives(&h).is_empty());
     assert!(
         h.agent_routes.is_empty(),
@@ -2306,8 +2320,8 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
         .expect("test connection id must satisfy the identifier grammar");
     let peer_results = connect_test_client(&mut h, "peer-client", tau_proto::ClientKind::External);
     queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id.clone(), "rollover");
-    assert_eq!(h.pending_external_receive_acks.len(), 1);
-    assert_eq!(h.peer_input_rate[&recipient_id].len(), 1);
+    assert_eq!(h.peer_messaging.pending_external_receive_acks.len(), 1);
+    assert_eq!(h.peer_messaging.peer_input_rate[&recipient_id].len(), 1);
 
     h.switch_session(
         "replacement"
@@ -2316,8 +2330,8 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
         tau_proto::SessionStartReason::New,
     )
     .expect("switch session");
-    assert!(h.pending_external_receive_acks.is_empty());
-    assert!(h.peer_input_rate.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.peer_input_rate.is_empty());
     let peer_results_after_rollover = peer_results.lock().expect("peer results");
     assert!(
         peer_results_after_rollover.iter().any(|frame| {
@@ -2356,7 +2370,7 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
     )
     .expect("consume stale old-receive reply");
 
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert_eq!(committed_peer_receives(&h), committed_before_stale_reply);
     queue_intercepted_peer_receive(
         &mut h,
@@ -2368,7 +2382,7 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
         h.pending_intercept.is_some(),
         "interception must resume after consuming exactly one stale reply"
     );
-    assert_eq!(h.pending_external_receive_acks.len(), 1);
+    assert_eq!(h.peer_messaging.pending_external_receive_acks.len(), 1);
     h.handle_extension_event(
         "peer-rollover-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -2376,7 +2390,7 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
         })),
     )
     .expect("commit post-stale receive");
-    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(h.peer_messaging.pending_external_receive_acks.is_empty());
     assert!(
         committed_peer_receives(&h).iter().any(|received| {
             received.message_id.as_str() == "peer-message-post-stale-resumption"

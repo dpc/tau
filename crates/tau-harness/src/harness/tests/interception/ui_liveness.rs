@@ -112,7 +112,8 @@ fn other_client_sources_cannot_publish_liveness_events() {
         tau_proto::ClientKind::Ui,
         ConnectionOrigin::Socket,
     );
-    h.external_message_peers
+    h.peer_messaging
+        .external_message_peers
         .insert(crate::test_connection_id("external"));
     h.handle_client_event_inner(&crate::test_connection_id("external"), draft("denied"))
         .expect("reject external-message peer");

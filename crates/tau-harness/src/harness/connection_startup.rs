@@ -490,7 +490,8 @@ impl Harness {
         match command {
             HarnessCommand::ConnectExtension(command) => self.connect_extension(*command)?,
             HarnessCommand::ExternalMessageToolCompleted(command) => {
-                self.pending_external_message_auth
+                self.peer_messaging
+                    .pending_external_message_auth
                     .remove(&command.auth_message_id);
                 if command.session_generation != self.current_session_generation
                     || self.tool_runtime.tool_agents.get(&command.call_id)
@@ -568,7 +569,10 @@ impl Harness {
             HarnessCommand::ExternalMessageAuthCompleted(command) => {
                 let client_id = command.client_id.clone();
                 if command.session_generation != self.current_session_generation
-                    || !self.external_message_peers.contains(&client_id)
+                    || !self
+                        .peer_messaging
+                        .external_message_peers
+                        .contains(&client_id)
                 {
                     tracing::debug!(
                         target: "tau_harness::external_agent_message",

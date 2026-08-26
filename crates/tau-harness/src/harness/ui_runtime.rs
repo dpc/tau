@@ -1,4 +1,5 @@
-//! Owns attached human-UI command admission, routing, and replies.
+//! Owns attached-client transport lifecycles plus human-UI command admission,
+//! routing, and replies.
 //!
 //! Human UI authority remains distinct from configured extensions and peers.
 
@@ -1446,7 +1447,10 @@ impl Harness {
     pub(super) fn is_attached_socket_ui(&self, client_id: &tau_proto::ConnectionId) -> bool {
         self.bus.connection(client_id).is_some_and(|connection| {
             connection.kind == ClientKind::Ui && connection.origin == ConnectionOrigin::Socket
-        }) && !self.external_message_peers.contains(client_id)
+        }) && !self
+            .peer_messaging
+            .external_message_peers
+            .contains(client_id)
     }
 
     pub(super) fn handle_client_ui_event(
@@ -1517,6 +1521,7 @@ impl Harness {
                 let is_ui = self.bus.connections().iter().any(|connection| {
                     connection.id == **client_id && connection.kind == tau_proto::ClientKind::Ui
                 }) && !self
+                    .peer_messaging
                     .external_message_peers
                     .iter()
                     .any(|connection_id| connection_id == client_id);

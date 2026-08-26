@@ -259,8 +259,11 @@ impl Harness {
         self.ui_runtime
             .client_writers
             .remove(&connection_id.clone());
-        self.external_message_peers.remove(&connection_id.clone());
+        self.peer_messaging
+            .external_message_peers
+            .remove(&connection_id.clone());
         let canceled_peer_receives = self
+            .peer_messaging
             .pending_external_receive_acks
             .iter()
             .filter_map(|(message_id, pending)| {
@@ -281,16 +284,22 @@ impl Harness {
             .map(|(message_id, _, _)| message_id.clone())
             .collect::<HashSet<_>>();
         for (message_id, recipient_id, admitted_at) in canceled_peer_receives {
-            if let Some(pending) = self.pending_external_receive_acks.get_mut(&message_id) {
+            if let Some(pending) = self
+                .peer_messaging
+                .pending_external_receive_acks
+                .get_mut(&message_id)
+            {
                 pending.canceled = true;
             }
             self.release_peer_input_rate(&recipient_id, admitted_at);
             self.cleanup_uncommitted_peer_auto_start(&recipient_id);
         }
         self.discard_canceled_peer_receive_publishes(&canceled_message_ids);
-        self.pending_external_receive_acks
+        self.peer_messaging
+            .pending_external_receive_acks
             .retain(|message_id, _| !canceled_message_ids.contains(message_id));
         if let Some(cancellations) = self
+            .peer_messaging
             .inbound_peer_io_cancellations
             .remove(&connection_id.clone())
         {
@@ -1073,11 +1082,6 @@ impl Harness {
                 allows_provider_image: false,
             },
         );
-    }
-
-    /// Return loaded-agent correlation for one peer request routed internally.
-    pub(crate) fn peer_internal_tool_agent(&self, call_id: &ToolCallId) -> Option<&AgentId> {
-        self.tool_runtime.peer_internal_tool_agents.get(call_id)
     }
 
     pub(super) fn clear_prompt_tool_snapshot(&mut self, agent_prompt_id: &AgentPromptId) {

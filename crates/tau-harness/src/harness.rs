@@ -146,6 +146,7 @@ use crate::harness::interception::{
     InterceptorRegistry, PendingIntercept, PostCommitContinuation, PromptDispatchContinuation,
     PromptDispatchPhase,
 };
+use crate::harness::peer_messaging::PeerMessagingState;
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
 use crate::harness::provider_startup::ProviderStartupSnapshot;
 use crate::harness::subagents_tool::SubagentToolState;
@@ -1738,26 +1739,8 @@ pub struct Harness {
     cost_ledger: AgentCostLedger,
     /// Attached-client and human-UI command runtime state.
     pub(crate) ui_runtime: UiRuntimeState,
-    /// Socket clients that completed the narrow external-message RPC hello.
-    external_message_peers: HashSet<tau_proto::ConnectionId>,
-    /// Pending outbound external messages keyed by logical message id.
-    ///
-    /// Target harnesses call back to authenticate sender identity and delivery
-    /// kind before accepting the inbound projection.
-    pub(crate) pending_external_message_auth:
-        HashMap<tau_proto::AgentMessageId, PendingExternalAgentMessageAuth>,
-    /// Bounded live acknowledgements waiting for durable receive commit.
-    pub(crate) pending_external_receive_acks:
-        HashMap<tau_proto::AgentMessageId, PendingExternalReceiveAck>,
-    /// Rolling accepted-input timestamps by concrete peer endpoint.
-    pub(crate) peer_input_rate: HashMap<tau_proto::AgentId, VecDeque<std::time::Instant>>,
-    /// Auto-started endpoints that have not committed their first peer input.
-    pub(crate) uncommitted_peer_auto_starts: HashSet<tau_proto::AgentId>,
-    /// Weak cancellation handles for peer I/O tied to the active session.
-    pub(crate) peer_io_cancellations: Vec<std::sync::Weak<path_std_sync::atomic::AtomicBool>>,
-    /// Inbound callback jobs grouped by the socket whose request owns them.
-    pub(crate) inbound_peer_io_cancellations:
-        HashMap<tau_proto::ConnectionId, Vec<std::sync::Weak<path_std_sync::atomic::AtomicBool>>>,
+    /// External peer authentication, delivery, I/O, and routing state.
+    peer_messaging: PeerMessagingState,
     /// Buffered human-readable lifecycle messages (extension init,
     /// model changes, etc.) surfaced to the UI as part of the next
     /// `InteractionOutcome`.
@@ -1954,10 +1937,6 @@ pub struct Harness {
     pub(crate) available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
     /// Receiver-capable roles in deterministic configured order.
     pub(crate) inter_session_receivers: Vec<crate::model::InterSessionReceiverRole>,
-    /// Monotonic event-loop-owned peer selection clock.
-    pub(crate) peer_route_clock: u64,
-    /// Most recent peer-route selection clock by concrete agent id.
-    pub(crate) peer_last_routed: HashMap<String, u64>,
     /// Reusable prompt templates from the effective startup harness settings.
     pub(crate) custom_prompts: Vec<tau_proto::HarnessCustomPrompt>,
     /// Handlebars template used to mint new stable agent identifiers.
@@ -3108,7 +3087,10 @@ impl Harness {
         client_id: &tau_proto::ConnectionId,
         message: HarnessInputMessage,
     ) -> Result<ClientMessageDisposition, HarnessError> {
-        if self.external_message_peers.contains(client_id)
+        if self
+            .peer_messaging
+            .external_message_peers
+            .contains(client_id)
             && !matches!(
                 &message,
                 HarnessInputMessage::ExternalAgentMessage(_)
@@ -3170,7 +3152,9 @@ impl Harness {
                 if hello.client_kind == ClientKind::External
                     && hello.client_name.as_str() == EXTERNAL_AGENT_MESSAGE_CLIENT_NAME
                 {
-                    self.external_message_peers.insert(client_id.clone());
+                    self.peer_messaging
+                        .external_message_peers
+                        .insert(client_id.clone());
                 }
                 Ok(ClientMessageDisposition::Continue)
             }
@@ -3245,7 +3229,11 @@ impl Harness {
                 Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::ExternalAgentMessage(request) => {
-                if !self.external_message_peers.contains(&client_id.clone()) {
+                if !self
+                    .peer_messaging
+                    .external_message_peers
+                    .contains(&client_id.clone())
+                {
                     return Ok(ClientMessageDisposition::Continue);
                 }
                 if let Some(result) =
@@ -3260,7 +3248,11 @@ impl Harness {
                 Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::ExternalAgentMessageAuth(request) => {
-                if !self.external_message_peers.contains(&client_id.clone()) {
+                if !self
+                    .peer_messaging
+                    .external_message_peers
+                    .contains(&client_id.clone())
+                {
                     return Ok(ClientMessageDisposition::Continue);
                 }
                 let result = self.handle_external_agent_message_auth_request(request);
@@ -3272,7 +3264,11 @@ impl Harness {
                 Ok(ClientMessageDisposition::Continue)
             }
             HarnessInputMessage::PeerSessionProbe(request) => {
-                if !self.external_message_peers.contains(&client_id.clone()) {
+                if !self
+                    .peer_messaging
+                    .external_message_peers
+                    .contains(&client_id.clone())
+                {
                     return Ok(ClientMessageDisposition::Continue);
                 }
                 let result = tau_proto::PeerSessionProbeResult {

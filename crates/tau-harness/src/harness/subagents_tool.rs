@@ -990,10 +990,14 @@ impl Harness {
             return Err("peer message exceeds the 64 KiB limit".to_owned());
         }
         let message_id = next_agent_message_id(&sender_id);
-        if self.pending_external_receive_acks.len() >= MAX_INBOUND_PEER_AUTH_JOBS {
+        if self.peer_messaging.pending_external_receive_acks.len() >= MAX_INBOUND_PEER_AUTH_JOBS {
             return Err("peer receive commit queue is busy; retry later".to_owned());
         }
-        if self.pending_external_receive_acks.contains_key(&message_id) {
+        if self
+            .peer_messaging
+            .pending_external_receive_acks
+            .contains_key(&message_id)
+        {
             return Err("peer receive is already pending".to_owned());
         }
         let (recipient_id, started, rate_admitted_at) = self
@@ -1011,7 +1015,7 @@ impl Harness {
             watch_lifecycle: None,
             message: message.clone(),
         };
-        self.pending_external_receive_acks.insert(
+        self.peer_messaging.pending_external_receive_acks.insert(
             message_id.clone(),
             crate::harness::PendingExternalReceiveAck {
                 session_generation: self.current_session_generation,
@@ -1880,7 +1884,7 @@ impl Harness {
         let request_id = format!("external-{message_id}");
         let capability = random_external_message_capability(&mut self.agent_id_rng);
         let publish_sent = kind == tau_proto::AgentMessageKind::Message;
-        self.pending_external_message_auth.insert(
+        self.peer_messaging.pending_external_message_auth.insert(
             message_id.clone(),
             PendingExternalAgentMessageAuth {
                 capability: capability.clone(),
@@ -1905,9 +1909,11 @@ impl Harness {
         };
         let tx = self.tx.clone();
         let cancellation = Arc::new(path_std_sync_atomic::AtomicBool::new(false));
-        self.peer_io_cancellations
+        self.peer_messaging
+            .peer_io_cancellations
             .retain(|pending| pending.strong_count() > 0);
-        self.peer_io_cancellations
+        self.peer_messaging
+            .peer_io_cancellations
             .push(Arc::downgrade(&cancellation));
         thread::spawn(move || {
             let _permit = permit;
@@ -1958,7 +1964,11 @@ impl Harness {
         &self,
         request: tau_proto::ExternalAgentMessageAuthRequest,
     ) -> Result<(), String> {
-        let Some(pending) = self.pending_external_message_auth.get(&request.message_id) else {
+        let Some(pending) = self
+            .peer_messaging
+            .pending_external_message_auth
+            .get(&request.message_id)
+        else {
             return Err("unknown external message capability".to_owned());
         };
         if pending.capability != request.capability
@@ -2000,6 +2010,7 @@ impl Harness {
         let session_generation = self.current_session_generation;
         let cancellation = Arc::new(path_std_sync_atomic::AtomicBool::new(false));
         let cancellations = self
+            .peer_messaging
             .inbound_peer_io_cancellations
             .entry(client_id.clone())
             .or_default();
@@ -2053,14 +2064,22 @@ impl Harness {
         if session_generation != self.current_session_generation {
             return Err(tau_proto::ExternalAgentMessageFailure::TargetSessionChanged);
         }
-        if !self.external_message_peers.contains(&client_id) {
+        if !self
+            .peer_messaging
+            .external_message_peers
+            .contains(&client_id)
+        {
             return Err(tau_proto::ExternalAgentMessageFailure::Rejected);
         }
-        if self.pending_external_receive_acks.len() >= MAX_INBOUND_PEER_AUTH_JOBS {
+        if self.peer_messaging.pending_external_receive_acks.len() >= MAX_INBOUND_PEER_AUTH_JOBS {
             return Err(tau_proto::ExternalAgentMessageFailure::Rejected);
         }
         let message_id = request.message_id.clone();
-        if self.pending_external_receive_acks.contains_key(&message_id) {
+        if self
+            .peer_messaging
+            .pending_external_receive_acks
+            .contains_key(&message_id)
+        {
             return Err(tau_proto::ExternalAgentMessageFailure::Rejected);
         }
         let (recipient_id, started, rate_admitted_at) = match &request.recipient {
@@ -2086,7 +2105,7 @@ impl Harness {
             watch_lifecycle: None,
             message: request.message,
         };
-        self.pending_external_receive_acks.insert(
+        self.peer_messaging.pending_external_receive_acks.insert(
             message_id.clone(),
             crate::harness::PendingExternalReceiveAck {
                 session_generation,
@@ -2162,7 +2181,9 @@ impl Harness {
             }),
         );
         self.record_peer_route(&recipient_id);
-        self.uncommitted_peer_auto_starts.remove(&recipient_id);
+        self.peer_messaging
+            .uncommitted_peer_auto_starts
+            .remove(&recipient_id);
         Ok((recipient_id, started))
     }
 
@@ -2243,7 +2264,11 @@ impl Harness {
                         usize::from(
                             agent.published_runtime_state == tau_proto::AgentRuntimeState::Running,
                         ),
-                        self.peer_last_routed.get(id).copied().unwrap_or(0),
+                        self.peer_messaging
+                            .peer_last_routed
+                            .get(id)
+                            .copied()
+                            .unwrap_or(0),
                         id.clone(),
                     )
                 })
@@ -2255,7 +2280,8 @@ impl Harness {
                     .map(|pending| {
                         (
                             0,
-                            self.peer_last_routed
+                            self.peer_messaging
+                                .peer_last_routed
                                 .get(&pending.agent_id)
                                 .copied()
                                 .unwrap_or(0),
@@ -2335,7 +2361,8 @@ impl Harness {
             }
             return Err(PeerEntrypointResolutionError::Rejected(error.to_string()));
         }
-        self.uncommitted_peer_auto_starts
+        self.peer_messaging
+            .uncommitted_peer_auto_starts
             .insert(recipient_id.clone());
         Ok((recipient_id, true, admitted_at))
     }
@@ -2361,6 +2388,7 @@ impl Harness {
             .flat_map(|pending| &pending.pending_agent_message_wakes)
             .filter_map(|wake| wake.source.peer_admission_bytes());
         let parked_receive_bytes = self
+            .peer_messaging
             .pending_external_receive_acks
             .values()
             .filter(|pending| &pending.recipient_id == recipient_id && !pending.canceled)
@@ -2378,6 +2406,7 @@ impl Harness {
         }
         let now = Instant::now();
         let accepted = self
+            .peer_messaging
             .peer_input_rate
             .entry(recipient_id.clone())
             .or_default();
@@ -2395,7 +2424,7 @@ impl Harness {
 
     /// Release a rolling-rate slot for a receive rejected before commit.
     pub(crate) fn release_peer_input_rate(&mut self, recipient_id: &AgentId, admitted_at: Instant) {
-        let Some(accepted) = self.peer_input_rate.get_mut(recipient_id) else {
+        let Some(accepted) = self.peer_messaging.peer_input_rate.get_mut(recipient_id) else {
             return;
         };
         if let Some(index) = accepted
@@ -2405,7 +2434,7 @@ impl Harness {
             accepted.remove(index);
         }
         if accepted.is_empty() {
-            self.peer_input_rate.remove(recipient_id);
+            self.peer_messaging.peer_input_rate.remove(recipient_id);
         }
     }
 
@@ -2439,9 +2468,12 @@ impl Harness {
     /// Record a successful concrete route for deterministic
     /// least-recently-routed selection.
     pub(crate) fn record_peer_route(&mut self, recipient_id: &AgentId) {
-        self.peer_route_clock = self.peer_route_clock.saturating_add(1);
-        self.peer_last_routed
-            .insert(recipient_id.to_string(), self.peer_route_clock);
+        self.peer_messaging.peer_route_clock =
+            self.peer_messaging.peer_route_clock.saturating_add(1);
+        self.peer_messaging.peer_last_routed.insert(
+            recipient_id.to_string(),
+            self.peer_messaging.peer_route_clock,
+        );
     }
 
     #[cfg(test)]

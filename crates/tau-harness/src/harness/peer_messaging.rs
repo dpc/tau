@@ -5,6 +5,43 @@
 
 use super::*;
 
+/// Runtime-only authentication, delivery, and fair routing state for
+/// cooperative inter-harness peers.
+///
+/// Socket admission follows connection lifetime. Callback capabilities,
+/// receive acknowledgements, rate admission, auto-start tracking, I/O
+/// cancellation, and fairness belong to the active session generation. Session
+/// rollover first invalidates callback authority, then resolves parked receive
+/// acknowledgements, signals and drains I/O handles, and resets rate and
+/// fairness state. Connection teardown removes socket admission and inbound
+/// handles. Durable receive publication remains with the publication
+/// coordinator, and this state has no independent drop side effects.
+#[derive(Default)]
+pub(super) struct PeerMessagingState {
+    /// Socket clients authenticated for the external-message RPC.
+    pub(super) external_message_peers: HashSet<tau_proto::ConnectionId>,
+    /// Outbound messages awaiting callback authentication by logical message
+    /// id.
+    pub(super) pending_external_message_auth:
+        HashMap<tau_proto::AgentMessageId, PendingExternalAgentMessageAuth>,
+    /// Remote acknowledgements retained until their durable receive commits.
+    pub(super) pending_external_receive_acks:
+        HashMap<tau_proto::AgentMessageId, PendingExternalReceiveAck>,
+    /// Rolling accepted-input timestamps for each concrete peer endpoint.
+    pub(super) peer_input_rate: HashMap<tau_proto::AgentId, VecDeque<std::time::Instant>>,
+    /// Auto-started endpoints awaiting their first committed peer input.
+    pub(super) uncommitted_peer_auto_starts: HashSet<tau_proto::AgentId>,
+    /// Weak cancellation handles for outbound peer I/O in the active session.
+    pub(super) peer_io_cancellations: Vec<std::sync::Weak<path_std_sync::atomic::AtomicBool>>,
+    /// Inbound callback cancellation handles grouped by owning socket.
+    pub(super) inbound_peer_io_cancellations:
+        HashMap<tau_proto::ConnectionId, Vec<std::sync::Weak<path_std_sync::atomic::AtomicBool>>>,
+    /// Monotonic event-loop clock used for fair peer selection.
+    pub(super) peer_route_clock: u64,
+    /// Most recent selection clock for each concrete peer agent.
+    pub(super) peer_last_routed: HashMap<String, u64>,
+}
+
 pub(crate) const EXTERNAL_AGENT_MESSAGE_CLIENT_NAME: &str = "tau-external-agent-message";
 
 #[derive(Clone, Debug)]
@@ -160,6 +197,7 @@ impl Harness {
             return;
         };
         let peer_admission_bytes = self
+            .peer_messaging
             .pending_external_receive_acks
             .contains_key(&message.message_id)
             .then_some(message.message.len());

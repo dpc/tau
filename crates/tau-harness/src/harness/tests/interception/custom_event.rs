@@ -159,7 +159,8 @@ fn attached_ui_can_publish_but_other_socket_peers_cannot() {
         tau_proto::ClientKind::Ui,
         ConnectionOrigin::Socket,
     );
-    h.external_message_peers
+    h.peer_messaging
+        .external_message_peers
         .insert(crate::test_connection_id("external"));
     h.handle_client_event_inner(
         &crate::test_connection_id("external"),

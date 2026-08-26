@@ -168,7 +168,8 @@ fn attached_ui_has_authority_but_external_message_peer_does_not() {
     }));
 
     connect_socket_ui(&mut h, "external");
-    h.external_message_peers
+    h.peer_messaging
+        .external_message_peers
         .insert(crate::test_connection_id("external"));
     h.handle_client_event_inner_with_persist(
         &crate::test_connection_id("external"),

@@ -745,7 +745,7 @@ impl Harness {
         // Callback capabilities are live only for the generation that issued
         // them. Clearing them before a session id can be selected again makes
         // an old callback fail even after an S -> other -> S rollover.
-        self.pending_external_message_auth.clear();
+        self.peer_messaging.pending_external_message_auth.clear();
         self.publish_event(
             None,
             Event::SessionShutdown(tau_proto::SessionShutdown { session_id: old_id }),
@@ -851,11 +851,13 @@ impl Harness {
         self.pending_notices.unavailable_tools_delivered.clear();
         self.pending_start_agent_requests.clear();
         let canceled_message_ids = self
+            .peer_messaging
             .pending_external_receive_acks
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
         let canceled_receives = self
+            .peer_messaging
             .pending_external_receive_acks
             .drain()
             .map(|(_, pending)| pending)
@@ -886,12 +888,13 @@ impl Harness {
             }
         }
         self.discard_canceled_peer_receive_publishes(&canceled_message_ids);
-        for cancellation in self.peer_io_cancellations.drain(..) {
+        for cancellation in self.peer_messaging.peer_io_cancellations.drain(..) {
             if let Some(cancellation) = cancellation.upgrade() {
                 cancellation.store(true, path_std_sync_atomic::Ordering::Release);
             }
         }
         for cancellations in self
+            .peer_messaging
             .inbound_peer_io_cancellations
             .drain()
             .map(|(_, value)| value)
@@ -902,10 +905,10 @@ impl Harness {
                 }
             }
         }
-        self.peer_route_clock = 0;
-        self.peer_last_routed.clear();
-        self.peer_input_rate.clear();
-        self.uncommitted_peer_auto_starts.clear();
+        self.peer_messaging.peer_route_clock = 0;
+        self.peer_messaging.peer_last_routed.clear();
+        self.peer_messaging.peer_input_rate.clear();
+        self.peer_messaging.uncommitted_peer_auto_starts.clear();
         self.pending_manual_compaction_tools.clear();
         self.accepted_manual_compaction_tools.clear();
         let pending_compactions = std::mem::take(&mut self.pending_ui_compactions_after_wait);

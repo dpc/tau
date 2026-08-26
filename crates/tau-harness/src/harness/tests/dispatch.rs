@@ -36927,7 +36927,7 @@ fn external_agent_message_auth_binds_sender_identity_and_kind() {
     let mut h = echo_harness(&sp).expect("start");
     let message_id = tau_proto::AgentMessageId::parse("msg-auth")
         .expect("test identifier must satisfy its grammar");
-    h.pending_external_message_auth.insert(
+    h.peer_messaging.pending_external_message_auth.insert(
         message_id.clone(),
         crate::harness::PendingExternalAgentMessageAuth {
             capability: "secret-capability".to_owned(),
@@ -37211,7 +37211,7 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
         kind: tau_proto::AgentMessageKind::Message,
         message: "hello between harnesses".to_owned(),
     };
-    sender.pending_external_message_auth.insert(
+    sender.peer_messaging.pending_external_message_auth.insert(
         message_id,
         crate::harness::PendingExternalAgentMessageAuth {
             capability: request.capability.clone(),
@@ -37547,7 +37547,7 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
     )
     .expect("start external send");
     assert!(session_agent_message_sent_events(&h).is_empty());
-    assert_eq!(h.pending_external_message_auth.len(), 1);
+    assert_eq!(h.peer_messaging.pending_external_message_auth.len(), 1);
 
     let command = loop {
         match h
@@ -37563,7 +37563,7 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
         .expect("handle completion");
 
     assert!(session_agent_message_sent_events(&h).is_empty());
-    assert!(h.pending_external_message_auth.is_empty());
+    assert!(h.peer_messaging.pending_external_message_auth.is_empty());
     assert!(
         event_log_events(&h)
             .into_iter()
@@ -38042,7 +38042,9 @@ fn peer_auto_start_requires_durable_marked_creation_before_receive_commit() {
         h.ensure_agent_id_for_agent(&cid)
             .expect("ordinary agent id"),
     );
-    h.uncommitted_peer_auto_starts.insert(agent_id.clone());
+    h.peer_messaging
+        .uncommitted_peer_auto_starts
+        .insert(agent_id.clone());
 
     assert!(
         !h.peer_auto_start_creation_committed(&agent_id),
@@ -38329,7 +38331,7 @@ fn external_message_auth_rejects_bare_exact_capability_substitution() {
     let message_id: tau_proto::AgentMessageId =
         tau_proto::AgentMessageId::parse("typed-auth-message")
             .expect("test identifier must satisfy its grammar");
-    h.pending_external_message_auth.insert(
+    h.peer_messaging.pending_external_message_auth.insert(
         message_id.clone(),
         crate::harness::PendingExternalAgentMessageAuth {
             capability: "typed-capability".to_owned(),
@@ -38454,7 +38456,7 @@ fn stale_external_message_callback_after_session_round_trip_is_rejected_before_c
         kind: tau_proto::AgentMessageKind::Message,
         message: "old generation body".to_owned(),
     };
-    h.pending_external_message_auth.insert(
+    h.peer_messaging.pending_external_message_auth.insert(
         message_id.clone(),
         crate::harness::PendingExternalAgentMessageAuth {
             capability: request.capability.clone(),
@@ -38467,7 +38469,8 @@ fn stale_external_message_callback_after_session_round_trip_is_rejected_before_c
         },
     );
     let cancellation = path_std_sync::Arc::new(path_std_sync_atomic::AtomicBool::new(false));
-    h.peer_io_cancellations
+    h.peer_messaging
+        .peer_io_cancellations
         .push(path_std_sync::Arc::downgrade(&cancellation));
 
     // Retain the old worker completion, roll away and back, then deliver its
@@ -38503,7 +38506,9 @@ fn stale_external_message_callback_after_session_round_trip_is_rejected_before_c
         .expect("switch back");
 
     assert!(
-        !h.pending_external_message_auth.contains_key(&message_id),
+        !h.peer_messaging
+            .pending_external_message_auth
+            .contains_key(&message_id),
         "generation rollover must synchronously remove the old callback capability"
     );
     let result = h.handle_external_agent_message_auth_request(request);
@@ -41496,7 +41501,8 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         .find(|connection| connection.name == "navigation-promoted")
         .expect("promoted external connection")
         .id;
-    h.external_message_peers
+    h.peer_messaging
+        .external_message_peers
         .insert(promoted_external_id.clone());
     h.submit_user_prompt(h.current_session_id.clone(), "hello".to_owned())
         .expect("create user agent");
@@ -42484,7 +42490,8 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
                     tau_proto::ClientKind::Ui,
                     ConnectionOrigin::Socket,
                 );
-                h.external_message_peers
+                h.peer_messaging
+                    .external_message_peers
                     .insert(crate::test_connection_id("prompt-source"));
                 "prompt-source"
             }

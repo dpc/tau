@@ -536,7 +536,12 @@ impl<'a> InternalToolHost<'a> {
             .tool_runtime
             .tool_agents
             .get(&started.call_id)
-            .or_else(|| self.harness.peer_internal_tool_agent(&started.call_id))?
+            .or_else(|| {
+                self.harness
+                    .tool_runtime
+                    .peer_internal_tool_agents
+                    .get(&started.call_id)
+            })?
             .clone();
         let pending = self
             .harness

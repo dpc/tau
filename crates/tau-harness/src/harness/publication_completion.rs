@@ -1228,13 +1228,18 @@ impl Harness {
         let Some(message_id) = Self::pending_external_receive_message_id(event) else {
             return true;
         };
-        let Some(pending) = self.pending_external_receive_acks.get(message_id) else {
+        let Some(pending) = self
+            .peer_messaging
+            .pending_external_receive_acks
+            .get(message_id)
+        else {
             return true;
         };
         let completion_live = match &pending.completion {
-            PendingPeerReceiveCompletion::Remote { client_id, .. } => {
-                self.external_message_peers.contains(client_id)
-            }
+            PendingPeerReceiveCompletion::Remote { client_id, .. } => self
+                .peer_messaging
+                .external_message_peers
+                .contains(client_id),
             PendingPeerReceiveCompletion::Local {
                 conversation_id, ..
             } => self.agents.contains_key(conversation_id),
@@ -1326,7 +1331,11 @@ impl Harness {
         &self,
         recipient_id: &tau_proto::AgentId,
     ) -> bool {
-        if !self.uncommitted_peer_auto_starts.contains(recipient_id) {
+        if !self
+            .peer_messaging
+            .uncommitted_peer_auto_starts
+            .contains(recipient_id)
+        {
             return true;
         }
         let runtime_role = self
@@ -1366,7 +1375,11 @@ impl Harness {
         message_id: &tau_proto::AgentMessageId,
         event: &Event,
     ) -> Result<bool, tau_proto::ExternalAgentMessageFailure> {
-        let Some(mut pending) = self.pending_external_receive_acks.remove(message_id) else {
+        let Some(mut pending) = self
+            .peer_messaging
+            .pending_external_receive_acks
+            .remove(message_id)
+        else {
             return Ok(false);
         };
         let old_recipient = pending.recipient_id.clone();
@@ -1376,7 +1389,8 @@ impl Harness {
             match self.resolve_peer_entrypoint_recipient(message_id, message_bytes) {
                 Ok(replacement) => replacement,
                 Err(error) => {
-                    self.pending_external_receive_acks
+                    self.peer_messaging
+                        .pending_external_receive_acks
                         .insert(message_id.clone(), pending);
                     return Err(error.failure());
                 }
@@ -1387,7 +1401,8 @@ impl Harness {
         pending.reselect_attempted = true;
         pending.rate_admitted_at = rate_admitted_at;
         let replacement_event = Event::AgentMessageReceived(pending.expected_receive.clone());
-        self.pending_external_receive_acks
+        self.peer_messaging
+            .pending_external_receive_acks
             .insert(message_id.clone(), pending);
         self.cleanup_uncommitted_peer_auto_start(&old_recipient);
         // ast-grep-ignore: debug-assert-expression-must-not-mutate
@@ -1408,7 +1423,11 @@ impl Harness {
         let Some(message_id) = Self::pending_external_receive_message_id(event) else {
             return;
         };
-        let Some(pending) = self.pending_external_receive_acks.remove(message_id) else {
+        let Some(pending) = self
+            .peer_messaging
+            .pending_external_receive_acks
+            .remove(message_id)
+        else {
             return;
         };
         self.release_peer_input_rate(&pending.recipient_id, pending.rate_admitted_at);
@@ -1455,10 +1474,15 @@ impl Harness {
         let Some(message_id) = Self::pending_external_receive_message_id(event) else {
             return;
         };
-        let Some(pending) = self.pending_external_receive_acks.remove(message_id) else {
+        let Some(pending) = self
+            .peer_messaging
+            .pending_external_receive_acks
+            .remove(message_id)
+        else {
             return;
         };
-        self.uncommitted_peer_auto_starts
+        self.peer_messaging
+            .uncommitted_peer_auto_starts
             .remove(&pending.recipient_id);
         self.record_peer_route(&pending.recipient_id);
         match pending.completion {
@@ -1541,15 +1565,21 @@ impl Harness {
         &mut self,
         recipient_id: &tau_proto::AgentId,
     ) {
-        if !self.uncommitted_peer_auto_starts.contains(recipient_id)
+        if !self
+            .peer_messaging
+            .uncommitted_peer_auto_starts
+            .contains(recipient_id)
             || self
+                .peer_messaging
                 .pending_external_receive_acks
                 .values()
                 .any(|pending| &pending.recipient_id == recipient_id && !pending.canceled)
         {
             return;
         }
-        self.uncommitted_peer_auto_starts.remove(recipient_id);
+        self.peer_messaging
+            .uncommitted_peer_auto_starts
+            .remove(recipient_id);
         if let Some(cid) = self.agent_routes.get(recipient_id.as_str()).cloned() {
             self.remove_agent_expected(&cid);
         }
