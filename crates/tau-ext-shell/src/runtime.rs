@@ -224,6 +224,11 @@ impl ShellRuntime {
                 false,
             ))?;
         }
+        tracing::info!(
+            target: "tau_ext_shell",
+            directory_locking = self.config.dir_lock.enable,
+            "shell configured"
+        );
         Ok(())
     }
 

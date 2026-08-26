@@ -337,6 +337,36 @@ fn daemon_command_sets_and_clears_harness_config_override_env() {
     }
 }
 
+/// Ensures the launcher does not manufacture a parent-wide logging allowlist;
+/// the harness and each extension must own their absent-environment fallback.
+#[test]
+fn daemon_command_leaves_tau_log_inherited() {
+    let command = build_daemon_command(DaemonCommandSpec {
+        tau_binary: Path::new("tau"),
+        session_id: "session-1",
+        session_status: SessionLaunchStatus::New,
+        stdout: Stdio::null(),
+        stderr: Stdio::null(),
+        stdin: Stdio::null(),
+        startup_role: None,
+        cli_overrides: DaemonCliOverrides {
+            profile: None,
+            role: &[],
+            extension: &[],
+            extension_environment: None,
+            harness_config: &[],
+            memory_only_agent_store: false,
+        },
+        storage_mode: HarnessStorageMode::Durable,
+    });
+
+    assert!(
+        command
+            .get_envs()
+            .all(|(name, _)| name != std::ffi::OsStr::new("TAU_LOG"))
+    );
+}
+
 /// Ensures an ordered CLI profile selection reaches the daemon unchanged and an
 /// absent selection clears inherited profile state rather than changing child
 /// configuration.

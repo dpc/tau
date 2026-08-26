@@ -177,6 +177,36 @@ fn idle_summary_query_ids_are_namespaced_by_process_generation() {
     assert_ne!(first.next_id(), respawned.next_id());
 }
 
+/// Ensures event floods cannot grow the default-info log beyond the one
+/// accepted configuration baseline.
+#[test]
+fn idle_occurrences_remain_debug_below_the_info_baseline() {
+    let writer = SharedWriter::default();
+    let captured = writer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("std-notifications=info,warn")
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
+        NotificationLoop::new(Duration::from_secs(1))
+            .apply_config(ExtConfig::default())
+            .expect("default notification config");
+        for _ in 0..100 {
+            log_idle_summary_request("private-query-canary", "agent idle");
+            log_static_idle_notification("agent idle");
+            log_summary_timeout();
+        }
+    });
+    let output = String::from_utf8(captured.bytes()).expect("UTF-8 tracing output");
+
+    assert_eq!(output.matches("applied config").count(), 1);
+    assert!(!output.contains("deadline elapsed"));
+    assert!(!output.contains("summary timed out"));
+    assert!(!output.contains("private-query-canary"));
+}
+
 /// Install a `tracing` subscriber for tests. Pick up `TAU_LOG` (same
 /// env var the extension uses in production); default to off so a
 /// plain `cargo test` is silent. Run a hanging test like

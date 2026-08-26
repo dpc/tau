@@ -375,5 +375,5 @@ The extension also publishes `:calendar` actions:
 The extension uses the `pim` tracing target:
 
 ```sh
-TAU_EXT_LOG=pim=debug tau
+TAU_LOG='pim=debug,warn' tau
 ```

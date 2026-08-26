@@ -34,7 +34,7 @@ use crate::specs::{
     vote_spec,
 };
 use crate::tools::write::{
-    handle as handle_signed_tool_with_limit, log_local_commit, parse_tags,
+    handle as handle_signed_tool_with_limit, log_local_commit, log_local_commit_result, parse_tags,
     pause_before_test_publication, pause_before_test_publication_with_deadline_after_entry,
     pause_before_test_publication_without_deadline, short_event_id, validate_body,
 };
@@ -90,7 +90,7 @@ fn capture_rostra_stderr<T>(emit: impl FnOnce() -> T) -> (T, String) {
     let stderr = CapturedStderr::default();
     let writer = stderr.clone();
     let subscriber = tracing_subscriber::fmt()
-        .with_env_filter("rostra=debug,warn")
+        .with_env_filter("tau_ext_rostra=debug,rostra=debug,warn")
         .with_writer(move || writer.clone())
         .with_ansi(false)
         .without_time()
@@ -1000,8 +1000,19 @@ fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
     let (extension_input, harness_input) = UnixStream::pair().expect("input stream pair");
     let output = SharedWriter::default();
     let runner_output = output.clone();
+    let stderr = CapturedStderr::default();
+    let trace_writer = stderr.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("tau_ext_rostra=debug,warn")
+        .with_writer(move || trace_writer.clone())
+        .with_ansi(false)
+        .without_time()
+        .finish();
+    let dispatch = Dispatch::new(subscriber);
     let runner = thread::spawn(move || {
-        run(extension_input, runner_output).map_err(|error| error.to_string())
+        tracing::dispatcher::with_default(&dispatch, || {
+            run(extension_input, runner_output).map_err(|error| error.to_string())
+        })
     });
     let mut writer = HarnessOutputWriter::new(harness_input);
     let configure = tau_proto::Configure {
@@ -1134,6 +1145,10 @@ fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
         .join()
         .expect("Rostra runner thread")
         .expect("Rostra runner");
+    let stderr = stderr.text();
+    assert!(!stderr.contains("local_commit"));
+    assert!(!stderr.contains("timeout-after-admission"));
+    assert!(!stderr.contains("cancel-after-admission"));
 
     let events = output_events(&output);
     assert_eq!(
@@ -1222,25 +1237,36 @@ fn local_commit_debug_record_is_content_free_and_post_commit_only() {
     invoke.call_id = tau_proto::ToolCallId::new("private-call-canary");
 
     let (result, stderr) = capture_rostra_stderr(|| {
-        runtime.block_on(handle_signed_tool(
+        let result = runtime.block_on(handle_signed_tool(
             &invoke,
             &client,
             secret,
             Arc::new(AsyncMutex::new(())),
             write_boundary(),
-        ))
+        ));
+        if let Ok(text) = &result {
+            log_local_commit_result(&invoke, text);
+        }
+        result
     });
     let result = result.expect("stored post");
     let result: serde_json::Value = serde_json::from_str(&result).expect("post result JSON");
     let full_event_id = result["event_id"].as_str().expect("event ID");
     let local_commit = stderr
         .lines()
-        .find(|line| line.contains("local_commit"))
+        .find(|line| line.contains("call_id=private-call-canary"))
         .expect("post-commit Rostra log record");
+    let default_info = stderr
+        .lines()
+        .find(|line| line.contains("local_state=\"stored\""))
+        .expect("default-info local commit record");
 
-    assert_eq!(stderr.matches("local_commit").count(), 1);
+    assert_eq!(stderr.matches("local_commit").count(), 2);
     assert!(local_commit.contains("call_id=private-call-canary"));
     assert!(local_commit.contains("operation=\"post\""));
+    assert!(default_info.contains("operation=\"post\""));
+    assert!(!default_info.contains("call_id"));
+    assert!(!default_info.contains("event_id"));
     assert!(!local_commit.contains("private body canary"));
     assert!(!local_commit.contains("private-tag-canary"));
     assert!(!local_commit.contains(&identity));
@@ -1265,10 +1291,10 @@ fn local_commit_debug_record_shortens_the_full_local_event_id() {
     });
     let local_commit = stderr
         .lines()
-        .find(|line| line.contains("local_commit"))
+        .find(|line| line.contains("call_id=short-id-canary"))
         .expect("local-commit Rostra log record");
 
-    assert_eq!(stderr.matches("local_commit").count(), 1);
+    assert_eq!(stderr.matches("local_commit").count(), 2);
     assert!(local_commit.contains("call_id=short-id-canary"));
     assert!(local_commit.contains("operation=\"post\""));
     assert!(local_commit.contains(&format!("event_id={expected_event_id}")));

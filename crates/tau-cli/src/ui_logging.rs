@@ -9,7 +9,7 @@ use tracing_subscriber::{EnvFilter, fmt as path_tracing_subscriber_fmt};
 use crate::mint_short_id;
 
 const UI_LOG_ENV: &str = "TAU_LOG";
-const DEFAULT_FILTER: &str = "info";
+const DEFAULT_FILTER: &str = "tau_cli=info,warn";
 
 /// Initialize stderr tracing for component subcommands that do not
 /// have their own logging setup. Uses `TAU_LOG` so startup can be
@@ -78,7 +78,7 @@ impl UiLogging {
 ///
 /// Logs go to `$XDG_STATE_HOME/tau/uis/<ui-id>/ui.log` (normally
 /// `~/.local/state/tau/uis/<ui-id>/ui.log`). The filter comes from
-/// `TAU_LOG`, defaulting to `info`.
+/// `TAU_LOG`, defaulting to first-party `tau_cli` info and global warnings.
 pub fn init(state_dir: &Path) -> io::Result<UiLogging> {
     let ui_id = mint_ui_id();
     let dir = state_dir.join("uis").join(&ui_id);

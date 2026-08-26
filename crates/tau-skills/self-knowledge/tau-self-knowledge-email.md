@@ -237,5 +237,5 @@ If a legitimate sender fails with `dkim missing` or `auth unaligned`, do not imm
 For tracing logs, use:
 
 ```sh
-TAU_EXT_LOG=pim=debug tau
+TAU_LOG='pim=debug,warn' tau
 ```

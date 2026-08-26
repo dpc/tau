@@ -215,8 +215,8 @@ impl Tracker {
     /// Remove every artifact still owned by this tracker.
     fn remove_all(&mut self) {
         self.files.retain(|saved| !remove_saved(&saved.path));
-        for saved in &self.files {
-            tracing::warn!(path = %saved.path.display(), "failed to remove ephemeral shell output");
+        for _ in &self.files {
+            tracing::warn!("failed to remove ephemeral shell output");
         }
     }
 }

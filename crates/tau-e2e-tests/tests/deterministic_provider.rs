@@ -128,6 +128,10 @@ fn deterministic_dummy_tool_round() -> Result<(), Box<dyn std::error::Error>> {
     let events = fixture.published_trace_events()?;
     assert_exact_extensions(&events, &["e2e-fake-provider", "e2e-test-dummy"]);
     assert_tool_provider_sequence(&events);
+    let extension_log = fixture.extension_log("e2e-test-dummy")?;
+    assert_eq!(extension_log.matches("test dummy configured").count(), 1);
+    assert!(!extension_log.contains("fake-call-1"));
+    assert!(!extension_log.contains(prompt));
     Ok(())
 }
 

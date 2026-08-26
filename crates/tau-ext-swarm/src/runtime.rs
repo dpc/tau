@@ -603,6 +603,7 @@ fn handle_configure(cx: RawConfigureContext<'_, SwarmRuntime>) -> Result<(), Cli
         limits.command_entries,
         limits.command_bytes,
     ))));
+    tracing::info!(target: LOG_TARGET, "swarm configured");
     Ok(())
 }
 

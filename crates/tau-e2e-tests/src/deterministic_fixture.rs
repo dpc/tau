@@ -591,7 +591,12 @@ impl DeterministicFixture {
             extensions.insert(
                 "e2e-test-dummy".to_owned(),
                 serde_json::json!({
-                    "command": [exact_binary(&dummy_tool_bin)?],
+                    "command": [
+                        exact_path_command("env")?,
+                        "-u",
+                        "TAU_LOG",
+                        exact_binary(&dummy_tool_bin)?
+                    ],
                     "role": "tool",
                     "require": true,
                     "config": dummy_config,
@@ -1064,6 +1069,17 @@ impl DeterministicFixture {
         let bytes = tau_util_fs_err::read_to_string(path)?;
         Ok(tau_test_support::parse_published_trace_events(&bytes)?)
     }
+
+    /// Reads one supervised extension's captured stderr log.
+    pub fn extension_log(&self, instance: &str) -> Result<String, std::io::Error> {
+        tau_util_fs_err::read_to_string(
+            self.harness_state_dir
+                .join("sessions")
+                .join("deterministic-e2e-session")
+                .join("logs")
+                .join(format!("{instance}.log")),
+        )
+    }
 }
 
 fn exact_tau_binary() -> Result<String, Box<dyn std::error::Error>> {
@@ -1077,6 +1093,23 @@ fn exact_tau_binary() -> Result<String, Box<dyn std::error::Error>> {
             .ok_or("integration test executable has no ancestor Cargo profile containing `tau`")?
     };
     exact_binary(&candidate)
+}
+
+/// Resolve one fixture utility through PATH and retain its exact executable
+/// path.
+fn exact_path_command(name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
+    let candidate = std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| format!("required fixture utility `{name}` is unavailable"))?;
+    let directory = candidate
+        .parent()
+        .ok_or("fixture utility has no parent directory")?
+        .canonicalize()?;
+    let absolute_link = directory.join(name);
+    let _canonical = exact_binary(&absolute_link)?;
+    Ok(absolute_link.to_string_lossy().into_owned())
 }
 
 impl Drop for DeterministicFixture {

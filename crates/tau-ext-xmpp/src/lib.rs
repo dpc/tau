@@ -1036,8 +1036,8 @@ impl Drop for Extension {
     fn drop(&mut self) {
         self.revoke_all();
         self.shutdown.request();
-        if let Err(error) = self.bridge.shutdown(SHUTDOWN_TIMEOUT) {
-            tracing::warn!(target: LOG_TARGET, %error, "xmpp bridge shutdown did not finish cleanly");
+        if let Err(_error) = self.bridge.shutdown(SHUTDOWN_TIMEOUT) {
+            tracing::warn!(target: LOG_TARGET, "xmpp bridge shutdown did not finish cleanly");
         }
     }
 }
@@ -1232,7 +1232,7 @@ fn xmpp_thread(
         .build()
     {
         Ok(runtime) => runtime.block_on(xmpp_worker(cfg, command_rx, output, shutdown, authority)),
-        Err(error) => tracing::warn!(target: LOG_TARGET, %error, "failed to create xmpp runtime"),
+        Err(_error) => tracing::warn!(target: LOG_TARGET, "failed to create xmpp runtime"),
     }
 }
 
@@ -1249,8 +1249,8 @@ async fn xmpp_worker(
     let resource = generated_resource(&cfg);
     let login_jid = match Jid::new(&format!("{}/{resource}", cfg.account_jid)) {
         Ok(jid) => jid,
-        Err(error) => {
-            tracing::warn!(target: LOG_TARGET, %error, "failed to build xmpp resource jid");
+        Err(_error) => {
+            tracing::warn!(target: LOG_TARGET, "failed to build xmpp resource jid");
             return;
         }
     };
@@ -1287,8 +1287,8 @@ async fn xmpp_worker(
                             return;
                         }
                     }
-                    tokio_xmpp::Event::Disconnected(error) => {
-                        tracing::warn!(target: LOG_TARGET, %error, "xmpp disconnected");
+                    tokio_xmpp::Event::Disconnected(_error) => {
+                        tracing::warn!(target: LOG_TARGET, "xmpp disconnected");
                         worker.handle_disconnected();
                     }
                     tokio_xmpp::Event::Stanza(stanza) => {
@@ -1595,8 +1595,8 @@ impl WorkerState {
             .await
         {
             Ok(()) => "sent a MUC invite for",
-            Err(error) => {
-                tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to send xmpp muc invite; sending direct diagnostic notice");
+            Err(_error) => {
+                tracing::warn!(target: LOG_TARGET, "failed to send xmpp muc invite; sending direct diagnostic notice");
                 "could not send a MUC invite for"
             }
         };
@@ -1609,7 +1609,7 @@ impl WorkerState {
             invite_status,
             room
         );
-        if let Err(error) = self
+        if let Err(_error) = self
             .until_shutdown(send_chat(
                 client,
                 self.cfg.default_recipient.clone(),
@@ -1617,7 +1617,7 @@ impl WorkerState {
             ))
             .await
         {
-            tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to send xmpp muc fallback notice after join");
+            tracing::warn!(target: LOG_TARGET, "failed to send xmpp muc fallback notice after join");
         }
     }
 
@@ -1706,8 +1706,8 @@ impl WorkerState {
                         }
                         return Ok(());
                     }
-                    tokio_xmpp::Event::Disconnected(error) => {
-                        tracing::warn!(target: LOG_TARGET, %error, "xmpp disconnected while waiting for online state");
+                    tokio_xmpp::Event::Disconnected(_error) => {
+                        tracing::warn!(target: LOG_TARGET, "xmpp disconnected while waiting for online state");
                     }
                     tokio_xmpp::Event::Stanza(stanza) => {
                         self.handle_nested_stanza(stanza, "online state")?;
@@ -1813,9 +1813,9 @@ impl WorkerState {
     /// no per-conversation unavailable stanza.
     async fn leave_conversation(&self, conversation: &Conversation, client: &mut Client) {
         if let Conversation::Muc { room, nick } = conversation
-            && let Err(error) = leave_room(client, room, nick).await
+            && let Err(_error) = leave_room(client, room, nick).await
         {
-            tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to leave xmpp muc room");
+            tracing::warn!(target: LOG_TARGET, "failed to leave xmpp muc room");
         }
     }
 
@@ -1827,9 +1827,9 @@ impl WorkerState {
         deadline: tokio::time::Instant,
     ) {
         if let Conversation::Muc { room, nick } = conversation
-            && let Err(error) = leave_room_until(client, room, nick, deadline).await
+            && let Err(_error) = leave_room_until(client, room, nick, deadline).await
         {
-            tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to leave xmpp muc room during shutdown");
+            tracing::warn!(target: LOG_TARGET, "failed to leave xmpp muc room during shutdown");
         }
     }
 
@@ -1844,8 +1844,8 @@ impl WorkerState {
 
     /// Send unavailable presence for one MUC room/nick pair.
     async fn leave_muc_occupant(&self, occupant: &MucOccupant, client: &mut Client) {
-        if let Err(error) = leave_room(client, &occupant.room, &occupant.nick).await {
-            tracing::warn!(target: LOG_TARGET, %error, room = %occupant.room, "failed to leave pending xmpp muc room");
+        if let Err(_error) = leave_room(client, &occupant.room, &occupant.nick).await {
+            tracing::warn!(target: LOG_TARGET, "failed to leave pending xmpp muc room");
         }
     }
 
@@ -1857,9 +1857,10 @@ impl WorkerState {
         client: &mut Client,
         deadline: tokio::time::Instant,
     ) {
-        if let Err(error) = leave_room_until(client, &occupant.room, &occupant.nick, deadline).await
+        if let Err(_error) =
+            leave_room_until(client, &occupant.room, &occupant.nick, deadline).await
         {
-            tracing::warn!(target: LOG_TARGET, %error, room = %occupant.room, "failed to leave pending xmpp muc room during shutdown");
+            tracing::warn!(target: LOG_TARGET, "failed to leave pending xmpp muc room during shutdown");
         }
     }
 
@@ -1874,8 +1875,8 @@ impl WorkerState {
     /// Refresh online state without recursively rejoining rooms.
     async fn refresh_online_state(&mut self, bound_jid: Jid, client: &mut Client) {
         let direct_updates = self.apply_online_state(bound_jid);
-        if let Err(error) = send_presence(client, Presence::available().with_priority(-1)).await {
-            tracing::warn!(target: LOG_TARGET, %error, "failed to send xmpp available presence");
+        if let Err(_error) = send_presence(client, Presence::available().with_priority(-1)).await {
+            tracing::warn!(target: LOG_TARGET, "failed to send xmpp available presence");
         }
         self.notify_direct_reconnects(direct_updates, client).await;
     }
@@ -1913,9 +1914,10 @@ impl WorkerState {
                 agent_id.as_ref(),
                 bound_jid
             );
-            if let Err(error) = send_chat(client, self.cfg.default_recipient.clone(), &notice).await
+            if let Err(_error) =
+                send_chat(client, self.cfg.default_recipient.clone(), &notice).await
             {
-                tracing::warn!(target: LOG_TARGET, %error, agent_id = %agent_id.as_ref(), "failed to send xmpp direct-resource reconnect notice");
+                tracing::warn!(target: LOG_TARGET, "failed to send xmpp direct-resource reconnect notice");
             }
         }
     }
@@ -1950,7 +1952,7 @@ impl WorkerState {
         let join = self
             .wait_for_muc_self_presence(client, &occupant.room, &occupant.nick)
             .await?;
-        tracing::info!(
+        tracing::debug!(
             target: LOG_TARGET,
             room = %occupant.room,
             nick = %occupant.nick,
@@ -1959,9 +1961,9 @@ impl WorkerState {
             "joined xmpp muc room"
         );
         if join.created {
-            tracing::info!(target: LOG_TARGET, room = %occupant.room, "new xmpp muc room created; submitting instant-room owner config");
+            tracing::debug!(target: LOG_TARGET, room = %occupant.room, "new xmpp muc room created; submitting instant-room owner config");
             submit_instant_room_config(client, &occupant.room).await?;
-            tracing::info!(target: LOG_TARGET, room = %occupant.room, "submitted xmpp muc instant-room owner config");
+            tracing::debug!(target: LOG_TARGET, room = %occupant.room, "submitted xmpp muc instant-room owner config");
         }
         Ok(())
     }
@@ -1986,9 +1988,9 @@ impl WorkerState {
                     tokio_xmpp::Event::Online { bound_jid, .. } => {
                         self.refresh_online_state(bound_jid, client).await;
                     }
-                    tokio_xmpp::Event::Disconnected(error) => {
+                    tokio_xmpp::Event::Disconnected(_error) => {
                         self.handle_disconnected();
-                        tracing::warn!(target: LOG_TARGET, %error, room = %room, nick = %nick, "xmpp disconnected while waiting for muc join confirmation");
+                        tracing::warn!(target: LOG_TARGET, "xmpp disconnected while waiting for muc join confirmation");
                     }
                     tokio_xmpp::Event::Stanza(Stanza::Presence(presence))
                         if muc_presence_from(&presence, &occupant) =>
@@ -2032,12 +2034,12 @@ impl WorkerState {
         for (room, nick) in self.muc_rooms_to_rejoin() {
             let occupant = MucOccupant::new(room, nick);
             self.muc_presence_cache.begin_join(&occupant.room);
-            if let Err(error) = join_room(client, &occupant.room, &occupant.nick).await {
-                tracing::warn!(target: LOG_TARGET, %error, room = %occupant.room, "failed to rejoin xmpp muc room");
+            if let Err(_error) = join_room(client, &occupant.room, &occupant.nick).await {
+                tracing::warn!(target: LOG_TARGET, "failed to rejoin xmpp muc room");
                 continue;
             }
-            if let Err(error) = self.setup_joined_muc_room(client, &occupant).await {
-                tracing::warn!(target: LOG_TARGET, %error, room = %occupant.room, "failed to confirm/setup rejoined xmpp muc room");
+            if let Err(_error) = self.setup_joined_muc_room(client, &occupant).await {
+                tracing::warn!(target: LOG_TARGET, "failed to confirm/setup rejoined xmpp muc room");
                 if self.shutdown.is_requested() {
                     return WorkerControl::Stop;
                 }
@@ -2086,11 +2088,8 @@ impl WorkerState {
     /// Process inbound IQ stanzas not already claimed by an explicit IQ
     /// response token.
     fn handle_iq(&self, iq: Iq) {
-        if let Iq::Error {
-            from, id, error, ..
-        } = iq
-        {
-            tracing::warn!(target: LOG_TARGET, from = ?from, id = %id, error = ?error, "received xmpp iq error");
+        if let Iq::Error { .. } = iq {
+            tracing::warn!(target: LOG_TARGET, "received xmpp iq error");
         }
     }
 
@@ -2112,11 +2111,11 @@ impl WorkerState {
         ) {
             self.muc_presence_cache.remove(&occupant);
             if presence.type_ == PresenceType::Error {
-                let error = presence
+                let _error = presence
                     .payloads
                     .iter()
                     .find_map(|payload| StanzaError::try_from(payload.clone()).ok());
-                tracing::warn!(target: LOG_TARGET, from = %from, error = ?error, "received xmpp presence error");
+                tracing::warn!(target: LOG_TARGET, "received xmpp presence error");
             }
             return;
         }
@@ -2160,11 +2159,11 @@ impl WorkerState {
     /// Process inbound message stanzas.
     fn handle_message(&mut self, message: Message) {
         if message.type_ == MessageType::Error {
-            let error = message
+            let _error = message
                 .payloads
                 .iter()
                 .find_map(|payload| StanzaError::try_from(payload.clone()).ok());
-            tracing::warn!(target: LOG_TARGET, from = ?message.from, error = ?error, "received xmpp message error");
+            tracing::warn!(target: LOG_TARGET, "received xmpp message error");
             return;
         }
         // XEP-0203 delayed delivery marks backlog/history. The MVP is live-only,
@@ -2213,13 +2212,17 @@ impl WorkerState {
         };
         let real = self.muc_presence_cache.get(&occupant).cloned();
         if real.is_none() && !self.cfg.muc.trust_muc_membership {
-            tracing::warn!(target: LOG_TARGET, room = %room, expose_real_jids = self.cfg.muc.expose_real_jids, "dropping muc message without real jid proof");
+            tracing::warn!(
+                target: LOG_TARGET,
+                expose_real_jids = self.cfg.muc.expose_real_jids,
+                "dropping muc message without real jid proof"
+            );
             return;
         }
         if let Some(real_jid) = real.as_ref()
             && !self.cfg.is_allowed(real_jid)
         {
-            tracing::warn!(target: LOG_TARGET, room = %room, sender = %real_jid, "dropping muc message from non-allowlisted real jid");
+            tracing::warn!(target: LOG_TARGET, "dropping muc message from non-allowlisted real jid");
             return;
         }
         let sender_id = real
@@ -2259,7 +2262,7 @@ impl WorkerState {
             return;
         };
         if !self.cfg.is_allowed(&from) {
-            tracing::warn!(target: LOG_TARGET, sender = %from, "dropping direct xmpp message from non-allowlisted jid");
+            tracing::warn!(target: LOG_TARGET, "dropping direct xmpp message from non-allowlisted jid");
             return;
         }
         let Some(to) = message.to.as_ref() else {
@@ -2269,7 +2272,7 @@ impl WorkerState {
             return;
         };
         if to != bound {
-            tracing::warn!(target: LOG_TARGET, sender = %from, to = %to, bound = %bound, "dropping direct xmpp message not addressed to the current bound full jid");
+            tracing::warn!(target: LOG_TARGET, "dropping direct xmpp message not addressed to the current bound full jid");
             return;
         }
         let agents: Vec<_> = self
@@ -2280,7 +2283,7 @@ impl WorkerState {
             })
             .collect();
         if agents.len() != 1 {
-            tracing::warn!(target: LOG_TARGET, sender = %from, "dropping direct xmpp message with no registered direct-resource agent; in MUC mode, send messages in the agent room instead of replying to direct notices");
+            tracing::warn!(target: LOG_TARGET, "dropping direct xmpp message with no registered direct-resource agent; in MUC mode, send messages in the agent room instead of replying to direct notices");
             return;
         }
         let Some(lease) = self.registration_leases.get(&agents[0]).copied() else {
@@ -2480,8 +2483,6 @@ impl MucJoin {
                 .find_map(|payload| StanzaError::try_from(payload.clone()).ok());
             tracing::warn!(
                 target: LOG_TARGET,
-                from = ?presence.from,
-                error = ?error,
                 "xmpp muc join presence error"
             );
             let detail = error.map_or_else(
@@ -2493,8 +2494,6 @@ impl MucJoin {
         if presence.type_ != PresenceType::None {
             tracing::warn!(
                 target: LOG_TARGET,
-                from = ?presence.from,
-                presence_type = ?presence.type_,
                 "xmpp muc join returned non-available self-presence"
             );
             return Err(format!(
@@ -2566,14 +2565,14 @@ async fn submit_instant_room_config(client: &mut Client, room: &BareJid) -> Resu
     match tokio::time::timeout(STANZA_TIMEOUT, token).await {
         Ok(Ok(IqResponse::Result(_))) => Ok(()),
         Ok(Ok(IqResponse::Error(error))) => {
-            tracing::warn!(target: LOG_TARGET, room = %room, error = ?error, "xmpp muc instant-room owner config rejected");
+            tracing::warn!(target: LOG_TARGET, "xmpp muc instant-room owner config rejected");
             Err(format!(
                 "xmpp MUC instant-room owner config rejected by server: {:?} {:?}",
                 error.type_, error.defined_condition
             ))
         }
         Ok(Err(error)) => {
-            tracing::warn!(target: LOG_TARGET, room = %room, %error, "failed to send xmpp muc instant-room owner config iq");
+            tracing::warn!(target: LOG_TARGET, "failed to send xmpp muc instant-room owner config iq");
             Err(format!(
                 "failed to send xmpp MUC instant-room owner config iq: {error}"
             ))
@@ -2822,7 +2821,13 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, XmppRuntime>) -> Cli
         cx.state.ext.clear_config_before_start();
         return Err(ClientError::handler(message));
     }
+    log_xmpp_configured();
     Ok(())
+}
+
+/// Emit the accepted-configuration baseline without routing identities.
+fn log_xmpp_configured() {
+    tracing::info!(target: LOG_TARGET, "xmpp configured");
 }
 
 fn handle_tool_invocation(cx: tau_client::ToolContext<'_, XmppRuntime>) -> ClientResult<()> {

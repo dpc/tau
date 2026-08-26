@@ -1712,7 +1712,7 @@ fn startup_quota_initialization_resolves_once_per_provider() {
     let mut attempts = Vec::new();
     let trace = SharedTraceWriter::default();
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(tracing::Level::TRACE)
         .without_time()
         .with_ansi(false)
         .with_writer({
@@ -1779,6 +1779,10 @@ fn startup_quota_initialization_resolves_once_per_provider() {
     assert!(!trace.contains("provider=router"));
     assert!(trace.contains("HTTP 400"));
     assert!(!trace.contains(reflected_secret));
+    for warning in trace.lines().filter(|line| line.contains(" WARN ")) {
+        assert!(!warning.contains("provider="));
+        assert!(!warning.contains("HTTP 400"));
+    }
 
     for profile in profiles.providers.values_mut() {
         if let BuiltinProviderProfile::Chatgpt(profile) = profile {

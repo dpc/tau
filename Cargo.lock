@@ -5927,6 +5927,7 @@ dependencies = [
  "tau-proto",
  "tempfile",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -6035,6 +6036,7 @@ dependencies = [
  "tau-swarm-core",
  "tau-swarm-iroh",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6053,6 +6055,7 @@ dependencies = [
  "tau-proto",
  "tempfile",
  "tracing",
+ "tracing-subscriber",
  "ureq",
  "url",
 ]
@@ -6066,6 +6069,7 @@ dependencies = [
  "serde_json",
  "tau-client",
  "tau-proto",
+ "tracing",
 ]
 
 [[package]]

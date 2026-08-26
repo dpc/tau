@@ -2565,13 +2565,14 @@ fn muc_active_overflow_warning_is_content_free_once_per_connection() {
     let trace = TraceWriter::default();
     let captured = Arc::clone(&trace.0);
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
+        .with_env_filter("xmpp=info,warn")
         .without_time()
         .with_ansi(false)
         .with_writer(move || trace.clone())
         .finish();
 
     tracing::subscriber::with_default(subscriber, || {
+        log_xmpp_configured();
         for index in 0..MAX_MUC_OCCUPANTS_PER_ROOM {
             worker.handle_presence(muc_identity_presence(
                 Jid::new(&format!("{room}/nick-{index}")).expect("jid"),
@@ -2598,6 +2599,7 @@ fn muc_active_overflow_warning_is_content_free_once_per_connection() {
             .count(),
         2
     );
+    assert_eq!(output.matches("xmpp configured").count(), 1);
     for secret in [
         "tau-agent-1",
         "conference.example.org",

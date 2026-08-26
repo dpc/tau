@@ -37,7 +37,7 @@ use crate::mandatory_output::MandatoryOutput;
 use crate::post_rate_limit::{PostRateLimit, PostRateLimitWindow};
 
 /// Logging target used by this extension.
-pub const LOG_TARGET: &str = "rostra";
+pub const LOG_TARGET: &str = "tau_ext_rostra";
 /// Maximum records returned by one timeline call.
 pub(crate) const MAX_PAGE_SIZE: usize = 50;
 /// Default records returned by one timeline call.
@@ -448,6 +448,11 @@ fn configure(
         .lock()
         .expect("post rate-limit state lock") = PostRateLimitWindow::default();
     *active_notifications = notifications;
+    tracing::info!(
+        target: LOG_TARGET,
+        reused_client = reuses_client,
+        "Rostra configured"
+    );
     Ok(())
 }
 
@@ -639,6 +644,10 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
             };
             #[cfg(not(test))]
             let completion = tokio::time::timeout(TOOL_DEADLINE, &mut task.task).await;
+            let local_commit_text = match &completion {
+                Ok(Ok(Ok(text))) => Some(text.clone()),
+                _ => None,
+            };
             let event = match completion {
                 Ok(Ok(Ok(text))) => tools::tool_result(&invoke, text),
                 Ok(Ok(Err(error))) => tools::tool_error(&invoke, error),
@@ -656,6 +665,9 @@ fn handle_tool(cx: tau_client::ToolContext<'_, RostraState>) -> ClientResult<()>
                 })
             });
             if claimed {
+                if let Some(text) = local_commit_text {
+                    tools::write::log_local_commit_result(&invoke, &text);
+                }
                 let outcome = tau_client::ToolTerminalOutcome::try_from(event)
                     .expect("Rostra worker constructs only terminal events");
                 if output.report_tool_terminal(outcome).is_ok()

@@ -219,12 +219,11 @@ async fn reconcile_agent(
 /// Applies one full reconciliation outcome to bounded retry state and
 /// diagnostics.
 fn finish_reconcile(state: &mut State, failure: Option<(AgentId, &'static str)>) {
-    if let Some((agent_id, stage)) = failure {
+    if let Some((_agent_id, stage)) = failure {
         state.record_retry();
         if state.should_log_failure() {
             tracing::warn!(
                 target: crate::LOG_TARGET,
-                agent = %agent_id,
                 stage,
                 "Rostra notification worker operation failed; retrying with backoff"
             );

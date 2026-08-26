@@ -479,6 +479,7 @@ fn followed_by_letter(bytes: &[u8], i: usize) -> bool {
 
 /// Runs the dummy extension on standard input and standard output.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
+    tau_client::init_logging_for("tau_ext_test_dummy");
     run(std::io::stdin(), std::io::stdout())
 }
 
@@ -537,6 +538,7 @@ where
         sender: terminal_tx,
         waker: runtime.waker(),
     });
+    tracing::info!(target: "tau_ext_test_dummy", "test dummy configured");
     let loop_result = run_dummy_loop(&mut runtime);
     runtime.state_mut().shutdown_pending_hold();
     match loop_result {

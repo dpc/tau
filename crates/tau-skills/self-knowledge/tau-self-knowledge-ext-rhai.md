@@ -95,7 +95,9 @@ Other host functions are available after `init` succeeds:
 - `tau_emit(event)` emits a durable Tau event map.
 - `tau_emit_transient(event)` emits a transient Tau event map.
 - `tau_info(message)` and `tau_info(message, level)` request a live user notice; the harness owns and sanitizes the resulting `harness.notice`. `level` is `info`, `warning`, `debug`, or `trace` (`important` is accepted as a legacy spelling for `warning`).
-- `tau_log(level, message)` writes only to extension logs.
+- `tau_log(level, message)` writes private script-authored text only to the
+  opt-in `rhai-script-private` debug target. Enable it explicitly with
+  `TAU_LOG='rhai-script-private=debug,warn'`.
 
 
 ## Safety and limitations

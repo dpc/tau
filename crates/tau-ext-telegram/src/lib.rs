@@ -488,7 +488,6 @@ fn emit_gateway_deliveries(
         let Ok(agent_id) = AgentId::parse(&delivery.agent_id) else {
             tracing::warn!(
                 target: LOG_TARGET,
-                request_id = delivery.request_id,
                 "telegram gateway delivery had invalid agent id"
             );
             continue;
@@ -511,8 +510,6 @@ fn emit_gateway_deliveries(
         let Some(publisher_name) = publisher_name else {
             tracing::warn!(
                 target: LOG_TARGET,
-                request_id = delivery.request_id,
-                source = delivery.source,
                 "telegram gateway delivery targeted a non-live local registration"
             );
             continue;
@@ -520,7 +517,6 @@ fn emit_gateway_deliveries(
         let Some(report_id) = TelegramReportId::from_gateway(delivery.request_id.clone()) else {
             tracing::warn!(
                 target: LOG_TARGET,
-                request_id = delivery.request_id,
                 "telegram gateway delivery had invalid report id"
             );
             continue;
@@ -894,10 +890,14 @@ impl Extension {
         state_dir: Option<std::path::PathBuf>,
     ) -> Result<(), String> {
         let _apply_guard = self.config_apply.lock().expect("config apply lock");
-        match mode.into() {
+        let result = match mode.into() {
             BridgeMode::LocalPoll(cfg) => self.apply_local_poll_config(cfg, state_dir),
             BridgeMode::GatewayClient(cfg) => self.apply_gateway_client_config(cfg, state_dir),
+        };
+        if result.is_ok() {
+            tracing::info!(target: LOG_TARGET, "telegram configured");
         }
+        result
     }
 
     fn set_publisher_name(&self, publisher_name: tau_proto::ExtensionName) {
@@ -1757,7 +1757,7 @@ impl Extension {
         if cfg.allowed_user_ids.contains(&message.user_id) {
             Some(cfg)
         } else {
-            tracing::warn!(target: LOG_TARGET, user_id = message.user_id, "ignoring Telegram message from unallowed user");
+            tracing::warn!(target: LOG_TARGET, "ignoring Telegram message from unallowed user");
             None
         }
     }
@@ -2445,12 +2445,10 @@ fn poll_loop_with_tool_names(
                 if !ext.poll_response_matches_config(poll_request.config_generation) {
                     continue;
                 }
-                if let Some(diagnostic) = telegram_contention_diagnostic(&message.to_string()) {
-                    tracing::warn!(target: LOG_TARGET, error = %message, "telegram update stream contention detected");
+                if let Some(diagnostic) = log_telegram_poll_failure(&message) {
                     ext.fail_active_polling_with_notice(&poll_request.cfg, &diagnostic);
                     continue;
                 }
-                tracing::warn!(target: LOG_TARGET, error = %message, "telegram polling failed");
                 wait_for_coordination_change_or_shutdown(
                     &ext.state,
                     &shutdown,
@@ -2459,6 +2457,18 @@ fn poll_loop_with_tool_names(
                 );
             }
         }
+    }
+}
+
+/// Emit one categorical polling warning and retain only the safe contention
+/// notice.
+fn log_telegram_poll_failure(failure: &TelegramApiFailure) -> Option<String> {
+    if let Some(diagnostic) = telegram_contention_diagnostic(&failure.to_string()) {
+        tracing::warn!(target: LOG_TARGET, "telegram update stream contention detected");
+        Some(diagnostic)
+    } else {
+        tracing::warn!(target: LOG_TARGET, "telegram polling failed");
+        None
     }
 }
 

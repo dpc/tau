@@ -351,6 +351,7 @@ struct DiscoveryScan {
 
 /// Runs the extension on stdin/stdout.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
+    tau_client::init_logging_for("tau_ext_shell");
     run_impl(
         std::io::stdin(),
         std::io::stdout(),

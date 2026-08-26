@@ -179,8 +179,9 @@ restart because no live echo retry exists.
 - If notifications do not arrive, enable them from that agent with
   `rostra_notifications`, ensure the agent is loaded and replay completes, and
   check direct follow/persona filters and the debounce/interval windows.
-- For the next launch, use `TAU_LOG='rostra=debug,warn' tau`. This replaces
-  the standard extension filter, enables `rostra` and `rostra_client` debug
+- For the next launch, use
+  `TAU_LOG='tau_ext_rostra=debug,rostra=debug,warn' tau`. This replaces the
+  standard extension filter, enables extension and upstream Rostra debug
   records, and keeps a global warning fallback. Debug logs are private:
   they can contain identity-bearing Rostra diagnostics, so do not share them
   without review.

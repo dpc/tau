@@ -103,6 +103,20 @@ submissions.
 5. Check runtime daemon files under `${XDG_RUNTIME_DIR}/tau/` when the bug involves attach/resume, wrong project daemon selection, or socket connection failures.
 6. For provider/cache-shape bugs, inspect `debug/provider-requests/` for the exact request body, successful response, or bounded failed-attempt record. Match Responses inference requests and failures with `agent_prompt_id`, `logical_attempt`, and `wire_dispatch_index`; a transparent repair increments the dispatch index inside one attempt. Unary compaction requests omit inference correlation.
 
+Extension logs normally contain a small `info` baseline for configuration and
+important lifecycle or durable-completion transitions. With no valid `TAU_LOG`,
+each built-in component enables its own first-party target at `info` and all
+other targets at `warn`. Custom extension processes own their logging fallback.
+A valid `TAU_LOG` replaces the built-in filter completely.
+
+Treat debug and trace extension output as private: it can contain identifiers,
+queries, paths, and script-authored text. Extension stderr is unredacted,
+unrotated within the session, and follows whole-session retention rather than
+the shorter diagnostic cleanup. Dependency warnings may also contain public
+identifiers or filesystem paths, so treat the complete file as private.
+Setting `TAU_LOG` while running `tau attach`
+changes only the new UI; it cannot reconfigure existing processes.
+
 Helpful commands:
 
 ```bash

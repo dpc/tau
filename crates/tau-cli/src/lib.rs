@@ -1194,16 +1194,12 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     ));
                 }
                 if name == "harness" && initial_ui_stdio {
-                    ui_logging::init_stderr_from_env(
-                        "tau_harness=info,tau_cli=info,provider-builtin=info",
-                    );
+                    ui_logging::init_stderr_from_env("tau_harness=info,tau_cli=info,warn");
                     return run_harness_component(true)
                         .map_err(|e| CliError::Participant(e.to_string()));
                 }
                 if name == "harness" {
-                    ui_logging::init_stderr_from_env(
-                        "tau_harness=info,tau_cli=info,provider-builtin=info",
-                    );
+                    ui_logging::init_stderr_from_env("tau_harness=info,tau_cli=info,warn");
                     return tau_harness::run_component_with_internal_tools_and_extension_cli_overrides(
                         tau_harness_tools::builtin_handlers(),
                         extension_cli_overrides.clone(),
@@ -1231,9 +1227,9 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         ))
                     })?;
                 match component.logging {
-                    ComponentLogging::CliStderr => ui_logging::init_stderr_from_env(
-                        "tau_harness=info,tau_cli=info,provider-builtin=info",
-                    ),
+                    ComponentLogging::CliStderr => {
+                        ui_logging::init_stderr_from_env("tau_harness=info,tau_cli=info,warn")
+                    }
                     ComponentLogging::RunnerManaged => {}
                 }
                 (component.runner)().map_err(|e| CliError::Participant(e.to_string()))

@@ -18,6 +18,29 @@ use super::*;
 /// Serializes fixtures that observe the test-only detached-overload latch.
 static SATURATION_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Ensures arbitrary script-authored text is absent from the normal Rhai
+/// baseline and appears only when the private target is explicitly enabled.
+#[test]
+fn script_logging_requires_the_private_debug_target() {
+    fn capture(filter: &str) -> String {
+        let writer = SharedWriter::default();
+        let captured = writer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
+            log_script_message("info", "private-script-canary");
+        });
+        String::from_utf8(captured.bytes()).expect("UTF-8 tracing output")
+    }
+
+    assert!(!capture("rhai=info,warn").contains("private-script-canary"));
+    assert!(capture("rhai-script-private=debug,warn").contains("private-script-canary"));
+}
+
 #[derive(Clone, Default)]
 struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 

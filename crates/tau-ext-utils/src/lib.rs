@@ -61,6 +61,7 @@ const HOST_TIMEZONE_REFRESH_SECONDS: u64 = 60;
 /// Returns protocol I/O, handshake, or handler errors that prevent the
 /// extension from continuing.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
+    tau_client::init_logging_for("tau_ext_utils");
     run(std::io::stdin(), std::io::stdout())
 }
 
@@ -96,6 +97,11 @@ where
         runtime.state_mut().papercut_storage = Some(Box::new(storage));
     }
     send_startup(&mut runtime, config.papercut.enable)?;
+    tracing::info!(
+        target: "tau_ext_utils",
+        papercut_enabled = config.papercut.enable,
+        "utils configured"
+    );
     TimerRuntime::run(runtime)?;
     Ok(())
 }
@@ -692,10 +698,8 @@ impl TimerRuntime {
                     deadline: DailyDeadline::At(next_fire_at),
                 } => match schedule.advance_past(*next_fire_at, now, local_timezone) {
                     Ok(advance) => Some(advance),
-                    Err(error) => {
+                    Err(_error) => {
                         tracing::warn!(
-                            timer_id = timer.timer_id,
-                            %error,
                             "daily timer could not resolve its next wall-clock occurrence"
                         );
                         self.timers.insert(key, timer);
@@ -766,11 +770,9 @@ impl TimerRuntime {
                 Ok(next_fire_at) => {
                     *deadline = DailyDeadline::At(next_fire_at);
                 }
-                Err(error) => tracing::warn!(
-                    timer_id = timer.timer_id,
-                    %error,
-                    "daily timer could not follow the changed host local timezone"
-                ),
+                Err(_error) => {
+                    tracing::warn!("daily timer could not follow the changed host local timezone")
+                }
             }
         }
     }
@@ -791,8 +793,8 @@ impl TimerRuntime {
                 self.local_timezone = Some(timezone);
                 true
             }
-            Err(error) => {
-                tracing::warn!(%error, "host local timezone refresh failed");
+            Err(_error) => {
+                tracing::warn!("host local timezone refresh failed");
                 false
             }
         }
@@ -875,13 +877,9 @@ impl TimerRuntime {
                     Ok(next_fire_at) => {
                         *deadline = DailyDeadline::At(next_fire_at);
                     }
-                    Err(error) => {
+                    Err(_error) => {
                         *deadline = DailyDeadline::AwaitingTimezone;
-                        tracing::warn!(
-                            timer_id = timer.timer_id,
-                            %error,
-                            "replayed daily timer retained pending timezone recovery"
-                        );
+                        tracing::warn!("replayed daily timer retained pending timezone recovery");
                     }
                 }
                 self.timers.insert(key, timer);
@@ -977,8 +975,8 @@ impl TimerRuntime {
         };
         let session_id = match tau_proto::SessionId::parse(session_id) {
             Ok(session_id) => session_id,
-            Err(error) => {
-                tracing::warn!(%error, "papercut session attribution was invalid");
+            Err(_error) => {
+                tracing::warn!("papercut session attribution was invalid");
                 return papercut_not_recorded("active session attribution was invalid");
             }
         };
@@ -988,8 +986,8 @@ impl TimerRuntime {
         let record = PapercutRecord::new(invoke.agent_id.clone(), session_id, now, report);
         let mut line = match serde_json::to_vec(&record) {
             Ok(line) => line,
-            Err(error) => {
-                tracing::warn!(%error, "papercut serialization failed");
+            Err(_error) => {
+                tracing::warn!("papercut serialization failed");
                 return papercut_not_recorded("record serialization failed");
             }
         };
@@ -1087,12 +1085,8 @@ impl TimerRuntime {
                 let resolution = schedule.next_after(now, self.local_timezone.as_ref());
                 let deadline = match resolution {
                     Ok(next_fire_at) => DailyDeadline::At(next_fire_at),
-                    Err(error) if source == ScheduleMutationSource::Replay => {
-                        tracing::warn!(
-                            timer_id = args.timer_id,
-                            %error,
-                            "restored daily timer retained pending timezone recovery"
-                        );
+                    Err(_error) if source == ScheduleMutationSource::Replay => {
+                        tracing::warn!("restored daily timer retained pending timezone recovery");
                         DailyDeadline::AwaitingTimezone
                     }
                     Err(error) => return Err(error),

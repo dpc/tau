@@ -641,13 +641,13 @@ impl Engine {
             .save_google_refresh_token(&account.id, &finished.refresh_token)?;
         self.state.clear_pending_google_auth(&account.id)?;
         if let Some(access_token) = finished.access_token
-            && let Err(message) = self.google.prime_access_token_cache(
+            && let Err(_message) = self.google.prime_access_token_cache(
                 &account.id,
                 access_token,
                 finished.expires_in_secs,
             )
         {
-            tracing::warn!(target: crate::LOG_TARGET, error = %message, "failed to prime Google Calendar access token cache");
+            tracing::warn!(target: crate::LOG_TARGET, "failed to prime Google Calendar access token cache");
         }
         Ok(format!(
             "Google Calendar authorization stored for account {}.",
@@ -818,8 +818,8 @@ impl Engine {
         let Some(entry) = self.calendar_log_entry(invocation, result) else {
             return;
         };
-        if let Err(message) = self.state.append_calendar_log(&entry) {
-            tracing::warn!(target: crate::LOG_TARGET, error = %message, "failed to append calendar log");
+        if let Err(_message) = self.state.append_calendar_log(&entry) {
+            tracing::warn!(target: crate::LOG_TARGET, "failed to append calendar log");
         }
     }
 

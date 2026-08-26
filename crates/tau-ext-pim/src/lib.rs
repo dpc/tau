@@ -123,6 +123,8 @@ impl RuntimeState {
         };
         if let Err(message) = &result {
             self.reject_modules(message.clone());
+        } else {
+            tracing::info!(target: LOG_TARGET, "PIM configured");
         }
         result
     }

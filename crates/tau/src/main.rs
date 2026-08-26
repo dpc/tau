@@ -3,12 +3,12 @@ fn main() -> std::process::ExitCode {
         tau_cli::Component {
             name: "ext-shell",
             runner: tau_ext_shell::run_stdio,
-            logging: tau_cli::ComponentLogging::CliStderr,
+            logging: tau_cli::ComponentLogging::RunnerManaged,
         },
         tau_cli::Component {
             name: "ext-test-dummy",
             runner: tau_ext_test_dummy::run_stdio,
-            logging: tau_cli::ComponentLogging::CliStderr,
+            logging: tau_cli::ComponentLogging::RunnerManaged,
         },
         tau_cli::Component {
             name: "ext-provider-builtin",

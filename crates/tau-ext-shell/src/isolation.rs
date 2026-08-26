@@ -153,8 +153,7 @@ impl ReadOnlyMountWarningPipe {
             )
         };
         if 0 < len {
-            let message = String::from_utf8_lossy(&buf[..len as usize]);
-            warn!(reason = %message.trim(), "shell read-only cwd mount unavailable");
+            warn!("shell read-only cwd mount unavailable");
         }
     }
 }

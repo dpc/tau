@@ -28,6 +28,11 @@ pub(super) struct ProviderPool {
 }
 
 impl ProviderPool {
+    /// Return the configured number of providers.
+    pub(super) fn len(&self) -> usize {
+        self.providers.len()
+    }
+
     /// Validate one configured operation pool and reset its cursor to index
     /// zero.
     pub(super) fn new(name: &str, providers: Vec<WebAdapter>) -> Result<Self, String> {

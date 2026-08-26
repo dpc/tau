@@ -3456,8 +3456,8 @@ impl<B: EmailBackend> Engine<B> {
         let Some(entry) = self.email_log_entry(command, result) else {
             return;
         };
-        if let Err(message) = self.state.append_email_log(&entry) {
-            tracing::warn!(target: LOG_TARGET, error = %message, "failed to append email log");
+        if let Err(_message) = self.state.append_email_log(&entry) {
+            tracing::warn!(target: LOG_TARGET, "failed to append email log");
         }
     }
 
@@ -4440,13 +4440,13 @@ impl<B: EmailBackend> Engine<B> {
             .save_google_refresh_token(&account_id, &refresh_token)?;
         self.state.clear_pending_google_auth(&account_id)?;
         if let Some(access_token) = access_token
-            && let Err(message) = self.backend.prime_google_access_token_cache(
+            && let Err(_message) = self.backend.prime_google_access_token_cache(
                 &account_id,
                 access_token,
                 expires_in_secs,
             )
         {
-            tracing::warn!(target: LOG_TARGET, error = %message, "failed to prime Google email access token cache");
+            tracing::warn!(target: LOG_TARGET, "failed to prime Google email access token cache");
         }
         Ok(format!(
             "Google email authorization stored for account {}.",

@@ -29,6 +29,7 @@ tau-swarm-client.workspace = true
 tau-swarm-client-api.workspace = true
 tau-swarm-iroh.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tau-swarm-core.workspace = true

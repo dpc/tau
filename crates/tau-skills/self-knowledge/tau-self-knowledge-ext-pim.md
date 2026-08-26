@@ -155,5 +155,5 @@ If ICS calendar reads fail, verify the private ICS URL secret is present and rea
 For tracing logs, use:
 
 ```sh
-TAU_EXT_LOG=pim=debug tau
+TAU_LOG='pim=debug,warn' tau
 ```

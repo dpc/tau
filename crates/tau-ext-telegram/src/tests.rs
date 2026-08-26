@@ -2653,6 +2653,48 @@ fn telegram_contention_diagnostic_classifies_409_conflicts() {
     }
 }
 
+/// Ensures default polling warnings never expose remote bodies, tokens, chat
+/// identities, message identities, or protocol text.
+#[test]
+fn telegram_poll_warnings_are_categorical() {
+    let writer = SharedWriter::default();
+    let captured = writer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("telegram=info,warn")
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::dispatcher::with_default(&tracing::Dispatch::new(subscriber), || {
+        crate::gateway::log_gateway_listening();
+        let _ = log_telegram_poll_failure(&TelegramApiFailure::Http {
+            status: 500,
+            message: "private-body token-canary chat-123 message-456".to_owned(),
+        });
+        let _ = log_telegram_poll_failure(&TelegramApiFailure::Protocol(
+            "private-protocol-canary".to_owned(),
+        ));
+    });
+    let output = String::from_utf8(captured.bytes()).expect("UTF-8 tracing output");
+
+    assert_eq!(output.matches("telegram polling failed").count(), 2);
+    assert_eq!(
+        output
+            .matches("telegram gateway configured and listening")
+            .count(),
+        1
+    );
+    for canary in [
+        "private-body",
+        "token-canary",
+        "chat-123",
+        "message-456",
+        "private-protocol-canary",
+    ] {
+        assert!(!output.contains(canary), "warning leaked `{canary}`");
+    }
+}
+
 /// Webhook error text is Telegram-provided diagnostic content, so it must be
 /// bounded and stripped of non-whitespace control characters before being shown
 /// to the user.

@@ -1,5 +1,6 @@
 //! Focused environment-filter contract tests for extension stderr logging.
 
+use std::env::VarError;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
@@ -55,7 +56,7 @@ fn capture(filter: EnvFilter, emit: impl FnOnce()) -> String {
 /// extension's default.
 #[test]
 fn explicit_tau_log_filter_replaces_the_extension_default() {
-    let filter = filter_from_env("rostra=info,warn", |name| {
+    let filter = filter_from_env("tau_ext_rostra=info,warn", |name| {
         assert_eq!(name, "TAU_LOG");
         Ok("warn".to_owned())
     });
@@ -63,8 +64,8 @@ fn explicit_tau_log_filter_replaces_the_extension_default() {
         tracing::info!(target: "rostra", "hidden Rostra info");
         tracing::warn!(target: "unrelated", "global warning fallback");
     });
-    let default_output = capture(EnvFilter::new("rostra=info,warn"), || {
-        tracing::info!(target: "rostra", "default Rostra info");
+    let default_output = capture(EnvFilter::new("tau_ext_rostra=info,warn"), || {
+        tracing::info!(target: "tau_ext_rostra", "default Rostra info");
     });
 
     assert!(!output.contains("hidden Rostra info"));
@@ -72,12 +73,48 @@ fn explicit_tau_log_filter_replaces_the_extension_default() {
     assert!(default_output.contains("default Rostra info"));
 }
 
+/// Ensures missing and malformed operator filters both select the component's
+/// scoped info/global-warning fallback without enabling dependency info.
+#[test]
+fn absent_or_invalid_tau_log_uses_the_component_fallback() {
+    for configured in [
+        Err(VarError::NotPresent),
+        Ok("[invalid directive".to_owned()),
+    ] {
+        let filter = filter_from_env("tau_ext_rostra=info,warn", |_| configured);
+        let output = capture(filter, || {
+            tracing::info!(target: "tau_ext_rostra", "component baseline");
+            tracing::info!(target: "dependency", "private dependency info");
+            tracing::warn!(target: "dependency", "dependency warning");
+        });
+
+        assert!(output.contains("component baseline"));
+        assert!(!output.contains("private dependency info"));
+        assert!(output.contains("dependency warning"));
+    }
+}
+
+/// Locks the subtle EnvFilter contract that an empty explicit value is valid
+/// and disables both the component baseline and global warning fallback.
+#[test]
+fn empty_tau_log_is_a_complete_off_replacement() {
+    let filter = filter_from_env("tau_ext_rostra=info,warn", |_| Ok(String::new()));
+    let output = capture(filter, || {
+        tracing::info!(target: "tau_ext_rostra", "component baseline");
+        tracing::warn!(target: "dependency", "dependency warning");
+    });
+
+    assert!(output.is_empty());
+}
+
 /// Ensures the published `rostra=debug,warn` directive reaches both the
 /// extension target and the upstream Rostra-client target while retaining
 /// warnings from every other target.
 #[test]
 fn rostra_debug_prefix_and_global_warn_fallback_are_effective() {
-    let filter = filter_from_env("rostra=info,warn", |_| Ok("rostra=debug,warn".to_owned()));
+    let filter = filter_from_env("tau_ext_rostra=info,warn", |_| {
+        Ok("tau_ext_rostra=debug,rostra=debug,warn".to_owned())
+    });
     let output = capture(filter, || {
         tracing::debug!(target: "rostra::tools::write", "extension debug");
         tracing::debug!(target: "rostra_client::publisher", "upstream debug");

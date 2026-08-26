@@ -362,7 +362,6 @@ async fn post(invoke: &ToolStarted, client: &Client, secret: RostraIdSecretKey) 
         .social_post(secret, args.body, reply_to, tags)
         .await
         .map_err(|_| ToolFailure::storage())?;
-    log_local_commit(&invoke.call_id, "post", event.event_id);
     #[cfg(test)]
     if let Some(gate) = test_gate {
         gate.committed
@@ -397,7 +396,6 @@ async fn react(invoke: &ToolStarted, client: &Client, secret: RostraIdSecretKey)
         .social_post(secret, reaction, reply_to, BTreeSet::new())
         .await
         .map_err(|_| ToolFailure::storage())?;
-    log_local_commit(&invoke.call_id, "reaction", event.event_id);
     Ok(result(client, event.event_id, "reaction"))
 }
 
@@ -568,11 +566,18 @@ fn result(client: &Client, event_id: rostra_core::EventId, operation: &str) -> S
 }
 
 /// Emit the post-commit diagnostic without exposing signed content or identity.
+#[cfg(test)]
 pub(crate) fn log_local_commit(
     call_id: &tau_proto::ToolCallId,
     operation: &'static str,
     event_id: rostra_core::EventId,
 ) {
+    tracing::info!(
+        target: crate::LOG_TARGET,
+        operation,
+        local_state = "stored",
+        "local_commit"
+    );
     tracing::debug!(
         target: crate::LOG_TARGET,
         call_id = %call_id,
@@ -582,7 +587,40 @@ pub(crate) fn log_local_commit(
     );
 }
 
+/// Emit a local-commit record from the successful signed-write result only.
+pub(crate) fn log_local_commit_result(invoke: &ToolStarted, text: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return;
+    };
+    let operation = match value.get("operation").and_then(serde_json::Value::as_str) {
+        Some("reaction") => "reaction",
+        Some("post" | "reply") => "post",
+        _ => return,
+    };
+    let Some(event_id) = value
+        .get("event_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| ExternalEventId::from_str(value).ok())
+    else {
+        return;
+    };
+    tracing::info!(
+        target: crate::LOG_TARGET,
+        operation,
+        local_state = "stored",
+        "local_commit"
+    );
+    tracing::debug!(
+        target: crate::LOG_TARGET,
+        call_id = %invoke.call_id,
+        operation,
+        event_id = %event_id.event_id().to_string().chars().take(12).collect::<String>(),
+        "local_commit"
+    );
+}
+
 /// Return a non-identifying diagnostic prefix for one event ID.
+#[cfg(test)]
 pub(crate) fn short_event_id(event_id: rostra_core::EventId) -> String {
     event_id.to_string().chars().take(12).collect()
 }

@@ -363,6 +363,32 @@ The variable accepts names only, not arguments or credentials. Ordered CLI
 extension overrides are applied after it, so an explicit CLI disable still
 wins. Use one joined environment value rather than repeated keys.
 
+## Extension logs
+
+Each supervised extension writes stderr to
+`~/.local/state/tau/sessions/<session-id>/logs/<instance>.log`. When `TAU_LOG`
+is absent or invalid, Tau's built-in component processes enable `info` for
+their own first-party target and use `warn` as the global fallback. Custom
+extension processes own their subscriber and fallback policy. The built-in
+policy keeps low-frequency configuration, connection, and durable-completion
+records visible without enabling dependency `info` logs.
+
+An explicit valid `TAU_LOG` is a complete replacement and is inherited unchanged:
+
+```console
+TAU_LOG=warn tau
+TAU_LOG='xmpp=debug,warn' tau
+```
+
+Debug and trace records can contain private identifiers, queries, paths, or
+script-authored text. Extension stderr is stored unredacted and follows
+whole-session retention; it is not covered by the shorter debug-diagnostic
+cleanup. Dependency warnings can also contain public identifiers or filesystem
+paths, so treat the entire file as private. `tau attach` starts only a new UI,
+so its environment cannot change
+the filter of an already-running harness or extension. Restart or resume the
+harness with the desired filter instead.
+
 ## Failure and naming behavior
 
 `enable` answers whether an extension should run. For an enabled extension,

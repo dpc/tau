@@ -412,17 +412,18 @@ fn load_initial_runtime(
                 Ok(prepared) => prepared,
                 Err(error) => {
                     let message = error.to_string();
-                    tracing::warn!(target: LOG_TARGET, error = %message, "rhai disabled");
+                    tracing::warn!(target: LOG_TARGET, "rhai disabled");
                     send_config_error(manual, message)?;
                     return Ok(None);
                 }
             };
             send_init_messages(manual, prepared)?;
             runtime.start(config_json, &output);
+            tracing::info!(target: LOG_TARGET, enabled = true, "rhai configured");
             Ok(Some(runtime))
         }
         Err(message) => {
-            tracing::warn!(target: LOG_TARGET, error = %message, "rhai disabled");
+            tracing::warn!(target: LOG_TARGET, "rhai disabled");
             send_config_error(manual, message)?;
             Ok(None)
         }
@@ -842,13 +843,19 @@ fn register_host_functions(
 
     engine.register_fn(
         "tau_log",
-        move |level: ImmutableString, message: ImmutableString| match level.as_str() {
-            "trace" => tracing::trace!(target: LOG_TARGET, message = %message, "rhai script log"),
-            "debug" => tracing::debug!(target: LOG_TARGET, message = %message, "rhai script log"),
-            "warn" => tracing::warn!(target: LOG_TARGET, message = %message, "rhai script log"),
-            "error" => tracing::error!(target: LOG_TARGET, message = %message, "rhai script log"),
-            _ => tracing::info!(target: LOG_TARGET, message = %message, "rhai script log"),
+        move |level: ImmutableString, message: ImmutableString| {
+            log_script_message(&level, &message)
         },
+    );
+}
+
+/// Emit explicitly opted-in script-authored text on its private debug target.
+fn log_script_message(level: &str, message: &str) {
+    tracing::debug!(
+        target: "rhai-script-private",
+        requested_level = level,
+        message,
+        "rhai script log"
     );
 }
 
@@ -1046,7 +1053,7 @@ fn enqueue_event(output: &Output, event: Dynamic, persist: bool) {
             output.emit(event, persist);
         }
         Err(message) => {
-            tracing::warn!(target: LOG_TARGET, error = %message, "script emitted invalid event");
+            tracing::warn!(target: LOG_TARGET, "script emitted invalid event");
             output.request_notice(
                 format!("rhai invalid event: {message}"),
                 NoticeLevel::Warning,
@@ -1476,20 +1483,19 @@ impl Drop for ScriptRuntime {
 fn join_shell_worker_bounded(job: PendingShellJob) {
     job.cancel.cancel();
     if job.join_finished.wait_timeout(SHELL_SHUTDOWN_JOIN_TIMEOUT) {
-        if let Err(err) = job.join_handle.join() {
-            tracing::warn!(target: LOG_TARGET, ?err, "shell worker panicked during shutdown");
+        if job.join_handle.join().is_err() {
+            tracing::warn!(target: LOG_TARGET, "shell worker panicked during shutdown");
         }
     } else {
         tracing::warn!(
             target: LOG_TARGET,
-            command = %job.command,
             "shell worker did not finish within shutdown timeout after cancellation"
         );
     }
 }
 
 fn report_callback_error(output: &Output, message: String) {
-    tracing::warn!(target: LOG_TARGET, error = %message, "rhai callback failed");
+    tracing::warn!(target: LOG_TARGET, "rhai callback failed");
     output.request_notice(message, NoticeLevel::Warning);
 }
 

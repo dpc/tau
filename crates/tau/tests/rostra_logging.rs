@@ -24,7 +24,7 @@ fn rostra_debug_command_reaches_the_bundled_rostra_target() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_tau"))
         .arg("component")
         .arg("ext-rostra")
-        .env("TAU_LOG", "rostra=debug,warn")
+        .env("TAU_LOG", "tau_ext_rostra=debug,rostra=debug,warn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -96,12 +96,18 @@ fn rostra_debug_command_reaches_the_bundled_rostra_target() {
         .expect("component stderr is UTF-8");
 
     assert!(status.success());
-    assert_eq!(stderr.matches("local_commit").count(), 1);
+    assert_eq!(stderr.matches("local_commit").count(), 2);
     assert!(stderr.contains("rostra"));
     let local_commit = stderr
         .lines()
-        .find(|line| line.contains("local_commit"))
+        .find(|line| line.contains("call_id=subprocess-log-canary"))
         .expect("post-commit Rostra log record");
+    let default_info = stderr
+        .lines()
+        .find(|line| line.contains("local_state=\"stored\""))
+        .expect("default-info local commit record");
+    assert!(!default_info.contains("call_id"));
+    assert!(!default_info.contains("event_id"));
     let event_id = local_commit
         .split_whitespace()
         .find_map(|field| field.strip_prefix("event_id="))

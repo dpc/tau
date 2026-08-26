@@ -74,7 +74,9 @@ fn on_intercept(event, persist) {
 - `tau_emit(event)` — emit a durable Tau event map.
 - `tau_emit_transient(event)` — emit a transient Tau event map.
 - `tau_info(message)` / `tau_info(message, level)` — request a live user notice; the harness owns and sanitizes the resulting `harness.notice`. `level` is `"info"`, `"warning"`, `"debug"`, or `"trace"` (`"important"` is accepted as legacy `"warning"`).
-- `tau_log(level, message)` — write to extension logs only.
+- `tau_log(level, message)` — write private script-authored text to the
+  `rhai-script-private` debug target. Enable it explicitly with
+  `TAU_LOG='rhai-script-private=debug,warn'`.
 
 `register_tool*` are available only during `init`. Other side-effecting host functions are available to `start`, raw event/intercept callbacks, tool handlers, and shell completion callbacks, but not during `init`. This keeps broken init scripts inert.
 

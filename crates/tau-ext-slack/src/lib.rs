@@ -4381,7 +4381,7 @@ async fn socket_worker_once_with_heartbeat(
     )
     .await
     .map_err(|_| "Slack websocket connection failed".to_owned())?;
-    tracing::info!(target: LOG_TARGET, lifecycle = "connected", "Slack Socket Mode connected");
+    tracing::debug!(target: LOG_TARGET, lifecycle = "connected", "Slack Socket Mode connected");
     let connected_at = Instant::now();
     let mut hello_at = None;
     let heartbeat_started_at = path_tokio_time::Instant::now();
@@ -5342,6 +5342,7 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .instance_name = instance_name;
+    tracing::info!(target: LOG_TARGET, mode = "socket", "Slack configured");
     Ok(())
 }
 

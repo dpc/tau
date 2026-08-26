@@ -322,6 +322,7 @@ impl Extension {
         state.config = Some(cfg);
         state.publisher_name = Some(publisher);
         self.state.changed.notify_all();
+        tracing::info!(target: LOG_TARGET, "Zulip configured");
     }
 
     fn clear_config(&self) {

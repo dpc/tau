@@ -667,15 +667,6 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
         // here; the harness child now reads its own `built` snapshot
         // (see `tau_harness::version::export_to_env`) and publishes
         // them to its own environment instead.
-        // Default-enable info logging in the child process so `tau`
-        // captures harness logs without requiring an env var. Users
-        // can still override/filter with `TAU_LOG`.
-        .env(
-            "TAU_LOG",
-            std::env::var("TAU_LOG").unwrap_or_else(|_| {
-                "tau_harness=info,tau_cli=info,provider-builtin=info".to_owned()
-            }),
-        )
         .stdin(spec.stdin)
         .stdout(spec.stdout)
         .stderr(spec.stderr);

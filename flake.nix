@@ -620,7 +620,6 @@
           ];
           NEXTEST_SHOW_PROGRESS = "none";
           NEXTEST_STATUS_LEVEL = "none";
-          TAU_LOG = "tau_ext_shell=debug,tau_harness=debug,info";
           packages = [
             cargoCrap
             selfciMq

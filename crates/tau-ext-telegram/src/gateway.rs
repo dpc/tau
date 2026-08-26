@@ -132,7 +132,10 @@ pub(super) fn run_from_env() -> std::process::ExitCode {
     }
     let result = GatewayConfig::from_env_args(args, |name| env::var(name).ok())
         .and_then(|config| Gateway::new(config, Arc::new(HttpTelegramClient::default())))
-        .and_then(Gateway::run_forever);
+        .and_then(|gateway| {
+            log_gateway_listening();
+            gateway.run_forever()
+        });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -140,6 +143,11 @@ pub(super) fn run_from_env() -> std::process::ExitCode {
             error.exit_code()
         }
     }
+}
+
+/// Emit the standalone gateway's content-free successful startup boundary.
+pub(super) fn log_gateway_listening() {
+    tracing::info!(target: crate::LOG_TARGET, "telegram gateway configured and listening");
 }
 
 /// Validated configuration for the standalone gateway daemon.
@@ -445,10 +453,6 @@ impl Gateway {
         mut self,
         mut retry_wait: impl FnMut(Duration),
     ) -> Result<(), GatewayExitError> {
-        eprintln!(
-            "Telegram gateway started; local socket: {}",
-            self.socket_state.socket_path.display()
-        );
         loop {
             self.durable = self
                 .durable_store
@@ -463,7 +467,7 @@ impl Gateway {
                     if let Some(exit) = GatewayExitError::runtime_poll(&error) {
                         return Err(exit);
                     }
-                    tracing::warn!(target: crate::LOG_TARGET, error = %error, "telegram gateway polling failed");
+                    tracing::warn!(target: crate::LOG_TARGET, "telegram gateway polling failed");
                     retry_wait(Duration::from_secs(5));
                 }
             }
@@ -541,7 +545,6 @@ impl Gateway {
         if !self.cfg.allowed_user_ids.contains(&message.user_id) {
             tracing::warn!(
                 target: crate::LOG_TARGET,
-                user_id = message.user_id,
                 "telegram gateway ignored message from unallowed user"
             );
             self.durable.rejected_update_count =
@@ -584,7 +587,6 @@ impl Gateway {
             }
             tracing::warn!(
                 target: crate::LOG_TARGET,
-                chat_id = message.chat_id,
                 "telegram gateway ignored start command from unconfigured group"
             );
             return Some(UpdateOutcome::AdvanceOffset);
@@ -592,7 +594,6 @@ impl Gateway {
         if !is_private_message_chat(message) {
             tracing::warn!(
                 target: crate::LOG_TARGET,
-                chat_id = message.chat_id,
                 "telegram gateway ignored unconfigured group start command"
             );
             return Some(UpdateOutcome::AdvanceOffset);
@@ -642,14 +643,12 @@ impl Gateway {
             }
             tracing::warn!(
                 target: crate::LOG_TARGET,
-                chat_id = message.chat_id,
                 "telegram gateway ignored unconfigured group message"
             );
             UpdateOutcome::AdvanceOffset
         } else if !is_private_message_chat(message) {
             tracing::warn!(
                 target: crate::LOG_TARGET,
-                chat_id = message.chat_id,
                 "telegram gateway ignored unconfigured group message"
             );
             UpdateOutcome::AdvanceOffset
@@ -676,8 +675,8 @@ impl Gateway {
         let text = bounded_reply_text(text);
         match self.client.send_message(&self.cfg, chat_id, &text) {
             Ok(()) => true,
-            Err(message) => {
-                tracing::warn!(target: crate::LOG_TARGET, error = %message, "telegram gateway reply failed");
+            Err(_message) => {
+                tracing::warn!(target: crate::LOG_TARGET, "telegram gateway reply failed");
                 false
             }
         }
@@ -1626,10 +1625,9 @@ impl GatewaySocketState {
         let text = format!("[{}] {message}", short_id(&key.agent_id));
         self.client
             .send_message(&self.cfg, chat_id, &text)
-            .map_err(|error| {
+            .map_err(|_error| {
                 tracing::warn!(
                     target: crate::LOG_TARGET,
-                    error = %error,
                     "telegram gateway outbound send failed"
                 );
                 "Telegram gateway could not send the message.".to_owned()
@@ -2110,8 +2108,8 @@ fn accept_gateway_socket_loop(listener: UnixListener, state: Arc<GatewaySocketSt
                     .name("telegram-gateway-client".to_owned())
                     .spawn(move || handle_gateway_socket_client(stream, state));
             }
-            Err(error) => {
-                tracing::warn!(target: crate::LOG_TARGET, error = %error, "telegram gateway socket accept failed");
+            Err(_error) => {
+                tracing::warn!(target: crate::LOG_TARGET, "telegram gateway socket accept failed");
             }
         }
     }

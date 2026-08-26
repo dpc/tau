@@ -631,6 +631,12 @@ impl TauExtension for WebsearchExtension {
                 cx.state.hosted_client.configure(cfg.hosted);
                 cx.state.search_pool = cfg.search_pool;
                 cx.state.fetch_pool = cfg.fetch_pool;
+                tracing::info!(
+                    target: LOG_TARGET,
+                    search_pool = cx.state.search_pool.len(),
+                    fetch_pool = cx.state.fetch_pool.len(),
+                    "websearch configured"
+                );
                 Ok(())
             })
             .tool(hybrid_search_tool_spec(), handle_tool_invocation)

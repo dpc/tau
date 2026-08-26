@@ -2306,7 +2306,6 @@ fn hydrate_profile_credentials_with(
                 }
                 tracing::warn!(
                     target: LOG_TARGET,
-                    provider = %name,
                     credential_error = credential_hydration_error_category(&error),
                     "skipping provider with unavailable credential"
                 );
@@ -2316,7 +2315,6 @@ fn hydrate_profile_credentials_with(
         }) else {
             tracing::warn!(
                 target: LOG_TARGET,
-                provider = %name,
                 "skipping provider after unexpected credential result"
             );
             profiles.providers.remove(&name);
@@ -2367,7 +2365,6 @@ fn hydrate_profile_credentials_with(
         if valid.is_err() {
             tracing::warn!(
                 target: LOG_TARGET,
-                provider = %name,
                 "skipping provider with invalid version-zero credential"
             );
             profiles.providers.remove(&name);
@@ -2809,15 +2806,30 @@ where
                 *settings_snapshot
                     .lock()
                     .expect("lock provider settings snapshot") = profiles.clone();
+                let provider_count = profiles.providers.len();
+                let models = models_for_profiles(&profiles);
+                let model_count = models.len();
                 if !publish_models_after_configure {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        providers = provider_count,
+                        models = model_count,
+                        "provider configured"
+                    );
                     return Ok(());
                 }
                 cx.state
                     .set_startup_responses_modes(profiles.startup_responses_modes());
-                cx.handle
-                    .emit_transient(Event::ProviderModelsDeclared(ProviderModelsDeclared {
-                        models: models_for_profiles(&profiles),
-                    }))
+                cx.handle.emit_transient(Event::ProviderModelsDeclared(
+                    ProviderModelsDeclared { models },
+                ))?;
+                tracing::info!(
+                    target: LOG_TARGET,
+                    providers = provider_count,
+                    models = model_count,
+                    "provider configured"
+                );
+                Ok(())
             })
             .on_raw_live(
                 tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_PREWARM_REQUESTED),
@@ -5411,11 +5423,10 @@ fn production_prompt_executor() -> PromptExecutor {
                 );
             }
             Ok(None) => {}
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    agent_prompt_id = %agent_prompt_id,
-                    "prompt worker failed to emit provider response: {error}"
+                    "prompt worker failed to emit provider response"
                 );
             }
         }
@@ -5646,7 +5657,7 @@ fn finish_canceled<W: Write>(
     prompt: &tau_proto::AgentPromptCreated,
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
-    tracing::info!(
+    tracing::debug!(
         target: LOG_TARGET,
         agent_prompt_id = %agent_prompt_id,
         "skipping provider request — already canceled by harness",
@@ -5912,10 +5923,15 @@ fn resolve_chatgpt_backend_with_refresh(
                 *auth_store = refreshed;
             }
             Err(error @ RefreshCredentialsError::Storage(_)) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     provider = %provider_name,
-                    "failed to refresh ChatGPT credentials: {error}"
+                    %error,
+                    "ChatGPT credential refresh details"
+                );
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "failed to refresh ChatGPT credentials"
                 );
                 if forced {
                     auth_store.access_token.clear();
@@ -5925,10 +5941,15 @@ fn resolve_chatgpt_backend_with_refresh(
                 error @ (RefreshCredentialsError::IdentityMismatch
                 | RefreshCredentialsError::RejectedGeneration),
             ) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     provider = %provider_name,
-                    "failed to refresh ChatGPT credentials: {error}"
+                    %error,
+                    "ChatGPT credential refresh details"
+                );
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "failed to refresh ChatGPT credentials"
                 );
                 auth_store.access_token.clear();
             }
@@ -5937,10 +5958,15 @@ fn resolve_chatgpt_backend_with_refresh(
                 | RefreshCredentialsError::Suppressed { credentials, error },
             ) => {
                 *auth_store = *credentials;
-                tracing::warn!(
+                tracing::debug!(
                     target: LOG_TARGET,
                     provider = %provider_name,
-                    "failed to refresh ChatGPT credentials: {error}"
+                    %error,
+                    "ChatGPT credential refresh details"
+                );
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "failed to refresh ChatGPT credentials"
                 );
                 if forced {
                     auth_store.access_token.clear();

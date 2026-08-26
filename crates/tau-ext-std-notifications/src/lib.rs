@@ -1287,7 +1287,6 @@ impl NotificationLoop {
             let Some(agent_id) = self.agent_for_tool_result(&result.call_id) else {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    call_id = %result.call_id,
                     "background tool placeholder has no known owning agent; ignoring for notifications",
                 );
                 return;
@@ -1532,11 +1531,7 @@ fn process_due_idle_hooks(
         match pending.state {
             IdleState::WaitingIdle { .. } if hook.agent_summary => {
                 let query_id = summary_query_ids.next_id();
-                tracing::info!(
-                    target: LOG_TARGET,
-                    query_id = %query_id,
-                    "{log_prefix} deadline elapsed, requesting agent summary",
-                );
+                log_idle_summary_request(&query_id, log_prefix);
                 let instruction =
                     summary_instruction(&pending.user_prompt, &pending.agent_response);
                 handle.emit_transient(Event::StartAgentRequest(StartAgentRequest {
@@ -1556,22 +1551,41 @@ fn process_due_idle_hooks(
                 pending_hooks.push(pending);
             }
             IdleState::WaitingIdle { .. } => {
-                tracing::info!(
-                    target: LOG_TARGET,
-                    "{log_prefix} deadline elapsed, emitting static notification",
-                );
+                log_static_idle_notification(log_prefix);
                 emit_due_idle_hook(handle, config, agent_display_names, &pending, "")?;
             }
             IdleState::WaitingSummary { .. } => {
-                tracing::info!(
-                    target: LOG_TARGET,
-                    "summary timed out, falling back to static notification",
-                );
+                log_summary_timeout();
                 emit_due_idle_hook(handle, config, agent_display_names, &pending, "")?;
             }
         }
     }
     Ok(())
+}
+
+/// Keep per-idle summary requests on the private debug surface.
+fn log_idle_summary_request(query_id: &str, log_prefix: &str) {
+    tracing::debug!(
+        target: LOG_TARGET,
+        query_id = %query_id,
+        "{log_prefix} deadline elapsed, requesting agent summary",
+    );
+}
+
+/// Keep per-idle static notifications on the private debug surface.
+fn log_static_idle_notification(log_prefix: &str) {
+    tracing::debug!(
+        target: LOG_TARGET,
+        "{log_prefix} deadline elapsed, emitting static notification",
+    );
+}
+
+/// Keep per-idle summary timeouts on the private debug surface.
+fn log_summary_timeout() {
+    tracing::debug!(
+        target: LOG_TARGET,
+        "summary timed out, falling back to static notification",
+    );
 }
 
 fn emit_due_idle_hook(
@@ -1795,21 +1809,19 @@ fn emit_hook(
                     Ok(()) => {
                         handle.emit(Event::Osc1337SetUserVar(Osc1337SetUserVar { name, value }))?
                     }
-                    Err(message) => {
+                    Err(_message) => {
                         tracing::warn!(
                             target: LOG_TARGET,
                             value_len = value.len(),
-                            error = %message,
                             "skipping notification with oversized OSC 1337 user-var value",
                         );
                     }
                 }
             }
-            Err(message) => {
+            Err(_message) => {
                 tracing::warn!(
                     target: LOG_TARGET,
                     name_len = name.len(),
-                    error = %message,
                     "skipping notification with invalid OSC 1337 user-var name",
                 );
             }
@@ -1988,7 +2000,7 @@ fn spawn_command(command_template: &[String], ctx: &TemplateContext<'_>) {
     for part in command_template {
         match render_template(part, ctx) {
             Ok(rendered) => {
-                if let Err(message) = validate_rendered_value_len(
+                if let Err(_message) = validate_rendered_value_len(
                     "command argv element",
                     &rendered,
                     MAX_COMMAND_ARG_LEN,
@@ -1996,17 +2008,15 @@ fn spawn_command(command_template: &[String], ctx: &TemplateContext<'_>) {
                     tracing::warn!(
                         target: LOG_TARGET,
                         arg_len = rendered.len(),
-                        error = %message,
                         "skipping notification command with oversized argument",
                     );
                     return;
                 }
                 argv.push(rendered);
             }
-            Err(e) => {
+            Err(_e) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    error = %e,
                     "failed to render notification command template",
                 );
                 return;
@@ -2025,16 +2035,12 @@ fn spawn_command(command_template: &[String], ctx: &TemplateContext<'_>) {
             Ok(status) if !status.success() => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    program = %program,
-                    status = ?status,
                     "notification command exited non-zero",
                 );
             }
-            Err(e) => {
+            Err(_e) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    program = %program,
-                    error = %e,
                     "notification command failed",
                 );
             }
