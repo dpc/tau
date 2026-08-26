@@ -159,7 +159,13 @@ impl Harness {
             self.fail_initial_prompt_preflight(correlation);
             return Ok(());
         }
-        self.record_durable_agent_session_activity(agent_id);
+        self.record_durable_agent_session_activity(
+            agent_id,
+            matches!(
+                prompt.submission_source,
+                tau_proto::PromptSubmissionSource::HumanUi
+            ) && prompt.initial_prompt_correlation.is_none(),
+        );
         // A fresh ordinary activation explicitly abandons a response-uncertain
         // inference restored from a previous harness runtime. The historical
         // outer start remains unterminated as the crash boundary; this runtime
@@ -385,7 +391,7 @@ impl Harness {
                         return;
                     }
                 };
-                self.record_durable_agent_session_activity(&agent_id);
+                self.record_durable_agent_session_activity(&agent_id, false);
                 let Some(checkpoint) = self.claim_inference_checkpoint(&agent_id, selection) else {
                     continue;
                 };
@@ -591,8 +597,13 @@ impl Harness {
     }
 
     /// Project one accepted durable-agent activation into its session's
-    /// best-effort retention hint.
-    fn record_durable_agent_session_activity(&mut self, agent_id: &AgentId) {
+    /// best-effort retention hint, timing only authenticated UI prompt
+    /// dispatch.
+    fn record_durable_agent_session_activity(
+        &mut self,
+        agent_id: &AgentId,
+        trace_human_ui_prompt_acceptance: bool,
+    ) {
         let Some(session_id) = self.agents.get(agent_id).and_then(|agent| {
             agent
                 .persistence
@@ -601,16 +612,20 @@ impl Harness {
         }) else {
             return;
         };
-        let started = Instant::now();
-        let result = self.store.record_session_activity(session_id.as_str());
-        tracing::trace!(
-            target: "tau_harness::prompt_acceptance",
-            stage = "session_meta_touch",
-            agent_id = %agent_id,
-            result_class = if result.is_ok() { "success" } else { "failure" },
-            session_meta_touch_us = started.elapsed().as_micros(),
-            "content-free prompt acceptance precursor"
-        );
+        if trace_human_ui_prompt_acceptance {
+            let started = Instant::now();
+            let result = self.store.record_session_activity(session_id.as_str());
+            tracing::trace!(
+                target: "tau_harness::prompt_acceptance",
+                stage = "session_meta_touch",
+                agent_id = %agent_id,
+                result_class = if result.is_ok() { "success" } else { "failure" },
+                session_meta_touch_us = started.elapsed().as_micros(),
+                "content-free prompt acceptance precursor"
+            );
+        } else {
+            let _ = self.store.record_session_activity(session_id.as_str());
+        }
     }
 
     /// True when a fresh prompt for one agent should *not* be sent

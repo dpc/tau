@@ -5296,28 +5296,6 @@ impl Harness {
         succeeded
     }
 
-    /// Allocate and append the identity of one accepted activating queue item.
-    ///
-    /// Callers queue the runtime item first, then invoke this helper and wake
-    /// waiters regardless of append success.
-    fn observe_activation_queued(
-        &mut self,
-        cid: &AgentId,
-        kind: tau_proto::ActivationKind,
-        source_observation: Option<tau_proto::ObservationId>,
-        source_call: Option<tau_proto::ToolCallRef>,
-    ) -> tau_proto::ObservationId {
-        let observation_id = tau_proto::ObservationId::random();
-        self.observe_activation_queued_with_id(
-            cid,
-            observation_id,
-            kind,
-            source_observation,
-            source_call,
-        );
-        observation_id
-    }
-
     /// Append and time one activation observation with a caller-provided
     /// identity.
     ///
@@ -5360,24 +5338,31 @@ impl Harness {
         prompt: &mut PendingPrompt,
     ) {
         if prompt.creates_inference_activation() && prompt.activation_observation.is_none() {
-            prompt.activation_observation =
-                Some(self.observe_activation_queued(cid, prompt.activation_kind(), None, None));
+            let observation_id = tau_proto::ObservationId::random();
+            self.append_prompt_activation_queued(
+                cid,
+                observation_id,
+                prompt.activation_kind(),
+                prompt,
+            );
+            prompt.activation_observation = Some(observation_id);
         }
     }
 
-    /// Append one already-allocated prompt activation, tracing only
+    /// Append one already-allocated prompt activation, tracing only direct
     /// authenticated UI prompt acceptance.
     fn append_prompt_activation_queued(
         &mut self,
         cid: &AgentId,
         observation_id: tau_proto::ObservationId,
         kind: tau_proto::ActivationKind,
-        submission_source: &tau_proto::PromptSubmissionSource,
+        prompt: &PendingPrompt,
     ) {
         if matches!(
-            submission_source,
+            prompt.submission_source,
             tau_proto::PromptSubmissionSource::HumanUi
-        ) {
+        ) && prompt.initial_prompt_correlation.is_none()
+        {
             self.observe_activation_queued_with_id(cid, observation_id, kind, None, None);
         } else {
             self.append_activation_queued(cid, observation_id, kind, None, None);
@@ -24065,8 +24050,10 @@ impl Harness {
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
         }
-        let activation = self.observe_activation_queued(
+        let activation = tau_proto::ObservationId::random();
+        self.append_activation_queued(
             &cid,
+            activation,
             tau_proto::ActivationKind::VisibleUser,
             None,
             None,
@@ -24118,12 +24105,7 @@ impl Harness {
                 conv.pending_prompts.push_back(queued_prompt);
             }
             if let Some(activation) = activation {
-                self.append_prompt_activation_queued(
-                    &cid,
-                    activation,
-                    activation_kind,
-                    &prompt.submission_source,
-                );
+                self.append_prompt_activation_queued(&cid, activation, activation_kind, &prompt);
             }
             self.publish_event(
                 None,
@@ -24152,12 +24134,7 @@ impl Harness {
                 conv.pending_prompts.push_back(queued_prompt);
             }
             if let Some(activation) = activation {
-                self.append_prompt_activation_queued(
-                    &cid,
-                    activation,
-                    activation_kind,
-                    &prompt.submission_source,
-                );
+                self.append_prompt_activation_queued(&cid, activation, activation_kind, &prompt);
             }
             self.publish_event(
                 None,
@@ -24175,8 +24152,14 @@ impl Harness {
         }
         let mut prompt = prompt;
         if prompt.creates_inference_activation() {
-            prompt.activation_observation =
-                Some(self.observe_activation_queued(&cid, prompt.activation_kind(), None, None));
+            let activation = tau_proto::ObservationId::random();
+            self.append_prompt_activation_queued(
+                &cid,
+                activation,
+                prompt.activation_kind(),
+                &prompt,
+            );
+            prompt.activation_observation = Some(activation);
         }
         self.dispatch_prompt_for_agent(&cid, prompt)?;
         Ok(PromptSubmission::Dispatched)

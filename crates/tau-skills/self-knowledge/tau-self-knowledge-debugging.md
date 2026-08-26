@@ -240,9 +240,20 @@ payload values, paths, credentials, or durable observation identifiers.
   protocol interval. Its `traffic_class` is exactly `ui_prompt_submitted` or
   `ui_create_agent`; unrelated frames and prompt drafts do not emit these
   prompt-ingress records.
-- `tau_harness::prompt_acceptance` reports `activation_append_us` and
-  `session_meta_touch_us`, safe agent identity, fixed event/stage class, and
-  only `success` or `failure`.
+- `tau_harness::prompt_acceptance` reports only direct authenticated `HumanUi`
+  prompt acceptance, not UI agent creation. An activation append has the fixed
+  `stage=activation_append`, `event_class=agent.activation_queued`, `agent_id`,
+  `result_class` (`success` or `failure`), `activation_append_us`, and the fixed
+  message `content-free prompt acceptance precursor`. A durable dispatch's
+  session-retention touch has the fixed `stage=session_meta_touch`, `agent_id`,
+  `result_class` (`success` or `failure`), `session_meta_touch_us`, and that same
+  fixed message. Immediate and either queued UI branch emit one activation record;
+  a durable UI dispatch emits its one session-touch record. Internal, harness,
+  extension, agent-create, passive, replay, message-wake, and other session
+  metadata traffic emits neither record. These fields contain no prompt/model
+  content, prompt, observation, request, or protocol-correlation identifiers,
+  or authority. `agent_id` is the stable durable target identity and can support
+  agent-level correlation; only timings are process-local diagnostics.
 
 All counters use existing bounded state. The one added correlation value is a
 wrapping fixed-size process-local sequence; it never enters wire or durable

@@ -99,6 +99,27 @@ impl Visit for TraceFieldVisitor {
     }
 }
 
+/// Submit one prompt through the authenticated UI acceptance boundary.
+fn submit_authenticated_ui_prompt(
+    harness: &mut Harness,
+    agent_id: tau_proto::AgentId,
+    text: &str,
+    message_class: tau_proto::PromptMessageClass,
+) -> Result<bool, HarnessError> {
+    harness.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        tau_proto::UiPromptSubmitted {
+            literal: true,
+            session_id: harness.current_session_id.clone(),
+            text: text.to_owned(),
+            agent_id,
+            message_class,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
+}
+
 /// Final-status steering uses the concise generic wording approved for both
 /// unresolved phases.
 #[test]
@@ -299,28 +320,44 @@ fn durable_message_wake_extends_session_retention() {
         .as_deref()
         .map(crate::parse_agent_id)
         .expect("durable agent id");
-    h.resolving_initial_extension_collisions = true;
-    h.publish_event(
-        Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
-        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
-            message_id: tau_proto::AgentMessageId::parse("retention-message").expect("message id"),
-            sender_id: crate::parse_agent_id("manager"),
-            sender_session_id: None,
-            recipient_id: agent_id,
-            kind: tau_proto::AgentMessageKind::Message,
-            watch_provider_status: None,
-            watch_work_status: None,
-            watch_long_wait: None,
-            watch_lifecycle: None,
-            message: "operational wake".to_owned(),
-        }),
-    );
-    let meta_path = stale_session_manifest(&h);
+    let capture = TraceCapture::default();
+    let subscriber = tracing_subscriber::registry().with(TraceCaptureLayer {
+        capture: capture.clone(),
+    });
+    let meta_path = tracing::subscriber::with_default(subscriber, || {
+        h.resolving_initial_extension_collisions = true;
+        h.publish_event(
+            Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+            Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                message_id: tau_proto::AgentMessageId::parse("retention-message")
+                    .expect("message id"),
+                sender_id: crate::parse_agent_id("manager"),
+                sender_session_id: None,
+                recipient_id: agent_id,
+                kind: tau_proto::AgentMessageKind::Message,
+                watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
+                watch_lifecycle: None,
+                message: "MESSAGE-WAKE-CANARY".to_owned(),
+            }),
+        );
+        let meta_path = stale_session_manifest(&h);
 
-    h.resolving_initial_extension_collisions = false;
-    h.try_advance_queue();
+        h.resolving_initial_extension_collisions = false;
+        h.try_advance_queue();
+        meta_path
+    });
 
     assert_session_manifest_refreshed(&meta_path);
+    assert!(
+        capture
+            .events
+            .lock()
+            .expect("trace capture lock")
+            .is_empty(),
+        "message wake session activity must not enter prompt-acceptance tracing"
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -337,10 +374,21 @@ fn durable_replay_activation_extends_session_retention() {
         .expect("loaded durable agent")
         .pending_replay_activation = true;
     let meta_path = stale_session_manifest(&h);
-
-    h.try_advance_queue();
+    let capture = TraceCapture::default();
+    let subscriber = tracing_subscriber::registry().with(TraceCaptureLayer {
+        capture: capture.clone(),
+    });
+    tracing::subscriber::with_default(subscriber, || h.try_advance_queue());
 
     assert_session_manifest_refreshed(&meta_path);
+    assert!(
+        capture
+            .events
+            .lock()
+            .expect("trace capture lock")
+            .is_empty(),
+        "replay activation session activity must not enter prompt-acceptance tracing"
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -535,6 +583,7 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
         .agent_id
         .clone()
         .expect("durable agent id");
+    let expected_trace_agent_id = cid.to_string();
     let capture = TraceCapture::default();
     let subscriber = tracing_subscriber::registry().with(TraceCaptureLayer {
         capture: capture.clone(),
@@ -550,59 +599,52 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
                 .filter(|trace| trace.fields.contains_key("activation_append_us"))
                 .count()
         };
-        assert_eq!(
-            harness
-                .submit_prompt_to_agent(
-                    harness.current_session_id.clone(),
-                    agent_id.as_str(),
-                    PendingPrompt::human_ui("IMMEDIATE-UI-CANARY".to_owned()),
-                )
-                .expect("submit immediate UI prompt"),
-            PromptSubmission::Dispatched
-        );
+        submit_authenticated_ui_prompt(
+            &mut harness,
+            crate::parse_agent_id(&agent_id),
+            "IMMEDIATE-UI-CANARY",
+            tau_proto::PromptMessageClass::User,
+        )
+        .expect("submit immediate UI prompt");
         assert_eq!(activation_count(), 1, "immediate UI append traces once");
-
         assert_eq!(
-            harness
-                .submit_prompt_to_agent(
-                    harness.current_session_id.clone(),
-                    agent_id.as_str(),
-                    PendingPrompt::human_ui("QUEUED-UI-CANARY".to_owned()),
-                )
-                .expect("queue UI prompt"),
-            PromptSubmission::Queued
+            capture.events.lock().expect("trace capture lock").len(),
+            2,
+            "immediate UI dispatch also traces its durable session touch once"
         );
+
+        submit_authenticated_ui_prompt(
+            &mut harness,
+            crate::parse_agent_id(&agent_id),
+            "QUEUED-UI-CANARY",
+            tau_proto::PromptMessageClass::User,
+        )
+        .expect("queue UI prompt");
         assert_eq!(
             activation_count(),
             2,
             "the startup-or-global-turn queued UI branch traces once"
         );
         harness.turn_state = TurnState::Idle;
-        assert_eq!(
-            harness
-                .submit_prompt_to_agent(
-                    harness.current_session_id.clone(),
-                    agent_id.as_str(),
-                    PendingPrompt::human_ui("BLOCKED-UI-CANARY".to_owned()),
-                )
-                .expect("queue blocked UI prompt"),
-            PromptSubmission::Queued
-        );
+        submit_authenticated_ui_prompt(
+            &mut harness,
+            crate::parse_agent_id(&agent_id),
+            "BLOCKED-UI-CANARY",
+            tau_proto::PromptMessageClass::User,
+        )
+        .expect("queue blocked UI prompt");
         assert_eq!(
             activation_count(),
             3,
             "the per-agent dispatch-blocked queued UI branch traces once"
         );
-        assert_eq!(
-            harness
-                .submit_prompt_to_agent(
-                    harness.current_session_id.clone(),
-                    agent_id.as_str(),
-                    PendingPrompt::internal("INTERNAL-QUEUE-CANARY".to_owned()),
-                )
-                .expect("queue internal prompt"),
-            PromptSubmission::Queued
-        );
+        submit_authenticated_ui_prompt(
+            &mut harness,
+            crate::parse_agent_id(&agent_id),
+            "INTERNAL-QUEUE-CANARY",
+            tau_proto::PromptMessageClass::Internal,
+        )
+        .expect("queue internal UI prompt");
         assert_eq!(
             activation_count(),
             3,
@@ -622,17 +664,45 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
             "instrumentation must not change queue order"
         );
 
-        harness.observe_activation_queued_with_id(
-            &AgentId::parse("missing-ui-agent").expect("agent id"),
+        harness.turn_state = TurnState::Idle;
+        let agent = harness.agents.get_mut(&cid).expect("agent");
+        agent.turn_state = AgentTurnState::Idle;
+        agent.in_flight_prompt = None;
+        agent.activation_dispatch = ActivationDispatchState::None;
+        harness.try_advance_queue();
+        assert_eq!(
+            capture
+                .events
+                .lock()
+                .expect("trace capture lock")
+                .iter()
+                .filter(|trace| trace.fields.contains_key("session_meta_touch_us"))
+                .count(),
+            2,
+            "the drained queued UI prompt touches session metadata once"
+        );
+        assert_eq!(
+            activation_count(),
+            3,
+            "queue draining must not append a second UI activation observation"
+        );
+
+        harness.agents.get_mut(&cid).expect("agent").agent_id = None;
+        harness.append_prompt_activation_queued(
+            &cid,
             tau_proto::ObservationId::random(),
             tau_proto::ActivationKind::VisibleUser,
-            None,
-            None,
+            &PendingPrompt::human_ui("FAILED-UI-CANARY".to_owned()),
         );
         assert_eq!(activation_count(), 4, "failed append traces once");
     });
 
     let captured_traces = capture.events.lock().expect("trace capture lock");
+    assert_eq!(
+        captured_traces.len(),
+        6,
+        "the immediate and drained queued UI dispatches plus all activation results are the entire trace"
+    );
     let activation_traces = captured_traces
         .iter()
         .filter(|trace| trace.fields.contains_key("activation_append_us"))
@@ -665,6 +735,14 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
                     .fields
                     .get("message")
                     .is_some_and(|value| value == "content-free prompt acceptance precursor")
+                && trace
+                    .fields
+                    .get("agent_id")
+                    .is_some_and(|value| value == &expected_trace_agent_id)
+                && trace
+                    .fields
+                    .get("activation_append_us")
+                    .is_some_and(|value| value.parse::<u128>().is_ok())
         }),
         "every record keeps the fixed prompt-acceptance classes: {activation_traces:?}"
     );
@@ -694,18 +772,304 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
         1,
         "failed append retains failure classification"
     );
+    let session_meta_traces = captured_traces
+        .iter()
+        .filter(|trace| trace.fields.contains_key("session_meta_touch_us"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        session_meta_traces.len(),
+        2,
+        "the immediate and drained queued durable UI dispatches touch session metadata once"
+    );
     assert!(
-        activation_traces.iter().all(|trace| {
+        session_meta_traces.iter().all(|trace| {
+            trace.target == "tau_harness::prompt_acceptance"
+                && trace.fields.keys().map(String::as_str).eq([
+                    "agent_id",
+                    "message",
+                    "result_class",
+                    "session_meta_touch_us",
+                    "stage",
+                ])
+                && trace
+                    .fields
+                    .get("stage")
+                    .is_some_and(|value| value == "session_meta_touch")
+                && trace
+                    .fields
+                    .get("result_class")
+                    .is_some_and(|value| value == "success")
+                && trace
+                    .fields
+                    .get("message")
+                    .is_some_and(|value| value == "content-free prompt acceptance precursor")
+                && trace
+                    .fields
+                    .get("agent_id")
+                    .is_some_and(|value| value == &expected_trace_agent_id)
+                && trace
+                    .fields
+                    .get("session_meta_touch_us")
+                    .is_some_and(|value| value.parse::<u128>().is_ok())
+        }),
+        "session metadata traces retain their distinct fixed fields: {session_meta_traces:?}"
+    );
+    assert!(
+        captured_traces.iter().all(|trace| {
             !trace.fields.values().any(|value| {
                 value.contains("IMMEDIATE-UI-CANARY")
                     || value.contains("QUEUED-UI-CANARY")
                     || value.contains("BLOCKED-UI-CANARY")
                     || value.contains("INTERNAL-QUEUE-CANARY")
+                    || value.contains("FAILED-UI-CANARY")
             })
         }),
         "trace output must not retain prompt content"
     );
     harness.shutdown().expect("shutdown");
+}
+
+/// A failed retention-hint touch remains one content-free UI diagnostic and
+/// does not retract the accepted UI prompt dispatch.
+#[test]
+fn ui_session_metadata_touch_failure_is_traced_without_blocking_dispatch() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut harness = echo_harness(temp.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut harness);
+    let agent_id = harness.agents[&cid]
+        .agent_id
+        .as_deref()
+        .map(crate::parse_agent_id)
+        .expect("durable agent id");
+    let expected_trace_agent_id = cid.to_string();
+    let meta_path = harness
+        .store
+        .sessions_dir()
+        .join(harness.current_session_id.as_str())
+        .join("meta.json");
+    path_std_fs::remove_file(&meta_path).expect("remove session metadata");
+    path_std_fs::create_dir(&meta_path).expect("obstruct session metadata touch");
+    let capture = TraceCapture::default();
+    let subscriber = tracing_subscriber::registry().with(TraceCaptureLayer {
+        capture: capture.clone(),
+    });
+
+    tracing::subscriber::with_default(subscriber, || {
+        submit_authenticated_ui_prompt(
+            &mut harness,
+            agent_id,
+            "SESSION-META-FAILURE-CANARY",
+            tau_proto::PromptMessageClass::User,
+        )
+        .expect("dispatch continues after metadata touch failure");
+    });
+
+    let captured_traces = capture.events.lock().expect("trace capture lock");
+    assert_eq!(
+        captured_traces.len(),
+        2,
+        "one successful activation append and one failed metadata touch are emitted"
+    );
+    assert!(captured_traces.iter().any(|trace| {
+        trace.fields.contains_key("activation_append_us")
+            && trace
+                .fields
+                .get("result_class")
+                .is_some_and(|value| value == "success")
+    }));
+    let session_meta_traces = captured_traces
+        .iter()
+        .filter(|trace| trace.fields.contains_key("session_meta_touch_us"))
+        .collect::<Vec<_>>();
+    assert_eq!(session_meta_traces.len(), 1);
+    let session_meta_trace = session_meta_traces[0];
+    assert_eq!(session_meta_trace.target, "tau_harness::prompt_acceptance");
+    assert_eq!(
+        session_meta_trace
+            .fields
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [
+            "agent_id",
+            "message",
+            "result_class",
+            "session_meta_touch_us",
+            "stage"
+        ]
+    );
+    assert_eq!(
+        session_meta_trace.fields.get("agent_id"),
+        Some(&expected_trace_agent_id)
+    );
+    assert_eq!(
+        session_meta_trace.fields.get("stage").map(String::as_str),
+        Some("session_meta_touch")
+    );
+    assert_eq!(
+        session_meta_trace
+            .fields
+            .get("result_class")
+            .map(String::as_str),
+        Some("failure")
+    );
+    assert_eq!(
+        session_meta_trace.fields.get("message").map(String::as_str),
+        Some("content-free prompt acceptance precursor")
+    );
+    assert!(
+        session_meta_trace
+            .fields
+            .get("session_meta_touch_us")
+            .is_some_and(|value| value.parse::<u128>().is_ok())
+    );
+    assert!(
+        captured_traces.iter().all(|trace| !trace
+            .fields
+            .values()
+            .any(|value| value.contains("SESSION-META-FAILURE-CANARY"))),
+        "metadata failure traces must not retain prompt content"
+    );
+    drop(captured_traces);
+    path_std_fs::remove_dir(&meta_path).expect("remove metadata obstruction");
+    stale_session_manifest(&harness);
+    assert!(
+        event_log_events(&harness).iter().any(|event| {
+            matches!(
+                event,
+                Event::AgentPromptSubmitted(submitted)
+                    if submitted.text == "SESSION-META-FAILURE-CANARY"
+            )
+        }),
+        "metadata failure must not retract the accepted prompt"
+    );
+    harness.shutdown().expect("shutdown");
+}
+
+/// Only authenticated UI submissions may enter prompt-acceptance traces, even
+/// when other activating or passive prompts dispatch immediately.
+#[test]
+fn prompt_acceptance_traces_exclude_non_ui_prompt_and_metadata_traffic() {
+    let capture = TraceCapture::default();
+    let subscriber = tracing_subscriber::registry().with(TraceCaptureLayer {
+        capture: capture.clone(),
+    });
+
+    tracing::subscriber::with_default(subscriber, || {
+        let submit = |prompt: PendingPrompt| {
+            let temp = TempDir::new().expect("tempdir");
+            let mut harness = echo_harness(temp.path().join("state")).expect("harness");
+            let cid = ensure_test_user_agent(&mut harness);
+            let agent_id = harness.agents[&cid]
+                .agent_id
+                .clone()
+                .expect("durable agent id");
+            let submission = harness
+                .submit_prompt_to_agent(
+                    harness.current_session_id.clone(),
+                    agent_id.as_str(),
+                    prompt,
+                )
+                .expect("submit prompt");
+            harness.shutdown().expect("shutdown");
+            submission
+        };
+        let trace_count = || capture.events.lock().expect("trace capture lock").len();
+
+        let temp = TempDir::new().expect("tempdir");
+        let mut harness = echo_harness(temp.path().join("state")).expect("harness");
+        let cid = ensure_test_user_agent(&mut harness);
+        let agent_id = harness.agents[&cid]
+            .agent_id
+            .as_deref()
+            .map(crate::parse_agent_id)
+            .expect("durable agent id");
+        submit_authenticated_ui_prompt(
+            &mut harness,
+            agent_id,
+            "IMMEDIATE-INTERNAL-CANARY",
+            tau_proto::PromptMessageClass::Internal,
+        )
+        .expect("submit authenticated internal UI prompt");
+        harness.shutdown().expect("shutdown");
+        assert_eq!(
+            trace_count(),
+            0,
+            "authenticated UI internal prompt remains outside UI diagnostics"
+        );
+
+        assert_eq!(
+            submit(PendingPrompt::user(
+                "IMMEDIATE-HARNESS-USER-CANARY".to_owned()
+            )),
+            PromptSubmission::Dispatched
+        );
+        assert_eq!(
+            trace_count(),
+            0,
+            "visible harness-owned prompt remains outside UI diagnostics"
+        );
+
+        let mut extension_prompt = PendingPrompt::user("IMMEDIATE-EXTENSION-CANARY".to_owned());
+        extension_prompt.submission_source = tau_proto::PromptSubmissionSource::Extension {
+            name: tau_proto::ExtensionName::parse("trace-test").expect("extension name"),
+        };
+        assert_eq!(submit(extension_prompt), PromptSubmission::Dispatched);
+        assert_eq!(
+            trace_count(),
+            0,
+            "immediate extension activation remains outside UI diagnostics"
+        );
+
+        let temp = TempDir::new().expect("tempdir");
+        let mut harness = echo_harness(temp.path().join("state")).expect("harness");
+        harness
+            .handle_ui_create_agent_from(
+                &crate::test_connection_id("trace-ui-create"),
+                tau_proto::UiCreateAgent {
+                    request_id: "trace-agent-create".to_owned(),
+                    literal: true,
+                    session_id: harness.current_session_id.clone(),
+                    role: harness.selected_role.clone(),
+                    model_override: None,
+                    metadata: Vec::new(),
+                    initial_prompt: Some("AGENT-CREATE-CANARY".to_owned()),
+                    message_class: tau_proto::PromptMessageClass::User,
+                    originator: tau_proto::PromptOriginator::User,
+                    ctx_id: Some("trace-agent-create-context".to_owned()),
+                    parent_agent: None,
+                    ephemeral: false,
+                },
+            )
+            .expect("create agent through the UI handler");
+        harness.shutdown().expect("shutdown");
+        assert_eq!(
+            trace_count(),
+            0,
+            "agent-create activation remains outside UI diagnostics"
+        );
+
+        assert_eq!(
+            submit(PendingPrompt::passive_background_completion(
+                "PASSIVE-CANARY".to_owned()
+            )),
+            PromptSubmission::Dispatched
+        );
+        assert_eq!(
+            trace_count(),
+            0,
+            "passive prompt dispatch remains outside UI diagnostics"
+        );
+    });
+
+    assert!(
+        capture
+            .events
+            .lock()
+            .expect("trace capture lock")
+            .is_empty(),
+        "non-UI canaries must not appear in content-free trace output"
+    );
 }
 
 /// Publish the canonical declaration required before a background terminal can
