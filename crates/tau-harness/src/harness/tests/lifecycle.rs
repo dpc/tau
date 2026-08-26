@@ -1510,7 +1510,7 @@ fn deferred_compaction_rejection_is_requester_only_and_not_logged() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let wait_call_id = ToolCallId::from("wait-call");
-    h.pending_ui_compactions_after_wait.insert(
+    h.compaction_runtime.pending_ui_after_wait.insert(
         cid.clone(),
         crate::harness::PendingUiCompactionAfterWait {
             session_generation: h.current_session_generation,
@@ -1539,7 +1539,7 @@ fn deferred_compaction_rejection_is_requester_only_and_not_logged() {
     assert_no_message(&mut observer);
     assert_eq!(h.event_log.next_seq(), baseline_seq);
 
-    h.pending_ui_compactions_after_wait.insert(
+    h.compaction_runtime.pending_ui_after_wait.insert(
         cid.clone(),
         crate::harness::PendingUiCompactionAfterWait {
             session_generation: h.current_session_generation,
@@ -7051,7 +7051,7 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     }
     assert!(!h.provider_runtime.model_info.contains_key(&captured));
     assert!(
-        h.enqueued_standalone_inference_checkpoints.is_empty(),
+        h.compaction_runtime.enqueued_inference_checkpoints.is_empty(),
         "pre-Ready snapshots must not reconcile restored work"
     );
 
@@ -7066,7 +7066,7 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     );
     assert!(!h.provider_runtime.model_routes.contains_key(&captured));
     assert!(
-        !h.enqueued_standalone_inference_checkpoints
+        !h.compaction_runtime.enqueued_inference_checkpoints
             .contains(&(agent_id.clone(), transaction_id.clone()))
     );
     let events = event_log_events(&h);

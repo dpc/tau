@@ -107,7 +107,7 @@ impl Harness {
             );
             response.output_items.clear();
             if standalone_compaction {
-                self.silent_compaction_failure_prompts
+                self.compaction_runtime.silent_failure_prompts
                     .insert(response.agent_prompt_id.clone());
                 self.reject_standalone_compaction(
                     &cid,
@@ -136,7 +136,7 @@ impl Harness {
                 "rejecting provider response: agent tree already has an open foreground tool round",
             );
             if standalone {
-                self.silent_compaction_failure_prompts
+                self.compaction_runtime.silent_failure_prompts
                     .insert(response.agent_prompt_id.clone());
                 self.reject_standalone_compaction(
                     &cid,
@@ -1016,7 +1016,7 @@ impl Harness {
                     transaction_id: transaction_id.clone(),
                 };
         }
-        self.suppressed_compaction_dispatches
+        self.compaction_runtime.suppressed_dispatches
             .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()));
         let failure = tau_proto::AgentStandaloneCompactionFailed {
             agent_id: crate::parse_agent_id(&agent_id),

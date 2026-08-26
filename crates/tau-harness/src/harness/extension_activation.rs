@@ -613,7 +613,7 @@ impl Harness {
                     output_length_continuation: None,
                 });
             if !self.activation_successor_matches_selected_head(&event)
-                || !self.enqueued_standalone_inference_checkpoints.insert(key)
+                || !self.compaction_runtime.enqueued_inference_checkpoints.insert(key)
             {
                 continue;
             }

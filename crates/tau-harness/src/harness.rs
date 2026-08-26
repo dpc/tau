@@ -107,6 +107,7 @@ use crate::frozen_agent_discovery::FrozenAgentDiscovery;
 use crate::harness::agent_context::AgentContextStore;
 use crate::harness::agent_watch_provider_deliveries::AgentWatchProviderDeliveries;
 use crate::harness::current_session::CurrentSessionState;
+use crate::harness::compaction_runtime_state::CompactionRuntimeState;
 use crate::harness::extension_data::{
     ExtensionDataError, MAX_SECRET_DATA_FILE_BYTES, run_extension_data_compare_and_swap_file,
     run_extension_data_create_file, run_extension_data_create_file_with_limit,
@@ -1474,6 +1475,7 @@ mod agent_registry;
 mod agent_watch;
 mod agent_watch_provider_deliveries;
 mod compaction_runtime;
+mod compaction_runtime_state;
 mod compaction_supplement;
 mod connection_startup;
 mod construction;
@@ -1812,27 +1814,8 @@ pub struct Harness {
     /// Keep session-scoped counters here instead of as top-level
     /// harness fields, so `:session new` resets them with one assignment.
     pub(crate) current_session_state: CurrentSessionState,
-    /// Durable compaction starts whose post-commit reaction must not dispatch
-    /// remote work because a correlated terminal failure is already queued.
-    suppressed_compaction_dispatches:
-        HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
-    /// Global-round conflicts whose durable compaction failure performs runtime
-    /// cleanup without projecting provider-watch activity.
-    silent_compaction_failure_prompts: HashSet<AgentPromptId>,
-    /// Suppressed queued reactive claims that must terminalize as Cancelled
-    /// immediately after their durable start commits.
-    cancelled_compaction_claims: HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
-    /// Model tool calls awaiting one durable compaction terminal.
-    pending_manual_compaction_tools:
-        HashMap<tau_proto::CompactionTransactionId, PendingManualCompactionTool>,
-    /// Accepted manual requests waiting for a safe start boundary.
-    accepted_manual_compaction_tools:
-        HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
-    /// UI compactions waiting for one claimed wait cancellation to commit.
-    pending_ui_compactions_after_wait: HashMap<AgentId, PendingUiCompactionAfterWait>,
-    /// Standalone inference checkpoints currently queued through publication.
-    enqueued_standalone_inference_checkpoints:
-        HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
+    /// Manual, reactive, and UI standalone-compaction runtime ownership.
+    pub(crate) compaction_runtime: CompactionRuntimeState,
     /// Selected skill winners, keyed by name.
     pub(crate) discovered_skills: std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     /// All discovered skill candidates, keyed by name, so removing the winner

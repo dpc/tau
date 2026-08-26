@@ -3077,7 +3077,7 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
             &"test/model".into(),
             "ct-steer-retry",
         );
-    h.enqueued_standalone_inference_checkpoints.clear();
+    h.compaction_runtime.enqueued_inference_checkpoints.clear();
     let watcher_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
@@ -3237,7 +3237,7 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
             &"test/model".into(),
             "ct-envelope-ownership",
         );
-    h.enqueued_standalone_inference_checkpoints.clear();
+    h.compaction_runtime.enqueued_inference_checkpoints.clear();
     h.agent_registry
         .agents
         .get_mut(&cid)
@@ -3765,7 +3765,7 @@ fn intercepted_reactive_drift_terminalization_never_dispatches() {
         })),
     )
     .expect("release start");
-    assert!(h.suppressed_compaction_dispatches.is_empty());
+    assert!(h.compaction_runtime.suppressed_dispatches.is_empty());
     assert_eq!(
         event_log_events(&h)
             .iter()

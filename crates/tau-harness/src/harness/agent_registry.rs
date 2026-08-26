@@ -1539,7 +1539,7 @@ impl Harness {
             self.clear_agent_runtime_indicators_for_agent(&unloading_agent_id_proto);
             self.pending_rendered_prompts
                 .remove(&unloading_agent_id_proto);
-            self.enqueued_standalone_inference_checkpoints
+            self.compaction_runtime.enqueued_inference_checkpoints
                 .retain(|(agent_id, _)| agent_id != &unloading_agent_id_proto);
             self.peer_messaging
                 .peer_input_rate
@@ -1548,7 +1548,7 @@ impl Harness {
                 .uncommitted_peer_auto_starts
                 .remove(&unloading_agent_id_proto);
             let requests: Vec<_> = self
-                .accepted_manual_compaction_tools
+                .compaction_runtime.accepted_manual_tools
                 .values()
                 .filter(|accepted| {
                     accepted.request.caller_agent_id.as_str() == unloading_agent_id

@@ -69,7 +69,7 @@ impl Harness {
             );
             return;
         };
-        if let Some(pending) = self.pending_ui_compactions_after_wait.get(&cid)
+        if let Some(pending) = self.compaction_runtime.pending_ui_after_wait.get(&cid)
             && pending.wait_call_id == *wait_call_id
             && self.wait_claimed_for_manual_compaction(&cid, wait_call_id)
         {
@@ -107,7 +107,7 @@ impl Harness {
             );
             return;
         }
-        self.pending_ui_compactions_after_wait.insert(
+        self.compaction_runtime.pending_ui_after_wait.insert(
             cid.clone(),
             PendingUiCompactionAfterWait {
                 session_generation: self.current_session_generation,
@@ -292,7 +292,7 @@ impl Harness {
         let self_request = target_cid == *caller_cid;
         let target_public_id = target.agent_id.clone();
         if self
-            .accepted_manual_compaction_tools
+            .compaction_runtime.accepted_manual_tools
             .values()
             .any(|entry| Some(entry.request.target_agent_id.to_string()) == target_public_id)
         {
@@ -376,12 +376,12 @@ impl Harness {
             return;
         };
         let caller_active_requests = self
-            .accepted_manual_compaction_tools
+            .compaction_runtime.accepted_manual_tools
             .values()
             .filter(|entry| entry.request.caller_agent_id.as_str() == caller_public_id)
             .count()
             + self
-                .pending_manual_compaction_tools
+                .compaction_runtime.pending_manual_tools
                 .values()
                 .filter(|entry| entry.caller_agent_id.as_str() == caller_public_id)
                 .count();
@@ -476,7 +476,7 @@ impl Harness {
             &target_cid,
             Event::AgentManualCompactionRequested(request.clone()),
         );
-        self.accepted_manual_compaction_tools.insert(
+        self.compaction_runtime.accepted_manual_tools.insert(
             request_id.clone(),
             AcceptedManualCompactionTool {
                 request: request.clone(),
@@ -518,7 +518,7 @@ impl Harness {
         request_id: &tau_proto::CompactionRequestId,
     ) -> bool {
         let Some(accepted) = self
-            .accepted_manual_compaction_tools
+            .compaction_runtime.accepted_manual_tools
             .get(request_id)
             .cloned()
         else {
@@ -637,8 +637,8 @@ impl Harness {
         if let Some(target) = self.agent_registry.agents.get_mut(target_cid) {
             target.next_prompt_index = target.next_prompt_index.saturating_add(1);
         }
-        self.accepted_manual_compaction_tools.remove(request_id);
-        self.pending_manual_compaction_tools.insert(
+        self.compaction_runtime.accepted_manual_tools.remove(request_id);
+        self.compaction_runtime.pending_manual_tools.insert(
             transaction_id.clone(),
             PendingManualCompactionTool {
                 request_id: request_id.clone(),
@@ -1300,7 +1300,7 @@ impl Harness {
             let (request, started) = match recovery {
                 tau_core::ManualCompactionRecovery::Waiting(request) => {
                     let tool_name = request.visible_tool_name.clone();
-                    self.accepted_manual_compaction_tools.insert(
+                    self.compaction_runtime.accepted_manual_tools.insert(
                         request.request_id.clone(),
                         AcceptedManualCompactionTool {
                             request: request.clone(),
@@ -1354,7 +1354,7 @@ impl Harness {
                         tool_name: requested.visible_tool_name.clone(),
                         target_agent_id: requested.target_agent_id.clone(),
                     };
-                    self.pending_manual_compaction_tools
+                    self.compaction_runtime.pending_manual_tools
                         .insert(started.transaction_id.clone(), pending);
                     (requested, Some((started, outcome)))
                 }
@@ -1424,7 +1424,7 @@ impl Harness {
                 &caller_cid,
                 &request.initiating_tool_call_id,
             ) {
-                self.pending_manual_compaction_tools
+                self.compaction_runtime.pending_manual_tools
                     .remove(&started.transaction_id);
                 if request.resume_inference && !self.self_compaction_terminal_delivered(&request) {
                     self.consume_wait_background_completion(&request.initiating_tool_call_id);
@@ -1502,7 +1502,7 @@ impl Harness {
                             BackgroundCompletionPromptMode::QueueOnly
                         },
                     );
-                    self.pending_manual_compaction_tools
+                    self.compaction_runtime.pending_manual_tools
                         .remove(&started.transaction_id);
                     if request.resume_inference {
                         self.consume_wait_background_completion(&request.initiating_tool_call_id);
@@ -1543,7 +1543,7 @@ impl Harness {
                             BackgroundCompletionPromptMode::QueueAndAdvance
                         },
                     );
-                    self.pending_manual_compaction_tools
+                    self.compaction_runtime.pending_manual_tools
                         .remove(&started.transaction_id);
                     if request.resume_inference {
                         self.consume_wait_background_completion(&call_id);
@@ -1569,7 +1569,7 @@ impl Harness {
         }
         for (target_cid, request_id) in waiting {
             let self_request = self
-                .accepted_manual_compaction_tools
+                .compaction_runtime.accepted_manual_tools
                 .get(&request_id)
                 .is_some_and(|accepted| accepted.request.resume_inference);
             if !self_request || self.manual_request_has_complete_tool_round(&request_id) {
@@ -1665,11 +1665,11 @@ impl Harness {
     }
 
     pub(super) fn is_pending_manual_compaction_call(&self, call_id: &ToolCallId) -> bool {
-        self.accepted_manual_compaction_tools
+        self.compaction_runtime.accepted_manual_tools
             .values()
             .any(|accepted| accepted.request.initiating_tool_call_id == *call_id)
             || self
-                .pending_manual_compaction_tools
+                .compaction_runtime.pending_manual_tools
                 .values()
                 .any(|pending| pending.call_id == *call_id)
     }
@@ -1678,7 +1678,7 @@ impl Harness {
         &self,
         request_id: &tau_proto::CompactionRequestId,
     ) -> bool {
-        let Some(accepted) = self.accepted_manual_compaction_tools.get(request_id) else {
+        let Some(accepted) = self.compaction_runtime.accepted_manual_tools.get(request_id) else {
             return false;
         };
         let Some(caller_cid) =

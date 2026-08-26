@@ -14073,7 +14073,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
             approved_retry_event: None,
         },
     );
-    h.enqueued_standalone_inference_checkpoints.insert((
+    h.compaction_runtime.enqueued_inference_checkpoints.insert((
         tau_proto::AgentId::parse("old-agent").expect("agent id"),
         transaction_id.clone(),
     ));
@@ -14149,7 +14149,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
 
     assert_eq!(h.current_session_id.as_str(), "s2");
     assert!(h.prompt_runtime.pending_publish_completions.is_empty());
-    assert!(h.enqueued_standalone_inference_checkpoints.is_empty());
+    assert!(h.compaction_runtime.enqueued_inference_checkpoints.is_empty());
     assert!(h.publication.idle_dispatches.is_empty());
     assert!(h.publication.pending_intercept.is_none());
     assert!(event_log_events(&h).into_iter().any(|event| {
@@ -20306,7 +20306,7 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
     h.agent_registry.agents.get_mut(&cid).expect("agent").head = None;
     assert!(!h.activation_successor_matches_selected_head(&checkpoint));
     h.resume_restored_compaction_checkpoints(RestoredCheckpointAuthority::DiscoveryComplete);
-    assert!(h.enqueued_standalone_inference_checkpoints.is_empty());
+    assert!(h.compaction_runtime.enqueued_inference_checkpoints.is_empty());
     assert_eq!(
         event_log_events(&h)
             .iter()
@@ -20331,7 +20331,7 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
     let backup_path = event_path.with_extension("cbor.retry-backup");
     std::fs::rename(&event_path, &backup_path).expect("park agent journal");
     std::fs::create_dir(&event_path).expect("reject checkpoint append");
-    h.enqueued_standalone_inference_checkpoints
+    h.compaction_runtime.enqueued_inference_checkpoints
         .insert((agent_id.clone(), transaction_id.clone()));
     h.publish_for_agent(&cid, checkpoint);
     assert!(matches!(
@@ -20342,7 +20342,7 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
         }
     ));
     assert!(
-        !h.enqueued_standalone_inference_checkpoints
+        !h.compaction_runtime.enqueued_inference_checkpoints
             .contains(&(agent_id.clone(), transaction_id.clone()))
     );
     std::fs::remove_dir(&event_path).expect("remove append blocker");
@@ -25829,7 +25829,7 @@ fn manual_cross_compaction_rejects_caller_limit() {
             .expect("caller public id"),
     );
     for index in 0..4 {
-        h.pending_manual_compaction_tools.insert(
+        h.compaction_runtime.pending_manual_tools.insert(
             tau_proto::CompactionTransactionId::parse(format!("ct-cap-{index}"))
                 .expect("transaction id"),
             crate::harness::PendingManualCompactionTool {
@@ -27329,7 +27329,7 @@ fn explicit_cancel_while_wait_preemption_is_parked_never_compacts() {
             .iter()
             .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
     );
-    assert!(!h.pending_ui_compactions_after_wait.contains_key(&cid));
+    assert!(!h.compaction_runtime.pending_ui_after_wait.contains_key(&cid));
 }
 
 /// Session rollover clears a parked wait-preemption request and cannot leak a
@@ -27368,7 +27368,7 @@ fn session_rollover_while_wait_preemption_is_parked_never_compacts() {
     h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("roll over session");
 
-    assert!(h.pending_ui_compactions_after_wait.is_empty());
+    assert!(h.compaction_runtime.pending_ui_after_wait.is_empty());
     assert!(
         !event_log_events(&h)
             .iter()
@@ -27970,7 +27970,7 @@ fn agent_unload_discards_registered_input_wait() {
             approved_retry_event: None,
         },
     );
-    h.enqueued_standalone_inference_checkpoints
+    h.compaction_runtime.enqueued_inference_checkpoints
         .insert((crate::parse_agent_id(&durable_id), transaction_id));
     h.enqueue_committed_activation_dispatch(
         cid.clone(),
@@ -27987,7 +27987,7 @@ fn agent_unload_discards_registered_input_wait() {
     );
     assert!(!h.input_wait_pending_for(&cid));
     assert!(!h.prompt_runtime.pending_publish_completions.contains_key(&cid));
-    assert!(h.enqueued_standalone_inference_checkpoints.is_empty());
+    assert!(h.compaction_runtime.enqueued_inference_checkpoints.is_empty());
     assert!(
         h.publication.idle_dispatches
             .iter()

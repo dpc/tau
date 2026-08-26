@@ -927,9 +927,9 @@ impl Harness {
         self.peer_messaging.peer_last_routed.clear();
         self.peer_messaging.peer_input_rate.clear();
         self.peer_messaging.uncommitted_peer_auto_starts.clear();
-        self.pending_manual_compaction_tools.clear();
-        self.accepted_manual_compaction_tools.clear();
-        let pending_compactions = std::mem::take(&mut self.pending_ui_compactions_after_wait);
+        self.compaction_runtime.pending_manual_tools.clear();
+        self.compaction_runtime.accepted_manual_tools.clear();
+        let pending_compactions = std::mem::take(&mut self.compaction_runtime.pending_ui_after_wait);
         for pending in pending_compactions.into_values() {
             self.send_ui_error_response(
                 &pending.requester_client_id,
@@ -942,7 +942,7 @@ impl Harness {
         // mandatory SessionShutdown before switching the bound session.
         self.quiesce_synchronized_publications_for_rollover();
         self.prompt_runtime.pending_publish_completions.clear();
-        self.enqueued_standalone_inference_checkpoints.clear();
+        self.compaction_runtime.enqueued_inference_checkpoints.clear();
         self.publication.idle_dispatches.clear();
         self.clear_session_agent_context();
         self.agent_runtime_indicators.clear();
@@ -1565,7 +1565,7 @@ impl Harness {
         self.repair_restored_background_tool_calls(session_id);
         self.seed_restored_wait_background_completions(session_id);
         let ready_requests: Vec<_> = self
-            .accepted_manual_compaction_tools
+            .compaction_runtime.accepted_manual_tools
             .iter()
             .filter_map(|(request_id, accepted)| {
                 (accepted.request.resume_inference

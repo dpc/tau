@@ -796,10 +796,10 @@ impl Harness {
         });
         if let Some((agent_id, transaction_id)) = pending
             && self
-                .cancelled_compaction_claims
+                .compaction_runtime.cancelled_claims
                 .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()))
         {
-            self.suppressed_compaction_dispatches
+            self.compaction_runtime.suppressed_dispatches
                 .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()));
         }
     }
@@ -1292,7 +1292,7 @@ impl Harness {
             return;
         }
         if let Some(accepted) = self
-            .accepted_manual_compaction_tools
+            .compaction_runtime.accepted_manual_tools
             .values()
             .find(|accepted| accepted.request.initiating_tool_call_id == target.call_id)
             .cloned()
@@ -1307,7 +1307,7 @@ impl Harness {
             return;
         }
         if let Some((transaction_id, pending)) = self
-            .pending_manual_compaction_tools
+            .compaction_runtime.pending_manual_tools
             .iter()
             .find(|(_, pending)| pending.call_id == target.call_id)
             .map(|(id, pending)| (id.clone(), pending.clone()))

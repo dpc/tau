@@ -152,7 +152,7 @@ impl Harness {
         else {
             return;
         };
-        let Some(pending) = self.pending_ui_compactions_after_wait.get(&cid) else {
+        let Some(pending) = self.compaction_runtime.pending_ui_after_wait.get(&cid) else {
             return;
         };
         if pending.wait_call_id != cancelled.call_id {
@@ -171,7 +171,7 @@ impl Harness {
 
     /// Removes one deferred UI compaction and reports why it cannot continue.
     pub(super) fn reject_pending_ui_compaction(&mut self, cid: &AgentId, message: &'static str) {
-        if let Some(pending) = self.pending_ui_compactions_after_wait.remove(cid) {
+        if let Some(pending) = self.compaction_runtime.pending_ui_after_wait.remove(cid) {
             self.send_ui_error_response(&pending.requester_client_id, message);
         }
     }
@@ -499,7 +499,7 @@ impl Harness {
                     },
                 };
         }
-        self.enqueued_standalone_inference_checkpoints
+        self.compaction_runtime.enqueued_inference_checkpoints
             .insert((agent_id.clone(), transaction_id.clone()));
         self.publish_for_agent_from(
             cid,
@@ -1134,7 +1134,7 @@ impl Harness {
         };
         let key = (agent_id.clone(), transaction_id.clone());
         if self
-            .enqueued_standalone_inference_checkpoints
+            .compaction_runtime.enqueued_inference_checkpoints
             .contains(&key)
         {
             return;
@@ -1153,7 +1153,7 @@ impl Harness {
         if !self.activation_successor_matches_selected_head(&event) {
             return;
         }
-        self.enqueued_standalone_inference_checkpoints.insert(key);
+        self.compaction_runtime.enqueued_inference_checkpoints.insert(key);
         self.publish_for_agent(cid, event);
     }
 
@@ -1168,7 +1168,7 @@ impl Harness {
             return;
         };
         if let Some(transaction_id) = started.transaction_id.as_ref() {
-            self.enqueued_standalone_inference_checkpoints
+            self.compaction_runtime.enqueued_inference_checkpoints
                 .remove(&(started.agent_id.clone(), transaction_id.clone()));
         }
         let Some(cid) = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
@@ -2029,8 +2029,8 @@ impl Harness {
                 initiating_tool_call_id,
             } = &started.trigger
             {
-                let accepted = self.accepted_manual_compaction_tools.remove(request_id);
-                self.pending_manual_compaction_tools
+                let accepted = self.compaction_runtime.accepted_manual_tools.remove(request_id);
+                self.compaction_runtime.pending_manual_tools
                     .entry(started.transaction_id.clone())
                     .or_insert_with(|| PendingManualCompactionTool {
                         request_id: request_id.clone(),
@@ -2045,9 +2045,9 @@ impl Harness {
             }
             let suppression_key = (started.agent_id.clone(), started.transaction_id.clone());
             let suppressed = self
-                .suppressed_compaction_dispatches
+                .compaction_runtime.suppressed_dispatches
                 .remove(&suppression_key);
-            let cancelled = suppressed && self.cancelled_compaction_claims.remove(&suppression_key);
+            let cancelled = suppressed && self.compaction_runtime.cancelled_claims.remove(&suppression_key);
             let cid = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()));
             if let Some(cid) = cid {
                 if suppressed {
@@ -2165,7 +2165,7 @@ impl Harness {
         }
         if let Event::AgentManualCompactionRequestFailed(failed) = event
             && let Some(pending) = self
-                .accepted_manual_compaction_tools
+                .compaction_runtime.accepted_manual_tools
                 .remove(&failed.request_id)
         {
             if pending.request.resume_inference {
@@ -2210,7 +2210,7 @@ impl Harness {
         }
         if let Event::AgentStandaloneCompactionFailed(failed) = event {
             if let Some(pending) = self
-                .pending_manual_compaction_tools
+                .compaction_runtime.pending_manual_tools
                 .remove(&failed.transaction_id)
             {
                 let self_request = pending.caller_agent_id == pending.target_agent_id;
@@ -2257,8 +2257,8 @@ impl Harness {
                 }
             }
             let key = (failed.agent_id.clone(), failed.transaction_id.clone());
-            self.suppressed_compaction_dispatches.remove(&key);
-            self.cancelled_compaction_claims.remove(&key);
+            self.compaction_runtime.suppressed_dispatches.remove(&key);
+            self.compaction_runtime.cancelled_claims.remove(&key);
         }
         if let Event::AgentStandaloneCompactionFailed(failed) = event
             && let Some(cid) =
@@ -2278,7 +2278,7 @@ impl Harness {
                 });
             let suppress_provider_watch = failed_prompt_id
                 .as_ref()
-                .is_some_and(|prompt_id| self.silent_compaction_failure_prompts.remove(prompt_id));
+                .is_some_and(|prompt_id| self.compaction_runtime.silent_failure_prompts.remove(prompt_id));
             if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
                 agent.activation_dispatch = path_crate_agent::ActivationDispatchState::Blocked {
                     failed_id: failed.transaction_id.clone(),
@@ -2336,7 +2336,7 @@ impl Harness {
         }
         if let Event::AgentCompacted(compacted) = event
             && let Some(transaction_id) = compacted.transaction_id.as_ref()
-            && let Some(pending) = self.pending_manual_compaction_tools.remove(transaction_id)
+            && let Some(pending) = self.compaction_runtime.pending_manual_tools.remove(transaction_id)
         {
             let self_request = pending.caller_agent_id == pending.target_agent_id;
             let call_id = pending.call_id.clone();
@@ -2464,7 +2464,7 @@ impl Harness {
         if let Event::AgentInferenceDispatchStarted(started) = event
             && let Some(transaction_id) = started.transaction_id.as_ref()
         {
-            self.enqueued_standalone_inference_checkpoints
+            self.compaction_runtime.enqueued_inference_checkpoints
                 .remove(&(started.agent_id.clone(), transaction_id.clone()));
         }
         if let Event::AgentInferenceDispatchStarted(started) = event
@@ -2777,7 +2777,7 @@ impl Harness {
             self.prompt_runtime.pending_publish_completions.remove(&cid);
             self.publication.idle_dispatches
                 .retain(|dispatch| dispatch.cid != cid);
-            self.enqueued_standalone_inference_checkpoints
+            self.compaction_runtime.enqueued_inference_checkpoints
                 .retain(|(agent_id, _)| agent_id != &unloaded.agent_id);
             self.tombstone_ephemeral_provider_prompts_for_agent(&cid);
             self.agent_registry.agents.remove(&cid);

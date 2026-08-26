@@ -738,7 +738,7 @@ impl Harness {
         };
         if should_send {
             self.queue_working_reminder_if_needed(cid);
-            let pending_ui = self.pending_ui_compactions_after_wait.remove(cid);
+            let pending_ui = self.compaction_runtime.pending_ui_after_wait.remove(cid);
             if let Some(pending) = pending_ui {
                 let remains_valid = pending.wait_call_id.as_str() == completed_call_id
                     && pending.session_generation == self.current_session_generation
@@ -766,7 +766,7 @@ impl Harness {
                 .get(cid)
                 .and_then(|agent| agent.agent_id.as_deref())
                 .and_then(|agent_id| {
-                    self.accepted_manual_compaction_tools.iter().find_map(
+                    self.compaction_runtime.accepted_manual_tools.iter().find_map(
                         |(request_id, accepted)| {
                             (accepted.request.resume_inference
                                 && accepted.request.target_agent_id.as_str() == agent_id)
