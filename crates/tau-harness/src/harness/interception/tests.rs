@@ -137,3 +137,43 @@ fn successor_lookup_avoids_quadratic_prefix_comparisons() {
         "{comparisons} ordering comparisons revisited too much of the consumed prefix"
     );
 }
+
+/// The one-shot prompt handoff must preserve the owned string allocation
+/// instead of deep-cloning the complete materialized request.
+#[test]
+fn unique_prompt_handoff_moves_constituent_allocations() {
+    let prompt = tau_proto::AgentPromptCreated {
+        agent_prompt_id: "ap-move-owned".parse().expect("prompt id"),
+        agent_id: tau_proto::AgentId::parse("agent-move-owned").expect("agent id"),
+        session_id: tau_proto::SessionId::parse("session-move-owned").expect("session id"),
+        system_prompt: "uniquely owned system prompt".to_owned(),
+        context: tau_proto::PromptContext::default(),
+        tools: Vec::new(),
+        tools_ref: None,
+        model: "test/model".parse().expect("model id"),
+        model_params: tau_proto::ModelParams::default(),
+        tool_choice: Default::default(),
+        originator: tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        ctx_id: None,
+        compaction: None,
+        operation: tau_proto::PromptOperation::Inference,
+    };
+    let system_prompt_address = prompt.system_prompt.as_ptr();
+
+    let continuation = super::PromptDispatchContinuation {
+        authority: super::PromptDispatchAuthority {
+            started: tau_proto::AgentPromptStarted::from(&prompt),
+            provider_connection_id: tau_proto::ConnectionId::parse("provider-move-owned")
+                .expect("provider connection"),
+            runtime_incarnation: 7,
+        },
+        prompt: Arc::new(prompt),
+    };
+
+    let (moved, authority) = continuation.into_delivery();
+
+    assert_eq!(moved.system_prompt.as_ptr(), system_prompt_address);
+    assert_eq!(moved.system_prompt, "uniquely owned system prompt");
+    assert_eq!(authority.runtime_incarnation, 7);
+}

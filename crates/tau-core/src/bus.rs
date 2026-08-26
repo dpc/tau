@@ -486,6 +486,80 @@ impl EventBus {
         let _ = collector;
     }
 
+    /// Lazily constructs and broadcasts one event projection when at least one
+    /// non-excluded live subscription selects the admission event.
+    ///
+    /// The admission message supplies the source event identity and is returned
+    /// unchanged so the caller can reuse its ownership. The builder runs at
+    /// most once and only after selector and kind filtering find a candidate.
+    /// Its result must be another event delivery with the same event name,
+    /// replay marker, and timestamp; otherwise nothing is delivered. Visibility
+    /// and the final target set are frozen against that constructed projection,
+    /// which is the exact frame delivered to eligible sinks.
+    pub fn publish_event_from_excluding_kinds_lazy_without_report<F>(
+        &mut self,
+        source_id: Option<&ConnectionId>,
+        admission_message: HarnessOutputMessage,
+        excluded_kinds: &[ClientKind],
+        build_message: F,
+    ) -> HarnessOutputMessage
+    where
+        F: FnOnce() -> HarnessOutputMessage,
+    {
+        #[cfg(test)]
+        {
+            self.last_route_work = RouteWork::default();
+        }
+        let Some(admission_delivery) = admission_message.as_delivery() else {
+            return admission_message;
+        };
+        let event_name = admission_delivery.event().name();
+        let replay = admission_delivery.replay;
+        let recorded_at = admission_delivery.recorded_at;
+        let candidates = self
+            .connections
+            .iter()
+            .filter(|(_, entry)| {
+                !excluded_kinds.contains(&entry.metadata.kind)
+                    && entry.subscriptions.matches(&admission_message)
+            })
+            .map(|(connection_id, _)| connection_id.clone())
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return admission_message;
+        }
+        let admission = RoutedFrame::new(source_id.cloned(), admission_message);
+        let message = build_message();
+        let Some(delivery) = message.as_delivery() else {
+            return admission.frame;
+        };
+        if delivery.event().name() != event_name
+            || delivery.replay != replay
+            || delivery.recorded_at != recorded_at
+        {
+            return admission.frame;
+        }
+        let routed = RoutedFrame::new(source_id.cloned(), message);
+        let eligible = candidates
+            .into_iter()
+            .filter(|connection_id| {
+                self.connections
+                    .get(connection_id)
+                    .is_some_and(|entry| entry.visibility_filter.allows(&routed))
+            })
+            .collect::<Vec<_>>();
+        if eligible.is_empty() {
+            return admission.frame;
+        }
+        let mut collector = NoReportRouteCollector::default();
+        self.deliver_eligible(routed, eligible, &mut collector);
+        #[cfg(test)]
+        {
+            self.last_route_work = collector.work;
+        }
+        admission.frame
+    }
+
     fn publish_with_collector<C: RouteCollector>(
         &mut self,
         source_id: Option<&ConnectionId>,

@@ -3,6 +3,8 @@
 use super::super::lifecycle::{assert_no_message, connect_socket_ui};
 use super::*;
 
+/// Provider-owned prompt fanout must preserve exact/prefix observer equality,
+/// delivery metadata, provider exclusion, and typed-image projection semantics.
 #[test]
 fn provider_model_prompt_routes_directly_to_provider_owner() {
     // Provider-published models should not wake every provider subscriber.
@@ -21,6 +23,8 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
     let provider_observer_frames =
         connect_test_client(&mut h, "provider-observer", tau_proto::ClientKind::Provider);
     let ui_frames = connect_test_client(&mut h, "ui-observer", tau_proto::ClientKind::Ui);
+    let prefix_ui_frames =
+        connect_test_client(&mut h, "prefix-ui-observer", tau_proto::ClientKind::Ui);
     let prompt_selector = vec![EventSelector::Exact(
         tau_proto::EventName::AGENT_PROMPT_CREATED,
     )];
@@ -40,6 +44,14 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
             prompt_selector,
         )
         .expect("ui observer subscription");
+    h.runtime_io
+        .bus
+        .set_subscriptions(
+            &crate::test_connection_id("prefix-ui-observer"),
+            Vec::new(),
+            vec![EventSelector::Prefix("agent.".to_owned())],
+        )
+        .expect("prefix UI observer subscription");
 
     let model_id: tau_proto::ModelId = "openai/gpt-5.5".parse().expect("model id");
     h.handle_extension_event(
@@ -154,12 +166,116 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
         "UI observer should still see the committed prompt fact"
     );
     assert!(
+        prefix_ui_frames
+            .lock()
+            .expect("prefix UI frames")
+            .iter()
+            .any(|routed| frame_is_prompt(routed, &spid)),
+        "prefix UI observer should see the same committed prompt fact"
+    );
+    assert!(
         provider_observer_frames
             .lock()
             .expect("provider observer frames")
             .is_empty(),
         "provider observers should not receive provider-owned prompt execution"
     );
+    let prompt_frame = |frames: &Arc<Mutex<Vec<RoutedFrame>>>| {
+        frames
+            .lock()
+            .expect("prompt frames")
+            .iter()
+            .find(|routed| frame_is_prompt(routed, &spid))
+            .cloned()
+            .expect("matching prompt frame")
+    };
+    let provider_frame = prompt_frame(&provider_frames);
+    let exact_observer_frame = prompt_frame(&ui_frames);
+    let prefix_observer_frame = prompt_frame(&prefix_ui_frames);
+    assert_eq!(
+        provider_frame
+            .frame
+            .as_delivery()
+            .map(|delivery| (delivery.replay, delivery.recorded_at)),
+        exact_observer_frame
+            .frame
+            .as_delivery()
+            .map(|delivery| (delivery.replay, delivery.recorded_at)),
+        "observer projection must preserve canonical delivery metadata"
+    );
+    assert_eq!(exact_observer_frame, prefix_observer_frame);
+    let Event::AgentPromptCreated(provider_prompt) = provider_frame
+        .frame
+        .delivered_event()
+        .expect("provider prompt event")
+    else {
+        unreachable!("selected frame is a prompt")
+    };
+    let Event::AgentPromptCreated(observer_prompt) = exact_observer_frame
+        .frame
+        .delivered_event()
+        .expect("observer prompt event")
+    else {
+        unreachable!("selected frame is a prompt")
+    };
+    let mut expected_observer_prompt = provider_prompt.clone();
+    expected_observer_prompt
+        .context
+        .clear_provider_image_bytes();
+    assert_eq!(
+        observer_prompt, &expected_observer_prompt,
+        "observer prompt must differ only by stripped provider image bytes"
+    );
+    let prompt_image_bytes = |prompt: &tau_proto::AgentPromptCreated| {
+        prompt.context.flatten_iter().find_map(|item| {
+            let ContextItem::ToolResult(result) = item else {
+                return None;
+            };
+            let [tau_proto::ToolResultContentPart::Image(image)] =
+                result.provider_content.as_slice()
+            else {
+                return None;
+            };
+            Some(image.data.to_vec())
+        })
+    };
+    let image_bytes = vec![1, 2, 3, 4];
+    let mut typed_provider_prompt = provider_prompt.clone();
+    typed_provider_prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::ToolResults(
+            tau_proto::ToolResultsBlock {
+                items: vec![tau_proto::ToolResultItem {
+                    presentation: Default::default(),
+                    call_id: "call-observer-image".into(),
+                    tool_type: tau_proto::ToolType::Function,
+                    status: tau_proto::ToolResultStatus::Success,
+                    output: tau_proto::ToolResponse::from_cbor(&CborValue::Text("image".into())),
+                    provider_content: vec![tau_proto::ToolResultContentPart::Image(
+                        tau_proto::ImageContent {
+                            media_type: tau_proto::ImageMediaType::Png,
+                            data: image_bytes.clone().into(),
+                            width: 1,
+                            height: 1,
+                            detail: tau_proto::ImageDetail::High,
+                        },
+                    )],
+                }],
+            },
+        ));
+    let Event::AgentPromptCreated(typed_observer_prompt) =
+        crate::harness::event_without_provider_image_bytes(&Event::AgentPromptCreated(
+            typed_provider_prompt.clone(),
+        ))
+    else {
+        unreachable!("prompt projection preserves event identity")
+    };
+    assert_eq!(
+        prompt_image_bytes(&typed_provider_prompt),
+        Some(image_bytes)
+    );
+    assert_eq!(prompt_image_bytes(&typed_observer_prompt), Some(Vec::new()));
 
     h.provider_runtime
         .models_by_extension

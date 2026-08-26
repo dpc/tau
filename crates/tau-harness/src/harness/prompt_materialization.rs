@@ -315,10 +315,12 @@ impl Harness {
                 suppress_activation_dispatch: true,
                 continuation: Some(PostCommitContinuation::PromptMaterialization(
                     PromptDispatchContinuation {
-                        started,
+                        authority: interception::PromptDispatchAuthority {
+                            started,
+                            provider_connection_id,
+                            runtime_incarnation,
+                        },
                         prompt: path_std_sync::Arc::new(prompt),
-                        provider_connection_id,
-                        runtime_incarnation,
                     },
                 )),
                 notify_watchers: false,

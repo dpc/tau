@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -86,9 +87,13 @@ impl ConnectionSink for ModelSink {
 }
 
 fn notice() -> HarnessOutputMessage {
+    notice_with_message("payload")
+}
+
+fn notice_with_message(message: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::deliver(Event::HarnessNotice(HarnessNotice {
         kind: "routing-model".to_owned(),
-        message: "payload".to_owned(),
+        message: message.to_owned(),
         level: NoticeLevel::Info,
         purpose: NoticePurpose::Diagnostic,
     }))
@@ -318,4 +323,222 @@ fn no_report_broadcast_omits_report_clones_and_reconciles_linearly() {
     assert_eq!(bus.last_route_work().report_id_clones, 0);
     assert_eq!(bus.last_route_work().report_entries, 0);
     assert_eq!(bus.last_route_work().admitted_membership_probes, 64);
+}
+
+/// A lazy event broadcast must not construct its payload when no
+/// non-excluded subscriber selects the event.
+#[test]
+fn lazy_event_broadcast_skips_payload_without_candidate() {
+    let (mut bus, trace) = model_bus();
+    let built = Cell::new(false);
+
+    bus.publish_event_from_excluding_kinds_lazy_without_report(
+        None,
+        HarnessOutputMessage::deliver(Event::AgentPromptCreated(tau_proto::AgentPromptCreated {
+            agent_prompt_id: "ap-lazy".parse().expect("prompt"),
+            agent_id: tau_proto::AgentId::parse("agent-lazy").expect("agent"),
+            session_id: tau_proto::SessionId::parse("session-lazy").expect("session"),
+            system_prompt: String::new(),
+            context: Default::default(),
+            tools: Vec::new(),
+            tools_ref: None,
+            model: "test/model".parse().expect("model"),
+            model_params: Default::default(),
+            tool_choice: Default::default(),
+            originator: Default::default(),
+            share_user_cache_key: false,
+            ctx_id: None,
+            compaction: None,
+            operation: tau_proto::PromptOperation::Inference,
+        })),
+        &[ClientKind::Provider],
+        || {
+            built.set(true);
+            notice()
+        },
+    );
+
+    assert!(!built.get());
+    assert!(trace.normalized().is_empty());
+}
+
+/// A lazy event broadcast must preserve the ordinary selector, visibility,
+/// exclusion, shared-generation, failure, and legacy fanout decisions.
+#[test]
+fn lazy_event_broadcast_matches_eager_fanout() {
+    let (mut eager_bus, eager_trace) = model_bus();
+    let (mut lazy_bus, lazy_trace) = model_bus();
+    let built = Cell::new(false);
+    let excluded = [ClientKind::Provider];
+
+    eager_bus.publish_from_excluding_kinds_without_report(None, notice(), &excluded);
+    lazy_bus.publish_event_from_excluding_kinds_lazy_without_report(
+        None,
+        notice(),
+        &excluded,
+        || {
+            built.set(true);
+            notice()
+        },
+    );
+
+    assert!(built.get());
+    assert_eq!(eager_trace.normalized(), lazy_trace.normalized());
+}
+
+/// A lazy event broadcast must construct one exact projection before applying
+/// arbitrary payload-sensitive visibility filters, then skip hidden delivery.
+#[test]
+fn lazy_event_broadcast_builds_once_when_all_candidates_are_hidden() {
+    let mut bus = EventBus::new();
+    let trace = DeliveryTrace::default();
+    connect_model(
+        &mut bus,
+        &trace,
+        Arc::new(HashSet::new()),
+        ModelConnection {
+            label: "hidden",
+            kind: ClientKind::Ui,
+            shared_target: None,
+            fail_call: false,
+            subscribed: true,
+            visible: false,
+        },
+    );
+    let built = Cell::new(false);
+
+    bus.publish_event_from_excluding_kinds_lazy_without_report(None, notice(), &[], || {
+        built.set(true);
+        notice()
+    });
+
+    assert!(built.get());
+    assert!(trace.normalized().is_empty());
+}
+
+/// A lazy event broadcast must evaluate payload-sensitive visibility against
+/// the exact observer projection that it delivers.
+#[test]
+fn lazy_event_broadcast_filters_the_built_projection() {
+    let mut bus = EventBus::new();
+    let trace = DeliveryTrace::default();
+    let id = test_connection_id("projection-filter");
+    let connection = Connection::new(
+        PendingConnectionMetadata {
+            id: Some(id.clone()),
+            name: test_extension_name("projection-filter"),
+            kind: ClientKind::Ui,
+            origin: ConnectionOrigin::InMemory,
+        },
+        Box::new(ModelSink {
+            label: "projection-filter".to_owned(),
+            shared_target: None,
+            admitted_consumers: Arc::new(HashSet::new()),
+            fail_call: false,
+            trace: trace.clone(),
+        }),
+    )
+    .with_visibility_filter(Box::new(|frame: &RoutedFrame| {
+        matches!(
+            frame.frame.delivered_event(),
+            Some(Event::HarnessNotice(notice)) if notice.message == "observer projection"
+        )
+    }));
+    bus.connect(connection);
+    bus.set_subscriptions(
+        &id,
+        Vec::new(),
+        vec![EventSelector::Prefix("harness.".to_owned())],
+    )
+    .expect("prefix subscription");
+
+    bus.publish_event_from_excluding_kinds_lazy_without_report(
+        None,
+        notice_with_message("canonical payload"),
+        &[],
+        || notice_with_message("observer projection"),
+    );
+
+    assert_eq!(trace.normalized(), ["legacy:projection-filter".to_owned()]);
+}
+
+/// A lazy event broadcast must reject a builder result whose event identity
+/// differs from the frame used to establish selector candidates.
+#[test]
+fn lazy_event_broadcast_rejects_mismatched_built_event() {
+    let (mut bus, trace) = model_bus();
+
+    bus.publish_event_from_excluding_kinds_lazy_without_report(None, notice(), &[], || {
+        HarnessOutputMessage::deliver(Event::ToolStarted(tau_proto::ToolStarted {
+            call_id: tau_proto::ToolCallId::from("call-mismatch"),
+            agent_id: tau_proto::AgentId::parse("agent-mismatch").expect("agent id"),
+            tool_name: tau_proto::ToolName::new("mismatch"),
+            arguments: tau_proto::CborValue::Null,
+            originator: Default::default(),
+        }))
+    });
+
+    assert!(trace.normalized().is_empty());
+}
+
+/// A lazy event broadcast must reject a same-name projection that changes only
+/// the replay marker carried by the admission delivery.
+#[test]
+fn lazy_event_broadcast_rejects_mismatched_replay_marker() {
+    let (mut bus, trace) = model_bus();
+    let recorded_at = tau_proto::UnixMicros::new(1_700_000_000_000_000);
+    let admission = HarnessOutputMessage::deliver_live(
+        recorded_at,
+        Event::HarnessNotice(HarnessNotice {
+            kind: "routing-model".to_owned(),
+            message: "canonical payload".to_owned(),
+            level: NoticeLevel::Info,
+            purpose: NoticePurpose::Diagnostic,
+        }),
+    );
+
+    bus.publish_event_from_excluding_kinds_lazy_without_report(None, admission, &[], || {
+        HarnessOutputMessage::deliver_replay(
+            recorded_at,
+            Event::HarnessNotice(HarnessNotice {
+                kind: "routing-model".to_owned(),
+                message: "observer projection".to_owned(),
+                level: NoticeLevel::Info,
+                purpose: NoticePurpose::Diagnostic,
+            }),
+        )
+    });
+
+    assert!(trace.normalized().is_empty());
+}
+
+/// A lazy event broadcast must reject a same-name projection that changes only
+/// the timestamp carried by the admission delivery.
+#[test]
+fn lazy_event_broadcast_rejects_mismatched_recorded_at() {
+    let (mut bus, trace) = model_bus();
+    let recorded_at = tau_proto::UnixMicros::new(1_700_000_000_000_000);
+    let admission = HarnessOutputMessage::deliver_live(
+        recorded_at,
+        Event::HarnessNotice(HarnessNotice {
+            kind: "routing-model".to_owned(),
+            message: "canonical payload".to_owned(),
+            level: NoticeLevel::Info,
+            purpose: NoticePurpose::Diagnostic,
+        }),
+    );
+
+    bus.publish_event_from_excluding_kinds_lazy_without_report(None, admission, &[], || {
+        HarnessOutputMessage::deliver_live(
+            tau_proto::UnixMicros::new(recorded_at.get() + 1),
+            Event::HarnessNotice(HarnessNotice {
+                kind: "routing-model".to_owned(),
+                message: "observer projection".to_owned(),
+                level: NoticeLevel::Info,
+                purpose: NoticePurpose::Diagnostic,
+            }),
+        )
+    });
+
+    assert!(trace.normalized().is_empty());
 }

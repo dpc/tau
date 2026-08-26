@@ -230,19 +230,25 @@ impl<C: CacheClock, J: CacheJitter> ProviderCacheResidency<C, J> {
         else {
             return;
         };
-        let Ok(bytes) = serde_json::to_vec(&(
-            &prompt.system_prompt,
-            &prompt.context,
-            &prompt.tools,
-            &prompt.model,
-            prompt.model_params,
-            prompt.tool_choice,
-            &prompt.originator,
-            prompt.share_user_cache_key,
-        )) else {
+        let mut hasher = blake3::Hasher::new_keyed(&self.digest_key);
+        if serde_json::to_writer(
+            &mut hasher,
+            &(
+                &prompt.system_prompt,
+                &prompt.context,
+                &prompt.tools,
+                &prompt.model,
+                prompt.model_params,
+                prompt.tool_choice,
+                &prompt.originator,
+                prompt.share_user_cache_key,
+            ),
+        )
+        .is_err()
+        {
             return;
-        };
-        let hash = blake3::keyed_hash(&self.digest_key, &bytes);
+        }
+        let hash = hasher.finalize();
         let mut digest = [0; 16];
         digest.copy_from_slice(&hash.as_bytes()[..16]);
         let key = CacheKey {

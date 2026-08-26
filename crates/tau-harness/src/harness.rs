@@ -146,8 +146,8 @@ use crate::harness::extensions::{
 use crate::harness::gated_final::{CommittedGatedFinal, GatedFinalDisposition};
 use crate::harness::interception::{
     AgentPublishCompletion, ConversationHeadSync, DeferredPublish, DormantOutputLengthCompletion,
-    InterceptorRegistry, PendingIntercept, PostCommitContinuation, PromptDispatchContinuation,
-    PromptDispatchPhase,
+    InterceptorRegistry, PendingIntercept, PostCommitContinuation, PromptDispatchAuthority,
+    PromptDispatchContinuation, PromptDispatchPhase,
 };
 use crate::harness::peer_messaging::PeerMessagingState;
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};

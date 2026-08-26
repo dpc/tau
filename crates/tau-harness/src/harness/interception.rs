@@ -21,6 +21,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Bound::{Excluded, Unbounded};
+use std::sync::Arc;
 
 use tau_proto::{
     AgentId, Event, EventName, EventSelector, ExtensionName, HarnessOutputMessage, InterceptAction,
@@ -30,18 +31,43 @@ use tau_proto::{
 use crate::harness::InferenceDispatchSelectionError;
 use crate::{agent as path_crate_agent, extension as path_crate_extension};
 
-/// One harness-owned full prompt carried from compact-fact admission through
-/// its one-shot post-commit delivery.
+/// Materialization-phase owner of one full prompt until the compact fact
+/// commits and [`Self::into_delivery`] moves the prompt into its event
+/// envelope.
 #[derive(Clone)]
 pub(crate) struct PromptDispatchContinuation {
+    /// Compact prompt authority retained after the full prompt moves onward.
+    pub(crate) authority: PromptDispatchAuthority,
+    /// Full transient provider work envelope owned only during materialization.
+    pub(crate) prompt: Arc<tau_proto::AgentPromptCreated>,
+}
+
+/// Prompt identity and route authority shared by both one-shot dispatch phases.
+#[derive(Clone)]
+pub(crate) struct PromptDispatchAuthority {
     /// Exact compact fact that owns this continuation.
     pub(crate) started: tau_proto::AgentPromptStarted,
-    /// Full transient provider work envelope.
-    pub(crate) prompt: std::sync::Arc<tau_proto::AgentPromptCreated>,
     /// Provider route resolved from the captured model at admission.
     pub(crate) provider_connection_id: tau_proto::ConnectionId,
     /// Loaded runtime instance that materialized the request.
     pub(crate) runtime_incarnation: u64,
+}
+
+impl PromptDispatchContinuation {
+    /// Moves the full prompt into its delivery phase while retaining only its
+    /// compact dispatch authority for post-commit validation.
+    pub(crate) fn into_delivery(self) -> (tau_proto::AgentPromptCreated, PromptDispatchAuthority) {
+        (take_owned_prompt(self.prompt), self.authority)
+    }
+}
+
+/// Consumes the sole full-prompt owner without cloning its constituent
+/// allocations, while retaining a conservative fallback for copied test or
+/// interception state.
+pub(crate) fn take_owned_prompt(
+    prompt: Arc<tau_proto::AgentPromptCreated>,
+) -> tau_proto::AgentPromptCreated {
+    Arc::try_unwrap(prompt).unwrap_or_else(|prompt| (*prompt).clone())
 }
 
 /// Phase of an envelope-bound prompt continuation.
@@ -60,8 +86,9 @@ pub(crate) enum PostCommitContinuation {
     AgentPublish(Box<AgentPublishCompletion>),
     /// Compact prompt fact awaiting its authoritative append.
     PromptMaterialization(PromptDispatchContinuation),
-    /// Full transient prompt awaiting directed provider delivery.
-    PromptDelivery(PromptDispatchContinuation),
+    /// Prompt-free authority for a full prompt already owned by its event
+    /// envelope.
+    PromptDelivery(PromptDispatchAuthority),
     /// Unexpected watched-agent retirement awaiting one exact lifecycle append.
     WatchRetirement(WatchRetirementCompletion),
 }
@@ -286,12 +313,12 @@ impl ConversationHeadSync {
     }
 
     /// Returns the prompt continuation for either exclusive prompt phase.
-    pub(crate) fn prompt_dispatch(&self) -> Option<&PromptDispatchContinuation> {
+    pub(crate) fn prompt_dispatch(&self) -> Option<&PromptDispatchAuthority> {
         match self.continuation.as_ref() {
-            Some(
-                PostCommitContinuation::PromptMaterialization(continuation)
-                | PostCommitContinuation::PromptDelivery(continuation),
-            ) => Some(continuation),
+            Some(PostCommitContinuation::PromptMaterialization(continuation)) => {
+                Some(&continuation.authority)
+            }
+            Some(PostCommitContinuation::PromptDelivery(authority)) => Some(authority),
             _ => None,
         }
     }

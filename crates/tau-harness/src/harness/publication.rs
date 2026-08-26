@@ -745,7 +745,8 @@ impl Harness {
         self.enqueue_publish(source.as_ref(), event, persist, must_pass, sync);
     }
 
-    pub(super) fn note_agent_prompt_created(&mut self, prompt: &AgentPromptCreated) {
+    /// Updates runtime prompt-route bookkeeping from the compact durable owner.
+    pub(super) fn note_agent_prompt_started(&mut self, prompt: &tau_proto::AgentPromptStarted) {
         if let Some(cid) = self
             .prompt_coordination
             .prompt_runtime
@@ -910,6 +911,20 @@ impl Harness {
         let Event::AgentPromptCreated(prompt) = event else {
             return;
         };
+        let started = tau_proto::AgentPromptStarted::from(prompt);
+        self.recover_failed_provider_prompt_route_metadata(
+            &started,
+            provider_connection_id,
+            reason,
+        );
+    }
+
+    fn recover_failed_provider_prompt_route_metadata(
+        &mut self,
+        prompt: &tau_proto::AgentPromptStarted,
+        provider_connection_id: &tau_proto::ConnectionId,
+        reason: &str,
+    ) {
         let agent_prompt_id = prompt.agent_prompt_id.clone();
         let cid = self
             .prompt_coordination
@@ -981,7 +996,7 @@ impl Harness {
     pub(super) fn prompt_dispatch_runtime_matches(
         &self,
         sync: &ConversationHeadSync,
-        continuation: &PromptDispatchContinuation,
+        continuation: &PromptDispatchAuthority,
         require_compact_fact: bool,
     ) -> bool {
         if sync.session_generation != self.session_runtime.current_session_generation
@@ -1101,12 +1116,14 @@ impl Harness {
                 started == &continuation.started
             }
             (Event::AgentPromptCreated(prompt), PromptDispatchPhase::Delivery) => {
-                prompt == continuation.prompt.as_ref()
-                    && prompt.agent_prompt_id == continuation.started.agent_prompt_id
+                prompt.agent_prompt_id == continuation.started.agent_prompt_id
                     && prompt.agent_id == continuation.started.agent_id
                     && prompt.session_id == continuation.started.session_id
                     && prompt.model == continuation.started.model
+                    && Some(prompt.model_params) == continuation.started.model_params
                     && prompt.operation == continuation.started.operation
+                    && prompt.originator == continuation.started.originator
+                    && prompt.ctx_id == continuation.started.ctx_id
             }
             _ => false,
         };
@@ -1128,13 +1145,16 @@ impl Harness {
             return;
         };
         let prompt_id = continuation.started.agent_prompt_id.clone();
-        let prompt = Event::AgentPromptCreated((*continuation.prompt).clone());
         let provider_connection_id = continuation.provider_connection_id.clone();
         self.prompt_coordination
             .prompt_runtime
             .pending_dispatches
             .remove(&prompt_id);
-        self.recover_failed_provider_prompt_route(&prompt, &provider_connection_id, reason);
+        self.recover_failed_provider_prompt_route_metadata(
+            &continuation.started,
+            &provider_connection_id,
+            reason,
+        );
     }
 
     /// Persist one stamped message fact before exposing it to any consumer.
@@ -1735,8 +1755,8 @@ impl Harness {
                 .roster_loaded
                 .remove(&unloaded.agent_id);
         }
-        if let Event::AgentPromptCreated(prompt) = &event {
-            self.note_agent_prompt_created(prompt);
+        if let Event::AgentPromptStarted(prompt) = &event {
+            self.note_agent_prompt_started(prompt);
         }
         if let Some(sync) = sync_head_for.as_ref()
             && let Some(c) = self.agent_runtime.agent_registry.agents.get_mut(&sync.cid)
@@ -1860,12 +1880,6 @@ impl Harness {
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
                 (cid, completion, through)
             });
-        // Wrap in a harness-owned delivery so subscribers get the shared
-        // runtime timestamp and replay/live envelope metadata.
-        let observer_frame = HarnessOutputMessage::deliver_live(
-            recorded_at,
-            event_without_provider_image_bytes(&event),
-        );
         let bus_enqueue_started = Instant::now();
         let prompt_provider_route = matches!(event, Event::AgentPromptCreated(_))
             .then(|| {
@@ -1901,14 +1915,21 @@ impl Harness {
             // payload via a directed route so replay/live delivery metadata
             // matches the subscribed-provider path.
             let execution_kinds = [ClientKind::Provider];
-            self.runtime_io
-                .bus
-                .publish_from_excluding_kinds_without_report(
-                    source,
-                    observer_frame,
-                    &execution_kinds,
-                );
             let provider_frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
+            let provider_frame = self
+                .runtime_io
+                .bus
+                .publish_event_from_excluding_kinds_lazy_without_report(
+                    source,
+                    provider_frame,
+                    &execution_kinds,
+                    || {
+                        HarnessOutputMessage::deliver_live(
+                            recorded_at,
+                            event_without_provider_image_bytes(&event),
+                        )
+                    },
+                );
             match self
                 .runtime_io
                 .bus
@@ -1953,12 +1974,19 @@ impl Harness {
             // exclude every provider and fail the exact durable owner before any
             // remote client can see the request.
             let execution_kinds = [ClientKind::Provider];
+            let admission_frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
             self.runtime_io
                 .bus
-                .publish_from_excluding_kinds_without_report(
+                .publish_event_from_excluding_kinds_lazy_without_report(
                     source,
-                    observer_frame,
+                    admission_frame,
                     &execution_kinds,
+                    || {
+                        HarnessOutputMessage::deliver_live(
+                            recorded_at,
+                            event_without_provider_image_bytes(&event),
+                        )
+                    },
                 );
             let unavailable_route = tau_proto::ConnectionId::parse("unavailable-model-route")
                 .expect("fixed unavailable route must satisfy the connection identifier grammar");
@@ -1971,6 +1999,10 @@ impl Harness {
             event,
             Event::ProviderToolResult(_) | Event::ToolResult(_) | Event::ToolBackgroundResult(_)
         ) {
+            let observer_frame = HarnessOutputMessage::deliver_live(
+                recorded_at,
+                event_without_provider_image_bytes(&event),
+            );
             // Raw provider and generic result data is not a UI payload. UIs
             // receive the separately published payload-free display projection.
             self.runtime_io
@@ -1981,6 +2013,10 @@ impl Harness {
                     &[ClientKind::Ui],
                 );
         } else {
+            let observer_frame = HarnessOutputMessage::deliver_live(
+                recorded_at,
+                event_without_provider_image_bytes(&event),
+            );
             self.runtime_io
                 .bus
                 .publish_from_excluding_kinds_without_report(source, observer_frame, &[]);
@@ -2088,16 +2124,17 @@ impl Harness {
         if let Some(completion) = watch_retirement.as_ref() {
             self.finish_watch_retirement_delivery(completion, true);
         }
-        if let Some(continuation) = sync_head_for
-            .as_ref()
-            .filter(|sync| {
-                sync.prompt_dispatch_phase() == Some(PromptDispatchPhase::Materialization)
-                    && matches!(event, Event::AgentPromptStarted(_))
-            })
-            .and_then(ConversationHeadSync::prompt_dispatch)
-            .cloned()
+        let prompt_materialization = sync_head_for.as_mut().and_then(|sync| {
+            (sync.prompt_dispatch_phase() == Some(PromptDispatchPhase::Materialization)
+                && matches!(event, Event::AgentPromptStarted(_)))
+            .then(|| sync.continuation.take())
+            .flatten()
+        });
+        if let Some(PostCommitContinuation::PromptMaterialization(continuation)) =
+            prompt_materialization
         {
-            let prompt = Event::AgentPromptCreated((*continuation.prompt).clone());
+            let (prompt, authority) = continuation.into_delivery();
+            let prompt = Event::AgentPromptCreated(prompt);
             let sync = sync_head_for.as_ref().expect("prompt sync exists");
             self.enqueue_publish(
                 None,
@@ -2110,7 +2147,7 @@ impl Harness {
                     session_generation: sync.session_generation,
                     fold_parent: None,
                     suppress_activation_dispatch: true,
-                    continuation: Some(PostCommitContinuation::PromptDelivery(continuation)),
+                    continuation: Some(PostCommitContinuation::PromptDelivery(authority)),
                     notify_watchers: false,
                 }),
             );

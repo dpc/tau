@@ -192,6 +192,39 @@ pub(crate) fn prompt(provider: &str, id: &str) -> AgentPromptCreated {
     }
 }
 
+/// Streaming prefix hashing must retain the exact digest identity produced by
+/// the previous contiguous JSON serialization.
+#[test]
+fn streaming_prefix_hash_matches_contiguous_serialization() {
+    let prompt = prompt("one", "prompt-hash");
+    let key = [7; 32];
+    let expected_bytes = serde_json::to_vec(&(
+        &prompt.system_prompt,
+        &prompt.context,
+        &prompt.tools,
+        &prompt.model,
+        prompt.model_params,
+        prompt.tool_choice,
+        &prompt.originator,
+        prompt.share_user_cache_key,
+    ))
+    .expect("serialize prefix");
+    let expected = blake3::keyed_hash(&key, &expected_bytes);
+    let (_, mut scheduler) = owner();
+
+    scheduler.track_prompt(
+        tau_proto::ConnectionId::parse("one-route").expect("route"),
+        &prompt,
+        Some(&model("one")),
+    );
+
+    let tracked = scheduler
+        .tracked
+        .get(&prompt.agent_prompt_id)
+        .expect("tracked prompt");
+    assert_eq!(tracked.key.digest, expected.as_bytes()[..16]);
+}
+
 /// Build response-local cache usage with explicit read/write counters.
 pub(crate) fn usage(read: u64, write: u64) -> tau_proto::ProviderTokenUsage {
     tau_proto::ProviderTokenUsage {
