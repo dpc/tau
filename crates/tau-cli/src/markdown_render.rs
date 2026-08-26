@@ -27,6 +27,11 @@
 //! parsed through its last completed newline, while the currently incomplete
 //! streamed line remains plain until it receives a newline or final/static
 //! rendering parses the complete string.
+//!
+//! Inline recognition indexes the suffix once before rendering it. Unmatched
+//! code backticks, link labels and targets, autolink brackets, and emphasis,
+//! strong, or strike delimiters therefore reuse the same next-candidate facts
+//! instead of rescanning the suffix for every failed opener.
 
 use std::sync as path_std_sync;
 
@@ -984,7 +989,220 @@ fn fence_marker(trimmed: &str) -> Option<FenceKind> {
 }
 
 fn parse_inline(text: &str, runs: &mut Vec<MarkdownRun>) {
-    parse_inline_with_style(text, runs, MarkdownStyle::Base, true);
+    let mut work = InlineWork::default();
+    parse_inline_with_style(text, runs, MarkdownStyle::Base, true, &mut work);
+}
+
+#[cfg(test)]
+fn inline_recognition_work(text: &str) -> usize {
+    let mut runs = Vec::new();
+    let mut work = InlineWork::default();
+    parse_inline_with_style(text, &mut runs, MarkdownStyle::Base, true, &mut work);
+    work.inspected
+}
+
+/// Deterministic count of input positions inspected by inline recognition.
+///
+/// This is deliberately not elapsed time: tests use it to keep failed
+/// recognition linear across machines and build profiles.
+#[derive(Default)]
+struct InlineWork {
+    inspected: usize,
+}
+
+impl InlineWork {
+    fn inspect(&mut self) {
+        self.inspected = self.inspected.saturating_add(1);
+    }
+}
+
+/// Suffix facts and monotonic search cursors shared by one inline parse.
+///
+/// The previous parser searched each candidate's remaining suffix
+/// independently. This scanner instead inspects each character a fixed number
+/// of times. Its fused `u32` index is valid because each parsed line is bounded
+/// by the protocol frame limit. Opaque spans use the same precedence as
+/// rendering (escape, code, link, autolink), and delimiter cursors jump over
+/// them before considering a close. Consequently a failed candidate cannot hide
+/// or expose a delimiter differently from the old left-to-right search.
+struct InlineScanner<'text> {
+    text: &'text str,
+    opaque_len: Vec<u32>,
+    closing_cursors: [usize; 5],
+    bare_url_cursor: usize,
+}
+
+impl<'text> InlineScanner<'text> {
+    fn new(text: &'text str, work: &mut InlineWork) -> Self {
+        let mut opaque_len = vec![0; text.len() + 1];
+        let mut next_backtick = None;
+        let mut after_next_backtick = None;
+        let mut next_bracket = None;
+        let mut after_next_bracket = None;
+        let mut next_paren = None;
+        let mut after_next_paren = None;
+        let mut next_greater = None;
+        let mut next_whitespace = None;
+        let mut next_http_invalid = None;
+        for (index, ch) in text.char_indices().rev() {
+            work.inspect();
+            opaque_len[index] = scanner_opaque_len(
+                text,
+                index,
+                next_backtick,
+                next_bracket,
+                next_greater,
+                next_http_invalid,
+                &opaque_len,
+            );
+            if ch == ']'
+                && text.as_bytes().get(index + 1) == Some(&b'(')
+                && let Some(close_target) = next_paren
+                && index + 2 < close_target
+                && next_whitespace.is_none_or(|found| close_target <= found)
+            {
+                opaque_len[index] =
+                    u32::try_from(close_target + 1).expect("Markdown line fits protocol frame");
+            }
+            update_unescaped_index(index, ch, '`', &mut next_backtick, &mut after_next_backtick);
+            update_unescaped_index(index, ch, ']', &mut next_bracket, &mut after_next_bracket);
+            update_unescaped_index(index, ch, ')', &mut next_paren, &mut after_next_paren);
+            next_greater = (ch == '>').then_some(index).or(next_greater);
+            next_whitespace = ch.is_whitespace().then_some(index).or(next_whitespace);
+            next_http_invalid = (ch.is_whitespace() || ch.is_control())
+                .then_some(index)
+                .or(next_http_invalid);
+        }
+        for (index, ch) in text.char_indices() {
+            work.inspect();
+            if ch == ']' {
+                opaque_len[index] = 0;
+            }
+        }
+        Self {
+            text,
+            opaque_len,
+            closing_cursors: [0; 5],
+            bare_url_cursor: 0,
+        }
+    }
+
+    fn code_len(&self, start: usize, range_end: usize) -> Option<usize> {
+        let len = self.opaque_len(start);
+        (len != 0 && start + len <= range_end).then_some(len)
+    }
+
+    fn link(
+        &self,
+        start: usize,
+        range_end: usize,
+        work: &mut InlineWork,
+    ) -> Option<(&'text str, &'text str, usize)> {
+        let len = self.opaque_len(start);
+        if len == 0 || range_end < start + len {
+            return None;
+        }
+        let text = &self.text[start..start + len];
+        let close_label = find_unescaped_counted(&text[1..], ']', work)? + start + 1;
+        let open_target = close_label + 1;
+        let close_target = start + len - 1;
+        let label = &self.text[start + 1..close_label];
+        let target = &self.text[open_target + 1..close_target];
+        Some((label, target, len))
+    }
+
+    fn autolink(&self, start: usize, range_end: usize) -> Option<(&'text str, usize)> {
+        let len = self.opaque_len(start);
+        (len != 0 && start + len <= range_end)
+            .then(|| (&self.text[start + 1..start + len - 1], len))
+    }
+
+    fn bare_url_len(
+        &mut self,
+        start: usize,
+        range_end: usize,
+        work: &mut InlineWork,
+    ) -> Option<usize> {
+        let rest = &self.text[start..range_end];
+        let body = rest
+            .strip_prefix("https://")
+            .or_else(|| rest.strip_prefix("http://"))?;
+        if body.is_empty() || body.starts_with(['/', '?', '#']) {
+            return None;
+        }
+
+        let mut end = self.bare_url_cursor.max(start).min(range_end);
+        while end < range_end {
+            work.inspect();
+            let ch = self.text[end..]
+                .chars()
+                .next()
+                .expect("non-empty bare URL suffix");
+            if ch.is_whitespace() || ch.is_control() || matches!(ch, '<' | '>') {
+                self.bare_url_cursor = end;
+                if ch.is_control() && !ch.is_whitespace() {
+                    return None;
+                }
+                break;
+            }
+            end += ch.len_utf8();
+        }
+        if end == self.text.len() {
+            self.bare_url_cursor = end;
+        }
+        while self.text[start..end].ends_with(['.', ',', ';', ':', '!', '?', ')', ']']) {
+            end -= self.text[start..end]
+                .chars()
+                .next_back()
+                .map_or(0, char::len_utf8);
+        }
+        let len = end - start;
+        valid_http_target(&self.text[start..end]).then_some(len)
+    }
+
+    fn closing_sequence(
+        &mut self,
+        start: usize,
+        delimiter: &str,
+        work: &mut InlineWork,
+    ) -> Option<usize> {
+        let after_open = start + delimiter.len();
+        let cursor = match delimiter {
+            "***" => 0,
+            "**" => 1,
+            "~~" => 2,
+            "*" => 3,
+            "_" => 4,
+            _ => return None,
+        };
+        let mut candidate = self.closing_cursors[cursor].max(after_open);
+        while candidate < self.text.len() {
+            work.inspect();
+            let opaque_len = self.opaque_len(candidate);
+            if opaque_len != 0 {
+                candidate += opaque_len;
+                continue;
+            }
+            if after_open < candidate
+                && self.text[candidate..].starts_with(delimiter)
+                && (delimiter != "_" || delimiter_allowed(self.text, candidate, '_'))
+            {
+                self.closing_cursors[cursor] = candidate;
+                return Some(candidate + delimiter.len());
+            }
+            candidate += self.text[candidate..]
+                .chars()
+                .next()
+                .expect("non-empty closing suffix")
+                .len_utf8();
+        }
+        self.closing_cursors[cursor] = self.text.len();
+        None
+    }
+
+    fn opaque_len(&self, start: usize) -> usize {
+        self.opaque_len[start] as usize
+    }
 }
 
 fn parse_inline_with_style(
@@ -992,10 +1210,34 @@ fn parse_inline_with_style(
     runs: &mut Vec<MarkdownRun>,
     inherited_style: MarkdownStyle,
     recognize_delimiters: bool,
+    work: &mut InlineWork,
 ) {
-    let mut index = 0;
-    while index < text.len() {
-        let rest = &text[index..];
+    let mut scanner = InlineScanner::new(text, work);
+    parse_inline_range(
+        &mut scanner,
+        runs,
+        0,
+        text.len(),
+        inherited_style,
+        recognize_delimiters,
+        work,
+    );
+}
+
+fn parse_inline_range(
+    scanner: &mut InlineScanner<'_>,
+    runs: &mut Vec<MarkdownRun>,
+    start: usize,
+    end: usize,
+    inherited_style: MarkdownStyle,
+    recognize_delimiters: bool,
+    work: &mut InlineWork,
+) {
+    let text = scanner.text;
+    let mut index = start;
+    while index < end {
+        work.inspect();
+        let rest = &text[index..end];
         let ch = rest.chars().next().expect("non-empty remainder");
         if ch == '\\'
             && let Some(len) = escaped_len(rest)
@@ -1010,9 +1252,8 @@ fn parse_inline_with_style(
             continue;
         }
         if ch == '`'
-            && let Some(end) = find_unescaped(&rest[1..], '`')
+            && let Some(len) = scanner.code_len(index, end)
         {
-            let len = 1 + end + 1;
             let style = if inherited_style == MarkdownStyle::Base {
                 MarkdownStyle::Code
             } else {
@@ -1023,63 +1264,79 @@ fn parse_inline_with_style(
             continue;
         }
         if ch == '['
-            && let Some((label, target, len)) = parse_inline_link(rest)
+            && let Some((label, target, len)) = scanner.link(index, end, work)
         {
             push_link_run(runs, label, target, inherited_style);
             index += len;
             continue;
         }
         if ch == '<'
-            && let Some((target, len)) = parse_autolink(rest)
+            && let Some((target, len)) = scanner.autolink(index, end)
         {
             push_link_run(runs, target, target, inherited_style);
             index += len;
             continue;
         }
-        if is_bare_url_start(text, index, rest) {
-            let len = bare_url_len(rest);
+        if is_bare_url_start(text, start, index, rest)
+            && let Some(len) = scanner.bare_url_len(index, end, work)
+        {
             let target = &rest[..len];
-            if valid_http_target(target) {
-                push_link_run(runs, target, target, inherited_style);
-                index += len;
-                continue;
-            }
+            push_link_run(runs, target, target, inherited_style);
+            index += len;
+            continue;
         }
         if recognize_delimiters
             && rest.starts_with("***")
-            && let Some(end) = find_closing_sequence(text, index, "***")
+            && let Some(end) = scanner.closing_sequence(index, "***", work)
         {
-            push_styled_inline(runs, &text[index..end], MarkdownStyle::StrongEmphasis, 3);
+            push_styled_inline(
+                scanner,
+                runs,
+                index,
+                end,
+                MarkdownStyle::StrongEmphasis,
+                3,
+                work,
+            );
             index = end;
             continue;
         }
         if recognize_delimiters
             && rest.starts_with("**")
-            && let Some(end) = find_closing_sequence(text, index, "**")
+            && let Some(end) = scanner.closing_sequence(index, "**", work)
         {
-            push_styled_inline(runs, &text[index..end], MarkdownStyle::Strong, 2);
+            push_styled_inline(scanner, runs, index, end, MarkdownStyle::Strong, 2, work);
             index = end;
             continue;
         }
         if recognize_delimiters
             && rest.starts_with("~~")
-            && let Some(end) = find_closing_sequence(text, index, "~~")
+            && let Some(end) = scanner.closing_sequence(index, "~~", work)
         {
-            push_styled_inline(runs, &text[index..end], MarkdownStyle::Strikethrough, 2);
+            push_styled_inline(
+                scanner,
+                runs,
+                index,
+                end,
+                MarkdownStyle::Strikethrough,
+                2,
+                work,
+            );
             index = end;
             continue;
         }
         if recognize_delimiters
             && matches!(ch, '*' | '_')
             && delimiter_allowed(text, index, ch)
-            && let Some(end) = find_closing_delimiter(text, index, ch)
+            && let Some(end) =
+                scanner.closing_sequence(index, if ch == '*' { "*" } else { "_" }, work)
         {
             let style = if ch == '*' {
                 MarkdownStyle::Strong
             } else {
                 MarkdownStyle::Emphasis
             };
-            push_styled_inline(runs, &text[index..end], style, ch.len_utf8());
+            push_styled_inline(scanner, runs, index, end, style, ch.len_utf8(), work);
             index = end;
             continue;
         }
@@ -1091,19 +1348,30 @@ fn parse_inline_with_style(
 
 /// Parses links inside a uniformly styled delimiter-preserving span.
 fn push_styled_inline(
+    scanner: &mut InlineScanner<'_>,
     runs: &mut Vec<MarkdownRun>,
-    text: &str,
+    start: usize,
+    end: usize,
     style: MarkdownStyle,
     delimiter_len: usize,
+    work: &mut InlineWork,
 ) {
-    let content_end = text.len().saturating_sub(delimiter_len);
-    if content_end < delimiter_len {
-        push_run(runs, text, style);
+    let content_end = end.saturating_sub(delimiter_len);
+    if content_end < start + delimiter_len {
+        push_run(runs, &scanner.text[start..end], style);
         return;
     }
-    push_run(runs, &text[..delimiter_len], style);
-    parse_inline_with_style(&text[delimiter_len..content_end], runs, style, false);
-    push_run(runs, &text[content_end..], style);
+    push_run(runs, &scanner.text[start..start + delimiter_len], style);
+    parse_inline_range(
+        scanner,
+        runs,
+        start + delimiter_len,
+        content_end,
+        style,
+        false,
+        work,
+    );
+    push_run(runs, &scanner.text[content_end..end], style);
 }
 
 fn escaped_len(rest: &str) -> Option<usize> {
@@ -1119,87 +1387,90 @@ fn escaped_len(rest: &str) -> Option<usize> {
         .map(|c| 1 + c.len_utf8())
 }
 
-fn find_unescaped(text: &str, needle: char) -> Option<usize> {
+fn update_unescaped_index(
+    index: usize,
+    ch: char,
+    needle: char,
+    next: &mut Option<usize>,
+    after_next: &mut Option<usize>,
+) {
+    let current = if ch == '\\' {
+        *after_next
+    } else if ch == needle {
+        Some(index)
+    } else {
+        *next
+    };
+    *after_next = *next;
+    *next = current;
+}
+
+fn find_unescaped_counted(text: &str, needle: char, work: &mut InlineWork) -> Option<usize> {
     let mut escaped = false;
-    for (idx, ch) in text.char_indices() {
+    for (index, ch) in text.char_indices() {
+        work.inspect();
         if escaped {
             escaped = false;
-            continue;
-        }
-        if ch == '\\' {
+        } else if ch == '\\' {
             escaped = true;
-            continue;
-        }
-        if ch == needle {
-            return Some(idx);
+        } else if ch == needle {
+            return Some(index);
         }
     }
     None
 }
 
-fn find_closing_sequence(text: &str, start: usize, delimiter: &str) -> Option<usize> {
-    let after_open = start + delimiter.len();
-    let rest = &text[after_open..];
-    let mut relative = 0;
-    while relative < rest.len() {
-        let candidate = &rest[relative..];
-        if let Some(len) = opaque_inline_len(candidate) {
-            relative += len;
-            continue;
-        }
-        let close = after_open + relative;
-        if candidate.starts_with(delimiter) && after_open < close {
-            return Some(close + delimiter.len());
-        }
-        relative += candidate
-            .chars()
-            .next()
-            .expect("non-empty candidate")
-            .len_utf8();
+fn scanner_opaque_len(
+    text: &str,
+    index: usize,
+    next_backtick: Option<usize>,
+    next_bracket: Option<usize>,
+    next_greater: Option<usize>,
+    next_http_invalid: Option<usize>,
+    link_end_by_label: &[u32],
+) -> u32 {
+    let rest = &text[index..];
+    if let Some(len) = escaped_len(rest) {
+        return u32::try_from(len).expect("escape length fits u32");
     }
-    None
+    if rest.starts_with('`')
+        && let Some(close) = next_backtick
+    {
+        return u32::try_from(close - index + 1).expect("Markdown line fits protocol frame");
+    }
+    if rest.starts_with('[')
+        && let Some(close_label) = next_bracket
+    {
+        let link_end = link_end_by_label[close_label] as usize;
+        if index + 1 < close_label && link_end != 0 {
+            return u32::try_from(link_end - index).expect("Markdown line fits protocol frame");
+        }
+    }
+    if rest.starts_with('<')
+        && let Some(close) = next_greater
+        && scanner_valid_http_target(text, index + 1, close, next_http_invalid)
+    {
+        return u32::try_from(close - index + 1).expect("Markdown line fits protocol frame");
+    }
+    0
 }
 
-fn find_closing_delimiter(text: &str, start: usize, delimiter: char) -> Option<usize> {
-    let after_open = start + delimiter.len_utf8();
-    let rest = &text[after_open..];
-    let mut relative = 0;
-    while relative < rest.len() {
-        let candidate = &rest[relative..];
-        if let Some(len) = opaque_inline_len(candidate) {
-            relative += len;
-            continue;
-        }
-        let ch = candidate.chars().next().expect("non-empty candidate");
-        if ch == delimiter {
-            let close = after_open + relative;
-            if delimiter_allowed(text, close, delimiter) && after_open < close {
-                return Some(close + delimiter.len_utf8());
-            }
-        }
-        relative += ch.len_utf8();
-    }
-    None
-}
-
-fn opaque_inline_len(text: &str) -> Option<usize> {
-    escaped_len(text)
-        .or_else(|| {
-            text.strip_prefix('`')
-                .and_then(|rest| find_unescaped(rest, '`').map(|end| end + 2))
-        })
-        .or_else(|| {
-            text.starts_with('[')
-                .then(|| parse_inline_link(text))
-                .flatten()
-                .map(|(_, _, len)| len)
-        })
-        .or_else(|| {
-            text.starts_with('<')
-                .then(|| parse_autolink(text))
-                .flatten()
-                .map(|(_, len)| len)
-        })
+fn scanner_valid_http_target(
+    text: &str,
+    start: usize,
+    end: usize,
+    next_http_invalid: Option<usize>,
+) -> bool {
+    let target = &text[start..end];
+    let Some(body) = target
+        .strip_prefix("https://")
+        .or_else(|| target.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    !body.is_empty()
+        && !body.starts_with(['/', '?', '#'])
+        && next_http_invalid.is_none_or(|found| end <= found)
 }
 
 fn delimiter_allowed(text: &str, index: usize, delimiter: char) -> bool {
@@ -1237,31 +1508,13 @@ fn push_link_run(runs: &mut Vec<MarkdownRun>, text: &str, target: &str, style: M
     });
 }
 
-fn parse_inline_link(text: &str) -> Option<(&str, &str, usize)> {
-    let close_label = find_unescaped(&text[1..], ']')? + 1;
-    let open_target = close_label + 1;
-    if text.as_bytes().get(open_target) != Some(&b'(') {
-        return None;
-    }
-    let close_target = find_unescaped(&text[open_target + 1..], ')')? + open_target + 1;
-    let label = &text[1..close_label];
-    let target = &text[open_target + 1..close_target];
-    (!label.is_empty() && !target.is_empty() && !target.chars().any(char::is_whitespace))
-        .then_some((label, target, close_target + 1))
-}
-
-fn parse_autolink(text: &str) -> Option<(&str, usize)> {
-    let close = text.find('>')?;
-    let target = &text[1..close];
-    valid_http_target(target).then_some((target, close + 1))
-}
-
-fn is_bare_url_start(text: &str, index: usize, rest: &str) -> bool {
+fn is_bare_url_start(text: &str, range_start: usize, index: usize, rest: &str) -> bool {
     (rest.starts_with("https://") || rest.starts_with("http://"))
-        && text[..index]
-            .chars()
-            .next_back()
-            .is_none_or(|ch| ch.is_whitespace() || matches!(ch, '(' | '[' | '{'))
+        && (index == range_start
+            || text[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_whitespace() || matches!(ch, '(' | '[' | '{')))
 }
 
 fn valid_http_target(target: &str) -> bool {
@@ -1273,20 +1526,6 @@ fn valid_http_target(target: &str) -> bool {
             && !body.starts_with(['/', '?', '#'])
             && !body.chars().any(|ch| ch.is_whitespace() || ch.is_control())
     })
-}
-
-fn bare_url_len(text: &str) -> usize {
-    let mut end = text.len();
-    for (idx, ch) in text.char_indices() {
-        if ch.is_whitespace() || ch == '<' || ch == '>' {
-            end = idx;
-            break;
-        }
-    }
-    while text[..end].ends_with(['.', ',', ';', ':', '!', '?', ')', ']']) {
-        end -= text[..end].chars().next_back().map_or(0, char::len_utf8);
-    }
-    end
 }
 
 #[cfg(test)]

@@ -494,6 +494,46 @@ fn markdown_url_recognition_rejects_malformed_and_embedded_forms() {
     assert_eq!(links, ["https://valid.test/x"]);
 }
 
+/// A bare URL inside an outer style uses that style's local boundaries and
+/// cannot scan through the closing delimiter into following transcript text.
+#[test]
+fn markdown_nested_bare_url_stays_inside_outer_style_range() {
+    let theme = markdown_test_theme();
+    let source = "**x https://inside.test/a** outside";
+    let block = markdown_block(&theme, names::AGENT_RESPONSE, source);
+    let links: Vec<_> = block
+        .content
+        .spans()
+        .iter()
+        .filter_map(|span| {
+            span.hyperlink
+                .as_deref()
+                .map(|target| (span.text.as_str(), target))
+        })
+        .collect();
+
+    assert_eq!(rendered_text(&block), source);
+    assert_eq!(links, [("https://inside.test/a", "https://inside.test/a")]);
+}
+
+/// A failed outer URL may advance the shared terminator cursor past a later
+/// styled range; the nested parse must clamp that cursor to its local boundary.
+#[test]
+fn markdown_nested_bare_url_clamps_retained_terminator_cursor() {
+    let theme = markdown_test_theme();
+    let source = "http://a**https://nested.test/x**\u{0001}";
+    let block = markdown_block(&theme, names::AGENT_RESPONSE, source);
+    let links: Vec<_> = block
+        .content
+        .spans()
+        .iter()
+        .filter_map(|span| span.hyperlink.as_deref())
+        .collect();
+
+    assert_eq!(rendered_text(&block), source);
+    assert_eq!(links, ["https://nested.test/x"]);
+}
+
 /// Link metadata survives narrow wrapping and never extends to surrounding
 /// text.
 #[test]
@@ -1112,6 +1152,46 @@ fn live_stream_tables_update_only_complete_lines_and_match_final_parse() {
         rendered_text(&live),
         format!("{}…", rendered_text(&final_block))
     );
+}
+
+/// Proves every formerly suffix-searching recognizer has a deterministic linear
+/// work bound for unmatched and mixed adversarial candidates at audit sizes.
+#[test]
+fn inline_recognition_work_is_linear_for_failed_candidates() {
+    const SIZES: [usize; 3] = [1024, 8 * 1024, 64 * 1024];
+    const WORK_PER_BYTE: usize = 32;
+    let theme = markdown_test_theme();
+
+    for size in SIZES {
+        let candidates = [
+            ("unmatched-link", "[".repeat(size)),
+            ("unmatched-autolink", "<".repeat(size)),
+            (
+                "delimiter-runs",
+                "***~~_*".repeat(size.div_ceil(7))[..size].to_owned(),
+            ),
+            (
+                "mixed",
+                "[<*_~`\\]x".repeat(size.div_ceil(9))[..size].to_owned(),
+            ),
+            (
+                "malformed-bare-url",
+                "(http:///".repeat(size.div_ceil(9))[..size].to_owned(),
+            ),
+        ];
+        for (kind, source) in candidates {
+            let work = inline_recognition_work(&source);
+            assert!(
+                work <= WORK_PER_BYTE * size + 64,
+                "{kind} at {size} bytes inspected {work} positions"
+            );
+            assert_eq!(
+                rendered_text(&markdown_block(&theme, names::SHELL_OUTPUT, &source)),
+                source,
+                "{kind} must retain its raw-visible fallback"
+            );
+        }
+    }
 }
 
 /// Ensures unmatched, escaped, identifier, and code-like delimiters do not
