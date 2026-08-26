@@ -2,7 +2,7 @@
 
 `tau-ext-rostra` is the disabled-by-default built-in `std-rostra` tool
 extension. One instance owns one Rostra identity. It uses the exact
-`rostra-client = 0.1.2` full client with relay-only Iroh peer transport and
+`rostra-client = 0.1.3` full client with relay-only Iroh peer transport and
 Pkarr HTTPS/DNS discovery; it never enables direct peer-IP transport.
 
 The operator configures a declared Tau secret and a strict reference to it:
@@ -81,10 +81,23 @@ Pages default to 20 and never exceed 50 records. List excerpts stop near 240
 Unicode scalar values, and detailed Djot stops at 64 KiB. Versioned bounded
 cursors bind continuation to its timeline and author filter. Tau pins
 `rostra-client`, `rostra-client-db`, and `rostra-core` to the synchronized
-crates.io Rostra 0.1.2 release, whose materialization feed API and upstream
+crates.io Rostra 0.1.3 release, whose materialization feed API and upstream
 database migration are separately approved external prerequisites. Tau adds no
 Rostra table, schema, or migration; all client construction, networking, and
 storage access still go through `rostra-client`.
+
+The authoritative release provenance is tag
+[`rostra-client-v0.1.3`](https://app.radicle.xyz/nodes/iris.radicle.xyz/rad:zzK566qFsZnXomX2juRjxj9K1LuF/tree/8dab17efcf4d6ee14a534719af30d6363f639e5f),
+release change `wmrxnrvvxrrm`, and commit/tag target
+`8dab17efcf4d6ee14a534719af30d6363f639e5f`; its annotated tag object is
+`5563015c49aa3135ae7b67b47d78a7f88931956b`, and its diagnostics ancestor is
+`tlurqmkpmovr/406ab534e1634cff9a44f03dacb7111b21c4e3b4`. The
+[crates.io client archive](https://crates.io/crates/rostra-client/0.1.3) is
+registry-verified as SHA256
+`20896b007a2f52d7f1df0a755e0db2c1490bbf027dec52ee7cd76f5f8c416485`;
+the synchronized `rostra-client-db` and `rostra-core` archives are respectively
+`819519d665f7c258870d80c3be13068d3a1b25e2245406e52400ae91d11bf0a9` and
+`dcb52577cae0371dd27c2a0f4cd507a62694cad33d1b5e82904c4c8f2b27963f`.
 
 The protocol reader only validates and schedules work. Reads run independently
 under an eight-query admission cap. Writes take one mutex across activation and
