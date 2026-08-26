@@ -154,13 +154,16 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
         .expect("local action");
 
     let mut scheduler = RendererCommandScheduler::new(remote_rx, local_rx, arbiter);
+    let remote = scheduler
+        .recv_timeout(Duration::from_millis(10))
+        .expect("remote delivery");
     assert!(matches!(
-        scheduler.recv_timeout(Duration::from_millis(10)),
-        Ok(RendererCmd::Remote {
+        remote,
+        RendererCmd::Remote {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
             delivery_id: 1,
             ..
-        })
+        }
     ));
     assert!(matches!(
         scheduler.recv_timeout(Duration::from_millis(10)),
@@ -179,6 +182,47 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
     ));
     assert!(!scheduler.remote_closed());
     drop(remote_tx);
+}
+
+/// A decoded event keeps its original box through ordinary staging, bounded
+/// admission, and scheduler ownership.
+#[test]
+fn renderer_admission_preserves_decoded_event_box() {
+    let (remote_tx, remote_rx) = mpsc::sync_channel(1);
+    let remote_admitted = path_std_sync_atomic::AtomicU64::new(0);
+    let queued_items = path_std_sync_atomic::AtomicUsize::new(0);
+    let arbiter = Mutex::new(());
+    let budget = RendererByteBudget::new();
+    let source =
+        tau_proto::EventDelivery::live(UnixMicros::new(1), Event::TermBell(tau_proto::TermBell {}));
+    let source_allocation = std::ptr::from_ref(source.event.as_ref());
+    let delivery = renderer_event_from_delivery(source, 1, 1).expect("ordinary delivery");
+    let mut stager = cold_attach_stager::ColdAttachStager::pass_through();
+    let delivery = stager.admit(delivery).pop().expect("staged delivery");
+
+    assert!(enqueue_remote_delivery(
+        delivery,
+        &remote_tx,
+        &budget,
+        &queued_items,
+        &arbiter,
+        &remote_admitted,
+    ));
+
+    let (local_tx, local_rx) = LocalRendererSender::channel(
+        Arc::new(path_std_sync_atomic::AtomicU64::new(1)),
+        Arc::new(Mutex::new(())),
+    );
+    drop(local_tx);
+    let mut scheduler =
+        RendererCommandScheduler::new(remote_rx, local_rx, Arc::new(Mutex::new(())));
+    let RendererCmd::Remote { event, .. } = scheduler
+        .recv_timeout(Duration::from_millis(10))
+        .expect("admitted remote delivery")
+    else {
+        panic!("expected remote delivery");
+    };
+    assert_eq!(std::ptr::from_ref(event.as_ref()), source_allocation);
 }
 
 /// A remote reservation captured by a local watermark must not be

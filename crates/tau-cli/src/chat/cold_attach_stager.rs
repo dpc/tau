@@ -13,8 +13,10 @@ mod tests;
 /// boundary. The renderer applies abandonment before the event and interprets
 /// the event according to `presentation`.
 pub(super) struct RendererDelivery {
-    /// Typed payload interpreted by the event renderer.
-    pub(super) event: Event,
+    /// Original decoded event allocation interpreted by the renderer. Staging
+    /// and enqueueing move this box intact; replay normalization may replace
+    /// only its contained event.
+    pub(super) event: Box<Event>,
     /// Whether the harness marked this delivery as replay/catch-up.
     replay: bool,
     /// Harness-provided observation time.
@@ -203,14 +205,14 @@ impl ColdAttachStager {
     /// Admits one decoded delivery and returns deliveries ready for rendering.
     pub(super) fn admit(&mut self, mut delivery: RendererDelivery) -> Vec<RendererDelivery> {
         if delivery.replay
-            && let Event::ProviderToolError(error) = &delivery.event
+            && let Event::ProviderToolError(error) = delivery.event.as_ref()
         {
-            delivery.event = Event::ToolError(error.clone());
+            *delivery.event = Event::ToolError(error.clone());
         }
         if !self.observe_tool_reconstruction_scope(&delivery) {
             return self.finish_tool_reconstruction(Some(delivery), true);
         }
-        let replay_complete = matches!(delivery.event, Event::SessionReplayComplete(_));
+        let replay_complete = matches!(delivery.event.as_ref(), Event::SessionReplayComplete(_));
         if !replay_complete {
             delivery = match self.fold_tool_delivery(delivery) {
                 ToolFold::Consumed => return Vec::new(),
@@ -224,7 +226,7 @@ impl ColdAttachStager {
         if replay_complete {
             delivery.abandoned_shell_starts = self.finish_shell_reconciliation();
         }
-        match (&mut self.shell_reconciliation, &delivery.event) {
+        match (&mut self.shell_reconciliation, delivery.event.as_ref()) {
             (
                 ShellReconciliation::Collecting {
                     starts,
@@ -273,7 +275,7 @@ impl ColdAttachStager {
         }
         if replay_complete {
             if matches!(
-                &delivery.event,
+                delivery.event.as_ref(),
                 Event::SessionReplayComplete(complete) if complete.error.is_some()
             ) && let ToolReconciliation::Active(state) = &mut self.tool_reconciliation
             {
@@ -286,13 +288,13 @@ impl ColdAttachStager {
         if matches!(self.phase, StagingPhase::PassThrough) {
             return vec![delivery];
         }
-        if delivery.replay && is_tool_transcript_event(&delivery.event) {
+        if delivery.replay && is_tool_transcript_event(delivery.event.as_ref()) {
             // Tool transcript reconstruction has cross-event ordering
             // dependencies. Keep its established protocol order; cold-attach
             // staging intentionally covers the plain prompt/response scenario.
             return self.finish_staging(delivery);
         }
-        if delivery.replay && is_transcript_event(&delivery.event) {
+        if delivery.replay && is_transcript_event(delivery.event.as_ref()) {
             if self.can_retain(&delivery) {
                 let next_bytes = self.transcript_bytes.saturating_add(delivery.queue_bytes);
                 self.transcript.push(delivery);
@@ -314,7 +316,7 @@ impl ColdAttachStager {
             return true;
         }
         let charge = delivery.queue_bytes.max(1);
-        match &delivery.event {
+        match delivery.event.as_ref() {
             Event::SessionStarted(started) => {
                 let (adds_item, old_charge) = match &self.tool_reconciliation {
                     ToolReconciliation::Active(state) => (
@@ -435,7 +437,7 @@ impl ColdAttachStager {
     fn fold_tool_delivery(&mut self, delivery: RendererDelivery) -> ToolFold {
         match self.tool_reconciliation {
             ToolReconciliation::FailedClosed
-                if delivery.replay && matches!(delivery.event, Event::ToolStarted(_)) =>
+                if delivery.replay && matches!(delivery.event.as_ref(), Event::ToolStarted(_)) =>
             {
                 return ToolFold::Consumed;
             }
@@ -444,7 +446,7 @@ impl ColdAttachStager {
             }
             ToolReconciliation::Active(_) => {}
         }
-        if !delivery.replay && is_tool_lifecycle_event(&delivery.event) {
+        if !delivery.replay && is_tool_lifecycle_event(delivery.event.as_ref()) {
             if !self.can_retain(&delivery) {
                 return ToolFold::Overflow(delivery);
             }
@@ -457,7 +459,7 @@ impl ColdAttachStager {
         if !delivery.replay {
             return ToolFold::Forward(delivery);
         }
-        match &delivery.event {
+        match delivery.event.as_ref() {
             Event::ToolStarted(started) => {
                 let duplicate = match &self.tool_reconciliation {
                     ToolReconciliation::Active(state) => {
@@ -587,7 +589,7 @@ impl ColdAttachStager {
             return overflow
                 .into_iter()
                 .filter(|delivery| {
-                    !delivery.replay || !matches!(delivery.event, Event::ToolStarted(_))
+                    !delivery.replay || !matches!(delivery.event.as_ref(), Event::ToolStarted(_))
                 })
                 .collect();
         };
@@ -628,7 +630,7 @@ impl ColdAttachStager {
                         || progress_before_terminal.contains(call_id))
             })
             .filter_map(|(call_id, mut delivery)| {
-                let Event::ToolStarted(started) = &delivery.event else {
+                let Event::ToolStarted(started) = delivery.event.as_ref() else {
                     return None;
                 };
                 let transcript_owned = state
@@ -665,7 +667,7 @@ impl ColdAttachStager {
         ready.extend(starts.into_iter().map(|(_, delivery)| delivery));
         ready.extend(state.buffered_live.drain(..).filter(|delivery| {
             preserve_buffered_tool_lifecycle(
-                &delivery.event,
+                delivery.event.as_ref(),
                 &mut active_tool_calls,
                 &mut settled_tool_calls,
             )
@@ -673,9 +675,9 @@ impl ColdAttachStager {
         ready.extend(overflow.into_iter().filter(|delivery| {
             (!discard_baseline
                 || !delivery.replay
-                || !matches!(delivery.event, Event::ToolStarted(_)))
+                || !matches!(delivery.event.as_ref(), Event::ToolStarted(_)))
                 && preserve_buffered_tool_lifecycle(
-                    &delivery.event,
+                    delivery.event.as_ref(),
                     &mut active_tool_calls,
                     &mut settled_tool_calls,
                 )
@@ -838,13 +840,24 @@ fn preserve_buffered_tool_lifecycle(
 }
 
 /// Converts one delivery while suppressing replayed terminal side effects.
+///
+/// Retains the socket decoder's event box for all admitted deliveries.
 pub(super) fn renderer_event_from_delivery(
     delivery: tau_proto::EventDelivery,
     queue_bytes: usize,
     delivery_id: u64,
 ) -> Option<RendererDelivery> {
-    let (event, replay, recorded_at) = delivery.into_parts();
-    if replay && matches!(event, Event::Osc1337SetUserVar(_) | Event::TermBell(_)) {
+    let tau_proto::EventDelivery {
+        event,
+        replay,
+        recorded_at,
+    } = delivery;
+    if replay
+        && matches!(
+            event.as_ref(),
+            Event::Osc1337SetUserVar(_) | Event::TermBell(_)
+        )
+    {
         return None;
     }
     Some(RendererDelivery {

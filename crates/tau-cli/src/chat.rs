@@ -923,7 +923,8 @@ fn encode_binding_action(action: &CliBindingAction) -> String {
     )
 }
 
-/// Enqueues one decoded delivery while preserving its decode correlation.
+/// Enqueues one decoded delivery while preserving its decode correlation and
+/// original decoded event box.
 fn enqueue_remote_delivery(
     delivery: cold_attach_stager::RendererDelivery,
     remote_tx: &mpsc::SyncSender<RendererCmd>,
@@ -937,7 +938,7 @@ fn enqueue_remote_delivery(
     let presentation = delivery.presentation;
     let abandoned_shell_starts = delivery.abandoned_shell_starts;
     let cmd = RendererCmd::Remote {
-        event: Box::new(delivery.event),
+        event: delivery.event,
         presentation,
         abandoned_shell_starts,
         recorded_at: delivery.recorded_at,
@@ -1819,7 +1820,8 @@ enum RendererCmd {
     },
     /// One decoded harness delivery admitted to the bounded remote FIFO.
     Remote {
-        /// Typed payload interpreted by the event renderer.
+        /// Original decoded event allocation moved intact from
+        /// `RendererDelivery` for renderer interpretation.
         event: Box<Event>,
         /// Presentation-only interpretation derived during cold-attach staging.
         presentation: cold_attach_stager::RendererPresentation,

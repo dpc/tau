@@ -99,8 +99,9 @@ fn completed_tool_is_absent_from_reconstructed_pending_rows() {
     assert!(matches!(ready.as_slice(), [boundary] if boundary.delivery_id == 3));
 }
 
-/// A dispatched start with no terminal remains pending even when it produced no
-/// progress, while duplicate historical starts still produce one row.
+/// A dispatched start with no terminal remains pending in its original box even
+/// when it produced no progress, while duplicate historical starts produce one
+/// row.
 #[test]
 fn active_silent_tool_reconstructs_once() {
     let mut stager = ColdAttachStager::staging();
@@ -112,11 +113,9 @@ fn active_silent_tool_reconstructs_once() {
             .len(),
         1
     );
-    assert!(
-        stager
-            .admit(replay(tool_started("active"), 1, 3))
-            .is_empty()
-    );
+    let start = replay(tool_started("active"), 1, 3);
+    let start_allocation = event_allocation(start.event.as_ref());
+    assert!(stager.admit(start).is_empty());
     assert!(
         stager
             .admit(replay(tool_started("active"), 1, 4))
@@ -128,13 +127,14 @@ fn active_silent_tool_reconstructs_once() {
     assert!(matches!(
         ready.as_slice(),
         [start, boundary]
-            if matches!(&start.event, Event::ToolStarted(started) if started.call_id.as_str() == "active")
+            if matches!(start.event.as_ref(), Event::ToolStarted(started) if started.call_id.as_str() == "active")
+                && event_allocation(start.event.as_ref()) == start_allocation
                 && matches!(
                     &start.presentation,
                     RendererPresentation::ReconstructedToolStart { owner }
                         if owner.as_str() == "agent-1"
                 )
-                && matches!(boundary.event, Event::SessionReplayComplete(_))
+                && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))
     ));
 }
 
@@ -167,7 +167,7 @@ fn live_progress_then_terminal_during_attach_preserves_tool_lifecycle() {
     assert!(matches!(
         ready.as_slice(),
         [start, progress, terminal, boundary]
-            if matches!(&start.event, Event::ToolStarted(started)
+            if matches!(start.event.as_ref(), Event::ToolStarted(started)
                 if started.call_id.as_str() == "racing")
                 && matches!(
                     &start.presentation,
@@ -176,7 +176,7 @@ fn live_progress_then_terminal_during_attach_preserves_tool_lifecycle() {
                 )
                 && progress.delivery_id == 4
                 && terminal.delivery_id == 5
-                && matches!(boundary.event, Event::SessionReplayComplete(_))
+                && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))
     ));
 }
 
@@ -209,7 +209,7 @@ fn live_lifecycle_after_terminal_during_attach_is_discarded() {
         ready.as_slice(),
         [terminal, boundary]
             if terminal.delivery_id == 4
-                && matches!(boundary.event, Event::SessionReplayComplete(_))
+                && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))
     ));
 }
 
@@ -272,12 +272,12 @@ fn tool_history_keeps_protocol_order() {
     assert!(matches!(
         tool_ready.as_slice(),
         [held, tool_event]
-            if held.event == prompt
+            if held.event.as_ref() == &prompt
                 && held.delivery_id == 1
-                && tool_event.event == tool
+                && tool_event.event.as_ref() == &tool
                 && tool_event.delivery_id == 2
     ));
-    assert!(matches!(after_ready.as_slice(), [value] if value.event == after));
+    assert!(matches!(after_ready.as_slice(), [value] if value.event.as_ref() == &after));
 }
 
 /// Tool-bearing history can end plain transcript staging before its dispatched
@@ -304,9 +304,9 @@ fn replay_boundary_drains_pending_start_after_tool_history_ends_staging() {
     assert!(matches!(
         ready.as_slice(),
         [start, boundary]
-            if matches!(&start.event, Event::ToolStarted(started)
+            if matches!(start.event.as_ref(), Event::ToolStarted(started)
                 if started.call_id.as_str() == "active")
-                && matches!(boundary.event, Event::SessionReplayComplete(_))
+                && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))
     ));
 }
 
@@ -333,7 +333,7 @@ fn replay_boundary_excludes_start_for_unloaded_agent() {
     let ready = stager.admit(live(replay_complete(), 6));
 
     assert!(matches!(ready.as_slice(), [boundary]
-        if matches!(boundary.event, Event::SessionReplayComplete(_))));
+        if matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))));
 }
 
 /// An unload fact from another session cannot erase valid current membership.
@@ -362,8 +362,8 @@ fn replay_boundary_ignores_unload_from_another_session() {
 
     let ready = stager.admit(live(replay_complete(), 6));
     assert!(matches!(ready.as_slice(), [start, boundary]
-        if matches!(start.event, Event::ToolStarted(_))
-            && matches!(boundary.event, Event::SessionReplayComplete(_))));
+        if matches!(start.event.as_ref(), Event::ToolStarted(_))
+            && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))));
 }
 
 /// Membership from another session cannot authorize a reconstructed start.
@@ -391,7 +391,7 @@ fn replay_boundary_excludes_agent_loaded_in_another_session() {
 
     let ready = stager.admit(live(replay_complete(), 5));
     assert!(matches!(ready.as_slice(), [boundary]
-        if matches!(boundary.event, Event::SessionReplayComplete(_))));
+        if matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))));
 }
 
 /// A start without a matching provider transcript call fails closed.
@@ -408,7 +408,7 @@ fn replay_boundary_excludes_start_without_transcript_ownership() {
 
     let ready = stager.admit(live(replay_complete(), 4));
     assert!(matches!(ready.as_slice(), [boundary]
-        if matches!(boundary.event, Event::SessionReplayComplete(_))));
+        if matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))));
 }
 
 /// Transcript ownership alone cannot replace explicit current-session loaded
@@ -430,7 +430,7 @@ fn replay_boundary_excludes_owned_start_without_session_or_membership() {
 
     let ready = stager.admit(live(replay_complete(), 3));
     assert!(matches!(ready.as_slice(), [boundary]
-        if matches!(boundary.event, Event::SessionReplayComplete(_))));
+        if matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))));
 }
 
 /// Transcript ownership by another agent cannot authorize the loaded starter;
@@ -461,7 +461,7 @@ fn replay_boundary_excludes_unowned_start_and_buffered_progress() {
     let ready = stager.admit(live(replay_complete(), 7));
     assert!(matches!(ready.as_slice(), [terminal, boundary]
         if terminal.delivery_id == 6
-            && matches!(boundary.event, Event::SessionReplayComplete(_))));
+            && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))));
 }
 
 /// A failed replay boundary must discard buffered progress whose replay start
@@ -494,7 +494,7 @@ fn replay_error_discards_reconstructed_start_and_buffered_progress() {
     let ready = stager.admit(live(boundary, 7));
     assert!(matches!(ready.as_slice(), [terminal, boundary]
         if terminal.delivery_id == 6
-            && matches!(boundary.event, Event::SessionReplayComplete(_))));
+            && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))));
 }
 
 /// A provider error is the durable failed-call terminal and must close and
@@ -527,9 +527,9 @@ fn replayed_provider_error_closes_pending_start() {
     let boundary = stager.admit(live(replay_complete(), 6));
 
     assert!(matches!(terminal.as_slice(), [delivery]
-        if matches!(delivery.event, Event::ToolError(_))));
+        if matches!(delivery.event.as_ref(), Event::ToolError(_))));
     assert!(matches!(boundary.as_slice(), [delivery]
-        if matches!(delivery.event, Event::SessionReplayComplete(_))));
+        if matches!(delivery.event.as_ref(), Event::SessionReplayComplete(_))));
 }
 
 /// Every canonical UI terminal closes a fold, while the foreground background
@@ -605,7 +605,7 @@ fn live_tool_after_boundary_does_not_wait_for_shell_draining() {
     let ready = stager.admit(live(tool_started("live"), 3));
 
     assert!(matches!(ready.as_slice(), [delivery]
-        if matches!(delivery.event, Event::ToolStarted(_))
+        if matches!(delivery.event.as_ref(), Event::ToolStarted(_))
             && matches!(delivery.presentation, RendererPresentation::Ordinary)));
 }
 
@@ -630,7 +630,7 @@ fn disconnect_drains_reconstructed_pending_start() {
     let ready = stager.finish_before_disconnect();
 
     assert!(matches!(ready.as_slice(), [delivery]
-        if matches!(delivery.event, Event::ToolStarted(_))));
+        if matches!(delivery.event.as_ref(), Event::ToolStarted(_))));
 }
 
 /// Tool reconstruction shares the byte bound and falls back to deterministic
@@ -655,7 +655,7 @@ fn tool_reconstruction_byte_overflow_flushes_and_stops_buffering() {
     let ready = stager.admit(live(tool_error("active"), 5));
 
     assert!(matches!(ready.as_slice(), [terminal]
-        if matches!(terminal.event, Event::ToolError(_))));
+        if matches!(terminal.event.as_ref(), Event::ToolError(_))));
     assert_eq!(stager.admit(live(tool_started("later"), 6)).len(), 1);
 }
 
@@ -690,13 +690,13 @@ fn tool_reconstruction_item_overflow_preserves_baseline_live_order() {
 
     assert_eq!(ready.len(), buffered_capacity + 2);
     assert!(matches!(
-        ready.first().map(|delivery| &delivery.event),
+        ready.first().map(|delivery| delivery.event.as_ref()),
         Some(Event::ToolStarted(_))
     ));
     assert!(
         ready[1..]
             .iter()
-            .all(|delivery| matches!(delivery.event, Event::ToolProgress(_)))
+            .all(|delivery| matches!(delivery.event.as_ref(), Event::ToolProgress(_)))
     );
 }
 
@@ -737,17 +737,17 @@ fn item_overflow_discards_start_after_buffered_terminal() {
 
     assert_eq!(ready.len(), buffered_capacity + 1);
     assert!(matches!(
-        ready.first().map(|delivery| &delivery.event),
+        ready.first().map(|delivery| delivery.event.as_ref()),
         Some(Event::ToolStarted(_))
     ));
     assert!(matches!(
-        ready.last().map(|delivery| &delivery.event),
+        ready.last().map(|delivery| delivery.event.as_ref()),
         Some(Event::ToolError(_))
     ));
     assert!(
         ready[1..ready.len().saturating_sub(1)]
             .iter()
-            .all(|delivery| matches!(delivery.event, Event::ToolProgress(_)))
+            .all(|delivery| matches!(delivery.event.as_ref(), Event::ToolProgress(_)))
     );
 }
 
@@ -778,10 +778,10 @@ fn duplicate_terminal_during_attach_is_discarded() {
     assert!(matches!(
         ready.as_slice(),
         [start, progress, terminal, boundary]
-            if matches!(start.event, Event::ToolStarted(_))
+            if matches!(start.event.as_ref(), Event::ToolStarted(_))
                 && progress.delivery_id == 5
                 && terminal.delivery_id == 6
-                && matches!(boundary.event, Event::SessionReplayComplete(_))
+                && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))
     ));
 }
 
@@ -808,7 +808,7 @@ fn historical_tool_overflow_fails_closed_until_replay_boundary() {
 
     let terminal = stager.admit(replay(tool_error("call-0"), 1, 2_000));
     assert!(matches!(terminal.as_slice(), [delivery]
-        if matches!(delivery.event, Event::ToolError(_))));
+        if matches!(delivery.event.as_ref(), Event::ToolError(_))));
     assert_eq!(
         stager
             .admit(replay(tool_call_response("call-late"), 1, 2_001))
@@ -824,7 +824,7 @@ fn historical_tool_overflow_fails_closed_until_replay_boundary() {
 
     let boundary = stager.admit(live(replay_complete(), 2_004));
     assert!(matches!(boundary.as_slice(), [delivery]
-        if matches!(delivery.event, Event::SessionReplayComplete(_))));
+        if matches!(delivery.event.as_ref(), Event::SessionReplayComplete(_))));
 }
 
 /// Reconstruction indexes share the item bound, are consumed at the boundary,
@@ -892,7 +892,7 @@ fn live_scope_metadata_overflow_discards_stale_pending_baseline() {
     replacement.queue_bytes = RENDERER_QUEUE_MAX_BYTES;
     let ready = stager.admit(replacement);
     assert!(matches!(ready.as_slice(), [membership]
-        if matches!(membership.event, Event::SessionAgentLoaded(_))));
+        if matches!(membership.event.as_ref(), Event::SessionAgentLoaded(_))));
     assert!(matches!(
         stager.tool_reconciliation,
         ToolReconciliation::FailedClosed
@@ -900,5 +900,5 @@ fn live_scope_metadata_overflow_discards_stale_pending_baseline() {
 
     let boundary = stager.admit(live(replay_complete(), 6));
     assert!(matches!(boundary.as_slice(), [delivery]
-        if matches!(delivery.event, Event::SessionReplayComplete(_))));
+        if matches!(delivery.event.as_ref(), Event::SessionReplayComplete(_))));
 }
