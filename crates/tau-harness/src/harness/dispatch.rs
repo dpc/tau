@@ -292,7 +292,7 @@ impl Harness {
                     )
                 });
             if self.selected_model.is_none()
-                && self.provider_model_info.is_empty()
+                && self.provider_runtime.model_info.is_empty()
                 && !has_captured_output_length_owner
             {
                 self.reject_runnable_activations_without_provider_models();

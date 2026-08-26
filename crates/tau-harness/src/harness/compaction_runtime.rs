@@ -142,7 +142,7 @@ impl Harness {
             .clone()
             .expect("admitted manual compaction has a durable target");
         let standalone_model = self.model_for_agent_role(conv).filter(|model| {
-            self.provider_model_info
+            self.provider_runtime.model_info
                 .get(model)
                 .is_some_and(|info| info.supports_standalone_compaction)
         });
@@ -349,10 +349,10 @@ impl Harness {
             return;
         }
         let Some(model) = self.model_for_agent_role(target).filter(|model| {
-            self.provider_model_info
+            self.provider_runtime.model_info
                 .get(model)
                 .is_some_and(|info| info.supports_standalone_compaction)
-                && self.provider_model_routes.contains_key(model)
+                && self.provider_runtime.model_routes.contains_key(model)
         }) else {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
@@ -542,7 +542,7 @@ impl Harness {
             return false;
         }
         if !self
-            .provider_model_info
+            .provider_runtime.model_info
             .get(&accepted.request.model)
             .is_some_and(|info| info.supports_standalone_compaction)
         {
@@ -554,7 +554,7 @@ impl Harness {
             return false;
         }
         if !self
-            .provider_model_routes
+            .provider_runtime.model_routes
             .contains_key(&accepted.request.model)
         {
             self.fail_accepted_manual_compaction(
@@ -694,7 +694,7 @@ impl Harness {
         model: &ModelId,
     ) -> Option<tau_proto::PromptCompactionContext> {
         let supports_compaction = self
-            .provider_model_info
+            .provider_runtime.model_info
             .get(model)
             .is_some_and(|info| info.supports_compaction);
         if !supports_compaction {
@@ -739,7 +739,7 @@ impl Harness {
         let Some(model) = continuation_model.or_else(|| self.model_for_agent_role(conv)) else {
             return false;
         };
-        self.provider_model_info
+        self.provider_runtime.model_info
             .get(&model)
             .is_some_and(|info| info.supports_compaction || info.supports_standalone_compaction)
     }
@@ -864,7 +864,7 @@ impl Harness {
         {
             return None;
         }
-        let info = self.provider_model_info.get(&model)?;
+        let info = self.provider_runtime.model_info.get(&model)?;
         if !info.supports_standalone_compaction {
             return None;
         }
@@ -1035,7 +1035,7 @@ impl Harness {
         if !self.context_usage_baseline_applies(conv) {
             return false;
         }
-        let Some(info) = self.provider_model_info.get(&model) else {
+        let Some(info) = self.provider_runtime.model_info.get(&model) else {
             return false;
         };
         if !info.supports_standalone_compaction {

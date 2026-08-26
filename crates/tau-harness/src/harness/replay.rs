@@ -726,10 +726,10 @@ impl Harness {
         }
 
         let mut provider_sources: Vec<_> =
-            self.provider_models_by_extension.keys().cloned().collect();
+            self.provider_runtime.models_by_extension.keys().cloned().collect();
         provider_sources.sort();
         for source_id in provider_sources {
-            let Some(models) = self.provider_models_by_extension.get(&source_id).cloned() else {
+            let Some(models) = self.provider_runtime.models_by_extension.get(&source_id).cloned() else {
                 continue;
             };
             let Some(entry) = self.extensions.entries.get(&source_id) else {
@@ -773,10 +773,10 @@ impl Harness {
             }
         }
         let mut quota_snapshots = self
-            .provider_quota
+            .provider_runtime.quota
             .values()
             .map(|current| current.snapshot.clone())
-            .chain(self.provider_quota_capabilities.values().cloned())
+            .chain(self.provider_runtime.quota_capabilities.values().cloned())
             .collect::<Vec<_>>();
         quota_snapshots.sort_by(|left, right| left.provider.cmp(&right.provider));
         for snapshot in quota_snapshots {
@@ -807,16 +807,16 @@ impl Harness {
 
         // Send current model state to the new client.
         let models_event = Event::HarnessModelsAvailable(HarnessModelsAvailable {
-            models: self.available_models.clone(),
+            models: self.provider_runtime.available_models.clone(),
         });
         if selector_matches_event(selectors, &models_event) {
             self.send_catch_up_event(client_id, None, models_event);
         }
         let roles_event = Event::HarnessRolesAvailable(HarnessRolesAvailable {
             roles: role_infos(
-                &self.provider_model_info,
+                &self.provider_runtime.model_info,
                 &self.available_roles,
-                &self.available_models,
+                &self.provider_runtime.available_models,
             ),
             groups: self.current_role_groups(),
             custom_prompts: self.custom_prompts.clone(),
@@ -829,7 +829,7 @@ impl Harness {
             baseline_params: self.selected_model.as_ref().map(|model| {
                 baseline_params_for_selection(
                     harness_settings,
-                    &self.provider_model_info,
+                    &self.provider_runtime.model_info,
                     &self.selected_role,
                     model,
                 )
@@ -839,7 +839,7 @@ impl Harness {
             context_window: self
                 .selected_model
                 .as_ref()
-                .and_then(|m| context_window_for_model(&self.provider_model_info, m)),
+                .and_then(|m| context_window_for_model(&self.provider_runtime.model_info, m)),
             role: self.selected_role.clone(),
         });
         if selector_matches_event(selectors, &selected_event) {
@@ -876,7 +876,7 @@ impl Harness {
         let effort_levels = self
             .selected_model
             .as_ref()
-            .map(|m| efforts_for_model(&self.provider_model_info, m))
+            .map(|m| efforts_for_model(&self.provider_runtime.model_info, m))
             .unwrap_or_default();
         let effort_levels_event =
             Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
@@ -888,7 +888,7 @@ impl Harness {
         let verbosity_levels = self
             .selected_model
             .as_ref()
-            .map(|m| verbosities_for_model(&self.provider_model_info, m))
+            .map(|m| verbosities_for_model(&self.provider_runtime.model_info, m))
             .unwrap_or_default();
         let verbosity_levels_event =
             Event::HarnessVerbositiesAvailable(tau_proto::HarnessVerbositiesAvailable {
@@ -900,7 +900,7 @@ impl Harness {
         let thinking_levels = self
             .selected_model
             .as_ref()
-            .map(|m| thinking_summaries_for_model(&self.provider_model_info, m))
+            .map(|m| thinking_summaries_for_model(&self.provider_runtime.model_info, m))
             .unwrap_or_default();
         let thinking_levels_event = Event::HarnessThinkingSummariesAvailable(
             tau_proto::HarnessThinkingSummariesAvailable {

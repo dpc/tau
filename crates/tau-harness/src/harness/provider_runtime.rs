@@ -46,7 +46,7 @@ impl Harness {
         models: Vec<ProviderModelInfo>,
     ) {
         let previous_model_info = self
-            .provider_models_by_extension
+            .provider_runtime.models_by_extension
             .get(source_id)
             .map(|models| {
                 models
@@ -88,7 +88,7 @@ impl Harness {
     }
     fn clear_unowned_provider_quota(&mut self) {
         let providers = self
-            .provider_quota
+            .provider_runtime.quota
             .iter()
             .filter(|(provider, current)| {
                 !self.source_owns_quota_provider(&current.source_id, provider)
@@ -108,7 +108,7 @@ impl Harness {
             return;
         }
         let providers = self
-            .provider_quota
+            .provider_runtime.quota
             .iter()
             .filter(|(_, current)| current.source_id == *source_id)
             .filter(|(_, current)| {
@@ -121,7 +121,7 @@ impl Harness {
             .map(|(provider, _)| provider.clone())
             .collect::<Vec<_>>();
         for provider in providers {
-            let Some(current) = self.provider_quota.get_mut(&provider) else {
+            let Some(current) = self.provider_runtime.quota.get_mut(&provider) else {
                 continue;
             };
             current
@@ -140,10 +140,10 @@ impl Harness {
         let mut provider_model_info = HashMap::new();
         let mut provider_model_routes = HashMap::new();
         let mut duplicate_model_ids = HashSet::new();
-        let mut source_ids: Vec<_> = self.provider_models_by_extension.keys().collect();
+        let mut source_ids: Vec<_> = self.provider_runtime.models_by_extension.keys().collect();
         source_ids.sort();
         for source_id in source_ids {
-            let Some(models) = self.provider_models_by_extension.get(source_id) else {
+            let Some(models) = self.provider_runtime.models_by_extension.get(source_id) else {
                 continue;
             };
             let connection_id = source_id.clone();
@@ -157,8 +157,8 @@ impl Harness {
                 provider_model_routes.insert(model.id.clone(), connection_id.clone());
             }
         }
-        self.provider_model_info = provider_model_info;
-        self.provider_model_routes = provider_model_routes;
+        self.provider_runtime.model_info = provider_model_info;
+        self.provider_runtime.model_routes = provider_model_routes;
         self.warn_on_duplicate_provider_models(duplicate_model_ids);
     }
     /// Warns about ambiguous provider-qualified ids without changing the
@@ -235,9 +235,9 @@ impl Harness {
     }
     fn refresh_available_models(&mut self) {
         self.refresh_provider_model_info();
-        let mut models: Vec<ModelId> = self.provider_model_info.keys().cloned().collect();
+        let mut models: Vec<ModelId> = self.provider_runtime.model_info.keys().cloned().collect();
         models.sort();
-        self.available_models = models;
+        self.provider_runtime.available_models = models;
     }
     pub(super) fn role_after_update(
         &mut self,
@@ -250,7 +250,7 @@ impl Harness {
             .cloned()
             .unwrap_or_default();
         let effective_params =
-            model_for_role(&self.provider_model_info, &self.available_roles, role_name)
+            model_for_role(&self.provider_runtime.model_info, &self.available_roles, role_name)
                 .map(|model| self.params_for_role_model(role_name, &model))
                 .unwrap_or_default();
 
@@ -340,7 +340,7 @@ impl Harness {
     pub(super) fn reconcile_selected_model_with_available(&mut self) {
         let previous_model = self.selected_model.clone();
         self.selected_model = select_model_for_role(
-            &self.provider_model_info,
+            &self.provider_runtime.model_info,
             &self.available_roles,
             &self.selected_role,
         );
@@ -351,20 +351,20 @@ impl Harness {
         }
     }
     pub(super) fn refresh_provider_models_and_publish_state(&mut self) {
-        let had_provider_models = !self.provider_model_info.is_empty();
+        let had_provider_models = !self.provider_runtime.model_info.is_empty();
         let had_routable_model = self
             .selected_model
             .as_ref()
-            .is_some_and(|model| self.provider_model_routes.contains_key(model));
+            .is_some_and(|model| self.provider_runtime.model_routes.contains_key(model));
         self.refresh_available_models();
         self.reconcile_selected_model_with_available();
         self.reconcile_agent_context_usage_models();
         self.publish_available_model_state();
-        let has_provider_models = !self.provider_model_info.is_empty();
+        let has_provider_models = !self.provider_runtime.model_info.is_empty();
         let has_routable_model = self
             .selected_model
             .as_ref()
-            .is_some_and(|model| self.provider_model_routes.contains_key(model));
+            .is_some_and(|model| self.provider_runtime.model_routes.contains_key(model));
         if self.turn_state.is_idle()
             && ((!had_routable_model && has_routable_model)
                 || (!had_provider_models && has_provider_models))
@@ -388,7 +388,7 @@ impl Harness {
             })
             .collect();
         for (cid, usage_model, current_model) in resolutions {
-            if current_model.is_none() && !self.provider_model_info.contains_key(&usage_model) {
+            if current_model.is_none() && !self.provider_runtime.model_info.contains_key(&usage_model) {
                 // Provider discovery is staggered. Absence is not yet evidence
                 // that another model owns this agent, so keep the qualified
                 // baseline until its provider either appears or resolution
@@ -399,7 +399,7 @@ impl Harness {
                 self.clear_agent_context_usage(&cid);
                 continue;
             }
-            let context_window = context_window_for_model(&self.provider_model_info, &usage_model);
+            let context_window = context_window_for_model(&self.provider_runtime.model_info, &usage_model);
             if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 conv.context_percent_used = match (context_window, conv.context_input_tokens) {
                     (Some(window), Some(tokens)) => Some(context_percent_used(tokens, window)),
@@ -412,16 +412,16 @@ impl Harness {
         self.publish_event(
             None,
             Event::HarnessModelsAvailable(tau_proto::HarnessModelsAvailable {
-                models: self.available_models.clone(),
+                models: self.provider_runtime.available_models.clone(),
             }),
         );
         self.publish_event(
             None,
             Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
                 roles: role_infos(
-                    &self.provider_model_info,
+                    &self.provider_runtime.model_info,
                     &self.available_roles,
-                    &self.available_models,
+                    &self.provider_runtime.available_models,
                 ),
                 groups: self.current_role_groups(),
                 custom_prompts: self.custom_prompts.clone(),
@@ -473,16 +473,16 @@ impl Harness {
         let (effort_levels, verbosity_levels, thinking_levels) =
             if let Some(model) = selected_model.as_ref() {
                 (
-                    efforts_for_model(&self.provider_model_info, model),
-                    verbosities_for_model(&self.provider_model_info, model),
-                    thinking_summaries_for_model(&self.provider_model_info, model),
+                    efforts_for_model(&self.provider_runtime.model_info, model),
+                    verbosities_for_model(&self.provider_runtime.model_info, model),
+                    thinking_summaries_for_model(&self.provider_runtime.model_info, model),
                 )
             } else {
                 (Vec::new(), Vec::new(), Vec::new())
             };
         let context_window = selected_model
             .as_ref()
-            .and_then(|model| context_window_for_model(&self.provider_model_info, model));
+            .and_then(|model| context_window_for_model(&self.provider_runtime.model_info, model));
         self.current_session_state.context_percent_used = match (
             context_window,
             self.current_session_state.context_input_tokens,
@@ -498,7 +498,7 @@ impl Harness {
                 baseline_params: selected_model.as_ref().map(|model| {
                     baseline_params_for_selection(
                         &self.accepted_harness_settings,
-                        &self.provider_model_info,
+                        &self.provider_runtime.model_info,
                         &self.selected_role,
                         model,
                     )
@@ -546,7 +546,7 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         models: Vec<ProviderModelInfo>,
     ) {
-        self.provider_models_by_extension
+        self.provider_runtime.models_by_extension
             .insert(source_id.to_owned(), models);
         self.refresh_provider_models_and_publish_state();
     }
@@ -556,7 +556,7 @@ impl Harness {
         provider: &tau_proto::ProviderName,
     ) -> bool {
         let owners = self
-            .provider_model_routes
+            .provider_runtime.model_routes
             .iter()
             .filter(|(model, _)| &model.provider == provider)
             .map(|(_, route)| route)
@@ -572,7 +572,7 @@ impl Harness {
     ) -> bool {
         self.source_owns_quota_provider(source_id, provider)
             && bindings.iter().all(|binding| {
-                self.provider_model_routes
+                self.provider_runtime.model_routes
                     .get(&binding.model)
                     .is_some_and(|route| route == source_id)
             })
@@ -597,10 +597,10 @@ impl Harness {
             );
             return;
         }
-        let current = self.provider_quota.get(&replace.provider);
+        let current = self.provider_runtime.quota.get(&replace.provider);
         let accepted = if replace.establishes_new_epoch {
             !self
-                .provider_quota_retired_epochs
+                .provider_runtime.quota_retired_epochs
                 .get(&replace.provider)
                 .is_some_and(|epochs| epochs.contains(&replace.profile_epoch))
                 && current.is_none_or(|current| {
@@ -614,7 +614,7 @@ impl Harness {
                     && replace.sequence > current.snapshot.sequence
             }) || (current.is_none()
                 && self
-                    .provider_quota_tombstones
+                    .provider_runtime.quota_tombstones
                     .get(&replace.provider)
                     .is_some_and(|tombstone| {
                         tombstone.source_id == *source_id
@@ -623,7 +623,7 @@ impl Harness {
                     }))
                 || (current.is_none()
                     && !self
-                        .provider_quota_retired_epochs
+                        .provider_runtime.quota_retired_epochs
                         .get(&replace.provider)
                         .is_some_and(|epochs| epochs.contains(&replace.profile_epoch)))
         };
@@ -642,9 +642,9 @@ impl Harness {
             windows: replace.windows,
             route_bindings: replace.route_bindings,
         };
-        self.provider_quota_tombstones.remove(&replace.provider);
-        self.provider_quota_capabilities.remove(&replace.provider);
-        self.provider_quota.insert(
+        self.provider_runtime.quota_tombstones.remove(&replace.provider);
+        self.provider_runtime.quota_capabilities.remove(&replace.provider);
+        self.provider_runtime.quota.insert(
             replace.provider,
             CurrentProviderQuota {
                 source_id: source_id.clone(),
@@ -685,7 +685,7 @@ impl Harness {
         {
             return;
         }
-        let Some(current) = self.provider_quota.get(&patch.provider) else {
+        let Some(current) = self.provider_runtime.quota.get(&patch.provider) else {
             return;
         };
         if current.source_id != *source_id
@@ -733,7 +733,7 @@ impl Harness {
         {
             return;
         }
-        self.provider_quota.insert(
+        self.provider_runtime.quota.insert(
             patch.provider,
             CurrentProviderQuota {
                 source_id: source_id.clone(),
@@ -751,7 +751,7 @@ impl Harness {
         clear: tau_proto::ProviderQuotaClear,
     ) {
         let matches = self
-            .provider_quota
+            .provider_runtime.quota
             .get(&clear.provider)
             .is_some_and(|current| {
                 current.source_id == *source_id
@@ -763,7 +763,7 @@ impl Harness {
             return;
         }
         let tombstone_matches = self
-            .provider_quota_tombstones
+            .provider_runtime.quota_tombstones
             .get(&clear.provider)
             .is_some_and(|tombstone| {
                 tombstone.source_id == *source_id
@@ -771,13 +771,13 @@ impl Harness {
                     && clear.sequence > tombstone.sequence
             });
         if tombstone_matches {
-            self.provider_quota_tombstones.remove(&clear.provider);
+            self.provider_runtime.quota_tombstones.remove(&clear.provider);
             self.retire_provider_quota_epoch(&clear.provider, clear.profile_epoch);
         }
     }
     pub(super) fn remove_provider_quota(&mut self, provider: &tau_proto::ProviderName) {
         let sequence = self
-            .provider_quota
+            .provider_runtime.quota
             .get(provider)
             .map_or(0, |current| current.snapshot.sequence);
         self.remove_provider_quota_at(provider, sequence, true);
@@ -788,12 +788,12 @@ impl Harness {
         sequence: u64,
         allow_recovery: bool,
     ) {
-        let Some(current) = self.provider_quota.remove(provider) else {
+        let Some(current) = self.provider_runtime.quota.remove(provider) else {
             return;
         };
         self.retire_provider_quota_epoch(provider, current.snapshot.profile_epoch.clone());
         if allow_recovery {
-            self.provider_quota_tombstones.insert(
+            self.provider_runtime.quota_tombstones.insert(
                 provider.clone(),
                 ProviderQuotaTombstone {
                     source_id: current.source_id,
@@ -802,7 +802,7 @@ impl Harness {
                 },
             );
         } else {
-            self.provider_quota_tombstones.remove(provider);
+            self.provider_runtime.quota_tombstones.remove(provider);
         }
         let changed = tau_proto::HarnessProviderQuotaChanged {
             provider: provider.clone(),
@@ -811,7 +811,7 @@ impl Harness {
             windows: Vec::new(),
             route_bindings: Vec::new(),
         };
-        self.provider_quota_capabilities
+        self.provider_runtime.quota_capabilities
             .insert(provider.clone(), changed.clone());
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
@@ -825,7 +825,7 @@ impl Harness {
     ) {
         const MAX_RETIRED_EPOCHS: usize = 8;
         let epochs = self
-            .provider_quota_retired_epochs
+            .provider_runtime.quota_retired_epochs
             .entry(provider.clone())
             .or_default();
         if !epochs.contains(&epoch) {

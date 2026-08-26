@@ -111,8 +111,8 @@ fn policy_harness_for_model(
     .expect("harness");
     harness.available_roles = HashMap::from([(ROLE.to_owned(), role)]);
     let model = ModelId::new(ProviderName::new("provider"), ModelName::new(model_name));
-    harness.provider_model_info = HashMap::from([(model.clone(), model_info(&model, model_tags))]);
-    harness.provider_model_routes =
+    harness.provider_runtime.model_info = HashMap::from([(model.clone(), model_info(&model, model_tags))]);
+    harness.provider_runtime.model_routes =
         HashMap::from([(model.clone(), crate::test_connection_id("provider"))]);
     harness.selected_role = ROLE.to_owned();
     harness.selected_model = Some(model.clone());
@@ -252,7 +252,7 @@ fn image_tool_requires_exact_route_modalities() {
 
     let model_info = policy
         .harness
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&model)
         .expect("model metadata");
     model_info.input_modalities = vec![
@@ -383,7 +383,7 @@ fn forced_codex_requires_custom_support_and_style_tags_cannot_conflict() {
     );
     forced
         .harness
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&model)
         .expect("model info")
         .supported_tool_types = vec![ToolType::Function];
@@ -393,7 +393,7 @@ fn forced_codex_requires_custom_support_and_style_tags_cannot_conflict() {
     );
     forced
         .harness
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&model)
         .expect("model info")
         .supported_tool_types
@@ -685,7 +685,7 @@ fn provider_supported_tool_types_filter_effective_snapshot() {
 
     policy
         .harness
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&model)
         .expect("model info")
         .supported_tool_types = vec![ToolType::Function, ToolType::Custom];

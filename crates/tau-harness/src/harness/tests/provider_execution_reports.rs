@@ -59,7 +59,7 @@ fn publish_terminal_accounting_report(
             .expect("known-safe AgentPromptId must be valid"),
         cid.clone(),
     );
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "accounting-prompt"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -156,7 +156,7 @@ fn prompt_submitted_report_commits_before_harness_canonical_fact() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -212,7 +212,7 @@ fn pre_ready_provider_execution_report_retains_persistence_envelope() {
         .get_mut("provider")
         .expect("provider")
         .state = path_crate_extension::ExtensionState::Handshaking;
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -278,7 +278,7 @@ fn provider_execution_authority_is_default_deny() {
         "configured-provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -320,7 +320,7 @@ fn canceled_prompt_still_accepts_owned_cache_diagnostic() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -362,7 +362,7 @@ fn canceled_prompt_still_accepts_owned_cache_diagnostic() {
     }
     assert!(found);
 
-    harness.pending_provider_prompts.remove("prompt-1");
+    harness.provider_runtime.pending_prompts.remove("prompt-1");
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),
@@ -407,7 +407,7 @@ fn cache_refresh_terminal_requires_exact_provider_owner() {
     let refresh_id =
         tau_proto::ProviderCacheRefreshId::parse("pcr-harness-test").expect("refresh id");
     harness
-        .provider_cache_residency
+        .provider_runtime.cache_residency
         .install_active_for_test(crate::test_connection_id("provider"), refresh_id.clone());
 
     harness
@@ -420,7 +420,7 @@ fn cache_refresh_terminal_requires_exact_provider_owner() {
         )
         .expect("cache refresh report");
     assert!(
-        harness.provider_cache_residency.next_deadline().is_none(),
+        harness.provider_runtime.cache_residency.next_deadline().is_none(),
         "authenticated terminal must consume active ownership"
     );
 
@@ -462,11 +462,11 @@ fn cache_refresh_tool_windows_union_concurrent_cohorts() {
     let second = tau_proto::ToolCallId::from("second");
     harness.extend_cache_refresh_tool_window([first.clone()]);
     harness.extend_cache_refresh_tool_window([second.clone()]);
-    assert_eq!(harness.cache_refresh_tool_window_calls.len(), 2);
+    assert_eq!(harness.provider_runtime.cache_refresh_tool_window_calls.len(), 2);
     harness.clear_tool_call_tracking(first.as_str());
-    assert_eq!(harness.cache_refresh_tool_window_calls.len(), 1);
+    assert_eq!(harness.provider_runtime.cache_refresh_tool_window_calls.len(), 1);
     harness.clear_tool_call_tracking(second.as_str());
-    assert!(harness.cache_refresh_tool_window_calls.is_empty());
+    assert!(harness.provider_runtime.cache_refresh_tool_window_calls.is_empty());
 }
 
 /// Qualifying evidence traverses the real harness window/deadline dispatcher,
@@ -479,7 +479,7 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
     let debug_log = harness
         .enable_debug_log(&temp.path().join("cache-refresh-debug"))
         .expect("enable debug log");
-    harness.provider_cache_residency =
+    harness.provider_runtime.cache_residency =
         ProviderCacheResidency::runtime(tau_config::settings::ProviderCacheRefresh {
             enabled: true,
             max_idle_seconds: ProviderCacheMaxIdle::new(300).expect("valid idle"),
@@ -496,22 +496,22 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
     write.system_prompt = "private stable cache prefix".to_owned();
     let mut read = cache_fixtures::prompt("provider", "vertical-read");
     read.system_prompt = write.system_prompt.clone();
-    harness.provider_cache_residency.track_prompt(
+    harness.provider_runtime.cache_residency.track_prompt(
         crate::test_connection_id("provider"),
         &write,
         Some(&model),
     );
-    harness.provider_cache_residency.finish_prompt(
+    harness.provider_runtime.cache_residency.finish_prompt(
         &write.agent_prompt_id,
         true,
         Some(&cache_fixtures::usage(0, 10)),
     );
-    harness.provider_cache_residency.track_prompt(
+    harness.provider_runtime.cache_residency.track_prompt(
         crate::test_connection_id("provider"),
         &read,
         Some(&model),
     );
-    harness.provider_cache_residency.finish_prompt(
+    harness.provider_runtime.cache_residency.finish_prompt(
         &read.agent_prompt_id,
         true,
         Some(&cache_fixtures::usage(10, 0)),
@@ -519,7 +519,7 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
     let foreground = tau_proto::ToolCallId::from("vertical-foreground");
     harness.extend_cache_refresh_tool_window([foreground.clone()]);
     harness
-        .provider_cache_residency
+        .provider_runtime.cache_residency
         .force_scheduled_due_for_test();
     provider.lock().expect("provider sink").clear();
     observer.lock().expect("observer sink").clear();
@@ -578,7 +578,7 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
         .expect("real prompt delivery");
     harness.clear_tool_call_tracking(foreground.as_str());
     assert!(
-        harness.provider_cache_residency.next_deadline().is_some(),
+        harness.provider_runtime.cache_residency.next_deadline().is_some(),
         "cancel delivery alone retains ownership"
     );
     let ordered = provider
@@ -648,27 +648,27 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
             }),
         )
         .expect("terminal report");
-    assert!(harness.provider_cache_residency.next_deadline().is_none());
+    assert!(harness.provider_runtime.cache_residency.next_deadline().is_none());
 
     let mut deadline_read = cache_fixtures::prompt("provider", "vertical-deadline");
     deadline_read.system_prompt = read.system_prompt.clone();
-    harness.provider_cache_residency.track_prompt(
+    harness.provider_runtime.cache_residency.track_prompt(
         crate::test_connection_id("provider"),
         &deadline_read,
         Some(&model),
     );
-    harness.provider_cache_residency.finish_prompt(
+    harness.provider_runtime.cache_residency.finish_prompt(
         &deadline_read.agent_prompt_id,
         true,
         Some(&cache_fixtures::usage(10, 0)),
     );
     harness.extend_cache_refresh_tool_window([tau_proto::ToolCallId::from("deadline-cohort")]);
     harness
-        .provider_cache_residency
+        .provider_runtime.cache_residency
         .force_scheduled_due_for_test();
     harness.process_cache_refresh_deadline();
     harness
-        .provider_cache_residency
+        .provider_runtime.cache_residency
         .force_active_expired_for_test();
     provider.lock().expect("provider sink").clear();
     harness.process_cache_refresh_deadline();
@@ -683,53 +683,53 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
                 )
         )
     }));
-    assert!(harness.provider_cache_residency.next_deadline().is_none());
+    assert!(harness.provider_runtime.cache_residency.next_deadline().is_none());
 
     for (id, usage) in [
         ("vertical-missing-write", cache_fixtures::usage(0, 10)),
         ("vertical-missing-read", cache_fixtures::usage(10, 0)),
     ] {
         let prompt = cache_fixtures::prompt("provider", id);
-        harness.provider_cache_residency.track_prompt(
+        harness.provider_runtime.cache_residency.track_prompt(
             crate::test_connection_id("missing-provider"),
             &prompt,
             Some(&model),
         );
         harness
-            .provider_cache_residency
+            .provider_runtime.cache_residency
             .finish_prompt(&prompt.agent_prompt_id, true, Some(&usage));
     }
     harness.extend_cache_refresh_tool_window([tau_proto::ToolCallId::from("missing-cohort")]);
     harness
-        .provider_cache_residency
+        .provider_runtime.cache_residency
         .force_scheduled_due_for_test();
     harness.process_cache_refresh_deadline();
     assert!(
-        harness.provider_cache_residency.next_deadline().is_none(),
+        harness.provider_runtime.cache_residency.next_deadline().is_none(),
         "empty directed delivery releases ownership"
     );
 
     let mut disconnect_read = cache_fixtures::prompt("provider", "vertical-disconnect");
     disconnect_read.system_prompt = read.system_prompt.clone();
-    harness.provider_cache_residency.track_prompt(
+    harness.provider_runtime.cache_residency.track_prompt(
         crate::test_connection_id("provider"),
         &disconnect_read,
         Some(&model),
     );
-    harness.provider_cache_residency.finish_prompt(
+    harness.provider_runtime.cache_residency.finish_prompt(
         &disconnect_read.agent_prompt_id,
         true,
         Some(&cache_fixtures::usage(10, 0)),
     );
     harness.extend_cache_refresh_tool_window([tau_proto::ToolCallId::from("disconnect-cohort")]);
     harness
-        .provider_cache_residency
+        .provider_runtime.cache_residency
         .force_scheduled_due_for_test();
     harness.process_cache_refresh_deadline();
-    assert!(harness.provider_cache_residency.next_deadline().is_some());
+    assert!(harness.provider_runtime.cache_residency.next_deadline().is_some());
     harness.unregister_connection_tools_for_disconnect(&crate::test_connection_id("provider"));
     assert!(
-        harness.provider_cache_residency.next_deadline().is_none(),
+        harness.provider_runtime.cache_residency.next_deadline().is_none(),
         "authenticated disconnect releases exact ownership"
     );
 }
@@ -746,7 +746,7 @@ fn canceled_submitted_and_updated_reports_are_observation_only() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -807,7 +807,7 @@ fn response_update_without_harness_agent_identity_is_observation_only() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -886,7 +886,7 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
     );
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -918,7 +918,7 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
         )
         .expect("finished report");
     assert!(
-        !harness.pending_provider_prompts.contains_key("prompt-1"),
+        !harness.provider_runtime.pending_prompts.contains_key("prompt-1"),
         "events={:?}, parked={:?}, notices={:?}",
         committed_events(&harness)
             .iter()
@@ -1000,7 +1000,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
     );
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -1149,7 +1149,7 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
                 .expect("known-safe AgentPromptId must be valid"),
         );
     }
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -1205,7 +1205,7 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
             .filter_map(|frame| peel_inner_event(&frame.frame))
             .all(|event| !matches!(event, Event::ProviderResponseFinished(_)))
     );
-    assert!(!harness.pending_provider_prompts.contains_key("prompt-1"));
+    assert!(!harness.provider_runtime.pending_prompts.contains_key("prompt-1"));
     assert!(
         harness
             .agent_registry
@@ -1342,7 +1342,7 @@ fn stale_finished_report_termination_uses_harness_source() {
                 .expect("known-safe AgentPromptId must be valid"),
         );
     }
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -1385,7 +1385,7 @@ fn provider_execution_report_replacement_and_drop_control_semantics() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-2"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -1456,7 +1456,7 @@ fn parked_stale_provider_execution_report_commits_without_successor() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -1494,7 +1494,7 @@ fn parked_stale_provider_execution_report_commits_without_successor() {
         .get_mut("provider")
         .expect("replacement")
         .instance_id = 43.into();
-    harness.pending_provider_prompts.insert(
+    harness.provider_runtime.pending_prompts.insert(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),

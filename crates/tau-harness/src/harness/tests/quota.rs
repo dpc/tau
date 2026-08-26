@@ -127,7 +127,7 @@ fn provider_quota_report_commits_before_canonical_snapshot() {
             && canonical_source.as_str() == HARNESS_CONNECTION_ID
     ));
     assert_eq!(
-        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .windows[0]
             .used_basis_points,
@@ -203,7 +203,7 @@ fn rollover_applies_deferred_provider_quota_for_current_generation() {
             Some(false),
         )
         .expect("defer quota report");
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
 
     harness
         .switch_session(
@@ -215,7 +215,7 @@ fn rollover_applies_deferred_provider_quota_for_current_generation() {
         .expect("switch session");
 
     assert_eq!(
-        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .windows[0]
             .used_basis_points,
@@ -284,7 +284,7 @@ fn provider_quota_report_family_drives_state_end_to_end() {
             .expect("submit quota report");
     }
 
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
     let events = committed_quota_events(&harness);
     assert_eq!(events.len(), 6);
     for pair in events.as_chunks::<2>().0 {
@@ -329,7 +329,7 @@ fn provider_quota_unowned_report_commits_without_canonical_state() {
         )
         .expect("submit unowned quota report");
 
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
     assert!(matches!(
         committed_quota_events(&harness).as_slice(),
         [(Some(source), Event::ProviderQuotaReplaceReported(_))]
@@ -362,14 +362,14 @@ fn provider_quota_reports_and_state_do_not_cold_replay() {
                 Some(true),
             )
             .expect("submit persist=true quota report");
-        assert!(!harness.provider_quota.is_empty());
+        assert!(!harness.provider_runtime.quota.is_empty());
         harness.shutdown().expect("shutdown harness");
     }
 
     let resumed =
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("resume harness");
-    assert!(resumed.provider_quota.is_empty());
+    assert!(resumed.provider_runtime.quota.is_empty());
     assert!(
         event_log_events(&resumed)
             .into_iter()
@@ -430,7 +430,7 @@ fn provider_quota_report_rejects_non_provider_authority() {
     }
 
     assert!(committed_quota_events(&harness).is_empty());
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
 }
 
 /// Exact interception may replace a mutable report; only the committed
@@ -482,7 +482,7 @@ fn provider_quota_report_replacement_drives_canonical_state() {
         .expect("replace quota report");
 
     assert_eq!(
-        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .windows[0]
             .used_basis_points,
@@ -511,7 +511,7 @@ fn provider_quota_report_replacement_drives_canonical_state() {
         .expect("replace with invalid quota report");
 
     assert_eq!(
-        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .windows[0]
             .used_basis_points,
@@ -573,7 +573,7 @@ fn dropping_provider_quota_report_prevents_canonical_state() {
         .expect("drop quota report");
 
     assert!(committed_quota_events(&harness).is_empty());
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
 }
 
 /// A report parked before same-source provider replacement still commits with
@@ -638,7 +638,7 @@ fn parked_stale_provider_quota_report_cannot_mutate_state() {
         )
         .expect("pass stale report");
 
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
     assert!(matches!(
         committed_quota_events(&harness).as_slice(),
         [(Some(source), Event::ProviderQuotaReplaceReported(_))]
@@ -665,7 +665,7 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
             route_bindings: vec![quota_binding()],
         },
     );
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
     harness.handle_provider_quota_replace(
         &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
@@ -678,7 +678,7 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
         },
     );
     assert_eq!(
-        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .sequence,
         1
@@ -694,7 +694,7 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
             route_bindings: Vec::new(),
         },
     );
-    let snapshot = &harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
+    let snapshot = &harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
     assert_eq!(snapshot.sequence, 2);
     assert_eq!(snapshot.windows[0].used_basis_points, 2_000);
 }
@@ -734,7 +734,7 @@ fn provider_quota_two_pool_default_binding_projects_without_ambiguity() {
         },
     );
 
-    let snapshot = &harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
+    let snapshot = &harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
     assert_eq!(snapshot.windows.len(), 2);
     assert_eq!(snapshot.route_bindings.len(), 1);
     assert_eq!(snapshot.route_bindings[0].model, quota_binding().model);
@@ -765,10 +765,10 @@ fn duplicate_provider_namespace_cannot_spoof_effective_route() {
         route_bindings: vec![quota_binding()],
     };
     harness.handle_provider_quota_replace(&crate::test_connection_id("a-owner"), replace(1));
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
     harness.handle_provider_quota_replace(&crate::test_connection_id("z-winner"), replace(1));
     assert_eq!(
-        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .source_id
             .as_str(),
         "z-winner"
@@ -796,7 +796,7 @@ fn split_namespace_ownership_fails_closed() {
             route_bindings: vec![quota_binding()],
         },
     );
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
 }
 
 /// Harness-local model metadata invalidation does not consume provider sequence
@@ -823,7 +823,7 @@ fn model_change_preserves_provider_sequence_space() {
     changed.context_window = 200_000;
     harness.apply_provider_models_snapshot(&crate::test_connection_id("owner"), vec![changed]);
     assert_eq!(
-        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .sequence,
         1
@@ -840,7 +840,7 @@ fn model_change_preserves_provider_sequence_space() {
         },
     );
     assert_eq!(
-        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .sequence,
         2
@@ -911,7 +911,7 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
     );
     drop(routed_events);
     harness.apply_provider_models_snapshot(&crate::test_connection_id("owner"), Vec::new());
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
     let cleared_events = connect_test_client(
         &mut harness,
         "post-clear-quota-ui",
@@ -961,13 +961,13 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
         },
     );
     assert_eq!(
-        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .sequence,
         2
     );
     assert!(
-        harness.provider_quota_capabilities.is_empty(),
+        harness.provider_runtime.quota_capabilities.is_empty(),
         "new current state supersedes the cleared capability snapshot"
     );
 }
@@ -1087,9 +1087,9 @@ fn provider_quota_clear_orders_and_retires_epochs() {
             sequence: 6,
         },
     );
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
     assert!(
-        harness.provider_quota_retired_epochs[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota_retired_epochs[&tau_proto::ProviderName::new("chatgpt")]
             .contains(&epoch_a)
     );
     harness.handle_provider_quota_replace(
@@ -1103,7 +1103,7 @@ fn provider_quota_clear_orders_and_retires_epochs() {
             route_bindings: vec![quota_binding()],
         },
     );
-    assert!(harness.provider_quota.is_empty());
+    assert!(harness.provider_runtime.quota.is_empty());
     harness.handle_provider_quota_replace(
         &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaReplace {
@@ -1116,7 +1116,7 @@ fn provider_quota_clear_orders_and_retires_epochs() {
         },
     );
     assert_eq!(
-        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .profile_epoch
             .as_str(),
@@ -1158,7 +1158,7 @@ fn restored_owner_accepts_unretired_rotated_full_epoch() {
         },
     );
     assert_eq!(
-        harness.provider_quota[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .profile_epoch
             .as_str(),
@@ -1189,7 +1189,7 @@ fn clear_consumes_matching_route_loss_tombstone() {
     harness.apply_provider_models_snapshot(&crate::test_connection_id("owner"), Vec::new());
     assert!(
         harness
-            .provider_quota_tombstones
+            .provider_runtime.quota_tombstones
             .contains_key(&tau_proto::ProviderName::new("chatgpt"))
     );
     harness.handle_provider_quota_clear(
@@ -1202,11 +1202,11 @@ fn clear_consumes_matching_route_loss_tombstone() {
     );
     assert!(
         !harness
-            .provider_quota_tombstones
+            .provider_runtime.quota_tombstones
             .contains_key(&tau_proto::ProviderName::new("chatgpt"))
     );
     assert!(
-        harness.provider_quota_retired_epochs[&tau_proto::ProviderName::new("chatgpt")]
+        harness.provider_runtime.quota_retired_epochs[&tau_proto::ProviderName::new("chatgpt")]
             .contains(&epoch)
     );
 }

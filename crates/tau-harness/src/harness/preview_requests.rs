@@ -128,7 +128,7 @@ impl Harness {
                 | PendingRenderedPrompt::Prompt { role, .. }
                 | PendingRenderedPrompt::Tools { role, .. } => role.clone(),
             };
-            let model = model_for_role(&self.provider_model_info, &self.available_roles, &role);
+            let model = model_for_role(&self.provider_runtime.model_info, &self.available_roles, &role);
             let specs = self.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
             if let Some(name) = duplicate_model_visible_tool_name(&specs) {
                 self.send_rendered_preview_error(

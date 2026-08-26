@@ -1415,7 +1415,7 @@ impl Harness {
             }
             Event::ProviderCacheRefreshFinishedReported(finished) => {
                 if self
-                    .provider_cache_residency
+                    .provider_runtime.cache_residency
                     .finish(source_id, &finished.refresh_id)
                 {
                     self.publish_event(

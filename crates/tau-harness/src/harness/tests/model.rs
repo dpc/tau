@@ -294,7 +294,7 @@ fn provider_models_snapshot_updates_available_models() {
     connect_provider_source(&mut h, "provider-ext");
 
     let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
-    assert!(!h.available_models.contains(&model_id));
+    assert!(!h.provider_runtime.available_models.contains(&model_id));
     h.handle_extension_event(
         "provider-ext",
         TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
@@ -302,15 +302,15 @@ fn provider_models_snapshot_updates_available_models() {
         })),
     )
     .expect("handle provider snapshot");
-    assert!(h.available_models.contains(&model_id));
+    assert!(h.provider_runtime.available_models.contains(&model_id));
     assert_eq!(
-        h.provider_model_info
+        h.provider_runtime.model_info
             .get(&model_id)
             .map(|info| info.context_window),
         Some(128_000),
     );
     assert_eq!(
-        h.provider_model_routes.get(&model_id).map(|id| id.as_str()),
+        h.provider_runtime.model_routes.get(&model_id).map(|id| id.as_str()),
         Some("provider-ext"),
     );
 
@@ -385,13 +385,13 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
 
     let model_id = &duplicate_ids[0];
     assert_eq!(
-        h.provider_model_info
+        h.provider_runtime.model_info
             .get(model_id)
             .map(|info| info.context_window),
         Some(2_000),
     );
     assert_eq!(
-        h.provider_model_routes.get(model_id).map(|id| id.as_str()),
+        h.provider_runtime.model_routes.get(model_id).map(|id| id.as_str()),
         Some("provider-z"),
     );
     let canonical_snapshots = event_log_events(&h)
@@ -425,13 +425,13 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
     )
     .expect("withdraw colliding provider snapshot");
     assert_eq!(
-        h.provider_model_info
+        h.provider_runtime.model_info
             .get(model_id)
             .map(|info| info.context_window),
         Some(1_000),
     );
     assert_eq!(
-        h.provider_model_routes.get(model_id).map(|id| id.as_str()),
+        h.provider_runtime.model_routes.get(model_id).map(|id| id.as_str()),
         Some("provider-a"),
     );
     assert!(event_log_events(&h).iter().any(|event| matches!(
@@ -532,9 +532,9 @@ fn provider_model_declaration_from_non_provider_is_ignored() {
     )
     .expect("handle forged provider snapshot");
 
-    assert!(!h.available_models.contains(&model_id));
-    assert!(!h.provider_model_info.contains_key(&model_id));
-    assert!(!h.provider_model_routes.contains_key(&model_id));
+    assert!(!h.provider_runtime.available_models.contains(&model_id));
+    assert!(!h.provider_runtime.model_info.contains_key(&model_id));
+    assert!(!h.provider_runtime.model_routes.contains_key(&model_id));
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
@@ -565,9 +565,9 @@ fn provider_models_snapshot_from_ui_client_is_ignored() {
     )
     .expect("handle forged client provider snapshot");
 
-    assert!(!h.available_models.contains(&model_id));
-    assert!(!h.provider_model_info.contains_key(&model_id));
-    assert!(!h.provider_model_routes.contains_key(&model_id));
+    assert!(!h.provider_runtime.available_models.contains(&model_id));
+    assert!(!h.provider_runtime.model_info.contains_key(&model_id));
+    assert!(!h.provider_runtime.model_routes.contains_key(&model_id));
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
@@ -601,7 +601,7 @@ fn unconfigured_provider_cannot_declare_models() {
     )
     .expect("reject unconfigured declaration");
 
-    assert!(!h.provider_model_routes.contains_key(&model_id));
+    assert!(!h.provider_runtime.model_routes.contains_key(&model_id));
     assert!(event_log_events(&h).iter().all(|event| {
         !matches!(
             event,
@@ -630,7 +630,7 @@ fn configured_provider_cannot_emit_canonical_model_state() {
     )
     .expect("reject provider-authored canonical state");
 
-    assert!(!h.provider_model_routes.contains_key(&model_id));
+    assert!(!h.provider_runtime.model_routes.contains_key(&model_id));
     assert!(event_log_events(&h).iter().all(|event| {
         !matches!(
             event,
@@ -1059,9 +1059,9 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
     let mut h = echo_harness(td.path()).expect("harness");
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
-    h.provider_model_routes.clear();
-    h.provider_model_info.clear();
-    h.available_models.clear();
+    h.provider_runtime.model_routes.clear();
+    h.provider_runtime.model_info.clear();
+    h.provider_runtime.available_models.clear();
     h.selected_model = None;
     h.extensions.pending_connects = 1;
     let role = h.selected_role.clone();
@@ -1307,7 +1307,7 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     h.extensions.pending_connects = 1;
-    assert!(h.provider_model_info.is_empty());
+    assert!(h.provider_runtime.model_info.is_empty());
     assert!(h.selected_model.is_none());
 
     let missing_model: ModelId = "missing/provider-model".parse().expect("model id");

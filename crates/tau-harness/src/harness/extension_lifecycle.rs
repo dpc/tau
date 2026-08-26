@@ -110,7 +110,7 @@ impl Harness {
             .map(|entry| entry.name.clone());
         if let Some(publisher_extension_id) = disconnected_provider
             && self
-                .provider_models_by_extension
+                .provider_runtime.models_by_extension
                 .contains_key(connection_id)
             && !self.clear_parked_provider_model_updates(&publisher_extension_id)
         {
@@ -191,13 +191,13 @@ impl Harness {
         );
         let completed_foreground_calls = self.fail_pending_tool_calls_for_connection(connection_id);
         let lost_provider_prompts = self
-            .pending_provider_prompts
+            .provider_runtime.pending_prompts
             .iter()
             .filter_map(|(prompt_id, provider_id)| {
                 (provider_id == connection_id).then_some(prompt_id.clone())
             })
             .collect::<Vec<_>>();
-        self.pending_provider_prompts
+        self.provider_runtime.pending_prompts
             .retain(|_, provider_id| provider_id != connection_id);
         for prompt_id in lost_provider_prompts {
             let Some(cid) = self.prompt_agents.get(&prompt_id).cloned() else {
@@ -312,7 +312,7 @@ impl Harness {
             }
         }
         let removed_providers = self
-            .provider_quota
+            .provider_runtime.quota
             .iter()
             .filter(|(_, quota)| quota.source_id == *connection_id)
             .map(|(provider, _)| provider.clone())
@@ -321,7 +321,7 @@ impl Harness {
             self.remove_provider_quota(&provider);
         }
         if self
-            .provider_models_by_extension
+            .provider_runtime.models_by_extension
             .remove(connection_id)
             .is_some()
         {
@@ -480,7 +480,7 @@ impl Harness {
         &mut self,
         connection_id: &tau_proto::ConnectionId,
     ) {
-        self.provider_cache_residency
+        self.provider_runtime.cache_residency
             .release_connection(connection_id);
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ProviderRotated);
         let removing_tools: Vec<(ToolName, ToolName)> = self
@@ -555,7 +555,7 @@ impl Harness {
         agent_prompt_id: &AgentPromptId,
         event_name: tau_proto::EventName,
     ) -> bool {
-        match self.pending_provider_prompts.get(agent_prompt_id) {
+        match self.provider_runtime.pending_prompts.get(agent_prompt_id) {
             Some(expected) if *expected.as_str() == **source_id => true,
             Some(expected) => {
                 tracing::warn!(
@@ -1124,9 +1124,9 @@ impl Harness {
         }
         self.tool_runtime.tool_agents.remove(call_id);
         self.tool_runtime.pending_tools.remove(call_id);
-        self.cache_refresh_tool_window_calls.remove(call_id);
-        if self.cache_refresh_tool_window_calls.is_empty() {
-            let cancellations = self.provider_cache_residency.close_window();
+        self.provider_runtime.cache_refresh_tool_window_calls.remove(call_id);
+        if self.provider_runtime.cache_refresh_tool_window_calls.is_empty() {
+            let cancellations = self.provider_runtime.cache_residency.close_window();
             self.send_cache_refresh_cancellations(cancellations);
         }
         self.tool_runtime.pending_tool_providers.remove(call_id);

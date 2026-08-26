@@ -151,6 +151,7 @@ use crate::harness::peer_messaging::PeerMessagingState;
 use crate::harness::publication_state::PublicationState;
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
 use crate::harness::provider_startup::ProviderStartupSnapshot;
+use crate::harness::provider_runtime_state::ProviderRuntimeState;
 use crate::harness::subagents_tool::SubagentToolState;
 use crate::harness::tool_runtime::ToolRuntimeState;
 use crate::harness::ui_runtime::UiRuntimeState;
@@ -1499,6 +1500,7 @@ mod interception;
 mod pending_notices;
 mod preview_requests;
 mod provider_runtime;
+mod provider_runtime_state;
 mod provider_startup;
 mod replay;
 mod semantic_event_router;
@@ -1788,42 +1790,8 @@ pub struct Harness {
     debug_log_poisoned: bool,
     /// Interception, deferred publication, and post-commit continuation state.
     pub(crate) publication: PublicationState,
-    /// All available models.
-    pub(crate) available_models: Vec<ModelId>,
-    /// Model snapshots published by provider extensions, keyed by sender
-    /// connection.
-    pub(crate) provider_models_by_extension:
-        HashMap<tau_proto::ConnectionId, Vec<ProviderModelInfo>>,
-    /// Flattened provider model metadata keyed by model id. Rebuilt from
-    /// [`Self::provider_models_by_extension`] whenever a provider snapshot
-    /// changes.
-    pub(crate) provider_model_info: HashMap<ModelId, ProviderModelInfo>,
-    /// Provider extension connection for each model id. This is kept alongside
-    /// [`Self::provider_model_info`] so prompt routing can address the provider
-    /// selected by the deterministic sorted-source, last-advertisement-wins
-    /// registry rebuild.
-    pub(crate) provider_model_routes: HashMap<ModelId, tau_proto::ConnectionId>,
-    /// Single process-only owner of bounded Provider cache refresh work.
-    provider_cache_residency: ProviderCacheResidency<RuntimeCacheClock, RuntimeCacheJitter>,
-    /// Foreground cohort that owns the current finite cache-refresh window.
-    cache_refresh_tool_window_calls: HashSet<ToolCallId>,
-    /// Ephemeral validated account-quota snapshots keyed by provider namespace.
-    pub(crate) provider_quota: HashMap<tau_proto::ProviderName, CurrentProviderQuota>,
-    /// Empty latest snapshots retained after a clear so live and late clients
-    /// share running-harness evidence that the provider supports quota state.
-    provider_quota_capabilities:
-        HashMap<tau_proto::ProviderName, tau_proto::HarnessProviderQuotaChanged>,
-    /// Last cleared upstream position, allowing a later authoritative full
-    /// replacement to recover after temporary route ownership loss.
-    provider_quota_tombstones: HashMap<tau_proto::ProviderName, ProviderQuotaTombstone>,
-    /// Bounded retired epochs rejected if a late source tries to re-establish
-    /// them after clear or replacement.
-    provider_quota_retired_epochs:
-        HashMap<tau_proto::ProviderName, VecDeque<tau_proto::ProviderQuotaEpoch>>,
-    /// Provider connection that received each in-flight prompt request.
-    /// Incoming provider execution events must match this owner before the
-    /// harness will publish streaming updates or accept the final response.
-    pub(crate) pending_provider_prompts: HashMap<AgentPromptId, tau_proto::ConnectionId>,
+    /// Provider declarations, cache refresh, quota, and live route ownership.
+    pub(crate) provider_runtime: ProviderRuntimeState,
     /// Prompt ids that already own one live compact-fact continuation.
     pending_prompt_dispatches: HashSet<AgentPromptId>,
     /// Available agent roles.

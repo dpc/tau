@@ -63,7 +63,7 @@ fn add_routed_prompt(h: &mut Harness, agent_id: &str, prompt_id: &str, provider_
         cid,
     );
     if let Some(provider_id) = provider_id {
-        h.pending_provider_prompts.insert(
+        h.provider_runtime.pending_prompts.insert(
             prompt_id
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
@@ -161,7 +161,7 @@ fn retry_routes_exact_prompt_and_trusts_only_correlated_provider_result() {
         0
     );
 
-    h.pending_provider_prompts.remove("prompt-b");
+    h.provider_runtime.pending_prompts.remove("prompt-b");
     h.prompt_agents.remove("prompt-b");
     h.handle_extension_event(
         "provider-b",
@@ -292,7 +292,7 @@ fn retry_pending_requests_resolve_on_disconnect_and_session_rollover() {
         "provider",
         tau_proto::ClientKind::Provider,
     );
-    h.pending_provider_prompts.insert(
+    h.provider_runtime.pending_prompts.insert(
         "prompt"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),

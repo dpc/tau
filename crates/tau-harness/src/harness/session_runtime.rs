@@ -290,7 +290,7 @@ impl Harness {
             })?;
         self.preempt_blocking_ext_side_agents(&session_id);
         if !self.session_initialized(&session_id)
-            || (self.selected_model.is_none() && self.provider_model_info.is_empty())
+            || (self.selected_model.is_none() && self.provider_runtime.model_info.is_empty())
             || !self.turn_state.is_idle()
             || !self.extensions_all_ready()
         {
@@ -375,7 +375,7 @@ impl Harness {
             return Ok(PromptSubmission::Rejected { reason });
         }
         if !self.session_initialized(&session_id)
-            || (self.selected_model.is_none() && self.provider_model_info.is_empty())
+            || (self.selected_model.is_none() && self.provider_runtime.model_info.is_empty())
             || !self.turn_state.is_idle()
             || !self.extensions_all_ready()
         {
@@ -840,7 +840,7 @@ impl Harness {
         self.prompt_agents.clear();
         self.ephemeral_provider_prompts.clear();
         self.ephemeral_provider_retry_requests.clear();
-        self.pending_provider_prompts.clear();
+        self.provider_runtime.pending_prompts.clear();
         self.pending_prompt_dispatches.clear();
         self.prompt_models.clear();
         self.prompt_estimated_cost_rates.clear();
@@ -1799,9 +1799,9 @@ impl Harness {
             None,
             Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
                 roles: role_infos(
-                    &self.provider_model_info,
+                    &self.provider_runtime.model_info,
                     &self.available_roles,
-                    &self.available_models,
+                    &self.provider_runtime.available_models,
                 ),
                 groups: self.current_role_groups(),
                 custom_prompts: self.custom_prompts.clone(),
@@ -2452,7 +2452,7 @@ impl Harness {
                 conv.context_usage_head = usage_head;
                 conv.context_usage_model = Some(model.clone());
                 conv.context_percent_used =
-                    context_window_for_model(&self.provider_model_info, &model)
+                    context_window_for_model(&self.provider_runtime.model_info, &model)
                         .map(|window| context_percent_used(input_tokens, window));
             }
             self.agent_registry
@@ -2834,7 +2834,7 @@ impl Harness {
         for cid in restored_output_length_dormant {
             self.repair_dormant_output_length_lineage(&cid);
         }
-        if !self.provider_model_info.is_empty() {
+        if !self.provider_runtime.model_info.is_empty() {
             self.reconcile_agent_context_usage_models();
         }
         let restored_manual_compactions = self

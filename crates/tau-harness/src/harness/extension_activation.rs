@@ -560,7 +560,7 @@ impl Harness {
             RestoredCheckpointAuthority::DiscoveryComplete => None,
             RestoredCheckpointAuthority::ExplicitlyRemoved(models) => Some(models),
         };
-        if self.provider_model_info.is_empty()
+        if self.provider_runtime.model_info.is_empty()
             && !all_absence_is_authoritative
             && authoritatively_removed_models.is_none_or(HashSet::is_empty)
         {
@@ -594,7 +594,7 @@ impl Harness {
             let model = &checkpoint.dispatch.model;
             let absence_is_authoritative = all_absence_is_authoritative
                 || authoritatively_removed_models.is_some_and(|models| models.contains(model));
-            if !self.provider_model_info.contains_key(model) && !absence_is_authoritative {
+            if !self.provider_runtime.model_info.contains_key(model) && !absence_is_authoritative {
                 continue;
             }
             let key = (

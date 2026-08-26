@@ -142,9 +142,9 @@ impl Harness {
     /// Observe a live background-transition decision before publishing its
     /// foreground placeholder.
     pub(crate) fn observe_tool_backgrounded(&mut self, call_id: &ToolCallId) {
-        self.cache_refresh_tool_window_calls.remove(call_id);
-        if self.cache_refresh_tool_window_calls.is_empty() {
-            let cancellations = self.provider_cache_residency.close_window();
+        self.provider_runtime.cache_refresh_tool_window_calls.remove(call_id);
+        if self.provider_runtime.cache_refresh_tool_window_calls.is_empty() {
+            let cancellations = self.provider_runtime.cache_residency.close_window();
             self.send_cache_refresh_cancellations(cancellations);
         }
         let Some(call) = self.wait_tool_call_ref(call_id) else {

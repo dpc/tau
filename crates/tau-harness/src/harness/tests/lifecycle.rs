@@ -4445,7 +4445,7 @@ fn provider_model_parallel_capability_flows_into_prompt_rendering() {
     let model: tau_proto::ModelId = "test/model".parse().expect("model id");
     let mut info = staged_provider_model("test/model");
     info.supports_parallel_tool_calls = false;
-    h.provider_model_info.insert(model.clone(), info);
+    h.provider_runtime.model_info.insert(model.clone(), info);
     h.selected_model = Some(model);
 
     let normal = h.build_system_prompt_for_role(&h.selected_role);
@@ -5973,8 +5973,8 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
         .submit_user_prompt(test_session_id("s1"), "wait for staged model".to_owned())
         .expect("submit");
     assert!(matches!(submission, PromptSubmission::Queued));
-    assert!(!h.available_models.contains(&model_id));
-    assert!(!h.provider_model_routes.contains_key(&model_id));
+    assert!(!h.provider_runtime.available_models.contains(&model_id));
+    assert!(!h.provider_runtime.model_routes.contains_key(&model_id));
     assert!(
         !event_log_events(&h)
             .iter()
@@ -6003,9 +6003,9 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
     )
     .expect("ready");
 
-    assert!(h.available_models.contains(&model_id));
+    assert!(h.provider_runtime.available_models.contains(&model_id));
     assert_eq!(
-        h.provider_model_routes.get(&model_id).map(|id| id.as_str()),
+        h.provider_runtime.model_routes.get(&model_id).map(|id| id.as_str()),
         Some(conn_id)
     );
     assert!(event_log_contains_source_event(&h, conn_id, |event| {
@@ -6069,7 +6069,7 @@ fn provider_ready_waits_for_intercepted_declarations_and_coalesces_final_state()
         ExtensionState::Handshaking
     );
     assert!(h.extensions.ready_received.contains(conn_id));
-    assert!(!h.provider_model_routes.contains_key(&model));
+    assert!(!h.provider_runtime.model_routes.contains_key(&model));
 
     h.handle_extension_event(
         "startup-model-interceptor",
@@ -6095,9 +6095,9 @@ fn provider_ready_waits_for_intercepted_declarations_and_coalesces_final_state()
     )
     .expect("commit final declaration");
     assert_eq!(h.extensions.entries[conn_id].state, ExtensionState::Ready);
-    assert!(!h.provider_model_routes.contains_key(&model));
+    assert!(!h.provider_runtime.model_routes.contains_key(&model));
     assert_eq!(
-        h.provider_models_by_extension
+        h.provider_runtime.models_by_extension
             .get(conn_id)
             .expect("active empty provider snapshot"),
         &Vec::<tau_proto::ProviderModelInfo>::new()
@@ -6169,7 +6169,7 @@ fn required_intercepted_provider_replacement_overflow_fails_startup() {
         ExtensionState::Handshaking
     );
     assert!(
-        !h.provider_model_routes
+        !h.provider_runtime.model_routes
             .contains_key(&tau_proto::ModelId::from("staged/oversized"))
     );
 }
@@ -7026,7 +7026,7 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
     let mut captured_info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .values()
         .next()
         .expect("startup provider model")
@@ -7049,7 +7049,7 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
         )
         .expect("stage model snapshot");
     }
-    assert!(!h.provider_model_info.contains_key(&captured));
+    assert!(!h.provider_runtime.model_info.contains_key(&captured));
     assert!(
         h.enqueued_standalone_inference_checkpoints.is_empty(),
         "pre-Ready snapshots must not reconcile restored work"
@@ -7061,10 +7061,10 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     )
     .expect("activate provider");
     assert!(
-        !h.provider_model_info.contains_key(&captured),
+        !h.provider_runtime.model_info.contains_key(&captured),
         "an intermediate staged route must never become the active provider route"
     );
-    assert!(!h.provider_model_routes.contains_key(&captured));
+    assert!(!h.provider_runtime.model_routes.contains_key(&captured));
     assert!(
         !h.enqueued_standalone_inference_checkpoints
             .contains(&(agent_id.clone(), transaction_id.clone()))
@@ -7123,7 +7123,7 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
     let mut captured_info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .values()
         .next()
         .expect("startup provider model")
@@ -7138,8 +7138,8 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
     let current: tau_proto::ModelId = "other/current-selection".into();
     let mut current_info = staged_provider_model("other/current-selection");
     current_info.supported_tool_types.clear();
-    h.provider_model_info.insert(current.clone(), current_info);
-    h.provider_model_routes
+    h.provider_runtime.model_info.insert(current.clone(), current_info);
+    h.provider_runtime.model_routes
         .insert(current.clone(), crate::test_connection_id("other-provider"));
     let role = h
         .available_roles
@@ -8165,7 +8165,7 @@ fn provider_prompt_route_failure_clears_prompt_bookkeeping() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let model: tau_proto::ModelId = "test/model".into();
-    h.provider_model_routes
+    h.provider_runtime.model_routes
         .insert(model.clone(), crate::test_connection_id("missing-provider"));
     h.agent_registry
         .agents
@@ -8187,7 +8187,7 @@ fn provider_prompt_route_failure_clears_prompt_bookkeeping() {
 
     assert!(!h.prompt_agents.contains_key(agent_prompt_id.as_str()));
     assert!(!h.prompt_models.contains_key(&agent_prompt_id));
-    assert!(!h.pending_provider_prompts.contains_key(&agent_prompt_id));
+    assert!(!h.provider_runtime.pending_prompts.contains_key(&agent_prompt_id));
     let conv = h
         .agent_registry
         .agents
@@ -12413,7 +12413,7 @@ fn output_length_reactive_compaction_terminalizes_exact_descendant() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("start");
     super::dispatch::enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -12620,7 +12620,7 @@ fn output_length_reactive_post_compaction_checkpoint_cut_is_cancellable() {
     {
         let mut h = quiet_provider_harness(td.path()).expect("start");
         super::dispatch::enable_remote_compaction_for_test_model(&mut h);
-        h.provider_model_info
+        h.provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("test model")
             .supports_standalone_compaction = true;
@@ -12749,7 +12749,7 @@ fn output_length_reactive_rejection_cancelled_before_commit_never_dispatches() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("start");
     super::dispatch::enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -12862,7 +12862,7 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("start");
     super::dispatch::enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -12966,7 +12966,7 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("start");
     super::dispatch::enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -13251,7 +13251,7 @@ fn output_length_prompt_start_route_loss_terminalizes_before_provider_delivery()
         h.publication.pending_intercept.is_some(),
         "successor prompt-start is parked"
     );
-    h.provider_model_routes.remove(&source.model);
+    h.provider_runtime.model_routes.remove(&source.model);
     h.handle_extension_event(
         "length-owner-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -13365,7 +13365,7 @@ fn output_length_post_start_route_failure_race_prefers_cancelled_once() {
         h.publication.pending_intercept.is_some(),
         "successor delivery is parked"
     );
-    h.provider_model_routes.remove(&source.model);
+    h.provider_runtime.model_routes.remove(&source.model);
     h.publication.interceptors.replace_for_connection(
         &crate::test_connection_id("length-created-interceptor"),
         crate::test_extension_name("length-created-interceptor"),
@@ -13472,7 +13472,7 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
         .expect("submit");
     let source = read_nth_prompt_created(&h, 0);
     let provider_route = h
-        .provider_model_routes
+        .provider_runtime.model_routes
         .get(&source.model)
         .cloned()
         .expect("provider route");
@@ -13504,7 +13504,7 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
     .expect("register prompt-start interceptor");
     h.handle_provider_response_finished(reasoning_only_length_response(&source, 5))
         .expect("source response");
-    h.provider_model_routes.remove(&source.model);
+    h.provider_runtime.model_routes.remove(&source.model);
     h.handle_extension_event(
         "length-failure-race",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -13564,7 +13564,7 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
         h.agent_registry.agents[&source_cid].work_status.phase(),
         tau_proto::AgentWorkStatusPhase::Unknown
     );
-    h.provider_model_routes
+    h.provider_runtime.model_routes
         .insert(source.model.clone(), provider_route);
     h.handle_disconnect(&crate::test_connection_id("length-failure-race"));
     h.submit_user_prompt(

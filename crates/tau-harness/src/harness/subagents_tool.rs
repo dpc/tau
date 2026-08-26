@@ -447,9 +447,9 @@ impl Harness {
     /// registry.
     fn visible_available_delegate_roles(&self) -> Vec<tau_proto::HarnessRoleInfo> {
         let mut roles: Vec<_> = crate::model::role_infos(
-            &self.provider_model_info,
+            &self.provider_runtime.model_info,
             &self.available_roles,
-            &self.available_models,
+            &self.provider_runtime.available_models,
         )
         .into_iter()
         .filter(|info| {
@@ -459,7 +459,7 @@ impl Harness {
         })
         .filter(|info| {
             crate::model::model_for_role(
-                &self.provider_model_info,
+                &self.provider_runtime.model_info,
                 &self.available_roles,
                 &info.name,
             )
@@ -2291,7 +2291,7 @@ impl Harness {
                 .any(|receiver| receiver.role == role)
                 && self.available_roles.contains_key(role)
                 && crate::model::model_for_role(
-                    &self.provider_model_info,
+                    &self.provider_runtime.model_info,
                     &self.available_roles,
                     role,
                 )
@@ -2371,7 +2371,7 @@ impl Harness {
                     .contains_key(&receiver.role)
                     .then(|| {
                         crate::model::model_for_role(
-                            &self.provider_model_info,
+                            &self.provider_runtime.model_info,
                             &self.available_roles,
                             &receiver.role,
                         )
@@ -2504,7 +2504,7 @@ impl Harness {
                 .any(|receiver| receiver.role == role)
                 && self.available_roles.contains_key(role)
                 && crate::model::model_for_role(
-                    &self.provider_model_info,
+                    &self.provider_runtime.model_info,
                     &self.available_roles,
                     role,
                 )

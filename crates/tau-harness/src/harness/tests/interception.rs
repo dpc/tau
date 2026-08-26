@@ -731,7 +731,7 @@ fn dropping_provider_model_declaration_prevents_canonical_state() {
     .expect("drop declaration");
 
     let model: tau_proto::ModelId = "declared/dropped".into();
-    assert!(!h.provider_model_routes.contains_key(&model));
+    assert!(!h.provider_runtime.model_routes.contains_key(&model));
     assert!(committed_provider_model_events(&h).is_empty());
 }
 
@@ -765,7 +765,7 @@ fn rollover_applies_deferred_provider_models_for_current_generation() {
     )
     .expect("defer model declaration");
     let model: tau_proto::ModelId = "declared/rollover".into();
-    assert!(!h.provider_model_routes.contains_key(&model));
+    assert!(!h.provider_runtime.model_routes.contains_key(&model));
 
     h.switch_session(
         "replacement"
@@ -776,12 +776,12 @@ fn rollover_applies_deferred_provider_models_for_current_generation() {
     .expect("switch session");
 
     assert_eq!(
-        h.provider_model_routes
+        h.provider_runtime.model_routes
             .get(&model)
             .map(tau_proto::ConnectionId::as_str),
         Some("model-provider")
     );
-    assert_eq!(h.provider_model_info[&model].context_window, 1234);
+    assert_eq!(h.provider_runtime.model_info[&model].context_window, 1234);
     assert!(matches!(
         committed_provider_model_events(&h).as_slice(),
         [
@@ -847,12 +847,12 @@ fn replaced_provider_model_declaration_drives_canonical_state() {
     let replacement: tau_proto::ModelId = "declared/replacement".into();
     let original: tau_proto::ModelId = "declared/original".into();
     assert_eq!(
-        h.provider_model_routes
+        h.provider_runtime.model_routes
             .get(&replacement)
             .map(tau_proto::ConnectionId::as_str),
         Some("model-provider")
     );
-    assert!(!h.provider_model_routes.contains_key(&original));
+    assert!(!h.provider_runtime.model_routes.contains_key(&original));
 }
 
 /// A provider-prefix interceptor sees both the declaration and canonical state;
@@ -909,7 +909,7 @@ fn provider_prefix_interception_protects_canonical_model_state() {
     .expect("reject canonical rewrite");
 
     let model: tau_proto::ModelId = "declared/protected".into();
-    assert!(h.provider_model_routes.contains_key(&model));
+    assert!(h.provider_runtime.model_routes.contains_key(&model));
     assert!(matches!(
         committed_provider_model_events(&h).as_slice(),
         [
@@ -939,7 +939,7 @@ fn provider_prefix_interception_protects_canonical_model_state() {
     )
     .expect("canonical drop is overridden");
     let replacement: tau_proto::ModelId = "declared/drop-protected".into();
-    assert!(h.provider_model_routes.contains_key(&replacement));
+    assert!(h.provider_runtime.model_routes.contains_key(&replacement));
 }
 
 /// Disconnecting after a canonical update enters interception rewrites that
@@ -983,7 +983,7 @@ fn provider_disconnect_rewrites_parked_canonical_state_to_empty() {
         Some(Event::ProviderModelsUpdated(update)) if !update.models.is_empty()
     ));
     let model: tau_proto::ModelId = "declared/disconnected".into();
-    assert!(h.provider_model_routes.contains_key(&model));
+    assert!(h.provider_runtime.model_routes.contains_key(&model));
 
     h.handle_disconnect(&crate::test_connection_id("model-provider"));
     assert!(matches!(
@@ -1000,7 +1000,7 @@ fn provider_disconnect_rewrites_parked_canonical_state_to_empty() {
     )
     .expect("commit corrected canonical state");
 
-    assert!(!h.provider_model_routes.contains_key(&model));
+    assert!(!h.provider_runtime.model_routes.contains_key(&model));
     assert!(event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::ProviderModelsUpdated(update)
@@ -1069,7 +1069,7 @@ fn parked_provider_declaration_cannot_mutate_replacement_generation() {
             if source == "model-provider"
     ));
     let stale: tau_proto::ModelId = "declared/stale".into();
-    assert!(!h.provider_model_routes.contains_key(&stale));
+    assert!(!h.provider_runtime.model_routes.contains_key(&stale));
 }
 
 /// An old generation's dropped declaration cannot release the activation
@@ -1171,7 +1171,7 @@ fn parked_old_generation_drop_cannot_activate_same_id_replacement() {
         crate::extension::ExtensionState::Ready
     );
     assert_eq!(
-        h.provider_model_routes
+        h.provider_runtime.model_routes
             .get(&model)
             .map(tau_proto::ConnectionId::as_str),
         Some("model-provider")
@@ -1562,11 +1562,11 @@ fn prompt_created_count(h: &Harness) -> u64 {
 fn add_second_test_model(h: &mut Harness) {
     let first: tau_proto::ModelId = "echo/model".into();
     let second: tau_proto::ModelId = "other/model".into();
-    let mut info = h.provider_model_info[&first].clone();
+    let mut info = h.provider_runtime.model_info[&first].clone();
     info.id = second.clone();
-    let route = h.provider_model_routes[&first].clone();
-    h.provider_model_info.insert(second.clone(), info);
-    h.provider_model_routes.insert(second, route);
+    let route = h.provider_runtime.model_routes[&first].clone();
+    h.provider_runtime.model_info.insert(second.clone(), info);
+    h.provider_runtime.model_routes.insert(second, route);
 }
 
 fn queue_intercepted_peer_receive(
@@ -2556,7 +2556,7 @@ fn intercepted_inference_checkpoint_fails_before_unroutable_send() {
     let Event::AgentPromptCreated(prompt) = parked else {
         panic!("materialized prompt intercepted");
     };
-    h.provider_model_routes.remove(&prompt.model);
+    h.provider_runtime.model_routes.remove(&prompt.model);
     h.handle_extension_event(
         "checkpoint-route-owner",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -2781,7 +2781,7 @@ fn assert_unload_disposes_parked_prompt(selector: tau_proto::EventName, owner: &
     assert!(!h.prompt_agents.contains_key(prompt_id.as_str()));
     assert!(!h.prompt_models.contains_key(&prompt_id));
     assert!(!h.prompt_operations.contains_key(&prompt_id));
-    assert!(!h.pending_provider_prompts.contains_key(&prompt_id));
+    assert!(!h.provider_runtime.pending_prompts.contains_key(&prompt_id));
     assert_eq!(h.current_session_state.token_usage.total.requests, 0);
     h.shutdown().expect("shutdown");
 }
@@ -2816,7 +2816,7 @@ fn intercepted_compaction_start_pins_materialized_model() {
     let cid = ensure_test_user_agent(&mut h);
     {
         let info = h
-            .provider_model_info
+            .provider_runtime.model_info
             .get_mut(&tau_proto::ModelId::from("echo/model"))
             .expect("model");
         info.supports_standalone_compaction = true;
@@ -2877,7 +2877,7 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
     let cid = ensure_test_user_agent(&mut h);
     {
         let info = h
-            .provider_model_info
+            .provider_runtime.model_info
             .get_mut(&tau_proto::ModelId::from("test/model"))
             .expect("model");
         info.supports_standalone_compaction = true;
@@ -5949,7 +5949,7 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     h.initialized_sessions.insert(session_id);
     h.selected_model = Some("echo/model".into());
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model");
     info.supports_compaction = false;

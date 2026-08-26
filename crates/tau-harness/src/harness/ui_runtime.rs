@@ -697,7 +697,7 @@ impl Harness {
             return;
         };
         let Some(provider_connection_id) =
-            self.pending_provider_prompts.get(&agent_prompt_id).cloned()
+            self.provider_runtime.pending_prompts.get(&agent_prompt_id).cloned()
         else {
             reject(
                 self,
@@ -1633,7 +1633,7 @@ impl Harness {
         select: tau_proto::UiAgentModelSelect,
     ) -> Result<bool, HarnessError> {
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ModelChanged);
-        if !self.available_models.contains(&select.model) {
+        if !self.provider_runtime.available_models.contains(&select.model) {
             self.send_ui_error_response(client_id, format!("unknown model: {}", select.model));
             return Ok(true);
         }
@@ -1729,9 +1729,9 @@ impl Harness {
             None,
             Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
                 roles: role_infos(
-                    &self.provider_model_info,
+                    &self.provider_runtime.model_info,
                     &self.available_roles,
-                    &self.available_models,
+                    &self.provider_runtime.available_models,
                 ),
                 groups: self.current_role_groups(),
                 custom_prompts: self.custom_prompts.clone(),

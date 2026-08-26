@@ -181,7 +181,7 @@ impl Harness {
                     | ProviderStopReason::Length
             );
         if !standalone_compaction || standalone_success {
-            self.provider_cache_residency.finish_prompt(
+            self.provider_runtime.cache_residency.finish_prompt(
                 &response.agent_prompt_id,
                 refresh_success,
                 response.usage.as_ref(),
@@ -273,7 +273,7 @@ impl Harness {
             input_tokens.and_then(|tokens| {
                 terminal_model
                     .as_ref()
-                    .and_then(|model| self.provider_model_info.get(model))
+                    .and_then(|model| self.provider_runtime.model_info.get(model))
                     .map(|info| {
                         tokens.saturating_add(context_projection_reserve(info.context_window))
                     })
@@ -667,7 +667,7 @@ impl Harness {
         operation: tau_proto::PromptOperation,
     ) -> PromptContextLimitSnapshot {
         let advertised_context_window = self
-            .provider_model_info
+            .provider_runtime.model_info
             .get(model)
             .map(|info| info.context_window)
             .filter(|window| *window > 0);
@@ -700,7 +700,7 @@ impl Harness {
                 tau_proto::ContextLimitCompactionPolicy::Threshold,
             ),
             path_tau_config_settings::RoleCompaction::ProviderDefault => (
-                self.provider_model_info
+                self.provider_runtime.model_info
                     .get(model)
                     .and_then(|info| info.standalone_compaction_threshold),
                 tau_proto::ContextLimitCompactionPolicy::ProviderDefault,
@@ -850,7 +850,7 @@ impl Harness {
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
             )
             || !self
-                .provider_model_info
+                .provider_runtime.model_info
                 .get(&model)
                 .is_some_and(|info| info.supports_standalone_compaction)
         {
@@ -929,11 +929,11 @@ impl Harness {
                 );
                 continue;
             };
-            if !self.provider_model_info.contains_key(model) && !absence_is_authoritative {
+            if !self.provider_runtime.model_info.contains_key(model) && !absence_is_authoritative {
                 continue;
             }
             let capability_matches = self
-                .provider_model_info
+                .provider_runtime.model_info
                 .get(model)
                 .is_some_and(|info| info.supports_standalone_compaction);
             let selected_or_continuation_model_matches =
@@ -1414,7 +1414,7 @@ impl Harness {
         };
         // Rejection retains neither cache evidence nor context-recovery authority,
         // but it must release the prompt-local snapshots allocated for dispatch.
-        self.provider_cache_residency
+        self.provider_runtime.cache_residency
             .drop_prompt(&response.agent_prompt_id);
         self.prompt_context_size_alerts
             .remove(&response.agent_prompt_id);
@@ -1470,7 +1470,7 @@ impl Harness {
         &mut self,
         agent_prompt_id: &AgentPromptId,
     ) {
-        self.provider_cache_residency.drop_prompt(agent_prompt_id);
+        self.provider_runtime.cache_residency.drop_prompt(agent_prompt_id);
         self.remember_ephemeral_provider_prompt(agent_prompt_id);
         self.prompt_context_limits.remove(agent_prompt_id);
         self.prompt_context_size_alerts.remove(agent_prompt_id);
@@ -1478,7 +1478,7 @@ impl Harness {
         self.prompt_compaction_projected_tokens
             .remove(agent_prompt_id);
         self.prompt_agents.remove(agent_prompt_id.as_str());
-        self.pending_provider_prompts.remove(agent_prompt_id);
+        self.provider_runtime.pending_prompts.remove(agent_prompt_id);
         self.prompt_models.remove(agent_prompt_id);
         self.prompt_estimated_cost_rates.remove(agent_prompt_id);
         self.prompt_semantic_output.remove(agent_prompt_id);
@@ -1553,7 +1553,7 @@ impl Harness {
     pub(super) fn clear_finished_response_prompt_route(&mut self, agent_prompt_id: &AgentPromptId) {
         self.remember_ephemeral_provider_prompt(agent_prompt_id);
         self.prompt_agents.remove(agent_prompt_id.as_str());
-        self.pending_provider_prompts.remove(agent_prompt_id);
+        self.provider_runtime.pending_prompts.remove(agent_prompt_id);
     }
 
     pub(super) fn remember_ephemeral_provider_prompt(&mut self, agent_prompt_id: &AgentPromptId) {
@@ -2482,9 +2482,9 @@ impl Harness {
         &mut self,
         call_ids: impl IntoIterator<Item = ToolCallId>,
     ) {
-        self.cache_refresh_tool_window_calls.extend(call_ids);
-        if !self.cache_refresh_tool_window_calls.is_empty() {
-            self.provider_cache_residency.open_tool_window();
+        self.provider_runtime.cache_refresh_tool_window_calls.extend(call_ids);
+        if !self.provider_runtime.cache_refresh_tool_window_calls.is_empty() {
+            self.provider_runtime.cache_residency.open_tool_window();
         }
     }
 
@@ -2941,7 +2941,7 @@ impl Harness {
         source: Option<&tau_proto::ConnectionId>,
     ) {
         let context_window =
-            model.and_then(|m| context_window_for_model(&self.provider_model_info, m));
+            model.and_then(|m| context_window_for_model(&self.provider_runtime.model_info, m));
         let percent_used = match (context_window, input_tokens) {
             (Some(w), Some(tokens)) => Some(context_percent_used(tokens, w)),
             _ => None,
@@ -3028,7 +3028,7 @@ impl Harness {
                 .agents
                 .get(cid)
                 .and_then(|conv| self.model_for_agent_role(conv));
-            (current_model.is_none() && !self.provider_model_info.contains_key(model))
+            (current_model.is_none() && !self.provider_runtime.model_info.contains_key(model))
                 || current_model.as_ref() == Some(model)
         });
         self.clear_agent_context_usage(cid);
@@ -3037,7 +3037,7 @@ impl Harness {
             .unwrap_or((None, None, None, None));
         let context_window = model
             .as_ref()
-            .and_then(|model| context_window_for_model(&self.provider_model_info, model));
+            .and_then(|model| context_window_for_model(&self.provider_runtime.model_info, model));
         let percent_used = context_window
             .zip(input_tokens)
             .map(|(window, tokens)| context_percent_used(tokens, window));

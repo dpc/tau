@@ -719,7 +719,7 @@ impl Harness {
             return;
         };
         let rates = self
-            .provider_models_by_extension
+            .provider_runtime.models_by_extension
             .get(&provider_connection_id)
             .and_then(|models| {
                 models
@@ -738,7 +738,7 @@ impl Harness {
                 );
                 tau_proto::ESTIMATED_API_COST_FALLBACK
             });
-        self.pending_provider_prompts
+        self.provider_runtime.pending_prompts
             .insert(agent_prompt_id.clone(), provider_connection_id);
         self.prompt_estimated_cost_rates
             .insert(agent_prompt_id.clone(), rates);
@@ -751,9 +751,9 @@ impl Harness {
         agent_prompt_id: &AgentPromptId,
     ) -> Option<AgentId> {
         self.pending_prompt_dispatches.remove(agent_prompt_id);
-        self.provider_cache_residency.drop_prompt(agent_prompt_id);
+        self.provider_runtime.cache_residency.drop_prompt(agent_prompt_id);
         let cid = self.prompt_agents.remove(agent_prompt_id.as_str());
-        self.pending_provider_prompts.remove(agent_prompt_id);
+        self.provider_runtime.pending_prompts.remove(agent_prompt_id);
         self.prompt_operations.remove(agent_prompt_id);
         self.prompt_context_limits.remove(agent_prompt_id);
         self.prompt_context_size_alerts.remove(agent_prompt_id);
@@ -868,7 +868,7 @@ impl Harness {
             || !self
                 .pending_prompt_dispatches
                 .contains(&continuation.started.agent_prompt_id)
-            || self.provider_model_routes.get(&continuation.started.model)
+            || self.provider_runtime.model_routes.get(&continuation.started.model)
                 != Some(&continuation.provider_connection_id)
         {
             return false;
@@ -1718,8 +1718,8 @@ impl Harness {
             }
             if let Event::AgentPromptCreated(prompt) = &event {
                 self.preempt_cache_refresh_for_prompt(prompt);
-                let model_info = self.provider_model_info.get(&prompt.model).cloned();
-                self.provider_cache_residency.track_prompt(
+                let model_info = self.provider_runtime.model_info.get(&prompt.model).cloned();
+                self.provider_runtime.cache_residency.track_prompt(
                     provider_connection_id.clone(),
                     prompt,
                     model_info.as_ref(),

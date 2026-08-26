@@ -343,7 +343,7 @@ impl Harness {
             .available_roles
             .keys()
             .filter(|name| {
-                model_for_role(&self.provider_model_info, &self.available_roles, name).is_some()
+                model_for_role(&self.provider_runtime.model_info, &self.available_roles, name).is_some()
             })
             .cloned()
             .collect();
@@ -373,7 +373,7 @@ impl Harness {
         };
 
         if self.available_roles.contains_key(requested)
-            && model_for_role(&self.provider_model_info, &self.available_roles, requested).is_some()
+            && model_for_role(&self.provider_runtime.model_info, &self.available_roles, requested).is_some()
         {
             return Ok(requested.to_owned());
         }
@@ -1080,7 +1080,7 @@ impl Harness {
         let context_window = agent.context_input_tokens.and_then(|_| {
             self.model_for_agent_role(agent)
                 .as_ref()
-                .and_then(|model| context_window_for_model(&self.provider_model_info, model))
+                .and_then(|model| context_window_for_model(&self.provider_runtime.model_info, model))
         });
         Some(AgentStatsUpdated {
             session_id: self.current_session_id.clone(),

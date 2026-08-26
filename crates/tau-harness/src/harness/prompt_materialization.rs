@@ -195,7 +195,7 @@ impl Harness {
             return None;
         }
         let owned_model = match owned_model {
-            Some(model) if self.provider_model_routes.contains_key(&model) => model,
+            Some(model) if self.provider_runtime.model_routes.contains_key(&model) => model,
             model => {
                 self.terminalize_unroutable_owned_dispatch(cid, model.as_ref());
                 return None;
@@ -265,7 +265,7 @@ impl Harness {
                 .and_then(|agent| agent.outer_turn.active_id().cloned());
         }
         let provider_connection_id = self
-            .provider_model_routes
+            .provider_runtime.model_routes
             .get(&prompt.model)
             .cloned()
             .expect("owned model route was validated before materialization");
@@ -997,12 +997,12 @@ impl Harness {
 
     pub(super) fn model_for_agent_role(&self, conv: &Agent) -> Option<ModelId> {
         if let Some(model) = conv.model_override.clone()
-            && self.provider_model_routes.contains_key(&model)
+            && self.provider_runtime.model_routes.contains_key(&model)
         {
             return Some(model);
         }
         let role_name = self.role_name_for_agent(conv);
-        model_for_role(&self.provider_model_info, &self.available_roles, &role_name)
+        model_for_role(&self.provider_runtime.model_info, &self.available_roles, &role_name)
     }
 
     pub(crate) fn selected_model_params(&self) -> tau_proto::ModelParams {
@@ -1018,7 +1018,7 @@ impl Harness {
         model: &ModelId,
     ) -> tau_proto::ModelParams {
         selected_params_for_role(
-            &self.provider_model_info,
+            &self.provider_runtime.model_info,
             &self.available_roles,
             role_name,
             model,
@@ -1027,7 +1027,7 @@ impl Harness {
 
     #[cfg(test)]
     pub(super) fn build_system_prompt_for_role(&self, role_name: &str) -> String {
-        let model = model_for_role(&self.provider_model_info, &self.available_roles, role_name);
+        let model = model_for_role(&self.provider_runtime.model_info, &self.available_roles, role_name);
         let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
         self.try_build_system_prompt_for_role_and_agent(
             role_name,
@@ -1046,7 +1046,7 @@ impl Harness {
         role_name: &str,
         context_agent_id: &tau_proto::AgentId,
     ) -> Result<String, handlebars::RenderError> {
-        let model = model_for_role(&self.provider_model_info, &self.available_roles, role_name);
+        let model = model_for_role(&self.provider_runtime.model_info, &self.available_roles, role_name);
         let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
         self.build_system_prompt_for_role_preview_with_snapshot(
             role_name,
@@ -1152,7 +1152,7 @@ impl Harness {
             )
             .with_parallel_tool_calls(
                 model
-                    .and_then(|model| self.provider_model_info.get(model))
+                    .and_then(|model| self.provider_runtime.model_info.get(model))
                     .is_none_or(|info| info.supports_parallel_tool_calls),
             ),
         )
@@ -1368,7 +1368,7 @@ impl Harness {
 
     #[cfg(test)]
     pub(super) fn gather_tool_definitions_for_role(&self, role_name: &str) -> Vec<ToolDefinition> {
-        let model = model_for_role(&self.provider_model_info, &self.available_roles, role_name);
+        let model = model_for_role(&self.provider_runtime.model_info, &self.available_roles, role_name);
         let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
         self.tool_definitions_from_specs(&specs)
     }
@@ -1378,7 +1378,7 @@ impl Harness {
         role_name: &str,
         model: Option<&ModelId>,
     ) -> Vec<tau_proto::ToolSpec> {
-        let model_info = model.and_then(|model| self.provider_model_info.get(model));
+        let model_info = model.and_then(|model| self.provider_runtime.model_info.get(model));
         let supported_tool_types = model_info.map(|info| info.supported_tool_types.as_slice());
         let mut specs: Vec<_> = self
             .registry
@@ -1556,7 +1556,7 @@ impl Harness {
     ) -> bool {
         let mut enabled = spec.enabled_by_default;
         let model_tags = model
-            .and_then(|model| self.provider_model_info.get(model))
+            .and_then(|model| self.provider_runtime.model_info.get(model))
             .map(|info| info.tags.as_slice())
             .unwrap_or(&[]);
         match self.shell_tool_style_for_base_enablement(model_tags) {
@@ -1707,7 +1707,7 @@ impl Harness {
     /// Returns a prompt error for invalid style metadata or unavailable forced
     /// Codex support.
     pub(super) fn shell_tool_style_error(&self, model: Option<&ModelId>) -> Option<String> {
-        let info = model.and_then(|id| self.provider_model_info.get(id))?;
+        let info = model.and_then(|id| self.provider_runtime.model_info.get(id))?;
         let explicit: HashSet<_> = info
             .tags
             .iter()

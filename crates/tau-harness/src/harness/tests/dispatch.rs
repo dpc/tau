@@ -1400,7 +1400,7 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
         .map(crate::parse_agent_id)
         .expect("durable agent id");
     let role = h.selected_role.clone();
-    let model = crate::model::model_for_role(&h.provider_model_info, &h.available_roles, &role);
+    let model = crate::model::model_for_role(&h.provider_runtime.model_info, &h.available_roles, &role);
 
     let with_agent_start = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
     let rendered = h
@@ -1481,7 +1481,7 @@ fn hidden_delegate_roles_are_omitted_from_catalog_but_remain_explicitly_callable
     h.publish_delegate_roles_context();
 
     let role = h.selected_role.clone();
-    let model = crate::model::model_for_role(&h.provider_model_info, &h.available_roles, &role);
+    let model = crate::model::model_for_role(&h.provider_runtime.model_info, &h.available_roles, &role);
     let tools = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
     let rendered = h
         .try_build_system_prompt_for_role_and_agent(
@@ -1545,7 +1545,7 @@ fn agent_start_definition_lists_visible_available_roles_without_prompt_catalog()
         .expect("selected role")
         .prompt_override = Some("no-fragments".to_owned());
 
-    let model = crate::model::model_for_role(&h.provider_model_info, &h.available_roles, &role);
+    let model = crate::model::model_for_role(&h.provider_runtime.model_info, &h.available_roles, &role);
     let specs = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
     let description = specs
         .iter()
@@ -2388,9 +2388,9 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    h.provider_model_routes.clear();
-    h.provider_model_info.clear();
-    h.available_models.clear();
+    h.provider_runtime.model_routes.clear();
+    h.provider_runtime.model_info.clear();
+    h.provider_runtime.available_models.clear();
     h.selected_model = None;
     // Model-less queueing is transient only while startup still has an
     // unapplied extension connection.
@@ -2721,7 +2721,7 @@ fn publish_shell_workdir_context(
 
 fn render_shell_workdir_prompt(h: &Harness, agent_id: &tau_proto::AgentId) -> String {
     let role_name = h.selected_role.as_str();
-    let model = crate::model::model_for_role(&h.provider_model_info, &h.available_roles, role_name);
+    let model = crate::model::model_for_role(&h.provider_runtime.model_info, &h.available_roles, role_name);
     let specs = h.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
     h.try_build_system_prompt_for_role_and_agent(
         role_name,
@@ -2838,7 +2838,7 @@ fn shell_workdir_prompt_is_absent_when_workdir_is_hidden() {
         .push(ToolName::new("workdir"));
 
     let role_name = h.selected_role.as_str();
-    let model = crate::model::model_for_role(&h.provider_model_info, &h.available_roles, role_name);
+    let model = crate::model::model_for_role(&h.provider_runtime.model_info, &h.available_roles, role_name);
     let specs = h.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
     assert!(!specs.iter().any(|spec| spec.name.as_str() == "workdir"));
     assert!(specs.iter().any(|spec| {
@@ -7130,8 +7130,8 @@ fn set_available_provider_models(
     models: impl IntoIterator<Item = tau_proto::ProviderModelInfo>,
 ) {
     let models: Vec<_> = models.into_iter().collect();
-    h.available_models = models.iter().map(|info| info.id.clone()).collect();
-    h.provider_model_info = models
+    h.provider_runtime.available_models = models.iter().map(|info| info.id.clone()).collect();
+    h.provider_runtime.model_info = models
         .into_iter()
         .map(|info| (info.id.clone(), info))
         .collect();
@@ -9789,18 +9789,18 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
         )),
     )
     .expect("provider model snapshot");
-    let mut earlier_duplicate = h.provider_models_by_extension["provider-owner"][0].clone();
+    let mut earlier_duplicate = h.provider_runtime.models_by_extension["provider-owner"][0].clone();
     earlier_duplicate.est_uncached_input_cost_1m_usd =
         tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
     earlier_duplicate.est_cached_input_cost_1m_usd =
         tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
     earlier_duplicate.est_output_cost_1m_usd =
         tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
-    h.provider_models_by_extension
+    h.provider_runtime.models_by_extension
         .get_mut("provider-owner")
         .expect("provider snapshot")
         .insert(0, earlier_duplicate);
-    h.provider_model_info.insert(
+    h.provider_runtime.model_info.insert(
         model_id.clone(),
         tau_proto::ProviderModelInfo {
             id: model_id.clone(),
@@ -9826,7 +9826,7 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
             est_cache_storage_cost_1m_token_hour_usd: None,
         },
     );
-    h.provider_model_routes.insert(
+    h.provider_runtime.model_routes.insert(
         model_id.clone(),
         crate::test_connection_id("provider-owner"),
     );
@@ -9871,11 +9871,11 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
         "provider observers should not receive provider-owned prompt execution"
     );
 
-    h.provider_models_by_extension
+    h.provider_runtime.models_by_extension
         .get_mut("provider-owner")
         .expect("serving provider snapshot")[0]
         .est_uncached_input_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"openai/gpt-5.5".into())
         .expect("flattened model metadata")
         .est_uncached_input_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
@@ -9973,7 +9973,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         )),
     )
     .expect("provider model snapshot");
-    h.provider_model_info.insert(
+    h.provider_runtime.model_info.insert(
         model_id.clone(),
         tau_proto::ProviderModelInfo {
             id: model_id.clone(),
@@ -9999,7 +9999,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             est_cache_storage_cost_1m_token_hour_usd: None,
         },
     );
-    h.provider_model_routes.insert(
+    h.provider_runtime.model_routes.insert(
         model_id.clone(),
         crate::test_connection_id("provider-owner"),
     );
@@ -10036,7 +10036,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         .and_then(|agent| agent.in_flight_prompt.clone())
         .expect("send watched prompt");
     assert_eq!(
-        h.pending_provider_prompts.get(&spid).map(|id| id.as_str()),
+        h.provider_runtime.pending_prompts.get(&spid).map(|id| id.as_str()),
         Some("provider-owner"),
         "outbound prompt owner should be recorded"
     );
@@ -10088,7 +10088,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     .expect("forged final response");
 
     assert_eq!(
-        h.pending_provider_prompts.get(&spid).map(|id| id.as_str()),
+        h.provider_runtime.pending_prompts.get(&spid).map(|id| id.as_str()),
         Some("provider-owner"),
         "wrong-source events must not consume the pending owner"
     );
@@ -10156,7 +10156,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     )
     .expect("owner final response");
 
-    assert!(!h.pending_provider_prompts.contains_key(&spid));
+    assert!(!h.provider_runtime.pending_prompts.contains_key(&spid));
     assert!(matches!(
         h.agent_registry.agents[&watched_cid].turn_state,
         AgentTurnState::Idle
@@ -10198,7 +10198,7 @@ fn provider_response_stats_are_public_provider_updates() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     let durable_id = durable_agent_id_for_conversation(&h, &cid);
     h.prompt_agents.insert(spid.clone(), cid.clone());
-    h.pending_provider_prompts
+    h.provider_runtime.pending_prompts
         .insert(spid.clone(), crate::test_connection_id("provider-owner"));
     let ui_frames = connect_test_client(&mut h, "ui-stats-observer", tau_proto::ClientKind::Ui);
     h.bus
@@ -10626,7 +10626,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     let model_id: tau_proto::ModelId = "test/model".parse().expect("model id");
     let mut model_info = provider_model_info(model_id.clone(), 1_000);
     model_info.supports_parallel_tool_calls = false;
-    h.provider_model_info.insert(model_id, model_info);
+    h.provider_runtime.model_info.insert(model_id, model_info);
 
     append_user_message_via_event(&mut h, "s1", "go");
     let cid = ensure_test_user_agent(&mut h);
@@ -14813,7 +14813,7 @@ fn cold_resume_restores_usage_for_first_activation_compaction_projection() {
             .expect("resume");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -14874,7 +14874,7 @@ fn rewind_discards_off_branch_usage_before_tiny_and_new_agent_activations() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -14960,7 +14960,7 @@ fn off_branch_usage_baseline_is_ineligible_for_scheduling_and_telemetry() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -15125,7 +15125,7 @@ fn restored_usage_survives_staggered_provider_discovery() {
     );
 
     let base_info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get(&"test/model".into())
         .expect("test model info")
         .clone();
@@ -15194,20 +15194,20 @@ fn restored_context_usage_requires_current_model_and_resets_on_model_change() {
     );
     let alternate: tau_proto::ModelId = "test/alternate".into();
     let route = h
-        .provider_model_routes
+        .provider_runtime.model_routes
         .get(&"test/model".into())
         .expect("test model route")
         .clone();
     let mut info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get(&"test/model".into())
         .expect("test model info")
         .clone();
     info.id = alternate.clone();
     info.default_affinity = -1;
-    h.available_models.push(alternate.clone());
-    h.provider_model_routes.insert(alternate.clone(), route);
-    h.provider_model_info.insert(alternate.clone(), info);
+    h.provider_runtime.available_models.push(alternate.clone());
+    h.provider_runtime.model_routes.insert(alternate.clone(), route);
+    h.provider_runtime.model_info.insert(alternate.clone(), info);
     h.handle_ui_agent_model_select(
         crate::harness::harness_connection_id(),
         tau_proto::UiAgentModelSelect {
@@ -15240,7 +15240,7 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
     let role = h.selected_role.clone();
     let model = h.selected_model.clone().expect("selected model");
     let settings = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&model)
         .expect("selected model settings");
     settings.efforts = vec![
@@ -15353,7 +15353,7 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
     );
 
     let settings = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&model)
         .expect("selected model settings");
     settings.efforts = vec![tau_proto::Effort::Medium, tau_proto::Effort::High];
@@ -15392,7 +15392,7 @@ fn relative_role_updates_use_model_fallbacks_and_saturate() {
     );
 
     let settings = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&model)
         .expect("selected model settings");
     settings.efforts = vec![
@@ -15440,20 +15440,20 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
     let role = h.selected_role.clone();
     let alternate: tau_proto::ModelId = "test/alternate".into();
     let route = h
-        .provider_model_routes
+        .provider_runtime.model_routes
         .get(&"test/model".into())
         .expect("test model route")
         .clone();
     let mut info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get(&"test/model".into())
         .expect("test model info")
         .clone();
     info.id = alternate.clone();
     info.default_affinity = -1;
-    h.available_models.push(alternate.clone());
-    h.provider_model_routes.insert(alternate.clone(), route);
-    h.provider_model_info.insert(alternate.clone(), info);
+    h.provider_runtime.available_models.push(alternate.clone());
+    h.provider_runtime.model_routes.insert(alternate.clone(), route);
+    h.provider_runtime.model_info.insert(alternate.clone(), info);
 
     h.handle_ui_role_update(
         crate::harness::harness_connection_id(),
@@ -15586,7 +15586,7 @@ fn standalone_compaction_boundary_with_measurements(
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -15684,7 +15684,7 @@ fn manual_standalone_compact_installs_one_boundary() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -15897,16 +15897,16 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
     let model: tau_proto::ModelId = "test/model".into();
-    let provider_owner = h.provider_model_routes[&model].clone();
+    let provider_owner = h.provider_runtime.model_routes[&model].clone();
     let serving_model = h
-        .provider_models_by_extension
+        .provider_runtime.models_by_extension
         .get_mut(provider_owner.as_str())
         .expect("provider-owned model snapshot")
         .iter_mut()
@@ -15922,7 +15922,7 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
         .expect("dispatch inference");
     let inference = read_nth_prompt_created(&h, 0);
     let serving_model = h
-        .provider_models_by_extension
+        .provider_runtime.models_by_extension
         .get_mut(provider_owner.as_str())
         .expect("provider-owned model snapshot")
         .iter_mut()
@@ -16168,7 +16168,7 @@ fn reactive_context_overflow_eligibility_fails_closed() {
         let td = TempDir::new().expect("tempdir");
         let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
         enable_remote_compaction_for_test_model(&mut h);
-        h.provider_model_info
+        h.provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("test model")
             .supports_standalone_compaction =
@@ -16184,7 +16184,7 @@ fn reactive_context_overflow_eligibility_fails_closed() {
         let prompt = read_nth_prompt_created(&h, 0);
         if matches!(case, Case::StreamedOutput) {
             let provider = h
-                .pending_provider_prompts
+                .provider_runtime.pending_prompts
                 .get(&prompt.agent_prompt_id)
                 .cloned()
                 .expect("provider owner");
@@ -16214,12 +16214,12 @@ fn reactive_context_overflow_eligibility_fails_closed() {
         }
         if matches!(case, Case::CurrentModelMismatch) {
             let mut other = h
-                .provider_model_info
+                .provider_runtime.model_info
                 .get(&"test/model".into())
                 .expect("test model")
                 .clone();
             other.id = "provider/other".into();
-            h.provider_model_info.insert(other.id.clone(), other);
+            h.provider_runtime.model_info.insert(other.id.clone(), other);
             h.selected_model = Some("provider/other".into());
         }
         if matches!(case, Case::BranchMismatch) {
@@ -16289,7 +16289,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let mut h = quiet_provider_harness(&state).expect("start");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -16382,12 +16382,12 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     drop(store);
 
     let mut capable = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get(&"test/model".into())
         .expect("test model")
         .clone();
     capable.id = "provider-b/model".into();
-    let provider_owner = h.provider_model_routes[&"test/model".into()].to_string();
+    let provider_owner = h.provider_runtime.model_routes[&"test/model".into()].to_string();
     h.rehydrate_agents_from_session();
     let restored_cid = h.agent_registry.agent_routes["main"].clone();
     h.agent_registry
@@ -16534,7 +16534,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("resume");
     let unsupported = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get(&"test/model".into())
         .expect("test model")
         .clone();
@@ -16550,7 +16550,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
         h.agent_watch.provider_status["main"].state,
         tau_proto::AgentWatchProviderState::Blocked { .. }
     ));
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -16576,7 +16576,7 @@ fn reactive_context_overflow_ui_cancel_is_terminal_once() {
     {
         let mut h = quiet_provider_harness(&state).expect("start");
         enable_remote_compaction_for_test_model(&mut h);
-        h.provider_model_info
+        h.provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("test model")
             .supports_standalone_compaction = true;
@@ -16640,7 +16640,7 @@ fn reactive_context_overflow_ui_cancel_is_terminal_once() {
 fn reactive_context_overflow_side_failure_completes_request() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -16690,7 +16690,7 @@ fn reactive_context_overflow_claimed_crash_is_not_redispatched() {
     {
         let mut h = quiet_provider_harness(&state).expect("start");
         enable_remote_compaction_for_test_model(&mut h);
-        h.provider_model_info
+        h.provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("test model")
             .supports_standalone_compaction = true;
@@ -16861,7 +16861,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
         )
         .expect("start warm harness");
         assert!(
-            h.provider_model_info.contains_key(&"test/model".into()),
+            h.provider_runtime.model_info.contains_key(&"test/model".into()),
             "provider state is populated before warm resume"
         );
         h.switch_session(test_session_id("s1"), tau_proto::SessionStartReason::Resume)
@@ -16936,8 +16936,8 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
             .get_mut(&cid)
             .expect("agent")
             .model_override = Some("provider-b/model".into());
-        let owner = h.provider_model_routes[&"test/model".into()].to_string();
-        let mut model = h.provider_model_info[&"test/model".into()].clone();
+        let owner = h.provider_runtime.model_routes[&"test/model".into()].to_string();
+        let mut model = h.provider_runtime.model_info[&"test/model".into()].clone();
         model.id = "provider-b/model".into();
         h.publish_provider_models_update(
             &crate::test_connection_id(&owner),
@@ -17044,7 +17044,7 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
     let model: tau_proto::ModelId = "test/model".into();
-    let provider = h.provider_model_routes[&model].to_string();
+    let provider = h.provider_runtime.model_routes[&model].to_string();
     let transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-restored-removal").expect("transaction");
     let compact_prompt_id: tau_proto::AgentPromptId =
@@ -17116,11 +17116,11 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
         },
     };
     let other_model: tau_proto::ModelId = "other/current".into();
-    let mut other_info = h.provider_model_info[&model].clone();
+    let mut other_info = h.provider_runtime.model_info[&model].clone();
     other_info.id = other_model.clone();
-    h.provider_model_info
+    h.provider_runtime.model_info
         .insert(other_model.clone(), other_info);
-    h.provider_model_routes.insert(
+    h.provider_runtime.model_routes.insert(
         other_model.clone(),
         tau_proto::ConnectionId::parse("other-provider")
             .expect("test connection id must satisfy the identifier grammar"),
@@ -17190,7 +17190,7 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
 fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -17247,7 +17247,7 @@ fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
 fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -17383,7 +17383,7 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -17506,7 +17506,7 @@ fn reactive_context_overflow_extension_preemption_cancels_once() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -17554,7 +17554,7 @@ fn reactive_context_overflow_delegate_cancel_is_terminal_once() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -17600,7 +17600,7 @@ fn reactive_context_overflow_session_switch_cancels_and_cleans_state() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -17653,7 +17653,7 @@ fn standalone_compaction_rejects_response_after_head_navigation() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -17723,7 +17723,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -18037,7 +18037,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
         let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
         enable_remote_compaction_for_test_model(&mut h);
         let info = h
-            .provider_model_info
+            .provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("test model");
         info.supports_compaction = false;
@@ -18069,7 +18069,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
         let head_before = h.agent_registry.agents[&cid].head;
         let stored_head_before = h.agent_store.agent(&agent_id).expect("agent tree").head();
         let billable_before = h.current_session_state.token_usage.total;
-        let cache_deadline_before = h.provider_cache_residency.next_deadline();
+        let cache_deadline_before = h.provider_runtime.cache_residency.next_deadline();
         let (transaction_id, cut, resume_through) =
             match &h.agent_registry.agents[&cid].activation_dispatch {
                 ActivationDispatchState::Running {
@@ -18125,7 +18125,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
             "{label}"
         );
         assert_eq!(
-            h.provider_cache_residency.next_deadline(),
+            h.provider_runtime.cache_residency.next_deadline(),
             cache_deadline_before,
             "{label}"
         );
@@ -18151,7 +18151,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
             "{label}"
         );
         assert!(
-            !h.provider_cache_residency
+            !h.provider_runtime.cache_residency
                 .tracks_prompt(&compact.agent_prompt_id),
             "{label}"
         );
@@ -18198,7 +18198,7 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -18310,7 +18310,7 @@ fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
         let mut h = quiet_provider_harness(&state).expect("start");
         enable_remote_compaction_for_test_model(&mut h);
         let info = h
-            .provider_model_info
+            .provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("test model");
         info.supports_compaction = false;
@@ -18380,7 +18380,7 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
         let mut h = quiet_provider_harness(&state).expect("start");
         enable_remote_compaction_for_test_model(&mut h);
         let info = h
-            .provider_model_info
+            .provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("test model");
         info.supports_compaction = false;
@@ -18462,7 +18462,7 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -18552,7 +18552,7 @@ fn standalone_auto_compaction_schedules_at_threshold() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -18699,7 +18699,7 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
     let reserve = path_crate_harness::context_limit_telemetry::context_projection_reserve(128_000);
     {
         let info = h
-            .provider_model_info
+            .provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("test model");
         info.supports_compaction = false;
@@ -18731,7 +18731,7 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
         !h.schedule_standalone_auto_compaction_for_activation(&cid, true, None),
         "canonical image estimate remains below threshold"
     );
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .standalone_compaction_threshold = Some(projected + reserve);
@@ -18777,7 +18777,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -19042,7 +19042,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -19183,7 +19183,7 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -19288,7 +19288,7 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -19319,7 +19319,7 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
         .head
         .expect("branch A activation node");
     assert_eq!(h.publication.idle_dispatches.len(), 1);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -19375,7 +19375,7 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -19405,7 +19405,7 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
     let branch_a = h.agent_registry.agents[&cid]
         .head
         .expect("branch A activation node");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -19699,7 +19699,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         retained_obligation.obligation.is_committed()
     );
 
-    let ready_provider = h.pending_provider_prompts[&ready_checkpoint.agent_prompt_id].clone();
+    let ready_provider = h.provider_runtime.pending_prompts[&ready_checkpoint.agent_prompt_id].clone();
     h.handle_extension_event_inner(
         &ready_provider,
         Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
@@ -19748,7 +19748,7 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
     assert!(h.publication.idle_dispatches.is_empty());
 
     let retained_provider =
-        h.pending_provider_prompts[&retained_checkpoint.agent_prompt_id].clone();
+        h.provider_runtime.pending_prompts[&retained_checkpoint.agent_prompt_id].clone();
     h.handle_extension_event_inner(
         &retained_provider,
         Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
@@ -19993,7 +19993,7 @@ fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
             _ => None,
         })
         .expect("later runnable agent prompt");
-    let provider = h.pending_provider_prompts[&runnable_prompt.agent_prompt_id].clone();
+    let provider = h.provider_runtime.pending_prompts[&runnable_prompt.agent_prompt_id].clone();
     h.handle_extension_event_inner(
         &provider,
         Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
@@ -20405,7 +20405,7 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
 /// lifecycle tests in sibling harness test modules.
 pub(super) fn enable_remote_compaction_for_test_model(h: &mut Harness) {
     h.selected_model = Some("test/model".into());
-    h.provider_model_info.insert(
+    h.provider_runtime.model_info.insert(
         "test/model".into(),
         tau_proto::ProviderModelInfo {
             id: "test/model".into(),
@@ -20441,7 +20441,7 @@ fn outer_turn_finished_done_policy_persists_and_starts_one_compaction() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -20596,7 +20596,7 @@ fn post_tool_automatic_policy_crash_cuts_repair_owed_suffix_once() {
             let mut h = quiet_provider_harness(&state).expect("start");
             enable_remote_compaction_for_test_model(&mut h);
             let info = h
-                .provider_model_info
+                .provider_runtime.model_info
                 .get_mut(&"test/model".into())
                 .expect("test model");
             info.supports_compaction = false;
@@ -20891,7 +20891,7 @@ fn canceled_no_status_turn_persists_eager_decision_from_prompt_snapshot() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model");
     info.supports_compaction = false;
@@ -20976,7 +20976,7 @@ fn automatic_policy_terminal_matrix_commits_owned_suffix_once() {
             let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
             enable_remote_compaction_for_test_model(&mut h);
             let info = h
-                .provider_model_info
+                .provider_runtime.model_info
                 .get_mut(&"test/model".into())
                 .expect("test model");
             info.supports_compaction = false;
@@ -21438,7 +21438,7 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("model")
         .supports_standalone_compaction = true;
@@ -21543,7 +21543,7 @@ fn compact_repairs_cold_historical_open_prefix_failure() {
     {
         let mut h = quiet_provider_harness(&state).expect("start");
         enable_remote_compaction_for_test_model(&mut h);
-        h.provider_model_info
+        h.provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("model")
             .supports_standalone_compaction = true;
@@ -21569,7 +21569,7 @@ fn compact_repairs_cold_historical_open_prefix_failure() {
             .expect("resume");
     enable_remote_compaction_for_test_model(&mut resumed);
     resumed
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("model")
         .supports_standalone_compaction = true;
@@ -21622,7 +21622,7 @@ fn compact_refuses_warm_blocked_recovery_off_owed_branch() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("model")
         .supports_standalone_compaction = true;
@@ -21674,7 +21674,7 @@ fn compact_refuses_cold_blocked_recovery_off_owed_branch() {
     {
         let mut h = quiet_provider_harness(&state).expect("start");
         enable_remote_compaction_for_test_model(&mut h);
-        h.provider_model_info
+        h.provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("model")
             .supports_standalone_compaction = true;
@@ -21700,7 +21700,7 @@ fn compact_refuses_cold_blocked_recovery_off_owed_branch() {
             .expect("resume");
     enable_remote_compaction_for_test_model(&mut resumed);
     resumed
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("model")
         .supports_standalone_compaction = true;
@@ -21737,7 +21737,7 @@ fn compact_refuses_cold_blocked_recovery_off_owed_branch() {
 fn manual_self_compaction_waits_for_complete_sibling_round() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -21986,7 +21986,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
     let second_call_id = ToolCallId::from("scheduler-compact-second");
 
     let mut h = echo_harness(&state).expect("harness");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -22193,7 +22193,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
         echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
             .expect("cold reopen");
     resumed
-        .provider_model_info
+        .provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -22376,7 +22376,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
 fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -22493,7 +22493,7 @@ fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
 fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -22584,7 +22584,7 @@ fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let mut h = echo_harness(&state).expect("harness");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -22761,7 +22761,7 @@ fn manual_self_compaction_failure_delivers_error_once() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let mut h = echo_harness(&state).expect("harness");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -22898,7 +22898,7 @@ fn manual_self_compaction_cold_failure_before_delivery() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let mut h = echo_harness(&state).expect("harness");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -23018,7 +23018,7 @@ fn manual_self_compaction_cold_failure_before_delivery() {
 fn manual_self_compaction_success_delivers_directly() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -23102,7 +23102,7 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let mut h = echo_harness(&state).expect("harness");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -23703,7 +23703,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("first cold reopen");
     assert!(
-        first.provider_model_routes.contains_key(&model),
+        first.provider_runtime.model_routes.contains_key(&model),
         "captured inference model must have an observed route"
     );
     let first_records = first
@@ -24286,10 +24286,10 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
         tau_proto::SessionStartReason::Resume,
     )
     .expect("first cold reopen");
-    assert!(first.provider_model_info[&"strict/model".into()].supports_standalone_compaction);
+    assert!(first.provider_runtime.model_info[&"strict/model".into()].supports_standalone_compaction);
     assert!(
         first
-            .provider_model_routes
+            .provider_runtime.model_routes
             .contains_key(&"strict/model".into())
     );
     let target_records = first
@@ -24420,10 +24420,10 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
         tau_proto::SessionStartReason::Resume,
     )
     .expect("second cold reopen");
-    assert!(second.provider_model_info[&"strict/model".into()].supports_standalone_compaction);
+    assert!(second.provider_runtime.model_info[&"strict/model".into()].supports_standalone_compaction);
     assert!(
         second
-            .provider_model_routes
+            .provider_runtime.model_routes
             .contains_key(&"strict/model".into())
     );
     let second_target_records = second
@@ -24526,7 +24526,7 @@ fn setup_manual_cross_compaction_test() -> (
 ) {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -24746,7 +24746,7 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
             echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
                 .expect("cold reopen");
         resumed
-            .provider_model_info
+            .provider_runtime.model_info
             .get_mut(&"echo/model".into())
             .expect("echo model")
             .supports_standalone_compaction = true;
@@ -24945,7 +24945,7 @@ fn manual_cross_compaction_blocked_repeat_requires_exact_recovery_ownership() {
 fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = true;
@@ -25789,7 +25789,7 @@ fn manual_cross_compaction_rejects_uncertain_dispatch() {
 #[test]
 fn manual_cross_compaction_rejects_unsupported_model() {
     let (_td, mut h, caller, _target, call, target_id) = setup_manual_cross_compaction_test();
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"echo/model".into())
         .expect("echo model")
         .supports_standalone_compaction = false;
@@ -27058,7 +27058,7 @@ fn manual_compaction_cancels_sole_input_wait_before_starting() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -27122,7 +27122,7 @@ fn successful_wait_preemption_installs_replacement_before_queued_activation() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -27213,7 +27213,7 @@ fn repeated_manual_compaction_coalesces_while_wait_cancellation_is_parked() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -27282,7 +27282,7 @@ fn explicit_cancel_while_wait_preemption_is_parked_never_compacts() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -27339,7 +27339,7 @@ fn session_rollover_while_wait_preemption_is_parked_never_compacts() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -27383,7 +27383,7 @@ fn failed_wait_cancellation_append_rolls_back_without_compaction() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -27466,7 +27466,7 @@ fn manual_compaction_preserves_cancelled_wait_correlation() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -27540,7 +27540,7 @@ fn manual_compaction_rejects_already_terminalizing_wait() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
-    h.provider_model_info
+    h.provider_runtime.model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -27621,7 +27621,7 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("enter input wait".to_owned()))
         .expect("dispatch initial inference");
     let initial_prompt = read_nth_prompt_created(&h, 0);
-    let initial_provider = h.pending_provider_prompts[&initial_prompt.agent_prompt_id].clone();
+    let initial_provider = h.provider_runtime.pending_prompts[&initial_prompt.agent_prompt_id].clone();
     h.handle_extension_event_inner(
         &initial_provider,
         Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
@@ -27735,7 +27735,7 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
     let through =
         tau_proto::AgentHead::Node(h.agent_registry.agents[&cid].head.expect("wait terminal"));
     let continuation = read_nth_prompt_created(&h, 1);
-    let continuation_provider = h.pending_provider_prompts[&continuation.agent_prompt_id].clone();
+    let continuation_provider = h.provider_runtime.pending_prompts[&continuation.agent_prompt_id].clone();
     h.handle_extension_event_inner(
         &continuation_provider,
         Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
@@ -29387,7 +29387,7 @@ fn cold_restore_does_not_classify_reactive_recovery_as_completed_worker() {
     let sp = td.path().join("state");
     let worker_agent_id = {
         let mut h = quiet_provider_harness(&sp).expect("start");
-        h.provider_model_info
+        h.provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("test model")
             .supports_standalone_compaction = true;
@@ -29438,7 +29438,7 @@ fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
     let sp = td.path().join("state");
     let worker_agent_id = {
         let mut h = quiet_provider_harness(&sp).expect("start");
-        h.provider_model_info
+        h.provider_runtime.model_info
             .get_mut(&"test/model".into())
             .expect("test model")
             .supports_standalone_compaction = true;
@@ -35979,13 +35979,13 @@ fn agent_stats_accumulate_runtime_estimated_api_cost_by_serving_model() {
     info_a.est_cached_input_cost_1m_usd =
         Some(tau_proto::EstimatedUsdPerMillion::from_micro_usd(500_000));
     info_a.est_output_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(2);
-    h.provider_model_info.insert(model_a.clone(), info_a);
+    h.provider_runtime.model_info.insert(model_a.clone(), info_a);
     h.prompt_estimated_cost_rates.insert(
         test_agent_prompt_id("cost-prompt"),
-        h.provider_model_info[&model_a].estimated_api_cost_rates(),
+        h.provider_runtime.model_info[&model_a].estimated_api_cost_rates(),
     );
-    let captured_rates = h.provider_model_info[&model_a].estimated_api_cost_rates();
-    h.provider_model_info
+    let captured_rates = h.provider_runtime.model_info[&model_a].estimated_api_cost_rates();
+    h.provider_runtime.model_info
         .get_mut(&model_a)
         .expect("model metadata")
         .est_uncached_input_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(10);
@@ -36071,12 +36071,12 @@ fn accepted_provider_usage_updates_creator_cost_stats() {
         tau_proto::EstimatedUsdPerMillion::checked_from_usd(1);
     model_info.est_cache_write_input_cost_1m_usd =
         tau_proto::EstimatedUsdPerMillion::checked_from_usd(3);
-    h.provider_model_info.insert(model.clone(), model_info);
+    h.provider_runtime.model_info.insert(model.clone(), model_info);
     let prompt_id = h.agent_registry.agents[&child_cid]
         .in_flight_prompt
         .clone()
         .expect("child provider prompt");
-    let captured_rates = h.provider_model_info[&model].estimated_api_cost_rates();
+    let captured_rates = h.provider_runtime.model_info[&model].estimated_api_cost_rates();
     h.prompt_estimated_cost_rates
         .insert(prompt_id.clone(), captured_rates);
     let usage = tau_proto::ProviderTokenUsage {
@@ -36214,7 +36214,7 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
         "explicit-role-provider",
         tau_proto::ClientKind::Provider,
     );
-    h.provider_model_routes.insert(
+    h.provider_runtime.model_routes.insert(
         "test/role-model".into(),
         tau_proto::ConnectionId::parse("explicit-role-provider")
             .expect("test connection id must satisfy the identifier grammar"),
@@ -38595,7 +38595,7 @@ fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
     let mut h = echo_harness(td.path().join("state")).expect("start");
     configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     h.create_durable_user_agent(test_session_id("s1"), "engineer");
-    h.provider_model_info.clear();
+    h.provider_runtime.model_info.clear();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "model-revoked".to_owned(),
         message_id: tau_proto::AgentMessageId::parse("model-revoked-message")
@@ -40116,7 +40116,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
         let state = td.path().join("state");
         let mut h = quiet_provider_harness(&state).expect("start");
         let replacement_model = h
-            .provider_model_info
+            .provider_runtime.model_info
             .values()
             .find(|model| model.id == tau_proto::ModelId::from("test/model"))
             .expect("test model")
@@ -40126,7 +40126,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("provider-loss H".to_owned()))
             .expect("dispatch owner");
         let owner = read_nth_prompt_created(&h, 0).agent_prompt_id.clone();
-        let provider = h.pending_provider_prompts[&owner].clone();
+        let provider = h.provider_runtime.pending_prompts[&owner].clone();
         let interceptor = if raw_fact {
             "raw-loss-interceptor"
         } else {
@@ -40630,7 +40630,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
     enable_remote_compaction_for_test_model(&mut h);
     {
         let info = h
-            .provider_model_info
+            .provider_runtime.model_info
             .get_mut(&tau_proto::ModelId::from("test/model"))
             .expect("test model");
         info.supports_compaction = false;
@@ -41457,7 +41457,7 @@ fn provider_cache_miss_diagnostic_requires_prompt_owner() {
         "provider-b",
         tau_proto::ClientKind::Provider,
     );
-    h.pending_provider_prompts.insert(
+    h.provider_runtime.pending_prompts.insert(
         test_agent_prompt_id("prompt-1"),
         crate::test_connection_id("provider-a"),
     );

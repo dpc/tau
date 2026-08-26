@@ -651,7 +651,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         .get_mut(&cid)
         .expect("ephemeral agent")
         .last_prompt_id = Some(provider_prompt_id.clone());
-    h.pending_provider_prompts.insert(
+    h.provider_runtime.pending_prompts.insert(
         provider_prompt_id.clone(),
         crate::test_connection_id(provider),
     );

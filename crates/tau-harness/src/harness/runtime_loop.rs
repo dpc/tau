@@ -589,13 +589,13 @@ impl Harness {
     }
 
     pub(super) fn next_cache_refresh_deadline(&self) -> Option<Instant> {
-        self.provider_cache_residency.next_deadline()
+        self.provider_runtime.cache_residency.next_deadline()
     }
 
     pub(super) fn process_cache_refresh_deadline(&mut self) {
-        let cancellations = self.provider_cache_residency.expire_deadlines();
+        let cancellations = self.provider_runtime.cache_residency.expire_deadlines();
         self.send_cache_refresh_cancellations(cancellations);
-        for refresh in self.provider_cache_residency.admit() {
+        for refresh in self.provider_runtime.cache_residency.admit() {
             tracing::debug!(
                 target: "tau_harness",
                 provider = %refresh.provider,
@@ -609,7 +609,7 @@ impl Harness {
                 HarnessOutputMessage::deliver(Event::AgentCacheRefreshRequested(refresh.request)),
             );
             if !delivered.is_ok_and(|report| !report.delivered_to.is_empty()) {
-                self.provider_cache_residency
+                self.provider_runtime.cache_residency
                     .finish(&refresh.connection_id, &refresh_id);
             }
         }
@@ -632,7 +632,7 @@ impl Harness {
 
     pub(super) fn preempt_cache_refresh_for_prompt(&mut self, prompt: &AgentPromptCreated) {
         let cancellations = self
-            .provider_cache_residency
+            .provider_runtime.cache_residency
             .cancel_real(&prompt.model.provider, &prompt.agent_id);
         self.send_cache_refresh_cancellations(cancellations);
     }
@@ -641,8 +641,8 @@ impl Harness {
         &mut self,
         reason: tau_proto::ProviderCacheRefreshCancelReason,
     ) {
-        self.cache_refresh_tool_window_calls.clear();
-        let cancellations = self.provider_cache_residency.clear(reason);
+        self.provider_runtime.cache_refresh_tool_window_calls.clear();
+        let cancellations = self.provider_runtime.cache_residency.clear(reason);
         self.send_cache_refresh_cancellations(cancellations);
     }
 

@@ -178,9 +178,9 @@ fn restore_replay_does_not_project_extension_provenance_as_connection_source() {
 fn provider_model_catch_up_ignores_requested_declaration_persistence() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
-    let existing_source = h.provider_model_routes[&"test/model".into()].clone();
+    let existing_source = h.provider_runtime.model_routes[&"test/model".into()].clone();
     let existing_publisher = h.extensions.entries[&existing_source].name.clone();
-    let existing_models = h.provider_models_by_extension[&existing_source].clone();
+    let existing_models = h.provider_runtime.models_by_extension[&existing_source].clone();
     h.handle_extension_message(
         &existing_source,
         TestMessage::Emit(tau_proto::Emit {
@@ -203,7 +203,7 @@ fn provider_model_catch_up_ignores_requested_declaration_persistence() {
         &crate::test_connection_id("empty-provider-connection"),
         Vec::new(),
     );
-    let before_routes = h.provider_model_routes.clone();
+    let before_routes = h.provider_runtime.model_routes.clone();
     let before_log = event_log_events(&h).len();
     let sink = connect_test_client(&mut h, "model-replay-ui", tau_proto::ClientKind::Ui);
 
@@ -257,7 +257,7 @@ fn provider_model_catch_up_ignores_requested_declaration_persistence() {
             if update.publisher_extension_id.as_str() == "empty-provider"
                 && update.models.is_empty()
     )));
-    assert_eq!(h.provider_model_routes, before_routes);
+    assert_eq!(h.provider_runtime.model_routes, before_routes);
     assert_eq!(event_log_events(&h).len(), before_log);
 }
 
