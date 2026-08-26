@@ -87,7 +87,9 @@ impl Harness {
             if self.tool_call_waits_for_staged_registration(
                 &next.conversation_id,
                 &next.invocation.name,
-                self.prompt_runtime.tool_call_prompts.get(&next.invocation.id),
+                self.prompt_runtime
+                    .tool_call_prompts
+                    .get(&next.invocation.id),
             ) {
                 break;
             }
@@ -142,8 +144,14 @@ impl Harness {
     /// Observe a live background-transition decision before publishing its
     /// foreground placeholder.
     pub(crate) fn observe_tool_backgrounded(&mut self, call_id: &ToolCallId) {
-        self.provider_runtime.cache_refresh_tool_window_calls.remove(call_id);
-        if self.provider_runtime.cache_refresh_tool_window_calls.is_empty() {
+        self.provider_runtime
+            .cache_refresh_tool_window_calls
+            .remove(call_id);
+        if self
+            .provider_runtime
+            .cache_refresh_tool_window_calls
+            .is_empty()
+        {
             let cancellations = self.provider_runtime.cache_residency.close_window();
             self.send_cache_refresh_cancellations(cancellations);
         }
@@ -766,13 +774,14 @@ impl Harness {
                 .get(cid)
                 .and_then(|agent| agent.agent_id.as_deref())
                 .and_then(|agent_id| {
-                    self.compaction_runtime.accepted_manual_tools.iter().find_map(
-                        |(request_id, accepted)| {
+                    self.compaction_runtime
+                        .accepted_manual_tools
+                        .iter()
+                        .find_map(|(request_id, accepted)| {
                             (accepted.request.resume_inference
                                 && accepted.request.target_agent_id.as_str() == agent_id)
                                 .then_some(request_id.clone())
-                        },
-                    )
+                        })
                 });
             if let Some(request_id) = deferred_request
                 && self.start_accepted_manual_compaction(cid, &request_id)
@@ -925,7 +934,11 @@ impl Harness {
                 event_completion,
                 notify_watchers,
             );
-            if self.prompt_runtime.pending_publish_completions.contains_key(cid) {
+            if self
+                .prompt_runtime
+                .pending_publish_completions
+                .contains_key(cid)
+            {
                 break;
             }
         }

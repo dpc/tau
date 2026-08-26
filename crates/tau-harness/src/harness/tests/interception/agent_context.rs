@@ -66,7 +66,9 @@ fn dropped_context_value_has_no_projection() {
     )
     .expect("park context");
     assert_eq!(
-        h.context_discovery.agent_context.template_value(Some(&agent_id)),
+        h.context_discovery
+            .agent_context
+            .template_value(Some(&agent_id)),
         serde_json::json!({})
     );
     h.handle_extension_event(
@@ -78,7 +80,9 @@ fn dropped_context_value_has_no_projection() {
     .expect("drop context");
 
     assert_eq!(
-        h.context_discovery.agent_context.template_value(Some(&agent_id)),
+        h.context_discovery
+            .agent_context
+            .template_value(Some(&agent_id)),
         serde_json::json!({})
     );
     assert!(!source_committed(&h, "context-owner", |event| {
@@ -114,7 +118,11 @@ fn uncorrelated_context_replacement_is_observable_but_not_projected() {
     )
     .expect("replace context");
 
-    let projected = h.context_discovery.agent_context.template_value(Some(&agent_id)).to_string();
+    let projected = h
+        .context_discovery
+        .agent_context
+        .template_value(Some(&agent_id))
+        .to_string();
     assert!(!projected.contains("replacement"));
     assert!(!projected.contains("original"));
     assert!(source_committed(&h, "context-owner", |event| {
@@ -177,7 +185,8 @@ fn parked_context_value_prevents_readiness_overtake() {
     )
     .expect("commit context value");
     assert!(
-        h.context_discovery.agent_context
+        h.context_discovery
+            .agent_context
             .template_value(Some(&agent_id))
             .to_string()
             .contains("ordered")
@@ -195,7 +204,8 @@ fn parked_context_value_prevents_readiness_overtake() {
     .expect("commit readiness");
 
     assert!(
-        h.context_discovery.agent_context
+        h.context_discovery
+            .agent_context
             .template_value(Some(&agent_id))
             .to_string()
             .contains("ordered")
@@ -226,7 +236,8 @@ fn configured_kinds_cannot_publish_context_for_arbitrary_agents() {
         )
         .expect("publish configured context");
         assert_eq!(
-            h.context_discovery.agent_context
+            h.context_discovery
+                .agent_context
                 .template_value(Some(&tau_proto::AgentId::parse(&agent).expect("agent id"))),
             serde_json::json!({})
         );
@@ -489,7 +500,9 @@ fn rollover_rejects_already_staged_context_declarations_on_ready() {
         )
     );
     assert_eq!(
-        h.context_discovery.agent_context.template_value(Some(&agent_id)),
+        h.context_discovery
+            .agent_context
+            .template_value(Some(&agent_id)),
         serde_json::json!({})
     );
     assert!(
@@ -924,7 +937,8 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
     assert!(prompt.system_prompt.contains("SAFE CONTEXT"));
     assert!(!prompt.system_prompt.contains("STALE DISCONNECTING CONTEXT"));
     assert!(
-        !h.context_discovery.agent_context
+        !h.context_discovery
+            .agent_context
             .template_value(Some(&agent_id))
             .to_string()
             .contains("STALE DISCONNECTING CONTEXT")

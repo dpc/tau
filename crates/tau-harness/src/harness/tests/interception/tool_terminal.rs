@@ -462,7 +462,12 @@ fn parked_ownerless_disconnect_error_defers_teardown_until_canonical_commit() {
     for call_id in &call_ids {
         assert!(harness.tool_runtime.peer_tool_requests.contains(call_id));
         assert!(harness.tool_runtime.pending_tools.contains_key(call_id));
-        assert!(harness.publication.disconnect_terminal_batch_pending.contains(call_id));
+        assert!(
+            harness
+                .publication
+                .disconnect_terminal_batch_pending
+                .contains(call_id)
+        );
         assert!(committed_terminal_events(&harness, call_id.as_str()).is_empty());
     }
     assert_eq!(
@@ -487,12 +492,14 @@ fn parked_ownerless_disconnect_error_defers_teardown_until_canonical_commit() {
     );
     assert!(
         !harness
-            .publication.disconnect_terminal_batch_pending
+            .publication
+            .disconnect_terminal_batch_pending
             .contains(&call_ids[0])
     );
     assert!(
         harness
-            .publication.disconnect_terminal_batch_pending
+            .publication
+            .disconnect_terminal_batch_pending
             .contains(&call_ids[1])
     );
     assert_eq!(
@@ -506,7 +513,12 @@ fn parked_ownerless_disconnect_error_defers_teardown_until_canonical_commit() {
     for call_id in &call_ids {
         assert!(!harness.tool_runtime.peer_tool_requests.contains(call_id));
         assert!(!harness.tool_runtime.pending_tools.contains_key(call_id));
-        assert!(!harness.publication.disconnect_terminal_batch_pending.contains(call_id));
+        assert!(
+            !harness
+                .publication
+                .disconnect_terminal_batch_pending
+                .contains(call_id)
+        );
         assert!(matches!(
             committed_terminal_events(&harness, call_id.as_str()).as_slice(),
             [
@@ -818,7 +830,8 @@ fn result_report_replacement_drives_protected_canonical_projections() {
     );
     assert!(matches!(
         harness
-            .publication.pending_intercept
+            .publication
+            .pending_intercept
             .as_ref()
             .map(|pending| &pending.event),
         Some(Event::ProviderToolResult(_))
@@ -839,7 +852,8 @@ fn result_report_replacement_drives_protected_canonical_projections() {
     );
     assert!(matches!(
         harness
-            .publication.pending_intercept
+            .publication
+            .pending_intercept
             .as_ref()
             .map(|pending| &pending.event),
         Some(Event::ToolResult(_))

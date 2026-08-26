@@ -118,7 +118,11 @@ impl Harness {
         if !self.context_discovery.frozen_agents.contains_key(agent_id) {
             return;
         }
-        let Some(pending) = self.context_discovery.pending_rendered_prompts.remove(agent_id) else {
+        let Some(pending) = self
+            .context_discovery
+            .pending_rendered_prompts
+            .remove(agent_id)
+        else {
             return;
         };
         let cid = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str()));
@@ -128,7 +132,11 @@ impl Harness {
                 | PendingRenderedPrompt::Prompt { role, .. }
                 | PendingRenderedPrompt::Tools { role, .. } => role.clone(),
             };
-            let model = model_for_role(&self.provider_runtime.model_info, &self.available_roles, &role);
+            let model = model_for_role(
+                &self.provider_runtime.model_info,
+                &self.available_roles,
+                &role,
+            );
             let specs = self.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
             if let Some(name) = duplicate_model_visible_tool_name(&specs) {
                 self.send_rendered_preview_error(
@@ -243,8 +251,9 @@ impl Harness {
         result: Result<String, String>,
     ) {
         let result = result.map(|system_prompt| {
-            let agents_context = (enable_agents_md && !self.context_discovery.agents_files.is_empty())
-                .then(|| render_agents_context_message(self.context_discovery.agents_files.iter()));
+            let agents_context = (enable_agents_md
+                && !self.context_discovery.agents_files.is_empty())
+            .then(|| render_agents_context_message(self.context_discovery.agents_files.iter()));
             render_effective_prompt_message(&system_prompt, agents_context.as_deref())
         });
         let (prompt, error) =
@@ -294,12 +303,17 @@ impl Harness {
     /// Fails expired previews and unloads their context agents.
     pub(super) fn process_rendered_preview_deadlines(&mut self, now: Instant) {
         let expired = self
-            .context_discovery.pending_rendered_prompts
+            .context_discovery
+            .pending_rendered_prompts
             .iter()
             .filter_map(|(agent_id, pending)| (pending.deadline <= now).then_some(agent_id.clone()))
             .collect::<Vec<_>>();
         for agent_id in expired {
-            if let Some(pending) = self.context_discovery.pending_rendered_prompts.remove(&agent_id) {
+            if let Some(pending) = self
+                .context_discovery
+                .pending_rendered_prompts
+                .remove(&agent_id)
+            {
                 for request in pending.requests {
                     self.send_rendered_preview_error(
                         request,
@@ -724,7 +738,8 @@ impl Harness {
         mut cancel: impl FnMut(&PendingRenderedPrompt) -> bool,
     ) {
         let agent_ids = self
-            .context_discovery.pending_rendered_prompts
+            .context_discovery
+            .pending_rendered_prompts
             .iter()
             .filter_map(|(agent_id, pending)| {
                 pending
@@ -735,7 +750,9 @@ impl Harness {
             })
             .collect::<Vec<_>>();
         for agent_id in agent_ids {
-            self.context_discovery.pending_rendered_prompts.remove(&agent_id);
+            self.context_discovery
+                .pending_rendered_prompts
+                .remove(&agent_id);
             if let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str())) {
                 self.remove_agent_expected(&cid);
             }

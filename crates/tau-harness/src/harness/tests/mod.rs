@@ -355,7 +355,8 @@ fn test_agent_context_waits<'a>(
     h: &'a Harness,
     agent_id: &tau_proto::AgentId,
 ) -> Option<&'a std::collections::HashSet<tau_proto::ConnectionId>> {
-    h.context_discovery.pending_agents
+    h.context_discovery
+        .pending_agents
         .get(agent_id)
         .map(|pending| &pending.waiting_on)
 }
@@ -420,7 +421,8 @@ fn skill_winner_disconnect_restores_next_best_candidate() {
     let older = test_discovered_skill("old-ext", "older", 100);
     let newer = test_discovered_skill("new-ext", "newer", 200);
 
-    h.context_discovery.skill_candidates
+    h.context_discovery
+        .skill_candidates
         .insert(name.clone(), vec![older, newer]);
     h.recompute_discovered_skill_winner(&name);
     assert_eq!(h.context_discovery.skills[&name].description, "newer");
@@ -1218,7 +1220,8 @@ fn echo_harness_with_dirs_and_start_reason(
     h.context_discovery.agent_context_providers.clear();
     h.context_discovery.session_context_providers.clear();
     let pending_agents = h
-        .context_discovery.pending_agents
+        .context_discovery
+        .pending_agents
         .keys()
         .cloned()
         .collect::<Vec<_>>();
@@ -1317,7 +1320,12 @@ agents:
             .canonicalize()
             .expect("isolated test project root")
     );
-    assert!(!harness.context_discovery.skills.contains_key("ambient-skill"));
+    assert!(
+        !harness
+            .context_discovery
+            .skills
+            .contains_key("ambient-skill")
+    );
     assert!(harness.context_discovery.agents_files.is_empty());
     let expected_project_root = harness.project_root.clone();
     let outcome = harness

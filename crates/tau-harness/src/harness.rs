@@ -106,9 +106,9 @@ use crate::format::{format_tool_progress, render_entry_preview};
 use crate::frozen_agent_discovery::FrozenAgentDiscovery;
 use crate::harness::agent_context::AgentContextStore;
 use crate::harness::agent_watch_provider_deliveries::AgentWatchProviderDeliveries;
-use crate::harness::current_session::CurrentSessionState;
 use crate::harness::compaction_runtime_state::CompactionRuntimeState;
 use crate::harness::context_discovery_state::ContextDiscoveryState;
+use crate::harness::current_session::CurrentSessionState;
 use crate::harness::extension_data::{
     ExtensionDataError, MAX_SECRET_DATA_FILE_BYTES, run_extension_data_compare_and_swap_file,
     run_extension_data_create_file, run_extension_data_create_file_with_limit,
@@ -150,11 +150,11 @@ use crate::harness::interception::{
     PromptDispatchPhase,
 };
 use crate::harness::peer_messaging::PeerMessagingState;
-use crate::harness::publication_state::PublicationState;
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
-use crate::harness::provider_startup::ProviderStartupSnapshot;
-use crate::harness::provider_runtime_state::ProviderRuntimeState;
 use crate::harness::prompt_runtime_state::PromptRuntimeState;
+use crate::harness::provider_runtime_state::ProviderRuntimeState;
+use crate::harness::provider_startup::ProviderStartupSnapshot;
+use crate::harness::publication_state::PublicationState;
 use crate::harness::subagents_tool::SubagentToolState;
 use crate::harness::tool_runtime::ToolRuntimeState;
 use crate::harness::ui_runtime::UiRuntimeState;
@@ -1478,9 +1478,9 @@ mod agent_watch_provider_deliveries;
 mod compaction_runtime;
 mod compaction_runtime_state;
 mod compaction_supplement;
-mod context_discovery_state;
 mod connection_startup;
 mod construction;
+mod context_discovery_state;
 mod extension_activation;
 mod extension_lifecycle;
 mod peer_messaging;
@@ -1752,7 +1752,8 @@ pub struct Harness {
     pub(crate) replayable_harness_notices: Vec<tau_proto::HarnessNotice>,
     /// Extension process lifecycle and pre-`Ready` activation state.
     pub(crate) extensions: ExtensionRuntimeState,
-    /// Prompt correlation, dispatch snapshots, stale handling, and replay state.
+    /// Prompt correlation, dispatch snapshots, stale handling, and replay
+    /// state.
     pub(crate) prompt_runtime: PromptRuntimeState,
     /// Harness-local acceptance order for visible user interactions.
     ///
@@ -1818,7 +1819,8 @@ pub struct Harness {
     pub(crate) current_session_state: CurrentSessionState,
     /// Manual, reactive, and UI standalone-compaction runtime ownership.
     pub(crate) compaction_runtime: CompactionRuntimeState,
-    /// Skill, AGENTS.md, context-provider, preview, and template discovery state.
+    /// Skill, AGENTS.md, context-provider, preview, and template discovery
+    /// state.
     pub(crate) context_discovery: ContextDiscoveryState,
     /// Model-visible notices waiting to be folded into the next real user
     /// prompt.

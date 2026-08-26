@@ -5682,7 +5682,8 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-staged-tools");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-staged-tools"), cid.clone());
     assert!(
         h.prompt_runtime.tool_specs[&test_agent_prompt_id("sp-staged-tools")]
@@ -5837,7 +5838,8 @@ fn prompt_snapshot_does_not_expand_to_staged_registration() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-unadvertised-staged");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-unadvertised-staged"), cid.clone());
     assert!(
         !h.prompt_runtime.tool_specs[&test_agent_prompt_id("sp-unadvertised-staged")]
@@ -6005,7 +6007,10 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
 
     assert!(h.provider_runtime.available_models.contains(&model_id));
     assert_eq!(
-        h.provider_runtime.model_routes.get(&model_id).map(|id| id.as_str()),
+        h.provider_runtime
+            .model_routes
+            .get(&model_id)
+            .map(|id| id.as_str()),
         Some(conn_id)
     );
     assert!(event_log_contains_source_event(&h, conn_id, |event| {
@@ -6097,7 +6102,8 @@ fn provider_ready_waits_for_intercepted_declarations_and_coalesces_final_state()
     assert_eq!(h.extensions.entries[conn_id].state, ExtensionState::Ready);
     assert!(!h.provider_runtime.model_routes.contains_key(&model));
     assert_eq!(
-        h.provider_runtime.models_by_extension
+        h.provider_runtime
+            .models_by_extension
             .get(conn_id)
             .expect("active empty provider snapshot"),
         &Vec::<tau_proto::ProviderModelInfo>::new()
@@ -6169,7 +6175,8 @@ fn required_intercepted_provider_replacement_overflow_fails_startup() {
         ExtensionState::Handshaking
     );
     assert!(
-        !h.provider_runtime.model_routes
+        !h.provider_runtime
+            .model_routes
             .contains_key(&tau_proto::ModelId::from("staged/oversized"))
     );
 }
@@ -6277,7 +6284,9 @@ fn session_init_catchup_replays_current_session_dir_to_early_subscribers() {
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
     let events = connect_test_client(&mut h, "early-session-dir", tau_proto::ClientKind::Provider);
-    h.context_discovery.initialized_sessions.remove(&test_session_id("s1"));
+    h.context_discovery
+        .initialized_sessions
+        .remove(&test_session_id("s1"));
 
     h.handle_extension_message(
         &crate::test_connection_id("early-session-dir"),
@@ -6323,7 +6332,9 @@ fn session_init_catchup_does_not_duplicate_ui_startup_status_snapshots() {
         tau_proto::EventSelector::Exact(tau_proto::EventName::HARNESS_SESSION_DIR),
         tau_proto::EventSelector::Exact(tau_proto::EventName::EXTENSION_READY),
     ];
-    h.context_discovery.initialized_sessions.remove(&test_session_id("s1"));
+    h.context_discovery
+        .initialized_sessions
+        .remove(&test_session_id("s1"));
 
     h.handle_client_message(
         &crate::test_connection_id("startup-ui"),
@@ -6997,7 +7008,8 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
     )
     .expect("publish context before disconnect");
     assert!(
-        h.context_discovery.agent_context
+        h.context_discovery
+            .agent_context
             .template_value(Some(&agent_id))
             .to_string()
             .contains("stale")
@@ -7007,7 +7019,8 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
 
     assert!(h.publication.idle_dispatches.is_empty());
     assert!(
-        !h.context_discovery.agent_context
+        !h.context_discovery
+            .agent_context
             .template_value(Some(&agent_id))
             .to_string()
             .contains("stale")
@@ -7026,7 +7039,8 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
     let mut captured_info = h
-        .provider_runtime.model_info
+        .provider_runtime
+        .model_info
         .values()
         .next()
         .expect("startup provider model")
@@ -7051,7 +7065,9 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     }
     assert!(!h.provider_runtime.model_info.contains_key(&captured));
     assert!(
-        h.compaction_runtime.enqueued_inference_checkpoints.is_empty(),
+        h.compaction_runtime
+            .enqueued_inference_checkpoints
+            .is_empty(),
         "pre-Ready snapshots must not reconcile restored work"
     );
 
@@ -7066,7 +7082,8 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     );
     assert!(!h.provider_runtime.model_routes.contains_key(&captured));
     assert!(
-        !h.compaction_runtime.enqueued_inference_checkpoints
+        !h.compaction_runtime
+            .enqueued_inference_checkpoints
             .contains(&(agent_id.clone(), transaction_id.clone()))
     );
     let events = event_log_events(&h);
@@ -7123,7 +7140,8 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
     let mut captured_info = h
-        .provider_runtime.model_info
+        .provider_runtime
+        .model_info
         .values()
         .next()
         .expect("startup provider model")
@@ -7138,8 +7156,11 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
     let current: tau_proto::ModelId = "other/current-selection".into();
     let mut current_info = staged_provider_model("other/current-selection");
     current_info.supported_tool_types.clear();
-    h.provider_runtime.model_info.insert(current.clone(), current_info);
-    h.provider_runtime.model_routes
+    h.provider_runtime
+        .model_info
+        .insert(current.clone(), current_info);
+    h.provider_runtime
+        .model_routes
         .insert(current.clone(), crate::test_connection_id("other-provider"));
     let role = h
         .available_roles
@@ -7250,7 +7271,10 @@ fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
     assert_eq!(prompt.agent_id, agent_id);
     assert_eq!(prompt.session_id, h.current_session_id);
     assert_eq!(prompt.originator, tau_proto::PromptOriginator::User);
-    assert_eq!(h.prompt_runtime.models.get(&checkpoint_prompt_id), Some(&captured));
+    assert_eq!(
+        h.prompt_runtime.models.get(&checkpoint_prompt_id),
+        Some(&captured)
+    );
     assert!(
         sink.lock().expect("provider sink").iter().any(|routed| {
             matches!(
@@ -7607,7 +7631,8 @@ fn unavailable_tool_is_reported_without_crashing() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-x"), cid.clone());
     h.publish_for_agent(
         &cid,
@@ -7855,7 +7880,8 @@ fn disconnected_tool_is_removed_cleanly() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-x"), cid.clone());
     h.publish_for_agent(
         &cid,
@@ -8079,7 +8105,8 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     h.selected_role = "engineer".to_owned();
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-x"), cid.clone());
     h.publish_for_agent(
         &cid,
@@ -8165,7 +8192,8 @@ fn provider_prompt_route_failure_clears_prompt_bookkeeping() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let model: tau_proto::ModelId = "test/model".into();
-    h.provider_runtime.model_routes
+    h.provider_runtime
+        .model_routes
         .insert(model.clone(), crate::test_connection_id("missing-provider"));
     h.agent_registry
         .agents
@@ -8185,9 +8213,17 @@ fn provider_prompt_route_failure_clears_prompt_bookkeeping() {
         })
         .expect("compact prompt fact committed before route failure");
 
-    assert!(!h.prompt_runtime.agents.contains_key(agent_prompt_id.as_str()));
+    assert!(
+        !h.prompt_runtime
+            .agents
+            .contains_key(agent_prompt_id.as_str())
+    );
     assert!(!h.prompt_runtime.models.contains_key(&agent_prompt_id));
-    assert!(!h.provider_runtime.pending_prompts.contains_key(&agent_prompt_id));
+    assert!(
+        !h.provider_runtime
+            .pending_prompts
+            .contains_key(&agent_prompt_id)
+    );
     let conv = h
         .agent_registry
         .agents
@@ -8475,7 +8511,8 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-x"), cid.clone());
     h.publish_for_agent(
         &cid,
@@ -8603,7 +8640,8 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
     );
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-x"), cid.clone());
     h.publish_for_agent(
         &cid,
@@ -8712,7 +8750,8 @@ fn duplicate_tool_call_id_becomes_model_visible_tool_error() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-x"), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -8796,7 +8835,8 @@ fn reused_prior_tool_call_id_becomes_model_visible_tool_error() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-y");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-y"), cid.clone());
     h.tool_runtime
         .completed_tool_calls
@@ -8873,7 +8913,8 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-x"), cid.clone());
     let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_client_event(
@@ -8969,7 +9010,8 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
 
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-x"), cid.clone());
     let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -10203,7 +10245,8 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
         let mut h = echo_harness(&sp).expect("start");
         let cid = ensure_test_user_agent(&mut h);
         seed_agent_thinking(&mut h, &cid, "sp-old");
-        h.prompt_runtime.agents
+        h.prompt_runtime
+            .agents
             .insert(test_agent_prompt_id("sp-old"), cid.clone());
         h.handle_provider_response_finished(ProviderResponseFinished {
             automatic_compaction_decision: None,
@@ -10243,7 +10286,8 @@ fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
         .expect("resume");
     let cid = test_user_agent(&h);
     seed_agent_thinking(&mut h, &cid, "sp-new");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-new"), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -10426,7 +10470,8 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
         conv.parent_tool_call_id = None;
     }
     seed_agent_thinking(&mut h, &cid, "sp-query");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-query"), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -10513,7 +10558,8 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
         conv.parent_tool_call_id = None;
     }
     seed_agent_thinking(&mut h, &cid, "sp-query-pending");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-query-pending"), cid.clone());
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
@@ -10590,7 +10636,8 @@ fn length_stopped_tool_call_is_preserved_but_never_executed() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     seed_agent_thinking(&mut h, &cid, "sp-length");
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(test_agent_prompt_id("sp-length"), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -10767,7 +10814,8 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
     )
     .expect("release planned steer into append failure");
     assert!(
-        h.prompt_runtime.pending_publish_completions
+        h.prompt_runtime
+            .pending_publish_completions
             .values()
             .any(|completion| {
                 matches!(
@@ -11032,7 +11080,8 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
                 if owner.output_length_continuation.is_some()
         ),
         "pending: {:?}",
-        h.publication.pending_intercept
+        h.publication
+            .pending_intercept
             .as_ref()
             .map(|pending| pending.event.name())
     );
@@ -11220,11 +11269,16 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
     );
     assert!(h.agent_registry.agents[&cid].pending_cancel.is_none());
     assert!(
-        !h.publication.idle_dispatches
+        !h.publication
+            .idle_dispatches
             .iter()
             .any(|dispatch| dispatch.cid == cid)
     );
-    assert!(!h.prompt_runtime.pending_publish_completions.contains_key(&cid));
+    assert!(
+        !h.prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
     let selected_context = crate::prompt::assemble_prompt_context_from(
         h.agent_store
             .agent(source.agent_id.as_str())
@@ -11381,7 +11435,10 @@ fn output_length_dormant_repair_resumes_each_cold_cut() {
             )
             .expect("commit dormant steer");
             while matches!(
-                h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+                h.publication
+                    .pending_intercept
+                    .as_ref()
+                    .map(|pending| &pending.event),
                 Some(Event::AgentPromptSteered(_))
             ) {
                 h.handle_extension_event(
@@ -11393,7 +11450,8 @@ fn output_length_dormant_repair_resumes_each_cold_cut() {
                 .expect("commit exact dormant steer");
             }
             assert_eq!(
-                h.publication.pending_intercept
+                h.publication
+                    .pending_intercept
                     .as_ref()
                     .map(|pending| pending.event.name()),
                 Some(parked_event),
@@ -11617,7 +11675,10 @@ fn output_length_post_start_branch_move_waits_for_real_terminal() {
     h.handle_provider_response_finished(terminal)
         .expect("real successor terminal");
     assert!(matches!(
-        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
         Some(Event::AgentOuterTurnFinished(_))
     ));
     assert_eq!(
@@ -12413,7 +12474,8 @@ fn output_length_reactive_compaction_terminalizes_exact_descendant() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("start");
     super::dispatch::enable_remote_compaction_for_test_model(&mut h);
-    h.provider_runtime.model_info
+    h.provider_runtime
+        .model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -12478,7 +12540,10 @@ fn output_length_reactive_compaction_terminalizes_exact_descendant() {
     std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.retry_pending_agent_publications();
     assert!(matches!(
-        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
         Some(Event::AgentStandaloneCompactionStarted(_))
     ));
     std::fs::rename(&journal_path, &backup_path).expect("park journal for start");
@@ -12620,7 +12685,8 @@ fn output_length_reactive_post_compaction_checkpoint_cut_is_cancellable() {
     {
         let mut h = quiet_provider_harness(td.path()).expect("start");
         super::dispatch::enable_remote_compaction_for_test_model(&mut h);
-        h.provider_runtime.model_info
+        h.provider_runtime
+            .model_info
             .get_mut(&"test/model".into())
             .expect("test model")
             .supports_standalone_compaction = true;
@@ -12651,7 +12717,12 @@ fn output_length_reactive_post_compaction_checkpoint_cut_is_cancellable() {
             "compact replacement",
         ))
         .expect("commit compaction");
-        descendant_prompt_id = match h.publication.pending_intercept.as_ref().map(|pending| &pending.event) {
+        descendant_prompt_id = match h
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event)
+        {
             Some(Event::AgentInferenceDispatchStarted(started)) => started.agent_prompt_id.clone(),
             other => panic!("expected parked descendant checkpoint, got {other:?}"),
         };
@@ -12749,7 +12820,8 @@ fn output_length_reactive_rejection_cancelled_before_commit_never_dispatches() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("start");
     super::dispatch::enable_remote_compaction_for_test_model(&mut h);
-    h.provider_runtime.model_info
+    h.provider_runtime
+        .model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -12862,7 +12934,8 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("start");
     super::dispatch::enable_remote_compaction_for_test_model(&mut h);
-    h.provider_runtime.model_info
+    h.provider_runtime
+        .model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -12966,7 +13039,8 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("start");
     super::dispatch::enable_remote_compaction_for_test_model(&mut h);
-    h.provider_runtime.model_info
+    h.provider_runtime
+        .model_info
         .get_mut(&"test/model".into())
         .expect("test model")
         .supports_standalone_compaction = true;
@@ -13034,7 +13108,10 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
     )
     .expect("commit response");
     assert!(matches!(
-        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
         Some(Event::AgentStandaloneCompactionStarted(_))
     ));
     h.handle_cancel_prompt(
@@ -13053,7 +13130,10 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
     )
     .expect("commit start");
     assert!(matches!(
-        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
         Some(Event::AgentStandaloneCompactionFailed(_))
     ));
     h.handle_cancel_prompt(
@@ -13130,7 +13210,10 @@ fn output_length_finish_append_failure_retries_before_new_work() {
     });
     h.handle_provider_response_finished(completed)
         .expect("successor response");
-    assert!(h.publication.pending_intercept.is_some(), "settled finish is parked");
+    assert!(
+        h.publication.pending_intercept.is_some(),
+        "settled finish is parked"
+    );
 
     let journal_path = td
         .path()
@@ -13472,7 +13555,8 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
         .expect("submit");
     let source = read_nth_prompt_created(&h, 0);
     let provider_route = h
-        .provider_runtime.model_routes
+        .provider_runtime
+        .model_routes
         .get(&source.model)
         .cloned()
         .expect("provider route");
@@ -13564,7 +13648,8 @@ fn output_length_pre_delivery_failure_race_prefers_cancellation_once() {
         h.agent_registry.agents[&source_cid].work_status.phase(),
         tau_proto::AgentWorkStatusPhase::Unknown
     );
-    h.provider_runtime.model_routes
+    h.provider_runtime
+        .model_routes
         .insert(source.model.clone(), provider_route);
     h.handle_disconnect(&crate::test_connection_id("length-failure-race"));
     h.submit_user_prompt(
@@ -13626,7 +13711,10 @@ fn output_length_real_terminal_race_cancels_with_exact_accounting() {
     });
     h.handle_provider_response_finished(terminal)
         .expect("park real successor terminal");
-    assert!(h.publication.pending_intercept.is_some(), "real terminal is parked");
+    assert!(
+        h.publication.pending_intercept.is_some(),
+        "real terminal is parked"
+    );
     assert!(!matches!(
         h.agent_watch
             .provider_status
@@ -13810,7 +13898,8 @@ fn output_length_append_rejected_terminal_cancellation_repairs_once() {
     )
     .expect("release terminal into append failure");
     assert!(
-        h.prompt_runtime.pending_publish_completions
+        h.prompt_runtime
+            .pending_publish_completions
             .values()
             .any(|completion| completion.owns_output_length_terminal(&successor.agent_prompt_id))
     );
@@ -14366,7 +14455,8 @@ fn output_length_eligibility_matrix_is_exact() {
             .expect("submit");
         let source = read_nth_prompt_created(&h, 0);
         if let Some(operation) = case.operation {
-            h.prompt_runtime.operations
+            h.prompt_runtime
+                .operations
                 .insert(source.agent_prompt_id.clone(), (operation, false));
         }
         if !case.originator.is_user() {
@@ -14694,7 +14784,9 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
             value: tau_proto::AgentContextValue(serde_json::json!(["stale"])),
         },
     );
-    h.context_discovery.agent_context_providers.insert(contributor.clone());
+    h.context_discovery
+        .agent_context_providers
+        .insert(contributor.clone());
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
@@ -14703,12 +14795,22 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
 
     h.handle_disconnect(&crate::test_connection_id("ctx-ext"));
 
-    assert!(!h.context_discovery.prompt_fragments.contains_key(&contributor));
+    assert!(
+        !h.context_discovery
+            .prompt_fragments
+            .contains_key(&contributor)
+    );
     assert_eq!(
-        h.context_discovery.agent_context.template_value(Some(&agent_id)),
+        h.context_discovery
+            .agent_context
+            .template_value(Some(&agent_id)),
         serde_json::json!({})
     );
-    assert!(!h.context_discovery.agent_context_providers.contains(&contributor));
+    assert!(
+        !h.context_discovery
+            .agent_context_providers
+            .contains(&contributor)
+    );
     assert!(!h.context_discovery.pending_agents.contains_key(&agent_id));
 }
 
@@ -14743,7 +14845,9 @@ fn switch_session_clears_session_scoped_extension_context() {
             value: tau_proto::AgentContextValue(serde_json::json!(["old session"])),
         },
     );
-    h.context_discovery.agent_context_providers.insert(contributor.clone());
+    h.context_discovery
+        .agent_context_providers
+        .insert(contributor.clone());
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
@@ -14753,7 +14857,11 @@ fn switch_session_clears_session_scoped_extension_context() {
     h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch session");
 
-    assert!(h.context_discovery.prompt_fragments.contains_key(&contributor));
+    assert!(
+        h.context_discovery
+            .prompt_fragments
+            .contains_key(&contributor)
+    );
     let (fragments, tool_fragments) = h.gather_sourced_prompt_fragment_groups(&h.selected_role);
     assert!(tool_fragments.is_empty());
     assert!(fragments.iter().any(|sourced| {
@@ -14765,11 +14873,17 @@ fn switch_session_clears_session_scoped_extension_context() {
             )
     }));
     assert_eq!(
-        h.context_discovery.agent_context.template_value(Some(&agent_id)),
+        h.context_discovery
+            .agent_context
+            .template_value(Some(&agent_id)),
         serde_json::json!({})
     );
     assert!(h.context_discovery.pending_agents.is_empty());
-    assert!(h.context_discovery.agent_context_providers.contains(&contributor));
+    assert!(
+        h.context_discovery
+            .agent_context_providers
+            .contains(&contributor)
+    );
 }
 
 /// Builds a validated shell command id used by this test module.

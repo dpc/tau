@@ -266,11 +266,13 @@ impl Harness {
                 }
             }
             let Some(agent_initialization_id) = self
-                .context_discovery.pending_agents
+                .context_discovery
+                .pending_agents
                 .get(agent_id)
                 .map(|pending| pending.initialization_id.clone())
                 .or_else(|| {
-                    self.context_discovery.frozen_agents
+                    self.context_discovery
+                        .frozen_agents
                         .get(agent_id)
                         .map(|frozen| frozen.initialization_id.clone())
                 })
@@ -725,11 +727,20 @@ impl Harness {
             }
         }
 
-        let mut provider_sources: Vec<_> =
-            self.provider_runtime.models_by_extension.keys().cloned().collect();
+        let mut provider_sources: Vec<_> = self
+            .provider_runtime
+            .models_by_extension
+            .keys()
+            .cloned()
+            .collect();
         provider_sources.sort();
         for source_id in provider_sources {
-            let Some(models) = self.provider_runtime.models_by_extension.get(&source_id).cloned() else {
+            let Some(models) = self
+                .provider_runtime
+                .models_by_extension
+                .get(&source_id)
+                .cloned()
+            else {
                 continue;
             };
             let Some(entry) = self.extensions.entries.get(&source_id) else {
@@ -757,7 +768,8 @@ impl Harness {
             );
         }
         let mut initialized = self
-            .context_discovery.initialized_agent_context
+            .context_discovery
+            .initialized_agent_context
             .values()
             .cloned()
             .collect::<Vec<_>>();
@@ -773,7 +785,8 @@ impl Harness {
             }
         }
         let mut quota_snapshots = self
-            .provider_runtime.quota
+            .provider_runtime
+            .quota
             .values()
             .map(|current| current.snapshot.clone())
             .chain(self.provider_runtime.quota_capabilities.values().cloned())

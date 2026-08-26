@@ -639,7 +639,8 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         .parse::<tau_proto::AgentPromptId>()
         .expect("known-safe AgentPromptId must be valid");
     seed_agent_thinking(&mut h, &cid, provider_prompt_id.as_str());
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(provider_prompt_id.clone(), cid.clone());
     h.agent_registry
         .agents

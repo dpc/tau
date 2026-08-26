@@ -1,8 +1,8 @@
 //! Owns publication interception and deferred commit continuations.
 //!
 //! Publication preserves one serial enqueue, intercept, commit, and post-commit
-//! pipeline. Disconnect settlement remains in this owner because it resumes only
-//! after the complete synthesized terminal batch commits.
+//! pipeline. Disconnect settlement remains in this owner because it resumes
+//! only after the complete synthesized terminal batch commits.
 
 use super::*;
 

@@ -12,10 +12,18 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
     ) {
         let disconnected = connection_id.clone();
-        self.context_discovery.prompt_fragments.remove(&disconnected);
-        self.context_discovery.agent_context.remove_contributor(&disconnected);
-        self.context_discovery.agent_context_providers.remove(&disconnected);
-        self.context_discovery.session_context_providers.remove(&disconnected);
+        self.context_discovery
+            .prompt_fragments
+            .remove(&disconnected);
+        self.context_discovery
+            .agent_context
+            .remove_contributor(&disconnected);
+        self.context_discovery
+            .agent_context_providers
+            .remove(&disconnected);
+        self.context_discovery
+            .session_context_providers
+            .remove(&disconnected);
         let mut finalize = Vec::new();
         for (agent_id, pending) in &mut self.context_discovery.pending_agents {
             replace_discovery_source(
@@ -110,7 +118,8 @@ impl Harness {
             .map(|entry| entry.name.clone());
         if let Some(publisher_extension_id) = disconnected_provider
             && self
-                .provider_runtime.models_by_extension
+                .provider_runtime
+                .models_by_extension
                 .contains_key(connection_id)
             && !self.clear_parked_provider_model_updates(&publisher_extension_id)
         {
@@ -149,9 +158,12 @@ impl Harness {
         // readiness and dispatch a prompt snapshot.
         self.remove_extension_context_for_connection(connection_id);
         self.clear_agent_runtime_indicators_for_source(connection_id);
-        self.publication.suspended_interceptor_connections
+        self.publication
+            .suspended_interceptor_connections
             .remove(&connection_id.clone());
-        self.publication.interceptors.remove_connection(connection_id);
+        self.publication
+            .interceptors
+            .remove_connection(connection_id);
         self.fail_pending_intercept_for_disconnect(connection_id);
         if is_extension {
             self.unregister_connection_tools_for_disconnect(connection_id);
@@ -191,13 +203,15 @@ impl Harness {
         );
         let completed_foreground_calls = self.fail_pending_tool_calls_for_connection(connection_id);
         let lost_provider_prompts = self
-            .provider_runtime.pending_prompts
+            .provider_runtime
+            .pending_prompts
             .iter()
             .filter_map(|(prompt_id, provider_id)| {
                 (provider_id == connection_id).then_some(prompt_id.clone())
             })
             .collect::<Vec<_>>();
-        self.provider_runtime.pending_prompts
+        self.provider_runtime
+            .pending_prompts
             .retain(|_, provider_id| provider_id != connection_id);
         for prompt_id in lost_provider_prompts {
             let Some(cid) = self.prompt_runtime.agents.get(&prompt_id).cloned() else {
@@ -312,7 +326,8 @@ impl Harness {
             }
         }
         let removed_providers = self
-            .provider_runtime.quota
+            .provider_runtime
+            .quota
             .iter()
             .filter(|(_, quota)| quota.source_id == *connection_id)
             .map(|(provider, _)| provider.clone())
@@ -321,14 +336,19 @@ impl Harness {
             self.remove_provider_quota(&provider);
         }
         if self
-            .provider_runtime.models_by_extension
+            .provider_runtime
+            .models_by_extension
             .remove(connection_id)
             .is_some()
         {
             self.refresh_provider_models_and_publish_state();
         }
         if !self.extensions.resolving_initial_collisions {
-            if self.publication.disconnect_terminal_batch_pending.is_empty() {
+            if self
+                .publication
+                .disconnect_terminal_batch_pending
+                .is_empty()
+            {
                 self.drain_pending_tool_invocations_or_report();
                 for (call_id, cid) in completed_foreground_calls {
                     self.maybe_complete_agent_turn_for(&cid, call_id.as_str());
@@ -480,7 +500,8 @@ impl Harness {
         &mut self,
         connection_id: &tau_proto::ConnectionId,
     ) {
-        self.provider_runtime.cache_residency
+        self.provider_runtime
+            .cache_residency
             .release_connection(connection_id);
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ProviderRotated);
         let removing_tools: Vec<(ToolName, ToolName)> = self
@@ -611,7 +632,8 @@ impl Harness {
             .filter(|call_id| !self.tool_runtime.tool_turn.is_backgrounded(call_id))
             .cloned()
             .collect::<Vec<_>>();
-        self.publication.disconnect_terminal_batch_pending
+        self.publication
+            .disconnect_terminal_batch_pending
             .extend(foreground_batch);
 
         let completed_foreground_calls: Vec<(ToolCallId, AgentId)> = Vec::new();
@@ -1088,7 +1110,8 @@ impl Harness {
 
     pub(super) fn clear_prompt_tool_snapshot(&mut self, agent_prompt_id: &AgentPromptId) {
         self.prompt_runtime.tool_specs.remove(agent_prompt_id);
-        self.prompt_runtime.tool_call_prompts
+        self.prompt_runtime
+            .tool_call_prompts
             .retain(|_, prompt_id| prompt_id != agent_prompt_id);
     }
 
@@ -1124,8 +1147,14 @@ impl Harness {
         }
         self.tool_runtime.tool_agents.remove(call_id);
         self.tool_runtime.pending_tools.remove(call_id);
-        self.provider_runtime.cache_refresh_tool_window_calls.remove(call_id);
-        if self.provider_runtime.cache_refresh_tool_window_calls.is_empty() {
+        self.provider_runtime
+            .cache_refresh_tool_window_calls
+            .remove(call_id);
+        if self
+            .provider_runtime
+            .cache_refresh_tool_window_calls
+            .is_empty()
+        {
             let cancellations = self.provider_runtime.cache_residency.close_window();
             self.send_cache_refresh_cancellations(cancellations);
         }
@@ -1145,7 +1174,8 @@ impl Harness {
             .remove(call_id);
         if let Some(prompt_id) = self.prompt_runtime.tool_call_prompts.remove(call_id)
             && !self
-                .prompt_runtime.tool_call_prompts
+                .prompt_runtime
+                .tool_call_prompts
                 .values()
                 .any(|other_prompt_id| other_prompt_id == &prompt_id)
         {
@@ -1628,7 +1658,8 @@ impl Harness {
 
     pub(super) fn remove_discovered_context(&mut self, source_id: &tau_proto::ConnectionId) {
         let affected_names = self
-            .context_discovery.skill_candidates
+            .context_discovery
+            .skill_candidates
             .iter_mut()
             .filter_map(|(name, candidates)| {
                 let old_len = candidates.len();
@@ -1639,18 +1670,21 @@ impl Harness {
                 (candidates.len() != old_len).then(|| name.clone())
             })
             .collect::<Vec<_>>();
-        self.context_discovery.skill_candidates
+        self.context_discovery
+            .skill_candidates
             .retain(|_, candidates| !candidates.is_empty());
         for name in affected_names {
             self.recompute_discovered_skill_winner(&name);
         }
-        self.context_discovery.agents_files
+        self.context_discovery
+            .agents_files
             .retain(|file| file.source_id != *source_id);
     }
 
     pub(super) fn recompute_discovered_skill_winner(&mut self, name: &tau_proto::SkillName) {
         let winner = self
-            .context_discovery.skill_candidates
+            .context_discovery
+            .skill_candidates
             .get(name)
             .and_then(|candidates| selected_skill_candidate(candidates).cloned());
         if let Some(winner) = winner {
@@ -1669,7 +1703,11 @@ impl Harness {
         });
         self.tool_connections_subscribed_to(&event)
             .into_iter()
-            .filter(|connection_id| self.context_discovery.session_context_providers.contains(connection_id))
+            .filter(|connection_id| {
+                self.context_discovery
+                    .session_context_providers
+                    .contains(connection_id)
+            })
             .collect()
     }
 
@@ -1686,7 +1724,11 @@ impl Harness {
         });
         self.tool_connections_subscribed_to(&event)
             .into_iter()
-            .filter(|connection_id| self.context_discovery.agent_context_providers.contains(connection_id))
+            .filter(|connection_id| {
+                self.context_discovery
+                    .agent_context_providers
+                    .contains(connection_id)
+            })
             .collect()
     }
 
@@ -1721,7 +1763,9 @@ impl Harness {
     }
 
     pub(crate) fn session_initialized(&self, session_id: &SessionId) -> bool {
-        self.context_discovery.initialized_sessions.contains(session_id)
+        self.context_discovery
+            .initialized_sessions
+            .contains(session_id)
     }
 
     pub(crate) fn agent_context_ready_for(&self, cid: &AgentId) -> bool {
@@ -1750,7 +1794,10 @@ impl Harness {
             return false;
         };
         self.context_discovery.frozen_agents.contains_key(&agent_id)
-            && !self.context_discovery.pending_agents.contains_key(&agent_id)
+            && !self
+                .context_discovery
+                .pending_agents
+                .contains_key(&agent_id)
     }
 
     /// Returns whether the durable agent tree has one unfinished foreground

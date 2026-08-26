@@ -286,7 +286,9 @@ fn waiter_prioritizes_final_readiness_and_runs_finalization() {
     .expect("register provider");
     while h.rx.try_recv().is_ok() {}
     let provider = crate::test_connection_id(provider);
-    h.context_discovery.initialized_sessions.remove(&h.current_session_id);
+    h.context_discovery
+        .initialized_sessions
+        .remove(&h.current_session_id);
     h.turn_state = TurnState::InitializingSession {
         session_id: h.current_session_id.clone(),
         reason: tau_proto::SessionStartReason::Initial,
@@ -306,7 +308,9 @@ fn waiter_prioritizes_final_readiness_and_runs_finalization() {
         .expect("final readiness and finalization must win");
     assert!(matches!(h.turn_state, TurnState::Idle));
     assert!(
-        h.context_discovery.initialized_sessions.contains(&h.current_session_id),
+        h.context_discovery
+            .initialized_sessions
+            .contains(&h.current_session_id),
         "complete_session_init must record the finalized session"
     );
 

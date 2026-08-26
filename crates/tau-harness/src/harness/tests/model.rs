@@ -304,13 +304,17 @@ fn provider_models_snapshot_updates_available_models() {
     .expect("handle provider snapshot");
     assert!(h.provider_runtime.available_models.contains(&model_id));
     assert_eq!(
-        h.provider_runtime.model_info
+        h.provider_runtime
+            .model_info
             .get(&model_id)
             .map(|info| info.context_window),
         Some(128_000),
     );
     assert_eq!(
-        h.provider_runtime.model_routes.get(&model_id).map(|id| id.as_str()),
+        h.provider_runtime
+            .model_routes
+            .get(&model_id)
+            .map(|id| id.as_str()),
         Some("provider-ext"),
     );
 
@@ -385,13 +389,17 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
 
     let model_id = &duplicate_ids[0];
     assert_eq!(
-        h.provider_runtime.model_info
+        h.provider_runtime
+            .model_info
             .get(model_id)
             .map(|info| info.context_window),
         Some(2_000),
     );
     assert_eq!(
-        h.provider_runtime.model_routes.get(model_id).map(|id| id.as_str()),
+        h.provider_runtime
+            .model_routes
+            .get(model_id)
+            .map(|id| id.as_str()),
         Some("provider-z"),
     );
     let canonical_snapshots = event_log_events(&h)
@@ -425,13 +433,17 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
     )
     .expect("withdraw colliding provider snapshot");
     assert_eq!(
-        h.provider_runtime.model_info
+        h.provider_runtime
+            .model_info
             .get(model_id)
             .map(|info| info.context_window),
         Some(1_000),
     );
     assert_eq!(
-        h.provider_runtime.model_routes.get(model_id).map(|id| id.as_str()),
+        h.provider_runtime
+            .model_routes
+            .get(model_id)
+            .map(|id| id.as_str()),
         Some("provider-a"),
     );
     assert!(event_log_events(&h).iter().any(|event| matches!(
@@ -1181,7 +1193,8 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
             .expect("agent id"),
     );
     let frozen = h
-        .context_discovery.frozen_agents
+        .context_discovery
+        .frozen_agents
         .get_mut(&agent_id)
         .expect("frozen discovery");
     frozen.skills.insert(

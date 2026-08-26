@@ -330,7 +330,8 @@ impl Harness {
         publish: tau_proto::ExtPromptFragmentPublish,
     ) {
         let contributor = source_id.clone();
-        self.context_discovery.prompt_fragments
+        self.context_discovery
+            .prompt_fragments
             .entry(contributor)
             .or_default()
             .insert(publish.fragment.name.clone(), publish.fragment);
@@ -508,7 +509,11 @@ impl Harness {
         if snapshot.session_id != self.current_session_id {
             return;
         }
-        let Some(pending) = self.context_discovery.pending_agents.get(&snapshot.agent_id) else {
+        let Some(pending) = self
+            .context_discovery
+            .pending_agents
+            .get(&snapshot.agent_id)
+        else {
             return;
         };
         if pending.initialization_id != snapshot.agent_initialization_id {
@@ -519,7 +524,11 @@ impl Harness {
         else {
             return;
         };
-        let Some(pending) = self.context_discovery.pending_agents.get_mut(&snapshot.agent_id) else {
+        let Some(pending) = self
+            .context_discovery
+            .pending_agents
+            .get_mut(&snapshot.agent_id)
+        else {
             return;
         };
         replace_discovery_source(
@@ -613,7 +622,10 @@ impl Harness {
                     output_length_continuation: None,
                 });
             if !self.activation_successor_matches_selected_head(&event)
-                || !self.compaction_runtime.enqueued_inference_checkpoints.insert(key)
+                || !self
+                    .compaction_runtime
+                    .enqueued_inference_checkpoints
+                    .insert(key)
             {
                 continue;
             }
@@ -678,14 +690,18 @@ impl Harness {
         &mut self,
         source_id: &tau_proto::ConnectionId,
     ) {
-        self.context_discovery.agent_context_providers.insert(source_id.clone());
+        self.context_discovery
+            .agent_context_providers
+            .insert(source_id.clone());
     }
 
     pub(super) fn apply_session_context_provider_registration(
         &mut self,
         source_id: &tau_proto::ConnectionId,
     ) {
-        self.context_discovery.session_context_providers.insert(source_id.clone());
+        self.context_discovery
+            .session_context_providers
+            .insert(source_id.clone());
     }
 
     pub(super) fn apply_agent_context_publish(
@@ -701,11 +717,13 @@ impl Harness {
             value,
         } = publish;
         let matches_pending = self
-            .context_discovery.pending_agents
+            .context_discovery
+            .pending_agents
             .get(&agent_id)
             .is_some_and(|pending| pending.initialization_id == agent_initialization_id);
         let matches_frozen = self
-            .context_discovery.frozen_agents
+            .context_discovery
+            .frozen_agents
             .get(&agent_id)
             .is_some_and(|frozen| frozen.initialization_id == agent_initialization_id);
         if session_id != self.current_session_id || !(matches_pending || matches_frozen) {

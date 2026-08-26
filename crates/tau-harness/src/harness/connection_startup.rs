@@ -443,7 +443,8 @@ impl Harness {
             }
             tau_proto::HarnessInputMessage::InterceptReply(reply) => {
                 let Some(pending) = self
-                    .publication.pending_intercept
+                    .publication
+                    .pending_intercept
                     .as_ref()
                     .filter(|pending| pending.conn_id == *connection_id)
                 else {

@@ -14,8 +14,7 @@ pub(crate) struct CompactionRuntimeState {
     /// Failures that clean runtime state without provider-watch projection.
     pub(super) silent_failure_prompts: HashSet<AgentPromptId>,
     /// Reactive claims that must terminalize immediately after start commit.
-    pub(super) cancelled_claims:
-        HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
+    pub(super) cancelled_claims: HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
     /// Model tool calls awaiting one durable compaction terminal.
     pub(super) pending_manual_tools:
         HashMap<tau_proto::CompactionTransactionId, PendingManualCompactionTool>,

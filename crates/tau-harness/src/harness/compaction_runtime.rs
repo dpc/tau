@@ -142,7 +142,8 @@ impl Harness {
             .clone()
             .expect("admitted manual compaction has a durable target");
         let standalone_model = self.model_for_agent_role(conv).filter(|model| {
-            self.provider_runtime.model_info
+            self.provider_runtime
+                .model_info
                 .get(model)
                 .is_some_and(|info| info.supports_standalone_compaction)
         });
@@ -292,7 +293,8 @@ impl Harness {
         let self_request = target_cid == *caller_cid;
         let target_public_id = target.agent_id.clone();
         if self
-            .compaction_runtime.accepted_manual_tools
+            .compaction_runtime
+            .accepted_manual_tools
             .values()
             .any(|entry| Some(entry.request.target_agent_id.to_string()) == target_public_id)
         {
@@ -349,7 +351,8 @@ impl Harness {
             return;
         }
         let Some(model) = self.model_for_agent_role(target).filter(|model| {
-            self.provider_runtime.model_info
+            self.provider_runtime
+                .model_info
                 .get(model)
                 .is_some_and(|info| info.supports_standalone_compaction)
                 && self.provider_runtime.model_routes.contains_key(model)
@@ -376,12 +379,14 @@ impl Harness {
             return;
         };
         let caller_active_requests = self
-            .compaction_runtime.accepted_manual_tools
+            .compaction_runtime
+            .accepted_manual_tools
             .values()
             .filter(|entry| entry.request.caller_agent_id.as_str() == caller_public_id)
             .count()
             + self
-                .compaction_runtime.pending_manual_tools
+                .compaction_runtime
+                .pending_manual_tools
                 .values()
                 .filter(|entry| entry.caller_agent_id.as_str() == caller_public_id)
                 .count();
@@ -396,7 +401,8 @@ impl Harness {
             );
             return;
         }
-        let Some(initiating_agent_prompt_id) = self.prompt_runtime.tool_call_prompts.get(&call.id).cloned()
+        let Some(initiating_agent_prompt_id) =
+            self.prompt_runtime.tool_call_prompts.get(&call.id).cloned()
         else {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
@@ -518,7 +524,8 @@ impl Harness {
         request_id: &tau_proto::CompactionRequestId,
     ) -> bool {
         let Some(accepted) = self
-            .compaction_runtime.accepted_manual_tools
+            .compaction_runtime
+            .accepted_manual_tools
             .get(request_id)
             .cloned()
         else {
@@ -542,7 +549,8 @@ impl Harness {
             return false;
         }
         if !self
-            .provider_runtime.model_info
+            .provider_runtime
+            .model_info
             .get(&accepted.request.model)
             .is_some_and(|info| info.supports_standalone_compaction)
         {
@@ -554,7 +562,8 @@ impl Harness {
             return false;
         }
         if !self
-            .provider_runtime.model_routes
+            .provider_runtime
+            .model_routes
             .contains_key(&accepted.request.model)
         {
             self.fail_accepted_manual_compaction(
@@ -637,7 +646,9 @@ impl Harness {
         if let Some(target) = self.agent_registry.agents.get_mut(target_cid) {
             target.next_prompt_index = target.next_prompt_index.saturating_add(1);
         }
-        self.compaction_runtime.accepted_manual_tools.remove(request_id);
+        self.compaction_runtime
+            .accepted_manual_tools
+            .remove(request_id);
         self.compaction_runtime.pending_manual_tools.insert(
             transaction_id.clone(),
             PendingManualCompactionTool {
@@ -694,7 +705,8 @@ impl Harness {
         model: &ModelId,
     ) -> Option<tau_proto::PromptCompactionContext> {
         let supports_compaction = self
-            .provider_runtime.model_info
+            .provider_runtime
+            .model_info
             .get(model)
             .is_some_and(|info| info.supports_compaction);
         if !supports_compaction {
@@ -739,7 +751,8 @@ impl Harness {
         let Some(model) = continuation_model.or_else(|| self.model_for_agent_role(conv)) else {
             return false;
         };
-        self.provider_runtime.model_info
+        self.provider_runtime
+            .model_info
             .get(&model)
             .is_some_and(|info| info.supports_compaction || info.supports_standalone_compaction)
     }
@@ -1354,7 +1367,8 @@ impl Harness {
                         tool_name: requested.visible_tool_name.clone(),
                         target_agent_id: requested.target_agent_id.clone(),
                     };
-                    self.compaction_runtime.pending_manual_tools
+                    self.compaction_runtime
+                        .pending_manual_tools
                         .insert(started.transaction_id.clone(), pending);
                     (requested, Some((started, outcome)))
                 }
@@ -1424,7 +1438,8 @@ impl Harness {
                 &caller_cid,
                 &request.initiating_tool_call_id,
             ) {
-                self.compaction_runtime.pending_manual_tools
+                self.compaction_runtime
+                    .pending_manual_tools
                     .remove(&started.transaction_id);
                 if request.resume_inference && !self.self_compaction_terminal_delivered(&request) {
                     self.consume_wait_background_completion(&request.initiating_tool_call_id);
@@ -1502,7 +1517,8 @@ impl Harness {
                             BackgroundCompletionPromptMode::QueueOnly
                         },
                     );
-                    self.compaction_runtime.pending_manual_tools
+                    self.compaction_runtime
+                        .pending_manual_tools
                         .remove(&started.transaction_id);
                     if request.resume_inference {
                         self.consume_wait_background_completion(&request.initiating_tool_call_id);
@@ -1543,7 +1559,8 @@ impl Harness {
                             BackgroundCompletionPromptMode::QueueAndAdvance
                         },
                     );
-                    self.compaction_runtime.pending_manual_tools
+                    self.compaction_runtime
+                        .pending_manual_tools
                         .remove(&started.transaction_id);
                     if request.resume_inference {
                         self.consume_wait_background_completion(&call_id);
@@ -1569,7 +1586,8 @@ impl Harness {
         }
         for (target_cid, request_id) in waiting {
             let self_request = self
-                .compaction_runtime.accepted_manual_tools
+                .compaction_runtime
+                .accepted_manual_tools
                 .get(&request_id)
                 .is_some_and(|accepted| accepted.request.resume_inference);
             if !self_request || self.manual_request_has_complete_tool_round(&request_id) {
@@ -1665,11 +1683,13 @@ impl Harness {
     }
 
     pub(super) fn is_pending_manual_compaction_call(&self, call_id: &ToolCallId) -> bool {
-        self.compaction_runtime.accepted_manual_tools
+        self.compaction_runtime
+            .accepted_manual_tools
             .values()
             .any(|accepted| accepted.request.initiating_tool_call_id == *call_id)
             || self
-                .compaction_runtime.pending_manual_tools
+                .compaction_runtime
+                .pending_manual_tools
                 .values()
                 .any(|pending| pending.call_id == *call_id)
     }
@@ -1678,7 +1698,11 @@ impl Harness {
         &self,
         request_id: &tau_proto::CompactionRequestId,
     ) -> bool {
-        let Some(accepted) = self.compaction_runtime.accepted_manual_tools.get(request_id) else {
+        let Some(accepted) = self
+            .compaction_runtime
+            .accepted_manual_tools
+            .get(request_id)
+        else {
             return false;
         };
         let Some(caller_cid) =

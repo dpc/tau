@@ -696,8 +696,11 @@ impl Harness {
             );
             return;
         };
-        let Some(provider_connection_id) =
-            self.provider_runtime.pending_prompts.get(&agent_prompt_id).cloned()
+        let Some(provider_connection_id) = self
+            .provider_runtime
+            .pending_prompts
+            .get(&agent_prompt_id)
+            .cloned()
         else {
             reject(
                 self,
@@ -750,7 +753,8 @@ impl Harness {
             return;
         }
         if self.agent_is_ephemeral(&target_agent_id) {
-            self.prompt_runtime.ephemeral_provider_retry_requests
+            self.prompt_runtime
+                .ephemeral_provider_retry_requests
                 .insert(provider_request_id.clone());
         }
         self.ui_runtime.pending_retry_prompts.insert(
@@ -796,10 +800,12 @@ impl Harness {
         });
         if let Some((agent_id, transaction_id)) = pending
             && self
-                .compaction_runtime.cancelled_claims
+                .compaction_runtime
+                .cancelled_claims
                 .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()))
         {
-            self.compaction_runtime.suppressed_dispatches
+            self.compaction_runtime
+                .suppressed_dispatches
                 .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()));
         }
     }
@@ -1052,17 +1058,19 @@ impl Harness {
                 }
             });
         if let Some(owner) = output_length_owner {
-            let terminal_write_pending = self.publication.pending_intercept.as_ref().is_some_and(|pending| {
-                matches!(
-                        &pending.event,
-                    Event::ProviderResponseFinished(response)
-                        if response.agent_prompt_id == canceled_prompt_id
-                            && matches!(
-                                response.output_length_disposition,
-                                tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
-                            )
-                )
-            }) || self.publication.deferred.iter().any(|pending| {
+            let terminal_write_pending = self.publication.pending_intercept.as_ref().is_some_and(
+                |pending| {
+                    matches!(
+                            &pending.event,
+                        Event::ProviderResponseFinished(response)
+                            if response.agent_prompt_id == canceled_prompt_id
+                                && matches!(
+                                    response.output_length_disposition,
+                                    tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+                                )
+                    )
+                },
+            ) || self.publication.deferred.iter().any(|pending| {
                 matches!(
                     pending.event(),
                     Event::ProviderResponseFinished(response)
@@ -1073,13 +1081,15 @@ impl Harness {
                             )
                 )
             }) || self
-                .prompt_runtime.pending_publish_completions
+                .prompt_runtime
+                .pending_publish_completions
                 .get(cid)
                 .is_some_and(|completion| {
                     completion.owns_output_length_terminal(&canceled_prompt_id)
                 });
             if self
-                .prompt_runtime.local_route_failures
+                .prompt_runtime
+                .local_route_failures
                 .contains(&canceled_prompt_id)
                 || terminal_write_pending
             {
@@ -1088,30 +1098,34 @@ impl Harness {
                 }
                 return;
             }
-            let status_was_available =
-                self.prompt_runtime.tool_specs
-                    .get(&canceled_prompt_id)
-                    .is_some_and(|specs| {
-                        specs
-                            .iter()
-                            .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
-                    });
+            let status_was_available = self
+                .prompt_runtime
+                .tool_specs
+                .get(&canceled_prompt_id)
+                .is_some_and(|specs| {
+                    specs
+                        .iter()
+                        .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
+                });
             if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
                 agent.terminal_status_was_available = status_was_available;
                 agent.terminal_notice_eligible = false;
             }
             let automatic_compaction_decision = self
-                .prompt_runtime.models
+                .prompt_runtime
+                .models
                 .get(&canceled_prompt_id)
                 .cloned()
                 .and_then(|model| {
                     let projected = self
-                        .prompt_runtime.compaction_projected_tokens
+                        .prompt_runtime
+                        .compaction_projected_tokens
                         .get(&canceled_prompt_id)
                         .copied()
                         .flatten();
                     let policies = self
-                        .prompt_runtime.compaction_policies
+                        .prompt_runtime
+                        .compaction_policies
                         .get(&canceled_prompt_id)
                         .cloned()
                         .unwrap_or_default();
@@ -1166,30 +1180,34 @@ impl Harness {
             self.publish_finished_response_for_agent(cid, None, &response, completion, false);
             return;
         }
-        let status_was_available =
-            self.prompt_runtime.tool_specs
-                .get(&canceled_prompt_id)
-                .is_some_and(|specs| {
-                    specs
-                        .iter()
-                        .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
-                });
+        let status_was_available = self
+            .prompt_runtime
+            .tool_specs
+            .get(&canceled_prompt_id)
+            .is_some_and(|specs| {
+                specs
+                    .iter()
+                    .any(|spec| self.tool_model_visible_name(spec).as_str() == "status")
+            });
         if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
             agent.terminal_status_was_available = status_was_available;
             agent.terminal_notice_eligible = false;
         }
         let cancellation_decision = self
-            .prompt_runtime.models
+            .prompt_runtime
+            .models
             .get(&canceled_prompt_id)
             .cloned()
             .and_then(|model| {
                 let projected = self
-                    .prompt_runtime.compaction_projected_tokens
+                    .prompt_runtime
+                    .compaction_projected_tokens
                     .get(&canceled_prompt_id)
                     .copied()
                     .flatten();
                 let policies = self
-                    .prompt_runtime.compaction_policies
+                    .prompt_runtime
+                    .compaction_policies
                     .get(&canceled_prompt_id)
                     .cloned()
                     .unwrap_or_default();
@@ -1207,12 +1225,21 @@ impl Harness {
         }
         self.canceled_prompts.insert(canceled_prompt_id.clone());
         self.prompt_runtime.operations.remove(&canceled_prompt_id);
-        self.prompt_runtime.context_limits.remove(&canceled_prompt_id);
-        self.prompt_runtime.context_size_alerts.remove(&canceled_prompt_id);
-        self.prompt_runtime.compaction_policies.remove(&canceled_prompt_id);
-        self.prompt_runtime.compaction_projected_tokens
+        self.prompt_runtime
+            .context_limits
             .remove(&canceled_prompt_id);
-        self.prompt_runtime.semantic_output.remove(&canceled_prompt_id);
+        self.prompt_runtime
+            .context_size_alerts
+            .remove(&canceled_prompt_id);
+        self.prompt_runtime
+            .compaction_policies
+            .remove(&canceled_prompt_id);
+        self.prompt_runtime
+            .compaction_projected_tokens
+            .remove(&canceled_prompt_id);
+        self.prompt_runtime
+            .semantic_output
+            .remove(&canceled_prompt_id);
         self.fail_pending_initial_prompts(
             cid,
             tau_proto::AgentPromptFailureStage::Canceled,
@@ -1292,7 +1319,8 @@ impl Harness {
             return;
         }
         if let Some(accepted) = self
-            .compaction_runtime.accepted_manual_tools
+            .compaction_runtime
+            .accepted_manual_tools
             .values()
             .find(|accepted| accepted.request.initiating_tool_call_id == target.call_id)
             .cloned()
@@ -1307,7 +1335,8 @@ impl Harness {
             return;
         }
         if let Some((transaction_id, pending)) = self
-            .compaction_runtime.pending_manual_tools
+            .compaction_runtime
+            .pending_manual_tools
             .iter()
             .find(|(_, pending)| pending.call_id == target.call_id)
             .map(|(id, pending)| (id.clone(), pending.clone()))
@@ -1438,7 +1467,9 @@ impl Harness {
             self.prompt_runtime.context_limits.remove(&spid);
             self.prompt_runtime.context_size_alerts.remove(&spid);
             self.prompt_runtime.compaction_policies.remove(&spid);
-            self.prompt_runtime.compaction_projected_tokens.remove(&spid);
+            self.prompt_runtime
+                .compaction_projected_tokens
+                .remove(&spid);
             self.publish_event(
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {
@@ -1633,7 +1664,11 @@ impl Harness {
         select: tau_proto::UiAgentModelSelect,
     ) -> Result<bool, HarnessError> {
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::ModelChanged);
-        if !self.provider_runtime.available_models.contains(&select.model) {
+        if !self
+            .provider_runtime
+            .available_models
+            .contains(&select.model)
+        {
             self.send_ui_error_response(client_id, format!("unknown model: {}", select.model));
             return Ok(true);
         }
@@ -1934,7 +1969,8 @@ impl Harness {
         }
         let skill_name = tau_proto::SkillName::from(name.to_owned());
         let Some(skills) = self
-            .context_discovery.frozen_agents
+            .context_discovery
+            .frozen_agents
             .get(agent_id)
             .map(|snapshot| &snapshot.skills)
         else {

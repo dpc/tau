@@ -46,7 +46,8 @@ impl Harness {
         models: Vec<ProviderModelInfo>,
     ) {
         let previous_model_info = self
-            .provider_runtime.models_by_extension
+            .provider_runtime
+            .models_by_extension
             .get(source_id)
             .map(|models| {
                 models
@@ -88,7 +89,8 @@ impl Harness {
     }
     fn clear_unowned_provider_quota(&mut self) {
         let providers = self
-            .provider_runtime.quota
+            .provider_runtime
+            .quota
             .iter()
             .filter(|(provider, current)| {
                 !self.source_owns_quota_provider(&current.source_id, provider)
@@ -108,7 +110,8 @@ impl Harness {
             return;
         }
         let providers = self
-            .provider_runtime.quota
+            .provider_runtime
+            .quota
             .iter()
             .filter(|(_, current)| current.source_id == *source_id)
             .filter(|(_, current)| {
@@ -249,10 +252,13 @@ impl Harness {
             .get(role_name)
             .cloned()
             .unwrap_or_default();
-        let effective_params =
-            model_for_role(&self.provider_runtime.model_info, &self.available_roles, role_name)
-                .map(|model| self.params_for_role_model(role_name, &model))
-                .unwrap_or_default();
+        let effective_params = model_for_role(
+            &self.provider_runtime.model_info,
+            &self.available_roles,
+            role_name,
+        )
+        .map(|model| self.params_for_role_model(role_name, &model))
+        .unwrap_or_default();
 
         match action {
             tau_proto::UiRoleUpdateAction::Delete => unreachable!("handled by caller"),
@@ -388,7 +394,9 @@ impl Harness {
             })
             .collect();
         for (cid, usage_model, current_model) in resolutions {
-            if current_model.is_none() && !self.provider_runtime.model_info.contains_key(&usage_model) {
+            if current_model.is_none()
+                && !self.provider_runtime.model_info.contains_key(&usage_model)
+            {
                 // Provider discovery is staggered. Absence is not yet evidence
                 // that another model owns this agent, so keep the qualified
                 // baseline until its provider either appears or resolution
@@ -399,7 +407,8 @@ impl Harness {
                 self.clear_agent_context_usage(&cid);
                 continue;
             }
-            let context_window = context_window_for_model(&self.provider_runtime.model_info, &usage_model);
+            let context_window =
+                context_window_for_model(&self.provider_runtime.model_info, &usage_model);
             if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 conv.context_percent_used = match (context_window, conv.context_input_tokens) {
                     (Some(window), Some(tokens)) => Some(context_percent_used(tokens, window)),
@@ -546,7 +555,8 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         models: Vec<ProviderModelInfo>,
     ) {
-        self.provider_runtime.models_by_extension
+        self.provider_runtime
+            .models_by_extension
             .insert(source_id.to_owned(), models);
         self.refresh_provider_models_and_publish_state();
     }
@@ -556,7 +566,8 @@ impl Harness {
         provider: &tau_proto::ProviderName,
     ) -> bool {
         let owners = self
-            .provider_runtime.model_routes
+            .provider_runtime
+            .model_routes
             .iter()
             .filter(|(model, _)| &model.provider == provider)
             .map(|(_, route)| route)
@@ -572,7 +583,8 @@ impl Harness {
     ) -> bool {
         self.source_owns_quota_provider(source_id, provider)
             && bindings.iter().all(|binding| {
-                self.provider_runtime.model_routes
+                self.provider_runtime
+                    .model_routes
                     .get(&binding.model)
                     .is_some_and(|route| route == source_id)
             })
@@ -600,7 +612,8 @@ impl Harness {
         let current = self.provider_runtime.quota.get(&replace.provider);
         let accepted = if replace.establishes_new_epoch {
             !self
-                .provider_runtime.quota_retired_epochs
+                .provider_runtime
+                .quota_retired_epochs
                 .get(&replace.provider)
                 .is_some_and(|epochs| epochs.contains(&replace.profile_epoch))
                 && current.is_none_or(|current| {
@@ -614,7 +627,8 @@ impl Harness {
                     && replace.sequence > current.snapshot.sequence
             }) || (current.is_none()
                 && self
-                    .provider_runtime.quota_tombstones
+                    .provider_runtime
+                    .quota_tombstones
                     .get(&replace.provider)
                     .is_some_and(|tombstone| {
                         tombstone.source_id == *source_id
@@ -623,7 +637,8 @@ impl Harness {
                     }))
                 || (current.is_none()
                     && !self
-                        .provider_runtime.quota_retired_epochs
+                        .provider_runtime
+                        .quota_retired_epochs
                         .get(&replace.provider)
                         .is_some_and(|epochs| epochs.contains(&replace.profile_epoch)))
         };
@@ -642,8 +657,12 @@ impl Harness {
             windows: replace.windows,
             route_bindings: replace.route_bindings,
         };
-        self.provider_runtime.quota_tombstones.remove(&replace.provider);
-        self.provider_runtime.quota_capabilities.remove(&replace.provider);
+        self.provider_runtime
+            .quota_tombstones
+            .remove(&replace.provider);
+        self.provider_runtime
+            .quota_capabilities
+            .remove(&replace.provider);
         self.provider_runtime.quota.insert(
             replace.provider,
             CurrentProviderQuota {
@@ -751,7 +770,8 @@ impl Harness {
         clear: tau_proto::ProviderQuotaClear,
     ) {
         let matches = self
-            .provider_runtime.quota
+            .provider_runtime
+            .quota
             .get(&clear.provider)
             .is_some_and(|current| {
                 current.source_id == *source_id
@@ -763,7 +783,8 @@ impl Harness {
             return;
         }
         let tombstone_matches = self
-            .provider_runtime.quota_tombstones
+            .provider_runtime
+            .quota_tombstones
             .get(&clear.provider)
             .is_some_and(|tombstone| {
                 tombstone.source_id == *source_id
@@ -771,13 +792,16 @@ impl Harness {
                     && clear.sequence > tombstone.sequence
             });
         if tombstone_matches {
-            self.provider_runtime.quota_tombstones.remove(&clear.provider);
+            self.provider_runtime
+                .quota_tombstones
+                .remove(&clear.provider);
             self.retire_provider_quota_epoch(&clear.provider, clear.profile_epoch);
         }
     }
     pub(super) fn remove_provider_quota(&mut self, provider: &tau_proto::ProviderName) {
         let sequence = self
-            .provider_runtime.quota
+            .provider_runtime
+            .quota
             .get(provider)
             .map_or(0, |current| current.snapshot.sequence);
         self.remove_provider_quota_at(provider, sequence, true);
@@ -811,7 +835,8 @@ impl Harness {
             windows: Vec::new(),
             route_bindings: Vec::new(),
         };
-        self.provider_runtime.quota_capabilities
+        self.provider_runtime
+            .quota_capabilities
             .insert(provider.clone(), changed.clone());
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
@@ -825,7 +850,8 @@ impl Harness {
     ) {
         const MAX_RETIRED_EPOCHS: usize = 8;
         let epochs = self
-            .provider_runtime.quota_retired_epochs
+            .provider_runtime
+            .quota_retired_epochs
             .entry(provider.clone())
             .or_default();
         if !epochs.contains(&epoch) {

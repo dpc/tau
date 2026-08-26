@@ -239,7 +239,9 @@ impl<'a> InternalToolHost<'a> {
             .and_then(|agent| agent.agent_id.as_deref())
             .and_then(|agent_id| tau_proto::AgentId::parse(agent_id).ok())
             .and_then(|agent_id| self.harness.context_discovery.frozen_agents.get(&agent_id))
-            .map_or(&self.harness.context_discovery.skills, |snapshot| &snapshot.skills);
+            .map_or(&self.harness.context_discovery.skills, |snapshot| {
+                &snapshot.skills
+            });
         skills
             .iter()
             .filter(|(_, skill)| !skill.disable_model_invocation)
@@ -611,7 +613,8 @@ impl<'a> InternalToolHost<'a> {
         let agent_id = tau_proto::AgentId::parse(agent.agent_id.as_deref()?).ok()?;
         let prompt_id = self
             .harness
-            .prompt_runtime.tool_call_prompts
+            .prompt_runtime
+            .tool_call_prompts
             .get(&owner.call().id)?;
         let started = self
             .harness

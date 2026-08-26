@@ -211,7 +211,8 @@ fn agents_files_keep_declared_order_and_empty_snapshot_removes_them() {
         ),
     );
     assert_eq!(
-        h.context_discovery.agents_files
+        h.context_discovery
+            .agents_files
             .iter()
             .map(|file| file.file_path.clone())
             .collect::<Vec<_>>(),
@@ -420,7 +421,11 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
         ),
     )
     .expect("stale");
-    assert!(h.context_discovery.pending_agents[&agent_id].skills.is_empty());
+    assert!(
+        h.context_discovery.pending_agents[&agent_id]
+            .skills
+            .is_empty()
+    );
     h.handle_extension_event_inner(
         &crate::test_connection_id("agent-snapshot-owner"),
         event(initialization_id),
@@ -568,7 +573,11 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
         event(vec![skill(&original, "original", None)]),
     )
     .expect("park original");
-    assert!(h.context_discovery.pending_agents[&agent_id].skills.is_empty());
+    assert!(
+        h.context_discovery.pending_agents[&agent_id]
+            .skills
+            .is_empty()
+    );
     h.handle_extension_event(
         "snapshot-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -829,8 +838,12 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
     let second = durable_agent_id_for_conversation(&h, &second_cid);
     h.ensure_loaded_agent_for_agent(&first_cid, first.as_str());
     h.ensure_loaded_agent_for_agent(&second_cid, second.as_str());
-    let first_init = h.context_discovery.pending_agents[&first].initialization_id.clone();
-    let second_init = h.context_discovery.pending_agents[&second].initialization_id.clone();
+    let first_init = h.context_discovery.pending_agents[&first]
+        .initialization_id
+        .clone();
+    let second_init = h.context_discovery.pending_agents[&second]
+        .initialization_id
+        .clone();
     let first_path = tmp.path().join("first.md");
     let late_path = tmp.path().join("late.md");
     let event = |agent_id: tau_proto::AgentId,
@@ -954,8 +967,16 @@ fn configured_snapshot_omits_items_beyond_all_discovery_bounds() {
         )),
     )
     .expect("publish byte-bounded snapshot");
-    assert!(!h.context_discovery.skills.contains_key("oversized-description"));
-    assert!(h.context_discovery.skills.contains_key("accepted-after-bytes"));
+    assert!(
+        !h.context_discovery
+            .skills
+            .contains_key("oversized-description")
+    );
+    assert!(
+        h.context_discovery
+            .skills
+            .contains_key("accepted-after-bytes")
+    );
 
     let oversized_agents = tmp.path().join("AGENTS.local.md");
     let accepted_agents = tmp.path().join("AGENTS.md");

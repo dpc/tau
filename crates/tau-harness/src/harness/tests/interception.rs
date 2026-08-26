@@ -245,7 +245,9 @@ fn challenged_working_final_drop_is_overridden_until_post_commit() {
     let prompt_id =
         tau_proto::AgentPromptId::parse("working-final-drop").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
-    h.prompt_runtime.agents.insert(prompt_id.clone(), cid.clone());
+    h.prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
     let interceptor = connect_test_tool(&mut h, "working-final-drop-owner");
     h.handle_extension_event(
         "working-final-drop-owner",
@@ -310,7 +312,9 @@ fn delayed_working_final_release_retains_exact_root_parent() {
     let prompt_id =
         tau_proto::AgentPromptId::parse("delayed-parent-final").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
-    h.prompt_runtime.agents.insert(prompt_id.clone(), cid.clone());
+    h.prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
     let interceptor = connect_test_tool(&mut h, "delayed-parent-owner");
     h.handle_extension_event(
         "delayed-parent-owner",
@@ -335,7 +339,11 @@ fn delayed_working_final_release_retains_exact_root_parent() {
     )
     .expect("release candidate");
 
-    assert!(h.prompt_runtime.pending_publish_completions.contains_key(&cid));
+    assert!(
+        h.prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
     assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
     assert_eq!(
         event_log_events(&h)
@@ -382,7 +390,9 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
         .head
         .map(tau_proto::AgentHead::Node)
         .unwrap_or(tau_proto::AgentHead::Root);
-    h.prompt_runtime.agents.insert(prompt_id.clone(), cid.clone());
+    h.prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
     let interceptor = connect_test_tool(&mut h, "working-final-append-owner");
     h.handle_extension_event(
         "working-final-append-owner",
@@ -415,7 +425,11 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
         })),
     )
     .expect("release into append failure");
-    assert!(h.prompt_runtime.pending_publish_completions.contains_key(&cid));
+    assert!(
+        h.prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
     assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
 
     std::fs::remove_dir(&journal_path).expect("remove append blocker");
@@ -430,7 +444,9 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
     )
     .expect("off-branch runtime progress");
     assert!(
-        h.prompt_runtime.pending_publish_completions.contains_key(&cid),
+        h.prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid),
         "off-branch progress must retain the original response"
     );
     h.agent_registry.agents.get_mut(&cid).expect("agent").head = owning_head.as_option();
@@ -441,7 +457,11 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
         })),
     )
     .expect("owning-branch runtime progress retries retained append");
-    assert!(!h.prompt_runtime.pending_publish_completions.contains_key(&cid));
+    assert!(
+        !h.prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
     assert!(matches!(
         h.agent_registry.agents[&cid].turn_state,
         AgentTurnState::AgentThinking { .. }
@@ -472,7 +492,8 @@ fn ordinary_final_append_failure_does_not_project_watch_response() {
     let prompt_id =
         tau_proto::AgentPromptId::parse("ordinary-final-append").expect("known-safe prompt id");
     seed_agent_thinking(&mut h, &watched_cid, prompt_id.as_str());
-    h.prompt_runtime.agents
+    h.prompt_runtime
+        .agents
         .insert(prompt_id.clone(), watched_cid.clone());
     let interceptor = connect_test_tool(&mut h, "ordinary-final-append-owner");
     h.handle_extension_event(
@@ -654,15 +675,24 @@ fn retained_working_final_rejects_root_and_descendant_head_drift() {
     );
     publish_child(&mut h, "after-root");
     h.retry_pending_agent_publish_completion(&cid);
-    assert!(h.prompt_runtime.pending_publish_completions.contains_key(&cid));
+    assert!(
+        h.prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
 
     h.prompt_runtime.pending_publish_completions.remove(&cid);
     let captured = h.selected_head_for_agent(&cid).expect("captured child");
-    h.prompt_runtime.pending_publish_completions
+    h.prompt_runtime
+        .pending_publish_completions
         .insert(cid.clone(), make_completion(captured, "descendant"));
     publish_child(&mut h, "later-descendant");
     h.retry_pending_agent_publish_completion(&cid);
-    assert!(h.prompt_runtime.pending_publish_completions.contains_key(&cid));
+    assert!(
+        h.prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -719,7 +749,10 @@ fn dropping_provider_model_declaration_prevents_canonical_state() {
     )
     .expect("declare models");
     assert!(matches!(
-        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
         Some(Event::ProviderModelsDeclared(_))
     ));
     h.handle_extension_event(
@@ -776,7 +809,8 @@ fn rollover_applies_deferred_provider_models_for_current_generation() {
     .expect("switch session");
 
     assert_eq!(
-        h.provider_runtime.model_routes
+        h.provider_runtime
+            .model_routes
             .get(&model)
             .map(tau_proto::ConnectionId::as_str),
         Some("model-provider")
@@ -847,7 +881,8 @@ fn replaced_provider_model_declaration_drives_canonical_state() {
     let replacement: tau_proto::ModelId = "declared/replacement".into();
     let original: tau_proto::ModelId = "declared/original".into();
     assert_eq!(
-        h.provider_runtime.model_routes
+        h.provider_runtime
+            .model_routes
             .get(&replacement)
             .map(tau_proto::ConnectionId::as_str),
         Some("model-provider")
@@ -891,7 +926,10 @@ fn provider_prefix_interception_protects_canonical_model_state() {
     )
     .expect("commit declaration");
     assert!(matches!(
-        h.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+        h.publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
         Some(Event::ProviderModelsUpdated(_))
     ));
     h.handle_extension_event(
@@ -1171,7 +1209,8 @@ fn parked_old_generation_drop_cannot_activate_same_id_replacement() {
         crate::extension::ExtensionState::Ready
     );
     assert_eq!(
-        h.provider_runtime.model_routes
+        h.provider_runtime
+            .model_routes
             .get(&model)
             .map(tau_proto::ConnectionId::as_str),
         Some("model-provider")
@@ -2645,7 +2684,8 @@ fn intercepted_prompt_start_append_failure_prevents_provider_delivery() {
     std::fs::rename(&backup_path, &journal_path).expect("restore agent journal");
 
     assert!(
-        !h.prompt_runtime.pending_dispatches
+        !h.prompt_runtime
+            .pending_dispatches
             .contains(&started.agent_prompt_id)
     );
     assert!(
@@ -2724,7 +2764,8 @@ fn intercepted_prompt_rejects_changed_runtime_incarnation() {
     .expect("release full prompt");
 
     assert!(
-        !h.prompt_runtime.pending_dispatches
+        !h.prompt_runtime
+            .pending_dispatches
             .contains(&prompt.agent_prompt_id)
     );
     assert!(
@@ -2816,7 +2857,8 @@ fn intercepted_compaction_start_pins_materialized_model() {
     let cid = ensure_test_user_agent(&mut h);
     {
         let info = h
-            .provider_runtime.model_info
+            .provider_runtime
+            .model_info
             .get_mut(&tau_proto::ModelId::from("echo/model"))
             .expect("model");
         info.supports_standalone_compaction = true;
@@ -2877,7 +2919,8 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
     let cid = ensure_test_user_agent(&mut h);
     {
         let info = h
-            .provider_runtime.model_info
+            .provider_runtime
+            .model_info
             .get_mut(&tau_proto::ModelId::from("test/model"))
             .expect("model");
         info.supports_standalone_compaction = true;
@@ -3170,7 +3213,9 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
     )
     .expect("release approved replacement into append failure");
     assert!(
-        h.prompt_runtime.pending_publish_completions.contains_key(&cid),
+        h.prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid),
         "clean storage failure retains the exact retry envelope"
     );
     assert!(matches!(
@@ -3208,7 +3253,11 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
     )
     .expect("release retained retry");
     assert!(h.publication.pending_intercept.is_none());
-    assert!(!h.prompt_runtime.pending_publish_completions.contains_key(&cid));
+    assert!(
+        !h.prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
     assert_eq!(prompt_created_count(&h), 2);
 }
 
@@ -3305,12 +3354,16 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
             ctx_id: None,
         }),
     );
-    assert!(h.publication.pending_intercept.as_ref().is_some_and(|pending| {
-        pending
-            .sync_head_for
+    assert!(
+        h.publication
+            .pending_intercept
             .as_ref()
-            .is_some_and(|sync| sync.suppress_activation_dispatch && sync.completion().is_some())
-    }));
+            .is_some_and(|pending| {
+                pending.sync_head_for.as_ref().is_some_and(|sync| {
+                    sync.suppress_activation_dispatch && sync.completion().is_some()
+                })
+            })
+    );
 
     h.handle_extension_event(
         "completion-envelope-owner",
@@ -3583,12 +3636,14 @@ fn suspended_interceptor_disconnect_reconnects_unsuspended() {
     h.remove_agent(&cid);
     let typed_connection_id = crate::test_connection_id(connection_id);
     assert!(
-        h.publication.suspended_interceptor_connections
+        h.publication
+            .suspended_interceptor_connections
             .contains(&typed_connection_id)
     );
     h.handle_disconnect(&crate::test_connection_id(connection_id));
     assert!(
-        !h.publication.suspended_interceptor_connections
+        !h.publication
+            .suspended_interceptor_connections
             .contains(&typed_connection_id)
     );
 
@@ -3607,7 +3662,8 @@ fn suspended_interceptor_disconnect_reconnects_unsuspended() {
     let (intercepted, _) = intercepted_payload(&reconnected);
     assert_eq!(intercepted, after_reconnect);
     assert_eq!(
-        h.publication.pending_intercept
+        h.publication
+            .pending_intercept
             .as_ref()
             .map(|pending| pending.conn_id.as_str()),
         Some(connection_id)
@@ -4697,7 +4753,9 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
-    h.context_discovery.initialized_sessions.insert(session_id.clone());
+    h.context_discovery
+        .initialized_sessions
+        .insert(session_id.clone());
     let cid = ensure_test_user_agent(&mut h);
     let call_id: ToolCallId = "call-read".into();
     let tool_name = ToolName::new("read");
@@ -5354,7 +5412,10 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
     )
     .expect("accept visible prompt");
 
-    assert!(h.publication.pending_intercept.is_some(), "prompt remains parked");
+    assert!(
+        h.publication.pending_intercept.is_some(),
+        "prompt remains parked"
+    );
     let interactions: Vec<_> = h
         .agent_store
         .agent_events(&agent_id)
@@ -5854,7 +5915,9 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
-    h.context_discovery.initialized_sessions.insert(session_id.clone());
+    h.context_discovery
+        .initialized_sessions
+        .insert(session_id.clone());
 
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
@@ -5889,12 +5952,17 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
         head_before_dispatch,
         "c.head must not advance while the prompt is parked"
     );
-    assert!(h.publication.pending_intercept.as_ref().is_some_and(|pending| {
-        pending
-            .sync_head_for
+    assert!(
+        h.publication
+            .pending_intercept
             .as_ref()
-            .is_some_and(|sync| sync.cid == cid && !sync.suppress_activation_dispatch)
-    }));
+            .is_some_and(|pending| {
+                pending
+                    .sync_head_for
+                    .as_ref()
+                    .is_some_and(|sync| sync.cid == cid && !sync.suppress_activation_dispatch)
+            })
+    );
 
     // Reply pass-through. Commit + react fires the deferred
     // dispatch, and the AgentPromptCreated is built from the
@@ -5949,7 +6017,8 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     h.context_discovery.initialized_sessions.insert(session_id);
     h.selected_model = Some("echo/model".into());
     let info = h
-        .provider_runtime.model_info
+        .provider_runtime
+        .model_info
         .get_mut(&"echo/model".into())
         .expect("echo model");
     info.supports_compaction = false;
@@ -5993,11 +6062,7 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     assert_eq!(prompt_created_count(&h), prompts_before);
     assert!(h.publication.pending_intercept.is_some());
     assert_eq!(h.publication.idle_dispatches.len(), 1);
-    assert!(
-        !h.publication.idle_dispatches[0]
-            .obligation
-            .is_committed()
-    );
+    assert!(!h.publication.idle_dispatches[0].obligation.is_committed());
 
     h.handle_extension_event(
         "interceptor-passive-batch",
@@ -6012,19 +6077,20 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
         prompts_before,
         "provider dispatch must still wait for the real user prompt"
     );
-    assert!(h.publication.pending_intercept.as_ref().is_some_and(|pending| matches!(
-        pending.event,
-        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-            inference_activation: true,
-            ..
-        })
-    )));
-    assert_eq!(h.publication.idle_dispatches.len(), 1);
     assert!(
-        !h.publication.idle_dispatches[0]
-            .obligation
-            .is_committed()
+        h.publication
+            .pending_intercept
+            .as_ref()
+            .is_some_and(|pending| matches!(
+                pending.event,
+                Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                    inference_activation: true,
+                    ..
+                })
+            ))
     );
+    assert_eq!(h.publication.idle_dispatches.len(), 1);
+    assert!(!h.publication.idle_dispatches[0].obligation.is_committed());
 
     h.handle_extension_event(
         "interceptor-passive-batch",
@@ -6102,12 +6168,17 @@ fn intercepted_activation_navigation_keeps_original_branch_dormant() {
 
     h.dispatch_prompt_for_agent(&cid, "branch A activation".to_owned())
         .expect("intercept activation");
-    assert!(h.publication.pending_intercept.as_ref().is_some_and(|pending| {
-        pending
-            .sync_head_for
+    assert!(
+        h.publication
+            .pending_intercept
             .as_ref()
-            .is_some_and(|sync| sync.cid == cid && !sync.suppress_activation_dispatch)
-    }));
+            .is_some_and(|pending| {
+                pending
+                    .sync_head_for
+                    .as_ref()
+                    .is_some_and(|sync| sync.cid == cid && !sync.suppress_activation_dispatch)
+            })
+    );
     h.publish_for_agent(
         &cid,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
@@ -6349,7 +6420,9 @@ fn interception_mutating_prompt_reaches_agent() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
-    h.context_discovery.initialized_sessions.insert(session_id.clone());
+    h.context_discovery
+        .initialized_sessions
+        .insert(session_id.clone());
 
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
@@ -6432,7 +6505,9 @@ fn publish_for_agent_does_not_emit_navigate_tree() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
-    h.context_discovery.initialized_sessions.insert(session_id.clone());
+    h.context_discovery
+        .initialized_sessions
+        .insert(session_id.clone());
 
     let baseline_seq = h.event_log.next_seq();
     let cid = ensure_test_user_agent(&mut h);
@@ -6685,8 +6760,16 @@ fn rollover_commits_deferred_peer_observations_without_semantic_effects() {
     }));
     let source = tau_proto::ConnectionId::parse("observation-owner")
         .expect("test connection id must satisfy the identifier grammar");
-    assert!(!h.context_discovery.agent_context_providers.contains(&source));
-    assert!(!h.context_discovery.session_context_providers.contains(&source));
+    assert!(
+        !h.context_discovery
+            .agent_context_providers
+            .contains(&source)
+    );
+    assert!(
+        !h.context_discovery
+            .session_context_providers
+            .contains(&source)
+    );
 }
 
 /// Interceptors may rewrite progress payloads, but shell correlation/target

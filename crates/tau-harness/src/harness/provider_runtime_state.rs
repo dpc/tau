@@ -1,4 +1,5 @@
-//! Owns provider declarations, cache refresh, quota epochs, and live dispatches.
+//! Owns provider declarations, cache refresh, quota epochs, and live
+//! dispatches.
 //!
 //! Prompt transcript and response-policy ownership remain in prompt runtime
 //! state; this owner tracks only the provider route selected for live work.

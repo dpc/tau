@@ -839,7 +839,9 @@ impl Harness {
         self.ui_runtime.pending_action_invocations.clear();
         self.prompt_runtime.agents.clear();
         self.prompt_runtime.ephemeral_provider_prompts.clear();
-        self.prompt_runtime.ephemeral_provider_retry_requests.clear();
+        self.prompt_runtime
+            .ephemeral_provider_retry_requests
+            .clear();
         self.provider_runtime.pending_prompts.clear();
         self.prompt_runtime.pending_dispatches.clear();
         self.prompt_runtime.models.clear();
@@ -850,7 +852,9 @@ impl Harness {
         self.prompt_runtime.compaction_projected_tokens.clear();
         self.prompt_runtime.semantic_output.clear();
         self.prompt_runtime.pending_stale_provider_responses.clear();
-        self.prompt_runtime.pending_replay_activation_occurrences.clear();
+        self.prompt_runtime
+            .pending_replay_activation_occurrences
+            .clear();
         self.prompt_runtime.pending_replay_uncertain_stale.clear();
         self.prompt_runtime.local_route_failures.clear();
         self.prompt_runtime.operations.clear();
@@ -929,7 +933,8 @@ impl Harness {
         self.peer_messaging.uncommitted_peer_auto_starts.clear();
         self.compaction_runtime.pending_manual_tools.clear();
         self.compaction_runtime.accepted_manual_tools.clear();
-        let pending_compactions = std::mem::take(&mut self.compaction_runtime.pending_ui_after_wait);
+        let pending_compactions =
+            std::mem::take(&mut self.compaction_runtime.pending_ui_after_wait);
         for pending in pending_compactions.into_values() {
             self.send_ui_error_response(
                 &pending.requester_client_id,
@@ -942,7 +947,9 @@ impl Harness {
         // mandatory SessionShutdown before switching the bound session.
         self.quiesce_synchronized_publications_for_rollover();
         self.prompt_runtime.pending_publish_completions.clear();
-        self.compaction_runtime.enqueued_inference_checkpoints.clear();
+        self.compaction_runtime
+            .enqueued_inference_checkpoints
+            .clear();
         self.publication.idle_dispatches.clear();
         self.clear_session_agent_context();
         self.agent_runtime_indicators.clear();
@@ -1565,7 +1572,8 @@ impl Harness {
         self.repair_restored_background_tool_calls(session_id);
         self.seed_restored_wait_background_completions(session_id);
         let ready_requests: Vec<_> = self
-            .compaction_runtime.accepted_manual_tools
+            .compaction_runtime
+            .accepted_manual_tools
             .iter()
             .filter_map(|(request_id, accepted)| {
                 (accepted.request.resume_inference
@@ -1626,7 +1634,8 @@ impl Harness {
         }
         let source_id = source_id.clone();
         let should_finalize = self
-            .context_discovery.pending_agents
+            .context_discovery
+            .pending_agents
             .get_mut(&ready.agent_id)
             .filter(|pending| pending.initialization_id == ready.agent_initialization_id)
             .is_some_and(|pending| {
@@ -1848,7 +1857,9 @@ impl Harness {
         for (cid, agent_id) in restored {
             self.ensure_loaded_agent_for_agent(&cid, &agent_id);
         }
-        self.context_discovery.initialized_sessions.insert(session_id.clone());
+        self.context_discovery
+            .initialized_sessions
+            .insert(session_id.clone());
         // Catch up before repair: repair appends its synthetic tool errors to
         // the durable log as it publishes them live, so running it first
         // would deliver each error twice (live, then replay-marked) to peers
@@ -1957,7 +1968,11 @@ impl Harness {
         &mut self,
         context: &tau_proto::AgentInitializationContextSet,
     ) {
-        let Some(pending) = self.context_discovery.pending_agents.remove(&context.agent_id) else {
+        let Some(pending) = self
+            .context_discovery
+            .pending_agents
+            .remove(&context.agent_id)
+        else {
             return;
         };
         if pending.initialization_id != context.agent_initialization_id {
@@ -1967,10 +1982,12 @@ impl Harness {
             initialization_id: pending.initialization_id,
             skills: pending.skills,
         };
-        self.context_discovery.frozen_agents
+        self.context_discovery
+            .frozen_agents
             .insert(context.agent_id.clone(), frozen);
         let frozen = self
-            .context_discovery.frozen_agents
+            .context_discovery
+            .frozen_agents
             .get(&context.agent_id)
             .expect("just inserted frozen discovery");
         let projection = tau_proto::HarnessAgentContextInitialized {
@@ -1983,7 +2000,8 @@ impl Harness {
                 .collect(),
             agents_files: context.agents_files.clone(),
         };
-        self.context_discovery.initialized_agent_context
+        self.context_discovery
+            .initialized_agent_context
             .insert(context.agent_id.clone(), projection.clone());
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
@@ -2548,13 +2566,17 @@ impl Harness {
                 }
                 Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(checkpoint)) => {
                     let status_prompt_id = checkpoint.agent_prompt_id.clone();
-                    self.prompt_runtime.agents
+                    self.prompt_runtime
+                        .agents
                         .insert(status_prompt_id.clone(), cid.clone());
                     if let Some(model) = checkpoint.model.clone() {
-                        self.prompt_runtime.models.insert(status_prompt_id.clone(), model);
+                        self.prompt_runtime
+                            .models
+                            .insert(status_prompt_id.clone(), model);
                     }
                     if let Some(operation) = checkpoint.operation {
-                        self.prompt_runtime.operations
+                        self.prompt_runtime
+                            .operations
                             .insert(status_prompt_id.clone(), (operation, true));
                     }
                     let restored_lineage_owner =
@@ -2700,7 +2722,8 @@ impl Harness {
                 conv.pending_message_wakes = replay_message_wakes;
             }
             if derive_activations && !replay_prompt_activations.is_empty() {
-                self.prompt_runtime.pending_replay_activation_occurrences
+                self.prompt_runtime
+                    .pending_replay_activation_occurrences
                     .insert(cid.clone(), replay_prompt_activations);
             }
             let uncertain_prompt_activation = restored_inference.as_ref().is_some_and(|recovery| {

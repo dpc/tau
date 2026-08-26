@@ -19,8 +19,7 @@ pub(crate) struct PromptRuntimeState {
     /// Provider model captured for each dispatched prompt.
     pub(super) models: HashMap<AgentPromptId, ModelId>,
     /// Cost rates captured at exact provider dispatch.
-    pub(super) estimated_cost_rates:
-        HashMap<AgentPromptId, tau_proto::EstimatedApiCostRates>,
+    pub(super) estimated_cost_rates: HashMap<AgentPromptId, tau_proto::EstimatedApiCostRates>,
     /// Immutable content-free context projection captured at dispatch.
     pub(super) context_limits: HashMap<AgentPromptId, PromptContextLimitSnapshot>,
     /// Effective context-size alerts captured for each prompt.

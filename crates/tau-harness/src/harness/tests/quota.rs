@@ -694,7 +694,8 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
             route_bindings: Vec::new(),
         },
     );
-    let snapshot = &harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
+    let snapshot =
+        &harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
     assert_eq!(snapshot.sequence, 2);
     assert_eq!(snapshot.windows[0].used_basis_points, 2_000);
 }
@@ -734,7 +735,8 @@ fn provider_quota_two_pool_default_binding_projects_without_ambiguity() {
         },
     );
 
-    let snapshot = &harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
+    let snapshot =
+        &harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
     assert_eq!(snapshot.windows.len(), 2);
     assert_eq!(snapshot.route_bindings.len(), 1);
     assert_eq!(snapshot.route_bindings[0].model, quota_binding().model);
@@ -1189,7 +1191,8 @@ fn clear_consumes_matching_route_loss_tombstone() {
     harness.apply_provider_models_snapshot(&crate::test_connection_id("owner"), Vec::new());
     assert!(
         harness
-            .provider_runtime.quota_tombstones
+            .provider_runtime
+            .quota_tombstones
             .contains_key(&tau_proto::ProviderName::new("chatgpt"))
     );
     harness.handle_provider_quota_clear(
@@ -1202,7 +1205,8 @@ fn clear_consumes_matching_route_loss_tombstone() {
     );
     assert!(
         !harness
-            .provider_runtime.quota_tombstones
+            .provider_runtime
+            .quota_tombstones
             .contains_key(&tau_proto::ProviderName::new("chatgpt"))
     );
     assert!(

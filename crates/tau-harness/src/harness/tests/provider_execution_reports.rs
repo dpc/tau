@@ -407,7 +407,8 @@ fn cache_refresh_terminal_requires_exact_provider_owner() {
     let refresh_id =
         tau_proto::ProviderCacheRefreshId::parse("pcr-harness-test").expect("refresh id");
     harness
-        .provider_runtime.cache_residency
+        .provider_runtime
+        .cache_residency
         .install_active_for_test(crate::test_connection_id("provider"), refresh_id.clone());
 
     harness
@@ -420,7 +421,11 @@ fn cache_refresh_terminal_requires_exact_provider_owner() {
         )
         .expect("cache refresh report");
     assert!(
-        harness.provider_runtime.cache_residency.next_deadline().is_none(),
+        harness
+            .provider_runtime
+            .cache_residency
+            .next_deadline()
+            .is_none(),
         "authenticated terminal must consume active ownership"
     );
 
@@ -462,11 +467,28 @@ fn cache_refresh_tool_windows_union_concurrent_cohorts() {
     let second = tau_proto::ToolCallId::from("second");
     harness.extend_cache_refresh_tool_window([first.clone()]);
     harness.extend_cache_refresh_tool_window([second.clone()]);
-    assert_eq!(harness.provider_runtime.cache_refresh_tool_window_calls.len(), 2);
+    assert_eq!(
+        harness
+            .provider_runtime
+            .cache_refresh_tool_window_calls
+            .len(),
+        2
+    );
     harness.clear_tool_call_tracking(first.as_str());
-    assert_eq!(harness.provider_runtime.cache_refresh_tool_window_calls.len(), 1);
+    assert_eq!(
+        harness
+            .provider_runtime
+            .cache_refresh_tool_window_calls
+            .len(),
+        1
+    );
     harness.clear_tool_call_tracking(second.as_str());
-    assert!(harness.provider_runtime.cache_refresh_tool_window_calls.is_empty());
+    assert!(
+        harness
+            .provider_runtime
+            .cache_refresh_tool_window_calls
+            .is_empty()
+    );
 }
 
 /// Qualifying evidence traverses the real harness window/deadline dispatcher,
@@ -519,7 +541,8 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
     let foreground = tau_proto::ToolCallId::from("vertical-foreground");
     harness.extend_cache_refresh_tool_window([foreground.clone()]);
     harness
-        .provider_runtime.cache_residency
+        .provider_runtime
+        .cache_residency
         .force_scheduled_due_for_test();
     provider.lock().expect("provider sink").clear();
     observer.lock().expect("observer sink").clear();
@@ -578,7 +601,11 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
         .expect("real prompt delivery");
     harness.clear_tool_call_tracking(foreground.as_str());
     assert!(
-        harness.provider_runtime.cache_residency.next_deadline().is_some(),
+        harness
+            .provider_runtime
+            .cache_residency
+            .next_deadline()
+            .is_some(),
         "cancel delivery alone retains ownership"
     );
     let ordered = provider
@@ -648,7 +675,13 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
             }),
         )
         .expect("terminal report");
-    assert!(harness.provider_runtime.cache_residency.next_deadline().is_none());
+    assert!(
+        harness
+            .provider_runtime
+            .cache_residency
+            .next_deadline()
+            .is_none()
+    );
 
     let mut deadline_read = cache_fixtures::prompt("provider", "vertical-deadline");
     deadline_read.system_prompt = read.system_prompt.clone();
@@ -664,11 +697,13 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
     );
     harness.extend_cache_refresh_tool_window([tau_proto::ToolCallId::from("deadline-cohort")]);
     harness
-        .provider_runtime.cache_residency
+        .provider_runtime
+        .cache_residency
         .force_scheduled_due_for_test();
     harness.process_cache_refresh_deadline();
     harness
-        .provider_runtime.cache_residency
+        .provider_runtime
+        .cache_residency
         .force_active_expired_for_test();
     provider.lock().expect("provider sink").clear();
     harness.process_cache_refresh_deadline();
@@ -683,7 +718,13 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
                 )
         )
     }));
-    assert!(harness.provider_runtime.cache_residency.next_deadline().is_none());
+    assert!(
+        harness
+            .provider_runtime
+            .cache_residency
+            .next_deadline()
+            .is_none()
+    );
 
     for (id, usage) in [
         ("vertical-missing-write", cache_fixtures::usage(0, 10)),
@@ -695,17 +736,24 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
             &prompt,
             Some(&model),
         );
-        harness
-            .provider_runtime.cache_residency
-            .finish_prompt(&prompt.agent_prompt_id, true, Some(&usage));
+        harness.provider_runtime.cache_residency.finish_prompt(
+            &prompt.agent_prompt_id,
+            true,
+            Some(&usage),
+        );
     }
     harness.extend_cache_refresh_tool_window([tau_proto::ToolCallId::from("missing-cohort")]);
     harness
-        .provider_runtime.cache_residency
+        .provider_runtime
+        .cache_residency
         .force_scheduled_due_for_test();
     harness.process_cache_refresh_deadline();
     assert!(
-        harness.provider_runtime.cache_residency.next_deadline().is_none(),
+        harness
+            .provider_runtime
+            .cache_residency
+            .next_deadline()
+            .is_none(),
         "empty directed delivery releases ownership"
     );
 
@@ -723,13 +771,24 @@ fn cache_refresh_vertical_dispatch_is_direct_and_terminal_owned() {
     );
     harness.extend_cache_refresh_tool_window([tau_proto::ToolCallId::from("disconnect-cohort")]);
     harness
-        .provider_runtime.cache_residency
+        .provider_runtime
+        .cache_residency
         .force_scheduled_due_for_test();
     harness.process_cache_refresh_deadline();
-    assert!(harness.provider_runtime.cache_residency.next_deadline().is_some());
+    assert!(
+        harness
+            .provider_runtime
+            .cache_residency
+            .next_deadline()
+            .is_some()
+    );
     harness.unregister_connection_tools_for_disconnect(&crate::test_connection_id("provider"));
     assert!(
-        harness.provider_runtime.cache_residency.next_deadline().is_none(),
+        harness
+            .provider_runtime
+            .cache_residency
+            .next_deadline()
+            .is_none(),
         "authenticated disconnect releases exact ownership"
     );
 }
@@ -918,14 +977,18 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
         )
         .expect("finished report");
     assert!(
-        !harness.provider_runtime.pending_prompts.contains_key("prompt-1"),
+        !harness
+            .provider_runtime
+            .pending_prompts
+            .contains_key("prompt-1"),
         "events={:?}, parked={:?}, notices={:?}",
         committed_events(&harness)
             .iter()
             .map(|(_, event)| event.name())
             .collect::<Vec<_>>(),
         harness
-            .publication.pending_intercept
+            .publication
+            .pending_intercept
             .as_ref()
             .map(|pending| pending.event.name()),
         committed_events(&harness)
@@ -1205,7 +1268,12 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
             .filter_map(|frame| peel_inner_event(&frame.frame))
             .all(|event| !matches!(event, Event::ProviderResponseFinished(_)))
     );
-    assert!(!harness.provider_runtime.pending_prompts.contains_key("prompt-1"));
+    assert!(
+        !harness
+            .provider_runtime
+            .pending_prompts
+            .contains_key("prompt-1")
+    );
     assert!(
         harness
             .agent_registry

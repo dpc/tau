@@ -479,7 +479,8 @@ impl Harness {
                 tau_proto::Event::AgentPromptTerminated(terminated),
             );
         }
-        let pending = std::mem::take(&mut self.prompt_runtime.pending_replay_activation_occurrences);
+        let pending =
+            std::mem::take(&mut self.prompt_runtime.pending_replay_activation_occurrences);
         for (cid, occurrences) in pending {
             if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
                 agent.pending_replay_activation = false;

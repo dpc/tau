@@ -534,7 +534,8 @@ impl Harness {
             let extension = self.next_extension_deadline();
             let cache = self.next_cache_refresh_deadline();
             let preview = self
-                .context_discovery.pending_rendered_prompts
+                .context_discovery
+                .pending_rendered_prompts
                 .values()
                 .map(|pending| pending.deadline)
                 .min();
@@ -578,7 +579,8 @@ impl Harness {
             self.next_work_wait_threshold_deadline(),
             self.next_extension_deadline(),
             self.next_cache_refresh_deadline(),
-            self.context_discovery.pending_rendered_prompts
+            self.context_discovery
+                .pending_rendered_prompts
                 .values()
                 .map(|pending| pending.deadline)
                 .min(),
@@ -609,7 +611,8 @@ impl Harness {
                 HarnessOutputMessage::deliver(Event::AgentCacheRefreshRequested(refresh.request)),
             );
             if !delivered.is_ok_and(|report| !report.delivered_to.is_empty()) {
-                self.provider_runtime.cache_residency
+                self.provider_runtime
+                    .cache_residency
                     .finish(&refresh.connection_id, &refresh_id);
             }
         }
@@ -632,7 +635,8 @@ impl Harness {
 
     pub(super) fn preempt_cache_refresh_for_prompt(&mut self, prompt: &AgentPromptCreated) {
         let cancellations = self
-            .provider_runtime.cache_residency
+            .provider_runtime
+            .cache_residency
             .cancel_real(&prompt.model.provider, &prompt.agent_id);
         self.send_cache_refresh_cancellations(cancellations);
     }
@@ -641,7 +645,9 @@ impl Harness {
         &mut self,
         reason: tau_proto::ProviderCacheRefreshCancelReason,
     ) {
-        self.provider_runtime.cache_refresh_tool_window_calls.clear();
+        self.provider_runtime
+            .cache_refresh_tool_window_calls
+            .clear();
         let cancellations = self.provider_runtime.cache_residency.clear(reason);
         self.send_cache_refresh_cancellations(cancellations);
     }

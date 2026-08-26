@@ -102,7 +102,8 @@ impl Harness {
         response.error = Some("cancelled".to_owned());
         response.failure_kind = None;
         response.output_items.clear();
-        self.prompt_runtime.local_route_failures
+        self.prompt_runtime
+            .local_route_failures
             .remove(&response.agent_prompt_id);
         let batch_parent = sync.as_ref().and_then(|sync| {
             let completion = sync.completion()?;
@@ -125,7 +126,8 @@ impl Harness {
         });
         if let (Some(sync), Some(batch_parent)) = (sync.as_mut(), batch_parent) {
             sync.suppress_activation_dispatch = true;
-            self.publication.idle_dispatches
+            self.publication
+                .idle_dispatches
                 .retain(|dispatch| dispatch.cid != sync.cid);
             sync.continuation = Some(PostCommitContinuation::AgentPublish(Box::new(
                 AgentPublishCompletion::OutputLengthContinuation {
@@ -277,7 +279,8 @@ impl Harness {
     ) {
         if let AgentPublishCompletion::InitialPromptSubmission { mut correlation } = completion {
             correlation.activation_through = Some(through);
-            self.prompt_runtime.pending_initial_correlations
+            self.prompt_runtime
+                .pending_initial_correlations
                 .insert(cid.clone(), correlation);
             return;
         }
@@ -343,7 +346,8 @@ impl Harness {
                 .get(cid)
                 .is_some_and(|agent| agent.pending_cancel.is_some())
             {
-                self.prompt_runtime.local_route_failures
+                self.prompt_runtime
+                    .local_route_failures
                     .remove(&response.agent_prompt_id);
                 self.finalize_canceled_in_flight_prompt(cid);
                 return;
@@ -499,7 +503,8 @@ impl Harness {
                     },
                 };
         }
-        self.compaction_runtime.enqueued_inference_checkpoints
+        self.compaction_runtime
+            .enqueued_inference_checkpoints
             .insert((agent_id.clone(), transaction_id.clone()));
         self.publish_for_agent_from(
             cid,
@@ -532,7 +537,8 @@ impl Harness {
             return;
         };
         if let AgentPublishCompletion::InitialPromptSubmission { correlation } = completion {
-            self.publication.idle_dispatches
+            self.publication
+                .idle_dispatches
                 .retain(|dispatch| dispatch.cid != cid);
             if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
                 agent.in_flight_prompt = None;
@@ -584,7 +590,8 @@ impl Harness {
         ) {
             self.discard_deferred_agent_publish_batch(&cid, &completion);
         }
-        self.prompt_runtime.pending_publish_completions
+        self.prompt_runtime
+            .pending_publish_completions
             .insert(cid, completion);
     }
 
@@ -739,7 +746,8 @@ impl Harness {
                 _ => unreachable!(),
             };
             if self.selected_head_for_agent(cid) != Some(batch_parent) {
-                self.prompt_runtime.pending_publish_completions
+                self.prompt_runtime
+                    .pending_publish_completions
                     .insert(cid.clone(), completion);
                 return;
             }
@@ -820,7 +828,8 @@ impl Harness {
             .and_then(|agent_id| self.agent_store.agent(agent_id))
             .is_some_and(|tree| tree.is_ancestor_head(batch_parent, selected));
         if !on_owning_branch {
-            self.prompt_runtime.pending_publish_completions
+            self.prompt_runtime
+                .pending_publish_completions
                 .insert(cid.clone(), completion);
             return;
         }
@@ -837,7 +846,11 @@ impl Harness {
             *approved_retry_event = None;
             *complete_on_commit = retry_prompts.len() == 1;
             self.commit_approved_agent_retry(cid, *approved_event, approved_completion);
-            if self.prompt_runtime.pending_publish_completions.contains_key(cid) {
+            if self
+                .prompt_runtime
+                .pending_publish_completions
+                .contains_key(cid)
+            {
                 return;
             }
             if retry_prompts.len() == 1 {
@@ -866,7 +879,8 @@ impl Harness {
     /// proves that the harness is making progress again.
     pub(super) fn retry_pending_agent_publications(&mut self) {
         let pending = self
-            .prompt_runtime.pending_publish_completions
+            .prompt_runtime
+            .pending_publish_completions
             .keys()
             .cloned()
             .collect::<Vec<_>>();
@@ -902,7 +916,8 @@ impl Harness {
                 // The exact dormant repair supersedes pre-branch live
                 // scheduling.
             } else {
-                self.prompt_runtime.pending_publish_completions
+                self.prompt_runtime
+                    .pending_publish_completions
                     .insert(cid.clone(), completion);
                 return;
             }
@@ -1134,7 +1149,8 @@ impl Harness {
         };
         let key = (agent_id.clone(), transaction_id.clone());
         if self
-            .compaction_runtime.enqueued_inference_checkpoints
+            .compaction_runtime
+            .enqueued_inference_checkpoints
             .contains(&key)
         {
             return;
@@ -1153,7 +1169,9 @@ impl Harness {
         if !self.activation_successor_matches_selected_head(&event) {
             return;
         }
-        self.compaction_runtime.enqueued_inference_checkpoints.insert(key);
+        self.compaction_runtime
+            .enqueued_inference_checkpoints
+            .insert(key);
         self.publish_for_agent(cid, event);
     }
 
@@ -1168,7 +1186,8 @@ impl Harness {
             return;
         };
         if let Some(transaction_id) = started.transaction_id.as_ref() {
-            self.compaction_runtime.enqueued_inference_checkpoints
+            self.compaction_runtime
+                .enqueued_inference_checkpoints
                 .remove(&(started.agent_id.clone(), transaction_id.clone()));
         }
         let Some(cid) = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
@@ -1668,7 +1687,10 @@ impl Harness {
             _ => {}
         }
         let Some(append_outcome) = append_outcome else {
-            let disconnect_batch_pending = self.publication.disconnect_terminal_batch_pending.contains(call_id);
+            let disconnect_batch_pending = self
+                .publication
+                .disconnect_terminal_batch_pending
+                .contains(call_id);
             let runtime_cid = runtime_only_cid.clone().or_else(|| {
                 self.tool_runtime
                     .tool_agents
@@ -1798,7 +1820,11 @@ impl Harness {
             return;
         }
 
-        if self.publication.disconnect_terminal_batch_pending.contains(call_id) {
+        if self
+            .publication
+            .disconnect_terminal_batch_pending
+            .contains(call_id)
+        {
             self.finish_tool_call_runtime_state(call_id.as_str());
             self.clear_tool_call_tracking(call_id.as_str());
             self.release_disconnect_terminal_batch_after_commit(call_id, Some(cid));
@@ -1854,14 +1880,23 @@ impl Harness {
         call_id: &ToolCallId,
         cid: Option<AgentId>,
     ) {
-        if !self.publication.disconnect_terminal_batch_pending.remove(call_id) {
+        if !self
+            .publication
+            .disconnect_terminal_batch_pending
+            .remove(call_id)
+        {
             return;
         }
         if let Some(cid) = cid {
-            self.publication.disconnect_terminal_batch_completed
+            self.publication
+                .disconnect_terminal_batch_completed
                 .push((call_id.clone(), cid));
         }
-        if !self.publication.disconnect_terminal_batch_pending.is_empty() {
+        if !self
+            .publication
+            .disconnect_terminal_batch_pending
+            .is_empty()
+        {
             return;
         }
         let completed = std::mem::take(&mut self.publication.disconnect_terminal_batch_completed);
@@ -2029,8 +2064,12 @@ impl Harness {
                 initiating_tool_call_id,
             } = &started.trigger
             {
-                let accepted = self.compaction_runtime.accepted_manual_tools.remove(request_id);
-                self.compaction_runtime.pending_manual_tools
+                let accepted = self
+                    .compaction_runtime
+                    .accepted_manual_tools
+                    .remove(request_id);
+                self.compaction_runtime
+                    .pending_manual_tools
                     .entry(started.transaction_id.clone())
                     .or_insert_with(|| PendingManualCompactionTool {
                         request_id: request_id.clone(),
@@ -2045,9 +2084,14 @@ impl Harness {
             }
             let suppression_key = (started.agent_id.clone(), started.transaction_id.clone());
             let suppressed = self
-                .compaction_runtime.suppressed_dispatches
+                .compaction_runtime
+                .suppressed_dispatches
                 .remove(&suppression_key);
-            let cancelled = suppressed && self.compaction_runtime.cancelled_claims.remove(&suppression_key);
+            let cancelled = suppressed
+                && self
+                    .compaction_runtime
+                    .cancelled_claims
+                    .remove(&suppression_key);
             let cid = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()));
             if let Some(cid) = cid {
                 if suppressed {
@@ -2165,7 +2209,8 @@ impl Harness {
         }
         if let Event::AgentManualCompactionRequestFailed(failed) = event
             && let Some(pending) = self
-                .compaction_runtime.accepted_manual_tools
+                .compaction_runtime
+                .accepted_manual_tools
                 .remove(&failed.request_id)
         {
             if pending.request.resume_inference {
@@ -2210,7 +2255,8 @@ impl Harness {
         }
         if let Event::AgentStandaloneCompactionFailed(failed) = event {
             if let Some(pending) = self
-                .compaction_runtime.pending_manual_tools
+                .compaction_runtime
+                .pending_manual_tools
                 .remove(&failed.transaction_id)
             {
                 let self_request = pending.caller_agent_id == pending.target_agent_id;
@@ -2276,9 +2322,11 @@ impl Harness {
                     }
                     })
                 });
-            let suppress_provider_watch = failed_prompt_id
-                .as_ref()
-                .is_some_and(|prompt_id| self.compaction_runtime.silent_failure_prompts.remove(prompt_id));
+            let suppress_provider_watch = failed_prompt_id.as_ref().is_some_and(|prompt_id| {
+                self.compaction_runtime
+                    .silent_failure_prompts
+                    .remove(prompt_id)
+            });
             if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
                 agent.activation_dispatch = path_crate_agent::ActivationDispatchState::Blocked {
                     failed_id: failed.transaction_id.clone(),
@@ -2336,7 +2384,10 @@ impl Harness {
         }
         if let Event::AgentCompacted(compacted) = event
             && let Some(transaction_id) = compacted.transaction_id.as_ref()
-            && let Some(pending) = self.compaction_runtime.pending_manual_tools.remove(transaction_id)
+            && let Some(pending) = self
+                .compaction_runtime
+                .pending_manual_tools
+                .remove(transaction_id)
         {
             let self_request = pending.caller_agent_id == pending.target_agent_id;
             let call_id = pending.call_id.clone();
@@ -2464,7 +2515,8 @@ impl Harness {
         if let Event::AgentInferenceDispatchStarted(started) = event
             && let Some(transaction_id) = started.transaction_id.as_ref()
         {
-            self.compaction_runtime.enqueued_inference_checkpoints
+            self.compaction_runtime
+                .enqueued_inference_checkpoints
                 .remove(&(started.agent_id.clone(), transaction_id.clone()));
         }
         if let Event::AgentInferenceDispatchStarted(started) = event
@@ -2620,7 +2672,8 @@ impl Harness {
                 agent.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
             }
             let local_route_failure = self
-                .prompt_runtime.local_route_failures
+                .prompt_runtime
+                .local_route_failures
                 .remove(&response.agent_prompt_id);
             if local_route_failure {
                 self.project_agent_watch_provider_state(
@@ -2667,16 +2720,23 @@ impl Harness {
                 .agents
                 .get(&cid)
                 .is_some_and(|agent| agent.terminating);
-            self.prompt_runtime.operations.remove(&terminated.agent_prompt_id);
-            self.prompt_runtime.context_limits
+            self.prompt_runtime
+                .operations
                 .remove(&terminated.agent_prompt_id);
-            self.prompt_runtime.context_size_alerts
+            self.prompt_runtime
+                .context_limits
                 .remove(&terminated.agent_prompt_id);
-            self.prompt_runtime.compaction_policies
+            self.prompt_runtime
+                .context_size_alerts
                 .remove(&terminated.agent_prompt_id);
-            self.prompt_runtime.compaction_projected_tokens
+            self.prompt_runtime
+                .compaction_policies
                 .remove(&terminated.agent_prompt_id);
-            self.prompt_runtime.semantic_output
+            self.prompt_runtime
+                .compaction_projected_tokens
+                .remove(&terminated.agent_prompt_id);
+            self.prompt_runtime
+                .semantic_output
                 .remove(&terminated.agent_prompt_id);
             if terminated.reason == AgentPromptTerminationReason::Canceled {
                 self.canceled_prompts
@@ -2705,7 +2765,8 @@ impl Harness {
             self.release_start_agent_request(&cid);
             self.remember_ephemeral_provider_prompt(&terminated.agent_prompt_id);
             if let Some(pending) = self
-                .prompt_runtime.pending_stale_provider_responses
+                .prompt_runtime
+                .pending_stale_provider_responses
                 .remove(&terminated.agent_prompt_id)
             {
                 debug_assert_eq!(pending.response.agent_prompt_id, terminated.agent_prompt_id);
@@ -2762,10 +2823,17 @@ impl Harness {
             self.agent_registry
                 .session_loaded
                 .remove(&unloaded.agent_id);
-            self.context_discovery.pending_agents.remove(&unloaded.agent_id);
-            self.context_discovery.frozen_agents.remove(&unloaded.agent_id);
-            self.context_discovery.initialized_agent_context.remove(&unloaded.agent_id);
-            self.prompt_runtime.shown_tool_failure_examples
+            self.context_discovery
+                .pending_agents
+                .remove(&unloaded.agent_id);
+            self.context_discovery
+                .frozen_agents
+                .remove(&unloaded.agent_id);
+            self.context_discovery
+                .initialized_agent_context
+                .remove(&unloaded.agent_id);
+            self.prompt_runtime
+                .shown_tool_failure_examples
                 .retain(|(agent_id, _, _)| agent_id != &cid);
             self.agent_registry
                 .agent_routes
@@ -2775,9 +2843,11 @@ impl Harness {
                 .insert(unloaded.agent_id.to_string());
             self.discard_input_wait_for(&cid);
             self.prompt_runtime.pending_publish_completions.remove(&cid);
-            self.publication.idle_dispatches
+            self.publication
+                .idle_dispatches
                 .retain(|dispatch| dispatch.cid != cid);
-            self.compaction_runtime.enqueued_inference_checkpoints
+            self.compaction_runtime
+                .enqueued_inference_checkpoints
                 .retain(|(agent_id, _)| agent_id != &unloaded.agent_id);
             self.tombstone_ephemeral_provider_prompts_for_agent(&cid);
             self.agent_registry.agents.remove(&cid);
@@ -2794,12 +2864,14 @@ impl Harness {
                 self.replay_loaded_agent_history_to_subscribers(&loaded.agent_id);
             }
             let is_current_initialization = self
-                .context_discovery.pending_agents
+                .context_discovery
+                .pending_agents
                 .get(&loaded.agent_id)
                 .is_some_and(|pending| pending.initialization_id == loaded.agent_initialization_id);
             if is_current_initialization
                 && self
-                    .context_discovery.pending_agents
+                    .context_discovery
+                    .pending_agents
                     .get(&loaded.agent_id)
                     .is_some_and(|pending| pending.waiting_on.is_empty())
                 && let Err(error) = self.finalize_agent_discovery(&loaded.agent_id)
@@ -2821,14 +2893,16 @@ impl Harness {
                 .agent(moved.agent_id.as_str())
                 .is_some_and(|tree| tree.output_length_dormant_repair().is_some());
             if dormant_repair {
-                if let Some(completion) = self.prompt_runtime.pending_publish_completions.remove(&cid)
+                if let Some(completion) =
+                    self.prompt_runtime.pending_publish_completions.remove(&cid)
                     && !matches!(
                         completion,
                         AgentPublishCompletion::OutputLengthSteer { .. }
                             | AgentPublishCompletion::OutputLengthContinuation { .. }
                     )
                 {
-                    self.prompt_runtime.pending_publish_completions
+                    self.prompt_runtime
+                        .pending_publish_completions
                         .insert(cid.clone(), completion);
                 }
                 self.repair_dormant_output_length_lineage(&cid);
@@ -3304,7 +3378,8 @@ impl Harness {
                     .get(&value.request_id)
                     .is_some_and(|pending| self.agent_is_ephemeral(&pending.target_agent_id))
                     || self
-                        .prompt_runtime.ephemeral_provider_retry_requests
+                        .prompt_runtime
+                        .ephemeral_provider_retry_requests
                         .contains(&value.request_id);
             }
             _ => None,
@@ -3313,9 +3388,12 @@ impl Harness {
     }
 
     pub(super) fn provider_prompt_targets_ephemeral(&self, prompt_id: &AgentPromptId) -> bool {
-        self.prompt_runtime.ephemeral_provider_prompts.contains(prompt_id)
+        self.prompt_runtime
+            .ephemeral_provider_prompts
+            .contains(prompt_id)
             || self
-                .prompt_runtime.agents
+                .prompt_runtime
+                .agents
                 .get(prompt_id)
                 .and_then(|cid| self.agent_registry.agents.get(cid))
                 .is_some_and(|agent| agent.persistence.is_ephemeral())

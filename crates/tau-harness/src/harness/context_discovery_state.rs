@@ -10,8 +10,7 @@ pub(crate) struct ContextDiscoveryState {
     /// Selected skill winners keyed by skill name.
     pub(crate) skills: HashMap<tau_proto::SkillName, DiscoveredSkill>,
     /// All discovered candidates retained behind each selected winner.
-    pub(crate) skill_candidates:
-        HashMap<tau_proto::SkillName, Vec<DiscoveredSkill>>,
+    pub(crate) skill_candidates: HashMap<tau_proto::SkillName, Vec<DiscoveredSkill>>,
     /// AGENTS.md files in extension delivery order.
     pub(crate) agents_files: Vec<DiscoveredAgentsFile>,
     /// Session-scoped JSON context contributions from extensions.

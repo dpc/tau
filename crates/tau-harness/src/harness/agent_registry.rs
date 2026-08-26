@@ -343,7 +343,12 @@ impl Harness {
             .available_roles
             .keys()
             .filter(|name| {
-                model_for_role(&self.provider_runtime.model_info, &self.available_roles, name).is_some()
+                model_for_role(
+                    &self.provider_runtime.model_info,
+                    &self.available_roles,
+                    name,
+                )
+                .is_some()
             })
             .cloned()
             .collect();
@@ -373,7 +378,12 @@ impl Harness {
         };
 
         if self.available_roles.contains_key(requested)
-            && model_for_role(&self.provider_runtime.model_info, &self.available_roles, requested).is_some()
+            && model_for_role(
+                &self.provider_runtime.model_info,
+                &self.available_roles,
+                requested,
+            )
+            .is_some()
         {
             return Ok(requested.to_owned());
         }
@@ -1078,9 +1088,9 @@ impl Harness {
         let agent_id = agent.agent_id.as_ref()?;
         let stable_agent_id = crate::parse_agent_id(agent_id);
         let context_window = agent.context_input_tokens.and_then(|_| {
-            self.model_for_agent_role(agent)
-                .as_ref()
-                .and_then(|model| context_window_for_model(&self.provider_runtime.model_info, model))
+            self.model_for_agent_role(agent).as_ref().and_then(|model| {
+                context_window_for_model(&self.provider_runtime.model_info, model)
+            })
         });
         Some(AgentStatsUpdated {
             session_id: self.current_session_id.clone(),
@@ -1503,7 +1513,8 @@ impl Harness {
             cid,
             "compaction canceled because the target agent unloaded",
         );
-        self.publication.idle_dispatches
+        self.publication
+            .idle_dispatches
             .retain(|dispatch| &dispatch.cid != cid);
         let mut peer_internal_calls = self
             .tool_runtime
@@ -1537,9 +1548,11 @@ impl Harness {
         if let Some(unloading_agent_id) = unloading_agent_id {
             let unloading_agent_id_proto = crate::parse_agent_id(&unloading_agent_id);
             self.clear_agent_runtime_indicators_for_agent(&unloading_agent_id_proto);
-            self.context_discovery.pending_rendered_prompts
+            self.context_discovery
+                .pending_rendered_prompts
                 .remove(&unloading_agent_id_proto);
-            self.compaction_runtime.enqueued_inference_checkpoints
+            self.compaction_runtime
+                .enqueued_inference_checkpoints
                 .retain(|(agent_id, _)| agent_id != &unloading_agent_id_proto);
             self.peer_messaging
                 .peer_input_rate
@@ -1548,7 +1561,8 @@ impl Harness {
                 .uncommitted_peer_auto_starts
                 .remove(&unloading_agent_id_proto);
             let requests: Vec<_> = self
-                .compaction_runtime.accepted_manual_tools
+                .compaction_runtime
+                .accepted_manual_tools
                 .values()
                 .filter(|accepted| {
                     accepted.request.caller_agent_id.as_str() == unloading_agent_id
@@ -2130,8 +2144,14 @@ impl Harness {
                 );
             }
         }
-        if self.context_discovery.pending_agents.contains_key(&agent_id_proto)
-            || self.context_discovery.frozen_agents.contains_key(&agent_id_proto)
+        if self
+            .context_discovery
+            .pending_agents
+            .contains_key(&agent_id_proto)
+            || self
+                .context_discovery
+                .frozen_agents
+                .contains_key(&agent_id_proto)
         {
             return;
         }
@@ -2161,7 +2181,8 @@ impl Harness {
         }
         if self.publication.pending_intercept.is_none()
             && self
-                .context_discovery.pending_agents
+                .context_discovery
+                .pending_agents
                 .get(&agent_id_proto)
                 .is_some_and(|pending| pending.waiting_on.is_empty())
             && let Err(error) = self.finalize_agent_discovery(&agent_id_proto)

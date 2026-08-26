@@ -111,7 +111,8 @@ fn policy_harness_for_model(
     .expect("harness");
     harness.available_roles = HashMap::from([(ROLE.to_owned(), role)]);
     let model = ModelId::new(ProviderName::new("provider"), ModelName::new(model_name));
-    harness.provider_runtime.model_info = HashMap::from([(model.clone(), model_info(&model, model_tags))]);
+    harness.provider_runtime.model_info =
+        HashMap::from([(model.clone(), model_info(&model, model_tags))]);
     harness.provider_runtime.model_routes =
         HashMap::from([(model.clone(), crate::test_connection_id("provider"))]);
     harness.selected_role = ROLE.to_owned();
@@ -252,7 +253,8 @@ fn image_tool_requires_exact_route_modalities() {
 
     let model_info = policy
         .harness
-        .provider_runtime.model_info
+        .provider_runtime
+        .model_info
         .get_mut(&model)
         .expect("model metadata");
     model_info.input_modalities = vec![
@@ -383,7 +385,8 @@ fn forced_codex_requires_custom_support_and_style_tags_cannot_conflict() {
     );
     forced
         .harness
-        .provider_runtime.model_info
+        .provider_runtime
+        .model_info
         .get_mut(&model)
         .expect("model info")
         .supported_tool_types = vec![ToolType::Function];
@@ -393,7 +396,8 @@ fn forced_codex_requires_custom_support_and_style_tags_cannot_conflict() {
     );
     forced
         .harness
-        .provider_runtime.model_info
+        .provider_runtime
+        .model_info
         .get_mut(&model)
         .expect("model info")
         .supported_tool_types
@@ -685,7 +689,8 @@ fn provider_supported_tool_types_filter_effective_snapshot() {
 
     policy
         .harness
-        .provider_runtime.model_info
+        .provider_runtime
+        .model_info
         .get_mut(&model)
         .expect("model info")
         .supported_tool_types = vec![ToolType::Function, ToolType::Custom];
@@ -902,12 +907,19 @@ fn prompt_snapshot_cleanup_removes_call_backreferences() {
     );
     policy
         .harness
-        .prompt_runtime.tool_call_prompts
+        .prompt_runtime
+        .tool_call_prompts
         .insert("call-1".into(), prompt_id.clone());
 
     policy.harness.clear_prompt_tool_snapshot(&prompt_id);
 
-    assert!(!policy.harness.prompt_runtime.tool_specs.contains_key(&prompt_id));
+    assert!(
+        !policy
+            .harness
+            .prompt_runtime
+            .tool_specs
+            .contains_key(&prompt_id)
+    );
     assert!(policy.harness.prompt_runtime.tool_call_prompts.is_empty());
 }
 
@@ -1051,7 +1063,8 @@ fn prompt_alias_resolution_does_not_prefer_an_internal_name() {
         .expect("known-safe AgentPromptId must be valid");
     policy
         .harness
-        .prompt_runtime.tool_specs
+        .prompt_runtime
+        .tool_specs
         .insert(prompt_id.clone(), vec![aliased, other]);
 
     let resolved = policy

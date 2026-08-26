@@ -191,7 +191,11 @@ impl Harness {
                 agent.originator.clone(),
             ))
         })?;
-        if self.prompt_runtime.pending_dispatches.contains(&owned_prompt_id) {
+        if self
+            .prompt_runtime
+            .pending_dispatches
+            .contains(&owned_prompt_id)
+        {
             return None;
         }
         let owned_model = match owned_model {
@@ -247,7 +251,8 @@ impl Harness {
         let agent_prompt_id = prompt.agent_prompt_id.clone();
         if agent_prompt_id != owned_prompt_id
             || !self
-                .prompt_runtime.pending_dispatches
+                .prompt_runtime
+                .pending_dispatches
                 .insert(agent_prompt_id.clone())
         {
             self.terminalize_owned_dispatch_error(
@@ -265,7 +270,8 @@ impl Harness {
                 .and_then(|agent| agent.outer_turn.active_id().cloned());
         }
         let provider_connection_id = self
-            .provider_runtime.model_routes
+            .provider_runtime
+            .model_routes
             .get(&prompt.model)
             .cloned()
             .expect("owned model route was validated before materialization");
@@ -363,7 +369,8 @@ impl Harness {
                     tree.prompt_started(&continuation.plan.agent_prompt_id)
                         .is_some()
                 });
-        self.prompt_runtime.local_route_failures
+        self.prompt_runtime
+            .local_route_failures
             .insert(response.agent_prompt_id.clone());
         if prompt_start_committed {
             if self
@@ -372,7 +379,8 @@ impl Harness {
                 .get(cid)
                 .is_some_and(|agent| agent.pending_cancel.is_some())
             {
-                self.prompt_runtime.local_route_failures
+                self.prompt_runtime
+                    .local_route_failures
                     .remove(&response.agent_prompt_id);
                 self.finalize_canceled_in_flight_prompt(cid);
             } else {
@@ -503,7 +511,8 @@ impl Harness {
             _ => None,
         };
         if let Some(Event::ProviderResponseFinished(response)) = failure.as_ref() {
-            self.prompt_runtime.local_route_failures
+            self.prompt_runtime
+                .local_route_failures
                 .insert(response.agent_prompt_id.clone());
             self.invalidate_working_status_after_unsuccessful_terminal(cid);
         }
@@ -562,7 +571,8 @@ impl Harness {
                 ..
             } => {
                 let agent_prompt_id = agent_prompt_id.clone();
-                self.prompt_runtime.local_route_failures
+                self.prompt_runtime
+                    .local_route_failures
                     .insert(agent_prompt_id.clone());
                 Event::ProviderResponseFinished(ProviderResponseFinished {
                     automatic_compaction_decision: None,
@@ -812,7 +822,8 @@ impl Harness {
                 AgentPromptId::parse(format!("ap-{durable_agent_id}-{prompt_index}"))
                     .expect("known-safe AgentPromptId must be valid")
             });
-        self.prompt_runtime.agents
+        self.prompt_runtime
+            .agents
             .insert(agent_prompt_id.clone(), cid.clone());
         let ctx_id = self
             .agent_registry
@@ -830,14 +841,16 @@ impl Harness {
         );
 
         self.current_session_state.token_usage.start_request(&model);
-        self.prompt_runtime.models
+        self.prompt_runtime
+            .models
             .insert(agent_prompt_id.clone(), model.clone());
         let context_limit_snapshot = self.prompt_context_limit_snapshot(cid, &model, operation);
         self.prompt_runtime.compaction_projected_tokens.insert(
             agent_prompt_id.clone(),
             context_limit_snapshot.projected_input_tokens,
         );
-        self.prompt_runtime.context_limits
+        self.prompt_runtime
+            .context_limits
             .insert(agent_prompt_id.clone(), context_limit_snapshot);
         let role_name = self.role_name_for_agent_id(cid);
         let context_size_alerts = self
@@ -845,14 +858,16 @@ impl Harness {
             .get(&role_name)
             .map(|role| role.context_size_alerts.clone())
             .unwrap_or_default();
-        self.prompt_runtime.context_size_alerts
+        self.prompt_runtime
+            .context_size_alerts
             .insert(agent_prompt_id.clone(), context_size_alerts);
         let compactions = self
             .available_roles
             .get(&role_name)
             .map(|role| role.compactions.clone())
             .unwrap_or_default();
-        self.prompt_runtime.compaction_policies
+        self.prompt_runtime
+            .compaction_policies
             .insert(agent_prompt_id.clone(), compactions);
         self.prompt_runtime.operations.insert(
             agent_prompt_id.clone(),
@@ -863,7 +878,8 @@ impl Harness {
                     .is_some_and(|(_, _, resume)| resume.is_some()),
             ),
         );
-        self.prompt_runtime.tool_specs
+        self.prompt_runtime
+            .tool_specs
             .insert(agent_prompt_id.clone(), tool_specs);
         let session_id = self
             .agent_registry
@@ -1002,7 +1018,11 @@ impl Harness {
             return Some(model);
         }
         let role_name = self.role_name_for_agent(conv);
-        model_for_role(&self.provider_runtime.model_info, &self.available_roles, &role_name)
+        model_for_role(
+            &self.provider_runtime.model_info,
+            &self.available_roles,
+            &role_name,
+        )
     }
 
     pub(crate) fn selected_model_params(&self) -> tau_proto::ModelParams {
@@ -1027,7 +1047,11 @@ impl Harness {
 
     #[cfg(test)]
     pub(super) fn build_system_prompt_for_role(&self, role_name: &str) -> String {
-        let model = model_for_role(&self.provider_runtime.model_info, &self.available_roles, role_name);
+        let model = model_for_role(
+            &self.provider_runtime.model_info,
+            &self.available_roles,
+            role_name,
+        );
         let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
         self.try_build_system_prompt_for_role_and_agent(
             role_name,
@@ -1046,7 +1070,11 @@ impl Harness {
         role_name: &str,
         context_agent_id: &tau_proto::AgentId,
     ) -> Result<String, handlebars::RenderError> {
-        let model = model_for_role(&self.provider_runtime.model_info, &self.available_roles, role_name);
+        let model = model_for_role(
+            &self.provider_runtime.model_info,
+            &self.available_roles,
+            role_name,
+        );
         let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
         self.build_system_prompt_for_role_preview_with_snapshot(
             role_name,
@@ -1129,7 +1157,8 @@ impl Harness {
             skills,
             &prompt_fragments,
             &tool_prompt_fragments,
-            self.context_discovery.agent_context
+            self.context_discovery
+                .agent_context
                 .template_value_filtered(context_agent_id, |key, contributor| {
                     key.as_ref() != "workdir" || visible_workdir_contributors.contains(contributor)
                 }),
@@ -1167,7 +1196,8 @@ impl Harness {
             .get(role_name)
             .and_then(|role| role.prompt_override.as_deref())
             .unwrap_or(BUILT_IN_SYSTEM_TEMPLATE_NAME);
-        self.context_discovery.system_prompt_templates
+        self.context_discovery
+            .system_prompt_templates
             .get(template_name)
             .map(String::as_str)
             .ok_or_else(|| {
@@ -1244,7 +1274,8 @@ impl Harness {
             },
         );
         let mut fragments: Vec<_> = self
-            .context_discovery.prompt_fragments
+            .context_discovery
+            .prompt_fragments
             .iter()
             .flat_map(|(connection_id, fragments)| {
                 fragments
@@ -1368,7 +1399,11 @@ impl Harness {
 
     #[cfg(test)]
     pub(super) fn gather_tool_definitions_for_role(&self, role_name: &str) -> Vec<ToolDefinition> {
-        let model = model_for_role(&self.provider_runtime.model_info, &self.available_roles, role_name);
+        let model = model_for_role(
+            &self.provider_runtime.model_info,
+            &self.available_roles,
+            role_name,
+        );
         let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
         self.tool_definitions_from_specs(&specs)
     }

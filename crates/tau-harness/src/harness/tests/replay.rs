@@ -3354,13 +3354,15 @@ fn resumed_harness_replays_persisted_session_history() {
         )
         .expect("submit first prompt");
         let spid = h
-            .prompt_runtime.agents
+            .prompt_runtime
+            .agents
             .keys()
             .next()
             .expect("first session prompt id")
             .clone();
         let cid = h
-            .prompt_runtime.agents
+            .prompt_runtime
+            .agents
             .get(&spid)
             .expect("first prompt conversation")
             .clone();
@@ -3414,7 +3416,8 @@ fn resumed_harness_replays_persisted_session_history() {
         )
         .expect("submit resumed prompt");
     let spid = resumed
-        .prompt_runtime.agents
+        .prompt_runtime
+        .agents
         .keys()
         .next()
         .expect("resumed session prompt id")
