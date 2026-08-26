@@ -87,8 +87,6 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
     assert_boot_a(&observer.events, &session_id, &identities)?;
     let roster = observer.roster(&session_id, SessionAgentListScope::Current, deadline)?;
     assert_roster(&roster, &identities)?;
-    let durable_before = DurableSessionSnapshot::load(&fixture.tau_state(), &session_id)?;
-    assert_snapshot_a(&durable_before, &identities)?;
     let setup_actions = matched_actions(&fixture)?;
     if setup_actions != 4 {
         return Err(format!(
@@ -100,6 +98,8 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
     drop(observer);
     daemon.finish()?;
     fixture.require_boot_gone(session_id.as_str())?;
+    let durable_before = DurableSessionSnapshot::load(&fixture.tau_state(), &session_id)?;
+    assert_snapshot_a(&durable_before, &identities)?;
 
     let mut first = PtyProcess::spawn(
         fixture.command(Some(session_id.as_str())),

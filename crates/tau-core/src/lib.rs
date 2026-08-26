@@ -12,6 +12,7 @@ mod connection;
 mod journal_sync;
 mod memory;
 mod record_log;
+mod semantic_persistence;
 mod session;
 mod session_store;
 mod tool_registry;
@@ -39,6 +40,11 @@ pub use connection::{
     RoutedFrame, SharedConsumerId, SharedDeliveryGroup, SharedDeliveryTarget, VisibilityFilter,
 };
 pub use memory::{MemoryInbox, memory_connection};
+pub use semantic_persistence::{
+    PersistenceAdmissionError, PersistenceCapacity, PersistenceFailure, PersistenceFailureKind,
+    PersistenceGeneration, PersistenceLease, PreparedAgentStream, PreparedSessionStreams,
+    SemanticPersistenceOwner, SessionPreparationMode, StreamIdentity,
+};
 pub use session::{
     AgentEntry, AgentEventParent, AgentEventValidationError, AgentJournalFoldSemantics,
     AgentMessageDirection, AgentMeta, AgentMetadataEntry, AgentNode, AgentTree,

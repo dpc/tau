@@ -686,18 +686,9 @@ fn provider_terminal_append_failure_remains_retryable() {
         .as_deref()
         .expect("durable agent id")
         .to_owned();
-    let journal = harness
-        .session_runtime
-        .state_dir
-        .join("agents")
-        .join(&agent_id)
-        .join("events.cbor");
-    let backup = journal.with_extension("cbor.test-backup");
-    std::fs::rename(&journal, &backup).expect("park journal");
-    std::fs::create_dir(&journal).expect("block journal path");
-
     let report =
         Event::ToolResultReported(final_tool_result("store-fault", "owned_tool", "result"));
+    reject_semantic_admissions(&harness, 2);
     harness
         .handle_extension_event("conn-owner", TestProtocolItem::Event(report.clone()))
         .expect("raw report remains a bounded observation");
@@ -731,8 +722,6 @@ fn provider_terminal_append_failure_remains_retryable() {
             .any(|call| call.call_id.as_str() == "store-fault")
     );
 
-    std::fs::remove_dir(&journal).expect("remove journal blocker");
-    std::fs::rename(&backup, &journal).expect("restore journal");
     harness
         .handle_extension_event("conn-owner", TestProtocolItem::Event(report))
         .expect("later observation remains bounded");
@@ -848,28 +837,27 @@ fn direct_append_fault_discards_deferred_terminal() {
     );
     assert_eq!(harness.runtime_io.publication.deferred.len(), 1);
 
-    let journal = harness
-        .session_runtime
-        .state_dir
-        .join("agents")
-        .join(&agent_id)
-        .join("events.cbor");
-    let backup = journal.with_extension("cbor.direct-fault-backup");
-    std::fs::rename(&journal, &backup).expect("park journal");
-    std::fs::create_dir(&journal).expect("block journal");
+    reject_semantic_admissions(&harness, 2);
     assert!(
         harness
             .record_accepted_visible_user_interaction(&agent_id)
             .is_err()
     );
-    std::fs::remove_dir(&journal).expect("remove journal blocker");
-    std::fs::rename(&backup, &journal).expect("restore journal");
 
     reply(&mut harness, InterceptAction::Pass(None));
-    assert!(harness.runtime_io.publication.pending_intercept.is_none());
+    assert!(matches!(
+        harness
+            .runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
+        Some(Event::HarnessNotice(_))
+    ));
+    reply(&mut harness, InterceptAction::Pass(None));
     assert!(harness.runtime_io.publication.deferred.is_empty());
     assert!(
-        !harness
+        harness
             .tool_routing
             .tool_runtime
             .tool_agents
@@ -1709,23 +1697,10 @@ fn background_terminal_append_failure_remains_retryable() {
             .tool_turn
             .mark_backgrounded(&call_id)
     );
-    let agent_id = harness.agent_runtime.agent_registry.agents[&cid]
-        .identity
-        .agent_id
-        .clone()
-        .expect("durable agent");
-    let journal = harness
-        .session_runtime
-        .state_dir
-        .join("agents")
-        .join(&agent_id)
-        .join("events.cbor");
-    let backup = journal.with_extension("cbor.background-test-backup");
-    std::fs::rename(&journal, &backup).expect("park journal");
-    std::fs::create_dir(&journal).expect("block journal path");
     let report =
         Event::ToolResultReported(final_tool_result(call_id.as_str(), "owned_tool", "done"));
 
+    reject_semantic_admissions(&harness, 2);
     harness
         .handle_extension_event("conn-owner", TestProtocolItem::Event(report.clone()))
         .expect("raw report remains observable");
@@ -1750,8 +1725,6 @@ fn background_terminal_append_failure_remains_retryable() {
             .contains_key(&call_id)
     );
 
-    std::fs::remove_dir(&journal).expect("remove blocker");
-    std::fs::rename(&backup, &journal).expect("restore journal");
     harness
         .handle_extension_event("conn-owner", TestProtocolItem::Event(report))
         .expect("retry report");
@@ -1782,15 +1755,7 @@ fn failed_result_then_disconnect_commits_fresh_disconnected_classification() {
         .agent_id
         .clone()
         .expect("durable agent");
-    let journal = harness
-        .session_runtime
-        .state_dir
-        .join("agents")
-        .join(&agent_id)
-        .join("events.cbor");
-    let backup = journal.with_extension("cbor.competing-test-backup");
-    std::fs::rename(&journal, &backup).expect("park journal");
-    std::fs::create_dir(&journal).expect("block journal path");
+    reject_semantic_admissions(&harness, 2);
     harness
         .handle_extension_event(
             "conn-owner",
@@ -1806,8 +1771,6 @@ fn failed_result_then_disconnect_commits_fresh_disconnected_classification() {
         .tool_runtime
         .pending_terminal_observations[&call_id]
         .observation_id;
-    std::fs::remove_dir(&journal).expect("remove blocker");
-    std::fs::rename(&backup, &journal).expect("restore journal");
 
     harness.fail_pending_tool_calls_for_connection(&crate::test_connection_id("conn-owner"));
 
@@ -1836,15 +1799,7 @@ fn failed_result_then_cancellation_commits_fresh_cancellation_classification() {
         .agent_id
         .clone()
         .expect("durable agent");
-    let journal = harness
-        .session_runtime
-        .state_dir
-        .join("agents")
-        .join(&agent_id)
-        .join("events.cbor");
-    let backup = journal.with_extension("cbor.cancel-test-backup");
-    std::fs::rename(&journal, &backup).expect("park journal");
-    std::fs::create_dir(&journal).expect("block journal path");
+    reject_semantic_admissions(&harness, 2);
     harness
         .handle_extension_event(
             "conn-owner",
@@ -1860,8 +1815,6 @@ fn failed_result_then_cancellation_commits_fresh_cancellation_classification() {
         .tool_runtime
         .pending_terminal_observations[&call_id]
         .observation_id;
-    std::fs::remove_dir(&journal).expect("remove blocker");
-    std::fs::rename(&backup, &journal).expect("restore journal");
     let request = tau_proto::ObservationId::from_bytes([44; 16]);
     harness
         .tool_routing

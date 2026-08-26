@@ -1047,6 +1047,24 @@ pub(super) fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
     cid
 }
 
+/// Rejects the next durable semantic fact at the pre-publication admission cut.
+fn reject_next_semantic_admission(h: &Harness) {
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("durable test harness has one persistence owner")
+        .reject_next_admission_for_test();
+}
+
+/// Rejects a bounded sequence of semantic admissions at the same canonical cut.
+fn reject_semantic_admissions(h: &Harness, count: usize) {
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("durable test harness has one persistence owner")
+        .reject_admissions_for_test(count);
+}
+
 fn test_user_agent(h: &Harness) -> AgentId {
     h.agent_runtime
         .agent_registry

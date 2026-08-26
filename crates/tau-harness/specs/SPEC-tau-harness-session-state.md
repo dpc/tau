@@ -1,5 +1,12 @@
 # SPEC-tau-harness-session-state: Session State
 
+Durable session state uses explicit lifecycle preparation. `Resume` requires a
+valid manifest, existing lock, and both strict existing journals. `New` creates
+missing state; valid same-id history is sequence-continued without rehydrating
+the old runtime branch or truncating canonical bytes. Switch relinquishes agent,
+ordinary, and restore leases as one group. Activity is lossy coalesced debt that
+preserves prepared `created_at` and waits for its triggering frame disposition.
+
 ## Record justification
 
 Session state spans durable session and agent stores, harness cold restoration,

@@ -1149,11 +1149,6 @@ impl Harness {
         debug_assert_eq!(event.name().category(), &tau_proto::EventCategory::Message);
         let recorded_at = tau_proto::UnixMicros::now();
         let source_id = source.cloned();
-        let skip_debug_log = self.event_targets_ephemeral_agent(&event, None);
-        if !skip_debug_log && let Some(log) = &mut self.runtime_io.debug_log {
-            let result = log.log_published_event(source_id.as_ref(), &event, recorded_at);
-            self.observe_debug_log_result(result);
-        }
         let persisted_agent = match self.persist_message_fact_record(source, &event, recorded_at) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -1170,6 +1165,11 @@ impl Harness {
                 return false;
             }
         };
+        let skip_debug_log = self.event_targets_ephemeral_agent(&event, None);
+        if !skip_debug_log && let Some(log) = &mut self.runtime_io.debug_log {
+            let result = log.log_published_event(source_id.as_ref(), &event, recorded_at);
+            self.observe_debug_log_result(result);
+        }
 
         let seq = self.runtime_io.event_log.reserve_seq();
         #[cfg(test)]
@@ -1205,6 +1205,22 @@ impl Harness {
             Event::AgentStarted(started) => Some(started.clone()),
             _ => None,
         };
+        if creation.is_some()
+            && self
+                .session_runtime
+                .agent_store
+                .agent_persistence(agent_id)
+                .is_durable()
+            && !self
+                .session_runtime
+                .agent_store
+                .agent_id_is_reserved(agent_id)
+        {
+            self.session_runtime
+                .agent_store
+                .reserve_new_agent(agent_id)
+                .map_err(HarnessError::AgentStore)?;
+        }
         let outcome = self
             .session_runtime
             .agent_store
@@ -1598,36 +1614,7 @@ impl Harness {
         // Sampling the clock separately would let timing analyses
         // disagree with what live subscribers saw.
         let source_id = source.cloned();
-        let (seq, recorded_at) = self.runtime_io.event_log.append();
-        #[cfg(test)]
-        self.runtime_io.event_log.record_for_test(
-            seq,
-            recorded_at,
-            source_id.clone(),
-            event.clone(),
-        );
-        #[cfg(not(test))]
-        let _ = seq;
-        // Mirror every committed event into the JSONL debug log as a
-        // `published` line. The inbound `from_connection` lines carry
-        // the raw frame the agent sent us, but for events that the
-        // harness enriches (notably `ProviderResponseFinished`, where
-        // `token_usage` is built here from session-wide state the
-        // agent never sees), the enriched payload only exists on the
-        // outbound copy. Offline cache/cost analysis tools that read
-        // `events.jsonl` would otherwise see zeros where the running
-        // session totals belong.
-        let debug_log_started = Instant::now();
-        let skip_debug_log = peer_context
-            .extension
-            .as_ref()
-            .is_some_and(|extension| extension.shell_report_targets_ephemeral)
-            || self.event_targets_ephemeral_agent(&event, sync_head_for.as_ref());
-        if !skip_debug_log && let Some(log) = &mut self.runtime_io.debug_log {
-            let result = log.log_published_event(source_id.as_ref(), &event, recorded_at);
-            self.observe_debug_log_result(result);
-        }
-        commit_timing.debug_log = debug_log_started.elapsed();
+        let recorded_at = tau_proto::UnixMicros::now();
         let persistence_source = match &event {
             // A configured peer's durable request must not retain its run-local
             // connection id. The stable configured publisher is the only identity
@@ -1661,25 +1648,6 @@ impl Harness {
             Ok(append_outcome) => append_outcome,
             Err(error) => {
                 commit_timing.result = CommitEventTimingResult::SemanticPersistError;
-                if let Event::ShellCommandFinished(finished) = &event {
-                    // The provider route has already completed. Settle the live UI
-                    // exactly once even though this fact cannot enter replay, and
-                    // never inject output whose canonical durability failed.
-                    self.ui_runtime
-                        .pending_ui_shell_output_injections
-                        .remove(&finished.command_id);
-                    self.ui_runtime
-                        .active_ui_shell_command_ids
-                        .remove(&finished.command_id);
-                    self.release_pending_ephemeral_shell_canonical_marker(&finished.command_id);
-                    let frame = HarnessOutputMessage::deliver_live(
-                        recorded_at,
-                        Event::ShellCommandFinished(finished.clone()),
-                    );
-                    self.runtime_io
-                        .bus
-                        .publish_from_excluding_kinds_without_report(source, frame, &[]);
-                }
                 self.rollback_rejected_activation_successor(&event);
                 self.clear_rejected_eager_compaction_start(&event);
                 self.rollback_failed_wait_compaction_terminal(&event);
@@ -1727,6 +1695,27 @@ impl Harness {
                 return;
             }
         };
+        let seq = self.runtime_io.event_log.reserve_seq();
+        #[cfg(test)]
+        self.runtime_io.event_log.record_for_test(
+            seq,
+            recorded_at,
+            source_id.clone(),
+            event.clone(),
+        );
+        #[cfg(not(test))]
+        let _ = seq;
+        let debug_log_started = Instant::now();
+        let skip_debug_log = peer_context
+            .extension
+            .as_ref()
+            .is_some_and(|extension| extension.shell_report_targets_ephemeral)
+            || self.event_targets_ephemeral_agent(&event, sync_head_for.as_ref());
+        if !skip_debug_log && let Some(log) = &mut self.runtime_io.debug_log {
+            let result = log.log_published_event(source_id.as_ref(), &event, recorded_at);
+            self.observe_debug_log_result(result);
+        }
+        commit_timing.debug_log = debug_log_started.elapsed();
         if let Event::SessionAgentLoaded(loaded) = &event
             && loaded.session_id == self.session_runtime.current_session_id
         {
@@ -2060,15 +2049,41 @@ impl Harness {
                             tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
                         ) =>
                     {
+                        assert!(
+                            self.session_runtime
+                                .persistence_owner
+                                .as_ref()
+                                .is_some_and(|owner| owner
+                                    .wait_for_latest_durability_for_test(Duration::from_secs(5))),
+                            "planned-response persistence barrier timed out"
+                        );
                         reach(OutputLengthCommitCut::AfterPlannedResponse);
                     }
                     AgentPublishCompletion::OutputLengthSteer { .. } => {
+                        assert!(
+                            self.session_runtime
+                                .persistence_owner
+                                .as_ref()
+                                .is_some_and(|owner| owner
+                                    .wait_for_latest_durability_for_test(Duration::from_secs(5))),
+                            "continuation-steer persistence barrier timed out"
+                        );
                         reach(OutputLengthCommitCut::AfterContinuationSteer);
                     }
                     _ => {}
                 }
             }
             self.complete_agent_publish(&cid, completion, through);
+        }
+        #[cfg(feature = "output-length-test-barrier")]
+        if let Some(cut) = crate::output_length_test_barrier::observe_typed_receipt(&event) {
+            assert!(
+                self.session_runtime.persistence_owner.as_ref().is_some_and(
+                    |owner| owner.wait_for_latest_durability_for_test(Duration::from_secs(5))
+                ),
+                "typed-receipt persistence barrier timed out"
+            );
+            crate::output_length_test_barrier::reach(cut);
         }
         if let Some(completion) = watch_retirement.as_ref() {
             self.finish_watch_retirement_delivery(completion, true);

@@ -334,14 +334,7 @@ fn output_length_reactive_compaction_terminalizes_exact_descendant() {
             initial: false,
         },
     );
-    let journal_path = td
-        .path()
-        .join("agents")
-        .join(source.agent_id.as_str())
-        .join("events.cbor");
-    let backup_path = journal_path.with_extension("cbor.reactive-backup");
-    std::fs::rename(&journal_path, &backup_path).expect("park journal");
-    std::fs::create_dir(&journal_path).expect("reject planned rejection append");
+    reject_semantic_admissions(&h, 2);
     h.handle_provider_response_finished(context_overflow_response(&successor))
         .expect("reserved successor context rejection");
     assert_eq!(
@@ -363,8 +356,6 @@ fn output_length_reactive_compaction_terminalizes_exact_descendant() {
         })),
     )
     .expect("register reactive start interceptor");
-    std::fs::remove_dir(&journal_path).expect("remove rejection directory");
-    std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.retry_pending_agent_publications();
     assert!(matches!(
         h.runtime_io
@@ -374,8 +365,7 @@ fn output_length_reactive_compaction_terminalizes_exact_descendant() {
             .map(|pending| &pending.event),
         Some(Event::AgentStandaloneCompactionStarted(_))
     ));
-    std::fs::rename(&journal_path, &backup_path).expect("park journal for start");
-    std::fs::create_dir(&journal_path).expect("reject reactive start append");
+    reject_next_semantic_admission(&h);
     h.handle_extension_event(
         "reactive-start-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -383,8 +373,6 @@ fn output_length_reactive_compaction_terminalizes_exact_descendant() {
         })),
     )
     .expect("release reactive start into append failure");
-    std::fs::remove_dir(&journal_path).expect("remove start rejection directory");
-    std::fs::rename(&backup_path, &journal_path).expect("restore journal after start");
     h.retry_pending_agent_publications();
     h.handle_disconnect(&crate::test_connection_id("reactive-start-interceptor"));
     let compact = read_nth_prompt_created(&h, 2);

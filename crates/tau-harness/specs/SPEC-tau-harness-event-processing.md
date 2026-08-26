@@ -1,5 +1,11 @@
 # SPEC-tau-harness-event-processing: Event Processing
 
+Durable semantic facts cross persistence admission before EventLog, debug JSONL,
+subscriptions, reactions, and continuation mutation. `Full`, unavailable, stale,
+or staging failures leave those consumers unchanged. Worker I/O follows
+acceptance; retryable failures retain the FIFO head, and rejected
+`ShellCommandFinished` facts receive no substitute canonical broadcast.
+
 ## Record justification
 
 Publication spans harness intake, admission and activation staging, interceptor

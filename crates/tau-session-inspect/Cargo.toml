@@ -25,3 +25,6 @@ tau-config.workspace = true
 tau-core.workspace = true
 tau-proto.workspace = true
 tempfile.workspace = true
+
+[dev-dependencies]
+tau-core = { workspace = true, features = ["test-legacy-writer"] }

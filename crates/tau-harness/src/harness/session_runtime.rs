@@ -798,7 +798,9 @@ impl Harness {
         self.peer_messaging.pending_external_message_auth.clear();
         self.publish_event(
             None,
-            Event::SessionShutdown(tau_proto::SessionShutdown { session_id: old_id }),
+            Event::SessionShutdown(tau_proto::SessionShutdown {
+                session_id: old_id.clone(),
+            }),
         );
         self.fail_all_pending_ui_shell_commands(
             "the session shut down before the shell command completed",
@@ -1081,6 +1083,31 @@ impl Harness {
         // canceled, cancel transaction-owned checkpoints, and commit the queued
         // mandatory SessionShutdown before switching the bound session.
         self.quiesce_synchronized_publications_for_rollover();
+        if let Some(owner) = self.session_runtime.persistence_owner.as_ref() {
+            let mut leases = self
+                .session_runtime
+                .agent_store
+                .managed_persistence_leases();
+            leases.extend(
+                self.session_runtime
+                    .store
+                    .managed_persistence_leases(old_id.as_str()),
+            );
+            if let Err(error) = owner.release(&leases, Duration::from_secs(2)) {
+                owner.fail_stop();
+                self.session_runtime.agent_store.finish_managed_release();
+                self.session_runtime
+                    .store
+                    .finish_managed_release(old_id.as_str());
+                return Err(HarnessError::Participant(format!(
+                    "terminal semantic persistence release failure after session shutdown: {error}"
+                )));
+            }
+            self.session_runtime.agent_store.finish_managed_release();
+            self.session_runtime
+                .store
+                .finish_managed_release(old_id.as_str());
+        }
         self.prompt_coordination
             .prompt_runtime
             .pending_publish_completions
@@ -1145,12 +1172,14 @@ impl Harness {
         self.session_runtime.current_session_start_reason = reason;
         self.reset_extension_restart_budgets_at(Instant::now());
         if self.session_runtime.storage_mode.is_durable() {
-            // Take write ownership before replay loads the durable sequence
-            // cursor. Retention cleanup holds this same lock through deletion.
-            let _ = self
-                .session_runtime
+            let mode = if matches!(reason, tau_proto::SessionStartReason::Resume) {
+                tau_core::SessionPreparationMode::Resume
+            } else {
+                tau_core::SessionPreparationMode::New
+            };
+            self.session_runtime
                 .store
-                .lock_and_load_session(new_session_id.as_str())?;
+                .prepare_session(new_session_id.as_str(), mode)?;
         }
         if matches!(reason, tau_proto::SessionStartReason::Resume) {
             self.rehydrate_agents_from_session();
@@ -1159,12 +1188,6 @@ impl Harness {
         self.publish_delegate_roles_context();
 
         if self.session_runtime.storage_mode.is_durable() {
-            // Refresh metadata after replay; write ownership was acquired before
-            // loading the membership log above.
-            self.session_runtime
-                .store
-                .record_session_meta(new_session_id.as_str())?;
-
             // Send the new debug log to the new session's dir, so each
             // session is self-contained.
             let _ = self.enable_debug_log(&self.sessions_dir().join(new_session_id.as_str()));

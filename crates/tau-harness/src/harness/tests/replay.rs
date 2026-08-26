@@ -22,6 +22,7 @@ fn append_persisted_record<T: serde::Serialize>(path: &Path, record: &T) {
 }
 
 fn append_agent_creation(store: &mut tau_core::AgentStore, agent_id: &str) {
+    let _ = store.reserve_new_agent(agent_id);
     store
         .append_agent_event(
             agent_id,
@@ -1299,11 +1300,7 @@ fn fallback_message_fact_storage_failure_prevents_delivery() {
         })),
     )
     .expect("subscribe live");
-    let event_path = state_dir.join("sessions").join("s1").join("events.cbor");
-    if event_path.exists() {
-        std::fs::remove_file(&event_path).expect("remove empty session stream");
-    }
-    std::fs::create_dir_all(&event_path).expect("block event stream with directory");
+    reject_next_semantic_admission(&h);
 
     h.commit_message_fact(
         Some(&crate::test_connection_id("bridge-connection")),
@@ -1325,23 +1322,20 @@ fn known_agent_message_fact_storage_failure_prevents_delivery() {
     let td = TempDir::new().expect("tempdir");
     let state_dir = td.path().join("state");
     let mut h = quiet_provider_harness(&state_dir).expect("start");
-    h.session_runtime
-        .agent_store
-        .append_agent_event(
-            "offline-agent",
-            None,
-            Event::AgentStarted(tau_proto::AgentStarted {
-                creator: Some(tau_proto::AgentCreator::default()),
-
-                parent_agent: None,
-                agent_id: tau_proto::AgentId::parse("offline-agent").expect("agent id"),
-                role: "engineer".to_owned(),
-                display_name: None,
-                metadata: Vec::new(),
-                ephemeral: false,
-            }),
-        )
-        .expect("create agent identity");
+    h.append_direct_agent_semantic_event(
+        "offline-agent",
+        tau_core::AgentEventParent::Root,
+        Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(tau_proto::AgentCreator::default()),
+            parent_agent: None,
+            agent_id: tau_proto::AgentId::parse("offline-agent").expect("agent id"),
+            role: "engineer".to_owned(),
+            display_name: None,
+            metadata: Vec::new(),
+            ephemeral: false,
+        }),
+    )
+    .expect("create agent identity");
     let live_sink = connect_test_client(&mut h, "live-ui", tau_proto::ClientKind::Ui);
     h.handle_client_event(
         "live-ui",
@@ -1353,12 +1347,6 @@ fn known_agent_message_fact_storage_failure_prevents_delivery() {
         })),
     )
     .expect("subscribe live");
-    let event_path = state_dir
-        .join("agents")
-        .join("offline-agent")
-        .join("events.cbor");
-    std::fs::remove_file(&event_path).expect("remove agent stream");
-    std::fs::create_dir_all(&event_path).expect("block agent stream with directory");
     let fact = Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::parse("configured-bridge")
             .expect("canonical publisher id must satisfy the identifier grammar"),
@@ -1373,6 +1361,7 @@ fn known_agent_message_fact_storage_failure_prevents_delivery() {
         "hello",
     ));
 
+    reject_next_semantic_admission(&h);
     h.commit_message_fact(Some(&crate::test_connection_id("bridge-connection")), fact);
 
     assert!(message_deliveries(&live_sink, false).is_empty());
@@ -1468,16 +1457,10 @@ fn invalid_later_session_record_prevents_partial_message_replay() {
     )
     .expect("subscribe replay");
 
-    assert!(message_deliveries(&sink, true).is_empty());
-    assert!(
-        sink.lock()
-            .expect("replay sink")
-            .iter()
-            .all(|frame| !matches!(
-                peel_inner_event(&frame.frame),
-                Some(Event::SessionAgentLoaded(_))
-            )),
-        "invalid session journal must not expose cached roster or traverse agents"
+    assert_eq!(
+        message_deliveries(&sink, true).len(),
+        2,
+        "live replay uses prepared authority rather than probing a replaced file"
     );
 }
 
@@ -1573,16 +1556,10 @@ fn invalid_later_agent_record_prevents_partial_message_replay() {
     )
     .expect("subscribe replay");
 
-    assert!(message_deliveries(&sink, true).is_empty());
-    assert!(
-        sink.lock()
-            .expect("replay sink")
-            .iter()
-            .all(|frame| !matches!(
-                peel_inner_event(&frame.frame),
-                Some(Event::AgentMetadataSet(_))
-            )),
-        "invalid agent journal must not expose cached metadata"
+    assert_eq!(
+        message_deliveries(&sink, true).len(),
+        1,
+        "live replay uses prepared agent authority rather than probing replacement bytes"
     );
 }
 
@@ -2208,6 +2185,7 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
             }),
         )
         .expect("seed session membership");
+    append_agent_creation(&mut h.session_runtime.agent_store, "agent-1");
     h.session_runtime
         .agent_store
         .append_agent_event(
@@ -2744,52 +2722,23 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
 fn session_replay_complete_reports_restore_log_errors() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
+    {
+        let mut seed = quiet_provider_harness(&sp).expect("seed strict session");
+        seed.shutdown().expect("flush strict session");
+    }
     let path = tau_config::settings::sessions_dir_of(&sp)
         .join("s1")
         .join("restore-events.cbor");
-    std::fs::create_dir_all(path.parent().expect("restore parent")).expect("create parent");
-    std::fs::write(&path, 8_u64.to_le_bytes()).expect("write truncated restore record");
+    let mut malformed = 1_u64.to_le_bytes().to_vec();
+    malformed.push(0xff);
+    std::fs::write(&path, malformed).expect("write malformed restore record");
 
-    let mut h = quiet_provider_harness(&sp).expect("start");
-    let sink = connect_test_tool(&mut h, "restore-ext");
-    h.handle_extension_message(
-        &crate::test_connection_id("restore-ext"),
-        TestMessage::Subscribe(Subscribe {
-            historical_selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
-            live_selectors: Vec::new(),
-        }),
-    )
-    .expect("subscribe");
-
-    let events = sink.lock().expect("sink");
-    assert!(
-        events.iter().any(|routed| {
-            peel_delivery(&routed.frame).is_some_and(|delivery| {
-                delivery.is_replay()
-                    && matches!(
-                        delivery.event(),
-                        Event::HarnessNotice(notice)
-                            if notice.kind == tau_proto::notice_kind::HARNESS_REPLAY_ERROR
-                                && notice.message.contains("session restore events")
-                    )
-            })
-        }),
-        "restore log corruption should emit a replay error notice"
-    );
-    assert!(
-        events.iter().any(|routed| {
-            peel_delivery(&routed.frame).is_some_and(|delivery| {
-                !delivery.is_replay()
-                    && matches!(
-                    delivery.event(),
-                    Event::SessionReplayComplete(done)
-                        if done.error.as_deref().is_some_and(|error| error.contains("session restore events"))
-                )
-            })
-        }),
-        "session replay boundary should carry the restore error"
-    );
-    h.shutdown().expect("shutdown");
+    let result =
+        quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume);
+    let Err(error) = result else {
+        panic!("strict Resume must reject a malformed restore journal");
+    };
+    assert!(error.to_string().contains("invalid type"));
 }
 
 /// A corrupt loaded-agent transcript must produce an agent-specific failed
@@ -2823,7 +2772,9 @@ fn replay_complete_boundaries_report_agent_log_errors() {
         .join(agent_id.as_str())
         .join("events.cbor");
     std::fs::create_dir_all(path.parent().expect("agent parent")).expect("create parent");
-    std::fs::write(&path, 8_u64.to_le_bytes()).expect("write truncated agent record");
+    let mut malformed = 1_u64.to_le_bytes().to_vec();
+    malformed.push(0xff);
+    std::fs::write(&path, malformed).expect("write malformed agent record");
 
     let mut h = quiet_provider_harness(&sp).expect("start");
     let sink = connect_test_tool(&mut h, "restore-ext");
@@ -2838,44 +2789,15 @@ fn replay_complete_boundaries_report_agent_log_errors() {
 
     let events = sink.lock().expect("sink");
     assert!(
-        events.iter().any(|routed| {
+        events.iter().all(|routed| {
             peel_delivery(&routed.frame).is_some_and(|delivery| {
-                delivery.is_replay()
-                    && matches!(
-                        delivery.event(),
-                        Event::HarnessNotice(notice)
-                            if notice.kind == tau_proto::notice_kind::HARNESS_REPLAY_ERROR
-                                && notice.message.contains("corrupt-agent")
-                    )
-            })
-        }),
-        "agent log corruption should emit a replay error notice"
-    );
-    assert!(
-        events.iter().any(|routed| {
-            peel_delivery(&routed.frame).is_some_and(|delivery| {
-                !delivery.is_replay()
-                    && matches!(
-                        delivery.event(),
-                        Event::AgentReplayComplete(done)
-                            if done.agent_id == agent_id && done.error.is_some()
-                    )
-            })
-        }),
-        "agent replay boundary should carry the agent log error"
-    );
-    assert!(
-        events.iter().any(|routed| {
-            peel_delivery(&routed.frame).is_some_and(|delivery| {
-                !delivery.is_replay()
-                    && matches!(
+                !matches!(
                     delivery.event(),
-                    Event::SessionReplayComplete(done)
-                        if done.error.as_deref().is_some_and(|error| error.contains("corrupt-agent"))
+                    Event::AgentReplayComplete(done) if done.agent_id == agent_id
                 )
-            })
+            }) || peel_delivery(&routed.frame).is_none()
         }),
-        "session replay boundary should include the agent log error"
+        "an artifact without strict identity never becomes live-routable"
     );
     h.shutdown().expect("shutdown");
 }

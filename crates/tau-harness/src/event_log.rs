@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+#[cfg(test)]
 use tau_proto::UnixMicros;
 #[cfg(test)]
 use tau_proto::{ConnectionId, Event};
@@ -472,17 +473,10 @@ impl EventLog {
         seq
     }
 
-    /// Assigns a sequence and wall-clock timestamp for one live committed
-    /// event.
-    ///
-    /// Stamping happens at the publish chokepoint so the wire delivery, any
-    /// durable semantic record, and the debug JSONL line all carry the same
-    /// timestamp. The timestamp is returned to the caller; live routing later
-    /// retains its delivery envelope only while consumer cursors require it.
+    /// Assigns a sequence and timestamp for focused event-log tests.
+    #[cfg(test)]
     pub(crate) fn append(&self) -> (EventLogSeq, UnixMicros) {
-        let recorded_at = UnixMicros::now();
-        let seq = self.reserve_seq();
-        (seq, recorded_at)
+        (self.reserve_seq(), UnixMicros::now())
     }
 
     /// Records a committed event for test assertions only.

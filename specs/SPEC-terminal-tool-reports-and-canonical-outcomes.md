@@ -92,16 +92,18 @@ transcript-owned foreground call, the durable provider terminal is the sole
 completion authority. Interception parking remains precommit, and routed-call
 tracking, wait and loop settlement, foreground completion or backgrounding,
 delegate teardown, and next-inference eligibility remain unchanged until its
-semantic append succeeds. Renderer projection begins only after that append and
+semantic-persistence admission succeeds. Renderer projection begins only after
+that admission and
 is not transacted with it. Completed-call tracking then prevents a duplicate
 report from repeating canonical projections or cleanup; the duplicate report
 itself remains an ordinary committed peer observation.
 
-An authoritative foreground append error rejects that terminal operation before
-renderer projection or terminal-dependent state. Clean open, lock, and write
-failures remain retryable; an unrestored partial write poisons only its journal.
-Background sync failure neither retracts the semantic append nor fail-stops the
-live harness epoch. Reopen or restart rebuilds the longest valid prefix; cold
+Count, byte, stale-capability, unavailable-owner, and fallible staging failures
+reject that terminal operation before renderer projection or terminal-dependent
+state. After acceptance, clean open, lock, and exact-rollback write failures retain
+the authoritative FIFO head for deadline retry; an unprovable rollback poisons only
+its generation. Later write or sync failure never retracts the accepted live fact.
+Reopen or restart rebuilds the longest valid prefix; cold
 recovery never automatically resends an uncertain tool, provider, or compaction
 effect.
 The writeback and recovery boundary is governed by

@@ -780,6 +780,8 @@ fn deterministic_restart_preserves_response_before_successor_input()
     let first = recv_until_finished(&mut peer_a)?;
     assert_assistant(&first.output_items, R);
     let agent_id = first.agent_id;
+    disconnect_ui(&mut peer_a)?;
+    server_a.finish()?;
     let snapshot_a = DurableSnapshot::load(
         fixture.harness_state_dir(),
         &"deterministic-e2e-session".parse()?,
@@ -792,8 +794,6 @@ fn deterministic_restart_preserves_response_before_successor_input()
             .join(agent_id.as_str())
             .join("events.cbor"),
     )?;
-    disconnect_ui(&mut peer_a)?;
-    server_a.finish()?;
 
     let socket_b = fixture.socket_path("placement-boot-b");
     let server_b = spawn_daemon(

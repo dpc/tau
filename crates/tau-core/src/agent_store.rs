@@ -16,6 +16,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -32,14 +33,18 @@ use crate::agent_checkpoint::{
     read_journal_bound_checkpoint, write_checkpoint_atomic,
 };
 use crate::record_log::{FramedAppendState, MAX_RECORD_BYTES, missing_directories};
+use crate::semantic_persistence::{AgentCheckpointCandidate, RetentionCharge, StagedFrame};
 use crate::session::{
     AgentEventParent, AgentEventValidationError, AgentJournalFoldSemantics, AgentMeta, AgentTree,
     PersistedAgentEvent, PersistedAgentEventSeq, PersistedEventSource,
 };
+use crate::{PersistenceAdmissionError, PersistenceLease, SemanticPersistenceOwner};
 
 /// Errors returned by the append-only agent store.
 #[derive(Debug)]
 pub enum AgentStoreError {
+    /// Bounded semantic persistence admission or lifecycle failure.
+    Persistence(PersistenceAdmissionError),
     CreateParentDirectory {
         path: PathBuf,
         source: io::Error,
@@ -125,6 +130,7 @@ mod tests;
 impl fmt::Display for AgentStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Persistence(source) => write!(f, "{source}"),
             Self::CreateParentDirectory { path, source } => write!(
                 f,
                 "failed to create parent directory for agent store {}: {source}",
@@ -220,6 +226,7 @@ impl fmt::Display for AgentStoreError {
 impl Error for AgentStoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Persistence(source) => Some(source),
             Self::CreateParentDirectory { source, .. } => Some(source),
             Self::Open { source, .. } => Some(source),
             Self::Read { source, .. } => Some(source),
@@ -380,8 +387,9 @@ pub struct AgentAppendOutcome {
 ///
 /// Durable frame failures return their original I/O error after an exact-EOF
 /// rollback. If truncation cannot restore that EOF, the store poisons only that
-/// journal and rejects later appends before reopening it. Complete frames enter
-/// the tree immediately and a coalesced worker syncs them in the background.
+/// journal and rejects later appends before reopening it. Harness-managed
+/// stores admit complete replacements through the lifecycle-owned persistence
+/// engine; ordinary public constructors are read-only inspection views.
 ///
 /// Durable replay and memory-only parity follow
 /// `ARCH-tau-core`.
@@ -390,10 +398,8 @@ pub struct AgentStore {
     agents_dir: PathBuf,
     /// Default persistence for agents without a per-agent ephemeral override.
     default_persistence: AgentPersistenceMode,
-    /// Failure-atomic append and per-journal poison state.
-    framed_appends: FramedAppendState,
-    /// Store-root boundary re-covered after the first successful branch lock.
-    pending_root_boundary: Option<PathBuf>,
+    /// Legacy/offline writer state, structurally absent from managed stores.
+    legacy_io: Option<LegacyAgentIo>,
     agents: HashMap<AgentId, AgentTree>,
     /// Agents whose validated stream begins with their immutable creation fact.
     created_agents: HashSet<AgentId>,
@@ -405,16 +411,66 @@ pub struct AgentStore {
     ephemeral_meta: HashMap<AgentId, AgentMeta>,
     /// Journal-derived summaries retained alongside loaded durable trees.
     summaries: HashMap<AgentId, AgentSummary>,
-    /// Agents whose latest derived checkpoint could not be atomically
-    /// published.
+    /// Unique Harness-lifecycle persistence owner for managed durable streams.
+    persistence_owner: Option<Arc<SemanticPersistenceOwner>>,
+    /// Exact prepared generation capability for each durable live stream.
+    persistence_leases: HashMap<AgentId, PersistenceLease>,
+    /// Atomic per-agent fold, summary, and creation projection for managed
+    /// streams.
+    managed_projections: HashMap<AgentId, ManagedAgentProjection>,
+}
+
+/// Mutable compatibility writer retained only by explicit legacy constructors.
+#[derive(Debug)]
+struct LegacyAgentIo {
+    /// Failure-atomic append and per-journal poison state.
+    framed_appends: FramedAppendState,
+    /// Store-root boundary re-covered after the first successful branch lock.
+    pending_root_boundary: Option<PathBuf>,
+    /// Checkpoints whose last compatibility publication failed.
     dirty_checkpoints: HashSet<AgentId>,
-    /// Held flocks per agent, acquired lazily on first write. Released
-    /// when this store is dropped (the OS releases the flock when the
-    /// file handle closes).
+    /// Lazily acquired per-agent flocks.
     locks: HashMap<AgentId, File>,
 }
 
+/// Complete off-side replacement committed beside one managed agent frame.
+#[derive(Clone, Debug)]
+struct ManagedAgentProjection {
+    /// Deterministic transcript fold.
+    tree: AgentTree,
+    /// Journal-derived list/checkpoint summary.
+    summary: AgentSummary,
+    /// Whether sequence zero is the matching immutable creation fact.
+    created: bool,
+    /// Accepted same-daemon replay records, including an asynchronously durable
+    /// suffix.
+    events: Vec<PersistedAgentEvent>,
+}
+
 impl AgentStore {
+    fn require_mutation_authority(&self) -> Result<(), AgentStoreError> {
+        if self.default_persistence.is_durable()
+            && self.persistence_owner.is_none()
+            && self.legacy_io.is_none()
+        {
+            return Err(AgentStoreError::Persistence(
+                PersistenceAdmissionError::Unavailable,
+            ));
+        }
+        Ok(())
+    }
+    fn legacy_io(&self) -> &LegacyAgentIo {
+        self.legacy_io
+            .as_ref()
+            .expect("legacy mutation is unreachable in a managed store")
+    }
+
+    fn legacy_io_mut(&mut self) -> &mut LegacyAgentIo {
+        self.legacy_io
+            .as_mut()
+            .expect("legacy mutation is unreachable in a managed store")
+    }
+
     /// Opens the agent store rooted at `agents_dir`, eagerly loading
     /// every agent subdirectory found there.
     ///
@@ -455,7 +511,41 @@ impl AgentStore {
     /// loading agent event logs. Individual agents are loaded on
     /// write; callers that need a pre-existing tree should use
     /// [`Self::open`].
+    #[cfg(not(any(test, feature = "test-legacy-writer")))]
     pub fn open_lazy(agents_dir: impl Into<PathBuf>) -> Result<Self, AgentStoreError> {
+        Ok(Self::read_only(agents_dir))
+    }
+
+    #[cfg_attr(all(feature = "test-legacy-writer", not(test)), allow(dead_code))]
+    fn read_only(agents_dir: impl Into<PathBuf>) -> Self {
+        let agents_dir = agents_dir.into();
+        Self {
+            agents_dir,
+            default_persistence: AgentPersistenceMode::Durable,
+            legacy_io: None,
+            agents: HashMap::new(),
+            created_agents: HashSet::new(),
+            ephemeral_agents: HashSet::new(),
+            ephemeral_events: HashMap::new(),
+            ephemeral_meta: HashMap::new(),
+            summaries: HashMap::new(),
+            persistence_owner: None,
+            persistence_leases: HashMap::new(),
+            managed_projections: HashMap::new(),
+        }
+    }
+
+    /// Opens the compatibility fixture writer when the explicit test feature is
+    /// active.
+    #[cfg(any(test, feature = "test-legacy-writer"))]
+    pub fn open_lazy(agents_dir: impl Into<PathBuf>) -> Result<Self, AgentStoreError> {
+        Self::open_legacy_writer(agents_dir)
+    }
+
+    /// Opens the test-only foreground compatibility writer.
+    #[cfg(any(test, feature = "test-legacy-writer"))]
+    #[doc(hidden)]
+    pub fn open_legacy_writer(agents_dir: impl Into<PathBuf>) -> Result<Self, AgentStoreError> {
         let agents_dir = agents_dir.into();
         let created_directories = missing_directories(&agents_dir);
         fs::create_dir_all(&agents_dir).map_err(|source| {
@@ -470,16 +560,21 @@ impl AgentStore {
         Ok(Self {
             agents_dir: agents_dir.clone(),
             default_persistence: AgentPersistenceMode::Durable,
-            framed_appends,
-            pending_root_boundary: Some(agents_dir.clone()),
+            legacy_io: Some(LegacyAgentIo {
+                framed_appends,
+                pending_root_boundary: Some(agents_dir.clone()),
+                dirty_checkpoints: HashSet::new(),
+                locks: HashMap::new(),
+            }),
             agents: HashMap::new(),
             created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
             ephemeral_events: HashMap::new(),
             ephemeral_meta: HashMap::new(),
             summaries: HashMap::new(),
-            dirty_checkpoints: HashSet::new(),
-            locks: HashMap::new(),
+            persistence_owner: None,
+            persistence_leases: HashMap::new(),
+            managed_projections: HashMap::new(),
         })
     }
 
@@ -489,17 +584,42 @@ impl AgentStore {
         Self {
             agents_dir: agents_dir.into(),
             default_persistence: AgentPersistenceMode::Ephemeral,
-            framed_appends: FramedAppendState::default(),
-            pending_root_boundary: None,
+            legacy_io: None,
             agents: HashMap::new(),
             created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
             ephemeral_events: HashMap::new(),
             ephemeral_meta: HashMap::new(),
             summaries: HashMap::new(),
-            dirty_checkpoints: HashSet::new(),
-            locks: HashMap::new(),
+            persistence_owner: None,
+            persistence_leases: HashMap::new(),
+            managed_projections: HashMap::new(),
         }
+    }
+
+    /// Opens a durable store managed by the unique Harness persistence owner.
+    pub fn open_managed(
+        agents_dir: impl Into<PathBuf>,
+        owner: Arc<SemanticPersistenceOwner>,
+    ) -> Result<Self, AgentStoreError> {
+        let agents_dir = agents_dir.into();
+        owner
+            .prepare_root(agents_dir.clone())
+            .map_err(AgentStoreError::Persistence)?;
+        Ok(Self {
+            agents_dir,
+            default_persistence: AgentPersistenceMode::Durable,
+            legacy_io: None,
+            agents: HashMap::new(),
+            created_agents: HashSet::new(),
+            ephemeral_agents: HashSet::new(),
+            ephemeral_events: HashMap::new(),
+            ephemeral_meta: HashMap::new(),
+            summaries: HashMap::new(),
+            persistence_owner: Some(owner),
+            persistence_leases: HashMap::new(),
+            managed_projections: HashMap::new(),
+        })
     }
 
     /// Returns whether `agent_id` must use the process-local replay stream.
@@ -519,10 +639,25 @@ impl AgentStore {
         if !events_path.exists() {
             return Ok(());
         }
+        if self.legacy_io.is_none() {
+            let events = load_agent_events(&events_path)?;
+            let tree = AgentTree::try_from_events(aid.clone(), &events)
+                .map_err(|source| AgentStoreError::InvalidEvent { source })?;
+            let mut summary = AgentSummary::default();
+            for record in &events {
+                summary.apply(record);
+            }
+            if records_begin_with_creation(&aid, &events) {
+                self.created_agents.insert(aid.clone());
+            }
+            self.summaries.insert(aid.clone(), summary);
+            self.agents.insert(aid, tree);
+            return Ok(());
+        }
         // A temporary nonblocking lock lets an ordinary strict load migrate a
         // stable legacy/missing checkpoint without contending with a daemon.
-        // Writers already retain the same lock in `self.locks`.
-        let temporary_lock = if self.locks.contains_key(&aid) {
+        // Writers already retain the same lock in `self.legacy_io().locks`.
+        let temporary_lock = if self.legacy_io().locks.contains_key(&aid) {
             None
         } else {
             let lock_path = self.agent_dir(agent_id).join("lock");
@@ -538,9 +673,10 @@ impl AgentStore {
                 .ok()
                 .filter(|file| FileExt::try_lock_exclusive(file).is_ok())
         };
-        let events = if self.locks.contains_key(&aid) {
+        let events = if self.legacy_io().locks.contains_key(&aid) {
             let mut tree = AgentTree::from_events(aid.clone(), &[]);
             let recovered = self
+                .legacy_io_mut()
                 .framed_appends
                 .recover(&events_path, |record: &PersistedAgentEvent| {
                     tree.apply_persisted_record(record).is_ok()
@@ -554,7 +690,7 @@ impl AgentStore {
                 if let Err(error) = fs::remove_file(&checkpoint_path)
                     && error.kind() != io::ErrorKind::NotFound
                 {
-                    self.dirty_checkpoints.insert(aid.clone());
+                    self.legacy_io_mut().dirty_checkpoints.insert(aid.clone());
                     eprintln!(
                         "tau: failed to invalidate repaired checkpoint {}: {error}",
                         checkpoint_path.display()
@@ -575,7 +711,7 @@ impl AgentStore {
             summary.apply(record);
         }
         if records_begin_with_creation(&aid, &events)
-            && (self.locks.contains_key(&aid) || temporary_lock.is_some())
+            && (self.legacy_io().locks.contains_key(&aid) || temporary_lock.is_some())
         {
             let migration = (|| -> io::Result<()> {
                 let mut journal = File::open(&events_path)?;
@@ -589,13 +725,13 @@ impl AgentStore {
                 write_checkpoint_atomic(&self.agent_dir(agent_id).join("meta.json"), &checkpoint)
             })();
             if let Err(error) = migration {
-                self.dirty_checkpoints.insert(aid.clone());
+                self.legacy_io_mut().dirty_checkpoints.insert(aid.clone());
                 eprintln!(
                     "tau: agent checkpoint migration failed for {}: {error}",
                     aid.as_str()
                 );
             } else {
-                self.dirty_checkpoints.remove(&aid);
+                self.legacy_io_mut().dirty_checkpoints.remove(&aid);
             }
         }
         self.summaries.insert(aid.clone(), summary);
@@ -609,6 +745,160 @@ impl AgentStore {
         self.agents_dir.join(agent_id)
     }
 
+    /// Reserves one new durable agent and derives its canonical journal path.
+    pub fn reserve_new_agent(
+        &mut self,
+        agent_id: &str,
+    ) -> Result<PersistenceLease, AgentStoreError> {
+        let agent_id = parse_agent_id_for_store(agent_id)?;
+        let owner = self
+            .persistence_owner
+            .as_ref()
+            .ok_or(AgentStoreError::Persistence(
+                PersistenceAdmissionError::Unavailable,
+            ))?;
+        let lease = owner
+            .reserve_new_agent(
+                agent_id.clone(),
+                self.agent_dir(agent_id.as_str()).join("events.cbor"),
+            )
+            .map_err(AgentStoreError::Persistence)?;
+        self.persistence_leases
+            .insert(agent_id.clone(), lease.clone());
+        self.managed_projections.insert(
+            agent_id.clone(),
+            ManagedAgentProjection {
+                tree: AgentTree::from_events(agent_id, &[]),
+                summary: AgentSummary::default(),
+                created: false,
+                events: Vec::new(),
+            },
+        );
+        Ok(lease)
+    }
+
+    /// Explicitly prepares and strictly recovers one existing durable agent.
+    pub fn prepare_existing_agent(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
+        let agent_id = parse_agent_id_for_store(agent_id)?;
+        if self.persistence_leases.contains_key(&agent_id) {
+            return Ok(());
+        }
+        let owner =
+            self.persistence_owner
+                .as_ref()
+                .cloned()
+                .ok_or(AgentStoreError::Persistence(
+                    PersistenceAdmissionError::Unavailable,
+                ))?;
+        let prepared = owner
+            .prepare_existing_agent(
+                agent_id.clone(),
+                self.agent_dir(agent_id.as_str()).join("events.cbor"),
+            )
+            .map_err(AgentStoreError::Persistence)?;
+        let tree = AgentTree::try_from_events(agent_id.clone(), &prepared.events)
+            .map_err(|source| AgentStoreError::InvalidEvent { source })?;
+        let mut summary = AgentSummary::default();
+        for record in &prepared.events {
+            summary.apply(record);
+        }
+        if records_begin_with_creation(&agent_id, &prepared.events) {
+            self.created_agents.insert(agent_id.clone());
+        }
+        self.summaries.insert(agent_id.clone(), summary.clone());
+        self.agents.insert(agent_id.clone(), tree.clone());
+        self.persistence_leases
+            .insert(agent_id.clone(), prepared.lease);
+        self.managed_projections.insert(
+            agent_id.clone(),
+            ManagedAgentProjection {
+                tree,
+                summary,
+                created: records_begin_with_creation(&agent_id, &prepared.events),
+                events: prepared.events,
+            },
+        );
+        Ok(())
+    }
+
+    /// Releases every managed agent generation before a session switch.
+    pub fn release_managed_agents(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<(), AgentStoreError> {
+        let Some(owner) = self.persistence_owner.as_ref() else {
+            return Ok(());
+        };
+        let leases: Vec<_> = self.persistence_leases.values().cloned().collect();
+        if leases.is_empty() {
+            return Ok(());
+        }
+        owner
+            .release(&leases, timeout)
+            .map_err(AgentStoreError::Persistence)?;
+        self.persistence_leases.clear();
+        self.managed_projections.clear();
+        Ok(())
+    }
+
+    /// Clones the exact active leases for one Harness-owned group release.
+    #[must_use]
+    pub fn managed_persistence_leases(&self) -> Vec<PersistenceLease> {
+        self.persistence_leases.values().cloned().collect()
+    }
+
+    /// Returns whether the unique owner prepared this exact durable agent.
+    #[must_use]
+    pub fn has_managed_persistence_lease(&self, agent_id: &AgentId) -> bool {
+        self.persistence_leases.contains_key(agent_id)
+    }
+
+    /// Drops live projections only after their group release completed.
+    pub fn finish_managed_release(&mut self) {
+        self.persistence_leases.clear();
+        self.managed_projections.clear();
+    }
+
+    /// Relinquishes live ownership, captures a strict read-only snapshot, then
+    /// disposes the exact maintenance generations.
+    pub fn capture_managed_snapshot(
+        &mut self,
+        included: impl IntoIterator<Item = AgentId>,
+        timeout: std::time::Duration,
+    ) -> Result<AgentJournalSnapshot, AgentStoreError> {
+        let owner =
+            self.persistence_owner
+                .as_ref()
+                .cloned()
+                .ok_or(AgentStoreError::Persistence(
+                    PersistenceAdmissionError::Unavailable,
+                ))?;
+        let included: Vec<_> = included.into_iter().collect();
+        let leases: Vec<_> =
+            included
+                .iter()
+                .map(|agent_id| {
+                    self.persistence_leases.get(agent_id).cloned().ok_or(
+                        AgentStoreError::Persistence(PersistenceAdmissionError::NotPrepared),
+                    )
+                })
+                .collect::<Result<_, _>>()?;
+        owner
+            .release_for_maintenance(&leases, timeout)
+            .map_err(AgentStoreError::Persistence)?;
+        owner
+            .claim_maintenance(&leases)
+            .map_err(AgentStoreError::Persistence)?;
+        let snapshot = AgentJournalSnapshot::capture(&self.agents_dir, included.iter().cloned());
+        let finish = owner.finish_maintenance(&leases);
+        for agent_id in included {
+            self.persistence_leases.remove(&agent_id);
+            self.managed_projections.remove(&agent_id);
+        }
+        finish.map_err(AgentStoreError::Persistence)?;
+        snapshot
+    }
+
     /// Returns whether an agent already exists in memory or on disk.
     ///
     /// A durable `events.cbor` log or `meta.json` sidecar reserves the
@@ -618,13 +908,16 @@ impl AgentStore {
         let Ok(aid) = AgentId::parse(agent_id) else {
             return false;
         };
-        if self.agents.contains_key(&aid) {
+        if self.managed_projections.contains_key(&aid) || self.agents.contains_key(&aid) {
             return true;
         }
         if self.ephemeral_agents.contains(&aid) {
             return true;
         }
         if self.default_persistence.is_ephemeral() {
+            return false;
+        }
+        if self.persistence_owner.is_some() {
             return false;
         }
         self.agent_dir(agent_id).exists()
@@ -649,6 +942,9 @@ impl AgentStore {
     /// excluded: they reserve an id but cannot establish routing identity.
     #[must_use]
     pub fn agent_has_committed_identity(&self, agent_id: &AgentId) -> bool {
+        if let Some(projection) = self.managed_projections.get(agent_id) {
+            return projection.created;
+        }
         if self.created_agents.contains(agent_id) {
             return true;
         }
@@ -681,7 +977,10 @@ impl AgentStore {
     pub fn mark_agent_ephemeral(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let aid = parse_agent_id_for_store(agent_id)?;
         let agent_dir = self.agent_dir(agent_id);
-        if self.default_persistence.is_durable() && agent_dir.exists() {
+        if self.default_persistence.is_durable()
+            && self.persistence_owner.is_none()
+            && agent_dir.exists()
+        {
             return Err(AgentStoreError::PersistenceConflict {
                 agent_id: aid,
                 path: agent_dir,
@@ -722,6 +1021,26 @@ impl AgentStore {
             max_record_bytes,
             remaining_bytes,
         } = budget;
+        if let Some(projection) = self.managed_projections.get(agent_id) {
+            let Some(record) = projection.events.first() else {
+                return Ok(AgentCreationFacts::Missing);
+            };
+            let display_name = projection.tree.display_name();
+            let Some(record_bytes) = encoded_size_with_limit(record, max_record_bytes) else {
+                return Ok(AgentCreationFacts::Unreadable { bytes_read: 0 });
+            };
+            let projected_bytes = record_bytes
+                .saturating_add(display_name.map_or(0, |display_name| display_name.len() as u64));
+            if remaining_bytes < projected_bytes {
+                return Err(AgentCreationFactsBudgetExceeded);
+            }
+            return Ok(agent_creation_facts_from_record(
+                agent_id,
+                record,
+                display_name.map(str::to_owned),
+                projected_bytes,
+            ));
+        }
         if self.agent_is_memory_only(agent_id) {
             let Some(record) = self
                 .ephemeral_events
@@ -820,7 +1139,7 @@ impl AgentStore {
     /// already held.
     fn ensure_locked(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let sid = parse_agent_id_for_store(agent_id)?;
-        if self.locks.contains_key(&sid) {
+        if self.legacy_io().locks.contains_key(&sid) {
             return Ok(());
         }
         let agent_dir = self.agent_dir(agent_id);
@@ -831,7 +1150,10 @@ impl AgentStore {
                 source,
             }
         })?;
-        self.framed_appends
+        self.legacy_io
+            .as_mut()
+            .expect("legacy writer exists")
+            .framed_appends
             .note_created_directories(created_directories);
         #[cfg(unix)]
         {
@@ -869,10 +1191,18 @@ impl AgentStore {
                 holder,
             });
         }
-        if let Some(root) = self.pending_root_boundary.take() {
-            self.framed_appends.note_directory_boundary_chain(&root);
+        if let Some(root) = self.legacy_io_mut().pending_root_boundary.take() {
+            self.legacy_io
+                .as_mut()
+                .expect("legacy writer exists")
+                .framed_appends
+                .note_directory_boundary_chain(&root);
         }
-        self.framed_appends.note_directory_boundary(&agent_dir);
+        self.legacy_io
+            .as_mut()
+            .expect("legacy writer exists")
+            .framed_appends
+            .note_directory_boundary(&agent_dir);
         // Replace lock contents with our PID + start time.
         file.set_len(0).map_err(|source| AgentStoreError::Write {
             path: lock_path.clone(),
@@ -889,7 +1219,7 @@ impl AgentStore {
             path: lock_path.clone(),
             source,
         })?;
-        self.locks.insert(sid, file);
+        self.legacy_io_mut().locks.insert(sid, file);
         Ok(())
     }
 
@@ -974,11 +1304,25 @@ impl AgentStore {
         recorded_at: UnixMicros,
         observation_id: tau_proto::ObservationId,
     ) -> Result<AgentAppendOutcome, AgentStoreError> {
+        self.require_mutation_authority()?;
         let sid = parse_agent_id_for_store(agent_id)?;
         let persistence = self.agent_persistence(agent_id);
+        if persistence.is_durable() && self.persistence_owner.is_some() {
+            return self.append_managed_agent_event(
+                sid,
+                source,
+                parent,
+                event,
+                recorded_at,
+                observation_id,
+            );
+        }
         let journal_path = self.agent_dir(agent_id).join("events.cbor");
         if persistence.is_durable() {
-            self.framed_appends
+            self.legacy_io
+                .as_mut()
+                .expect("legacy writer exists")
+                .framed_appends
                 .ensure_appendable(&journal_path)
                 .map_err(|source| AgentStoreError::Write {
                     path: journal_path.clone(),
@@ -1039,7 +1383,11 @@ impl AgentStore {
             .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         let committed_position = if persistence.is_durable() {
             Some(append_cbor_record(
-                &mut self.framed_appends,
+                &mut self
+                    .legacy_io
+                    .as_mut()
+                    .expect("legacy writer exists")
+                    .framed_appends,
                 &journal_path,
                 &record,
             )?)
@@ -1084,6 +1432,131 @@ impl AgentStore {
         })
     }
 
+    fn append_managed_agent_event(
+        &mut self,
+        agent_id: AgentId,
+        source: Option<PersistedEventSource>,
+        mut parent: AgentEventParent,
+        event: Event,
+        recorded_at: UnixMicros,
+        observation_id: tau_proto::ObservationId,
+    ) -> Result<AgentAppendOutcome, AgentStoreError> {
+        let lease =
+            self.persistence_leases
+                .get(&agent_id)
+                .cloned()
+                .ok_or(AgentStoreError::Persistence(
+                    PersistenceAdmissionError::NotPrepared,
+                ))?;
+        let count = lease
+            .try_reserve_frame()
+            .map_err(AgentStoreError::Persistence)?;
+        let projection =
+            self.managed_projections
+                .get(&agent_id)
+                .ok_or(AgentStoreError::Persistence(
+                    PersistenceAdmissionError::NotPrepared,
+                ))?;
+        if parent == AgentEventParent::InheritHead
+            && let Event::ProviderResponseFinished(response) = &event
+            && let Some(through) = projection
+                .tree
+                .marked_inference_through(&response.agent_prompt_id)
+        {
+            parent = AgentEventParent::from_head(through);
+        }
+        if matches!(event, Event::AgentStarted(_)) && projection.tree.next_event_seq().get() != 0 {
+            return Err(AgentStoreError::InvalidEvent {
+                source: AgentEventValidationError::new(
+                    "AgentStarted is only valid as the first journal record",
+                ),
+            });
+        }
+        if matches!(
+            &event,
+            Event::AgentPromptStarted(_)
+                | Event::AgentOuterTurnStarted(_)
+                | Event::AgentOuterTurnFinished(_)
+        ) && source.is_some()
+        {
+            return Err(AgentStoreError::InvalidEvent {
+                source: AgentEventValidationError::new(
+                    "agent accounting lifecycle facts must be harness-authored source-free records",
+                ),
+            });
+        }
+        let next_seq = projection.tree.next_event_seq();
+        let record = PersistedAgentEvent {
+            observation_id,
+            seq: next_seq,
+            source,
+            fold_semantics: AgentJournalFoldSemantics::for_new_event(&event),
+            event,
+            parent,
+            recorded_at,
+        };
+        projection
+            .tree
+            .validate_persisted_event(&record)
+            .map_err(|source| AgentStoreError::InvalidEvent { source })?;
+        let measured = encoded_size_with_limit(&record, MAX_RECORD_BYTES).ok_or_else(|| {
+            AgentStoreError::RecordTooLarge {
+                path: self.agent_dir(agent_id.as_str()).join("events.cbor"),
+                record_length: MAX_RECORD_BYTES + 1,
+                maximum: MAX_RECORD_BYTES,
+            }
+        })? as usize;
+        let charge = RetentionCharge {
+            frame: measured.saturating_add(8),
+            replacement: managed_agent_projection_charge(projection, measured),
+            checkpoint: 64 * 1024,
+            projections: measured.saturating_mul(2),
+        };
+        let reservation = count
+            .reserve_bytes(charge)
+            .map_err(AgentStoreError::Persistence)?;
+        let mut payload = Vec::with_capacity(measured);
+        ciborium::into_writer(&record, &mut payload).map_err(|source| AgentStoreError::Encode {
+            path: self.agent_dir(agent_id.as_str()).join("events.cbor"),
+            source,
+        })?;
+        let mut replacement = projection.clone();
+        let folded_node_id = replacement
+            .tree
+            .apply_persisted_record(&record)
+            .expect("validated managed record");
+        replacement.summary.apply(&record);
+        replacement.events.push(record.clone());
+        if matches!(record.event, Event::AgentStarted(_)) {
+            replacement.created = true;
+        }
+        let selected_head_id = replacement.tree.head();
+        let checkpoint = AgentCheckpointCandidate {
+            agent_id: agent_id.clone(),
+            summary: replacement.summary.clone(),
+            next_seq: replacement.tree.next_event_seq(),
+        };
+        let staged = if matches!(record.event, Event::AgentStarted(_)) {
+            StagedFrame::first_agent(&lease, &record, payload, Some(checkpoint))
+                .map_err(AgentStoreError::Persistence)?
+        } else {
+            StagedFrame::ordinary(payload, Some(checkpoint))
+        };
+        let target = self
+            .managed_projections
+            .get_mut(&agent_id)
+            .expect("managed projection remains installed");
+        reservation
+            .commit_swap(target, replacement, staged)
+            .map_err(AgentStoreError::Persistence)?;
+        Ok(AgentAppendOutcome {
+            observation_id,
+            seq: next_seq,
+            folded_node_id,
+            selected_head_id,
+        })
+    }
+
     /// Append one message fact before any semantic projection consumes it.
     ///
     /// Unlike [`Self::append_agent_event_at`], this path performs no transcript
@@ -1107,6 +1580,7 @@ impl AgentStore {
         event: Event,
         recorded_at: UnixMicros,
     ) -> Result<AgentAppendOutcome, AgentStoreError> {
+        self.require_mutation_authority()?;
         if event.name().category() != &tau_proto::EventCategory::Message {
             return Err(AgentStoreError::UnsupportedRawEvent {
                 event_name: event.name(),
@@ -1121,9 +1595,15 @@ impl AgentStore {
             });
         }
         let persistence = self.agent_persistence(agent_id);
+        if persistence.is_durable() && self.persistence_owner.is_some() {
+            return self.append_managed_message_fact(aid, source, event, recorded_at);
+        }
         let journal_path = self.agent_dir(agent_id).join("events.cbor");
         if persistence.is_durable() {
-            self.framed_appends
+            self.legacy_io
+                .as_mut()
+                .expect("legacy writer exists")
+                .framed_appends
                 .ensure_appendable(&journal_path)
                 .map_err(|source| AgentStoreError::Write {
                     path: journal_path.clone(),
@@ -1157,7 +1637,11 @@ impl AgentStore {
         };
         let committed_position = if persistence.is_durable() {
             Some(append_cbor_record(
-                &mut self.framed_appends,
+                &mut self
+                    .legacy_io
+                    .as_mut()
+                    .expect("legacy writer exists")
+                    .framed_appends,
                 &journal_path,
                 &record,
             )?)
@@ -1194,6 +1678,91 @@ impl AgentStore {
         })
     }
 
+    fn append_managed_message_fact(
+        &mut self,
+        agent_id: AgentId,
+        source: Option<PersistedEventSource>,
+        event: Event,
+        recorded_at: UnixMicros,
+    ) -> Result<AgentAppendOutcome, AgentStoreError> {
+        let lease =
+            self.persistence_leases
+                .get(&agent_id)
+                .cloned()
+                .ok_or(AgentStoreError::Persistence(
+                    PersistenceAdmissionError::NotPrepared,
+                ))?;
+        let count = lease
+            .try_reserve_frame()
+            .map_err(AgentStoreError::Persistence)?;
+        let projection =
+            self.managed_projections
+                .get(&agent_id)
+                .ok_or(AgentStoreError::Persistence(
+                    PersistenceAdmissionError::NotPrepared,
+                ))?;
+        let seq = projection.tree.next_event_seq();
+        let record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::random(),
+            seq,
+            source,
+            event,
+            parent: AgentEventParent::InheritHead,
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at,
+        };
+        let measured = encoded_size_with_limit(&record, MAX_RECORD_BYTES).ok_or_else(|| {
+            AgentStoreError::RecordTooLarge {
+                path: self.agent_dir(agent_id.as_str()).join("events.cbor"),
+                record_length: MAX_RECORD_BYTES + 1,
+                maximum: MAX_RECORD_BYTES,
+            }
+        })? as usize;
+        let reservation = count
+            .reserve_bytes(RetentionCharge {
+                frame: measured.saturating_add(8),
+                replacement: managed_agent_projection_charge(projection, measured),
+                checkpoint: 64 * 1024,
+                projections: measured.saturating_mul(2),
+            })
+            .map_err(AgentStoreError::Persistence)?;
+        let mut payload = Vec::with_capacity(measured);
+        ciborium::into_writer(&record, &mut payload).map_err(|source| AgentStoreError::Encode {
+            path: self.agent_dir(agent_id.as_str()).join("events.cbor"),
+            source,
+        })?;
+        let mut replacement = projection.clone();
+        let folded_node_id = replacement
+            .tree
+            .apply_persisted_record(&record)
+            .expect("raw message fact matches owner and sequence");
+        replacement.summary.apply(&record);
+        replacement.events.push(record.clone());
+        let selected_head_id = replacement.tree.head();
+        let checkpoint = AgentCheckpointCandidate {
+            agent_id: agent_id.clone(),
+            summary: replacement.summary.clone(),
+            next_seq: replacement.tree.next_event_seq(),
+        };
+        let target = self
+            .managed_projections
+            .get_mut(&agent_id)
+            .expect("managed projection remains installed");
+        reservation
+            .commit_swap(
+                target,
+                replacement,
+                StagedFrame::ordinary(payload, Some(checkpoint)),
+            )
+            .map_err(AgentStoreError::Persistence)?;
+        Ok(AgentAppendOutcome {
+            observation_id: record.observation_id,
+            seq,
+            folded_node_id,
+            selected_head_id,
+        })
+    }
+
     /// Validates one prospective event against the currently retained agent
     /// transcript without appending or folding it.
     ///
@@ -1209,6 +1778,28 @@ impl AgentStore {
         recorded_at: UnixMicros,
     ) -> Result<(), AgentStoreError> {
         let sid = parse_agent_id_for_store(agent_id)?;
+        if let Some(projection) = self.managed_projections.get(&sid) {
+            projection
+                .tree
+                .validate_event_at(parent, event)
+                .map_err(|source| AgentStoreError::InvalidEvent { source })?;
+            let prospective_record = PersistedAgentEvent {
+                observation_id: tau_proto::ObservationId::random(),
+                seq: projection.tree.next_event_seq(),
+                source,
+                event: event.clone(),
+                parent,
+                fold_semantics: AgentJournalFoldSemantics::for_new_event(event),
+                recorded_at,
+            };
+            let length = encoded_size_with_limit(&prospective_record, MAX_RECORD_BYTES)
+                .ok_or_else(|| AgentStoreError::RecordTooLarge {
+                    path: self.agent_dir(agent_id).join("events.cbor"),
+                    record_length: MAX_RECORD_BYTES + 1,
+                    maximum: MAX_RECORD_BYTES,
+                })?;
+            return validate_record_length(&self.agent_dir(agent_id).join("events.cbor"), length);
+        }
         self.load_agent_if_needed(agent_id)?;
         let tree = self
             .agents
@@ -1259,6 +1850,9 @@ impl AgentStore {
                 .map_err(|source| AgentStoreError::InvalidEvent { source })?;
             return Ok(events);
         }
+        if let Some(projection) = self.managed_projections.get(&parsed_agent_id) {
+            return Ok(projection.events.clone());
+        }
         let path = self.agent_dir(parsed_agent_id.as_str()).join("events.cbor");
         let events = load_agent_events(&path)?;
         AgentTree::try_from_events(parsed_agent_id, &events)
@@ -1276,6 +1870,22 @@ impl AgentStore {
     /// Returns one agent tree if it exists, loading a persisted log
     /// on demand.
     pub fn load_agent(&mut self, agent_id: &str) -> Result<Option<&AgentTree>, AgentStoreError> {
+        if self.persistence_owner.is_some() {
+            let parsed = parse_agent_id_for_store(agent_id)?;
+            if !self.managed_projections.contains_key(&parsed) {
+                match self.prepare_existing_agent(agent_id) {
+                    Ok(()) => {}
+                    Err(AgentStoreError::Persistence(
+                        PersistenceAdmissionError::StreamNotFound,
+                    )) => return Ok(None),
+                    Err(error) => return Err(error),
+                }
+            }
+            return Ok(self
+                .managed_projections
+                .get(&parsed)
+                .map(|projection| &projection.tree));
+        }
         self.load_agent_if_needed(agent_id)?;
         let Ok(agent_id) = AgentId::parse(agent_id) else {
             return Ok(None);
@@ -1295,7 +1905,15 @@ impl AgentStore {
         &mut self,
         agent_id: &str,
     ) -> Result<Option<&AgentTree>, AgentStoreError> {
+        self.require_mutation_authority()?;
         let parsed = parse_agent_id_for_store(agent_id)?;
+        if self.persistence_owner.is_some() {
+            self.prepare_existing_agent(agent_id)?;
+            return Ok(self
+                .managed_projections
+                .get(&parsed)
+                .map(|projection| &projection.tree));
+        }
         if self.default_persistence.is_ephemeral() {
             return Ok(self.agents.get(&parsed));
         }
@@ -1303,7 +1921,10 @@ impl AgentStore {
         if !path.exists() {
             return Ok(None);
         }
-        self.framed_appends
+        self.legacy_io
+            .as_mut()
+            .expect("legacy writer exists")
+            .framed_appends
             .ensure_appendable(&path)
             .map_err(|source| AgentStoreError::Write {
                 path: path.clone(),
@@ -1323,13 +1944,23 @@ impl AgentStore {
         let Ok(agent_id) = AgentId::parse(agent_id) else {
             return None;
         };
-        self.agents.get(&agent_id)
+        self.managed_projections
+            .get(&agent_id)
+            .map(|projection| &projection.tree)
+            .or_else(|| self.agents.get(&agent_id))
     }
 
     /// Returns all known agents.
     #[must_use]
     pub fn agents(&self) -> Vec<&AgentTree> {
-        self.agents.values().collect()
+        if self.persistence_owner.is_some() {
+            self.managed_projections
+                .values()
+                .map(|projection| &projection.tree)
+                .collect()
+        } else {
+            self.agents.values().collect()
+        }
     }
 
     /// Reads sidecar metadata for one durable or ephemeral agent, if it exists.
@@ -1338,6 +1969,9 @@ impl AgentStore {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         if self.agent_is_memory_only(&parsed_agent_id) {
             return Ok(self.ephemeral_meta.get(&parsed_agent_id).cloned());
+        }
+        if let Some(projection) = self.managed_projections.get(&parsed_agent_id) {
+            return Ok(Some(projection.summary.legacy_view()));
         }
         let path = self.agent_dir(parsed_agent_id.as_str()).join("meta.json");
         match read_checkpoint(&path) {
@@ -1418,13 +2052,15 @@ impl AgentStore {
         let checkpoint = AgentCheckpoint::new(agent_id.clone(), summary, next_seq, position);
         let path = self.agent_dir(agent_id.as_str()).join("meta.json");
         if let Err(error) = write_checkpoint_atomic(&path, &checkpoint) {
-            self.dirty_checkpoints.insert(agent_id.clone());
+            self.legacy_io_mut()
+                .dirty_checkpoints
+                .insert(agent_id.clone());
             eprintln!(
                 "tau: agent checkpoint update failed for {}: {error}",
                 agent_id.as_str()
             );
         } else {
-            self.dirty_checkpoints.remove(agent_id);
+            self.legacy_io_mut().dirty_checkpoints.remove(agent_id);
         }
     }
 }
@@ -1706,6 +2342,24 @@ fn encoded_size_with_limit<T: Serialize>(value: &T, limit: u64) -> Option<u64> {
     tau_proto::encode_message(&mut counter, value)
         .ok()
         .map(|()| counter.written)
+}
+
+fn managed_agent_projection_charge(
+    projection: &ManagedAgentProjection,
+    new_record_bytes: usize,
+) -> usize {
+    let retained = projection
+        .events
+        .iter()
+        .fold(new_record_bytes, |total, record| {
+            total.saturating_add(
+                encoded_size_with_limit(record, MAX_RECORD_BYTES).unwrap_or(MAX_RECORD_BYTES)
+                    as usize,
+            )
+        });
+    retained
+        .saturating_mul(4)
+        .saturating_add(std::mem::size_of::<ManagedAgentProjection>())
 }
 
 fn read_cbor_records<T, F>(path: &Path, mut handle: F) -> Result<(), AgentStoreError>

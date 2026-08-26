@@ -1,5 +1,11 @@
 # SPEC-tau-harness-prompt-dispatch: Prompt Dispatch
 
+Prompt, tool-terminal, and compaction facts that authorize dispatch or
+continuation first complete semantic-persistence admission. Rejection retains or
+rolls back the owning continuation and cannot expose publication or repeat an
+uncertain external effect. Accepted asynchronous suffixes remain live facts
+before the sole worker makes them durable.
+
 ## Record justification
 
 Prompt dispatch combines model and role selection, effective tool policy,

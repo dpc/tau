@@ -452,13 +452,7 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
     ))
     .expect("park candidate");
     let (parked, _) = intercepted_payload(&interceptor);
-    let journal_path = state_dir
-        .join("agents")
-        .join(agent_id.as_str())
-        .join("events.cbor");
-    let backup_path = journal_path.with_extension("cbor.working-final-backup");
-    std::fs::rename(&journal_path, &backup_path).expect("park journal");
-    std::fs::create_dir(&journal_path).expect("reject append");
+    reject_next_semantic_admission(&h);
     h.handle_extension_event(
         "working-final-append-owner",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -479,8 +473,6 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
             .is_empty()
     );
 
-    std::fs::remove_dir(&journal_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.agent_runtime
         .agent_registry
         .agents
@@ -589,13 +581,7 @@ fn ordinary_final_append_failure_does_not_project_watch_response() {
     };
     assert_eq!(watch_response_count(&h), 0, "parked final must not fan out");
 
-    let journal_path = state_dir
-        .join("agents")
-        .join(watched_id.as_str())
-        .join("events.cbor");
-    let backup_path = journal_path.with_extension("cbor.ordinary-final-backup");
-    std::fs::rename(&journal_path, &backup_path).expect("park journal");
-    std::fs::create_dir(&journal_path).expect("reject append");
+    reject_next_semantic_admission(&h);
     h.handle_extension_event(
         "ordinary-final-append-owner",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -609,8 +595,6 @@ fn ordinary_final_append_failure_does_not_project_watch_response() {
         "append failure must not fan out"
     );
 
-    std::fs::remove_dir(&journal_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.shutdown().expect("shutdown");
 }
 
@@ -662,13 +646,7 @@ fn initial_prompt_submission_append_failure_publishes_correlated_terminal() {
         .find_map(|agent| agent.identity.agent_id.as_deref())
         .map(crate::parse_agent_id)
         .expect("created agent id");
-    let journal_path = state_dir
-        .join("agents")
-        .join(agent_id.as_str())
-        .join("events.cbor");
-    let backup_path = journal_path.with_extension("cbor.initial-prompt-backup");
-    std::fs::rename(&journal_path, &backup_path).expect("park agent journal");
-    std::fs::create_dir(&journal_path).expect("reject append");
+    reject_next_semantic_admission(&h);
 
     h.handle_extension_event(
         "initial-prompt-append-owner",
@@ -693,8 +671,6 @@ fn initial_prompt_submission_append_failure_publishes_correlated_terminal() {
             .is_empty()
     );
 
-    std::fs::remove_dir(&journal_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.shutdown().expect("shutdown");
 }
 
@@ -2507,7 +2483,10 @@ fn peer_receive_parked_across_rollover_cannot_commit() {
         "peer results: {peer_results_after_rollover:?}"
     );
     drop(peer_results_after_rollover);
-    let replacement_cid = ensure_test_user_agent(&mut h);
+    let replacement_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
     let replacement_id = durable_agent_id_for_conversation(&h, &replacement_cid).clone();
     queue_intercepted_peer_receive(
         &mut h,
@@ -2778,13 +2757,7 @@ fn intercepted_prompt_start_append_failure_prevents_provider_delivery() {
     let Event::AgentPromptStarted(started) = parked else {
         panic!("compact prompt fact intercepted");
     };
-    let journal_path = state_dir
-        .join("agents")
-        .join(agent_id.as_str())
-        .join("events.cbor");
-    let backup_path = journal_path.with_extension("cbor.prompt-start-backup");
-    std::fs::rename(&journal_path, &backup_path).expect("park agent journal");
-    std::fs::create_dir(&journal_path).expect("reject compact-fact append");
+    reject_next_semantic_admission(&h);
     h.handle_extension_event(
         "prompt-start-append-owner",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -2792,8 +2765,6 @@ fn intercepted_prompt_start_append_failure_prevents_provider_delivery() {
         })),
     )
     .expect("release compact fact");
-    std::fs::remove_dir(&journal_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &journal_path).expect("restore agent journal");
 
     assert!(
         !h.prompt_coordination
@@ -3430,13 +3401,7 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
     };
     replaced.text = "approved replacement steer".to_owned();
     replaced.ctx_id = Some("approved-ctx".to_owned());
-    let event_path = state_dir
-        .join("agents")
-        .join(agent_id.as_str())
-        .join("events.cbor");
-    let backup_path = event_path.with_extension("cbor.steer-retry-backup");
-    std::fs::rename(&event_path, &backup_path).expect("park agent journal");
-    std::fs::create_dir(&event_path).expect("reject final steer append");
+    reject_next_semantic_admission(&h);
     h.handle_extension_event(
         "retry-replacement-owner",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -3469,8 +3434,6 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
         watcher_messages_before,
         "rejected steer must not fan out a phantom watcher input"
     );
-    std::fs::remove_dir(&event_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
 
     h.publish_for_agent(
         &cid,
@@ -4112,52 +4075,53 @@ fn intercepted_reactive_drift_terminalization_never_dispatches() {
 #[test]
 fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
     for inference_activation in [false, true] {
-        let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
-        let cases = [
-            (
-                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
-                Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-                    inference_activation,
-                    agent_id: agent_id.clone(),
-                    text: "submitted".to_owned(),
-                    trusted_internal_spans: Vec::new(),
-                    message_class: tau_proto::PromptMessageClass::User,
-                    internal_kind: None,
-                    originator: tau_proto::PromptOriginator::User,
-                    submission_source: tau_proto::PromptSubmissionSource::HumanUi,
-                    display_name: None,
-                    ctx_id: None,
-                }),
-            ),
-            (
-                tau_proto::EventName::AGENT_USER_MESSAGE_INJECTED,
-                Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
-                    inference_activation,
-                    agent_id: agent_id.clone(),
-                    text: "injected".to_owned(),
-                    message_class: tau_proto::PromptMessageClass::Internal,
-                }),
-            ),
-            (
-                tau_proto::EventName::AGENT_PROMPT_STEERED,
-                Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
-                    self_compaction_terminal: None,
-                    inference_activation,
-                    submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
-                    agent_id,
-                    text: "steered".to_owned(),
-                    trusted_internal_spans: Vec::new(),
-                    message_class: tau_proto::PromptMessageClass::User,
-                    internal_kind: None,
-                    ctx_id: None,
-                }),
-            ),
-        ];
-
-        for (event_name, original) in cases {
+        for event_name in [
+            tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            tau_proto::EventName::AGENT_USER_MESSAGE_INJECTED,
+            tau_proto::EventName::AGENT_PROMPT_STEERED,
+        ] {
             let tmp = TempDir::new().expect("tempdir");
             let mut h = echo_harness(tmp.path()).expect("harness");
             let cid = ensure_test_user_agent(&mut h);
+            let agent_id = durable_agent_id_for_conversation(&h, &cid);
+            let original = match &event_name {
+                event if *event == tau_proto::EventName::AGENT_PROMPT_SUBMITTED => {
+                    Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                        inference_activation,
+                        agent_id,
+                        text: "submitted".to_owned(),
+                        trusted_internal_spans: Vec::new(),
+                        message_class: tau_proto::PromptMessageClass::User,
+                        internal_kind: None,
+                        originator: tau_proto::PromptOriginator::User,
+                        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+                        display_name: None,
+                        ctx_id: None,
+                    })
+                }
+                event if *event == tau_proto::EventName::AGENT_USER_MESSAGE_INJECTED => {
+                    Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                        inference_activation,
+                        agent_id,
+                        text: "injected".to_owned(),
+                        message_class: tau_proto::PromptMessageClass::Internal,
+                    })
+                }
+                event if *event == tau_proto::EventName::AGENT_PROMPT_STEERED => {
+                    Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                        self_compaction_terminal: None,
+                        inference_activation,
+                        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+                        agent_id,
+                        text: "steered".to_owned(),
+                        trusted_internal_spans: Vec::new(),
+                        message_class: tau_proto::PromptMessageClass::User,
+                        internal_kind: None,
+                        ctx_id: None,
+                    })
+                }
+                _ => unreachable!("selected canonical fact"),
+            };
             let _interceptor = connect_test_tool(&mut h, "activation-rewriter");
             h.handle_extension_event(
                 "activation-rewriter",
@@ -4204,6 +4168,7 @@ fn interception_rejects_steered_submission_source_forgery() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let interceptor = connect_test_tool(&mut h, "steered-source-rewriter");
     h.handle_extension_event(
         "steered-source-rewriter",
@@ -4219,7 +4184,7 @@ fn interception_rejects_steered_submission_source_forgery() {
         self_compaction_terminal: None,
         inference_activation: true,
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        agent_id,
         text: "steered".to_owned(),
         trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -4348,6 +4313,16 @@ fn interception_preserves_internal_prompt_kind_and_text() {
             let tmp = TempDir::new().expect("tempdir");
             let mut h = echo_harness(tmp.path()).expect("harness");
             let cid = ensure_test_user_agent(&mut h);
+            let agent_id = durable_agent_id_for_conversation(&h, &cid);
+            let mut original = original;
+            let mut replacement = replacement;
+            for event in [&mut original, &mut replacement] {
+                match event {
+                    Event::AgentPromptSubmitted(prompt) => prompt.agent_id = agent_id.clone(),
+                    Event::AgentPromptSteered(prompt) => prompt.agent_id = agent_id.clone(),
+                    _ => unreachable!("internal prompt fixture"),
+                }
+            }
             let _interceptor = connect_test_tool(&mut h, "context-alert-rewriter");
             h.handle_extension_event(
                 "context-alert-rewriter",
@@ -4375,6 +4350,16 @@ fn interception_preserves_internal_prompt_kind_and_text() {
         let tmp = TempDir::new().expect("tempdir");
         let mut h = echo_harness(tmp.path()).expect("harness");
         let cid = ensure_test_user_agent(&mut h);
+        let agent_id = durable_agent_id_for_conversation(&h, &cid);
+        let mut untagged = untagged;
+        let mut rewritten_untagged = rewritten_untagged;
+        for event in [&mut untagged, &mut rewritten_untagged] {
+            match event {
+                Event::AgentPromptSubmitted(prompt) => prompt.agent_id = agent_id.clone(),
+                Event::AgentPromptSteered(prompt) => prompt.agent_id = agent_id.clone(),
+                _ => unreachable!("internal prompt fixture"),
+            }
+        }
         let _interceptor = connect_test_tool(&mut h, "ordinary-prompt-rewriter");
         h.handle_extension_event(
             "ordinary-prompt-rewriter",
@@ -5174,6 +5159,8 @@ fn interception_drop_of_must_pass_event_is_overridden() {
     // original event (with a warn).
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
@@ -5189,7 +5176,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
 
     let prompt = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
         inference_activation: true,
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        agent_id,
         text: "hello".to_owned(),
         trusted_internal_spans: Vec::new(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -5392,14 +5379,15 @@ fn prompt_rejected_terminal_is_immutable_and_must_pass() {
 /// cannot be forged or rewritten before their runtime producers exist.
 #[test]
 fn discovery_canonical_events_are_protected() {
-    let agent_id = crate::parse_agent_id("agent-1");
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let initialization_id =
         tau_proto::AgentInitializationId::parse("init-1").expect("test identifier must be valid");
     let events = [
         Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
-            session_id: "session-1"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
+            session_id: h.session_runtime.current_session_id.clone(),
             agent_id: agent_id.clone(),
             agent_initialization_id: initialization_id.clone(),
             agents_message: None,
@@ -5407,18 +5395,14 @@ fn discovery_canonical_events_are_protected() {
             agents_files: Vec::new(),
         }),
         Event::HarnessAgentContextInitialized(tau_proto::HarnessAgentContextInitialized {
-            session_id: "session-1"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
+            session_id: h.session_runtime.current_session_id.clone(),
             agent_id,
             agent_initialization_id: initialization_id,
             listed_skills: Vec::new(),
             agents_files: Vec::new(),
         }),
         Event::HarnessSessionSkillsAvailable(tau_proto::HarnessSessionSkillsAvailable {
-            session_id: "session-1"
-                .parse::<tau_proto::SessionId>()
-                .expect("known-safe SessionId must be valid"),
+            session_id: h.session_runtime.current_session_id.clone(),
             skills: Vec::new(),
         }),
     ];
@@ -5455,8 +5439,6 @@ fn discovery_canonical_events_are_protected() {
         );
     }
 
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
     connect_ready_configured_extension(
         &mut h,
         "configured-tool",
@@ -5743,25 +5725,21 @@ fn parked_ui_prompt_has_precommitted_interaction_fact() {
     );
 }
 
-fn session_agent_loaded_event(agent_id: &str) -> Event {
+fn session_agent_loaded_event(h: &Harness, agent_id: AgentId) -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
         agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
             .expect("test identifier must be valid"),
 
-        session_id: "session-intercept"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+        session_id: h.session_runtime.current_session_id.clone(),
+        agent_id,
         ephemeral: false,
     })
 }
 
-fn session_agent_unloaded_event(agent_id: &str) -> Event {
+fn session_agent_unloaded_event(h: &Harness, agent_id: AgentId) -> Event {
     Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-        session_id: "session-intercept"
-            .parse::<tau_proto::SessionId>()
-            .expect("known-safe SessionId must be valid"),
-        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+        session_id: h.session_runtime.current_session_id.clone(),
+        agent_id,
     })
 }
 
@@ -5772,6 +5750,8 @@ fn session_agent_unloaded_event(agent_id: &str) -> Event {
 fn interception_drop_of_session_agent_loaded_is_overridden() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
@@ -5785,7 +5765,7 @@ fn interception_drop_of_session_agent_loaded_is_overridden() {
     .expect("intercept registration");
     let baseline_seq = h.runtime_io.event_log.next_seq();
 
-    let loaded = session_agent_loaded_event("agent-loaded-original");
+    let loaded = session_agent_loaded_event(&h, agent_id.clone());
     h.publish_event(None, loaded.clone());
     h.handle_extension_event(
         "interceptor",
@@ -5804,12 +5784,9 @@ fn interception_drop_of_session_agent_loaded_is_overridden() {
     let membership = h
         .session_runtime
         .store
-        .session("session-intercept")
+        .session(&h.session_runtime.current_session_id)
         .expect("session membership");
-    assert!(
-        membership
-            .contains_agent(&tau_proto::AgentId::parse("agent-loaded-original").expect("agent id"))
-    );
+    assert!(membership.contains_agent(&agent_id));
 }
 
 /// Ensures interceptors cannot rewrite durable session membership unload facts,
@@ -5819,6 +5796,10 @@ fn interception_drop_of_session_agent_loaded_is_overridden() {
 fn interception_replacement_of_session_agent_unloaded_publishes_original() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let replacement_cid = ensure_test_user_agent(&mut h);
+    let replacement_agent_id = durable_agent_id_for_conversation(&h, &replacement_cid);
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
@@ -5832,13 +5813,14 @@ fn interception_replacement_of_session_agent_unloaded_publishes_original() {
     .expect("intercept registration");
     let baseline_seq = h.runtime_io.event_log.next_seq();
 
-    let unloaded = session_agent_unloaded_event("agent-unloaded-original");
+    let unloaded = session_agent_unloaded_event(&h, agent_id);
     h.publish_event(None, unloaded.clone());
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(Some(Box::new(session_agent_unloaded_event(
-                "agent-unloaded-replacement",
+                &h,
+                replacement_agent_id,
             )))),
         })),
     )
@@ -5853,12 +5835,12 @@ fn interception_replacement_of_session_agent_unloaded_publishes_original() {
     let events = h
         .session_runtime
         .store
-        .session_events("session-intercept")
+        .session_events(&h.session_runtime.current_session_id)
         .expect("session events")
         .into_iter()
         .map(|entry| entry.event)
         .collect::<Vec<_>>();
-    assert_eq!(events, vec![unloaded]);
+    assert!(events.contains(&unloaded));
 }
 
 fn session_started_event(session_id: &str) -> Event {
@@ -5891,13 +5873,13 @@ fn agent_message_sent_event(message: &str) -> Event {
     })
 }
 
-fn agent_message_received_event(recipient_id: &str) -> Event {
+fn agent_message_received_event(sender_id: AgentId, recipient_id: AgentId) -> Event {
     Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
         message_id: tau_proto::AgentMessageId::parse("msg-intercept")
             .expect("test identifier must satisfy its grammar"),
-        sender_id: tau_proto::AgentId::parse("agent-message-sender").expect("agent id"),
+        sender_id,
         sender_session_id: None,
-        recipient_id: tau_proto::AgentId::parse(recipient_id).expect("agent id"),
+        recipient_id,
         kind: tau_proto::AgentMessageKind::Message,
         watch_provider_status: None,
         watch_work_status: None,
@@ -6022,6 +6004,18 @@ fn interception_drop_of_agent_message_sent_is_overridden() {
 fn interception_replacement_of_agent_message_received_publishes_original() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
+    let sender_cid = ensure_test_user_agent(&mut h);
+    let sender_id = durable_agent_id_for_conversation(&h, &sender_cid);
+    let recipient_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let recipient_id = durable_agent_id_for_conversation(&h, &recipient_cid);
+    let replacement_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let replacement_id = durable_agent_id_for_conversation(&h, &replacement_cid);
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
@@ -6035,13 +6029,14 @@ fn interception_replacement_of_agent_message_received_publishes_original() {
     .expect("intercept registration");
     let baseline_seq = h.runtime_io.event_log.next_seq();
 
-    let received = agent_message_received_event("agent-message-recipient");
+    let received = agent_message_received_event(sender_id.clone(), recipient_id);
     h.publish_event(None, received.clone());
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(Some(Box::new(agent_message_received_event(
-                "agent-message-other-recipient",
+                sender_id,
+                replacement_id,
             )))),
         })),
     )
@@ -6747,13 +6742,7 @@ fn rejected_activating_append_leaves_no_stale_dispatch() {
     let mut h = quiet_provider_harness(&state_dir).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    let event_path = state_dir
-        .join("agents")
-        .join(agent_id.as_str())
-        .join("events.cbor");
-    let backup_path = event_path.with_extension("cbor.activation-backup");
-    std::fs::rename(&event_path, &backup_path).expect("park agent journal");
-    std::fs::create_dir(&event_path).expect("reject activation append");
+    reject_next_semantic_admission(&h);
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -6792,8 +6781,6 @@ fn rejected_activating_append_leaves_no_stale_dispatch() {
             .peer_internal_tool_agents
             .is_empty()
     );
-    std::fs::remove_dir(&event_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("committed activation".to_owned()))
         .expect("dispatch later activation");
@@ -6978,11 +6965,8 @@ fn agent_metadata_set_and_unset_events_are_interceptable() {
     )
     .expect("intercept registration");
 
-    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_runtime
-        .agent_registry
-        .session_loaded
-        .insert(agent_id.clone());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let key = tau_proto::AgentMetadataKey::new("ext_core-shell_cwd");
     let set = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
         agent_id: agent_id.clone(),
@@ -7059,11 +7043,8 @@ fn agent_metadata_set_and_unset_events_are_interceptable() {
 fn rollover_commits_deferred_mutation_correlated_metadata_set() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
-    let agent_id = tau_proto::AgentId::parse("metadata-rollover-agent").expect("agent id");
-    h.agent_runtime
-        .agent_registry
-        .session_loaded
-        .insert(agent_id.clone());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let _interceptor = connect_test_tool(&mut h, "metadata-rollover-blocker");
     h.handle_extension_event(
         "metadata-rollover-blocker",
@@ -7469,6 +7450,8 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
 fn invalid_metadata_interceptor_replacements_fall_back_to_original() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let _interceptor = connect_test_tool(&mut h, "metadata-rewriter");
     h.handle_extension_event(
         "metadata-rewriter",
@@ -7481,11 +7464,6 @@ fn invalid_metadata_interceptor_replacements_fall_back_to_original() {
     )
     .expect("intercept registration");
 
-    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_runtime
-        .agent_registry
-        .session_loaded
-        .insert(agent_id.clone());
     let original = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
         agent_id: agent_id.clone(),
         key: tau_proto::AgentMetadataKey::new("valid"),

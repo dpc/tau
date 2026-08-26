@@ -7,6 +7,20 @@ use super::*;
 use crate::journal_sync::SyncTargetKind;
 use crate::record_log::AppendFault;
 
+/// Normal-build inspection state rejects lock/repair mutation without
+/// artifacts.
+#[test]
+fn read_only_session_store_rejects_recovery_without_mutation() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let root = temp.path().join("sessions");
+    let mut store = SessionStore::read_only(&root);
+    let error = store
+        .lock_and_load_existing_session("missing-session")
+        .expect_err("read-only recovery rejects");
+    assert!(error.to_string().contains("unavailable"));
+    assert!(!root.exists());
+}
+
 /// Resume admission must fail without recreating any path when the selected
 /// persisted session disappeared before its writer lock was acquired.
 #[test]
@@ -208,7 +222,12 @@ fn writable_reopen_recovers_session_root_and_branch_boundaries() {
         assert!(first.dirty_target(&sessions_dir).is_some());
     }
     let mut store = SessionStore::open_lazy(&sessions_dir).expect("second store opens");
-    store.framed_appends.inject_sync_spawn_failure();
+    store
+        .legacy_io
+        .as_mut()
+        .expect("legacy writer")
+        .framed_appends
+        .inject_sync_spawn_failure();
     store
         .append_session_event_at(
             "session-1",
@@ -219,6 +238,9 @@ fn writable_reopen_recovers_session_root_and_branch_boundaries() {
         .expect("writable append");
 
     let root_target = store
+        .legacy_io
+        .as_ref()
+        .expect("legacy writer")
         .framed_appends
         .dirty_target(&sessions_dir)
         .expect("store-root target");
@@ -227,6 +249,9 @@ fn writable_reopen_recovers_session_root_and_branch_boundaries() {
     assert_eq!(root_target.kind, SyncTargetKind::DirectoryBoundary);
     let branch = sessions_dir.join("session-1");
     let branch_target = store
+        .legacy_io
+        .as_ref()
+        .expect("legacy writer")
         .framed_appends
         .dirty_target(&branch)
         .expect("branch target");
@@ -299,13 +324,18 @@ fn failed_frame_append_is_atomic_and_retry_reuses_sequence() {
     let journal_before = fs::read(&journal_path).expect("baseline journal");
     let meta_before = fs::read(&meta_path).expect("baseline metadata");
     let failed_agent = AgentId::parse("failed-agent").expect("agent id");
-    store.framed_appends.inject_fault(
-        &journal_path,
-        AppendFault {
-            fail_write_at: Some(3),
-            ..AppendFault::default()
-        },
-    );
+    store
+        .legacy_io
+        .as_mut()
+        .expect("legacy writer")
+        .framed_appends
+        .inject_fault(
+            &journal_path,
+            AppendFault {
+                fail_write_at: Some(3),
+                ..AppendFault::default()
+            },
+        );
 
     let error = store
         .append_session_event_at(
@@ -357,14 +387,19 @@ fn rollback_failure_poisons_only_selected_session_journal() {
         )
         .expect("baseline appends");
     let journal_path = temp.path().join("session-1/events.cbor");
-    store.framed_appends.inject_fault(
-        &journal_path,
-        AppendFault {
-            fail_write_at: Some(3),
-            fail_truncate: true,
-            ..AppendFault::default()
-        },
-    );
+    store
+        .legacy_io
+        .as_mut()
+        .expect("legacy writer")
+        .framed_appends
+        .inject_fault(
+            &journal_path,
+            AppendFault {
+                fail_write_at: Some(3),
+                fail_truncate: true,
+                ..AppendFault::default()
+            },
+        );
     store
         .append_session_event_at(
             "session-1",
@@ -588,13 +623,18 @@ fn failed_restore_append_is_atomic_and_retry_reuses_sequence() {
         .expect("baseline restore appends");
     let restore_path = temp.path().join("session-1/restore-events.cbor");
     let restore_before = fs::read(&restore_path).expect("baseline restore journal");
-    store.framed_appends.inject_fault(
-        &restore_path,
-        AppendFault {
-            fail_write_at: Some(5),
-            ..AppendFault::default()
-        },
-    );
+    store
+        .legacy_io
+        .as_mut()
+        .expect("legacy writer")
+        .framed_appends
+        .inject_fault(
+            &restore_path,
+            AppendFault {
+                fail_write_at: Some(5),
+                ..AppendFault::default()
+            },
+        );
 
     store
         .append_session_restore_event_at(
@@ -639,14 +679,19 @@ fn rollback_failure_poisons_only_restore_journal() {
         )
         .expect("baseline restore appends");
     let restore_path = temp.path().join("session-1/restore-events.cbor");
-    store.framed_appends.inject_fault(
-        &restore_path,
-        AppendFault {
-            fail_write_at: Some(5),
-            fail_truncate: true,
-            ..AppendFault::default()
-        },
-    );
+    store
+        .legacy_io
+        .as_mut()
+        .expect("legacy writer")
+        .framed_appends
+        .inject_fault(
+            &restore_path,
+            AppendFault {
+                fail_write_at: Some(5),
+                fail_truncate: true,
+                ..AppendFault::default()
+            },
+        );
     store
         .append_session_restore_event_at(
             "session-1",

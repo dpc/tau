@@ -6,6 +6,8 @@
 //! [GATE-persistence-and-extension-interface-change-approval](../../../../
 //! specs/GATE-persistence-and-extension-interface-change-approval.md).
 
+use std::sync::Arc;
+
 use super::*;
 
 /// Immutable construction inputs shared across configured harness startup
@@ -78,6 +80,8 @@ struct StartupHarnessParts {
     store: SessionStore,
     /// Per-agent transcript store.
     agent_store: AgentStore,
+    /// Unique lifecycle owner injected into both durable stores.
+    persistence_owner: Option<Arc<tau_core::SemanticPersistenceOwner>>,
     /// Session id the harness is initially bound to.
     eager_session_id: String,
     /// Launch reason and persistence policy.
@@ -229,15 +233,34 @@ impl Harness {
         // load on first access. Avoids a startup walk over every
         // historical session dir.
         let agents_dir = state_dir.join("agents");
+        let persistence_owner = (!storage_mode.is_memory_only())
+            .then(|| {
+                tau_core::SemanticPersistenceOwner::new(Default::default())
+                    .map(Arc::new)
+                    .map_err(|error| HarnessError::Participant(error.to_string()))
+            })
+            .transpose()?;
         let store = if storage_mode.is_ephemeral() {
             SessionStore::open_ephemeral(&sessions_dir)?
         } else {
-            SessionStore::open_lazy(&sessions_dir)?
+            SessionStore::open_managed(
+                &sessions_dir,
+                persistence_owner
+                    .as_ref()
+                    .expect("durable session has owner")
+                    .clone(),
+            )?
         };
         let agent_store = if storage_mode.is_memory_only() {
             AgentStore::open_memory_only(&agents_dir)
         } else {
-            AgentStore::open_lazy(&agents_dir)?
+            AgentStore::open_managed(
+                &agents_dir,
+                persistence_owner
+                    .as_ref()
+                    .expect("durable agent has owner")
+                    .clone(),
+            )?
         };
 
         let own_pid = std::process::id();
@@ -342,21 +365,24 @@ impl Harness {
         let selected_model =
             select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
         let mut store = store;
-        if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
+        if storage_mode.is_durable() {
+            let mode = if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
+                tau_core::SessionPreparationMode::Resume
+            } else {
+                tau_core::SessionPreparationMode::New
+            };
+            store.prepare_session(eager_session_id, mode)?;
+        } else if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
             let _ = store.lock_and_load_existing_session(eager_session_id)?;
+        } else {
+            let _ = store.lock_and_load_session(eager_session_id)?;
+        }
+        if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
             Self::create_resumed_harness_log_after_lock(
                 &sessions_dir,
                 eager_session_id,
                 storage_mode,
             )?;
-        } else {
-            let _ = store.lock_and_load_session(eager_session_id)?;
-        }
-        if storage_mode.is_durable() {
-            // Commit canonical existence before creating any session-owned
-            // diagnostic artifact. The lock and directory remain scaffolding
-            // until this manifest replacement succeeds.
-            store.record_session_meta(eager_session_id)?;
         }
         if storage_mode.is_durable() {
             crate::session_cleanup::spawn_session_cleanup(
@@ -391,6 +417,7 @@ impl Harness {
                 publication: PublicationState::default(),
             },
             session_runtime: SessionRuntimeState {
+                persistence_owner,
                 state_dir: state_dir.clone(),
                 store,
                 agent_store,
@@ -708,7 +735,7 @@ impl Harness {
             std::fs::create_dir_all(&state_dir)?;
         }
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "opening session store");
-        let (store, agent_store) = Self::open_startup_stores(
+        let (store, agent_store, persistence_owner) = Self::open_startup_stores(
             &state_dir,
             &sessions_dir,
             launch.storage_mode,
@@ -761,6 +788,7 @@ impl Harness {
             dirs,
             store,
             agent_store,
+            persistence_owner,
             eager_session_id: eager_session_id.to_owned(),
             launch,
             harness_settings,
@@ -806,18 +834,46 @@ impl Harness {
         sessions_dir: &Path,
         storage_mode: crate::HarnessStorageMode,
         memory_only_agent_store: bool,
-    ) -> Result<(SessionStore, AgentStore), HarnessError> {
+    ) -> Result<
+        (
+            SessionStore,
+            AgentStore,
+            Option<Arc<tau_core::SemanticPersistenceOwner>>,
+        ),
+        HarnessError,
+    > {
+        let durable_session = !storage_mode.is_ephemeral();
+        let durable_agents = !storage_mode.is_memory_only() && !memory_only_agent_store;
+        let persistence_owner = (durable_session || durable_agents)
+            .then(|| {
+                tau_core::SemanticPersistenceOwner::new(Default::default())
+                    .map(Arc::new)
+                    .map_err(|error| HarnessError::Participant(error.to_string()))
+            })
+            .transpose()?;
         let store = if storage_mode.is_ephemeral() {
             SessionStore::open_ephemeral(sessions_dir)?
         } else {
-            SessionStore::open_lazy(sessions_dir)?
+            SessionStore::open_managed(
+                sessions_dir,
+                persistence_owner
+                    .as_ref()
+                    .expect("durable session has owner")
+                    .clone(),
+            )?
         };
         let agent_store = if storage_mode.is_memory_only() || memory_only_agent_store {
             AgentStore::open_memory_only(state_dir.join("agents"))
         } else {
-            AgentStore::open_lazy(state_dir.join("agents"))?
+            AgentStore::open_managed(
+                state_dir.join("agents"),
+                persistence_owner
+                    .as_ref()
+                    .expect("durable agent has owner")
+                    .clone(),
+            )?
         };
-        Ok((store, agent_store))
+        Ok((store, agent_store, persistence_owner))
     }
     fn load_startup_roles(
         harness_settings: &tau_config::settings::HarnessSettings,
@@ -848,18 +904,27 @@ impl Harness {
         })
     }
     fn assemble_startup_harness(mut parts: StartupHarnessParts) -> Result<Self, HarnessError> {
-        if matches!(parts.launch.reason, tau_proto::SessionStartReason::Resume) {
+        if parts.launch.storage_mode.is_durable() {
+            let mode = if matches!(parts.launch.reason, tau_proto::SessionStartReason::Resume) {
+                tau_core::SessionPreparationMode::Resume
+            } else {
+                tau_core::SessionPreparationMode::New
+            };
+            parts.store.prepare_session(&parts.eager_session_id, mode)?;
+        } else if matches!(parts.launch.reason, tau_proto::SessionStartReason::Resume) {
             let _ = parts
                 .store
                 .lock_and_load_existing_session(&parts.eager_session_id)?;
+        } else {
+            let _ = parts.store.lock_and_load_session(&parts.eager_session_id)?;
+        }
+        if matches!(parts.launch.reason, tau_proto::SessionStartReason::Resume) {
             let sessions_dir = parts.store.sessions_dir().to_path_buf();
             Self::create_resumed_harness_log_after_lock(
                 &sessions_dir,
                 &parts.eager_session_id,
                 parts.launch.storage_mode,
             )?;
-        } else {
-            let _ = parts.store.lock_and_load_session(&parts.eager_session_id)?;
         }
         let (tx, rx) = mpsc::channel();
         let (component_ingress, component_ingress_tx) =
@@ -892,6 +957,7 @@ impl Harness {
                 publication: PublicationState::default(),
             },
             session_runtime: SessionRuntimeState {
+                persistence_owner: parts.persistence_owner,
                 state_dir: parts.state_dir,
                 store: parts.store,
                 agent_store: parts.agent_store,

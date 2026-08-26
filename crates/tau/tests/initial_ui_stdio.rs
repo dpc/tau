@@ -354,6 +354,8 @@ fn resumed_harness_process_does_not_recreate_deleted_session() {
         br#"{"created_at":1,"last_touched":1}"#,
     )
     .expect("write session metadata");
+    std::fs::write(session_dir.join("events.cbor"), b"").expect("write ordinary journal");
+    std::fs::write(session_dir.join("restore-events.cbor"), b"").expect("write restore journal");
     std::fs::remove_dir_all(&session_dir).expect("delete selected session before startup lock");
 
     let tau_bin = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
@@ -414,6 +416,8 @@ fn resumed_configured_harness_process_creates_relay_log() {
         br#"{"created_at":1,"last_touched":1}"#,
     )
     .expect("write session metadata");
+    std::fs::write(session_dir.join("events.cbor"), b"").expect("write ordinary journal");
+    std::fs::write(session_dir.join("restore-events.cbor"), b"").expect("write restore journal");
 
     let tau_bin = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
     let mut child = InitialUiChild {

@@ -1,5 +1,19 @@
 # ARCH-tau-harness: tau-harness architecture
 
+## Semantic persistence lifecycle
+
+One Harness-owned `SemanticPersistenceOwner` prepares every durable agent,
+ordinary-session, and restore stream. Startup and switch prepare `New` or strict
+`Resume` authority before exposing runtime state. Switch closes the complete old
+lease set under one deadline; failure after canonical shutdown fail-stops
+persistence rather than forging a second owner.
+
+Canonical publication first admits the semantic frame and complete in-memory
+replacement. Only successful admission may advance EventLog/debug output, bus
+delivery, reactions, or continuations. Worker I/O follows in one global FIFO.
+Rollback-safe failures retain the accepted head; uncertain rollback poisons that
+generation. Restart therefore sees the longest valid durable prefix.
+
 Live delivery uses one process-local logical stream with runtime-only positions.
 The event bus freezes selector, visibility, exclusion, and directed-route
 eligibility as consumer generations when admitting a frame. Per-connection

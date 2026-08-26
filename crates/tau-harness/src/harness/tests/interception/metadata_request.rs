@@ -48,11 +48,8 @@ fn metadata_commits(h: &Harness) -> Vec<(Option<tau_proto::ConnectionId>, Event)
 fn configured_extension_request_precedes_canonical_fact() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_runtime
-        .agent_registry
-        .session_loaded
-        .insert(agent_id.clone());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     connect_ready_configured_extension(
         &mut h,
         "requester",
@@ -96,11 +93,8 @@ fn configured_extension_request_precedes_canonical_fact() {
 fn rollover_metadata_request_is_observation_only() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_runtime
-        .agent_registry
-        .session_loaded
-        .insert(agent_id.clone());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     connect_ready_configured_extension(
         &mut h,
         "requester",
@@ -147,11 +141,8 @@ fn rollover_metadata_request_is_observation_only() {
 fn metadata_authority_is_exact_and_canonical_facts_are_harness_owned() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_runtime
-        .agent_registry
-        .session_loaded
-        .insert(agent_id.clone());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
     let kinds = [
         tau_proto::ClientKind::Provider,
@@ -248,11 +239,8 @@ fn metadata_authority_is_exact_and_canonical_facts_are_harness_owned() {
 fn stale_extension_request_has_no_canonical_successor() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_runtime
-        .agent_registry
-        .session_loaded
-        .insert(agent_id.clone());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     connect_ready_configured_extension(
         &mut h,
         "requester",
@@ -304,11 +292,8 @@ fn stale_extension_request_has_no_canonical_successor() {
 fn disconnected_ui_request_has_no_canonical_successor() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_runtime
-        .agent_registry
-        .session_loaded
-        .insert(agent_id.clone());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     connect_test_client_with_origin(
         &mut h,
         "ui",
@@ -391,11 +376,8 @@ fn invalid_request_commits_without_canonical_successor() {
 fn invalid_request_replacement_commits_without_original_mutation() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_runtime
-        .agent_registry
-        .session_loaded
-        .insert(agent_id.clone());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     connect_ready_configured_extension(
         &mut h,
         "requester",
@@ -450,11 +432,8 @@ fn invalid_request_replacement_commits_without_original_mutation() {
 fn tokened_request_preserves_identity_and_reaches_canonical_echo() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
-    h.agent_runtime
-        .agent_registry
-        .session_loaded
-        .insert(agent_id.clone());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
     connect_ready_configured_extension(
         &mut h,
         "requester",

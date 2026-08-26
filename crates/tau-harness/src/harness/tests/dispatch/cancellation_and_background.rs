@@ -4135,27 +4135,21 @@ fn background_completion_from_removed_side_conversation_is_retired() {
             Event::ToolCancelRequest(request) if request.target_call_id == call_id
         )
     ));
-    assert!(event_log_contains_any_source(&h, |event| matches!(
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ToolBackgroundError(error)
             if error.call_id == call_id && error.message == "Tool call canceled"
     )));
-    let terminal_position = event_log_position(&h, |event| {
-        matches!(
-            event,
-            Event::ToolBackgroundError(error) if error.call_id == call_id
-        )
-    })
-    .expect("child terminal committed");
-    let unload_position = event_log_position(&h, |event| {
-        matches!(
-            event,
-            Event::SessionAgentUnloaded(unloaded)
-                if unloaded.agent_id.as_str() == side_agent_id
-        )
-    })
-    .expect("child unload committed");
-    assert!(terminal_position < unload_position);
+    assert!(
+        event_log_position(&h, |event| {
+            matches!(
+                event,
+                Event::SessionAgentUnloaded(unloaded)
+                    if unloaded.agent_id.as_str() == side_agent_id
+            )
+        })
+        .is_some()
+    );
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-slow"),
@@ -4239,15 +4233,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
             .tool_turn
             .mark_backgrounded(&fault_call_id)
     );
-    let journal = h
-        .session_runtime
-        .state_dir
-        .join("agents")
-        .join(&fault_agent_id)
-        .join("events.cbor");
-    let backup = journal.with_extension("cbor.unload-test-backup");
-    std::fs::rename(&journal, &backup).expect("park fault child journal");
-    std::fs::create_dir(&journal).expect("block fault child journal");
+    reject_semantic_admissions(&h, 2);
 
     h.remove_agent(&fault_cid);
 
@@ -4287,9 +4273,6 @@ fn background_completion_from_removed_side_conversation_is_retired() {
             .iter()
             .all(|prompt| prompt.text != background_completion_prompt(&fault_call_id))
     );
-    std::fs::remove_dir(&journal).expect("remove child journal blocker");
-    std::fs::rename(&backup, &journal).expect("restore fault child journal");
-
     h.shutdown().expect("shutdown");
 }
 /// Resume should treat existing background results/errors as terminal. They are
@@ -4649,6 +4632,7 @@ fn scheduler_wait_for_completed_background_call_retains_durable_correlation() {
         } if delivered_source == source_call && terminal == source_terminal
     ));
 
+    h.shutdown().expect("flush accepted trace records");
     let mut trace = tau_session_inspect::prepare_agent_trace(
         &state.join("agents"),
         &crate::parse_agent_id(&agent_id),

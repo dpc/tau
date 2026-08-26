@@ -1,6 +1,7 @@
 //! Mixed-state and repeated-resume isolation acceptance.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tau_proto::{
@@ -287,8 +288,18 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
         return Err("S7 Boot C changed current/history roster state".into());
     }
 
-    let snapshot_c = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
-    super::assert_initialization_only_refresh(&snapshot_b, &snapshot_c)?;
+    let durable_deadline = Instant::now() + Duration::from_secs(5);
+    let snapshot_c = loop {
+        let snapshot = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
+        if super::assert_initialization_only_refresh(&snapshot_b, &snapshot).is_ok() {
+            break snapshot;
+        }
+        if durable_deadline < Instant::now() {
+            super::assert_initialization_only_refresh(&snapshot_b, &snapshot)?;
+            unreachable!("failed refresh assertion returns above");
+        }
+        std::thread::yield_now();
+    };
     interruption::assert_unfinished_worker_dispatch(&snapshot_c, &identities.uncertain, &dispatch)?;
 
     let continuation_start = observer_c.events.len();

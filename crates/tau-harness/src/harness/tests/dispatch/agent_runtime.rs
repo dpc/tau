@@ -13,14 +13,19 @@ fn repeated_loaded_agent_ensure_does_not_rescan_history() {
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let notice_count = h.runtime_io.replayable_harness_notices.len();
 
-    std::fs::write(
-        state_dir
-            .join("agents")
-            .join(agent_id.as_str())
-            .join("events.cbor"),
-        b"corrupt after initial load",
-    )
-    .expect("corrupt journal");
+    let journal = state_dir
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !journal.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "accepted creation was not written"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::fs::write(journal, b"corrupt after initial load").expect("corrupt journal");
     h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
 
     assert_eq!(h.runtime_io.replayable_harness_notices.len(), notice_count);

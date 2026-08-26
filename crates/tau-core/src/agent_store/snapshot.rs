@@ -13,7 +13,6 @@ use fs2::FileExt as Fs2FileExt;
 use tau_proto::AgentId;
 
 use super::{AgentStoreError, records_begin_with_creation};
-use crate::agent_checkpoint::read_journal_bound_checkpoint;
 use crate::record_log::{MAX_RECORD_BYTES, read_record_length};
 use crate::{AgentTree, PersistedAgentEvent, PersistedAgentEventSeq};
 
@@ -91,7 +90,6 @@ impl AgentJournalLocks {
                     path,
                     file,
                     covered_bytes,
-                    checkpoint_next_seq: None,
                 },
             );
         }
@@ -112,8 +110,6 @@ struct SnapshotJournal {
     file: File,
     /// Finite byte boundary selected under lock or from a bound checkpoint.
     covered_bytes: u64,
-    /// Checkpoint sequence immediately after a live committed prefix.
-    checkpoint_next_seq: Option<PersistedAgentEventSeq>,
 }
 
 /// A fully validated multi-journal snapshot at fixed committed boundaries.
@@ -225,10 +221,10 @@ impl AgentJournalReader<'_> {
 impl AgentJournalSnapshot {
     /// Captures and validates finite committed prefixes for requested journals.
     ///
-    /// Inactive journals select EOF only after acquiring their shared lock.
-    /// A journal whose writer lock remains held uses its existing atomic,
-    /// journal-bound checkpoint as the committed boundary. The snapshot retains
-    /// each exact opened file identity and never waits for writer completion.
+    /// Journals select EOF only after acquiring their shared lock. Active
+    /// writers fail closed; managed callers must release, claim
+    /// maintenance, capture, and finalize ownership instead of reading
+    /// through a checkpoint fallback.
     pub fn capture(
         agents_dir: &Path,
         agent_ids: impl IntoIterator<Item = AgentId>,
@@ -261,32 +257,8 @@ impl AgentJournalSnapshot {
                             path: journal_path,
                             file,
                             covered_bytes,
-                            checkpoint_next_seq: None,
                         },
                         Some(lock),
-                    )
-                }
-                Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
-                    let mut file = open_existing_journal(&journal_path)?;
-                    let checkpoint = read_journal_bound_checkpoint(
-                        &agent_dir.join("meta.json"),
-                        agent_id,
-                        &mut file,
-                    )
-                    .map_err(|source| AgentStoreError::Read {
-                        path: agent_dir.join("meta.json"),
-                        source,
-                    })?;
-                    (
-                        SnapshotJournal {
-                            path: journal_path,
-                            file,
-                            covered_bytes: checkpoint.journal.covered_bytes,
-                            checkpoint_next_seq: Some(PersistedAgentEventSeq::new(
-                                checkpoint.journal.next_seq,
-                            )),
-                        },
-                        None,
                     )
                 }
                 Err(source) => {
@@ -373,15 +345,6 @@ impl AgentJournalSnapshot {
                     source: crate::AgentEventValidationError::new(format!(
                         "agent journal `{agent_id}` is empty"
                     )),
-                });
-            }
-            if let Some(checkpoint_next_seq) = self.journals[agent_id].checkpoint_next_seq
-                && tree.next_event_seq() != checkpoint_next_seq
-            {
-                return Err(AgentStoreError::InvalidSequence {
-                    path: self.journals[agent_id].path.clone(),
-                    expected: checkpoint_next_seq,
-                    actual: tree.next_event_seq(),
                 });
             }
         }

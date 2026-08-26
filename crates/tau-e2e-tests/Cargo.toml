@@ -30,7 +30,7 @@ serde.workspace = true
 serde_json.workspace = true
 tau-client.workspace = true
 tau-config.workspace = true
-tau-core.workspace = true
+tau-core = { workspace = true, features = ["test-legacy-writer"] }
 tau-ext-test-dummy.workspace = true
 tau-harness = { workspace = true, features = ["output-length-test-barrier"] }
 tau-harness-tools.workspace = true

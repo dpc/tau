@@ -14,6 +14,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Compatibility writer used only to construct on-disk fixtures in test crates.
+test-legacy-writer = []
+
 [dependencies]
 blake3.workspace = true
 ciborium.workspace = true

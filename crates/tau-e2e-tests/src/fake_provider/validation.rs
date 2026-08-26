@@ -710,7 +710,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
     let gated_message_shape = gated_sender
         && matches!(
             message_lanes[1].actions.as_slice(),
-            [ScenarioActionV2::BarrierText { .. }, ScenarioActionV2::MessageInboundAfterHeld {
+            [ScenarioActionV2::BarrierText { .. } | ScenarioActionV2::HoldUntilCancel { .. }, ScenarioActionV2::MessageInboundAfterHeld {
                 call_id: inbound_id,
                 message: inbound_body,
                 ..

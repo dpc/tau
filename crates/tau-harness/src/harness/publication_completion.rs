@@ -3595,6 +3595,38 @@ impl Harness {
         else {
             return Ok(None);
         };
+        if matches!(event, Event::AgentMessageSent(_))
+            && !self
+                .session_runtime
+                .agent_store
+                .has_managed_persistence_lease(&agent_id)
+        {
+            self.session_runtime
+                .store
+                .append_session_event_at_with_persistence(
+                    self.session_runtime.current_session_id.as_str(),
+                    source,
+                    event.clone(),
+                    recorded_at,
+                    self.session_runtime.storage_mode.session_persistence(),
+                )?;
+            return Ok(None);
+        }
+        if matches!(event, Event::AgentStarted(_))
+            && self
+                .session_runtime
+                .agent_store
+                .agent_persistence(agent_id.as_str())
+                .is_durable()
+            && !self
+                .session_runtime
+                .agent_store
+                .agent_id_is_reserved(agent_id.as_str())
+        {
+            self.session_runtime
+                .agent_store
+                .reserve_new_agent(agent_id.as_str())?;
+        }
         let outcome = if let Event::ProviderResponseFinished(response) = event
             && let Some(observation_id) = self
                 .tool_routing

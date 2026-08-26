@@ -4048,11 +4048,6 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
 fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
     let (_td, mut h) = setup_routed_test_tool_call("disconnect-fault", "owned_tool");
     let cid = h.tool_routing.tool_runtime.tool_agents["disconnect-fault"].clone();
-    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
-        .identity
-        .agent_id
-        .clone()
-        .expect("agent id");
     let live_events = connect_test_tool(&mut h, "conn-live-after-fault");
     h.tool_routing.registry.register(
         &crate::test_connection_id("conn-live-after-fault"),
@@ -4070,15 +4065,7 @@ fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
         tau_proto::BackgroundSupport::Never,
     );
 
-    let journal = h
-        .session_runtime
-        .state_dir
-        .join("agents")
-        .join(agent_id)
-        .join("events.cbor");
-    let backup = journal.with_extension("cbor.disconnect-fault-backup");
-    std::fs::rename(&journal, &backup).expect("park journal");
-    std::fs::create_dir(&journal).expect("block journal");
+    reject_semantic_admissions(&h, 2);
     h.handle_disconnect(&crate::test_connection_id("conn-owner"));
 
     assert_eq!(h.tool_routing.tool_runtime.tool_turn.pending_len(), 1);
@@ -4095,7 +4082,4 @@ fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
             .disconnect_terminal_batch_completed
             .is_empty()
     );
-
-    std::fs::remove_dir(&journal).expect("remove journal blocker");
-    std::fs::rename(&backup, &journal).expect("restore journal");
 }

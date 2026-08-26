@@ -1,5 +1,12 @@
 # Security policy
 
+Durable semantic filesystem mutation belongs to one Harness-lifecycle
+`SemanticPersistenceOwner`. Stores pass generation capabilities and staged
+replacements to its sole worker; configured local extensions receive neither
+journal handles nor persistence capabilities. Read-only inspection constructors
+cannot acquire live mutation authority. This does not change the documented
+cooperative local-extension threat model.
+
 The disabled-by-default `std-rostra` extension is a trusted same-user
 executable, but every synchronized Rostra field is untrusted external content.
 Rostra signatures authenticate an author key, not instructions or Tau

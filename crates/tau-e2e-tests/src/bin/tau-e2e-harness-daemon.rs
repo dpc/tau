@@ -102,22 +102,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let cut = match cut.to_str() {
             Some("planned-response") => OutputLengthCommitCut::AfterPlannedResponse,
             Some("continuation-steer") => OutputLengthCommitCut::AfterContinuationSteer,
+            Some("typed-receipt-sender-terminal") => {
+                OutputLengthCommitCut::AfterTypedReceiptSenderTerminal
+            }
+            Some("next-provider-response") => OutputLengthCommitCut::AfterNextProviderResponse,
             _ => {
                 return Err(
-                    "output-length cut must be planned-response or continuation-steer".into(),
+                    "test persistence cut must be planned-response, continuation-steer, typed-receipt-sender-terminal, or next-provider-response".into(),
                 );
             }
         };
-        let harness_state = PathBuf::from(harness_state).canonicalize()?;
         let reached = PathBuf::from(reached);
-        let reached_parent = reached
-            .parent()
-            .ok_or("output-length reached path must have a parent")?
-            .canonicalize()?;
-        if reached.exists() || reached_parent != harness_state {
-            return Err(
-                "output-length reached path must be an absent direct child of harness state".into(),
-            );
+        if reached.parent().is_none() {
+            return Err("test barrier socket must have a parent".into());
         }
         tau_harness::output_length_test_barrier::install(cut, reached)?;
     }

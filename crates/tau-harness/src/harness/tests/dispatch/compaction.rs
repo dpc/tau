@@ -5717,15 +5717,7 @@ fn failed_wait_cancellation_append_rolls_back_without_compaction() {
         test_session_id("s1"),
         Some(agent_id.as_str()),
     );
-    let journal = h
-        .session_runtime
-        .state_dir
-        .join("agents")
-        .join(agent_id.as_str())
-        .join("events.cbor");
-    let backup = journal.with_extension("cbor.test-backup");
-    std::fs::rename(&journal, &backup).expect("park journal");
-    std::fs::create_dir(&journal).expect("block journal path");
+    reject_next_semantic_admission(&h);
     h.handle_extension_event(
         "wait-append-failure-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -5741,8 +5733,6 @@ fn failed_wait_cancellation_append_rolls_back_without_compaction() {
     );
     assert_eq!(tool_result_count(&h, wait.id.as_str()), 0);
     assert!(h.input_wait_pending_for(&cid));
-    std::fs::remove_dir(&journal).expect("remove journal blocker");
-    std::fs::rename(&backup, &journal).expect("restore journal");
     h.handle_compact_request(
         crate::harness::harness_connection_id(),
         test_session_id("s1"),
@@ -9697,7 +9687,7 @@ fn late_prompt_surface_failure_terminalizes_running_compaction() {
     }
 
     assert!(h.prepare_agent_prompt_for_dispatch(&cid).is_none());
-    assert!(event_log_contains_any_source(&h, |event| matches!(
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::AgentStandaloneCompactionFailed(failed)
             if failed.transaction_id == transaction_id
@@ -9769,17 +9759,11 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
         .expect("agent")
         .identity
         .head = through.as_option();
-    let event_path = state_dir
-        .join("agents")
-        .join(agent_id.as_str())
-        .join("events.cbor");
-    let backup_path = event_path.with_extension("cbor.retry-backup");
-    std::fs::rename(&event_path, &backup_path).expect("park agent journal");
-    std::fs::create_dir(&event_path).expect("reject checkpoint append");
     h.prompt_coordination
         .compaction_runtime
         .enqueued_inference_checkpoints
         .insert((agent_id.clone(), transaction_id.clone()));
+    reject_next_semantic_admission(&h);
     h.publish_for_agent(&cid, checkpoint);
     assert!(matches!(
         h.agent_runtime.agent_registry.agents[&cid]
@@ -9796,8 +9780,6 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
             .enqueued_inference_checkpoints
             .contains(&(agent_id.clone(), transaction_id.clone()))
     );
-    std::fs::remove_dir(&event_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
 
     h.publish_for_agent(
         &cid,

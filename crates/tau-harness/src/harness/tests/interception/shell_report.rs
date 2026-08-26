@@ -619,11 +619,9 @@ fn running_shell_snapshot_bounds_only_attach_projection() {
     }
 }
 
-/// A failed target-journal append still settles one live terminal while
-/// suppressing context injection, replay, leaked lifecycle state, and
-/// duplicates.
+/// Rejected terminal admission publishes nothing and retains retry ownership.
 #[test]
-fn terminal_append_failure_settles_live_without_durable_side_effects() {
+fn terminal_admission_failure_has_no_broadcast_or_durable_side_effect() {
     let tmp = TempDir::new().expect("tempdir");
     let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
     let sink = connect_test_client(&mut harness, "shell-ui", tau_proto::ClientKind::Ui);
@@ -645,24 +643,12 @@ fn terminal_append_failure_settles_live_without_durable_side_effects() {
         "shell-store-fault",
         true,
     );
-    let agent_id = command.target_agent_id.as_ref().expect("resolved target");
-    let journal = harness
-        .session_runtime
-        .state_dir
-        .join("agents")
-        .join(agent_id.as_str())
-        .join("events.cbor");
-    let backup = journal.with_extension("cbor.test-backup");
-    std::fs::rename(&journal, &backup).expect("park target journal");
-    std::fs::create_dir(&journal).expect("block target journal path");
+    reject_next_semantic_admission(&harness);
     let report = finished_report(&route_id, &command, "unpersisted");
 
     harness
         .handle_extension_event("shell-owner", TestProtocolItem::Event(report.clone()))
         .expect("report remains an observation despite append failure");
-    harness
-        .handle_extension_event("shell-owner", TestProtocolItem::Event(report))
-        .expect("late duplicate remains an observation");
 
     let live = sink
         .lock()
@@ -679,18 +665,19 @@ fn terminal_append_failure_settles_live_without_durable_side_effects() {
             )
         })
         .count();
-    assert_eq!(live, 1);
+    assert_eq!(live, 0);
     assert!(
-        !harness
+        harness
             .ui_runtime
             .active_ui_shell_command_ids
             .contains(&command.command_id)
     );
     assert!(
-        !harness
+        harness
             .ui_runtime
             .pending_ui_shell_output_injections
-            .contains(&command.command_id)
+            .contains(&command.command_id),
+        "rejected terminal retains pending canonical output"
     );
     assert!(
         !harness
@@ -706,9 +693,6 @@ fn terminal_append_failure_settles_live_without_durable_side_effects() {
                 Event::ShellCommandFinished(_) | Event::AgentUserMessageInjected(_)
             ))
     );
-
-    std::fs::remove_dir(&journal).expect("remove journal blocker");
-    std::fs::rename(&backup, &journal).expect("restore target journal");
 }
 
 /// A Core shell provider uses the same report boundary, with the harness

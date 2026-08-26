@@ -1239,30 +1239,7 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
             .expect("known-safe AgentPromptId must be valid"),
         crate::test_connection_id("provider"),
     );
-    let agent_id = durable_agent_id_for_conversation(&harness, &cid);
-    let failure_store = state_dir.join("failure-agent-store");
-    let mut agent_store = tau_core::AgentStore::open(&failure_store).expect("failure agent store");
-    agent_store
-        .append_agent_event(
-            agent_id.as_str(),
-            None,
-            Event::AgentStarted(tau_proto::AgentStarted {
-                creator: Some(tau_proto::AgentCreator::default()),
-
-                parent_agent: None,
-                agent_id: agent_id.clone(),
-                role: "engineer".to_owned(),
-                display_name: None,
-                metadata: Vec::new(),
-                ephemeral: false,
-            }),
-        )
-        .expect("seed failure agent");
-    let event_path = failure_store.join(agent_id.as_str()).join("events.cbor");
-    std::fs::remove_file(&event_path).expect("remove agent stream");
-    std::fs::create_dir_all(&event_path).expect("block agent stream with directory");
-    harness.session_runtime.agent_store = agent_store;
-
+    reject_next_semantic_admission(&harness);
     harness
         .handle_extension_event_inner(
             &crate::test_connection_id("provider"),

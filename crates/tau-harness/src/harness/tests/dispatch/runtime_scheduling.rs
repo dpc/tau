@@ -69,22 +69,24 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
             _ => None,
         })
         .collect();
-    assert_eq!(failed_results.len(), 1);
-    assert!(failed_results[0].error.is_some());
     assert!(
-        !h.agent_runtime
+        failed_results.is_empty(),
+        "asynchronous collision cannot retract accepted creation"
+    );
+    assert!(
+        h.agent_runtime
             .agent_registry
             .agent_routes
             .contains_key(&first_agent_id)
     );
     assert!(
-        !h.agent_runtime
+        h.agent_runtime
             .agent_registry
             .agents
             .contains_key(&crate::parse_agent_id(&first_agent_id))
     );
     assert!(
-        !h.agent_runtime
+        h.agent_runtime
             .agent_registry
             .session_loaded
             .contains(&crate::parse_agent_id(&first_agent_id))
@@ -93,19 +95,19 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
         h.session_runtime
             .store
             .session("s1")
-            .is_none_or(|membership| {
-                !membership.contains_agent(&crate::parse_agent_id(&first_agent_id))
+            .is_some_and(|membership| {
+                membership.contains_agent(&crate::parse_agent_id(&first_agent_id))
             })
     );
     assert!(events.iter().all(|event| !matches!(
         event,
         Event::AgentPromptSubmitted(prompt) if prompt.agent_id.as_str() == first_agent_id
     )));
-    assert!(events.iter().all(|event| !matches!(
+    assert!(events.iter().any(|event| matches!(
         event,
         Event::AgentStarted(started) if started.agent_id.as_str() == first_agent_id
     )));
-    assert!(events.iter().all(|event| !matches!(
+    assert!(events.iter().any(|event| matches!(
         event,
         Event::SessionAgentLoaded(loaded) if loaded.agent_id.as_str() == first_agent_id
     )));

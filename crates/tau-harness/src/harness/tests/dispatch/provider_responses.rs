@@ -321,13 +321,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
                 })
             }
         };
-        let journal = state
-            .join("agents")
-            .join(durable_agent_id.as_str())
-            .join("events.cbor");
-        let backup = journal.with_extension("cbor.test-backup");
-        std::fs::rename(&journal, &backup).expect("park journal");
-        std::fs::create_dir(&journal).expect("block journal path");
+        reject_next_semantic_admission(&h);
         h.publish_event(
             Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             input(),
@@ -343,9 +337,6 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
             h.runtime_io.publication.pending_intercept.is_none(),
             "failed receipt append cannot enqueue Stale"
         );
-        std::fs::remove_dir(&journal).expect("remove receipt blocker");
-        std::fs::rename(&backup, &journal).expect("restore journal");
-
         h.publish_event(
             Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             input(),
@@ -388,8 +379,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
                 .is_none(),
             "intercepted Stale cannot materialize input"
         );
-        std::fs::rename(&journal, &backup).expect("park journal for terminal");
-        std::fs::create_dir(&journal).expect("block terminal append");
+        reject_next_semantic_admission(&h);
         h.handle_extension_event(
             interceptor,
             TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -411,9 +401,6 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
                 .is_none(),
             "failed closer preserves uncertainty and deferred placement"
         );
-        std::fs::remove_dir(&journal).expect("remove terminal blocker");
-        std::fs::rename(&backup, &journal).expect("restore journal after terminal failure");
-
         connect_ready_configured_extension(
             &mut h,
             "replacement-provider",

@@ -188,6 +188,10 @@ pub(super) enum OutputLengthCrashCut {
     PlannedResponse,
     /// Stop after the continuation steer and before scheduling its owner.
     ContinuationSteer,
+    /// Stop after typed receipt plus its sender terminal are durable.
+    TypedReceiptSenderTerminal,
+    /// Stop after two provider responses in the resumed daemon.
+    NextProviderResponse,
 }
 
 impl OutputLengthCrashCut {
@@ -195,6 +199,8 @@ impl OutputLengthCrashCut {
         match self {
             Self::PlannedResponse => "planned-response",
             Self::ContinuationSteer => "continuation-steer",
+            Self::TypedReceiptSenderTerminal => "typed-receipt-sender-terminal",
+            Self::NextProviderResponse => "next-provider-response",
         }
     }
 }

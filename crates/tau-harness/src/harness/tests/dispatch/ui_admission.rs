@@ -1528,30 +1528,7 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
         .expect("observer subscription");
     observer.lock().expect("observer frames").clear();
 
-    let failure_store = state_dir.join("interaction-failure-agent-store");
-    let mut agent_store = tau_core::AgentStore::open(&failure_store).expect("failure agent store");
-    agent_store
-        .append_agent_event(
-            target_id.as_str(),
-            None,
-            Event::AgentStarted(tau_proto::AgentStarted {
-                creator: Some(tau_proto::AgentCreator::default()),
-
-                parent_agent: None,
-                agent_id: target_id.clone(),
-                role: h.config.selected_role.clone(),
-                display_name: None,
-                metadata: Vec::new(),
-                ephemeral: false,
-            }),
-        )
-        .expect("seed failure agent");
-    let event_path = failure_store.join(target_id.as_str()).join("events.cbor");
-    let backup_path = event_path.with_extension("cbor.interaction-backup");
-    std::fs::rename(&event_path, &backup_path).expect("park agent journal");
-    std::fs::create_dir(&event_path).expect("block agent append with directory");
-    h.session_runtime.agent_store = agent_store;
-
+    reject_next_semantic_admission(&h);
     let result = h.handle_client_event_inner(
         &crate::test_connection_id("append-failure-ui"),
         Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -1564,8 +1541,6 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
             ctx_id: Some("interaction-append-failure".to_owned()),
         }),
     );
-    std::fs::remove_dir(&event_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
 
     assert!(matches!(result, Err(HarnessError::AgentStore(_))));
     assert_eq!(
@@ -2822,7 +2797,7 @@ fn ui_emitted_custom_event_routes_to_subscribed_extension() {
 /// A failed retention-hint touch remains one content-free UI diagnostic and
 /// does not retract the accepted UI prompt dispatch.
 #[test]
-fn ui_session_metadata_touch_failure_is_traced_without_blocking_dispatch() {
+fn ui_session_metadata_touch_worker_failure_does_not_retract_admission() {
     let temp = TempDir::new().expect("tempdir");
     let mut harness = echo_harness(temp.path().join("state")).expect("harness");
     let cid = ensure_test_user_agent(&mut harness);
@@ -2860,7 +2835,7 @@ fn ui_session_metadata_touch_failure_is_traced_without_blocking_dispatch() {
     assert_eq!(
         captured_traces.len(),
         2,
-        "one successful activation append and one failed metadata touch are emitted"
+        "activation and touch admission both succeed before asynchronous I/O"
     );
     assert!(captured_traces.iter().any(|trace| {
         trace.fields.contains_key("activation_append_us")
@@ -2903,7 +2878,7 @@ fn ui_session_metadata_touch_failure_is_traced_without_blocking_dispatch() {
             .fields
             .get("result_class")
             .map(String::as_str),
-        Some("failure")
+        Some("success")
     );
     assert_eq!(
         session_meta_trace.fields.get("message").map(String::as_str),

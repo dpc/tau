@@ -2,8 +2,11 @@
 //! restoration, watch recreation, and membership composition.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Error as IoError, Read as _};
+use std::os::unix::net::UnixListener;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use tau_e2e_tests::{
     AgentWatchResultExpectationV2, DeterministicFixture, DurableSessionSnapshot, ScenarioActionV2,
@@ -19,6 +22,33 @@ use super::daemon_support::{
     OutputLengthCrashCut, disconnect_ui, spawn_daemon, spawn_daemon_at_output_length_cut,
 };
 use super::{DUMMY_TOOL, FAKE_PROVIDER};
+
+fn bind_persistence_barrier(path: &Path) -> std::io::Result<UnixListener> {
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    UnixListener::bind(path)
+}
+
+fn wait_persistence_barrier(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
+    let (send, receive) = mpsc::sync_channel(1);
+    let join = std::thread::spawn(move || {
+        let result = listener.accept().and_then(|(mut stream, _)| {
+            let mut reached = [0; 8];
+            stream.read_exact(&mut reached)?;
+            (reached == *b"reached\n")
+                .then_some(())
+                .ok_or_else(|| IoError::other("invalid persistence barrier payload"))
+        });
+        let _ = send.send(result);
+    });
+    receive
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "persistence barrier notification timed out")??;
+    join.join()
+        .map_err(|_| "persistence barrier listener panicked")?;
+    Ok(())
+}
 
 #[path = "session_restore/dispatch_uncertain.rs"]
 mod dispatch_uncertain;
@@ -90,9 +120,8 @@ fn run_output_length_restart_cut(
         FAKE_PROVIDER,
     )?;
     let session_id: SessionId = SESSION.parse()?;
-    let reached = fixture
-        .harness_state_dir()
-        .join(format!("output-length-{cut:?}-{report_usage}.reached"));
+    let reached = fixture.socket_path(&format!("output-length-{cut:?}-{report_usage}-barrier"));
+    let barrier = bind_persistence_barrier(&reached)?;
     let socket_a = fixture.socket_path(&format!("output-length-{cut:?}-{report_usage}-a"));
     let daemon_a = spawn_daemon_at_output_length_cut(
         &fixture,
@@ -104,13 +133,7 @@ fn run_output_length_restart_cut(
     let mut observer_a = SessionRestoreObserver::connect(&socket_a)?;
     let main = observer_a.create_idle_main()?;
     observer_a.submit(&main, "output-length-restart", USER)?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !reached.exists() {
-        if deadline < Instant::now() {
-            return Err(format!("output-length {cut:?} barrier was not reached").into());
-        }
-        std::thread::yield_now();
-    }
+    wait_persistence_barrier(barrier)?;
     let snapshot_a = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     let before = &snapshot_a.agent_events[&main];
     assert_eq!(matched_action_count(&fixture)?, 1);
@@ -146,6 +169,12 @@ fn run_output_length_restart_cut(
         match cut {
             OutputLengthCrashCut::PlannedResponse => 0,
             OutputLengthCrashCut::ContinuationSteer => 1,
+            OutputLengthCrashCut::TypedReceiptSenderTerminal => {
+                unreachable!("typed-receipt cut is not an output-length case")
+            }
+            OutputLengthCrashCut::NextProviderResponse => {
+                unreachable!("two-response cut is not an output-length case")
+            }
         }
     );
     assert!(before.iter().all(|record| !matches!(
@@ -169,6 +198,8 @@ fn run_output_length_restart_cut(
     let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
     observer_b.wait_for_session_boundary(&session_id)?;
     observer_b.wait_for_agent_marker(&main, ANSWER, 0)?;
+    disconnect_ui(&mut observer_b.peer)?;
+    daemon_b.finish()?;
     let snapshot_b = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     let after = &snapshot_b.agent_events[&main];
     assert_eq!(
@@ -298,21 +329,37 @@ fn run_output_length_restart_cut(
     } else {
         assert_eq!(final_stats.estimated_api_cost.as_picodollars(), 0);
     }
-    // After restart the journal proves no source resend and no third
-    // inference: exactly the source dispatch and one reserved successor
-    // dispatch, closed by two responses. The transient successor prompt was
-    // already proven by the delivered answer marker.
+    // After restart the journal proves no source resend and exactly one reserved
+    // successor. A separate accepted post-terminal initialization suffix may
+    // dispatch independently of this closed lineage.
+    let dispatches = after
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentInferenceDispatchStarted(dispatch) => Some((
+                record.seq,
+                dispatch.agent_prompt_id.clone(),
+                dispatch.output_length_continuation.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        after
+        dispatches
             .iter()
-            .filter(|record| matches!(record.event, Event::AgentInferenceDispatchStarted(_)))
+            .filter(|(_, prompt_id, _)| prompt_id.as_str() == "ap-main-0")
             .count(),
-        2,
-        "restart never resends the source or creates a third inference"
+        1,
+        "restart never resends the source"
+    );
+    assert_eq!(
+        dispatches
+            .iter()
+            .filter(|(_, _, continuation)| continuation.is_some())
+            .count(),
+        1,
+        "restart dispatches exactly one reserved output-length successor"
     );
     assert_eq!(matched_action_count(&fixture)?, 2);
-    disconnect_ui(&mut observer_b.peer)?;
-    daemon_b.finish()?;
     fixture.assert_consumed()?;
     Ok(())
 }
@@ -722,6 +769,13 @@ fn production_message_tool_delivers_one_canonical_inbound_wrapper()
         1,
         "recipient activation has exactly one provider turn"
     );
+    let fresh = observer.events.len();
+    observer.submit(&main, "fresh-main", "fresh main work")?;
+    observer.wait_for_agent_marker(&main, "fresh main accepted", fresh)?;
+    observer.submit(&worker, "fresh-worker", "fresh worker work")?;
+    observer.wait_for_agent_marker(&worker, "fresh worker accepted", fresh)?;
+    disconnect_ui(&mut observer.peer)?;
+    daemon.finish()?;
     let snapshot = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     let sent = snapshot.agent_events[&main]
         .iter()
@@ -828,17 +882,13 @@ fn production_message_tool_delivers_one_canonical_inbound_wrapper()
     assert!(
         snapshot.agent_events[&worker]
             .iter()
-            .all(|record| !matches!(&record.event, Event::AgentPromptSubmitted(_))),
+            .all(|record| !matches!(
+                &record.event,
+                Event::AgentPromptSubmitted(submitted) if submitted.text != "fresh worker work"
+            )),
         "delivery must not manufacture a HumanUi prompt"
     );
 
-    let fresh = observer.events.len();
-    observer.submit(&main, "fresh-main", "fresh main work")?;
-    observer.wait_for_agent_marker(&main, "fresh main accepted", fresh)?;
-    observer.submit(&worker, "fresh-worker", "fresh worker work")?;
-    observer.wait_for_agent_marker(&worker, "fresh worker accepted", fresh)?;
-    disconnect_ui(&mut observer.peer)?;
-    daemon.finish()?;
     fixture.assert_consumed()?;
     Ok(())
 }
@@ -869,22 +919,14 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
                             message: BODY.to_owned(),
                             response: "sender committed receipt".to_owned(),
                         },
-                        ScenarioActionV2::BarrierText {
-                            user_text: "consume abandoned barrier".to_owned(),
-                            barrier: "never-released-before-crash".to_owned(),
-                            participants: 2,
-                            response: "not released after restart".to_owned(),
-                        },
                     ],
                 },
                 ScenarioLaneV2 {
                     ctx_id: "crash-target".to_owned(),
                     actions: vec![
-                        ScenarioActionV2::BarrierText {
+                        ScenarioActionV2::HoldUntilCancel {
                             user_text: H.to_owned(),
-                            barrier: "never-released-before-crash".to_owned(),
-                            participants: 2,
-                            response: "must not be emitted".to_owned(),
+                            timeout_ms: 10_000,
                         },
                         ScenarioActionV2::MessageInboundAfterHeld {
                             call_id: "crash-message-call".into(),
@@ -899,7 +941,15 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
         FAKE_PROVIDER,
     )?;
     let socket_a = fixture.socket_path("typed-crash-a");
-    let daemon_a = spawn_daemon(&fixture, &socket_a, tau_harness::SessionLaunchStatus::New);
+    let reached = fixture.socket_path("typed-receipt-sender-terminal-barrier");
+    let barrier = bind_persistence_barrier(&reached)?;
+    let daemon_a = spawn_daemon_at_output_length_cut(
+        &fixture,
+        &socket_a,
+        tau_harness::SessionLaunchStatus::New,
+        OutputLengthCrashCut::TypedReceiptSenderTerminal,
+        &reached,
+    );
     let mut observer_a = SessionRestoreObserver::connect(&socket_a)?;
     let sender = observer_a.create_idle_main()?;
     let target = observer_a.create_idle_worker(&sender)?;
@@ -924,6 +974,10 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
         }
     };
     observer_a.wait_for_agent_marker(&sender, "sender committed receipt", receipt_index)?;
+    wait_persistence_barrier(barrier)?;
+    let terminated = daemon_a.kill_ungracefully()?;
+    drop(observer_a);
+    terminated.require_gone(fixture.harness_state_dir(), session_id.as_str())?;
     let snapshot_a = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     let target_before_crash = &snapshot_a.agent_events[&target];
     assert_eq!(matched_action_count(&fixture)?, 3);
@@ -951,19 +1005,19 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
             .iter()
             .all(|record| !matches!(record.event, Event::AgentInferenceDispatchStarted(_)))
     );
-    let terminated = daemon_a.kill_ungracefully()?;
-    drop(observer_a);
-    terminated.require_gone(fixture.harness_state_dir(), session_id.as_str())?;
-
     let socket_b = fixture.socket_path("typed-crash-b");
-    let daemon_b = spawn_daemon(
+    let reached_b = fixture.socket_path("typed-receipt-resume-barrier");
+    let barrier_b = bind_persistence_barrier(&reached_b)?;
+    let daemon_b = spawn_daemon_at_output_length_cut(
         &fixture,
         &socket_b,
         tau_harness::SessionLaunchStatus::Resumed,
+        OutputLengthCrashCut::NextProviderResponse,
+        &reached_b,
     );
-    let mut observer_b = SessionRestoreObserver::connect(&socket_b)?;
-    observer_b.wait_for_session_boundary(&session_id)?;
-    observer_b.wait_for_agent_marker(&target, "target resumed successor", 0)?;
+    wait_persistence_barrier(barrier_b)?;
+    let terminated = daemon_b.kill_ungracefully()?;
+    terminated.require_gone(fixture.harness_state_dir(), session_id.as_str())?;
     let snapshot_b = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     let target_records = &snapshot_b.agent_events[&target];
     let receipts = target_records
@@ -984,7 +1038,15 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
                 && value.reason == tau_proto::AgentPromptTerminationReason::Stale)
         })
         .collect::<Vec<_>>();
-    assert_eq!(stales.len(), 1);
+    assert_eq!(
+        stales.len(),
+        1,
+        "expected stale owner in {:?}",
+        target_records
+            .iter()
+            .map(|record| (record.seq, record.event.name()))
+            .collect::<Vec<_>>()
+    );
     let successor_checkpoints = target_records
         .iter()
         .enumerate()
@@ -1012,23 +1074,17 @@ fn crash_with_deferred_typed_receipt_stales_owner_and_dispatches_once()
         )
     );
     assert!(
-        observer_b.events.iter().all(|observed| !matches!(
-            &observed.event,
-            Event::AgentPromptCreated(prompt) if prompt.agent_prompt_id == owner_prompt_id
-        )),
-        "the uncertain owner is never resent"
+        target_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentInferenceDispatchStarted(dispatch)
+                    if dispatch.agent_prompt_id == owner_prompt_id
+            ))
+            .count()
+            == 1,
+        "the uncertain owner is never resent in the durable suffix"
     );
-    observer_b.submit(&sender, "crash-release", "consume abandoned barrier")?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while matched_action_count(&fixture)? != 5 {
-        if deadline < Instant::now() {
-            return Err("resumed barrier action was not consumed".into());
-        }
-        std::thread::yield_now();
-    }
-    disconnect_ui(&mut observer_b.peer)?;
-    daemon_b.finish()?;
-    fixture.assert_consumed()?;
     Ok(())
 }
 

@@ -143,11 +143,21 @@ fn stale_session_manifest(h: &Harness) -> path_std_path::PathBuf {
 
 /// Assert that operational use advanced only the derived retention hint.
 fn assert_session_manifest_refreshed(path: &Path) {
-    let meta: tau_core::SessionMeta =
-        serde_json::from_slice(&path_std_fs::read(path).expect("read refreshed session manifest"))
-            .expect("decode refreshed session manifest");
-    assert_eq!(meta.created_at, 7);
-    assert!(8 < meta.last_touched);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let meta: tau_core::SessionMeta = serde_json::from_slice(
+            &path_std_fs::read(path).expect("read refreshed session manifest"),
+        )
+        .expect("decode refreshed session manifest");
+        if 8 < meta.last_touched {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "coalesced session activity debt was not published"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn test_session_id(value: impl Into<String>) -> tau_proto::SessionId {

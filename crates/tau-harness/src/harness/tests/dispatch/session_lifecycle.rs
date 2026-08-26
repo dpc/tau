@@ -502,7 +502,7 @@ fn cold_resume_recovers_agent_session_and_restore_suffixes() {
         .into_iter()
         .find(|entry| entry.id == main_id)
         .expect("main agent entry");
-    assert_eq!(entry.status, tau_core::AgentListStatus::Fresh);
+    assert_eq!(entry.status, tau_core::AgentListStatus::Busy);
 }
 /// A cold boot preserves one unresolved ordinary outer turn without duplicating
 /// its start, then accounts a later completed turn alongside the crash
@@ -708,23 +708,21 @@ fn existing_agent_loaded_into_different_session_gets_session_state_notice() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
     let agent_id = tau_proto::AgentId::parse("existing-agent").expect("agent id");
-    h.session_runtime
-        .agent_store
-        .append_agent_event(
-            agent_id.as_str(),
-            None,
-            Event::AgentStarted(tau_proto::AgentStarted {
-                creator: Some(tau_proto::AgentCreator::default()),
+    h.append_direct_agent_semantic_event(
+        agent_id.as_str(),
+        tau_core::AgentEventParent::InheritHead,
+        Event::AgentStarted(tau_proto::AgentStarted {
+            creator: Some(tau_proto::AgentCreator::default()),
 
-                parent_agent: None,
-                agent_id: agent_id.clone(),
-                role: "engineer".to_owned(),
-                display_name: None,
-                metadata: Vec::new(),
-                ephemeral: false,
-            }),
-        )
-        .expect("seed existing agent");
+            parent_agent: None,
+            agent_id: agent_id.clone(),
+            role: "engineer".to_owned(),
+            display_name: None,
+            metadata: Vec::new(),
+            ephemeral: false,
+        }),
+    )
+    .expect("seed existing agent");
 
     let cid = crate::parse_agent_id(agent_id.as_str());
     let mut agent = Agent::new(
@@ -1400,12 +1398,7 @@ fn durable_agent_dispatch_extends_session_retention() {
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("operational use".to_owned()))
         .expect("dispatch prompt");
 
-    let meta: tau_core::SessionMeta = serde_json::from_slice(
-        &path_std_fs::read(meta_path).expect("read refreshed session manifest"),
-    )
-    .expect("decode refreshed session manifest");
-    assert_eq!(meta.created_at, 7);
-    assert!(8 < meta.last_touched);
+    assert_session_manifest_refreshed(&meta_path);
     h.shutdown().expect("shutdown");
 }
 
@@ -1429,10 +1422,7 @@ fn failed_initial_manifest_prevents_session_diagnostic_creation() {
     .expect_err("manifest obstruction must fail session setup");
 
     assert!(!session_dir.join("events.jsonl").exists());
-    assert!(
-        session_dir.join("lock").exists(),
-        "lock scaffolding may remain"
-    );
+    assert!(!session_dir.join("lock").exists());
     h.shutdown().expect("shutdown");
 }
 

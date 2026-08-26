@@ -50,29 +50,24 @@ validates and folds the durable snapshot, then validates and composes the
 overlay. Cached membership never bypasses durable journal validation, and restart
 discards the overlay with the corresponding ephemeral transcripts.
 
-Durable semantic stores share one bounded persistence admission stream. Its
-worker owns journal filesystem state and uses `JournalSyncWorker` through
-`FramedAppendState` for coalesced synchronization. The sync state keeps at most one
-merged dirty target and one ready-or-in-flight position per journal or directory
-boundary. A journal target records its generation, exact end offset, and required
-parent directories. A directory-boundary target records its distinct kind and
-child-before-parent directory chain. Newly created directories submit immediately;
-after acquiring writable branch ownership, stores deliberately re-cover the
-existing branch boundary and a pending store-root chain through `.` or filesystem
-root, so a prior process cannot strand any ancestor entry. Opening retains that
-root debt without submitting it; read-only use and losing lock contenders neither
-submit nor consume it. Worker-side appends update their journal target without
-delaying live publication.
+One Harness-lifecycle `SemanticPersistenceOwner` serves agent, ordinary-session,
+and restore journals through one bounded global FIFO. Explicit preparation hands
+all mutable files, locks, offsets, checkpoints, manifest authority, and durability
+debt to its sole worker. Stores retain generation-bound leases and complete
+in-memory projections; live admission reserves count and aggregate bytes, builds
+the frame and replacement off-side, then performs one nonblocking revalidation,
+swap, and FIFO insertion. Rejection changes no projection or publication state.
 
-The worker syncs each journal file before its required directories and each
-directory boundary child before its parent. It compares the full
-kind/generation/offset/directory target before clearing it, and immediately requeues
-a concurrently advanced target. Failed paths use independent capped retry
-deadlines and rotate fairly behind ready paths. A new dirty notification clears
-no existing backoff: later bytes coalesce under the failed path's deadline while
-newly dirty paths wake promptly. Thread creation is lazy and best-effort; store destruction
-signals one final pass but detaches rather than joining a potentially blocked
-filesystem sync. Exact semantics are governed by
+The worker retries exact-EOF rollback-safe heads on deadlines, poisons only
+generations whose rollback cannot be proven, coalesces watermarked checkpoint and
+session-touch debt, and synchronizes file data plus exact child-before-parent
+directory targets. Touch debt uses the prepared manifest's `created_at` and an
+exact global frame prerequisite. Release closes a complete generation set at one
+mutex cut, drains its accepted frames and debt, then drops handles and capacity;
+maintenance uses a distinct release/claim/read/finalize lifecycle. Normal
+`open`/`open_lazy` constructors are read-only inspection views. The foreground
+compatibility writer exists only behind the explicit test-fixture feature. Exact
+semantics are governed by
 [SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
 
 Store IDs used as path components share one bounded safe grammar with CLI

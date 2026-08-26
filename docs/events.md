@@ -1,5 +1,13 @@
 # Event log reference
 
+## Durable publication cut
+
+Tau admits each durable semantic frame and complete in-memory projection before
+recording or broadcasting it. Admission rejection is invisible to EventLog,
+debug JSONL, subscriptions, and continuation consumers. Filesystem durability
+then follows asynchronously in one global FIFO; restart observes the longest
+valid durable prefix.
+
 ## External-message reports and canonical facts
 
 Message bridges publish transient `message.delivered_reported`,

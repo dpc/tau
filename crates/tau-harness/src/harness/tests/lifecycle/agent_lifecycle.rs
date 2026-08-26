@@ -211,14 +211,7 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
             ))
             .collect::<Vec<_>>()
     );
-    let journal_path = td
-        .path()
-        .join("agents")
-        .join(&durable_agent_id)
-        .join("events.cbor");
-    let backup_path = journal_path.with_extension("cbor.length-backup");
-    std::fs::rename(&journal_path, &backup_path).expect("park journal");
-    std::fs::create_dir(&journal_path).expect("reject planned steer append");
+    reject_next_semantic_admission(&h);
     h.handle_extension_event(
         "length-steer-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -238,8 +231,6 @@ fn output_length_steer_append_failure_retains_pending_cancellation() {
                 )
             })
     );
-    std::fs::remove_dir(&journal_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.handle_extension_event(
         "length-steer-interceptor",
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
@@ -514,14 +505,7 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
             agent_prompt_id: None,
         },
     );
-    let journal_path = td
-        .path()
-        .join("agents")
-        .join(source.agent_id.as_str())
-        .join("events.cbor");
-    let backup_path = journal_path.with_extension("cbor.dormant-backup");
-    std::fs::rename(&journal_path, &backup_path).expect("park journal");
-    std::fs::create_dir(&journal_path).expect("reject dormant owner append");
+    reject_next_semantic_admission(&h);
     h.handle_extension_event(
         "dormant-owner-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -529,8 +513,6 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
         })),
     )
     .expect("release dormant owner into append rejection");
-    std::fs::remove_dir(&journal_path).expect("remove rejection directory");
-    std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.publish_for_agent(
         &cid,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
@@ -1630,14 +1612,7 @@ fn output_length_finish_append_failure_retries_before_new_work() {
         "settled finish is parked"
     );
 
-    let journal_path = td
-        .path()
-        .join("agents")
-        .join(source.agent_id.as_str())
-        .join("events.cbor");
-    let backup_path = journal_path.with_extension("cbor.finish-backup");
-    std::fs::rename(&journal_path, &backup_path).expect("park journal");
-    std::fs::create_dir(&journal_path).expect("reject finish append");
+    reject_next_semantic_admission(&h);
     h.handle_extension_event(
         "length-finish-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -1673,8 +1648,6 @@ fn output_length_finish_append_failure_retries_before_new_work() {
         "new work remains deferred while the old finish is retryable"
     );
 
-    std::fs::remove_dir(&journal_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.retry_pending_agent_publications();
     assert!(
         h.runtime_io.publication.pending_intercept.is_some(),
@@ -2234,14 +2207,7 @@ fn output_length_append_rejected_terminal_cancellation_repairs_once() {
     h.handle_provider_response_finished(terminal)
         .expect("park terminal");
 
-    let journal_path = td
-        .path()
-        .join("agents")
-        .join(source.agent_id.as_str())
-        .join("events.cbor");
-    let backup_path = journal_path.with_extension("cbor.terminal-backup");
-    std::fs::rename(&journal_path, &backup_path).expect("park journal");
-    std::fs::create_dir(&journal_path).expect("reject terminal append");
+    reject_next_semantic_admission(&h);
     h.handle_extension_event(
         "length-rejected-terminal",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -2273,8 +2239,6 @@ fn output_length_append_rejected_terminal_cancellation_repairs_once() {
         },
     );
 
-    std::fs::remove_dir(&journal_path).expect("remove append blocker");
-    std::fs::rename(&backup_path, &journal_path).expect("restore journal");
     h.retry_pending_agent_publications();
     assert!(
         h.runtime_io.publication.pending_intercept.is_none(),

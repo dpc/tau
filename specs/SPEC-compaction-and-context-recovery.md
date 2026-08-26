@@ -216,7 +216,7 @@ they identify a daemon incarnation rather than durable provider work.
 Only the start's post-commit reaction materializes one cut-local compact request
 with that exact prompt id, provider-qualified model, operation, model parameters,
 tool surface, accounting identity, and synthetic trigger. The harness then
-completes the foreground append of the compact `agent.prompt_started` fact; only that fact's
+completes bounded admission of the compact `agent.prompt_started` fact; only that fact's
 one-shot live post-commit continuation may deliver the full request to the
 selected provider. Mutable `:model` selection applies only to future work; it
 cannot rewrite a committed start. If the captured model route disappears, the
@@ -239,7 +239,7 @@ its operation is inference, and its activation cut equals the start cut. Core
 rejects incomplete or transaction-mismatched ownership correlations. The
 checkpoint post-commit continuation uses that exact model for prompt
 materialization regardless of later selection changes; provider delivery still
-requires the matching write-complete `agent.prompt_started` fact and its one-shot
+requires the matching admission-complete `agent.prompt_started` fact and its one-shot
 live continuation. An unavailable route is durably terminalized before remote
 send. It acknowledges
 only materialized typed-message wakes on that branch, including sequence-keyed

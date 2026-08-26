@@ -4,6 +4,20 @@ use super::*;
 use crate::journal_sync::SyncTargetKind;
 use crate::record_log::AppendFault;
 
+/// Normal-build inspection state rejects lock/repair mutation without
+/// artifacts.
+#[test]
+fn read_only_agent_store_rejects_recovery_without_mutation() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let root = temp.path().join("agents");
+    let mut store = AgentStore::read_only(&root);
+    let error = store
+        .lock_and_recover_agent("missing-agent")
+        .expect_err("read-only recovery rejects");
+    assert!(error.to_string().contains("unavailable"));
+    assert!(!root.exists());
+}
+
 fn facts_budget(max_record_bytes: u64, remaining_bytes: u64) -> AgentCreationFactsBudget {
     AgentCreationFactsBudget {
         max_record_bytes,
@@ -321,7 +335,12 @@ fn oversized_agent_append_is_atomic() {
 fn semantic_append_continues_while_sync_is_blocked() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut store = AgentStore::open_lazy(temp.path()).expect("store opens");
-    let sync = store.framed_appends.inject_blocking_sync();
+    let sync = store
+        .legacy_io
+        .as_mut()
+        .expect("legacy writer")
+        .framed_appends
+        .inject_blocking_sync();
     let agent_id = AgentId::parse("agent-1").expect("agent id");
     store
         .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
@@ -408,13 +427,21 @@ fn writable_reopen_recovers_store_root_and_branch_boundaries() {
         assert!(first.dirty_target(&agents_dir).is_some());
     }
     let mut store = AgentStore::open_lazy(&agents_dir).expect("second store opens");
-    store.framed_appends.inject_sync_spawn_failure();
+    store
+        .legacy_io
+        .as_mut()
+        .expect("legacy writer")
+        .framed_appends
+        .inject_sync_spawn_failure();
     let agent_id = AgentId::parse("agent-1").expect("agent id");
     store
         .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
         .expect("writable append");
 
     let root_target = store
+        .legacy_io
+        .as_ref()
+        .expect("legacy writer")
         .framed_appends
         .dirty_target(&agents_dir)
         .expect("store-root target");
@@ -423,6 +450,9 @@ fn writable_reopen_recovers_store_root_and_branch_boundaries() {
     assert_eq!(root_target.kind, SyncTargetKind::DirectoryBoundary);
     let branch = agents_dir.join(agent_id.as_str());
     let branch_target = store
+        .legacy_io
+        .as_ref()
+        .expect("legacy writer")
         .framed_appends
         .dirty_target(&branch)
         .expect("branch target");
@@ -682,13 +712,18 @@ fn failed_frame_append_is_atomic_and_retry_reuses_sequence() {
     let checkpoint_path = store.agent_dir(agent_id.as_str()).join("meta.json");
     let journal_before = fs::read(&journal_path).expect("baseline journal");
     let checkpoint_before = fs::read(&checkpoint_path).expect("baseline checkpoint");
-    store.framed_appends.inject_fault(
-        &journal_path,
-        AppendFault {
-            fail_write_at: Some(3),
-            ..AppendFault::default()
-        },
-    );
+    store
+        .legacy_io
+        .as_mut()
+        .expect("legacy writer")
+        .framed_appends
+        .inject_fault(
+            &journal_path,
+            AppendFault {
+                fail_write_at: Some(3),
+                ..AppendFault::default()
+            },
+        );
 
     let error = store
         .append_agent_event_at(
@@ -758,14 +793,19 @@ fn rollback_failure_poisons_agent_journal() {
         )
         .expect("baseline appends");
     let journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
-    store.framed_appends.inject_fault(
-        &journal_path,
-        AppendFault {
-            fail_write_at: Some(3),
-            fail_truncate: true,
-            ..AppendFault::default()
-        },
-    );
+    store
+        .legacy_io
+        .as_mut()
+        .expect("legacy writer")
+        .framed_appends
+        .inject_fault(
+            &journal_path,
+            AppendFault {
+                fail_write_at: Some(3),
+                fail_truncate: true,
+                ..AppendFault::default()
+            },
+        );
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -826,14 +866,19 @@ fn poisoned_agent_journal_rejection_precedes_event_validation() {
         )
         .expect("baseline appends");
     let journal_path = store.agent_dir(agent_id.as_str()).join("events.cbor");
-    store.framed_appends.inject_fault(
-        &journal_path,
-        AppendFault {
-            fail_write_at: Some(3),
-            fail_truncate: true,
-            ..AppendFault::default()
-        },
-    );
+    store
+        .legacy_io
+        .as_mut()
+        .expect("legacy writer")
+        .framed_appends
+        .inject_fault(
+            &journal_path,
+            AppendFault {
+                fail_write_at: Some(3),
+                fail_truncate: true,
+                ..AppendFault::default()
+            },
+        );
     store
         .append_agent_event_at(
             agent_id.as_str(),
@@ -1024,10 +1069,9 @@ fn journal_snapshot_does_not_create_missing_paths() {
     assert!(!temp.path().join(agent_id.as_str()).exists());
 }
 
-/// A lock-held journal must expose its last checkpointed committed prefix
-/// without waiting for the writer to exit or including later appends.
+/// A strict snapshot never falls back to a live writer's checkpoint.
 #[test]
-fn journal_snapshot_reads_lock_held_committed_prefix() {
+fn journal_snapshot_rejects_lock_held_writer() {
     let temp = tempfile::tempdir().expect("tempdir");
     let agent_id = AgentId::parse("agent-active").expect("agent id");
     let mut store = AgentStore::open_lazy(temp.path()).expect("store");
@@ -1035,29 +1079,14 @@ fn journal_snapshot_reads_lock_held_committed_prefix() {
         .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
         .expect("creation");
 
-    let snapshot = AgentJournalSnapshot::capture(temp.path(), [agent_id.clone()])
-        .expect("checkpointed committed prefix");
-    store
-        .append_agent_event(
-            agent_id.as_str(),
-            None,
-            display_name_event(&agent_id, "after-cut"),
-        )
-        .expect("writer remains appendable");
-
-    assert_eq!(
-        snapshot
-            .records(&agent_id)
-            .expect("snapshot records")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("valid committed prefix")
-            .len(),
-        1
-    );
+    let error = AgentJournalSnapshot::capture(temp.path(), [agent_id])
+        .expect_err("active writer excludes strict snapshot");
+    assert!(matches!(error, AgentStoreError::Open { source, .. }
+        if source.kind() == io::ErrorKind::WouldBlock));
 }
 
-/// A lock-held journal must reject a checkpoint whose boundary witness no
-/// longer authenticates the selected committed prefix.
+/// Inactive strict capture derives EOF without trusting a stale checkpoint
+/// witness.
 #[test]
 fn journal_snapshot_rejects_lock_held_checkpoint_boundary_mismatch() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1075,14 +1104,13 @@ fn journal_snapshot_rejects_lock_held_checkpoint_boundary_mismatch() {
     )
     .expect("rewrite checkpoint");
 
-    let error = AgentJournalSnapshot::capture(temp.path(), [agent_id])
-        .expect_err("mismatched live checkpoint must fail");
-
-    assert!(matches!(error, AgentStoreError::Read { .. }));
+    drop(store);
+    AgentJournalSnapshot::capture(temp.path(), [agent_id])
+        .expect("inactive snapshot ignores stale checkpoint");
 }
 
-/// A structurally valid lock-held checkpoint must not select a prefix whose
-/// decoded record count disagrees with its advertised next sequence.
+/// Inactive strict capture derives its sequence from journal records, not
+/// sidecar claims.
 #[test]
 fn journal_snapshot_rejects_lock_held_checkpoint_sequence_mismatch() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1100,10 +1128,9 @@ fn journal_snapshot_rejects_lock_held_checkpoint_sequence_mismatch() {
     )
     .expect("rewrite checkpoint");
 
-    let error = AgentJournalSnapshot::capture(temp.path(), [agent_id])
-        .expect_err("wrong live checkpoint sequence must fail");
-
-    assert!(matches!(error, AgentStoreError::InvalidSequence { .. }));
+    drop(store);
+    AgentJournalSnapshot::capture(temp.path(), [agent_id])
+        .expect("inactive snapshot ignores sidecar sequence");
 }
 
 /// Inactive capture must acquire the shared lock before selecting EOF, so

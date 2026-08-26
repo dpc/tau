@@ -4,6 +4,8 @@ use super::*;
 
 /// Harness storage plus the active session's binding and lifecycle state.
 pub(crate) struct SessionRuntimeState {
+    /// Unique lifecycle owner for every durable semantic stream.
+    pub(crate) persistence_owner: Option<std::sync::Arc<tau_core::SemanticPersistenceOwner>>,
     /// Runtime state directory for this harness.
     pub(crate) state_dir: PathBuf,
     /// Session membership store.

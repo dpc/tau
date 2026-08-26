@@ -2543,6 +2543,31 @@ impl Harness {
                 self.emit_extension_exited(&name);
             }
         }
+        if let Some(owner) = self.session_runtime.persistence_owner.as_ref() {
+            let session_id = self.session_runtime.current_session_id.clone();
+            let mut leases = self
+                .session_runtime
+                .agent_store
+                .managed_persistence_leases();
+            leases.extend(
+                self.session_runtime
+                    .store
+                    .managed_persistence_leases(session_id.as_str()),
+            );
+            if let Err(error) = owner.release(&leases, Duration::from_secs(5)) {
+                owner.fail_stop();
+                if first_error.is_none() {
+                    first_error = Some(HarnessError::Participant(format!(
+                        "semantic persistence shutdown release failed: {error}"
+                    )));
+                }
+            } else {
+                self.session_runtime.agent_store.finish_managed_release();
+                self.session_runtime
+                    .store
+                    .finish_managed_release(session_id.as_str());
+            }
+        }
         first_error.map_or(Ok(()), Err)
     }
 

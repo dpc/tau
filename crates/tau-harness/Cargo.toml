@@ -64,5 +64,6 @@ built.workspace = true
 [dev-dependencies]
 image.workspace = true
 proptest.workspace = true
+tau-core = { workspace = true, features = ["test-legacy-writer"] }
 tau-ext-shell = { workspace = true, features = ["echo-agent"] }
 tracing-subscriber.workspace = true
