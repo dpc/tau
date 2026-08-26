@@ -260,11 +260,30 @@ fn no_report_broadcast_matches_detailed_routing_model() {
 fn detailed_route_report_order_is_stable() {
     let (mut bus, _) = model_bus();
     let excluded = [ClientKind::Provider];
+    let expected_failed = [
+        test_connection_id("shared-retired"),
+        test_connection_id("shared-failing"),
+        test_connection_id("legacy-fail"),
+    ];
+    let expected_delivered = [
+        test_connection_id("shared-admitted"),
+        test_connection_id("legacy-ok"),
+    ];
 
     let first = bus.publish_from_excluding_kinds(None, notice(), &excluded);
-    let second = bus.publish_from_excluding_kinds(None, notice(), &excluded);
-
-    assert_eq!(first, second);
+    for _ in 0..32 {
+        let report = bus.publish_from_excluding_kinds(None, notice(), &excluded);
+        assert_eq!(first, report);
+        assert_eq!(report.delivered_to, expected_delivered);
+        assert_eq!(
+            report
+                .failed_deliveries
+                .iter()
+                .map(|failure| &failure.connection_id)
+                .collect::<Vec<_>>(),
+            expected_failed.iter().collect::<Vec<_>>(),
+        );
+    }
 }
 
 /// A discarded report must clone no IDs into diagnostic vectors, and admitted

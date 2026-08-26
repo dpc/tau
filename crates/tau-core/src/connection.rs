@@ -62,7 +62,7 @@ impl RoutedFrame {
 }
 
 /// Process-local identity of one shared connection egress stream.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SharedDeliveryGroup(
     /// Owner-allocated value meaningful only inside the current process.
     u64,

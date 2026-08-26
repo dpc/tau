@@ -1,7 +1,7 @@
 //! [`EventBus`]: routes protocol events between connections and tracks
 //! per-connection subscription state.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use tau_proto::{ClientKind, ConnectionId, EventSelector, HarnessOutputMessage};
 
@@ -630,10 +630,10 @@ impl EventBus {
         eligible: Vec<ConnectionId>,
         collector: &mut impl RouteCollector,
     ) {
-        let mut shared: HashMap<
+        let mut shared: BTreeMap<
             crate::SharedDeliveryGroup,
             Vec<(ConnectionId, crate::SharedDeliveryTarget)>,
-        > = HashMap::new();
+        > = BTreeMap::new();
         let mut legacy = Vec::new();
         for connection_id in eligible {
             let target = self
