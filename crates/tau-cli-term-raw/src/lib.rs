@@ -13,6 +13,10 @@
 //! - **Full render** — on resize/invalidation, clears screen + scrollback and
 //!   replays the capped log/history suffix plus fixed tail without rubber
 
+mod block_layout_state;
+mod prompt_editor_state;
+mod terminal_runtime_state;
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufWriter, Write};
@@ -55,6 +59,7 @@ fn admit_stall_warning() -> bool {
         .admit(path_std_time::Instant::now())
 }
 
+use block_layout_state::BlockLayoutState;
 use crossterm::cursor::{MoveToColumn, MoveUp, SetCursorStyle};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyCode, KeyEvent,
@@ -63,6 +68,7 @@ use crossterm::event::{
 };
 use crossterm::style::Print;
 use crossterm::{QueueableCommand, terminal};
+use prompt_editor_state::PromptEditorState;
 pub use tau_term_screen::{
     Align, BlockId, Cell, Color, PriorityLine, PriorityLineAlignment, PriorityLinePriority,
     PriorityLineTruncation, Span, Style, StyledBlock, StyledText, TwoLineElision,
@@ -72,6 +78,7 @@ use tau_term_screen::{
     Screen, display_width, emit_styled_cells, layout_block, layout_lines, next_grapheme_boundary,
     previous_grapheme_boundary, truncate_to_width,
 };
+use terminal_runtime_state::TerminalRuntimeState;
 use unicode_segmentation::UnicodeSegmentation;
 
 type NamedActionHandler = fn(&Term) -> Option<Event>;
@@ -260,172 +267,45 @@ struct CompletionMenu {
 /// Mutable state shared between the input loop, redraw thread, and
 /// any [`TermHandle`] holders.
 struct SharedState {
-    /// Central block storage.
-    blocks: HashMap<BlockId, StyledBlock>,
-    /// Human-readable labels for diagnostics.
-    block_debug_ids: HashMap<BlockId, String>,
-    /// Next auto-increment id.
-    next_id: u64,
-
-    /// Persistent output — append-only ordered list of block ids.
-    history: Vec<BlockId>,
-    /// Reference count of block ids present in `history`.
-    history_refs: HashMap<BlockId, usize>,
-    /// Bumped whenever persistent history content, order, or layout changes.
-    history_generation: u64,
-    /// Earliest history entry changed since the redraw cache last refreshed.
-    ///
-    /// Ordinary output appends mark only the new suffix. Destructive or
-    /// content-changing operations conservatively invalidate from entry zero.
-    history_dirty_from: Option<usize>,
-    /// Mutable blocks above the prompt (can be reordered).
-    above_active: Vec<BlockId>,
-    /// Blocks pinned right above the prompt.
-    above_sticky: Vec<BlockId>,
-    /// Blocks rendered immediately below the input line (e.g.
-    /// completion menus). Sits between the prompt and `below`.
-    suggestions: Vec<BlockId>,
-    /// Blocks rendered below suggestions.
-    below: Vec<BlockId>,
-
-    left_prompt: StyledText,
-    right_prompt: StyledText,
-    input_placeholder: StyledText,
-    buffer: String,
-    cursor: usize,
-    /// Visual column the cursor "wants" to be on for vertical motion
-    /// (Up/Down within the buffer and across history). Lazily set on
-    /// the first vertical motion after a horizontal motion or edit,
-    /// then preserved across consecutive vertical motions so jumping
-    /// over short or empty lines doesn't permanently truncate the
-    /// column. Cleared by any cursor change that isn't a vertical
-    /// motion.
-    sticky_col: Option<usize>,
-    /// Append-only log of submitted lines. Each entry carries its own
-    /// undo/redo stacks so history navigation can preserve draft-local
-    /// editing state.
-    input_history: Vec<PromptDraft>,
-    current_undo: Vec<PromptSnapshot>,
-    current_redo: Vec<PromptSnapshot>,
-    /// Active history navigation, if any. Independent of `completion`.
-    history_nav: Option<HistoryNav>,
-    /// Source history entry edited by the most recent submitted line.
-    last_submitted_recalled_source: Option<usize>,
-    /// Active completion menu, if any. Independent of `history_nav`.
-    completion: Option<CompletionMenu>,
-    /// First visual input row rendered in the prompt-local capped viewport.
-    /// This is independent of terminal scrollback/history viewporting; plain
-    /// Up/Down can adjust it before falling through to prompt history.
-    input_viewport_start: usize,
-    /// Whether to show a compact indicator when prompt input rows are hidden.
-    show_prompt_scroll_indicator: bool,
-    /// Whether an empty-prompt Ctrl-C has armed cancel for a second press.
-    ctrl_c_cancel_armed: bool,
-    width: usize,
-    height: usize,
-    /// Set by Term::drop to signal the redraw thread to exit.
-    shutdown: bool,
-    /// Set by another UI owner or virtual input disconnect to ask the blocking
-    /// input loop to return sticky EOF.
-    input_shutdown: bool,
-    /// Set while the terminal is released to an external program.
-    /// The redraw thread must not write to stdout in this state.
-    external_paused: bool,
-    /// Set by `resume_after_external` (and similar) to force the
-    /// next redraw to wipe its `Screen` cache and repaint from
-    /// scratch. The redraw loop reads-and-clears this flag.
-    invalidate_screen: bool,
-    /// Generation counter for `redraw_sync`. Caller bumps
-    /// `sync_requested`; redraw thread sets `sync_completed =
-    /// sync_requested` atomically with going idle (right before
-    /// blocking on recv).
-    sync_requested: u64,
-    sync_completed: u64,
-    /// Non-model terminal side effects waiting to be written by the redraw
-    /// thread on its next pass. Producers use narrow typed APIs on
-    /// [`TermHandle`] so callers cannot inject arbitrary cursor movement or
-    /// clear-screen escapes behind the renderer's back.
-    pending_raw: Vec<String>,
-    /// Nested redraw suppression counter used while the CLI renderer updates
-    /// an off-screen agent transcript snapshot.
-    redraw_suppression: u32,
-    /// A redraw request arrived while notifications were suppressed. The
-    /// outermost suppression guard flushes this request when it drops.
-    redraw_dirty_while_suppressed: bool,
-    /// Maximum number of rendered persistent-history/log rows to replay during
-    /// a full redraw. Older rows are omitted after clearing scrollback so slow
-    /// terminals do not receive an unbounded transcript.
-    redraw_history_size: usize,
-    /// Number of full renders performed by the redraw thread since creation.
-    full_render_count: u64,
+    /// Rendered output blocks and their placement around the prompt.
+    layout: BlockLayoutState,
+    /// Prompt contents, editing history, and prompt-local viewport state.
+    editor: PromptEditorState,
+    /// Terminal dimensions, redraw coordination, and lifecycle flags.
+    terminal: TerminalRuntimeState,
 }
 
 impl SharedState {
     fn new(width: usize, height: usize, left_prompt: StyledText) -> Self {
         Self {
-            blocks: HashMap::new(),
-            block_debug_ids: HashMap::new(),
-            next_id: 0,
-            history: Vec::new(),
-            history_refs: HashMap::new(),
-            history_generation: 0,
-            history_dirty_from: None,
-            above_active: Vec::new(),
-            above_sticky: Vec::new(),
-            suggestions: Vec::new(),
-            below: Vec::new(),
-            left_prompt,
-            right_prompt: StyledText::new(),
-            input_placeholder: StyledText::new(),
-            buffer: String::new(),
-            cursor: 0,
-            sticky_col: None,
-            input_history: Vec::new(),
-            current_undo: Vec::new(),
-            current_redo: Vec::new(),
-            history_nav: None,
-            last_submitted_recalled_source: None,
-            completion: None,
-            input_viewport_start: 0,
-            show_prompt_scroll_indicator: true,
-            ctrl_c_cancel_armed: false,
-            width,
-            height,
-            shutdown: false,
-            input_shutdown: false,
-            external_paused: false,
-            invalidate_screen: false,
-            sync_requested: 0,
-            sync_completed: 0,
-            pending_raw: Vec::new(),
-            redraw_suppression: 0,
-            redraw_dirty_while_suppressed: false,
-            redraw_history_size: usize::MAX,
-            full_render_count: 0,
+            layout: BlockLayoutState::new(),
+            editor: PromptEditorState::new(left_prompt),
+            terminal: TerminalRuntimeState::new(width, height),
         }
     }
 
     fn alloc_id(&mut self) -> BlockId {
-        let id = BlockId(self.next_id);
-        self.next_id += 1;
+        let id = BlockId(self.layout.next_id);
+        self.layout.next_id += 1;
         id
     }
 
     fn mark_history_dirty_from(&mut self, entry: usize) {
-        self.history_generation = self.history_generation.wrapping_add(1);
-        self.history_dirty_from = Some(
-            self.history_dirty_from
+        self.layout.history_generation = self.layout.history_generation.wrapping_add(1);
+        self.layout.history_dirty_from = Some(
+            self.layout
+                .history_dirty_from
                 .map_or(entry, |dirty| dirty.min(entry)),
         );
     }
 
     fn add_history_ref(&mut self, id: BlockId) {
-        *self.history_refs.entry(id).or_insert(0) += 1;
+        *self.layout.history_refs.entry(id).or_insert(0) += 1;
     }
 
     fn append_history(&mut self, id: BlockId) {
-        let appended_at = self.history.len();
-        self.history.push(id);
+        let appended_at = self.layout.history.len();
+        self.layout.history.push(id);
         self.add_history_ref(id);
         self.mark_history_dirty_from(appended_at);
     }
@@ -434,9 +314,9 @@ impl SharedState {
         if count == 0 {
             return;
         }
-        if let Some(existing) = self.history_refs.get_mut(&id) {
+        if let Some(existing) = self.layout.history_refs.get_mut(&id) {
             if *existing <= count {
-                self.history_refs.remove(&id);
+                self.layout.history_refs.remove(&id);
             } else {
                 *existing -= count;
             }
@@ -444,30 +324,30 @@ impl SharedState {
     }
 
     fn rebuild_history_refs(&mut self) {
-        self.history_refs.clear();
-        for &id in &self.history {
-            *self.history_refs.entry(id).or_insert(0) += 1;
+        self.layout.history_refs.clear();
+        for &id in &self.layout.history {
+            *self.layout.history_refs.entry(id).or_insert(0) += 1;
         }
         self.mark_history_dirty_from(0);
     }
 
     fn block_in_history(&self, id: BlockId) -> bool {
-        self.history_refs.contains_key(&id)
+        self.layout.history_refs.contains_key(&id)
     }
 
     fn current_snapshot(&self) -> PromptSnapshot {
         PromptSnapshot {
-            buffer: self.buffer.clone(),
-            cursor: self.cursor,
+            buffer: self.editor.buffer.clone(),
+            cursor: self.editor.cursor,
         }
     }
 
     fn current_draft(&self) -> PromptDraft {
         PromptDraft {
-            buffer: self.buffer.clone(),
-            cursor: self.cursor,
-            undo: self.current_undo.clone(),
-            redo: self.current_redo.clone(),
+            buffer: self.editor.buffer.clone(),
+            cursor: self.editor.cursor,
+            undo: self.editor.current_undo.clone(),
+            redo: self.editor.current_redo.clone(),
         }
     }
 
@@ -478,24 +358,24 @@ impl SharedState {
     /// immediately replace with a canonical submitted draft.
     fn take_submitted_draft(&mut self) -> PromptDraft {
         PromptDraft {
-            buffer: self.buffer.clone(),
-            cursor: self.cursor,
-            undo: std::mem::take(&mut self.current_undo),
-            redo: std::mem::take(&mut self.current_redo),
+            buffer: self.editor.buffer.clone(),
+            cursor: self.editor.cursor,
+            undo: std::mem::take(&mut self.editor.current_undo),
+            redo: std::mem::take(&mut self.editor.current_redo),
         }
     }
 
     fn load_draft(&mut self, draft: PromptDraft) {
-        self.buffer = draft.buffer;
-        self.current_undo = draft.undo;
-        self.current_redo = draft.redo;
-        self.cursor = draft.cursor.min(self.buffer.len());
+        self.editor.buffer = draft.buffer;
+        self.editor.current_undo = draft.undo;
+        self.editor.current_redo = draft.redo;
+        self.editor.cursor = draft.cursor.min(self.editor.buffer.len());
         self.ensure_input_cursor_visible();
     }
 
     fn record_undo(&mut self) {
-        self.current_undo.push(self.current_snapshot());
-        self.current_redo.clear();
+        self.editor.current_undo.push(self.current_snapshot());
+        self.editor.current_redo.clear();
     }
 
     /// Mirrors edits made to `buffer` and undo state into the live
@@ -503,10 +383,10 @@ impl SharedState {
     /// user's edited copy. No-op when not navigating history.
     fn sync_buffer_to_history_nav(&mut self) {
         let draft = self.current_draft();
-        if let Some(nav) = self.history_nav.as_mut() {
+        if let Some(nav) = self.editor.history_nav.as_mut() {
             nav.entries[nav.index] = draft.clone();
-            if nav.index < self.input_history.len() {
-                self.input_history[nav.index] = draft;
+            if nav.index < self.editor.input_history.len() {
+                self.editor.input_history[nav.index] = draft;
             }
         }
     }
@@ -515,16 +395,16 @@ impl SharedState {
     /// Row 0 starts after the left prompt, so `col` on row 0 is offset
     /// by the prompt width.
     fn visual_cursor_position(&self) -> (usize, usize) {
-        let width = self.width.max(1);
-        let left_cols = self.left_prompt.char_count();
-        buffer_position_for_byte(&self.buffer, self.cursor, width, left_cols)
+        let width = self.terminal.width.max(1);
+        let left_cols = self.editor.left_prompt.char_count();
+        buffer_position_for_byte(&self.editor.buffer, self.editor.cursor, width, left_cols)
     }
 
     /// Last visual row index of the current buffer.
     fn last_visual_row(&self) -> usize {
-        let width = self.width.max(1);
-        let left_cols = self.left_prompt.char_count();
-        let (max_row, _) = buffer_end_position(&self.buffer, width, left_cols);
+        let width = self.terminal.width.max(1);
+        let left_cols = self.editor.left_prompt.char_count();
+        let (max_row, _) = buffer_end_position(&self.editor.buffer, width, left_cols);
         max_row
     }
 
@@ -532,20 +412,26 @@ impl SharedState {
     /// the given visual `(row, col)`. Clamps to the nearest reachable
     /// position.
     fn cursor_byte_at(&self, target_row: usize, target_col: usize) -> usize {
-        let width = self.width.max(1);
-        let left_cols = self.left_prompt.char_count();
-        byte_offset_for_buffer_position(&self.buffer, target_row, target_col, width, left_cols)
+        let width = self.terminal.width.max(1);
+        let left_cols = self.editor.left_prompt.char_count();
+        byte_offset_for_buffer_position(
+            &self.editor.buffer,
+            target_row,
+            target_col,
+            width,
+            left_cols,
+        )
     }
 
     /// Visual column to use for the next vertical motion: returns the
     /// sticky column if one is set, otherwise captures the current
     /// cursor's visual column and stores it as sticky.
     fn vertical_target_col(&mut self) -> usize {
-        if let Some(col) = self.sticky_col {
+        if let Some(col) = self.editor.sticky_col {
             return col;
         }
         let (_, col) = self.visual_cursor_position();
-        self.sticky_col = Some(col);
+        self.editor.sticky_col = Some(col);
         col
     }
 
@@ -555,8 +441,8 @@ impl SharedState {
     /// column only stays valid as long as the cursor is moving
     /// purely up/down.
     fn write_cursor(&mut self, new_cursor: usize) {
-        self.cursor = new_cursor;
-        self.sticky_col = None;
+        self.editor.cursor = new_cursor;
+        self.editor.sticky_col = None;
         self.ensure_input_cursor_visible();
     }
 
@@ -564,16 +450,16 @@ impl SharedState {
     /// sticky column so consecutive vertical moves can replay the
     /// original column over short or empty rows.
     fn write_cursor_keep_sticky(&mut self, new_cursor: usize) {
-        self.cursor = new_cursor;
+        self.editor.cursor = new_cursor;
         self.ensure_input_cursor_visible();
     }
 
     fn input_visible_rows(&self) -> usize {
         let total_rows = self.last_visual_row() + 1;
-        let cap_rows = prompt_input_max_rows(self.height);
+        let cap_rows = prompt_input_max_rows(self.terminal.height);
         let indicator_rows = prompt_scroll_indicator_rows(
-            self.show_prompt_scroll_indicator,
-            !self.buffer.is_empty(),
+            self.editor.show_prompt_scroll_indicator,
+            !self.editor.buffer.is_empty(),
             total_rows,
             cap_rows,
         );
@@ -584,8 +470,8 @@ impl SharedState {
         let (cursor_row, _) = self.visual_cursor_position();
         let total_rows = self.last_visual_row() + 1;
         let visible_rows = self.input_visible_rows();
-        self.input_viewport_start = viewport_start_with_cursor(
-            self.input_viewport_start,
+        self.editor.input_viewport_start = viewport_start_with_cursor(
+            self.editor.input_viewport_start,
             cursor_row,
             total_rows,
             visible_rows,
@@ -596,34 +482,34 @@ impl SharedState {
     /// fresh empty prompt. No-op when the prompt is empty (and returns
     /// `false`). Clears the sticky column via `write_cursor`.
     fn push_current_as_history_entry(&mut self) -> bool {
-        if self.buffer.is_empty() {
+        if self.editor.buffer.is_empty() {
             return false;
         }
         let draft = self.take_submitted_draft();
-        self.input_history.push(draft);
-        self.buffer.clear();
+        self.editor.input_history.push(draft);
+        self.editor.buffer.clear();
         self.write_cursor(0);
         true
     }
 
     fn undo(&mut self) -> bool {
-        let Some(snapshot) = self.current_undo.pop() else {
+        let Some(snapshot) = self.editor.current_undo.pop() else {
             return false;
         };
-        self.current_redo.push(self.current_snapshot());
-        self.buffer = snapshot.buffer;
-        self.write_cursor(snapshot.cursor.min(self.buffer.len()));
+        self.editor.current_redo.push(self.current_snapshot());
+        self.editor.buffer = snapshot.buffer;
+        self.write_cursor(snapshot.cursor.min(self.editor.buffer.len()));
         self.sync_buffer_to_history_nav();
         true
     }
 
     fn redo(&mut self) -> bool {
-        let Some(snapshot) = self.current_redo.pop() else {
+        let Some(snapshot) = self.editor.current_redo.pop() else {
             return false;
         };
-        self.current_undo.push(self.current_snapshot());
-        self.buffer = snapshot.buffer;
-        self.write_cursor(snapshot.cursor.min(self.buffer.len()));
+        self.editor.current_undo.push(self.current_snapshot());
+        self.editor.buffer = snapshot.buffer;
+        self.write_cursor(snapshot.cursor.min(self.editor.buffer.len()));
         self.sync_buffer_to_history_nav();
         true
     }
@@ -634,7 +520,7 @@ impl SharedState {
     /// ends to `selected = None`). Returns `true` if a menu was open.
     fn cycle_completion(&mut self, delta: isize) -> bool {
         let (new_buffer, new_cursor) = {
-            let Some(menu) = self.completion.as_mut() else {
+            let Some(menu) = self.editor.completion.as_mut() else {
                 return false;
             };
             let len = menu.candidates.len();
@@ -660,7 +546,7 @@ impl SharedState {
                 }
             }
         };
-        self.buffer = new_buffer;
+        self.editor.buffer = new_buffer;
         self.write_cursor(new_cursor);
         true
     }
@@ -669,11 +555,11 @@ impl SharedState {
     /// restores the original buffer; otherwise leaves the buffer
     /// alone. Returns `true` if a menu was open.
     fn dismiss_completion(&mut self) -> bool {
-        let Some(menu) = self.completion.take() else {
+        let Some(menu) = self.editor.completion.take() else {
             return false;
         };
         if menu.selected.is_some() {
-            self.buffer = menu.original_buffer;
+            self.editor.buffer = menu.original_buffer;
             self.write_cursor(menu.original_cursor);
         }
         true
@@ -683,7 +569,7 @@ impl SharedState {
     /// leaves the previewed buffer in place. Returns `true` if a
     /// candidate was accepted (i.e. the menu had a selection).
     fn accept_completion(&mut self) -> bool {
-        let Some(menu) = self.completion.as_ref() else {
+        let Some(menu) = self.editor.completion.as_ref() else {
             return false;
         };
         if menu.selected.is_none() {
@@ -691,7 +577,7 @@ impl SharedState {
         }
         // Buffer already matches the previewed replacement; just
         // close the menu.
-        self.completion = None;
+        self.editor.completion = None;
         true
     }
 
@@ -708,7 +594,7 @@ impl SharedState {
     /// both at (or clamped to) the column the cursor was on.
     fn step_history(&mut self, delta: isize) -> bool {
         let target_col = self.vertical_target_col();
-        if self.history_nav.is_none() {
+        if self.editor.history_nav.is_none() {
             if 0 < delta {
                 return self.push_current_as_history_entry();
             }
@@ -721,10 +607,10 @@ impl SharedState {
     /// most recent entry, with the cursor placed at the previous
     /// entry's last visual row at `target_col`.
     fn enter_history_nav(&mut self, target_col: usize) -> bool {
-        if self.input_history.is_empty() {
+        if self.editor.input_history.is_empty() {
             return false;
         }
-        let mut entries = self.input_history.clone();
+        let mut entries = self.editor.input_history.clone();
         entries.push(self.current_draft());
         // The WIP buffer sits at `entries.last()`; the previous
         // history entry is one slot before it.
@@ -732,20 +618,20 @@ impl SharedState {
         self.load_draft(entries[index].clone());
         let new_cursor = self.cursor_byte_at(self.last_visual_row(), target_col);
         self.write_cursor_keep_sticky(new_cursor);
-        self.history_nav = Some(HistoryNav { entries, index });
+        self.editor.history_nav = Some(HistoryNav { entries, index });
         true
     }
 
     fn recall_prompt_before_current(&mut self, text: String) {
         let previous = self.current_draft();
-        let mut entries = self.input_history.clone();
+        let mut entries = self.editor.input_history.clone();
         entries.push(PromptDraft::submitted(text));
         entries.push(previous);
         let index = entries.len() - 2;
         self.load_draft(entries[index].clone());
-        self.write_cursor(self.buffer.len());
-        self.history_nav = Some(HistoryNav { entries, index });
-        self.completion = None;
+        self.write_cursor(self.editor.buffer.len());
+        self.editor.history_nav = Some(HistoryNav { entries, index });
+        self.editor.completion = None;
     }
 
     /// Steps within an already-active history navigation. Going past
@@ -754,22 +640,26 @@ impl SharedState {
     /// from `Editing`.
     fn advance_history_nav(&mut self, delta: isize, target_col: usize) -> bool {
         let current = self.current_draft();
-        let nav = self.history_nav.as_mut().expect("caller checked Some");
+        let nav = self
+            .editor
+            .history_nav
+            .as_mut()
+            .expect("caller checked Some");
         let new_index = nav.index as isize + delta;
         if new_index < 0 {
             return false;
         }
         if new_index >= nav.entries.len() as isize {
             let wip = nav.entries.last().cloned();
-            self.history_nav = None;
+            self.editor.history_nav = None;
             if let Some(wip) = wip {
                 self.load_draft(wip);
             }
             return self.push_current_as_history_entry();
         }
         nav.entries[nav.index] = current.clone();
-        if nav.index < self.input_history.len() {
-            self.input_history[nav.index] = current;
+        if nav.index < self.editor.input_history.len() {
+            self.editor.input_history[nav.index] = current;
         }
         nav.index = new_index as usize;
         let new_draft = nav.entries[nav.index].clone();
@@ -1110,7 +1000,7 @@ impl<'a> RedrawSuppressionGuard<'a> {
     fn new(handle: &'a TermHandle) -> Self {
         {
             let mut st = handle.lock();
-            st.redraw_suppression = st.redraw_suppression.saturating_add(1);
+            st.terminal.redraw_suppression = st.terminal.redraw_suppression.saturating_add(1);
         }
         Self { handle }
     }
@@ -1120,9 +1010,9 @@ impl Drop for RedrawSuppressionGuard<'_> {
     fn drop(&mut self) {
         let notify = {
             let mut st = self.handle.lock();
-            st.redraw_suppression = st.redraw_suppression.saturating_sub(1);
-            if st.redraw_suppression == 0 && st.redraw_dirty_while_suppressed {
-                st.redraw_dirty_while_suppressed = false;
+            st.terminal.redraw_suppression = st.terminal.redraw_suppression.saturating_sub(1);
+            if st.terminal.redraw_suppression == 0 && st.terminal.redraw_dirty_while_suppressed {
+                st.terminal.redraw_dirty_while_suppressed = false;
                 true
             } else {
                 false
@@ -1192,10 +1082,10 @@ impl TermHandle {
     }
 
     fn request_redraw_locked(st: &mut SharedState) -> bool {
-        if st.redraw_suppression == 0 {
+        if st.terminal.redraw_suppression == 0 {
             true
         } else {
-            st.redraw_dirty_while_suppressed = true;
+            st.terminal.redraw_dirty_while_suppressed = true;
             false
         }
     }
@@ -1221,7 +1111,7 @@ impl TermHandle {
     /// already in flight may finish later; their events are ignored after
     /// this flag is set.
     pub fn request_input_shutdown(&self) {
-        self.lock().input_shutdown = true;
+        self.lock().terminal.input_shutdown = true;
         let _ = self.input_tx.send(InputMessage::Shutdown);
     }
 
@@ -1290,14 +1180,14 @@ impl TermHandle {
         let _transaction = self.output_transaction_barrier();
         let st = self.lock();
         OutputSnapshot {
-            blocks: st.blocks.clone(),
-            block_debug_ids: st.block_debug_ids.clone(),
-            next_id: st.next_id,
-            history: st.history.clone(),
-            above_active: st.above_active.clone(),
-            above_sticky: st.above_sticky.clone(),
-            suggestions: st.suggestions.clone(),
-            below: st.below.clone(),
+            blocks: st.layout.blocks.clone(),
+            block_debug_ids: st.layout.block_debug_ids.clone(),
+            next_id: st.layout.next_id,
+            history: st.layout.history.clone(),
+            above_active: st.layout.above_active.clone(),
+            above_sticky: st.layout.above_sticky.clone(),
+            suggestions: st.layout.suggestions.clone(),
+            below: st.layout.below.clone(),
         }
     }
 
@@ -1331,17 +1221,17 @@ impl TermHandle {
     ) {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
-        st.blocks = snapshot.blocks;
-        st.block_debug_ids = snapshot.block_debug_ids;
-        st.next_id = st.next_id.max(snapshot.next_id);
-        st.history = snapshot.history;
+        st.layout.blocks = snapshot.blocks;
+        st.layout.block_debug_ids = snapshot.block_debug_ids;
+        st.layout.next_id = st.layout.next_id.max(snapshot.next_id);
+        st.layout.history = snapshot.history;
         st.rebuild_history_refs();
-        st.above_active = snapshot.above_active;
-        st.above_sticky = snapshot.above_sticky;
-        st.suggestions = snapshot.suggestions;
-        st.below = snapshot.below;
+        st.layout.above_active = snapshot.above_active;
+        st.layout.above_sticky = snapshot.above_sticky;
+        st.layout.suggestions = snapshot.suggestions;
+        st.layout.below = snapshot.below;
         if invalidate_screen {
-            st.invalidate_screen = true;
+            st.terminal.invalidate_screen = true;
         }
         let notify = notify && Self::request_redraw_locked(&mut st);
         drop(st);
@@ -1365,38 +1255,38 @@ impl TermHandle {
     /// `README.md` § "When mutations need a full redraw".
     pub fn invalidate_screen(&self) {
         let _transaction = self.output_transaction_barrier();
-        self.lock().invalidate_screen = true;
+        self.lock().terminal.invalidate_screen = true;
         self.notify_redraw();
     }
 
     /// Current terminal size tracked by the renderer.
     pub fn size(&self) -> (usize, usize) {
         let st = self.lock();
-        (st.width, st.height)
+        (st.terminal.width, st.terminal.height)
     }
 
     /// Current terminal height tracked by the renderer.
     pub fn height(&self) -> usize {
-        self.lock().height
+        self.lock().terminal.height
     }
 
     /// Number of full renders performed by the redraw thread since
     /// terminal creation. Temporary debugging aid for scrollback bugs.
     pub fn full_render_count(&self) -> u64 {
-        self.lock().full_render_count
+        self.lock().terminal.full_render_count
     }
 
     /// Maximum number of rendered history/log rows replayed during a full
     /// redraw. `usize::MAX` preserves the historical unbounded behavior.
     pub fn redraw_history_size(&self) -> usize {
-        self.lock().redraw_history_size
+        self.lock().terminal.redraw_history_size
     }
 
     /// Updates the maximum number of rendered history/log rows replayed during
     /// full redraw. This method only stores the value; callers decide whether
     /// to invalidate the screen immediately.
     pub fn set_redraw_history_size(&self, redraw_history_size: usize) {
-        self.lock().redraw_history_size = redraw_history_size;
+        self.lock().terminal.redraw_history_size = redraw_history_size;
     }
 
     /// Triggers a redraw and blocks until the redraw thread has
@@ -1405,8 +1295,8 @@ impl TermHandle {
     /// atomically with going idle (right before blocking on recv).
     pub fn redraw_sync(&self) {
         let mut st = self.lock();
-        st.sync_requested += 1;
-        let target = st.sync_requested;
+        st.terminal.sync_requested += 1;
+        let target = st.terminal.sync_requested;
         drop(st);
 
         self.redraw.notify();
@@ -1414,7 +1304,7 @@ impl TermHandle {
         let st = self.state.lock().expect("term state mutex poisoned");
         let _st = self
             .sync_condvar
-            .wait_while(st, |s| s.sync_completed < target)
+            .wait_while(st, |s| s.terminal.sync_completed < target)
             .expect("term state mutex poisoned");
     }
 
@@ -1428,8 +1318,8 @@ impl TermHandle {
         let debug_id = debug_id.into();
         let block = block.into();
         let content_empty = block.is_empty();
-        st.blocks.insert(id, block);
-        st.block_debug_ids.insert(id, debug_id.clone());
+        st.layout.blocks.insert(id, block);
+        st.layout.block_debug_ids.insert(id, debug_id.clone());
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, debug_id, content_empty, "new block");
         id
     }
@@ -1442,8 +1332,9 @@ impl TermHandle {
         let content_empty = block.is_empty();
         let mut st = self.lock();
         let affects_history = st.block_in_history(id);
-        st.blocks.insert(id, block);
-        st.block_debug_ids
+        st.layout.blocks.insert(id, block);
+        st.layout
+            .block_debug_ids
             .entry(id)
             .or_insert_with(|| format!("set-block-{}", id.0));
         if affects_history {
@@ -1457,17 +1348,17 @@ impl TermHandle {
     pub fn remove_block(&self, id: BlockId) {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
-        let existed = st.blocks.remove(&id).is_some();
-        let debug_id = st.block_debug_ids.remove(&id);
-        let removed_history_refs = remove_all_from_zone(&mut st.history, id);
+        let existed = st.layout.blocks.remove(&id).is_some();
+        let debug_id = st.layout.block_debug_ids.remove(&id);
+        let removed_history_refs = remove_all_from_zone(&mut st.layout.history, id);
         st.remove_history_refs(id, removed_history_refs);
         if removed_history_refs != 0 {
             st.mark_history_dirty_from(0);
         }
-        st.above_active.retain(|&x| x != id);
-        st.above_sticky.retain(|&x| x != id);
-        st.suggestions.retain(|&x| x != id);
-        st.below.retain(|&x| x != id);
+        st.layout.above_active.retain(|&x| x != id);
+        st.layout.above_sticky.retain(|&x| x != id);
+        st.layout.suggestions.retain(|&x| x != id);
+        st.layout.below.retain(|&x| x != id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, ?debug_id, existed, "remove block");
     }
 
@@ -1486,8 +1377,8 @@ impl TermHandle {
     pub fn push_above_active(&self, id: BlockId) {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
-        if !st.above_active.contains(&id) {
-            st.above_active.push(id);
+        if !st.layout.above_active.contains(&id) {
+            st.layout.above_active.push(id);
             tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_active", "push block zone");
         }
     }
@@ -1505,20 +1396,21 @@ impl TermHandle {
         let _transaction = self.output_transaction_barrier();
         let anchors = anchors.into_iter().collect::<HashSet<_>>();
         let mut st = self.lock();
-        st.above_active.retain(|&x| x != id);
+        st.layout.above_active.retain(|&x| x != id);
         let insert_at = st
+            .layout
             .above_active
             .iter()
             .position(|active_id| anchors.contains(active_id))
-            .unwrap_or(st.above_active.len());
-        st.above_active.insert(insert_at, id);
+            .unwrap_or(st.layout.above_active.len());
+        st.layout.above_active.insert(insert_at, id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_active", "insert block zone");
     }
 
     /// Removes a block id from the above-active zone.
     pub fn remove_above_active(&self, id: BlockId) {
         let _transaction = self.output_transaction_barrier();
-        self.lock().above_active.retain(|&x| x != id);
+        self.lock().layout.above_active.retain(|&x| x != id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_active", "remove block zone");
     }
 
@@ -1527,8 +1419,8 @@ impl TermHandle {
     pub fn push_above_sticky(&self, id: BlockId) {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
-        if !st.above_sticky.contains(&id) {
-            st.above_sticky.push(id);
+        if !st.layout.above_sticky.contains(&id) {
+            st.layout.above_sticky.push(id);
             tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_sticky", "push block zone");
         }
     }
@@ -1536,7 +1428,7 @@ impl TermHandle {
     /// Removes a block id from the above-sticky zone.
     pub fn remove_above_sticky(&self, id: BlockId) {
         let _transaction = self.output_transaction_barrier();
-        self.lock().above_sticky.retain(|&x| x != id);
+        self.lock().layout.above_sticky.retain(|&x| x != id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_sticky", "remove block zone");
     }
 
@@ -1545,8 +1437,8 @@ impl TermHandle {
     pub fn push_suggestions(&self, id: BlockId) {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
-        if !st.suggestions.contains(&id) {
-            st.suggestions.push(id);
+        if !st.layout.suggestions.contains(&id) {
+            st.layout.suggestions.push(id);
             tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "suggestions", "push block zone");
         }
     }
@@ -1554,7 +1446,7 @@ impl TermHandle {
     /// Removes a block id from the suggestions zone.
     pub fn remove_suggestions(&self, id: BlockId) {
         let _transaction = self.output_transaction_barrier();
-        self.lock().suggestions.retain(|&x| x != id);
+        self.lock().layout.suggestions.retain(|&x| x != id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "suggestions", "remove block zone");
     }
 
@@ -1562,8 +1454,8 @@ impl TermHandle {
     pub fn push_below(&self, id: BlockId) {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
-        if !st.below.contains(&id) {
-            st.below.push(id);
+        if !st.layout.below.contains(&id) {
+            st.layout.below.push(id);
             tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "below", "push block zone");
         }
     }
@@ -1571,7 +1463,7 @@ impl TermHandle {
     /// Removes a block id from the below zone.
     pub fn remove_below(&self, id: BlockId) {
         let _transaction = self.output_transaction_barrier();
-        self.lock().below.retain(|&x| x != id);
+        self.lock().layout.below.retain(|&x| x != id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "below", "remove block zone");
     }
 
@@ -1590,8 +1482,8 @@ impl TermHandle {
         let debug_id = debug_id.into();
         let block = block.into();
         let content_empty = block.is_empty();
-        st.blocks.insert(id, block);
-        st.block_debug_ids.insert(id, debug_id.clone());
+        st.layout.blocks.insert(id, block);
+        st.layout.block_debug_ids.insert(id, debug_id.clone());
         st.append_history(id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, debug_id, content_empty, zone = "history", "print output");
         let notify = Self::request_redraw_locked(&mut st);
@@ -1605,18 +1497,18 @@ impl TermHandle {
     /// Updates the left prompt prefix.
     pub fn set_left_prompt(&self, text: impl Into<StyledText>) {
         let mut st = self.lock();
-        st.left_prompt = text.into();
+        st.editor.left_prompt = text.into();
         st.ensure_input_cursor_visible();
     }
 
     /// Returns a clone of the current input buffer.
     pub fn get_buffer(&self) -> String {
-        self.lock().buffer.clone()
+        self.lock().editor.buffer.clone()
     }
 
     /// Returns the current cursor position in bytes.
     pub fn get_cursor(&self) -> usize {
-        self.lock().cursor
+        self.lock().editor.cursor
     }
 
     /// Replaces the input buffer and cursor position. Also clears
@@ -1626,11 +1518,11 @@ impl TermHandle {
     pub fn set_buffer(&self, text: String, cursor: usize) {
         let mut st = self.lock();
         let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
-        st.buffer = text;
-        st.history_nav = None;
-        st.completion = None;
-        st.current_undo.clear();
-        st.current_redo.clear();
+        st.editor.buffer = text;
+        st.editor.history_nav = None;
+        st.editor.completion = None;
+        st.editor.current_undo.clear();
+        st.editor.current_redo.clear();
         st.write_cursor(new_cursor);
     }
 
@@ -1652,10 +1544,10 @@ impl TermHandle {
     pub fn set_buffer_preserving_undo(&self, text: String, cursor: usize) {
         let mut st = self.lock();
         let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
-        st.buffer = text;
-        st.history_nav = None;
-        st.completion = None;
-        st.current_redo.clear();
+        st.editor.buffer = text;
+        st.editor.history_nav = None;
+        st.editor.completion = None;
+        st.editor.current_redo.clear();
         st.write_cursor(new_cursor);
     }
 
@@ -1663,7 +1555,7 @@ impl TermHandle {
     /// when no menu is showing.
     pub fn completion_state(&self) -> Option<CompletionView> {
         let st = self.lock();
-        st.completion.as_ref().map(|c| CompletionView {
+        st.editor.completion.as_ref().map(|c| CompletionView {
             candidates: c.candidates.clone(),
             selected: c.selected,
         })
@@ -1671,19 +1563,19 @@ impl TermHandle {
 
     /// Updates the right prompt.
     pub fn set_right_prompt(&self, text: impl Into<StyledText>) {
-        self.lock().right_prompt = text.into();
+        self.lock().editor.right_prompt = text.into();
     }
 
     /// Updates the placeholder shown when the input buffer is empty.
     pub fn set_input_placeholder(&self, text: impl Into<StyledText>) {
-        self.lock().input_placeholder = text.into();
+        self.lock().editor.input_placeholder = text.into();
     }
 
     /// Enables or disables the compact hidden-row indicator for capped prompt
     /// input.
     pub fn set_prompt_scroll_indicator(&self, enabled: bool) {
         let mut st = self.lock();
-        st.show_prompt_scroll_indicator = enabled;
+        st.editor.show_prompt_scroll_indicator = enabled;
         st.ensure_input_cursor_visible();
     }
 
@@ -1729,7 +1621,7 @@ impl TermHandle {
     fn queue_terminal_side_effect(&self, sequence: impl Into<String>) {
         let notify = {
             let mut st = self.lock();
-            st.pending_raw.push(sequence.into());
+            st.terminal.pending_raw.push(sequence.into());
             Self::request_redraw_locked(&mut st)
         };
         if notify {
@@ -2006,10 +1898,10 @@ impl Term {
                 RawEvent::Resize(w, h) => {
                     let (width, height) = {
                         let mut st = self.handle.lock();
-                        let width = effective_resize_dimension(w, st.width);
-                        let height = effective_resize_dimension(h, st.height);
-                        st.width = width;
-                        st.height = height;
+                        let width = effective_resize_dimension(w, st.terminal.width);
+                        let height = effective_resize_dimension(h, st.terminal.height);
+                        st.terminal.width = width;
+                        st.terminal.height = height;
                         st.ensure_input_cursor_visible();
                         (width, height)
                     };
@@ -2036,8 +1928,8 @@ impl Term {
                     {
                         let mut st = self.handle.lock();
                         st.record_undo();
-                        let cursor = st.cursor;
-                        st.buffer.insert_str(cursor, &text);
+                        let cursor = st.editor.cursor;
+                        st.editor.buffer.insert_str(cursor, &text);
                         st.write_cursor(cursor + text.len());
                         st.sync_buffer_to_history_nav();
                     }
@@ -2059,7 +1951,7 @@ impl Term {
     /// later helper result is dropped by the closed or shutdown channel
     /// path.
     fn next_raw(&self) -> io::Result<Option<RawEvent>> {
-        if self.handle.lock().input_shutdown {
+        if self.handle.lock().terminal.input_shutdown {
             return Ok(None);
         }
 
@@ -2078,13 +1970,13 @@ impl Term {
             Ok(message) => message,
             Err(_) => return Ok(None),
         };
-        if self.handle.lock().input_shutdown {
+        if self.handle.lock().terminal.input_shutdown {
             return Ok(None);
         }
         match message {
             InputMessage::Raw(raw) => Ok(Some(raw)),
             InputMessage::Shutdown => {
-                self.handle.lock().input_shutdown = true;
+                self.handle.lock().terminal.input_shutdown = true;
                 Ok(None)
             }
             InputMessage::Error(error) => Err(error),
@@ -2096,7 +1988,7 @@ impl Term {
     pub fn set_completion_source(&mut self, source: Option<Box<dyn CompletionSource>>) {
         self.completion_source = source;
         let mut st = self.handle.lock();
-        st.completion = None;
+        st.editor.completion = None;
     }
 
     /// Configures key bindings surfaced as [`Event::Binding`].
@@ -2130,13 +2022,13 @@ impl Term {
     /// prompts are ignored, and the active edit buffer is left intact.
     pub fn seed_input_history(&mut self, history: impl IntoIterator<Item = String>) {
         let mut st = self.handle.lock();
-        st.input_history.extend(
+        st.editor.input_history.extend(
             history
                 .into_iter()
                 .filter(|buffer| !buffer.is_empty())
                 .map(PromptDraft::submitted),
         );
-        st.history_nav = None;
+        st.editor.history_nav = None;
     }
 
     /// Replaces the most recently submitted input-history entry and any
@@ -2146,17 +2038,17 @@ impl Term {
     /// editor intentionally does not interpret.
     pub fn replace_last_submitted_input(&mut self, text: String) {
         let mut st = self.handle.lock();
-        let recalled_source = st.last_submitted_recalled_source;
+        let recalled_source = st.editor.last_submitted_recalled_source;
         if let Some(index) = recalled_source
-            && let Some(source) = st.input_history.get_mut(index)
+            && let Some(source) = st.editor.input_history.get_mut(index)
         {
             *source = PromptDraft::submitted(text.clone());
         }
-        if let Some(last) = st.input_history.last_mut() {
+        if let Some(last) = st.editor.input_history.last_mut() {
             *last = PromptDraft::submitted(text);
         }
-        st.history_nav = None;
-        st.completion = None;
+        st.editor.history_nav = None;
+        st.editor.completion = None;
     }
 
     /// Re-evaluates the completion source against the current buffer
@@ -2171,7 +2063,7 @@ impl Term {
         };
         let (buffer, cursor) = {
             let st = self.handle.lock();
-            (st.buffer.clone(), st.cursor)
+            (st.editor.buffer.clone(), st.editor.cursor)
         };
         let candidates = source
             .candidates(&buffer, cursor)
@@ -2183,9 +2075,9 @@ impl Term {
             .collect::<Vec<_>>();
         let mut st = self.handle.lock();
         if candidates.is_empty() {
-            st.completion = None;
+            st.editor.completion = None;
         } else {
-            st.completion = Some(CompletionMenu {
+            st.editor.completion = Some(CompletionMenu {
                 candidates,
                 selected: None,
                 original_buffer: buffer,
@@ -2234,7 +2126,7 @@ impl Term {
     ) -> io::Result<()> {
         {
             let mut st = self.handle.lock();
-            st.external_paused = true;
+            st.terminal.external_paused = true;
         }
         // Wait until any redraw frame that already passed the paused-state
         // check has finished writing before releasing the terminal to an
@@ -2287,11 +2179,11 @@ impl Term {
         let (width, height) = term_size();
         {
             let mut st = self.handle.lock();
-            st.width = width;
-            st.height = height;
+            st.terminal.width = width;
+            st.terminal.height = height;
             st.ensure_input_cursor_visible();
-            st.external_paused = false;
-            st.invalidate_screen = true;
+            st.terminal.external_paused = false;
+            st.terminal.invalidate_screen = true;
         }
         self.handle.redraw();
     }
@@ -2340,21 +2232,21 @@ impl Term {
     /// the input loop.
     pub fn trigger_history_step(&self, delta: isize) {
         let mut st = self.handle.lock();
-        st.completion = None;
+        st.editor.completion = None;
         st.step_history(delta);
     }
 
     /// Programmatically triggers prompt undo.
     pub fn trigger_undo(&self) -> bool {
         let mut st = self.handle.lock();
-        st.completion = None;
+        st.editor.completion = None;
         st.undo()
     }
 
     /// Programmatically triggers prompt redo.
     pub fn trigger_redo(&self) -> bool {
         let mut st = self.handle.lock();
-        st.completion = None;
+        st.editor.completion = None;
         st.redo()
     }
 
@@ -2404,27 +2296,27 @@ impl Term {
 
     fn move_cursor_left(&self) -> bool {
         let mut st = self.handle.lock();
-        if st.cursor == 0 {
+        if st.editor.cursor == 0 {
             return false;
         }
-        let prev = prev_char_boundary(&st.buffer, st.cursor);
+        let prev = prev_char_boundary(&st.editor.buffer, st.editor.cursor);
         st.write_cursor(prev);
         true
     }
 
     fn move_cursor_right(&self) -> bool {
         let mut st = self.handle.lock();
-        if st.buffer.len() <= st.cursor {
+        if st.editor.buffer.len() <= st.editor.cursor {
             return false;
         }
-        let next = next_char_boundary(&st.buffer, st.cursor);
+        let next = next_char_boundary(&st.editor.buffer, st.editor.cursor);
         st.write_cursor(next);
         true
     }
 
     fn move_cursor_start(&self) -> bool {
         let mut st = self.handle.lock();
-        if st.cursor == 0 {
+        if st.editor.cursor == 0 {
             return false;
         }
         st.write_cursor(0);
@@ -2433,8 +2325,8 @@ impl Term {
 
     fn move_cursor_end(&self) -> bool {
         let mut st = self.handle.lock();
-        let len = st.buffer.len();
-        if st.cursor == len {
+        let len = st.editor.buffer.len();
+        if st.editor.cursor == len {
             return false;
         }
         st.write_cursor(len);
@@ -2444,13 +2336,13 @@ impl Term {
     fn delete_backward(&self) -> bool {
         let changed = {
             let mut st = self.handle.lock();
-            if st.cursor == 0 {
+            if st.editor.cursor == 0 {
                 return false;
             }
             st.record_undo();
-            let prev = prev_char_boundary(&st.buffer, st.cursor);
-            let cursor = st.cursor;
-            st.buffer.drain(prev..cursor);
+            let prev = prev_char_boundary(&st.editor.buffer, st.editor.cursor);
+            let cursor = st.editor.cursor;
+            st.editor.buffer.drain(prev..cursor);
             st.write_cursor(prev);
             st.sync_buffer_to_history_nav();
             true
@@ -2462,13 +2354,13 @@ impl Term {
     fn delete_forward(&self) -> bool {
         let changed = {
             let mut st = self.handle.lock();
-            if st.buffer.len() <= st.cursor {
+            if st.editor.buffer.len() <= st.editor.cursor {
                 return false;
             }
             st.record_undo();
-            let cursor = st.cursor;
-            let next = next_char_boundary(&st.buffer, cursor);
-            st.buffer.drain(cursor..next);
+            let cursor = st.editor.cursor;
+            let next = next_char_boundary(&st.editor.buffer, cursor);
+            st.editor.buffer.drain(cursor..next);
             st.write_cursor(cursor);
             st.sync_buffer_to_history_nav();
             true
@@ -2480,14 +2372,14 @@ impl Term {
     fn clear_prompt(&self) -> bool {
         let changed = {
             let mut st = self.handle.lock();
-            if st.buffer.is_empty() {
+            if st.editor.buffer.is_empty() {
                 return false;
             }
-            st.ctrl_c_cancel_armed = false;
+            st.editor.ctrl_c_cancel_armed = false;
             st.record_undo();
-            st.buffer.clear();
-            st.history_nav = None;
-            st.completion = None;
+            st.editor.buffer.clear();
+            st.editor.history_nav = None;
+            st.editor.completion = None;
             st.write_cursor(0);
             true
         };
@@ -2497,21 +2389,21 @@ impl Term {
 
     fn clear_or_cancel_prompt(&self) -> Event {
         let mut st = self.handle.lock();
-        if st.buffer.is_empty() {
-            if st.ctrl_c_cancel_armed {
-                st.ctrl_c_cancel_armed = false;
+        if st.editor.buffer.is_empty() {
+            if st.editor.ctrl_c_cancel_armed {
+                st.editor.ctrl_c_cancel_armed = false;
                 return Event::CancelPrompt;
             }
-            st.ctrl_c_cancel_armed = true;
+            st.editor.ctrl_c_cancel_armed = true;
             return Event::Notice(
                 "Press Ctrl-C again to cancel the current response; use Ctrl-D to exit".to_owned(),
             );
         }
-        st.ctrl_c_cancel_armed = false;
+        st.editor.ctrl_c_cancel_armed = false;
         st.record_undo();
-        st.buffer.clear();
-        st.history_nav = None;
-        st.completion = None;
+        st.editor.buffer.clear();
+        st.editor.history_nav = None;
+        st.editor.completion = None;
         st.write_cursor(0);
         drop(st);
         self.refresh_completion();
@@ -2521,12 +2413,12 @@ impl Term {
     fn kill_to_start(&self) -> bool {
         let changed = {
             let mut st = self.handle.lock();
-            if st.cursor == 0 {
+            if st.editor.cursor == 0 {
                 return false;
             }
             st.record_undo();
-            let cursor = st.cursor;
-            st.buffer.drain(..cursor);
+            let cursor = st.editor.cursor;
+            st.editor.buffer.drain(..cursor);
             st.write_cursor(0);
             st.sync_buffer_to_history_nav();
             true
@@ -2538,13 +2430,13 @@ impl Term {
     fn kill_word_left(&self) -> bool {
         let changed = {
             let mut st = self.handle.lock();
-            if st.cursor == 0 {
+            if st.editor.cursor == 0 {
                 return false;
             }
-            let new_end = word_left_boundary(&st.buffer, st.cursor);
+            let new_end = word_left_boundary(&st.editor.buffer, st.editor.cursor);
             st.record_undo();
-            let cursor = st.cursor;
-            st.buffer.drain(new_end..cursor);
+            let cursor = st.editor.cursor;
+            st.editor.buffer.drain(new_end..cursor);
             st.write_cursor(new_end);
             st.sync_buffer_to_history_nav();
             true
@@ -2687,7 +2579,7 @@ impl Term {
     }
 
     fn prompt_eof_action(&self) -> Option<Event> {
-        let is_empty = self.handle.lock().buffer.is_empty();
+        let is_empty = self.handle.lock().editor.buffer.is_empty();
         is_empty.then_some(Event::Eof)
     }
 
@@ -2702,10 +2594,10 @@ impl Term {
     fn insert_newline(&self) -> Event {
         {
             let mut st = self.handle.lock();
-            st.completion = None;
+            st.editor.completion = None;
             st.record_undo();
-            let cursor = st.cursor;
-            st.buffer.insert(cursor, '\n');
+            let cursor = st.editor.cursor;
+            st.editor.buffer.insert(cursor, '\n');
             st.write_cursor(cursor + 1);
             st.sync_buffer_to_history_nav();
         }
@@ -2724,10 +2616,11 @@ impl Term {
         let started = path_std_time::Instant::now();
         let line = {
             let mut st = self.handle.lock();
-            st.completion = None;
-            st.last_submitted_recalled_source = st.history_nav.as_ref().map(|nav| nav.index);
-            st.history_nav = None;
-            let line = st.buffer.clone();
+            st.editor.completion = None;
+            st.editor.last_submitted_recalled_source =
+                st.editor.history_nav.as_ref().map(|nav| nav.index);
+            st.editor.history_nav = None;
+            let line = st.editor.buffer.clone();
             st.push_current_as_history_entry();
             line
         };
@@ -2770,7 +2663,7 @@ impl Term {
 
     fn write_cursor_end_raw(&self) {
         let mut st = self.handle.lock();
-        let len = st.buffer.len();
+        let len = st.editor.buffer.len();
         st.write_cursor(len);
     }
 
@@ -2778,8 +2671,8 @@ impl Term {
         {
             let mut st = self.handle.lock();
             st.record_undo();
-            let cursor = st.cursor;
-            st.buffer.drain(..cursor);
+            let cursor = st.editor.cursor;
+            st.editor.buffer.drain(..cursor);
             st.write_cursor(0);
             st.sync_buffer_to_history_nav();
         }
@@ -2793,21 +2686,21 @@ impl Term {
     // event/refresh boundary.
     fn handle_ctrl_c_key(&self) -> Event {
         let mut st = self.handle.lock();
-        if st.buffer.is_empty() {
-            if st.ctrl_c_cancel_armed {
-                st.ctrl_c_cancel_armed = false;
+        if st.editor.buffer.is_empty() {
+            if st.editor.ctrl_c_cancel_armed {
+                st.editor.ctrl_c_cancel_armed = false;
                 return Event::CancelPrompt;
             }
-            st.ctrl_c_cancel_armed = true;
+            st.editor.ctrl_c_cancel_armed = true;
             return Event::Notice(
                 "Press Ctrl-C again to cancel the current response; use Ctrl-D to exit".to_owned(),
             );
         }
-        st.ctrl_c_cancel_armed = false;
+        st.editor.ctrl_c_cancel_armed = false;
         st.record_undo();
-        st.buffer.clear();
-        st.history_nav = None;
-        st.completion = None;
+        st.editor.buffer.clear();
+        st.editor.history_nav = None;
+        st.editor.completion = None;
         st.write_cursor(0);
         Event::BufferChanged
     }
@@ -2819,6 +2712,7 @@ impl Term {
                     .state
                     .lock()
                     .expect("term state mutex poisoned")
+                    .editor
                     .buffer
                     .is_empty();
                 Ok(is_empty.then_some(Event::Eof))
@@ -2845,8 +2739,8 @@ impl Term {
         {
             let mut st = self.handle.lock();
             st.record_undo();
-            let cursor = st.cursor;
-            st.buffer.insert(cursor, ch);
+            let cursor = st.editor.cursor;
+            st.editor.buffer.insert(cursor, ch);
             st.write_cursor(cursor + ch.len_utf8());
             st.sync_buffer_to_history_nav();
         }
@@ -2931,7 +2825,7 @@ impl Term {
 
         let ctrl_c = matches!(key.code, KeyCode::Char('c')) && ctrl;
         if !ctrl_c {
-            self.handle.lock().ctrl_c_cancel_armed = false;
+            self.handle.lock().editor.ctrl_c_cancel_armed = false;
         }
 
         if let Some(event) = self.handle_completion_key(key, ctrl, shift, alt) {
@@ -2961,7 +2855,7 @@ impl Term {
         // next iteration.
         {
             let mut st = self.handle.lock();
-            st.shutdown = true;
+            st.terminal.shutdown = true;
         }
         self.handle.redraw.notify();
 
@@ -3078,7 +2972,7 @@ impl Drop for Term {
 
 impl Term {
     fn should_write_drop_terminal_cleanup(&self) -> bool {
-        self.owns_raw_mode && !self.handle.lock().external_paused
+        self.owns_raw_mode && !self.handle.lock().terminal.external_paused
     }
 }
 
@@ -3171,17 +3065,17 @@ impl Default for HistoryLayoutCache {
 impl HistoryLayoutCache {
     /// Refreshes the changed history suffix and returns entries laid out.
     fn refresh(&mut self, st: &mut SharedState) -> usize {
-        if self.width == st.width && self.generation == st.history_generation {
+        if self.width == st.terminal.width && self.generation == st.layout.history_generation {
             return 0;
         }
 
         let previous_generation = self.generation;
         let previous_entry_count = self.entry_line_offsets.len().saturating_sub(1);
-        let width_changed = self.width != st.width;
-        let requested_dirty_from = st.history_dirty_from.take().unwrap_or(0);
+        let width_changed = self.width != st.terminal.width;
+        let requested_dirty_from = st.layout.history_dirty_from.take().unwrap_or(0);
         let can_reuse_prefix = !width_changed
             && requested_dirty_from <= previous_entry_count
-            && requested_dirty_from <= st.history.len();
+            && requested_dirty_from <= st.layout.history.len();
         let dirty_from = if can_reuse_prefix {
             requested_dirty_from
         } else {
@@ -3194,43 +3088,43 @@ impl HistoryLayoutCache {
             .unwrap_or(0);
         let append_only = can_reuse_prefix
             && dirty_from == previous_entry_count
-            && previous_entry_count <= st.history.len();
+            && previous_entry_count <= st.layout.history.len();
 
         self.lines.truncate(line_start);
         self.sources.truncate(line_start);
         self.entry_line_offsets.truncate(dirty_from + 1);
-        for id in &st.history[dirty_from..] {
+        for id in &st.layout.history[dirty_from..] {
             layout_id_list(
                 std::slice::from_ref(id),
-                &st.blocks,
-                &st.block_debug_ids,
-                st.width,
+                &st.layout.blocks,
+                &st.layout.block_debug_ids,
+                st.terminal.width,
                 &mut self.lines,
                 &mut self.sources,
             );
             self.entry_line_offsets.push(self.lines.len());
         }
 
-        self.width = st.width;
+        self.width = st.terminal.width;
         self.previous_generation = previous_generation;
-        self.generation = st.history_generation;
+        self.generation = st.layout.history_generation;
         self.appended_from_line = append_only.then_some(line_start);
-        st.history.len().saturating_sub(dirty_from)
+        st.layout.history.len().saturating_sub(dirty_from)
     }
 
     /// Rebuilds an independent cache without consuming redraw dirty state.
     fn rebuild(st: &SharedState) -> Self {
         let mut cache = Self {
-            width: st.width,
-            generation: st.history_generation,
+            width: st.terminal.width,
+            generation: st.layout.history_generation,
             ..Self::default()
         };
-        for id in &st.history {
+        for id in &st.layout.history {
             layout_id_list(
                 std::slice::from_ref(id),
-                &st.blocks,
-                &st.block_debug_ids,
-                st.width,
+                &st.layout.blocks,
+                &st.layout.block_debug_ids,
+                st.terminal.width,
                 &mut cache.lines,
                 &mut cache.sources,
             );
@@ -3579,23 +3473,23 @@ fn prompt_scroll_indicator_text(
 }
 
 fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
-    let width = st.width;
+    let width = st.terminal.width;
     let mut lines: Vec<Vec<Cell>> = Vec::new();
     let mut sources: Vec<LineSource> = Vec::new();
 
     layout_id_list(
-        &st.above_active,
-        &st.blocks,
-        &st.block_debug_ids,
+        &st.layout.above_active,
+        &st.layout.blocks,
+        &st.layout.block_debug_ids,
         width,
         &mut lines,
         &mut sources,
     );
     let active_height = lines.len();
     layout_id_list(
-        &st.above_sticky,
-        &st.blocks,
-        &st.block_debug_ids,
+        &st.layout.above_sticky,
+        &st.layout.blocks,
+        &st.layout.block_debug_ids,
         width,
         &mut lines,
         &mut sources,
@@ -3603,13 +3497,13 @@ fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
 
     let above_end = history_height + lines.len();
 
-    let mut input_content = st.left_prompt.clone();
-    if st.buffer.is_empty() {
-        for span in st.input_placeholder.spans() {
+    let mut input_content = st.editor.left_prompt.clone();
+    if st.editor.buffer.is_empty() {
+        for span in st.editor.input_placeholder.spans() {
             input_content.push(span.clone());
         }
     } else {
-        input_content.push(Span::plain(&st.buffer));
+        input_content.push(Span::plain(&st.editor.buffer));
     }
     // Preserve a trailing-newline blank row so a buffer ending in
     // `\n` (the user just hit Shift+Enter / Alt+Enter) gives the
@@ -3621,9 +3515,9 @@ fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
         .preserve_last_newline(true)
         .call();
 
-    let left_cols = st.left_prompt.char_count();
+    let left_cols = st.editor.left_prompt.char_count();
     let (buffer_cursor_row, cursor_col) =
-        buffer_position_for_byte(&st.buffer, st.cursor, width, left_cols);
+        buffer_position_for_byte(&st.editor.buffer, st.editor.cursor, width, left_cols);
     // Prompt input is special because it owns a visible cursor. When the
     // cursor sits at the end and the final column has just been filled, it
     // must appear immediately at column 0 of the next visual row, growing the
@@ -3635,9 +3529,9 @@ fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
         input_lines.push(Vec::new());
     }
 
-    if !st.right_prompt.is_empty() && !input_lines.is_empty() {
+    if !st.editor.right_prompt.is_empty() && !input_lines.is_empty() {
         let first_line = &input_lines[0];
-        let right_cells = st.right_prompt.to_cells();
+        let right_cells = st.editor.right_prompt.to_cells();
         let first_cols: usize = first_line.iter().map(|c| c.col_width()).sum();
         let right_cols: usize = right_cells.iter().map(|c| c.col_width()).sum();
         let needed = first_cols + 1 + right_cols;
@@ -3651,16 +3545,16 @@ fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
     }
 
     let input_total_rows = input_lines.len().max(1);
-    let cap_rows = prompt_input_max_rows(st.height);
+    let cap_rows = prompt_input_max_rows(st.terminal.height);
     let indicator_rows = prompt_scroll_indicator_rows(
-        st.show_prompt_scroll_indicator,
-        !st.buffer.is_empty(),
+        st.editor.show_prompt_scroll_indicator,
+        !st.editor.buffer.is_empty(),
         input_total_rows,
         cap_rows,
     );
     let visible_input_rows = prompt_editable_rows(input_total_rows, cap_rows, indicator_rows);
     let viewport_start = viewport_start_with_cursor(
-        st.input_viewport_start,
+        st.editor.input_viewport_start,
         buffer_cursor_row,
         input_total_rows,
         visible_input_rows,
@@ -3689,17 +3583,17 @@ fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
         lines.push(line);
     }
     layout_id_list(
-        &st.suggestions,
-        &st.blocks,
-        &st.block_debug_ids,
+        &st.layout.suggestions,
+        &st.layout.blocks,
+        &st.layout.block_debug_ids,
         width,
         &mut lines,
         &mut sources,
     );
     layout_id_list(
-        &st.below,
-        &st.blocks,
-        &st.block_debug_ids,
+        &st.layout.below,
+        &st.layout.blocks,
+        &st.layout.block_debug_ids,
         width,
         &mut lines,
         &mut sources,
@@ -3852,7 +3746,7 @@ fn redraw_loop(
     let mut writer = BufWriter::new(writer);
     let (w, h) = {
         let st = state.lock().expect("term state mutex poisoned");
-        (st.width, st.height)
+        (st.terminal.width, st.terminal.height)
     };
     let mut screen = Screen::new(w);
     let mut prev_width = w;
@@ -3957,11 +3851,11 @@ fn render_shutdown_if_requested(
     sync_condvar: &std::sync::Condvar,
 ) -> bool {
     let mut st = state.lock().expect("term state mutex poisoned");
-    if !st.shutdown {
+    if !st.terminal.shutdown {
         return false;
     }
-    if st.external_paused {
-        st.sync_completed = st.sync_requested;
+    if st.terminal.external_paused {
+        st.terminal.sync_completed = st.terminal.sync_requested;
         drop(st);
         sync_condvar.notify_all();
         return true;
@@ -3969,7 +3863,7 @@ fn render_shutdown_if_requested(
 
     // Final render + move cursor below all content.
     let layout = layout_all(&st);
-    let height = st.height.max(1);
+    let height = st.terminal.height.max(1);
     let plan = terminal_model.plan_view(&layout, height);
     let visible = plan.visible_lines(height);
     let cursor_in_visible = plan.cursor_in_visible(height);
@@ -3984,7 +3878,7 @@ fn render_shutdown_if_requested(
     let _ = writer.flush();
     {
         let mut st = state.lock().expect("term state mutex poisoned");
-        st.sync_completed = st.sync_requested;
+        st.terminal.sync_completed = st.terminal.sync_requested;
     }
     sync_condvar.notify_all();
     true
@@ -3997,7 +3891,7 @@ fn wait_for_redraw_or_sync(
     // If a sync was requested but not yet completed, skip blocking on recv and
     // render immediately. Otherwise block until the next notification arrives.
     let st = state.lock().expect("term state mutex poisoned");
-    if st.sync_completed < st.sync_requested {
+    if st.terminal.sync_completed < st.terminal.sync_requested {
         return true;
     }
     drop(st);
@@ -4013,31 +3907,31 @@ fn prepare_redraw_pass(
     sync_condvar: &std::sync::Condvar,
 ) -> Option<RedrawPass> {
     let mut st = state.lock().expect("term state mutex poisoned");
-    if st.redraw_suppression != 0 {
+    if st.terminal.redraw_suppression != 0 {
         // The notification that woke this pass has been consumed. Preserve it
         // for the outermost suppression guard so a no-op transaction cannot
         // swallow another producer's already-pending redraw.
-        st.redraw_dirty_while_suppressed = true;
-        st.sync_completed = st.sync_requested;
+        st.terminal.redraw_dirty_while_suppressed = true;
+        st.terminal.sync_completed = st.terminal.sync_requested;
         sync_condvar.notify_all();
         return None;
     }
-    if st.external_paused {
-        st.sync_completed = st.sync_requested;
+    if st.terminal.external_paused {
+        st.terminal.sync_completed = st.terminal.sync_requested;
         sync_condvar.notify_all();
         return None;
     }
-    let width = st.width;
-    let height = st.height.max(1);
+    let width = st.terminal.width;
+    let height = st.terminal.height.max(1);
     let size_changed = prev_width != width || prev_height != height;
     // Take-and-clear so the flag is one-shot.
-    let force_full = std::mem::take(&mut st.invalidate_screen);
+    let force_full = std::mem::take(&mut st.terminal.invalidate_screen);
     // Capture the sync generation we're rendering against. We must not advance
     // sync_completed beyond this value, because a later bump to sync_requested
     // may have arrived with state changes we haven't read yet.
-    let sync_gen = st.sync_requested;
-    let pending_raw = std::mem::take(&mut st.pending_raw);
-    let redraw_history_size = st.redraw_history_size;
+    let sync_gen = st.terminal.sync_requested;
+    let pending_raw = std::mem::take(&mut st.terminal.pending_raw);
+    let redraw_history_size = st.terminal.redraw_history_size;
 
     history_cache.refresh(&mut st);
     let tail = layout_tail(&st, history_cache.lines.len());
@@ -4374,7 +4268,7 @@ fn complete_redraw_sync(
     // monotonically increasing, but max() makes the invariant explicit.
     {
         let mut st = state.lock().expect("term state mutex poisoned");
-        st.sync_completed = st.sync_completed.max(sync_gen);
+        st.terminal.sync_completed = st.terminal.sync_completed.max(sync_gen);
     }
     sync_condvar.notify_all();
 }
@@ -4392,8 +4286,8 @@ fn changed_line_in_range(
 fn mark_full_render(state: &Arc<Mutex<SharedState>>, layout: &LayoutAll, mark: FullRenderMark) {
     let full_render_count = {
         let mut st = state.lock().expect("term state mutex poisoned");
-        st.full_render_count += 1;
-        st.full_render_count
+        st.terminal.full_render_count += 1;
+        st.terminal.full_render_count
     };
     let current_source = mark
         .changed_line
@@ -4585,9 +4479,10 @@ where
 // --- Helpers ---
 
 fn move_cursor_vertical(st: &SharedState, delta: isize, target_col: usize) -> Option<usize> {
-    let width = st.width.max(1);
-    let left_cols = st.left_prompt.char_count();
-    let (current_row, _) = buffer_position_for_byte(&st.buffer, st.cursor, width, left_cols);
+    let width = st.terminal.width.max(1);
+    let left_cols = st.editor.left_prompt.char_count();
+    let (current_row, _) =
+        buffer_position_for_byte(&st.editor.buffer, st.editor.cursor, width, left_cols);
 
     let target_row = current_row as isize + delta;
     if target_row < 0 {
@@ -4595,13 +4490,17 @@ fn move_cursor_vertical(st: &SharedState, delta: isize, target_col: usize) -> Op
     }
     let target_row = target_row as usize;
 
-    let (max_row, _) = buffer_end_position(&st.buffer, width, left_cols);
+    let (max_row, _) = buffer_end_position(&st.editor.buffer, width, left_cols);
     if max_row < target_row {
         return None;
     }
 
     Some(byte_offset_for_buffer_position(
-        &st.buffer, target_row, target_col, width, left_cols,
+        &st.editor.buffer,
+        target_row,
+        target_col,
+        width,
+        left_cols,
     ))
 }
 

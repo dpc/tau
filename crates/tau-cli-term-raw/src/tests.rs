@@ -581,7 +581,7 @@ fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
 #[test]
 fn empty_input_renders_placeholder_without_moving_cursor() {
     let mut st = SharedState::new(80, 24, "> ".into());
-    st.input_placeholder = Span::new(
+    st.editor.input_placeholder = Span::new(
         "Write a message to engineer...",
         Style::default().fg(Color::DarkGrey).italic(),
     )
@@ -595,8 +595,8 @@ fn empty_input_renders_placeholder_without_moving_cursor() {
     );
     assert_eq!(layout.cursor_row, 0);
     assert_eq!(layout.cursor_col, 2);
-    assert_eq!(st.buffer, "");
-    assert_eq!(st.cursor, 0);
+    assert_eq!(st.editor.buffer, "");
+    assert_eq!(st.editor.cursor, 0);
     assert!(layout.all_lines[0][2].style.italic);
 }
 
@@ -729,9 +729,9 @@ fn submission_moves_large_undo_and_redo_stacks_without_materializing_copies() {
         Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
     let (undo_allocation, redo_allocation, undo_buffers, redo_buffers) = {
         let mut st = handle.lock();
-        st.buffer = "submitted".to_owned();
-        st.cursor = st.buffer.len();
-        st.current_undo = (0..SNAPSHOT_COUNT)
+        st.editor.buffer = "submitted".to_owned();
+        st.editor.cursor = st.editor.buffer.len();
+        st.editor.current_undo = (0..SNAPSHOT_COUNT)
             .map(|index| PromptSnapshot {
                 buffer: char::from(b'a' + (index % 26) as u8)
                     .to_string()
@@ -739,7 +739,7 @@ fn submission_moves_large_undo_and_redo_stacks_without_materializing_copies() {
                 cursor: index,
             })
             .collect();
-        st.current_redo = (0..SNAPSHOT_COUNT)
+        st.editor.current_redo = (0..SNAPSHOT_COUNT)
             .map(|index| PromptSnapshot {
                 buffer: char::from(b'A' + (index % 26) as u8)
                     .to_string()
@@ -748,13 +748,15 @@ fn submission_moves_large_undo_and_redo_stacks_without_materializing_copies() {
             })
             .collect();
         (
-            st.current_undo.as_ptr() as usize,
-            st.current_redo.as_ptr() as usize,
-            st.current_undo
+            st.editor.current_undo.as_ptr() as usize,
+            st.editor.current_redo.as_ptr() as usize,
+            st.editor
+                .current_undo
                 .iter()
                 .map(|snapshot| snapshot.buffer.as_ptr() as usize)
                 .collect::<Vec<_>>(),
-            st.current_redo
+            st.editor
+                .current_redo
                 .iter()
                 .map(|snapshot| snapshot.buffer.as_ptr() as usize)
                 .collect::<Vec<_>>(),
@@ -774,7 +776,11 @@ fn submission_moves_large_undo_and_redo_stacks_without_materializing_copies() {
 
     {
         let st = handle.lock();
-        let submitted = st.input_history.last().expect("submitted history entry");
+        let submitted = st
+            .editor
+            .input_history
+            .last()
+            .expect("submitted history entry");
         assert_eq!(submitted.undo.as_ptr() as usize, undo_allocation);
         assert_eq!(submitted.redo.as_ptr() as usize, redo_allocation);
         assert_eq!(
@@ -793,13 +799,17 @@ fn submission_moves_large_undo_and_redo_stacks_without_materializing_copies() {
                 .collect::<Vec<_>>(),
             redo_buffers
         );
-        assert!(st.current_undo.is_empty());
-        assert!(st.current_redo.is_empty());
+        assert!(st.editor.current_undo.is_empty());
+        assert!(st.editor.current_redo.is_empty());
     }
 
     term.replace_last_submitted_input("canonical".to_owned());
     let st = handle.lock();
-    let submitted = st.input_history.last().expect("canonical history entry");
+    let submitted = st
+        .editor
+        .input_history
+        .last()
+        .expect("canonical history entry");
     assert_eq!(submitted.buffer, "canonical");
     assert!(submitted.undo.is_empty());
     assert!(submitted.redo.is_empty());
@@ -818,35 +828,35 @@ fn redraw_suppression_is_scoped() {
         handle.redraw();
         {
             let mut st = handle.lock();
-            assert_eq!(st.redraw_suppression, 1);
-            assert!(st.redraw_dirty_while_suppressed);
-            st.redraw_dirty_while_suppressed = false;
+            assert_eq!(st.terminal.redraw_suppression, 1);
+            assert!(st.terminal.redraw_dirty_while_suppressed);
+            st.terminal.redraw_dirty_while_suppressed = false;
         }
 
         handle.print_output("suppressed-output", plain_block("hidden update"));
         {
             let mut st = handle.lock();
-            assert!(st.redraw_dirty_while_suppressed);
-            st.redraw_dirty_while_suppressed = false;
+            assert!(st.terminal.redraw_dirty_while_suppressed);
+            st.terminal.redraw_dirty_while_suppressed = false;
         }
 
         handle.print_osc1337_set_user_var("CurrentDir", "/tmp", false);
         {
             let mut st = handle.lock();
-            assert!(st.redraw_dirty_while_suppressed);
-            st.redraw_dirty_while_suppressed = false;
+            assert!(st.terminal.redraw_dirty_while_suppressed);
+            st.terminal.redraw_dirty_while_suppressed = false;
         }
 
         let snapshot = handle.output_snapshot();
         handle.replace_output_snapshot(snapshot);
         let st = handle.lock();
-        assert!(st.redraw_dirty_while_suppressed);
+        assert!(st.terminal.redraw_dirty_while_suppressed);
     });
 
     {
         let st = handle.lock();
-        assert_eq!(st.redraw_suppression, 0);
-        assert!(!st.redraw_dirty_while_suppressed);
+        assert_eq!(st.terminal.redraw_suppression, 0);
+        assert!(!st.terminal.redraw_dirty_while_suppressed);
     }
 
     drop(term);
@@ -867,11 +877,11 @@ fn consumed_redraw_remains_pending_during_suppression() {
         // this scope prevents rendering.
         handle.redraw_sync();
         let st = handle.lock();
-        assert_eq!(st.redraw_suppression, 1);
-        assert!(st.redraw_dirty_while_suppressed);
+        assert_eq!(st.terminal.redraw_suppression, 1);
+        assert!(st.terminal.redraw_dirty_while_suppressed);
     });
 
-    assert_eq!(handle.lock().redraw_suppression, 0);
+    assert_eq!(handle.lock().terminal.redraw_suppression, 0);
     drop(term);
 }
 
@@ -890,7 +900,10 @@ fn dirty_suppression_guard_notifies_redraw_channel() {
     };
 
     isolated_handle.with_redraw_suppressed(|| {
-        isolated_handle.lock().redraw_dirty_while_suppressed = true;
+        isolated_handle
+            .lock()
+            .terminal
+            .redraw_dirty_while_suppressed = true;
     });
 
     assert_eq!(
@@ -1606,13 +1619,13 @@ fn boundary_cursor_keys_clear_sticky_column_even_when_cursor_does_not_move() {
         KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
     ] {
         handle.set_buffer("abcdef".to_owned(), 0);
-        handle.lock().sticky_col = Some(6);
+        handle.lock().editor.sticky_col = Some(6);
         assert!(
             term.handle_key(key).expect("home/control-a key").is_none(),
             "boundary-start key should not emit an event"
         );
         assert_eq!(handle.get_cursor(), 0);
-        assert_eq!(handle.lock().sticky_col, None);
+        assert_eq!(handle.lock().editor.sticky_col, None);
     }
 
     for key in [
@@ -1620,13 +1633,13 @@ fn boundary_cursor_keys_clear_sticky_column_even_when_cursor_does_not_move() {
         KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
     ] {
         handle.set_buffer("abcdef".to_owned(), 6);
-        handle.lock().sticky_col = Some(6);
+        handle.lock().editor.sticky_col = Some(6);
         assert!(
             term.handle_key(key).expect("end/control-e key").is_none(),
             "boundary-end key should not emit an event"
         );
         assert_eq!(handle.get_cursor(), 6);
-        assert_eq!(handle.lock().sticky_col, None);
+        assert_eq!(handle.lock().editor.sticky_col, None);
     }
 }
 
@@ -2644,8 +2657,8 @@ fn prompt_boundaries_move_by_grapheme_cluster() {
 #[test]
 fn prompt_input_cursor_uses_last_column_before_line_is_full() {
     let mut st = SharedState::new(10, 30, StyledText::from("> "));
-    st.buffer = "abcdefg".to_owned();
-    st.cursor = st.buffer.len();
+    st.editor.buffer = "abcdefg".to_owned();
+    st.editor.cursor = st.editor.buffer.len();
 
     let layout = layout_all(&st);
 
@@ -2659,8 +2672,8 @@ fn prompt_input_cursor_uses_last_column_before_line_is_full() {
 #[test]
 fn prompt_input_cursor_wraps_to_new_line_when_last_column_is_filled() {
     let mut st = SharedState::new(10, 30, StyledText::from("> "));
-    st.buffer = "abcdefgh".to_owned();
-    st.cursor = st.buffer.len();
+    st.editor.buffer = "abcdefgh".to_owned();
+    st.editor.cursor = st.editor.buffer.len();
 
     let layout = layout_all(&st);
 
@@ -2675,8 +2688,8 @@ fn prompt_input_cursor_wraps_to_new_line_when_last_column_is_filled() {
 #[test]
 fn prompt_input_newline_after_filled_line_does_not_add_phantom_row() {
     let mut st = SharedState::new(10, 30, StyledText::from("> "));
-    st.buffer = "abcdefgh\n".to_owned();
-    st.cursor = st.buffer.len();
+    st.editor.buffer = "abcdefgh\n".to_owned();
+    st.editor.cursor = st.editor.buffer.len();
 
     let layout = layout_all(&st);
 
@@ -2691,8 +2704,8 @@ fn prompt_input_newline_after_filled_line_does_not_add_phantom_row() {
 #[test]
 fn prompt_input_text_after_newline_after_filled_line_keeps_cursor_on_text_row() {
     let mut st = SharedState::new(10, 30, StyledText::from("> "));
-    st.buffer = "abcdefgh\nZ".to_owned();
-    st.cursor = st.buffer.len();
+    st.editor.buffer = "abcdefgh\nZ".to_owned();
+    st.editor.cursor = st.editor.buffer.len();
 
     let layout = layout_all(&st);
 
@@ -2707,8 +2720,8 @@ fn prompt_input_text_after_newline_after_filled_line_keeps_cursor_on_text_row() 
 #[test]
 fn prompt_input_repeated_full_lines_ending_in_newline_do_not_stack_phantom_rows() {
     let mut st = SharedState::new(10, 30, StyledText::from("> "));
-    st.buffer = "abcdefgh\nabcdefghij\n".to_owned();
-    st.cursor = st.buffer.len();
+    st.editor.buffer = "abcdefgh\nabcdefghij\n".to_owned();
+    st.editor.cursor = st.editor.buffer.len();
 
     let layout = layout_all(&st);
 
@@ -2735,8 +2748,8 @@ fn prompt_input_height_cap_uses_floor_third_with_minimum_one() {
 #[test]
 fn prompt_input_layout_caps_height_and_shows_hidden_row_indicator() {
     let mut st = SharedState::new(12, 12, StyledText::from("> "));
-    st.buffer = "a\nb\nc\nd\ne".to_owned();
-    st.write_cursor(st.buffer.len());
+    st.editor.buffer = "a\nb\nc\nd\ne".to_owned();
+    st.write_cursor(st.editor.buffer.len());
 
     let layout = layout_all(&st);
 
@@ -2752,8 +2765,8 @@ fn prompt_input_layout_caps_height_and_shows_hidden_row_indicator() {
 #[test]
 fn prompt_input_cap_one_keeps_editable_row_and_suppresses_indicator() {
     let mut st = SharedState::new(12, 1, StyledText::from("> "));
-    st.buffer = "a\nb\nc".to_owned();
-    st.write_cursor(st.buffer.len());
+    st.editor.buffer = "a\nb\nc".to_owned();
+    st.write_cursor(st.editor.buffer.len());
 
     let layout = layout_all(&st);
 
@@ -2767,9 +2780,9 @@ fn prompt_input_cap_one_keeps_editable_row_and_suppresses_indicator() {
 #[test]
 fn prompt_input_scroll_indicator_can_be_disabled() {
     let mut st = SharedState::new(12, 9, StyledText::from("> "));
-    st.show_prompt_scroll_indicator = false;
-    st.buffer = "a\nb\nc\nd".to_owned();
-    st.write_cursor(st.buffer.len());
+    st.editor.show_prompt_scroll_indicator = false;
+    st.editor.buffer = "a\nb\nc\nd".to_owned();
+    st.write_cursor(st.editor.buffer.len());
 
     let layout = layout_all(&st);
 
@@ -2783,14 +2796,14 @@ fn prompt_input_scroll_indicator_can_be_disabled() {
 #[test]
 fn prompt_input_resize_clamps_viewport_when_more_rows_fit() {
     let mut st = SharedState::new(12, 12, StyledText::from("> "));
-    st.buffer = "a\nb\nc\nd\ne".to_owned();
-    st.write_cursor(st.buffer.len());
-    assert_eq!(st.input_viewport_start, 3);
+    st.editor.buffer = "a\nb\nc\nd\ne".to_owned();
+    st.write_cursor(st.editor.buffer.len());
+    assert_eq!(st.editor.input_viewport_start, 3);
 
-    st.height = 30;
+    st.terminal.height = 30;
     st.ensure_input_cursor_visible();
 
-    assert_eq!(st.input_viewport_start, 0);
+    assert_eq!(st.editor.input_viewport_start, 0);
     let layout = layout_all(&st);
     assert_eq!(layout.all_lines.len(), 5);
 }
@@ -2813,9 +2826,9 @@ fn prompt_input_plain_up_scrolls_before_history_navigation() {
     handle.set_buffer("a\nb\nc\nd\ne".to_owned(), 5);
     {
         let mut st = handle.lock();
-        st.input_viewport_start = 2;
+        st.editor.input_viewport_start = 2;
     }
-    assert_eq!(handle.lock().input_viewport_start, 2);
+    assert_eq!(handle.lock().editor.input_viewport_start, 2);
 
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
@@ -2826,7 +2839,7 @@ fn prompt_input_plain_up_scrolls_before_history_navigation() {
     let _ = term.get_next_event().expect("up event");
 
     assert_eq!(handle.get_buffer(), "a\nb\nc\nd\ne");
-    assert_eq!(handle.lock().input_viewport_start, 1);
+    assert_eq!(handle.lock().editor.input_viewport_start, 1);
 
     for _ in 0..2 {
         input_tx
@@ -2876,7 +2889,7 @@ fn prompt_input_completion_menu_keeps_priority_over_local_scroll() {
     handle.set_buffer("a\nb\nc\nd\ne".to_owned(), 9);
     {
         let mut st = handle.lock();
-        st.completion = Some(CompletionMenu {
+        st.editor.completion = Some(CompletionMenu {
             candidates: vec![Candidate {
                 label: "x".to_owned(),
                 description: "candidate".to_owned(),
@@ -2884,8 +2897,8 @@ fn prompt_input_completion_menu_keeps_priority_over_local_scroll() {
                 cursor: "replacement".len(),
             }],
             selected: None,
-            original_buffer: st.buffer.clone(),
-            original_cursor: st.cursor,
+            original_buffer: st.editor.buffer.clone(),
+            original_cursor: st.editor.cursor,
         });
     }
 
@@ -2904,8 +2917,8 @@ fn prompt_input_completion_menu_keeps_priority_over_local_scroll() {
 #[test]
 fn prompt_input_indicator_fits_tiny_terminal_width() {
     let mut st = SharedState::new(1, 7, StyledText::from(""));
-    st.buffer = "a\nb\nc".to_owned();
-    st.write_cursor(st.buffer.len());
+    st.editor.buffer = "a\nb\nc".to_owned();
+    st.write_cursor(st.editor.buffer.len());
 
     let layout = layout_all(&st);
     let indicator = line_text(&layout.all_lines[0]);
@@ -2927,9 +2940,9 @@ fn prompt_input_plain_down_scrolls_before_history_navigation() {
     handle.set_buffer("a\nb\nc\nd\ne".to_owned(), 5);
     {
         let mut st = handle.lock();
-        st.input_viewport_start = 1;
+        st.editor.input_viewport_start = 1;
     }
-    assert_eq!(handle.lock().input_viewport_start, 1);
+    assert_eq!(handle.lock().editor.input_viewport_start, 1);
 
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
@@ -2940,7 +2953,7 @@ fn prompt_input_plain_down_scrolls_before_history_navigation() {
     let _ = term.get_next_event().expect("down event");
 
     assert_eq!(handle.get_buffer(), "a\nb\nc\nd\ne");
-    assert_eq!(handle.lock().input_viewport_start, 2);
+    assert_eq!(handle.lock().editor.input_viewport_start, 2);
 }
 
 /// The explicit next-history shortcut must bypass local prompt scrolling.
@@ -2952,7 +2965,7 @@ fn prompt_input_explicit_next_history_shortcut_bypasses_local_scroll() {
     handle.set_buffer("a\nb\nc\nd\ne".to_owned(), 5);
     {
         let mut st = handle.lock();
-        st.input_viewport_start = 1;
+        st.editor.input_viewport_start = 1;
     }
 
     input_tx
@@ -5358,7 +5371,7 @@ fn completion_accept_preserves_suffix_and_explicit_cursor() {
     handle.set_buffer("日 tail".to_owned(), "日".len());
     {
         let mut st = handle.lock();
-        st.completion = Some(CompletionMenu {
+        st.editor.completion = Some(CompletionMenu {
             candidates: vec![Candidate {
                 label: "日本".to_owned(),
                 description: "candidate".to_owned(),
@@ -5366,8 +5379,8 @@ fn completion_accept_preserves_suffix_and_explicit_cursor() {
                 cursor: "日本".len(),
             }],
             selected: None,
-            original_buffer: st.buffer.clone(),
-            original_cursor: st.cursor,
+            original_buffer: st.editor.buffer.clone(),
+            original_cursor: st.editor.cursor,
         });
     }
 
@@ -5424,7 +5437,7 @@ fn completion_rejects_invalid_cursor_metadata() {
             term.get_next_event().expect("initial edit"),
             Event::BufferChanged
         ));
-        assert!(handle.lock().completion.is_none());
+        assert!(handle.lock().editor.completion.is_none());
 
         input_tx
             .send(RawEvent::Key(KeyEvent::new(
@@ -5564,8 +5577,10 @@ fn hidden_lines_changed_detects_removed_scrollback_line() {
 /// used by `TermHandle::print_output`.
 fn append_history_for_cache_test(st: &mut SharedState, text: String) {
     let id = st.alloc_id();
-    st.blocks.insert(id, plain_block(text));
-    st.block_debug_ids.insert(id, "cache-test".to_owned());
+    st.layout.blocks.insert(id, plain_block(text));
+    st.layout
+        .block_debug_ids
+        .insert(id, "cache-test".to_owned());
     st.append_history(id);
 }
 
@@ -5609,10 +5624,10 @@ fn long_history_append_selects_fast_scrolling_frame() {
     let tail = layout_tail(&st, cache.lines.len());
     let layout = layout_all_from_cached_history(&cache, tail);
     let mut model = TerminalModel::default();
-    let plan = model.plan_view(&layout, st.height);
+    let plan = model.plan_view(&layout, st.terminal.height);
     model.reset_to_layout(&layout, plan.viewport_start, plan.rubber_height);
-    let width = st.width;
-    let height = st.height;
+    let width = st.terminal.width;
+    let height = st.terminal.height;
 
     append_history_for_cache_test(&mut st, "submitted prompt".to_owned());
     let state = Arc::new(Mutex::new(st));
@@ -5646,25 +5661,27 @@ fn history_append_replacing_active_rows_selects_full_frame() {
         append_history_for_cache_test(&mut st, format!("history {index}"));
     }
     let active_id = st.alloc_id();
-    st.blocks
+    st.layout
+        .blocks
         .insert(active_id, plain_block("partial 0\npartial 1"));
-    st.block_debug_ids
+    st.layout
+        .block_debug_ids
         .insert(active_id, "active-cache-test".to_owned());
-    st.above_active.push(active_id);
+    st.layout.above_active.push(active_id);
 
     let mut cache = HistoryLayoutCache::default();
     cache.refresh(&mut st);
     let tail = layout_tail(&st, cache.lines.len());
     let layout = layout_all_from_cached_history(&cache, tail);
     let mut model = TerminalModel::default();
-    let plan = model.plan_view(&layout, st.height);
+    let plan = model.plan_view(&layout, st.terminal.height);
     model.reset_to_layout(&layout, plan.viewport_start, plan.rubber_height);
-    let width = st.width;
-    let height = st.height;
+    let width = st.terminal.width;
+    let height = st.terminal.height;
 
-    st.above_active.clear();
-    st.blocks.remove(&active_id);
-    st.block_debug_ids.remove(&active_id);
+    st.layout.above_active.clear();
+    st.layout.blocks.remove(&active_id);
+    st.layout.block_debug_ids.remove(&active_id);
     append_history_for_cache_test(&mut st, "final 0\nfinal 1".to_owned());
     let state = Arc::new(Mutex::new(st));
     let pass = prepare_redraw_pass(
@@ -5703,8 +5720,8 @@ fn external_pause_failure_rolls_back_through_resume() {
     assert!(release_called.get());
     assert_eq!(error.to_string(), "simulated release failure");
     let st = term.handle.lock();
-    assert!(!st.external_paused);
-    assert!(st.invalidate_screen);
+    assert!(!st.terminal.external_paused);
+    assert!(st.terminal.invalidate_screen);
 }
 
 /// The global warning policy should admit the first warning, reject one just
