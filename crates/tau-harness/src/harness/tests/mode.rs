@@ -1559,10 +1559,10 @@ fn harness_startup_eagerly_initializes_eager_session() {
     let h = echo_harness(&sp).expect("start");
 
     assert!(
-        h.initialized_sessions.contains("s1"),
+        h.context_discovery.initialized_sessions.contains("s1"),
         "eager init should mark the bound session as initialized at startup; \
          `initialized_sessions` was {:?}",
-        h.initialized_sessions
+        h.context_discovery.initialized_sessions
     );
     assert!(
         matches!(h.turn_state, TurnState::Idle),

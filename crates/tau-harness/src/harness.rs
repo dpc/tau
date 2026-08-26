@@ -108,6 +108,7 @@ use crate::harness::agent_context::AgentContextStore;
 use crate::harness::agent_watch_provider_deliveries::AgentWatchProviderDeliveries;
 use crate::harness::current_session::CurrentSessionState;
 use crate::harness::compaction_runtime_state::CompactionRuntimeState;
+use crate::harness::context_discovery_state::ContextDiscoveryState;
 use crate::harness::extension_data::{
     ExtensionDataError, MAX_SECRET_DATA_FILE_BYTES, run_extension_data_compare_and_swap_file,
     run_extension_data_create_file, run_extension_data_create_file_with_limit,
@@ -1477,6 +1478,7 @@ mod agent_watch_provider_deliveries;
 mod compaction_runtime;
 mod compaction_runtime_state;
 mod compaction_supplement;
+mod context_discovery_state;
 mod connection_startup;
 mod construction;
 mod extension_activation;
@@ -1816,41 +1818,8 @@ pub struct Harness {
     pub(crate) current_session_state: CurrentSessionState,
     /// Manual, reactive, and UI standalone-compaction runtime ownership.
     pub(crate) compaction_runtime: CompactionRuntimeState,
-    /// Selected skill winners, keyed by name.
-    pub(crate) discovered_skills: std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
-    /// All discovered skill candidates, keyed by name, so removing the winner
-    /// can restore the next-best candidate.
-    pub(crate) discovered_skill_candidates:
-        std::collections::HashMap<tau_proto::SkillName, Vec<DiscoveredSkill>>,
-    /// AGENTS.md files discovered by extensions, in delivery order.
-    pub(crate) discovered_agents_files: Vec<DiscoveredAgentsFile>,
-    /// Session-scoped JSON context contributions published by extensions.
-    pub(crate) agent_context: AgentContextStore,
-    /// Extensions that explicitly registered as per-agent prompt-context
-    /// providers.
-    pub(crate) agent_context_providers: HashSet<tau_proto::ConnectionId>,
-    /// Extensions that explicitly registered as session-wide prompt-context
-    /// providers.
-    pub(crate) session_context_providers: HashSet<tau_proto::ConnectionId>,
-    /// Mutable discovery/readiness state for exact current load attempts.
-    pub(crate) pending_agent_discovery: HashMap<tau_proto::AgentId, PendingAgentDiscovery>,
-    /// Frozen effective discovery state for initialized loaded agents.
-    pub(crate) frozen_agent_discovery: HashMap<tau_proto::AgentId, FrozenAgentDiscovery>,
-    /// Current canonical initialized projection for each loaded agent.
-    pub(crate) agent_context_initialized:
-        HashMap<tau_proto::AgentId, tau_proto::HarnessAgentContextInitialized>,
-    /// Developer prompt render requests waiting for their ephemeral preview
-    /// agent's ordinary extension context initialization.
-    pending_rendered_prompts: HashMap<tau_proto::AgentId, PendingRenderedPreview>,
-    /// Current canonical full session skill projection.
-    pub(crate) session_skills_available: tau_proto::HarnessSessionSkillsAvailable,
-    /// Extension-level prompt fragments keyed by source connection and name.
-    pub(crate) extension_prompt_fragments:
-        BTreeMap<tau_proto::ConnectionId, BTreeMap<String, PromptFragment>>,
-    /// Loaded system prompt templates keyed by template name.
-    pub(crate) system_prompt_templates: HashMap<String, String>,
-    /// Sessions whose AGENTS/skill discovery has completed.
-    pub(crate) initialized_sessions: std::collections::HashSet<SessionId>,
+    /// Skill, AGENTS.md, context-provider, preview, and template discovery state.
+    pub(crate) context_discovery: ContextDiscoveryState,
     /// Model-visible notices waiting to be folded into the next real user
     /// prompt.
     pub(crate) pending_notices: PendingPromptNoticeState,

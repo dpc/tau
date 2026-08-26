@@ -760,10 +760,10 @@ fn disable_echo_tool_context_gate_for_tests(harness: &mut Harness) {
     // Echo-mode harnesses use the shell extension only to satisfy deterministic
     // tool calls. Keep those helpers focused on provider/tool behavior instead
     // of deferring prompts for shell's cwd context acknowledgement.
-    harness.agent_context_providers.clear();
-    harness.pending_agent_discovery.clear();
-    harness.frozen_agent_discovery.clear();
-    harness.agent_context_initialized.clear();
+    harness.context_discovery.agent_context_providers.clear();
+    harness.context_discovery.pending_agents.clear();
+    harness.context_discovery.frozen_agents.clear();
+    harness.context_discovery.initialized_agent_context.clear();
 }
 
 /// Runs a foreground daemon that accepts socket clients.

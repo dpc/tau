@@ -12,12 +12,12 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
     ) {
         let disconnected = connection_id.clone();
-        self.extension_prompt_fragments.remove(&disconnected);
-        self.agent_context.remove_contributor(&disconnected);
-        self.agent_context_providers.remove(&disconnected);
-        self.session_context_providers.remove(&disconnected);
+        self.context_discovery.prompt_fragments.remove(&disconnected);
+        self.context_discovery.agent_context.remove_contributor(&disconnected);
+        self.context_discovery.agent_context_providers.remove(&disconnected);
+        self.context_discovery.session_context_providers.remove(&disconnected);
         let mut finalize = Vec::new();
-        for (agent_id, pending) in &mut self.pending_agent_discovery {
+        for (agent_id, pending) in &mut self.context_discovery.pending_agents {
             replace_discovery_source(
                 &mut pending.skill_candidates,
                 &mut pending.skills,
@@ -40,10 +40,10 @@ impl Harness {
     }
 
     pub(super) fn clear_session_agent_context(&mut self) {
-        self.agent_context.clear();
-        self.pending_agent_discovery.clear();
-        self.frozen_agent_discovery.clear();
-        self.agent_context_initialized.clear();
+        self.context_discovery.agent_context.clear();
+        self.context_discovery.pending_agents.clear();
+        self.context_discovery.frozen_agents.clear();
+        self.context_discovery.initialized_agent_context.clear();
     }
 
     pub(super) fn disable_optional_extension(
@@ -1628,7 +1628,7 @@ impl Harness {
 
     pub(super) fn remove_discovered_context(&mut self, source_id: &tau_proto::ConnectionId) {
         let affected_names = self
-            .discovered_skill_candidates
+            .context_discovery.skill_candidates
             .iter_mut()
             .filter_map(|(name, candidates)| {
                 let old_len = candidates.len();
@@ -1639,24 +1639,24 @@ impl Harness {
                 (candidates.len() != old_len).then(|| name.clone())
             })
             .collect::<Vec<_>>();
-        self.discovered_skill_candidates
+        self.context_discovery.skill_candidates
             .retain(|_, candidates| !candidates.is_empty());
         for name in affected_names {
             self.recompute_discovered_skill_winner(&name);
         }
-        self.discovered_agents_files
+        self.context_discovery.agents_files
             .retain(|file| file.source_id != *source_id);
     }
 
     pub(super) fn recompute_discovered_skill_winner(&mut self, name: &tau_proto::SkillName) {
         let winner = self
-            .discovered_skill_candidates
+            .context_discovery.skill_candidates
             .get(name)
             .and_then(|candidates| selected_skill_candidate(candidates).cloned());
         if let Some(winner) = winner {
-            self.discovered_skills.insert(name.clone(), winner);
+            self.context_discovery.skills.insert(name.clone(), winner);
         } else {
-            self.discovered_skills.remove(name);
+            self.context_discovery.skills.remove(name);
         }
     }
 
@@ -1669,7 +1669,7 @@ impl Harness {
         });
         self.tool_connections_subscribed_to(&event)
             .into_iter()
-            .filter(|connection_id| self.session_context_providers.contains(connection_id))
+            .filter(|connection_id| self.context_discovery.session_context_providers.contains(connection_id))
             .collect()
     }
 
@@ -1686,7 +1686,7 @@ impl Harness {
         });
         self.tool_connections_subscribed_to(&event)
             .into_iter()
-            .filter(|connection_id| self.agent_context_providers.contains(connection_id))
+            .filter(|connection_id| self.context_discovery.agent_context_providers.contains(connection_id))
             .collect()
     }
 
@@ -1721,7 +1721,7 @@ impl Harness {
     }
 
     pub(crate) fn session_initialized(&self, session_id: &SessionId) -> bool {
-        self.initialized_sessions.contains(session_id)
+        self.context_discovery.initialized_sessions.contains(session_id)
     }
 
     pub(crate) fn agent_context_ready_for(&self, cid: &AgentId) -> bool {
@@ -1749,8 +1749,8 @@ impl Harness {
         else {
             return false;
         };
-        self.frozen_agent_discovery.contains_key(&agent_id)
-            && !self.pending_agent_discovery.contains_key(&agent_id)
+        self.context_discovery.frozen_agents.contains_key(&agent_id)
+            && !self.context_discovery.pending_agents.contains_key(&agent_id)
     }
 
     /// Returns whether the durable agent tree has one unfinished foreground
@@ -1769,7 +1769,7 @@ impl Harness {
         agent_id: &tau_proto::AgentId,
     ) -> bool {
         !self.agent_registry.session_loaded.contains(agent_id)
-            || (self.frozen_agent_discovery.contains_key(agent_id)
-                && !self.pending_agent_discovery.contains_key(agent_id))
+            || (self.context_discovery.frozen_agents.contains_key(agent_id)
+                && !self.context_discovery.pending_agents.contains_key(agent_id))
     }
 }

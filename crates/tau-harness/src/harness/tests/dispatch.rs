@@ -1212,7 +1212,7 @@ fn responses_backend() -> tau_proto::ProviderBackend {
 fn publish_pending_agent_discovery(h: &mut Harness, agent_id: &str) {
     let agent_id = tau_proto::AgentId::parse(agent_id).expect("agent id");
     let Some((source_id, initialization_id)) =
-        h.pending_agent_discovery
+        h.context_discovery.pending_agents
             .get(&agent_id)
             .and_then(|pending| {
                 pending
@@ -1323,7 +1323,7 @@ fn prompt_override_template_can_place_agent_id_without_default_duplication() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let selected_role = h.selected_role.clone();
-    h.system_prompt_templates.insert(
+    h.context_discovery.system_prompt_templates.insert(
         "custom-template".to_owned(),
         "Custom identity placement: {{agent_id}}\n\nRole={{role.name}}".to_owned(),
     );
@@ -1371,7 +1371,7 @@ fn configured_role_group_reaches_fragment_and_system_template_contexts() {
             priority: tau_proto::PromptPriority::new(100),
             text: tau_proto::PromptContent::new("FRAGMENT {{role.group}}/{{role.name}}"),
         });
-    h.system_prompt_templates.insert(
+    h.context_discovery.system_prompt_templates.insert(
         "role-group-test".to_owned(),
         "SYSTEM {{role.group}}/{{role.name}} {{#each prompt_fragments}}{{content}}{{/each}}"
             .to_owned(),
@@ -1538,7 +1538,7 @@ fn agent_start_definition_lists_visible_available_roles_without_prompt_catalog()
         .get_mut("engineer-senior")
         .expect("built-in senior role")
         .visible = Some(false);
-    h.system_prompt_templates
+    h.context_discovery.system_prompt_templates
         .insert("no-fragments".to_owned(), "CUSTOM TEMPLATE".to_owned());
     h.available_roles
         .get_mut(&role)
@@ -1710,7 +1710,7 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
     h.registry
         .register(&crate::test_connection_id("capability-test"), unsupported);
     let selected_role = h.selected_role.clone();
-    h.system_prompt_templates.insert(
+    h.context_discovery.system_prompt_templates.insert(
         "conditional-template".to_owned(),
         "{{tool_available capabilities.tools}}".to_owned(),
     );
@@ -1788,7 +1788,7 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
     assert!(h.publication.idle_dispatches.is_empty());
     assert!(h.agent_registry.agents[&cid].next_ctx_id.is_none());
 
-    h.system_prompt_templates.insert(
+    h.context_discovery.system_prompt_templates.insert(
         "conditional-template".to_owned(),
         concat!(
             "READY alias={{tool_available capabilities.tools \"visible_alias\"}} ",
@@ -1949,7 +1949,7 @@ fn message_fact_payload_envelope_notice_failure_precedes_dispatch_checkpoint() {
         .get_mut(&cid)
         .expect("user agent")
         .terminating = false;
-    h.system_prompt_templates.insert(
+    h.context_discovery.system_prompt_templates.insert(
         "message-fact-conditional".to_owned(),
         "{{#if payload_envelope_provenance_notice}}{{missing_strict_value}}{{else}}READY{{/if}}"
             .to_owned(),
@@ -2686,7 +2686,7 @@ fn shell_workdir_prompt_fixture() -> (TempDir, Harness, tau_proto::AgentId) {
             .as_deref()
             .expect("durable agent id"),
     );
-    h.agent_context.clear();
+    h.context_discovery.agent_context.clear();
     (td, h, agent_id)
 }
 
@@ -2706,7 +2706,7 @@ fn publish_shell_workdir_context(
         .find(|provider| provider.tool.name.as_str() == workdir_tool_name)
         .map(|provider| provider.connection_id.clone())
         .expect("workdir tool provider");
-    h.agent_context.publish(
+    h.context_discovery.agent_context.publish(
         agent_id.clone(),
         tau_proto::AgentContextKey::new("workdir"),
         contributor,
@@ -2766,12 +2766,12 @@ fn shell_workdir_prompt_guides_one_default_instance() {
 fn shell_workdir_prompt_renders_prefixed_instances_independently() {
     let (_td, mut h, agent_id) = shell_workdir_prompt_fixture();
     let fragment = h
-        .extension_prompt_fragments
+        .context_discovery.prompt_fragments
         .values()
         .find_map(|fragments| fragments.get("shell.workdir"))
         .cloned()
         .expect("core shell workdir fragment");
-    h.extension_prompt_fragments.insert(
+    h.context_discovery.prompt_fragments.insert(
         crate::test_connection_id("shell-prod"),
         path_std_collections::BTreeMap::from([("shell.workdir".to_owned(), fragment)]),
     );
@@ -2914,17 +2914,17 @@ fn shell_workdir_prompt_is_absent_without_a_shell_instance() {
 fn duplicate_shell_workdir_fragments_are_coalesced_once() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path()).expect("harness");
-    h.extension_prompt_fragments.clear();
+    h.context_discovery.prompt_fragments.clear();
     let fragment = tau_proto::PromptFragment::new(
         "shell.workdir",
         tau_proto::PromptPriority::new(900),
         "{{#each agent_context.workdir}}{{value.label}}={{value.path}}{{/each}}",
     );
-    h.extension_prompt_fragments.insert(
+    h.context_discovery.prompt_fragments.insert(
         crate::test_connection_id("shell-a"),
         path_std_collections::BTreeMap::from([("shell.workdir".to_owned(), fragment.clone())]),
     );
-    h.extension_prompt_fragments.insert(
+    h.context_discovery.prompt_fragments.insert(
         crate::test_connection_id("shell-b"),
         path_std_collections::BTreeMap::from([("shell.workdir".to_owned(), fragment)]),
     );
@@ -12405,7 +12405,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
     // skill into the prompt body, so inserting one here is the
     // narrowest way to make the system_prompt string drift without
     // touching unrelated state.
-    h.discovered_skills.insert(
+    h.context_discovery.skills.insert(
         tau_proto::SkillName::new("late-loaded"),
         crate::discovery::DiscoveredSkill {
             source_id: tau_proto::ConnectionId::parse("test-ext")
@@ -36219,7 +36219,7 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
         tau_proto::ConnectionId::parse("explicit-role-provider")
             .expect("test connection id must satisfy the identifier grammar"),
     );
-    h.system_prompt_templates.insert(
+    h.context_discovery.system_prompt_templates.insert(
         "explicit-template".to_owned(),
         "role={{role.name}} agent={{agent_id}}".to_owned(),
     );
@@ -42091,7 +42091,7 @@ fn rendered_prompt_with_seeded_agents_md_includes_synthetic_agents_message() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     seed_render_prompt_role(&mut h);
-    h.discovered_agents_files.push(DiscoveredAgentsFile {
+    h.context_discovery.agents_files.push(DiscoveredAgentsFile {
         source_id: crate::test_connection_id("shell"),
         file_path: td.path().join("AGENTS.md"),
         content: "seeded AGENTS instructions\n".to_owned(),
@@ -42177,7 +42177,7 @@ fn disconnect_cancels_pending_rendered_preview() {
     let _frames = connect_test_client(&mut h, requester.as_str(), tau_proto::ClientKind::Ui);
     let cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.pending_rendered_prompts.insert(
+    h.context_discovery.pending_rendered_prompts.insert(
         agent_id.clone(),
         PendingRenderedPreview {
             requests: vec![PendingRenderedPrompt::Prompt {
@@ -42192,7 +42192,7 @@ fn disconnect_cancels_pending_rendered_preview() {
 
     h.handle_disconnect_at(&requester, Instant::now());
 
-    assert!(!h.pending_rendered_prompts.contains_key(&agent_id));
+    assert!(!h.context_discovery.pending_rendered_prompts.contains_key(&agent_id));
     assert!(
         h.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
             .is_none()
@@ -42207,7 +42207,7 @@ fn session_switch_cancels_pending_rendered_preview() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     let cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.pending_rendered_prompts.insert(
+    h.context_discovery.pending_rendered_prompts.insert(
         agent_id.clone(),
         PendingRenderedPreview {
             requests: vec![PendingRenderedPrompt::System {
@@ -42225,7 +42225,7 @@ fn session_switch_cancels_pending_rendered_preview() {
     )
     .expect("switch session");
 
-    assert!(!h.pending_rendered_prompts.contains_key(&agent_id));
+    assert!(!h.context_discovery.pending_rendered_prompts.contains_key(&agent_id));
     assert!(
         h.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
             .is_none()
@@ -42241,7 +42241,7 @@ fn rendered_preview_context_timeout_cleans_up_agent() {
     let cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     let deadline = Instant::now();
-    h.pending_rendered_prompts.insert(
+    h.context_discovery.pending_rendered_prompts.insert(
         agent_id.clone(),
         PendingRenderedPreview {
             requests: vec![PendingRenderedPrompt::Tools {
@@ -42255,7 +42255,7 @@ fn rendered_preview_context_timeout_cleans_up_agent() {
 
     h.process_rendered_preview_deadlines(deadline);
 
-    assert!(!h.pending_rendered_prompts.contains_key(&agent_id));
+    assert!(!h.context_discovery.pending_rendered_prompts.contains_key(&agent_id));
     assert!(
         h.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
             .is_none()

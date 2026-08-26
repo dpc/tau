@@ -337,15 +337,15 @@ fn set_test_agent_context_wait(
     agent_id: tau_proto::AgentId,
     waiting_on: std::collections::HashSet<tau_proto::ConnectionId>,
 ) {
-    h.frozen_agent_discovery.remove(&agent_id);
-    h.pending_agent_discovery.insert(
+    h.context_discovery.frozen_agents.remove(&agent_id);
+    h.context_discovery.pending_agents.insert(
         agent_id,
         PendingAgentDiscovery {
             initialization_id: tau_proto::AgentInitializationId::parse("test-init")
                 .expect("test identifier must be valid"),
-            skill_candidates: h.discovered_skill_candidates.clone(),
-            skills: h.discovered_skills.clone(),
-            agents_files: h.discovered_agents_files.clone(),
+            skill_candidates: h.context_discovery.skill_candidates.clone(),
+            skills: h.context_discovery.skills.clone(),
+            agents_files: h.context_discovery.agents_files.clone(),
             waiting_on,
         },
     );
@@ -355,17 +355,17 @@ fn test_agent_context_waits<'a>(
     h: &'a Harness,
     agent_id: &tau_proto::AgentId,
 ) -> Option<&'a std::collections::HashSet<tau_proto::ConnectionId>> {
-    h.pending_agent_discovery
+    h.context_discovery.pending_agents
         .get(agent_id)
         .map(|pending| &pending.waiting_on)
 }
 
 fn finish_test_agent_context_wait(h: &mut Harness, agent_id: &tau_proto::AgentId) {
-    let Some(mut pending) = h.pending_agent_discovery.remove(agent_id) else {
+    let Some(mut pending) = h.context_discovery.pending_agents.remove(agent_id) else {
         return;
     };
     pending.waiting_on.clear();
-    h.frozen_agent_discovery.insert(
+    h.context_discovery.frozen_agents.insert(
         agent_id.clone(),
         crate::frozen_agent_discovery::FrozenAgentDiscovery {
             initialization_id: pending.initialization_id,
@@ -420,13 +420,13 @@ fn skill_winner_disconnect_restores_next_best_candidate() {
     let older = test_discovered_skill("old-ext", "older", 100);
     let newer = test_discovered_skill("new-ext", "newer", 200);
 
-    h.discovered_skill_candidates
+    h.context_discovery.skill_candidates
         .insert(name.clone(), vec![older, newer]);
     h.recompute_discovered_skill_winner(&name);
-    assert_eq!(h.discovered_skills[&name].description, "newer");
+    assert_eq!(h.context_discovery.skills[&name].description, "newer");
 
     h.remove_discovered_context(&crate::test_connection_id("new-ext"));
-    assert_eq!(h.discovered_skills[&name].description, "older");
+    assert_eq!(h.context_discovery.skills[&name].description, "older");
 
     h.shutdown().expect("shutdown");
 }
@@ -1211,19 +1211,19 @@ fn echo_harness_with_dirs_and_start_reason(
     // Keep the generic echo helper independent from any test fixture discovery.
     // Readiness and AGENTS.md injection tests add their own deterministic
     // context directly.
-    h.discovered_agents_files.clear();
+    h.context_discovery.agents_files.clear();
     // Do not let shell's startup context-provider registration defer unrelated
     // prompt dispatch assertions; readiness-specific tests register providers
     // directly.
-    h.agent_context_providers.clear();
-    h.session_context_providers.clear();
+    h.context_discovery.agent_context_providers.clear();
+    h.context_discovery.session_context_providers.clear();
     let pending_agents = h
-        .pending_agent_discovery
+        .context_discovery.pending_agents
         .keys()
         .cloned()
         .collect::<Vec<_>>();
     for agent_id in pending_agents {
-        if let Some(pending) = h.pending_agent_discovery.get_mut(&agent_id) {
+        if let Some(pending) = h.context_discovery.pending_agents.get_mut(&agent_id) {
             pending.waiting_on.clear();
         }
         h.finalize_agent_discovery(&agent_id)?;
@@ -1317,8 +1317,8 @@ agents:
             .canonicalize()
             .expect("isolated test project root")
     );
-    assert!(!harness.discovered_skills.contains_key("ambient-skill"));
-    assert!(harness.discovered_agents_files.is_empty());
+    assert!(!harness.context_discovery.skills.contains_key("ambient-skill"));
+    assert!(harness.context_discovery.agents_files.is_empty());
     let expected_project_root = harness.project_root.clone();
     let outcome = harness
         .send_user_message("fixture-session", "shell pwd", None)

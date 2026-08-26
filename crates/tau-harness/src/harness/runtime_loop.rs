@@ -534,7 +534,7 @@ impl Harness {
             let extension = self.next_extension_deadline();
             let cache = self.next_cache_refresh_deadline();
             let preview = self
-                .pending_rendered_prompts
+                .context_discovery.pending_rendered_prompts
                 .values()
                 .map(|pending| pending.deadline)
                 .min();
@@ -578,7 +578,7 @@ impl Harness {
             self.next_work_wait_threshold_deadline(),
             self.next_extension_deadline(),
             self.next_cache_refresh_deadline(),
-            self.pending_rendered_prompts
+            self.context_discovery.pending_rendered_prompts
                 .values()
                 .map(|pending| pending.deadline)
                 .min(),

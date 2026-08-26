@@ -2762,9 +2762,9 @@ impl Harness {
             self.agent_registry
                 .session_loaded
                 .remove(&unloaded.agent_id);
-            self.pending_agent_discovery.remove(&unloaded.agent_id);
-            self.frozen_agent_discovery.remove(&unloaded.agent_id);
-            self.agent_context_initialized.remove(&unloaded.agent_id);
+            self.context_discovery.pending_agents.remove(&unloaded.agent_id);
+            self.context_discovery.frozen_agents.remove(&unloaded.agent_id);
+            self.context_discovery.initialized_agent_context.remove(&unloaded.agent_id);
             self.prompt_runtime.shown_tool_failure_examples
                 .retain(|(agent_id, _, _)| agent_id != &cid);
             self.agent_registry
@@ -2794,12 +2794,12 @@ impl Harness {
                 self.replay_loaded_agent_history_to_subscribers(&loaded.agent_id);
             }
             let is_current_initialization = self
-                .pending_agent_discovery
+                .context_discovery.pending_agents
                 .get(&loaded.agent_id)
                 .is_some_and(|pending| pending.initialization_id == loaded.agent_initialization_id);
             if is_current_initialization
                 && self
-                    .pending_agent_discovery
+                    .context_discovery.pending_agents
                     .get(&loaded.agent_id)
                     .is_some_and(|pending| pending.waiting_on.is_empty())
                 && let Err(error) = self.finalize_agent_discovery(&loaded.agent_id)

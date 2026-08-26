@@ -1626,7 +1626,7 @@ impl Harness {
         }
         let source_id = source_id.clone();
         let should_finalize = self
-            .pending_agent_discovery
+            .context_discovery.pending_agents
             .get_mut(&ready.agent_id)
             .filter(|pending| pending.initialization_id == ready.agent_initialization_id)
             .is_some_and(|pending| {
@@ -1721,7 +1721,7 @@ impl Harness {
         if let Some(message) = tau_skills::skill_name_validation_message(skill_name.as_str()) {
             return Some(format!("`{skill_name}` has invalid skill name: {message}"));
         }
-        let Some(skill) = self.discovered_skills.get(skill_name) else {
+        let Some(skill) = self.context_discovery.skills.get(skill_name) else {
             return Some(format!("`{skill_name}` is not discovered"));
         };
         if skill.disable_model_invocation {
@@ -1848,7 +1848,7 @@ impl Harness {
         for (cid, agent_id) in restored {
             self.ensure_loaded_agent_for_agent(&cid, &agent_id);
         }
-        self.initialized_sessions.insert(session_id.clone());
+        self.context_discovery.initialized_sessions.insert(session_id.clone());
         // Catch up before repair: repair appends its synthetic tool errors to
         // the durable log as it publishes them live, so running it first
         // would deliver each error twice (live, then replay-marked) to peers
@@ -1883,10 +1883,10 @@ impl Harness {
             .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
             .is_none()
         {
-            self.pending_agent_discovery.remove(agent_id);
+            self.context_discovery.pending_agents.remove(agent_id);
             return Ok(());
         }
-        let Some(pending) = self.pending_agent_discovery.get_mut(agent_id) else {
+        let Some(pending) = self.context_discovery.pending_agents.get_mut(agent_id) else {
             return Ok(());
         };
         if !pending.waiting_on.is_empty() {
@@ -1957,7 +1957,7 @@ impl Harness {
         &mut self,
         context: &tau_proto::AgentInitializationContextSet,
     ) {
-        let Some(pending) = self.pending_agent_discovery.remove(&context.agent_id) else {
+        let Some(pending) = self.context_discovery.pending_agents.remove(&context.agent_id) else {
             return;
         };
         if pending.initialization_id != context.agent_initialization_id {
@@ -1967,10 +1967,10 @@ impl Harness {
             initialization_id: pending.initialization_id,
             skills: pending.skills,
         };
-        self.frozen_agent_discovery
+        self.context_discovery.frozen_agents
             .insert(context.agent_id.clone(), frozen);
         let frozen = self
-            .frozen_agent_discovery
+            .context_discovery.frozen_agents
             .get(&context.agent_id)
             .expect("just inserted frozen discovery");
         let projection = tau_proto::HarnessAgentContextInitialized {
@@ -1983,7 +1983,7 @@ impl Harness {
                 .collect(),
             agents_files: context.agents_files.clone(),
         };
-        self.agent_context_initialized
+        self.context_discovery.initialized_agent_context
             .insert(context.agent_id.clone(), projection.clone());
         self.publish_event(
             Some(crate::harness::harness_connection_id()),

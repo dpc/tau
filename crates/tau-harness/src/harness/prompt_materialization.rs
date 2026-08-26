@@ -1111,8 +1111,8 @@ impl Harness {
             .collect::<HashSet<_>>();
         let system_template = self.system_template_for_role(role_name)?;
         let skills = context_agent_id
-            .and_then(|agent_id| self.frozen_agent_discovery.get(agent_id))
-            .map_or(&self.discovered_skills, |snapshot| &snapshot.skills);
+            .and_then(|agent_id| self.context_discovery.frozen_agents.get(agent_id))
+            .map_or(&self.context_discovery.skills, |snapshot| &snapshot.skills);
         let role_group = self.role_group_name_for_role(role_name);
         let template_context = match agent_id {
             Some(agent_id) => RolePromptTemplateContext::for_agent(role_name, agent_id),
@@ -1129,7 +1129,7 @@ impl Harness {
             skills,
             &prompt_fragments,
             &tool_prompt_fragments,
-            self.agent_context
+            self.context_discovery.agent_context
                 .template_value_filtered(context_agent_id, |key, contributor| {
                     key.as_ref() != "workdir" || visible_workdir_contributors.contains(contributor)
                 }),
@@ -1167,7 +1167,7 @@ impl Harness {
             .get(role_name)
             .and_then(|role| role.prompt_override.as_deref())
             .unwrap_or(BUILT_IN_SYSTEM_TEMPLATE_NAME);
-        self.system_prompt_templates
+        self.context_discovery.system_prompt_templates
             .get(template_name)
             .map(String::as_str)
             .ok_or_else(|| {
@@ -1244,7 +1244,7 @@ impl Harness {
             },
         );
         let mut fragments: Vec<_> = self
-            .extension_prompt_fragments
+            .context_discovery.prompt_fragments
             .iter()
             .flat_map(|(connection_id, fragments)| {
                 fragments

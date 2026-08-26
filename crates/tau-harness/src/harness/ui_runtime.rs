@@ -1934,7 +1934,7 @@ impl Harness {
         }
         let skill_name = tau_proto::SkillName::from(name.to_owned());
         let Some(skills) = self
-            .frozen_agent_discovery
+            .context_discovery.frozen_agents
             .get(agent_id)
             .map(|snapshot| &snapshot.skills)
         else {

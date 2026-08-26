@@ -34,7 +34,7 @@ fn register_workdir_capability(h: &mut Harness, source: &str) {
 
 /// Return the current template for one source/name projection slot.
 fn projected_template<'a>(h: &'a Harness, source: &str, name: &str) -> Option<&'a str> {
-    h.extension_prompt_fragments
+    h.context_discovery.prompt_fragments
         .get(source)
         .and_then(|fragments| fragments.get(name))
         .map(|fragment| fragment.template.as_str())

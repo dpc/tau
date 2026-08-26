@@ -6277,7 +6277,7 @@ fn session_init_catchup_replays_current_session_dir_to_early_subscribers() {
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
     let events = connect_test_client(&mut h, "early-session-dir", tau_proto::ClientKind::Provider);
-    h.initialized_sessions.remove(&test_session_id("s1"));
+    h.context_discovery.initialized_sessions.remove(&test_session_id("s1"));
 
     h.handle_extension_message(
         &crate::test_connection_id("early-session-dir"),
@@ -6323,7 +6323,7 @@ fn session_init_catchup_does_not_duplicate_ui_startup_status_snapshots() {
         tau_proto::EventSelector::Exact(tau_proto::EventName::HARNESS_SESSION_DIR),
         tau_proto::EventSelector::Exact(tau_proto::EventName::EXTENSION_READY),
     ];
-    h.initialized_sessions.remove(&test_session_id("s1"));
+    h.context_discovery.initialized_sessions.remove(&test_session_id("s1"));
 
     h.handle_client_message(
         &crate::test_connection_id("startup-ui"),
@@ -6891,7 +6891,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
         .and_then(|agent| agent.agent_id.as_deref())
         .expect("durable user agent")
         .to_owned();
-    let initialization_id = h.pending_agent_discovery[&crate::parse_agent_id(&agent_id)]
+    let initialization_id = h.context_discovery.pending_agents[&crate::parse_agent_id(&agent_id)]
         .initialization_id
         .clone();
     h.handle_extension_event(
@@ -6979,7 +6979,7 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
         .find_map(|agent| agent.agent_id.clone())
         .map(|agent_id| tau_proto::AgentId::parse(&agent_id).expect("agent id"))
         .expect("loaded agent");
-    let initialization_id = h.pending_agent_discovery[&agent_id]
+    let initialization_id = h.context_discovery.pending_agents[&agent_id]
         .initialization_id
         .clone();
     h.handle_extension_event(
@@ -6997,7 +6997,7 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
     )
     .expect("publish context before disconnect");
     assert!(
-        h.agent_context
+        h.context_discovery.agent_context
             .template_value(Some(&agent_id))
             .to_string()
             .contains("stale")
@@ -7007,7 +7007,7 @@ fn context_provider_disconnect_resumes_publish_idle_dispatch() {
 
     assert!(h.publication.idle_dispatches.is_empty());
     assert!(
-        !h.agent_context
+        !h.context_discovery.agent_context
             .template_value(Some(&agent_id))
             .to_string()
             .contains("stale")
@@ -8338,13 +8338,13 @@ fn agents_context_is_injected_when_agent_is_created() {
     // Eager init at construction may have already appended a real
     // AGENTS.md (ext-shell walks the test cwd). Clear so we assert
     // only on the test-injected pair below.
-    h.discovered_agents_files.clear();
-    h.discovered_agents_files.push(DiscoveredAgentsFile {
+    h.context_discovery.agents_files.clear();
+    h.context_discovery.agents_files.push(DiscoveredAgentsFile {
         source_id: crate::test_connection_id(tools_connection_id.clone()),
         file_path: PathBuf::from("/repo/AGENTS.md"),
         content: "# Root\n- root rule\n".to_owned(),
     });
-    h.discovered_agents_files.push(DiscoveredAgentsFile {
+    h.context_discovery.agents_files.push(DiscoveredAgentsFile {
         source_id: crate::test_connection_id(tools_connection_id.clone()),
         file_path: PathBuf::from("/repo/pkg/AGENTS.md"),
         content: "# Package\n- package rule\n".to_owned(),
@@ -8408,7 +8408,7 @@ fn resumed_session_init_does_not_reinject_agents_context() {
             .count()
     };
 
-    h.discovered_agents_files.clear();
+    h.context_discovery.agents_files.clear();
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h
         .ensure_agent_id_for_agent(&cid)
@@ -8425,7 +8425,7 @@ fn resumed_session_init_does_not_reinject_agents_context() {
     );
     assert_eq!(count_marker_injections(&h), 1);
 
-    h.discovered_agents_files.push(DiscoveredAgentsFile {
+    h.context_discovery.agents_files.push(DiscoveredAgentsFile {
         source_id: crate::test_connection_id(tools_connection_id.clone()),
         file_path: PathBuf::from("/repo/AGENTS.md"),
         content: format!("# Root\n- {marker}\n"),
@@ -14694,7 +14694,7 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
             value: tau_proto::AgentContextValue(serde_json::json!(["stale"])),
         },
     );
-    h.agent_context_providers.insert(contributor.clone());
+    h.context_discovery.agent_context_providers.insert(contributor.clone());
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
@@ -14703,13 +14703,13 @@ fn disconnect_removes_extension_prompt_and_agent_context() {
 
     h.handle_disconnect(&crate::test_connection_id("ctx-ext"));
 
-    assert!(!h.extension_prompt_fragments.contains_key(&contributor));
+    assert!(!h.context_discovery.prompt_fragments.contains_key(&contributor));
     assert_eq!(
-        h.agent_context.template_value(Some(&agent_id)),
+        h.context_discovery.agent_context.template_value(Some(&agent_id)),
         serde_json::json!({})
     );
-    assert!(!h.agent_context_providers.contains(&contributor));
-    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
+    assert!(!h.context_discovery.agent_context_providers.contains(&contributor));
+    assert!(!h.context_discovery.pending_agents.contains_key(&agent_id));
 }
 
 #[test]
@@ -14743,7 +14743,7 @@ fn switch_session_clears_session_scoped_extension_context() {
             value: tau_proto::AgentContextValue(serde_json::json!(["old session"])),
         },
     );
-    h.agent_context_providers.insert(contributor.clone());
+    h.context_discovery.agent_context_providers.insert(contributor.clone());
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
@@ -14753,7 +14753,7 @@ fn switch_session_clears_session_scoped_extension_context() {
     h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch session");
 
-    assert!(h.extension_prompt_fragments.contains_key(&contributor));
+    assert!(h.context_discovery.prompt_fragments.contains_key(&contributor));
     let (fragments, tool_fragments) = h.gather_sourced_prompt_fragment_groups(&h.selected_role);
     assert!(tool_fragments.is_empty());
     assert!(fragments.iter().any(|sourced| {
@@ -14765,11 +14765,11 @@ fn switch_session_clears_session_scoped_extension_context() {
             )
     }));
     assert_eq!(
-        h.agent_context.template_value(Some(&agent_id)),
+        h.context_discovery.agent_context.template_value(Some(&agent_id)),
         serde_json::json!({})
     );
-    assert!(h.pending_agent_discovery.is_empty());
-    assert!(h.agent_context_providers.contains(&contributor));
+    assert!(h.context_discovery.pending_agents.is_empty());
+    assert!(h.context_discovery.agent_context_providers.contains(&contributor));
 }
 
 /// Builds a validated shell command id used by this test module.

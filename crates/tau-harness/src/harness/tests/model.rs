@@ -1147,7 +1147,7 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
         };
 
     let mut h = echo_harness(td.path()).expect("harness");
-    h.discovered_skills.insert(
+    h.context_discovery.skills.insert(
         tau_proto::SkillName::new("same"),
         make_skill(baseline_path, "baseline"),
     );
@@ -1181,7 +1181,7 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
             .expect("agent id"),
     );
     let frozen = h
-        .frozen_agent_discovery
+        .context_discovery.frozen_agents
         .get_mut(&agent_id)
         .expect("frozen discovery");
     frozen.skills.insert(

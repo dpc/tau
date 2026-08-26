@@ -1537,7 +1537,7 @@ impl Harness {
         if let Some(unloading_agent_id) = unloading_agent_id {
             let unloading_agent_id_proto = crate::parse_agent_id(&unloading_agent_id);
             self.clear_agent_runtime_indicators_for_agent(&unloading_agent_id_proto);
-            self.pending_rendered_prompts
+            self.context_discovery.pending_rendered_prompts
                 .remove(&unloading_agent_id_proto);
             self.compaction_runtime.enqueued_inference_checkpoints
                 .retain(|(agent_id, _)| agent_id != &unloading_agent_id_proto);
@@ -2130,21 +2130,21 @@ impl Harness {
                 );
             }
         }
-        if self.pending_agent_discovery.contains_key(&agent_id_proto)
-            || self.frozen_agent_discovery.contains_key(&agent_id_proto)
+        if self.context_discovery.pending_agents.contains_key(&agent_id_proto)
+            || self.context_discovery.frozen_agents.contains_key(&agent_id_proto)
         {
             return;
         }
         let agent_initialization_id = self.mint_agent_initialization_id();
         let waiting_on = self
             .agent_context_provider_ids(agent_id_proto.clone(), agent_initialization_id.clone());
-        self.pending_agent_discovery.insert(
+        self.context_discovery.pending_agents.insert(
             agent_id_proto.clone(),
             PendingAgentDiscovery {
                 initialization_id: agent_initialization_id.clone(),
-                skill_candidates: self.discovered_skill_candidates.clone(),
-                skills: self.discovered_skills.clone(),
-                agents_files: self.discovered_agents_files.clone(),
+                skill_candidates: self.context_discovery.skill_candidates.clone(),
+                skills: self.context_discovery.skills.clone(),
+                agents_files: self.context_discovery.agents_files.clone(),
                 waiting_on,
             },
         );
@@ -2161,7 +2161,7 @@ impl Harness {
         }
         if self.publication.pending_intercept.is_none()
             && self
-                .pending_agent_discovery
+                .context_discovery.pending_agents
                 .get(&agent_id_proto)
                 .is_some_and(|pending| pending.waiting_on.is_empty())
             && let Err(error) = self.finalize_agent_discovery(&agent_id_proto)

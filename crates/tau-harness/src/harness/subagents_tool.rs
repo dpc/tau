@@ -422,7 +422,7 @@ impl Harness {
             .filter_map(|agent| agent.agent_id.clone())
             .collect();
         for agent_id in agent_ids {
-            self.agent_context.publish(
+            self.context_discovery.agent_context.publish(
                 tau_proto::AgentId::parse(agent_id).expect("agent id"),
                 AgentContextKey::new("delegate_roles"),
                 crate::harness::harness_connection_id().clone(),

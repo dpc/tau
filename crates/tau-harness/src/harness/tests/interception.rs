@@ -4697,7 +4697,7 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
-    h.initialized_sessions.insert(session_id.clone());
+    h.context_discovery.initialized_sessions.insert(session_id.clone());
     let cid = ensure_test_user_agent(&mut h);
     let call_id: ToolCallId = "call-read".into();
     let tool_name = ToolName::new("read");
@@ -5854,7 +5854,7 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
-    h.initialized_sessions.insert(session_id.clone());
+    h.context_discovery.initialized_sessions.insert(session_id.clone());
 
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
@@ -5946,7 +5946,7 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
-    h.initialized_sessions.insert(session_id);
+    h.context_discovery.initialized_sessions.insert(session_id);
     h.selected_model = Some("echo/model".into());
     let info = h
         .provider_runtime.model_info
@@ -6084,7 +6084,7 @@ fn intercepted_activation_navigation_keeps_original_branch_dormant() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
-    h.initialized_sessions.insert(session_id);
+    h.context_discovery.initialized_sessions.insert(session_id);
     h.selected_model = Some("echo/model".into());
     let _interceptor = connect_test_tool(&mut h, "interceptor-branch-activation");
     h.handle_extension_event(
@@ -6173,7 +6173,7 @@ fn intercepted_sibling_activations_retain_distinct_obligations() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
-    h.initialized_sessions.insert(session_id);
+    h.context_discovery.initialized_sessions.insert(session_id);
     h.selected_model = Some("echo/model".into());
     let _interceptor = connect_test_tool(&mut h, "interceptor-sibling-activations");
     h.handle_extension_event(
@@ -6349,7 +6349,7 @@ fn interception_mutating_prompt_reaches_agent() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
-    h.initialized_sessions.insert(session_id.clone());
+    h.context_discovery.initialized_sessions.insert(session_id.clone());
 
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
@@ -6432,7 +6432,7 @@ fn publish_for_agent_does_not_emit_navigate_tree() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
-    h.initialized_sessions.insert(session_id.clone());
+    h.context_discovery.initialized_sessions.insert(session_id.clone());
 
     let baseline_seq = h.event_log.next_seq();
     let cid = ensure_test_user_agent(&mut h);
@@ -6685,8 +6685,8 @@ fn rollover_commits_deferred_peer_observations_without_semantic_effects() {
     }));
     let source = tau_proto::ConnectionId::parse("observation-owner")
         .expect("test connection id must satisfy the identifier grammar");
-    assert!(!h.agent_context_providers.contains(&source));
-    assert!(!h.session_context_providers.contains(&source));
+    assert!(!h.context_discovery.agent_context_providers.contains(&source));
+    assert!(!h.context_discovery.session_context_providers.contains(&source));
 }
 
 /// Interceptors may rewrite progress payloads, but shell correlation/target

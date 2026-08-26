@@ -66,7 +66,7 @@ fn dropped_context_value_has_no_projection() {
     )
     .expect("park context");
     assert_eq!(
-        h.agent_context.template_value(Some(&agent_id)),
+        h.context_discovery.agent_context.template_value(Some(&agent_id)),
         serde_json::json!({})
     );
     h.handle_extension_event(
@@ -78,7 +78,7 @@ fn dropped_context_value_has_no_projection() {
     .expect("drop context");
 
     assert_eq!(
-        h.agent_context.template_value(Some(&agent_id)),
+        h.context_discovery.agent_context.template_value(Some(&agent_id)),
         serde_json::json!({})
     );
     assert!(!source_committed(&h, "context-owner", |event| {
@@ -114,7 +114,7 @@ fn uncorrelated_context_replacement_is_observable_but_not_projected() {
     )
     .expect("replace context");
 
-    let projected = h.agent_context.template_value(Some(&agent_id)).to_string();
+    let projected = h.context_discovery.agent_context.template_value(Some(&agent_id)).to_string();
     assert!(!projected.contains("replacement"));
     assert!(!projected.contains("original"));
     assert!(source_committed(&h, "context-owner", |event| {
@@ -167,7 +167,7 @@ fn parked_context_value_prevents_readiness_overtake() {
         }),
     )
     .expect("queue readiness");
-    assert!(h.pending_agent_discovery.contains_key(&agent_id));
+    assert!(h.context_discovery.pending_agents.contains_key(&agent_id));
 
     h.handle_extension_event(
         "agent-context-interceptor",
@@ -177,13 +177,13 @@ fn parked_context_value_prevents_readiness_overtake() {
     )
     .expect("commit context value");
     assert!(
-        h.agent_context
+        h.context_discovery.agent_context
             .template_value(Some(&agent_id))
             .to_string()
             .contains("ordered")
     );
     assert!(
-        h.pending_agent_discovery.contains_key(&agent_id),
+        h.context_discovery.pending_agents.contains_key(&agent_id),
         "readiness must remain effect-free while its own interception is pending"
     );
     h.handle_extension_event(
@@ -195,12 +195,12 @@ fn parked_context_value_prevents_readiness_overtake() {
     .expect("commit readiness");
 
     assert!(
-        h.agent_context
+        h.context_discovery.agent_context
             .template_value(Some(&agent_id))
             .to_string()
             .contains("ordered")
     );
-    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
+    assert!(!h.context_discovery.pending_agents.contains_key(&agent_id));
 }
 
 /// Configured client kind alone cannot bypass initialization correlation.
@@ -226,7 +226,7 @@ fn configured_kinds_cannot_publish_context_for_arbitrary_agents() {
         )
         .expect("publish configured context");
         assert_eq!(
-            h.agent_context
+            h.context_discovery.agent_context
                 .template_value(Some(&tau_proto::AgentId::parse(&agent).expect("agent id"))),
             serde_json::json!({})
         );
@@ -246,7 +246,7 @@ fn configured_kinds_cannot_publish_context_for_arbitrary_agents() {
     )
     .expect("reject unconfigured context");
     assert_eq!(
-        h.agent_context.template_value(Some(
+        h.context_discovery.agent_context.template_value(Some(
             &tau_proto::AgentId::parse("agent-99").expect("agent id")
         )),
         serde_json::json!({})
@@ -280,7 +280,7 @@ fn configured_kinds_cannot_publish_context_for_arbitrary_agents() {
     )
     .expect("reject socket-origin context");
     assert_eq!(
-        h.agent_context.template_value(Some(
+        h.context_discovery.agent_context.template_value(Some(
             &tau_proto::AgentId::parse("agent-100").expect("agent id")
         )),
         serde_json::json!({})
@@ -326,7 +326,7 @@ fn parked_registration_blocks_ready_activation() {
         crate::extension::ExtensionState::Handshaking
     );
     assert!(
-        !h.agent_context_providers.contains(
+        !h.context_discovery.agent_context_providers.contains(
             &tau_proto::ConnectionId::parse("context-owner")
                 .expect("test connection id must satisfy the identifier grammar")
         ),
@@ -351,7 +351,7 @@ fn parked_registration_blocks_ready_activation() {
         crate::extension::ExtensionState::Ready
     );
     assert!(
-        h.agent_context_providers.contains(
+        h.context_discovery.agent_context_providers.contains(
             &tau_proto::ConnectionId::parse("context-owner")
                 .expect("test connection id must satisfy the identifier grammar")
         )
@@ -419,7 +419,7 @@ fn rollover_releases_stale_context_registration_reservation() {
             .contains_key("context-owner")
     );
     assert!(
-        !h.agent_context_providers.contains(
+        !h.context_discovery.agent_context_providers.contains(
             &tau_proto::ConnectionId::parse("context-owner")
                 .expect("test connection id must satisfy the identifier grammar")
         )
@@ -483,13 +483,13 @@ fn rollover_rejects_already_staged_context_declarations_on_ready() {
         matches!(event, Event::ExtAgentContextPublish(publish) if publish.agent_id == agent_id)
     }));
     assert!(
-        !h.agent_context_providers.contains(
+        !h.context_discovery.agent_context_providers.contains(
             &tau_proto::ConnectionId::parse("context-owner")
                 .expect("test connection id must satisfy the identifier grammar")
         )
     );
     assert_eq!(
-        h.agent_context.template_value(Some(&agent_id)),
+        h.context_discovery.agent_context.template_value(Some(&agent_id)),
         serde_json::json!({})
     );
     assert!(
@@ -547,7 +547,7 @@ fn dropped_startup_context_releases_reservation_and_ready() {
             .contains_key("context-owner")
     );
     assert_eq!(
-        h.agent_context.template_value(Some(
+        h.context_discovery.agent_context.template_value(Some(
             &tau_proto::AgentId::parse("agent-1").expect("agent id")
         )),
         serde_json::json!({})
@@ -643,7 +643,7 @@ fn context_ready_does_not_release_session_wait() {
     let source = tau_proto::ConnectionId::parse("context-owner")
         .expect("test connection id must satisfy the identifier grammar");
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
-    h.initialized_sessions.remove("s1");
+    h.context_discovery.initialized_sessions.remove("s1");
     h.turn_state = TurnState::InitializingSession {
         session_id: "s1"
             .parse::<tau_proto::SessionId>()
@@ -667,8 +667,8 @@ fn context_ready_does_not_release_session_wait() {
     )
     .expect("publish readiness");
 
-    assert!(!h.initialized_sessions.contains("s1"));
-    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
+    assert!(!h.context_discovery.initialized_sessions.contains("s1"));
+    assert!(!h.context_discovery.pending_agents.contains_key(&agent_id));
 }
 
 /// A dropped or wrong-session readiness observation must not release either
@@ -721,7 +721,7 @@ fn dropped_and_mismatched_context_ready_are_effect_free() {
     )
     .expect("drop readiness");
     assert!(
-        h.pending_agent_discovery[&agent_id]
+        h.context_discovery.pending_agents[&agent_id]
             .waiting_on
             .contains(&source)
     );
@@ -743,7 +743,7 @@ fn dropped_and_mismatched_context_ready_are_effect_free() {
     )
     .expect("commit mismatched readiness");
     assert!(
-        h.pending_agent_discovery[&agent_id]
+        h.context_discovery.pending_agents[&agent_id]
             .waiting_on
             .contains(&source)
     );
@@ -791,7 +791,7 @@ fn disconnected_generation_cannot_project_parked_context() {
         matches!(event, Event::ExtAgentContextPublish(_))
     }));
     assert_eq!(
-        h.agent_context.template_value(Some(
+        h.context_discovery.agent_context.template_value(Some(
             &tau_proto::AgentId::parse("agent-1").expect("agent id")
         )),
         serde_json::json!({})
@@ -873,7 +873,7 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
         .find_map(|agent| agent.agent_id.clone())
         .map(|agent_id| tau_proto::AgentId::parse(&agent_id).expect("agent id"))
         .expect("loaded agent");
-    let initialization_id = h.pending_agent_discovery[&agent_id]
+    let initialization_id = h.context_discovery.pending_agents[&agent_id]
         .initialization_id
         .clone();
     let correlated_context = |value: &str| {
@@ -910,11 +910,11 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
     )
     .expect("park waiter readiness");
     assert!(h.publication.pending_intercept.is_some());
-    assert!(h.pending_agent_discovery.contains_key(&agent_id));
+    assert!(h.context_discovery.pending_agents.contains_key(&agent_id));
 
     h.handle_disconnect(&crate::test_connection_id("stale-owner"));
 
-    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
+    assert!(!h.context_discovery.pending_agents.contains_key(&agent_id));
     assert!(h.publication.pending_intercept.is_none());
     assert!(
         h.publication.idle_dispatches.is_empty(),
@@ -924,7 +924,7 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
     assert!(prompt.system_prompt.contains("SAFE CONTEXT"));
     assert!(!prompt.system_prompt.contains("STALE DISCONNECTING CONTEXT"));
     assert!(
-        !h.agent_context
+        !h.context_discovery.agent_context
             .template_value(Some(&agent_id))
             .to_string()
             .contains("STALE DISCONNECTING CONTEXT")

@@ -74,16 +74,16 @@ fn complete_source_snapshot_atomically_adds_updates_deletes_renames_and_clears()
         &crate::test_connection_id("source"),
         snapshot(vec![skill(&one, "one", Some(1))], vec![]),
     );
-    assert!(h.discovered_skills.contains_key("one"));
+    assert!(h.context_discovery.skills.contains_key("one"));
 
     h.apply_session_discovery_snapshot(
         &crate::test_connection_id("source"),
         snapshot(vec![skill(&two, "two", Some(2))], vec![]),
     );
-    assert!(!h.discovered_skills.contains_key("one"));
-    assert!(h.discovered_skills.contains_key("two"));
+    assert!(!h.context_discovery.skills.contains_key("one"));
+    assert!(h.context_discovery.skills.contains_key("two"));
     assert_eq!(
-        h.discovered_skills[&tau_proto::SkillName::new("two")]
+        h.context_discovery.skills[&tau_proto::SkillName::new("two")]
             .argument_hint
             .as_deref(),
         Some("[args]")
@@ -93,7 +93,7 @@ fn complete_source_snapshot_atomically_adds_updates_deletes_renames_and_clears()
         &crate::test_connection_id("source"),
         snapshot(vec![], vec![]),
     );
-    assert!(!h.discovered_skills.contains_key("two"));
+    assert!(!h.context_discovery.skills.contains_key("two"));
 }
 
 /// Equal timestamps preserve insertion order and source removal reveals the
@@ -114,7 +114,7 @@ fn collision_update_and_source_clear_fall_back_with_stable_equal_mtime_order() {
         snapshot(vec![skill(&second, "same", Some(7))], vec![]),
     );
     assert_eq!(
-        h.discovered_skills[&tau_proto::SkillName::new("same")]
+        h.context_discovery.skills[&tau_proto::SkillName::new("same")]
             .source
             .file_path(),
         Some(first.as_path())
@@ -125,7 +125,7 @@ fn collision_update_and_source_clear_fall_back_with_stable_equal_mtime_order() {
         snapshot(vec![], vec![]),
     );
     assert_eq!(
-        h.discovered_skills[&tau_proto::SkillName::new("same")]
+        h.context_discovery.skills[&tau_proto::SkillName::new("same")]
             .source
             .file_path(),
         Some(second.as_path())
@@ -165,10 +165,10 @@ fn invalid_and_duplicate_items_are_omitted_without_rejecting_valid_replacement()
         ),
     );
 
-    assert!(h.discovered_skills.contains_key("valid"));
-    assert!(!h.discovered_skills.contains_key("invalid name"));
-    assert_eq!(h.discovered_agents_files.len(), 1);
-    assert_eq!(h.discovered_agents_files[0].content, "first");
+    assert!(h.context_discovery.skills.contains_key("valid"));
+    assert!(!h.context_discovery.skills.contains_key("invalid name"));
+    assert_eq!(h.context_discovery.agents_files.len(), 1);
+    assert_eq!(h.context_discovery.agents_files[0].content, "first");
 }
 
 /// AGENTS.md ordering follows the complete producer snapshot and an empty
@@ -211,7 +211,7 @@ fn agents_files_keep_declared_order_and_empty_snapshot_removes_them() {
         ),
     );
     assert_eq!(
-        h.discovered_agents_files
+        h.context_discovery.agents_files
             .iter()
             .map(|file| file.file_path.clone())
             .collect::<Vec<_>>(),
@@ -225,7 +225,7 @@ fn agents_files_keep_declared_order_and_empty_snapshot_removes_them() {
         &crate::test_connection_id("source"),
         snapshot(vec![], vec![]),
     );
-    assert!(h.discovered_agents_files.is_empty());
+    assert!(h.context_discovery.agents_files.is_empty());
 }
 
 /// A snapshot for another session cannot change the current baseline.
@@ -239,7 +239,7 @@ fn wrong_session_snapshot_is_effect_free() {
         .parse::<tau_proto::SessionId>()
         .expect("known-safe SessionId must be valid");
     h.apply_session_discovery_snapshot(&crate::test_connection_id("source"), wrong);
-    assert!(!h.discovered_skills.contains_key("wrong"));
+    assert!(!h.context_discovery.skills.contains_key("wrong"));
 }
 
 /// Late UIs receive canonical current state without raw declarations or prompt
@@ -340,7 +340,7 @@ fn session_snapshot_commit_boundary_honors_replace_and_drop() {
         )),
     )
     .expect("park original");
-    assert!(!h.discovered_skills.contains_key("original"));
+    assert!(!h.context_discovery.skills.contains_key("original"));
     h.handle_extension_event(
         "snapshot-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -353,8 +353,8 @@ fn session_snapshot_commit_boundary_honors_replace_and_drop() {
         })),
     )
     .expect("replace");
-    assert!(!h.discovered_skills.contains_key("original"));
-    assert!(h.discovered_skills.contains_key("replacement"));
+    assert!(!h.context_discovery.skills.contains_key("original"));
+    assert!(h.context_discovery.skills.contains_key("replacement"));
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("snapshot-owner"),
@@ -368,7 +368,7 @@ fn session_snapshot_commit_boundary_honors_replace_and_drop() {
         })),
     )
     .expect("drop clear");
-    assert!(h.discovered_skills.contains_key("replacement"));
+    assert!(h.context_discovery.skills.contains_key("replacement"));
 }
 
 /// Agent snapshots cross ordinary commit but only mutate the exact pending
@@ -386,7 +386,7 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
     let agent_id = tau_proto::AgentId::parse("snapshot-agent").expect("agent");
     let initialization_id = tau_proto::AgentInitializationId::parse("current-init")
         .expect("test identifier must be valid");
-    h.pending_agent_discovery.insert(
+    h.context_discovery.pending_agents.insert(
         agent_id.clone(),
         PendingAgentDiscovery {
             initialization_id: initialization_id.clone(),
@@ -420,14 +420,14 @@ fn agent_snapshot_commit_boundary_rejects_wrong_initialization() {
         ),
     )
     .expect("stale");
-    assert!(h.pending_agent_discovery[&agent_id].skills.is_empty());
+    assert!(h.context_discovery.pending_agents[&agent_id].skills.is_empty());
     h.handle_extension_event_inner(
         &crate::test_connection_id("agent-snapshot-owner"),
         event(initialization_id),
     )
     .expect("current");
     assert!(
-        h.pending_agent_discovery[&agent_id]
+        h.context_discovery.pending_agents[&agent_id]
             .skills
             .contains_key("agent-skill")
     );
@@ -490,7 +490,7 @@ fn pre_ready_session_snapshot_waits_for_commit_before_activation() {
             .get("snapshot-owner"),
         Some(&1)
     );
-    assert!(!h.discovered_skills.contains_key("startup"));
+    assert!(!h.context_discovery.skills.contains_key("startup"));
 
     h.handle_extension_event(
         "snapshot-interceptor",
@@ -535,7 +535,7 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
     let agent_id = tau_proto::AgentId::parse("snapshot-agent").expect("agent");
     let initialization_id =
         tau_proto::AgentInitializationId::parse("init").expect("test identifier must be valid");
-    h.pending_agent_discovery.insert(
+    h.context_discovery.pending_agents.insert(
         agent_id.clone(),
         PendingAgentDiscovery {
             initialization_id: initialization_id.clone(),
@@ -568,7 +568,7 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
         event(vec![skill(&original, "original", None)]),
     )
     .expect("park original");
-    assert!(h.pending_agent_discovery[&agent_id].skills.is_empty());
+    assert!(h.context_discovery.pending_agents[&agent_id].skills.is_empty());
     h.handle_extension_event(
         "snapshot-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -581,7 +581,7 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
     )
     .expect("commit replacement");
     assert!(
-        h.pending_agent_discovery[&agent_id]
+        h.context_discovery.pending_agents[&agent_id]
             .skills
             .contains_key("replacement")
     );
@@ -599,7 +599,7 @@ fn agent_snapshot_delayed_replace_and_drop_obey_commit_boundary() {
     )
     .expect("drop clear");
     assert!(
-        h.pending_agent_discovery[&agent_id]
+        h.context_discovery.pending_agents[&agent_id]
             .skills
             .contains_key("replacement")
     );
@@ -646,7 +646,7 @@ fn disconnected_snapshot_generation_cannot_mutate_discovery() {
     )
     .expect("commit stale snapshot");
 
-    assert!(!h.discovered_skills.contains_key("stale"));
+    assert!(!h.context_discovery.skills.contains_key("stale"));
 }
 
 /// Unloading an agent while its configured snapshot is parked prevents the
@@ -683,7 +683,7 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
     let cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
-    let initialization_id = h.pending_agent_discovery[&agent_id]
+    let initialization_id = h.context_discovery.pending_agents[&agent_id]
         .initialization_id
         .clone();
     let path = tmp.path().join("unloaded.md");
@@ -709,7 +709,7 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
         agent_id: agent_id.clone(),
     });
     h.react_to_committed_event(None, &unloaded, true, None);
-    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
+    assert!(!h.context_discovery.pending_agents.contains_key(&agent_id));
 
     h.handle_extension_event(
         "snapshot-interceptor",
@@ -718,8 +718,8 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
         })),
     )
     .expect("commit snapshot after unload");
-    assert!(!h.pending_agent_discovery.contains_key(&agent_id));
-    assert!(!h.frozen_agent_discovery.contains_key(&agent_id));
+    assert!(!h.context_discovery.pending_agents.contains_key(&agent_id));
+    assert!(!h.context_discovery.frozen_agents.contains_key(&agent_id));
 }
 
 /// An oversized pre-Ready replacement fails activation accounting and releases
@@ -782,7 +782,7 @@ fn oversized_startup_snapshot_replacement_fails_activation() {
             .pending_session_discovery_declarations
             .contains_key("snapshot-owner")
     );
-    assert!(!h.discovered_skills.contains_key("small"));
+    assert!(!h.context_discovery.skills.contains_key("small"));
 }
 
 /// Two simultaneous initializations retain independent snapshot/ready
@@ -816,7 +816,7 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
     )
     .expect("register context provider");
     assert!(
-        h.agent_context_providers.contains(
+        h.context_discovery.agent_context_providers.contains(
             &tau_proto::ConnectionId::parse("snapshot-owner")
                 .expect("test connection id must satisfy the identifier grammar")
         )
@@ -829,8 +829,8 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
     let second = durable_agent_id_for_conversation(&h, &second_cid);
     h.ensure_loaded_agent_for_agent(&first_cid, first.as_str());
     h.ensure_loaded_agent_for_agent(&second_cid, second.as_str());
-    let first_init = h.pending_agent_discovery[&first].initialization_id.clone();
-    let second_init = h.pending_agent_discovery[&second].initialization_id.clone();
+    let first_init = h.context_discovery.pending_agents[&first].initialization_id.clone();
+    let second_init = h.context_discovery.pending_agents[&second].initialization_id.clone();
     let first_path = tmp.path().join("first.md");
     let late_path = tmp.path().join("late.md");
     let event = |agent_id: tau_proto::AgentId,
@@ -890,17 +890,17 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
     .expect("publish late second snapshot");
 
     assert!(
-        h.frozen_agent_discovery[&first]
+        h.context_discovery.frozen_agents[&first]
             .skills
             .contains_key("first")
     );
     assert!(
-        !h.frozen_agent_discovery[&second]
+        !h.context_discovery.frozen_agents[&second]
             .skills
             .contains_key("late")
     );
-    assert!(!h.pending_agent_discovery.contains_key(&first));
-    assert!(!h.pending_agent_discovery.contains_key(&second));
+    assert!(!h.context_discovery.pending_agents.contains_key(&first));
+    assert!(!h.context_discovery.pending_agents.contains_key(&second));
 }
 
 /// Configured publication enforces item, aggregate decoded-byte, and
@@ -931,8 +931,8 @@ fn configured_snapshot_omits_items_beyond_all_discovery_bounds() {
         Event::ExtensionSessionDiscoverySnapshotDeclared(snapshot(skills, Vec::new())),
     )
     .expect("publish item-bounded snapshot");
-    assert!(h.discovered_skills.contains_key("item-8191"));
-    assert!(!h.discovered_skills.contains_key("item-8192"));
+    assert!(h.context_discovery.skills.contains_key("item-8191"));
+    assert!(!h.context_discovery.skills.contains_key("item-8192"));
     assert_eq!(
         h.replayable_harness_notices.len() - notices_before,
         1,
@@ -954,8 +954,8 @@ fn configured_snapshot_omits_items_beyond_all_discovery_bounds() {
         )),
     )
     .expect("publish byte-bounded snapshot");
-    assert!(!h.discovered_skills.contains_key("oversized-description"));
-    assert!(h.discovered_skills.contains_key("accepted-after-bytes"));
+    assert!(!h.context_discovery.skills.contains_key("oversized-description"));
+    assert!(h.context_discovery.skills.contains_key("accepted-after-bytes"));
 
     let oversized_agents = tmp.path().join("AGENTS.local.md");
     let accepted_agents = tmp.path().join("AGENTS.md");
@@ -976,8 +976,8 @@ fn configured_snapshot_omits_items_beyond_all_discovery_bounds() {
         )),
     )
     .expect("publish AGENTS-size-bounded snapshot");
-    assert_eq!(h.discovered_agents_files.len(), 1);
-    assert_eq!(h.discovered_agents_files[0].content, "accepted");
+    assert_eq!(h.context_discovery.agents_files.len(), 1);
+    assert_eq!(h.context_discovery.agents_files[0].content, "accepted");
 }
 
 /// Filling the aggregate byte budget cannot prevent raw-item accounting from

@@ -266,11 +266,11 @@ impl Harness {
                 }
             }
             let Some(agent_initialization_id) = self
-                .pending_agent_discovery
+                .context_discovery.pending_agents
                 .get(agent_id)
                 .map(|pending| pending.initialization_id.clone())
                 .or_else(|| {
-                    self.frozen_agent_discovery
+                    self.context_discovery.frozen_agents
                         .get(agent_id)
                         .map(|frozen| frozen.initialization_id.clone())
                 })
@@ -748,7 +748,7 @@ impl Harness {
             }
         }
         let session_skills =
-            Event::HarnessSessionSkillsAvailable(self.session_skills_available.clone());
+            Event::HarnessSessionSkillsAvailable(self.context_discovery.session_skills.clone());
         if selector_matches_event(selectors, &session_skills) {
             self.send_catch_up_event(
                 client_id,
@@ -757,7 +757,7 @@ impl Harness {
             );
         }
         let mut initialized = self
-            .agent_context_initialized
+            .context_discovery.initialized_agent_context
             .values()
             .cloned()
             .collect::<Vec<_>>();

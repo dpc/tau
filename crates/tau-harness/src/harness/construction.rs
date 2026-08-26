@@ -143,13 +143,7 @@ impl Harness {
         }
     }
     fn from_base_parts(parts: HarnessBaseParts) -> Self {
-        let discovered_skills = built_in_discovered_skills();
-        let initial_effective_skills = effective_skills(&discovered_skills);
         let initial_session_id = parts.current_session_id.clone();
-        let discovered_skill_candidates = discovered_skills
-            .iter()
-            .map(|(name, skill)| (name.clone(), vec![skill.clone()]))
-            .collect();
         Self {
             tx: parts.tx,
             rx: parts.rx,
@@ -226,23 +220,10 @@ impl Harness {
             selected_model: parts.selected_model,
             current_session_state: CurrentSessionState::default(),
             compaction_runtime: CompactionRuntimeState::default(),
-            discovered_skills,
-            discovered_skill_candidates,
-            discovered_agents_files: Vec::new(),
-            agent_context: AgentContextStore::default(),
-            agent_context_providers: HashSet::new(),
-            session_context_providers: HashSet::new(),
-            pending_agent_discovery: HashMap::new(),
-            frozen_agent_discovery: HashMap::new(),
-            agent_context_initialized: HashMap::new(),
-            pending_rendered_prompts: HashMap::new(),
-            session_skills_available: tau_proto::HarnessSessionSkillsAvailable {
-                session_id: initial_session_id,
-                skills: initial_effective_skills,
-            },
-            extension_prompt_fragments: BTreeMap::new(),
-            system_prompt_templates: parts.system_prompt_templates,
-            initialized_sessions: HashSet::new(),
+            context_discovery: ContextDiscoveryState::new(
+                initial_session_id,
+                parts.system_prompt_templates,
+            ),
             pending_notices: PendingPromptNoticeState::default(),
             agent_runtime_indicators: HashMap::new(),
             canceled_prompts: HashSet::new(),

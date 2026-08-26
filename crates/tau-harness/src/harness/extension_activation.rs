@@ -330,7 +330,7 @@ impl Harness {
         publish: tau_proto::ExtPromptFragmentPublish,
     ) {
         let contributor = source_id.clone();
-        self.extension_prompt_fragments
+        self.context_discovery.prompt_fragments
             .entry(contributor)
             .or_default()
             .insert(publish.fragment.name.clone(), publish.fragment);
@@ -489,9 +489,9 @@ impl Harness {
             return;
         };
         replace_discovery_source(
-            &mut self.discovered_skill_candidates,
-            &mut self.discovered_skills,
-            &mut self.discovered_agents_files,
+            &mut self.context_discovery.skill_candidates,
+            &mut self.context_discovery.skills,
+            &mut self.context_discovery.agents_files,
             source_id,
             skills,
             agents_files,
@@ -508,7 +508,7 @@ impl Harness {
         if snapshot.session_id != self.current_session_id {
             return;
         }
-        let Some(pending) = self.pending_agent_discovery.get(&snapshot.agent_id) else {
+        let Some(pending) = self.context_discovery.pending_agents.get(&snapshot.agent_id) else {
             return;
         };
         if pending.initialization_id != snapshot.agent_initialization_id {
@@ -519,7 +519,7 @@ impl Harness {
         else {
             return;
         };
-        let Some(pending) = self.pending_agent_discovery.get_mut(&snapshot.agent_id) else {
+        let Some(pending) = self.context_discovery.pending_agents.get_mut(&snapshot.agent_id) else {
             return;
         };
         replace_discovery_source(
@@ -535,9 +535,9 @@ impl Harness {
     pub(super) fn publish_session_skills_projection(&mut self) {
         let snapshot = tau_proto::HarnessSessionSkillsAvailable {
             session_id: self.current_session_id.clone(),
-            skills: effective_skills(&self.discovered_skills),
+            skills: effective_skills(&self.context_discovery.skills),
         };
-        self.session_skills_available = snapshot.clone();
+        self.context_discovery.session_skills = snapshot.clone();
         self.publish_event(
             Some(crate::harness::harness_connection_id()),
             Event::HarnessSessionSkillsAvailable(snapshot),
@@ -678,14 +678,14 @@ impl Harness {
         &mut self,
         source_id: &tau_proto::ConnectionId,
     ) {
-        self.agent_context_providers.insert(source_id.clone());
+        self.context_discovery.agent_context_providers.insert(source_id.clone());
     }
 
     pub(super) fn apply_session_context_provider_registration(
         &mut self,
         source_id: &tau_proto::ConnectionId,
     ) {
-        self.session_context_providers.insert(source_id.clone());
+        self.context_discovery.session_context_providers.insert(source_id.clone());
     }
 
     pub(super) fn apply_agent_context_publish(
@@ -701,11 +701,11 @@ impl Harness {
             value,
         } = publish;
         let matches_pending = self
-            .pending_agent_discovery
+            .context_discovery.pending_agents
             .get(&agent_id)
             .is_some_and(|pending| pending.initialization_id == agent_initialization_id);
         let matches_frozen = self
-            .frozen_agent_discovery
+            .context_discovery.frozen_agents
             .get(&agent_id)
             .is_some_and(|frozen| frozen.initialization_id == agent_initialization_id);
         if session_id != self.current_session_id || !(matches_pending || matches_frozen) {
@@ -715,7 +715,7 @@ impl Harness {
         let extension_name = self
             .authenticated_source_name(&contributor)
             .expect("authenticated extension source must retain its canonical name");
-        self.agent_context.publish(
+        self.context_discovery.agent_context.publish(
             agent_id,
             key,
             contributor,

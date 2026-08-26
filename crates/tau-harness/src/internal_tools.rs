@@ -238,8 +238,8 @@ impl<'a> InternalToolHost<'a> {
             .get(conversation_id)
             .and_then(|agent| agent.agent_id.as_deref())
             .and_then(|agent_id| tau_proto::AgentId::parse(agent_id).ok())
-            .and_then(|agent_id| self.harness.frozen_agent_discovery.get(&agent_id))
-            .map_or(&self.harness.discovered_skills, |snapshot| &snapshot.skills);
+            .and_then(|agent_id| self.harness.context_discovery.frozen_agents.get(&agent_id))
+            .map_or(&self.harness.context_discovery.skills, |snapshot| &snapshot.skills);
         skills
             .iter()
             .filter(|(_, skill)| !skill.disable_model_invocation)
