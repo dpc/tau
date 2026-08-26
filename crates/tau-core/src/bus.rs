@@ -1,7 +1,7 @@
 //! [`EventBus`]: routes protocol events between connections and tracks
 //! per-connection subscription state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tau_proto::{ClientKind, ConnectionId, EventSelector, HarnessOutputMessage};
 
@@ -123,6 +123,144 @@ fn validate_socket_subscription(
 pub struct EventBus {
     next_connection_id: u64,
     connections: HashMap<ConnectionId, ConnectionEntry>,
+    #[cfg(test)]
+    last_route_work: RouteWork,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RouteWork {
+    /// Connection identifiers cloned solely into a detailed route report.
+    pub(crate) report_id_clones: usize,
+    /// Entries materialized solely in detailed route-report vectors.
+    pub(crate) report_entries: usize,
+    /// Shared admitted-target membership probes performed during
+    /// reconciliation.
+    pub(crate) admitted_membership_probes: usize,
+}
+
+trait RouteCollector {
+    /// Records a subscriber skipped by kind or selector.
+    fn skipped(&mut self, connection_id: &ConnectionId);
+
+    /// Records a subscriber rejected by its visibility filter.
+    fn blocked(&mut self, connection_id: &ConnectionId);
+
+    /// Records a successful delivery.
+    fn delivered(&mut self, connection_id: ConnectionId);
+
+    /// Records a failed delivery.
+    fn failed(&mut self, connection_id: ConnectionId, error: crate::ConnectionSendError);
+
+    /// Records a failed delivery whose group error must be copied into a
+    /// report.
+    fn failed_shared(&mut self, connection_id: ConnectionId, error: &crate::ConnectionSendError);
+
+    /// Records a shared consumer that retired before admission.
+    fn retired(&mut self, connection_id: ConnectionId);
+
+    /// Records one constant-time admitted-target membership probe.
+    #[cfg(test)]
+    fn probed_admitted_target(&mut self);
+}
+
+#[derive(Default)]
+struct DetailedRouteCollector {
+    /// Externally visible routing result.
+    report: RouteReport,
+    #[cfg(test)]
+    /// Work performed only to construct or reconcile the result.
+    work: RouteWork,
+}
+
+impl RouteCollector for DetailedRouteCollector {
+    fn skipped(&mut self, connection_id: &ConnectionId) {
+        self.report
+            .skipped_by_subscription
+            .push(connection_id.clone());
+        #[cfg(test)]
+        {
+            self.work.report_id_clones += 1;
+            self.work.report_entries += 1;
+        }
+    }
+
+    fn blocked(&mut self, connection_id: &ConnectionId) {
+        self.report.blocked_by_filter.push(connection_id.clone());
+        #[cfg(test)]
+        {
+            self.work.report_id_clones += 1;
+            self.work.report_entries += 1;
+        }
+    }
+
+    fn delivered(&mut self, connection_id: ConnectionId) {
+        self.report.delivered_to.push(connection_id);
+        #[cfg(test)]
+        {
+            self.work.report_entries += 1;
+        }
+    }
+
+    fn failed(&mut self, connection_id: ConnectionId, error: crate::ConnectionSendError) {
+        self.report.failed_deliveries.push(DeliveryFailure {
+            connection_id,
+            error,
+        });
+        #[cfg(test)]
+        {
+            self.work.report_entries += 1;
+        }
+    }
+
+    fn failed_shared(&mut self, connection_id: ConnectionId, error: &crate::ConnectionSendError) {
+        self.failed(connection_id, error.clone());
+    }
+
+    fn retired(&mut self, connection_id: ConnectionId) {
+        self.report.failed_deliveries.push(DeliveryFailure {
+            connection_id,
+            error: crate::ConnectionSendError::new(
+                "shared consumer generation retired before admission",
+            ),
+        });
+        #[cfg(test)]
+        {
+            self.work.report_entries += 1;
+        }
+    }
+
+    #[cfg(test)]
+    fn probed_admitted_target(&mut self) {
+        self.work.admitted_membership_probes += 1;
+    }
+}
+
+#[derive(Default)]
+struct NoReportRouteCollector {
+    #[cfg(test)]
+    /// Routing work retained for the test-only work oracle.
+    work: RouteWork,
+}
+
+impl RouteCollector for NoReportRouteCollector {
+    fn skipped(&mut self, _connection_id: &ConnectionId) {}
+
+    fn blocked(&mut self, _connection_id: &ConnectionId) {}
+
+    fn delivered(&mut self, _connection_id: ConnectionId) {}
+
+    fn failed(&mut self, _connection_id: ConnectionId, _error: crate::ConnectionSendError) {}
+
+    fn failed_shared(&mut self, _connection_id: ConnectionId, _error: &crate::ConnectionSendError) {
+    }
+
+    fn retired(&mut self, _connection_id: ConnectionId) {}
+
+    #[cfg(test)]
+    fn probed_admitted_target(&mut self) {
+        self.work.admitted_membership_probes += 1;
+    }
 }
 
 impl EventBus {
@@ -311,29 +449,70 @@ impl EventBus {
         message: HarnessOutputMessage,
         excluded_kinds: &[ClientKind],
     ) -> RouteReport {
-        let routed = RoutedFrame::new(source_id.cloned(), message);
-        let mut report = RouteReport::default();
+        let collector = self.publish_with_collector(
+            source_id,
+            message,
+            excluded_kinds,
+            DetailedRouteCollector::default(),
+        );
+        #[cfg(test)]
+        {
+            self.last_route_work = collector.work;
+        }
+        collector.report
+    }
 
+    /// Broadcasts one message without constructing a [`RouteReport`].
+    ///
+    /// This is intended for internal callers that deliberately ignore all
+    /// per-connection routing diagnostics.
+    pub fn publish_from_excluding_kinds_without_report(
+        &mut self,
+        source_id: Option<&ConnectionId>,
+        message: HarnessOutputMessage,
+        excluded_kinds: &[ClientKind],
+    ) {
+        let collector = self.publish_with_collector(
+            source_id,
+            message,
+            excluded_kinds,
+            NoReportRouteCollector::default(),
+        );
+        #[cfg(test)]
+        {
+            self.last_route_work = collector.work;
+        }
+        #[cfg(not(test))]
+        let _ = collector;
+    }
+
+    fn publish_with_collector<C: RouteCollector>(
+        &mut self,
+        source_id: Option<&ConnectionId>,
+        message: HarnessOutputMessage,
+        excluded_kinds: &[ClientKind],
+        mut collector: C,
+    ) -> C {
+        let routed = RoutedFrame::new(source_id.cloned(), message);
         let mut eligible = Vec::new();
         for (connection_id, entry) in &self.connections {
             if excluded_kinds.contains(&entry.metadata.kind) {
-                report.skipped_by_subscription.push(connection_id.clone());
+                collector.skipped(connection_id);
                 continue;
             }
             if !entry.subscriptions.matches(&routed.frame) {
-                report.skipped_by_subscription.push(connection_id.clone());
+                collector.skipped(connection_id);
                 continue;
             }
             if !entry.visibility_filter.allows(&routed) {
-                report.blocked_by_filter.push(connection_id.clone());
+                collector.blocked(connection_id);
                 continue;
             }
 
             eligible.push(connection_id.clone());
         }
-        self.deliver_eligible(routed, eligible, &mut report);
-
-        report
+        self.deliver_eligible(routed, eligible, &mut collector);
+        collector
     }
 
     /// Sends one directed harness output message to a specific connection.
@@ -375,7 +554,7 @@ impl EventBus {
         &mut self,
         routed: RoutedFrame,
         eligible: Vec<ConnectionId>,
-        report: &mut RouteReport,
+        collector: &mut impl RouteCollector,
     ) {
         let mut shared: HashMap<
             crate::SharedDeliveryGroup,
@@ -414,25 +593,22 @@ impl EventBus {
                 .send_shared(routed.clone(), &targets);
             match result {
                 Ok(admitted) => {
+                    let admitted = admitted.into_iter().collect::<HashSet<_>>();
                     for (connection_id, target) in members {
+                        #[cfg(test)]
+                        collector.probed_admitted_target();
                         if admitted.contains(&target) {
-                            report.delivered_to.push(connection_id);
+                            collector.delivered(connection_id);
                         } else {
-                            report.failed_deliveries.push(DeliveryFailure {
-                                connection_id,
-                                error: crate::ConnectionSendError::new(
-                                    "shared consumer generation retired before admission",
-                                ),
-                            });
+                            collector.retired(connection_id);
                         }
                     }
                 }
-                Err(error) => report.failed_deliveries.extend(members.into_iter().map(
-                    |(connection_id, _)| DeliveryFailure {
-                        connection_id,
-                        error: error.clone(),
-                    },
-                )),
+                Err(error) => {
+                    for (connection_id, _) in members {
+                        collector.failed_shared(connection_id, &error);
+                    }
+                }
             }
         }
         for connection_id in legacy {
@@ -443,13 +619,15 @@ impl EventBus {
                 .sink
                 .send(routed.clone());
             match result {
-                Ok(()) => report.delivered_to.push(connection_id),
-                Err(error) => report.failed_deliveries.push(DeliveryFailure {
-                    connection_id,
-                    error,
-                }),
+                Ok(()) => collector.delivered(connection_id),
+                Err(error) => collector.failed(connection_id, error),
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_route_work(&self) -> RouteWork {
+        self.last_route_work
     }
 
     fn allocate_connection_id(&mut self) -> ConnectionId {
@@ -458,3 +636,7 @@ impl EventBus {
             .expect("generated connection id must satisfy the connection identifier grammar")
     }
 }
+
+#[cfg(test)]
+#[path = "bus_tests.rs"]
+mod tests;

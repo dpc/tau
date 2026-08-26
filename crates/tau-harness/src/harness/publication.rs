@@ -1182,7 +1182,9 @@ impl Harness {
         #[cfg(not(test))]
         let _ = seq;
         let frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
-        let _ = self.runtime_io.bus.publish_from(source, frame);
+        self.runtime_io
+            .bus
+            .publish_from_excluding_kinds_without_report(source, frame, &[]);
         if let Some((agent_id, outcome)) = persisted_agent {
             self.activate_projected_message_fact(&agent_id, outcome, &event);
         }
@@ -1674,7 +1676,9 @@ impl Harness {
                         recorded_at,
                         Event::ShellCommandFinished(finished.clone()),
                     );
-                    let _ = self.runtime_io.bus.publish_from(source, frame);
+                    self.runtime_io
+                        .bus
+                        .publish_from_excluding_kinds_without_report(source, frame, &[]);
                 }
                 self.rollback_rejected_activation_successor(&event);
                 self.clear_rejected_eager_compaction_start(&event);
@@ -1908,11 +1912,13 @@ impl Harness {
             // payload via a directed route so replay/live delivery metadata
             // matches the subscribed-provider path.
             let execution_kinds = [ClientKind::Provider];
-            let _ = self.runtime_io.bus.publish_from_excluding_kinds(
-                source,
-                observer_frame,
-                &execution_kinds,
-            );
+            self.runtime_io
+                .bus
+                .publish_from_excluding_kinds_without_report(
+                    source,
+                    observer_frame,
+                    &execution_kinds,
+                );
             let provider_frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
             match self
                 .runtime_io
@@ -1958,11 +1964,13 @@ impl Harness {
             // exclude every provider and fail the exact durable owner before any
             // remote client can see the request.
             let execution_kinds = [ClientKind::Provider];
-            let _ = self.runtime_io.bus.publish_from_excluding_kinds(
-                source,
-                observer_frame,
-                &execution_kinds,
-            );
+            self.runtime_io
+                .bus
+                .publish_from_excluding_kinds_without_report(
+                    source,
+                    observer_frame,
+                    &execution_kinds,
+                );
             let unavailable_route = tau_proto::ConnectionId::parse("unavailable-model-route")
                 .expect("fixed unavailable route must satisfy the connection identifier grammar");
             self.recover_failed_provider_prompt_route(
@@ -1976,13 +1984,17 @@ impl Harness {
         ) {
             // Raw provider and generic result data is not a UI payload. UIs
             // receive the separately published payload-free display projection.
-            let _ = self.runtime_io.bus.publish_from_excluding_kinds(
-                source,
-                observer_frame,
-                &[ClientKind::Ui],
-            );
+            self.runtime_io
+                .bus
+                .publish_from_excluding_kinds_without_report(
+                    source,
+                    observer_frame,
+                    &[ClientKind::Ui],
+                );
         } else {
-            let _ = self.runtime_io.bus.publish_from(source, observer_frame);
+            self.runtime_io
+                .bus
+                .publish_from_excluding_kinds_without_report(source, observer_frame, &[]);
         }
         if let Event::AgentPromptCreated(prompt) = &event {
             self.prompt_coordination
