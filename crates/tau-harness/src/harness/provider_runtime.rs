@@ -374,6 +374,7 @@ impl Harness {
     }
     pub(super) fn reconcile_agent_context_usage_models(&mut self) {
         let resolutions: Vec<_> = self
+            .agent_registry
             .agents
             .iter()
             .filter_map(|(cid, conv)| {
@@ -399,7 +400,7 @@ impl Harness {
                 continue;
             }
             let context_window = context_window_for_model(&self.provider_model_info, &usage_model);
-            if let Some(conv) = self.agents.get_mut(&cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 conv.context_percent_used = match (context_window, conv.context_input_tokens) {
                     (Some(window), Some(tokens)) => Some(context_percent_used(tokens, window)),
                     _ => None,

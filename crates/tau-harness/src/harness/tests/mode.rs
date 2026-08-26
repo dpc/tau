@@ -534,6 +534,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         })
         .expect("ephemeral agent");
     let cid = h
+        .agent_registry
         .agent_routes
         .get(agent_id.as_str())
         .cloned()
@@ -640,11 +641,13 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     seed_agent_thinking(&mut h, &cid, provider_prompt_id.as_str());
     h.prompt_agents
         .insert(provider_prompt_id.clone(), cid.clone());
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("ephemeral agent")
         .in_flight_prompt = Some(provider_prompt_id.clone());
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("ephemeral agent")
         .last_prompt_id = Some(provider_prompt_id.clone());
@@ -741,7 +744,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
             "ephemeral-provider-finished-secret",
         ));
     h.remove_agent(&cid);
-    assert!(!h.agents.contains_key(&cid));
+    assert!(!h.agent_registry.agents.contains_key(&cid));
     h.log_event(&path_crate_event::HarnessEvent::from_connection_for_test(
         crate::test_connection_id(provider),
         tau_proto::HarnessInputMessage::emit_transient(finished.clone()),
@@ -868,6 +871,7 @@ fn tool_backed_start_agent_request_targets_ephemeral_agent() {
         })
         .expect("ephemeral agent");
     let cid = h
+        .agent_registry
         .agent_routes
         .get(agent_id.as_str())
         .cloned()
@@ -929,6 +933,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
         })
         .expect("ephemeral agent");
     let cid = h
+        .agent_registry
         .agent_routes
         .get(agent_id.as_str())
         .cloned()
@@ -1441,6 +1446,7 @@ fn embedded_deterministic_tool_round_clears_prompt_lifecycle() {
     );
     assert!(
         harness
+            .agent_registry
             .agents
             .values()
             .all(|agent| agent.in_flight_prompt.is_none()),

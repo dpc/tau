@@ -99,7 +99,7 @@ impl Harness {
                 return;
             }
         };
-        let agent_id = self.agents[&agent]
+        let agent_id = self.agent_registry.agents[&agent]
             .agent_id
             .as_deref()
             .map(crate::parse_agent_id)
@@ -359,10 +359,11 @@ impl Harness {
                 "the harness is bound to a different session",
             ));
         }
-        if !self.session_roster_valid
+        if !self.agent_registry.roster_valid
             || !self
-                .session_roster_loaded_agents
-                .is_subset(&self.session_roster_ever_loaded_agents)
+                .agent_registry
+                .roster_loaded
+                .is_subset(&self.agent_registry.roster_ever_loaded)
         {
             return Err(session_agent_list_error(
                 tau_proto::SessionAgentListErrorKind::SessionRead,
@@ -370,8 +371,8 @@ impl Harness {
             ));
         }
         let source = match scope {
-            tau_proto::SessionAgentListScope::Current => &self.session_roster_loaded_agents,
-            tau_proto::SessionAgentListScope::History => &self.session_roster_ever_loaded_agents,
+            tau_proto::SessionAgentListScope::Current => &self.agent_registry.roster_loaded,
+            tau_proto::SessionAgentListScope::History => &self.agent_registry.roster_ever_loaded,
         };
         if source.len() > MAX_SESSION_AGENT_LIST_ENTRIES {
             return Err(session_agent_list_error(
@@ -380,10 +381,11 @@ impl Harness {
             ));
         }
 
-        let loaded = &self.session_roster_loaded_agents;
+        let loaded = &self.agent_registry.roster_loaded;
         let mut agent_ids = source.iter().cloned().collect::<Vec<_>>();
         agent_ids.sort();
         let live_agents = self
+            .agent_registry
             .agents
             .iter()
             .filter(|(_, agent)| {
@@ -393,7 +395,11 @@ impl Harness {
             })
             .filter_map(|(cid, agent)| {
                 let agent_id = AgentId::parse(agent.agent_id.as_deref()?).ok()?;
-                let navigation_mode = self.agent_navigation_modes.get(&agent_id).copied()?;
+                let navigation_mode = self
+                    .agent_registry
+                    .navigation_modes
+                    .get(&agent_id)
+                    .copied()?;
                 Some((
                     agent_id,
                     (agent.published_runtime_state, navigation_mode, cid.clone()),
@@ -456,7 +462,7 @@ impl Harness {
                 }
             };
             let work_status = matches!(&lifecycle, tau_proto::SessionAgentLifecycle::Live { .. })
-                .then(|| self.agents.get(&agent_id))
+                .then(|| self.agent_registry.agents.get(&agent_id))
                 .flatten()
                 .map(|agent| {
                     tau_proto::SessionAgentWorkStatus::new(

@@ -155,7 +155,11 @@ fn agent_stats_keep_outer_turn_running_across_inner_tool_continuation() {
             remaining_calls: vec!["tool-round".into()],
         },
     );
-    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::Idle;
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn_state = AgentTurnState::Idle;
 
     assert_eq!(
         h.agent_stats_snapshot(&cid).expect("stats").runtime_state,
@@ -179,6 +183,7 @@ fn agent_turn_activity_reduces_provider_tools_and_timer_in_order() {
     let mut h = echo_harness(td.path().join("state")).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h
+        .agent_registry
         .agents
         .get(&cid)
         .and_then(|agent| agent.agent_id.as_deref())
@@ -232,8 +237,11 @@ fn agent_turn_activity_reduces_provider_tools_and_timer_in_order() {
         tau_proto::AgentTurnActivity::Manipulating
     );
 
-    h.agents.get_mut(&cid).expect("agent").in_flight_prompt =
-        Some(test_agent_prompt_id("responding"));
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .in_flight_prompt = Some(test_agent_prompt_id("responding"));
     assert_eq!(
         h.agent_turn_activity(&agent_id, &cid),
         tau_proto::AgentTurnActivity::Responding
@@ -315,7 +323,7 @@ fn durable_message_wake_extends_session_retention() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid]
+    let agent_id = h.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .map(crate::parse_agent_id)
@@ -325,7 +333,7 @@ fn durable_message_wake_extends_session_retention() {
         capture: capture.clone(),
     });
     let meta_path = tracing::subscriber::with_default(subscriber, || {
-        h.resolving_initial_extension_collisions = true;
+        h.extensions.resolving_initial_collisions = true;
         h.publish_event(
             Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
             Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
@@ -344,7 +352,7 @@ fn durable_message_wake_extends_session_retention() {
         );
         let meta_path = stale_session_manifest(&h);
 
-        h.resolving_initial_extension_collisions = false;
+        h.extensions.resolving_initial_collisions = false;
         h.try_advance_queue();
         meta_path
     });
@@ -369,7 +377,8 @@ fn durable_replay_activation_extends_session_retention() {
     let mut h = echo_harness(td.path().join("state")).expect("harness");
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("loaded durable agent")
         .pending_replay_activation = true;
@@ -546,7 +555,7 @@ fn prompt_activation_observation_is_allocated_once_and_skips_passive_notices() {
     let td = TempDir::new().expect("tempdir");
     let mut harness = quiet_provider_harness(td.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut harness);
-    let agent_id = harness.agents[&cid]
+    let agent_id = harness.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("durable agent id");
@@ -591,7 +600,7 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
     let temp = TempDir::new().expect("tempdir");
     let mut harness = echo_harness(temp.path().join("state")).expect("harness");
     let cid = ensure_test_user_agent(&mut harness);
-    let agent_id = harness.agents[&cid]
+    let agent_id = harness.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("durable agent id");
@@ -663,7 +672,7 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
             "queued internal activation remains outside the UI diagnostic"
         );
         assert_eq!(
-            harness.agents[&cid]
+            harness.agent_registry.agents[&cid]
                 .pending_prompts
                 .iter()
                 .map(|prompt| prompt.text.as_str())
@@ -677,7 +686,7 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
         );
 
         harness.turn_state = TurnState::Idle;
-        let agent = harness.agents.get_mut(&cid).expect("agent");
+        let agent = harness.agent_registry.agents.get_mut(&cid).expect("agent");
         agent.turn_state = AgentTurnState::Idle;
         agent.in_flight_prompt = None;
         agent.activation_dispatch = ActivationDispatchState::None;
@@ -699,7 +708,12 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
             "queue draining must not append a second UI activation observation"
         );
 
-        harness.agents.get_mut(&cid).expect("agent").agent_id = None;
+        harness
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent")
+            .agent_id = None;
         harness.append_prompt_activation_queued(
             &cid,
             tau_proto::ObservationId::random(),
@@ -848,7 +862,7 @@ fn ui_session_metadata_touch_failure_is_traced_without_blocking_dispatch() {
     let temp = TempDir::new().expect("tempdir");
     let mut harness = echo_harness(temp.path().join("state")).expect("harness");
     let cid = ensure_test_user_agent(&mut harness);
-    let agent_id = harness.agents[&cid]
+    let agent_id = harness.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .map(crate::parse_agent_id)
@@ -972,7 +986,7 @@ fn prompt_acceptance_traces_exclude_non_ui_prompt_and_metadata_traffic() {
             let temp = TempDir::new().expect("tempdir");
             let mut harness = echo_harness(temp.path().join("state")).expect("harness");
             let cid = ensure_test_user_agent(&mut harness);
-            let agent_id = harness.agents[&cid]
+            let agent_id = harness.agent_registry.agents[&cid]
                 .agent_id
                 .clone()
                 .expect("durable agent id");
@@ -991,7 +1005,7 @@ fn prompt_acceptance_traces_exclude_non_ui_prompt_and_metadata_traffic() {
         let temp = TempDir::new().expect("tempdir");
         let mut harness = echo_harness(temp.path().join("state")).expect("harness");
         let cid = ensure_test_user_agent(&mut harness);
-        let agent_id = harness.agents[&cid]
+        let agent_id = harness.agent_registry.agents[&cid]
             .agent_id
             .as_deref()
             .map(crate::parse_agent_id)
@@ -1087,7 +1101,7 @@ fn prompt_acceptance_traces_exclude_non_ui_prompt_and_metadata_traffic() {
 /// Publish the canonical declaration required before a background terminal can
 /// commit and trigger its dependent runtime effects.
 fn publish_test_tool_declaration(harness: &mut Harness, cid: &AgentId, call_id: &str) {
-    let agent_id = harness.agents[cid]
+    let agent_id = harness.agent_registry.agents[cid]
         .agent_id
         .clone()
         .expect("durable agent id");
@@ -1132,7 +1146,7 @@ fn wait_observation_classifies_invalid_and_unresolved_exact_arguments() {
     let td = TempDir::new().expect("tempdir");
     let mut harness = quiet_provider_harness(td.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut harness);
-    let agent_id = harness.agents[&cid]
+    let agent_id = harness.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("durable agent id");
@@ -1240,6 +1254,7 @@ fn user_prompt_mints_first_agent_for_empty_startup() {
     h.selected_model = Some("test/model".into());
 
     let existing_agent_id = h
+        .agent_registry
         .agents
         .values()
         .find(|conversation| conversation.originator.is_user())
@@ -1249,6 +1264,7 @@ fn user_prompt_mints_first_agent_for_empty_startup() {
         .expect("submit first user prompt");
 
     let agent_id = h
+        .agent_registry
         .agents
         .get(&test_user_agent(&h))
         .and_then(|conversation| conversation.agent_id.as_deref())
@@ -1258,7 +1274,10 @@ fn user_prompt_mints_first_agent_for_empty_startup() {
     } else {
         assert_role_hex_agent_id(agent_id, "engineer");
     }
-    assert_eq!(h.agent_routes.get(agent_id), Some(&test_user_agent(&h)));
+    assert_eq!(
+        h.agent_registry.agent_routes.get(agent_id),
+        Some(&test_user_agent(&h))
+    );
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::AgentPromptSubmitted(prompt)
@@ -1317,6 +1336,7 @@ fn prompt_override_template_can_place_agent_id_without_default_duplication() {
         .expect("submit first user prompt");
 
     let agent_id = h
+        .agent_registry
         .agents
         .get(&test_user_agent(&h))
         .and_then(|conversation| conversation.agent_id.as_deref())
@@ -1374,7 +1394,7 @@ fn available_delegate_roles_prompt_follows_agent_start_capability() {
     let mut h = echo_harness(td.path().join("state")).expect("start");
     h.install_internal_tool_handlers(vec![std::sync::Arc::new(TestAgentStartBuiltin)]);
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid]
+    let agent_id = h.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .map(crate::parse_agent_id)
@@ -1449,7 +1469,7 @@ fn hidden_delegate_roles_are_omitted_from_catalog_but_remain_explicitly_callable
     let mut h = echo_harness(td.path().join("state")).expect("start");
     h.install_internal_tool_handlers(vec![std::sync::Arc::new(TestAgentStartBuiltin)]);
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid]
+    let agent_id = h.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .map(crate::parse_agent_id)
@@ -1668,7 +1688,7 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
-    h.enabled_extension_names.insert("optional-ext".to_owned());
+    h.extensions.enabled_names.insert("optional-ext".to_owned());
     let aliased = ToolSpec {
         name: ToolName::new("internal_alias"),
         model_visible_name: Some(ToolName::new("visible_alias")),
@@ -1718,12 +1738,14 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
     )
     .expect("create agent");
     let agent_id = h
-        .session_loaded_agents
+        .agent_registry
+        .session_loaded
         .iter()
         .next()
         .cloned()
         .expect("created agent");
     let cid = h
+        .agent_registry
         .agents
         .iter()
         .find_map(|(cid, agent)| {
@@ -1760,11 +1782,11 @@ fn malformed_prompt_template_blocks_then_retries_after_repair() {
         1
     );
     assert!(matches!(
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
     assert!(h.pending_publish_idle_dispatches.is_empty());
-    assert!(h.agents[&cid].next_ctx_id.is_none());
+    assert!(h.agent_registry.agents[&cid].next_ctx_id.is_none());
 
     h.system_prompt_templates.insert(
         "conditional-template".to_owned(),
@@ -1847,12 +1869,14 @@ fn duplicate_tool_surface_does_not_resurrect_failed_create_prompt() {
     )
     .expect("create agent");
     let agent_id = h
-        .session_loaded_agents
+        .agent_registry
+        .session_loaded
         .iter()
         .next()
         .cloned()
         .expect("created agent");
     let cid = h
+        .agent_registry
         .agents
         .iter()
         .find_map(|(cid, agent)| {
@@ -1867,7 +1891,7 @@ fn duplicate_tool_surface_does_not_resurrect_failed_create_prompt() {
                 && failed.ctx_id == "prompt-duplicate-tools"
     )));
     assert!(h.pending_publish_idle_dispatches.is_empty());
-    assert!(h.agents[&cid].next_ctx_id.is_none());
+    assert!(h.agent_registry.agents[&cid].next_ctx_id.is_none());
 
     h.registry.unregister_connection(&provider);
     h.dispatch_prompt_for_agent(
@@ -1894,12 +1918,16 @@ fn message_fact_payload_envelope_notice_failure_precedes_dispatch_checkpoint() {
     let mut h = echo_harness(td.path().join("state")).expect("start");
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid]
+    let agent_id = h.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .map(crate::parse_agent_id)
         .expect("durable agent id");
-    h.agents.get_mut(&cid).expect("user agent").terminating = true;
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("user agent")
+        .terminating = true;
     h.commit_message_fact(
         None,
         Event::MessageDelivered(tau_proto::MessageDelivered::new(
@@ -1916,7 +1944,11 @@ fn message_fact_payload_envelope_notice_failure_precedes_dispatch_checkpoint() {
             "message fact",
         )),
     );
-    h.agents.get_mut(&cid).expect("user agent").terminating = false;
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("user agent")
+        .terminating = false;
     h.system_prompt_templates.insert(
         "message-fact-conditional".to_owned(),
         "{{#if payload_envelope_provenance_notice}}{{missing_strict_value}}{{else}}READY{{/if}}"
@@ -1927,7 +1959,8 @@ fn message_fact_payload_envelope_notice_failure_precedes_dispatch_checkpoint() {
         .entry(selected_role)
         .or_default()
         .prompt_override = Some("message-fact-conditional".to_owned());
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("user agent")
         .pending_replay_activation = true;
@@ -1948,7 +1981,7 @@ fn message_fact_payload_envelope_notice_failure_precedes_dispatch_checkpoint() {
         "conditional render failure must precede the durable checkpoint"
     );
     assert!(matches!(
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
     assert!(h.replayable_harness_notices.iter().any(|notice| {
@@ -1974,7 +2007,8 @@ fn late_prompt_surface_failure_terminalizes_running_compaction() {
     let cid = ensure_test_user_agent(&mut h);
     let transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-late-surface").expect("transaction id");
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("user agent")
         .activation_dispatch = path_crate_agent::ActivationDispatchState::Running {
@@ -2023,7 +2057,7 @@ fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     h.selected_model = Some("test/model".into());
-    h.resolving_initial_extension_collisions = true;
+    h.extensions.resolving_initial_collisions = true;
 
     h.handle_ui_create_agent_from(
         &crate::test_connection_id("context-race-ui"),
@@ -2044,7 +2078,8 @@ fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
     )
     .expect("create agent with queued initial prompt");
     let agent_id = h
-        .session_loaded_agents
+        .agent_registry
+        .session_loaded
         .iter()
         .next()
         .cloned()
@@ -2090,10 +2125,10 @@ fn eager_initial_prompt_waits_for_agent_context_before_strict_render() {
         }),
     );
 
-    h.resolving_initial_extension_collisions = false;
+    h.extensions.resolving_initial_collisions = false;
     h.try_advance_queue();
     assert!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .any(|prompt| prompt.initial_prompt_correlation.is_some())
@@ -2154,7 +2189,7 @@ fn failed_create_prompt_preflight_preserves_later_prompt() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     h.selected_model = Some("test/model".into());
-    h.resolving_initial_extension_collisions = true;
+    h.extensions.resolving_initial_collisions = true;
     let tool_provider = crate::test_connection_id("watermark-race-tools");
     for internal_name in ["first_internal", "second_internal"] {
         h.registry.register(
@@ -2193,12 +2228,14 @@ fn failed_create_prompt_preflight_preserves_later_prompt() {
     )
     .expect("create agent with queued A");
     let agent_id = h
-        .session_loaded_agents
+        .agent_registry
+        .session_loaded
         .iter()
         .next()
         .cloned()
         .expect("created agent");
     let cid = h
+        .agent_registry
         .agents
         .iter()
         .find_map(|(cid, agent)| {
@@ -2212,10 +2249,10 @@ fn failed_create_prompt_preflight_preserves_later_prompt() {
         path_std_collections::HashSet::from([context_provider]),
     );
 
-    h.resolving_initial_extension_collisions = false;
+    h.extensions.resolving_initial_collisions = false;
     h.try_advance_queue();
     assert!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .any(|prompt| prompt.initial_prompt_correlation.is_some())
@@ -2314,7 +2351,8 @@ fn failed_create_prompt_does_not_resurrect_after_cold_reload() {
         )
         .expect("create agent");
         agent_id = h
-            .session_loaded_agents
+            .agent_registry
+            .session_loaded
             .iter()
             .next()
             .cloned()
@@ -2378,6 +2416,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     .expect("create agent with queued first prompt");
 
     let agent_id = h
+        .agent_registry
         .agents
         .get(&test_user_agent(&h))
         .and_then(|conversation| conversation.agent_id.as_deref())
@@ -2389,6 +2428,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
             if queued.agent_id.as_str() == agent_id.as_str()
     )));
     let default_conversation = h
+        .agent_registry
         .agents
         .get(&test_user_agent(&h))
         .expect("default conversation");
@@ -2617,6 +2657,7 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
         })
     }));
     let created_id = h
+        .agent_registry
         .agents
         .values()
         .find_map(|agent| agent.agent_id.as_deref())
@@ -2640,7 +2681,7 @@ fn shell_workdir_prompt_fixture() -> (TempDir, Harness, tau_proto::AgentId) {
     let mut h = echo_harness(td.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = crate::parse_agent_id(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .agent_id
             .as_deref()
             .expect("durable agent id"),
@@ -2915,7 +2956,7 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
     let mut h = echo_harness(td.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = crate::parse_agent_id(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .agent_id
             .as_deref()
             .expect("durable agent id"),
@@ -3010,7 +3051,7 @@ fn ui_shell_routing_enforces_exactly_one_provider_at_event_boundary() {
     );
     let target = ensure_test_user_agent(&mut h);
     let target = crate::parse_agent_id(
-        h.agents[&target]
+        h.agent_registry.agents[&target]
             .agent_id
             .as_deref()
             .expect("durable agent id"),
@@ -3091,7 +3132,7 @@ fn ui_shell_route_is_point_to_point_with_resolved_target() {
     );
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = crate::parse_agent_id(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .agent_id
             .as_deref()
             .expect("durable agent id"),
@@ -3186,7 +3227,7 @@ fn routed_ui_shell_command(
 ) -> tau_proto::UiShellCommand {
     let cid = ensure_test_user_agent(h);
     let agent_id = crate::parse_agent_id(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .agent_id
             .as_deref()
             .expect("durable agent id"),
@@ -3397,7 +3438,7 @@ fn ui_shell_command_id_bounds_apply_before_projection() {
         .expect("subscribe ui");
     let cid = ensure_test_user_agent(&mut h);
     let target_agent_id = Some(crate::parse_agent_id(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .agent_id
             .as_deref()
             .expect("durable agent id"),
@@ -3575,17 +3616,18 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
     let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
         .expect("resume");
     assert_eq!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&test_user_agent(&h))
             .and_then(|conversation| conversation.agent_id.as_deref()),
         Some("engineer_default")
     );
     assert_eq!(
-        h.agent_routes.get("engineer_default"),
+        h.agent_registry.agent_routes.get("engineer_default"),
         Some(&test_user_agent(&h))
     );
     assert_ne!(
-        h.agent_routes.get("worker_steered"),
+        h.agent_registry.agent_routes.get("worker_steered"),
         Some(&test_user_agent(&h))
     );
     h.shutdown().expect("shutdown");
@@ -3733,11 +3775,12 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
         .expect("start delegate");
         let cid = ext_query_cid(&h, "delegate-9").expect("delegated conversation");
         let agent_id = h
+            .agent_registry
             .agents
             .get(&cid)
             .and_then(|conversation| conversation.agent_id.clone())
             .expect("delegated agent id");
-        h.agent_navigation_modes.insert(
+        h.agent_registry.navigation_modes.insert(
             crate::parse_agent_id(&agent_id),
             tau_proto::AgentNavigationMode::Suspended,
         );
@@ -3749,18 +3792,21 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
         .expect("resume");
     h.selected_role = "engineer-junior".to_owned();
     let cid = h
+        .agent_registry
         .agent_routes
         .get(&agent_id)
         .cloned()
         .expect("resumed delegated conversation");
     assert_eq!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .and_then(|conversation| conversation.role.as_deref()),
         Some("engineer-senior")
     );
     assert_eq!(
-        h.agent_navigation_modes
+        h.agent_registry
+            .navigation_modes
             .get(&tau_proto::AgentId::parse(&agent_id).expect("agent id")),
         Some(&tau_proto::AgentNavigationMode::ActiveAuto)
     );
@@ -3780,11 +3826,12 @@ fn resume_rehydrates_default_agent_conversation_from_durable_routing() {
         h.submit_user_prompt(test_session_id("s1"), "hello".to_owned())
             .expect("submit first prompt");
         let agent_id = h
+            .agent_registry
             .agents
             .get(&test_user_agent(&h))
             .and_then(|conversation| conversation.agent_id.clone())
             .expect("first prompt minted agent id");
-        h.agent_navigation_modes.insert(
+        h.agent_registry.navigation_modes.insert(
             crate::parse_agent_id(&agent_id),
             tau_proto::AgentNavigationMode::Suspended,
         );
@@ -3794,9 +3841,13 @@ fn resume_rehydrates_default_agent_conversation_from_durable_routing() {
 
     let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
         .expect("resume");
-    assert_eq!(h.agent_routes.get(&agent_id), Some(&test_user_agent(&h)));
     assert_eq!(
-        h.agent_navigation_modes
+        h.agent_registry.agent_routes.get(&agent_id),
+        Some(&test_user_agent(&h))
+    );
+    assert_eq!(
+        h.agent_registry
+            .navigation_modes
             .get(&crate::parse_agent_id(&agent_id)),
         Some(&tau_proto::AgentNavigationMode::Active)
     );
@@ -4159,7 +4210,7 @@ fn persisted_background_terminal(
     cid: &AgentId,
     call_id: &str,
 ) -> tau_proto::ObservationId {
-    let agent_id = harness.agents[cid]
+    let agent_id = harness.agent_registry.agents[cid]
         .agent_id
         .as_deref()
         .expect("durable agent id");
@@ -4313,7 +4364,8 @@ fn seed_background_error(state_dir: &Path, call_id: &str, tool_name: &str, messa
 }
 
 fn agent_event_count(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> usize {
-    h.agent_routes
+    h.agent_registry
+        .agent_routes
         .keys()
         .filter_map(|agent_id| h.agent_store.agent_events(agent_id).ok())
         .flatten()
@@ -5010,7 +5062,7 @@ fn loop_guard_detects_repeated_assistant_text_once_then_blocks() {
     h.record_assistant_loop_signature(&cid, Some(text));
     h.record_assistant_loop_signature(&cid, Some(text));
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert_eq!(conv.pending_prompts.len(), 1);
     assert!(conv.pending_prompts[0].text.contains("Loop guard:"));
     assert!(!conv.loop_guard.stop_automatic_continuation());
@@ -5018,7 +5070,7 @@ fn loop_guard_detects_repeated_assistant_text_once_then_blocks() {
     h.mark_loop_guard_breakers_dispatched(&cid);
     h.record_assistant_loop_signature(&cid, Some(text));
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert_eq!(conv.pending_prompts.len(), 1);
     assert!(conv.loop_guard.stop_automatic_continuation());
     assert!(event_log_contains_any_source(&h, |event| matches!(
@@ -5057,7 +5109,8 @@ fn loop_guard_repeated_assistant_text_flows_through_provider_responses() {
                 && steered.text.contains("Loop guard:")
     )));
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("agent")
             .pending_prompts
@@ -5065,6 +5118,7 @@ fn loop_guard_repeated_assistant_text_flows_through_provider_responses() {
     );
 
     let spid = h
+        .agent_registry
         .agents
         .get(&cid)
         .and_then(|conv| conv.in_flight_prompt.clone())
@@ -5077,7 +5131,8 @@ fn loop_guard_repeated_assistant_text_flows_through_provider_responses() {
     .expect("response handled");
 
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("agent")
             .loop_guard
@@ -5117,6 +5172,7 @@ fn loop_guard_provider_repetition_response_queues_pivot_then_blocks() {
                 && steered.text.contains("provider detected a tight exact stream repetition")
     )));
     let spid = h
+        .agent_registry
         .agents
         .get(&cid)
         .and_then(|conv| conv.in_flight_prompt.clone())
@@ -5128,7 +5184,8 @@ fn loop_guard_provider_repetition_response_queues_pivot_then_blocks() {
     .expect("response handled");
 
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("agent")
             .loop_guard
@@ -5223,8 +5280,8 @@ fn side_agent_repetition_response_propagates_error_result() {
     h.handle_provider_response_finished(response)
         .expect("side response handled");
 
-    assert!(!h.agents.contains_key(&side_cid));
-    assert!(!h.session_loaded_agents.contains(&side_agent_id));
+    assert!(!h.agent_registry.agents.contains_key(&side_cid));
+    assert!(!h.agent_registry.session_loaded.contains(&side_agent_id));
     assert!(
         h.store
             .session_events("s1")
@@ -5460,6 +5517,7 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
     h.submit_user_prompt(test_session_id("s1"), "parent prompt".to_owned())
         .expect("submit parent");
     let parent = h
+        .agent_registry
         .agents
         .get(&test_user_agent(&h))
         .and_then(|agent| agent.agent_id.as_deref())
@@ -5493,6 +5551,7 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
     )
     .expect("register side terminal interceptor");
     let first_prompt_id = h
+        .agent_registry
         .agents
         .get(&side_cid)
         .and_then(|agent| agent.in_flight_prompt.clone())
@@ -5526,7 +5585,11 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
         .iter()
         .find_map(|(call_id, owner)| (owner == &side_cid).then(|| call_id.clone()))
         .expect("normalized side call remains live");
-    let parked_side_agent = h.agents.get(&side_cid).expect("side agent remains parked");
+    let parked_side_agent = h
+        .agent_registry
+        .agents
+        .get(&side_cid)
+        .expect("side agent remains parked");
     assert_eq!(parked_side_agent.tools_in_flight, 1);
     assert!(parked_side_agent.in_flight_prompt.is_none());
     assert!(
@@ -5543,7 +5606,11 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
     )
     .expect("commit side canonical error");
 
-    let side_agent = h.agents.get(&side_cid).expect("side agent remains loaded");
+    let side_agent = h
+        .agent_registry
+        .agents
+        .get(&side_cid)
+        .expect("side agent remains loaded");
     let continuation = side_agent
         .in_flight_prompt
         .as_ref()
@@ -5597,7 +5664,7 @@ fn provider_completion_after_agent_unload_is_discarded_idempotently() {
     );
 
     h.remove_agent(&cid);
-    assert!(!h.agents.contains_key(&cid));
+    assert!(!h.agent_registry.agents.contains_key(&cid));
     assert!(h.prompt_agents.contains_key(&prompt_id));
 
     h.handle_provider_response_finished(response.clone())
@@ -5634,7 +5701,7 @@ fn loop_guard_detects_repeated_same_failing_tool_call() {
         );
     }
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert_eq!(conv.pending_prompts.len(), 1);
     assert!(
         conv.pending_prompts[0]
@@ -5669,7 +5736,8 @@ fn loop_guard_repeated_tool_failure_signature_includes_arguments() {
     }
 
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("agent")
             .pending_prompts
@@ -5701,7 +5769,8 @@ fn loop_guard_production_tool_failure_signature_includes_arguments() {
         .expect("tool call handled");
     }
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("agent")
             .pending_prompts
@@ -5773,7 +5842,8 @@ fn loop_guard_progress_reset_preserves_in_flight_argument_signatures() {
     }
 
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("agent")
             .pending_prompts
@@ -5795,7 +5865,7 @@ fn loop_guard_detects_consecutive_different_tool_failures() {
         );
     }
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert_eq!(conv.pending_prompts.len(), 1);
     assert!(
         conv.pending_prompts[0]
@@ -5818,7 +5888,7 @@ fn loop_guard_same_batch_failures_do_not_block_before_breaker_dispatch() {
         );
     }
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert_eq!(conv.pending_prompts.len(), 1);
     assert!(!conv.loop_guard.stop_automatic_continuation());
 }
@@ -5847,7 +5917,7 @@ fn loop_guard_detects_abab_suffix() {
         &loop_guard_tool_error("call-b", "read", "first distinct failure"),
     );
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert_eq!(conv.pending_prompts.len(), 1);
     assert!(conv.pending_prompts[0].text.contains("A/B/A/B"));
 }
@@ -5866,7 +5936,7 @@ fn loop_guard_resets_on_user_progress() {
     h.reset_loop_guard_for_progress(&cid);
     h.record_assistant_loop_signature(&cid, Some(text));
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert!(conv.pending_prompts.is_empty());
 }
 
@@ -5884,7 +5954,7 @@ fn loop_guard_resets_when_user_prompt_is_published() {
     h.publish_pending_prompt_for_agent(&cid, PendingPrompt::user("new direction".to_owned()))
         .expect("publish user prompt");
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert!(
         !conv
             .pending_prompts
@@ -5905,7 +5975,8 @@ fn loop_guard_reset_removes_pending_breaker_prompt() {
     h.record_assistant_loop_signature(&cid, Some(text));
     h.record_assistant_loop_signature(&cid, Some(text));
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("agent")
             .pending_prompts
@@ -5916,7 +5987,7 @@ fn loop_guard_reset_removes_pending_breaker_prompt() {
     h.publish_pending_prompt_for_agent(&cid, PendingPrompt::user("new input".to_owned()))
         .expect("publish user prompt");
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert!(
         !conv
             .pending_prompts
@@ -5935,7 +6006,11 @@ fn loop_guard_resets_when_user_prompt_is_queued() {
         .ensure_agent_id_for_agent(&cid)
         .expect("agent id")
         .to_owned();
-    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("sp-loop-queued-reset"),
     };
     h.record_assistant_loop_signature(
@@ -5952,7 +6027,7 @@ fn loop_guard_resets_when_user_prompt_is_queued() {
         .expect("submit prompt");
 
     assert_eq!(submission, PromptSubmission::Queued);
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert_eq!(conv.pending_prompts.len(), 1);
 }
 
@@ -5971,7 +6046,11 @@ fn loop_guard_queued_user_prompt_removes_pending_breaker() {
     h.record_assistant_loop_signature(&cid, Some(text));
     h.record_assistant_loop_signature(&cid, Some(text));
     h.record_assistant_loop_signature(&cid, Some(text));
-    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("sp-loop-queued-breaker-reset"),
     };
 
@@ -5984,7 +6063,7 @@ fn loop_guard_queued_user_prompt_removes_pending_breaker() {
         .expect("submit prompt");
 
     assert_eq!(submission, PromptSubmission::Queued);
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert!(
         !conv
             .pending_prompts
@@ -6002,7 +6081,7 @@ fn loop_guard_folding_user_prompt_drops_stale_pivot_from_batch() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     {
-        let conv = h.agents.get_mut(&cid).expect("agent");
+        let conv = h.agent_registry.agents.get_mut(&cid).expect("agent");
         conv.pending_prompts
             .push_back(PendingPrompt::user("queued user input".to_owned()));
     }
@@ -6034,8 +6113,12 @@ fn loop_guard_block_preserves_canonical_agent_message_wake() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
-    let recipient_id = h.agents[&cid].agent_id.clone().expect("agent id");
-    h.agents
+    let recipient_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("agent")
         .loop_guard
@@ -6101,7 +6184,7 @@ fn loop_guard_resets_on_successful_terminal_tool_result() {
         },
     );
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert_eq!(conv.loop_guard.consecutive_tool_failures(), 0);
     assert!(conv.pending_prompts.is_empty());
 }
@@ -6145,7 +6228,7 @@ fn loop_guard_resets_on_successful_background_tool_result() {
         },
     );
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert_eq!(conv.loop_guard.consecutive_tool_failures(), 0);
     assert!(
         conv.pending_prompts
@@ -6167,7 +6250,13 @@ fn loop_guard_resets_on_agent_head_move() {
         .to_owned();
     h.publish_pending_prompt_for_agent(&cid, PendingPrompt::user("seed".to_owned()))
         .expect("publish seed");
-    let node_id = h.agents.get(&cid).expect("agent").head.expect("agent head");
+    let node_id = h
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("agent")
+        .head
+        .expect("agent head");
     let text =
         "I will keep trying the same plan without taking any tool action or making progress.";
     h.record_assistant_loop_signature(&cid, Some(text));
@@ -6182,7 +6271,7 @@ fn loop_guard_resets_on_agent_head_move() {
         }),
     );
 
-    let conv = h.agents.get(&cid).expect("agent");
+    let conv = h.agent_registry.agents.get(&cid).expect("agent");
     assert!(
         !conv
             .pending_prompts
@@ -6718,7 +6807,10 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
 fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
     let (_td, mut h) = setup_routed_test_tool_call("disconnect-fault", "owned_tool");
     let cid = h.tool_runtime.tool_agents["disconnect-fault"].clone();
-    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     let live_events = connect_test_tool(&mut h, "conn-live-after-fault");
     h.registry.register(
         &crate::test_connection_id("conn-live-after-fault"),
@@ -6918,8 +7010,8 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
         &second.query.query_id,
         &second_agent_id,
     );
-    h.pending_start_agent_requests.push_back(first);
-    h.pending_start_agent_requests.push_back(second);
+    h.agent_registry.pending_start_requests.push_back(first);
+    h.agent_registry.pending_start_requests.push_back(second);
     let blocked_journal = state
         .join("agents")
         .join(&first_agent_id)
@@ -6948,13 +7040,15 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
         .collect();
     assert_eq!(failed_results.len(), 1);
     assert!(failed_results[0].error.is_some());
-    assert!(!h.agent_routes.contains_key(&first_agent_id));
+    assert!(!h.agent_registry.agent_routes.contains_key(&first_agent_id));
     assert!(
-        !h.agents
+        !h.agent_registry
+            .agents
             .contains_key(&crate::parse_agent_id(&first_agent_id))
     );
     assert!(
-        !h.session_loaded_agents
+        !h.agent_registry
+            .session_loaded
             .contains(&crate::parse_agent_id(&first_agent_id))
     );
     assert!(h.store.session("s1").is_none_or(|membership| {
@@ -6972,7 +7066,7 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
         event,
         Event::SessionAgentLoaded(loaded) if loaded.agent_id.as_str() == first_agent_id
     )));
-    assert!(h.agent_routes.contains_key(&second_agent_id));
+    assert!(h.agent_registry.agent_routes.contains_key(&second_agent_id));
     let second_records = h
         .agent_store
         .agent_events(&second_agent_id)
@@ -6996,7 +7090,7 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
         event,
         Event::AgentStarted(started) if started.agent_id.as_str() == second_agent_id
     )));
-    assert!(h.pending_start_agent_requests.is_empty());
+    assert!(h.agent_registry.pending_start_requests.is_empty());
 }
 
 fn provider_model_info(
@@ -7044,7 +7138,7 @@ fn set_available_provider_models(
 }
 
 fn ext_query_cid(h: &Harness, query_id: &str) -> Option<AgentId> {
-    h.agents.iter().find_map(|(cid, conv)| {
+    h.agent_registry.agents.iter().find_map(|(cid, conv)| {
         matches!(
             &conv.originator,
             tau_proto::PromptOriginator::Extension { query_id: id, .. } if id == query_id
@@ -7657,6 +7751,7 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     .expect("background tool response");
 
     let followup_spid = match &h
+        .agent_registry
         .agents
         .get(&cid)
         .expect("conversation remains live")
@@ -7673,7 +7768,8 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     ))
     .expect("finish placeholder follow-up");
     assert!(matches!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("conversation remains live")
             .turn_state,
@@ -7790,14 +7886,19 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
             .is_backgrounded(&"b-background-disconnect".into())
     );
     assert!(matches!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("conversation remains live")
             .turn_state,
         AgentTurnState::ToolsRunning { .. }
     ));
-    let AgentTurnState::ToolsRunning { remaining_calls } =
-        &mut h.agents.get_mut(&cid).expect("conversation").turn_state
+    let AgentTurnState::ToolsRunning { remaining_calls } = &mut h
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("conversation")
+        .turn_state
     else {
         unreachable!("asserted tools-running state");
     };
@@ -7879,8 +7980,12 @@ fn background_placeholder_repairs_stale_foreground_projection() {
     let call_id: ToolCallId = "background-repair-call".into();
     assert!(h.tool_runtime.tool_turn.begin_backgrounding(&call_id));
     h.observe_tool_backgrounded(&call_id);
-    let AgentTurnState::ToolsRunning { remaining_calls } =
-        &mut h.agents.get_mut(&cid).expect("agent").turn_state
+    let AgentTurnState::ToolsRunning { remaining_calls } = &mut h
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn_state
     else {
         panic!("tool round must be running");
     };
@@ -8359,7 +8464,10 @@ fn cancel_publishes_tool_cancel_request() {
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-cancel-tool");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let target_agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
@@ -8514,7 +8622,10 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-cancel-bg-tool");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let target_agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.prompt_estimated_cost_rates
         .insert(spid.clone(), tau_proto::ESTIMATED_API_COST_FALLBACK);
@@ -8583,9 +8694,12 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
     assert!(!h.tool_runtime.pending_tool_providers.contains_key(&call_id));
     assert!(!h.tool_runtime.tool_agents.contains_key(&call_id));
     assert!(
-        h.agents[&cid].pending_prompts.iter().any(|prompt| {
-            prompt.text == background_completion_prompt(&call_id) && prompt.is_internal()
-        }),
+        h.agent_registry.agents[&cid]
+            .pending_prompts
+            .iter()
+            .any(|prompt| {
+                prompt.text == background_completion_prompt(&call_id) && prompt.is_internal()
+            }),
         "live-branch cancellation should leave a queued internal completion notice"
     );
 
@@ -8605,7 +8719,10 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
 
     let cid = ensure_test_user_agent(&mut h);
     publish_test_tool_declaration(&mut h, &cid, "live-cancel-bg-call");
-    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let target_agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     let call_id: ToolCallId = "live-cancel-bg-call".into();
     h.tool_runtime.pending_tools.insert(
         call_id.clone(),
@@ -8628,7 +8745,8 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
     assert!(h.tool_runtime.tool_turn.mark_backgrounded(&call_id));
     h.publish_synthetic_background_result(&call_id);
     seed_tools_running(&mut h, &cid, vec![call_id.clone()]);
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("conversation")
         .pending_prompts
@@ -8655,10 +8773,13 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
         "events: {:?}",
         event_log_events(&h)
     );
-    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
-    assert!(h.agents[&cid].pending_cancel.is_none());
+    assert!(matches!(
+        h.agent_registry.agents[&cid].turn_state,
+        AgentTurnState::Idle
+    ));
+    assert!(h.agent_registry.agents[&cid].pending_cancel.is_none());
     assert!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .any(|prompt| prompt.text == completion_prompt
@@ -8666,7 +8787,7 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
         "live branch should retain the internal background completion notice"
     );
     assert!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .all(PendingPrompt::is_passive_background_completion),
@@ -8677,7 +8798,10 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
         event,
         Event::AgentPromptSubmitted(submitted) if submitted.text == completion_prompt
     )));
-    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+    assert!(matches!(
+        h.agent_registry.agents[&cid].turn_state,
+        AgentTurnState::Idle
+    ));
 
     let submission = h
         .submit_user_prompt(test_session_id("s1"), "continue after cancel".to_owned())
@@ -8698,7 +8822,7 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
                 && submitted.message_class == tau_proto::PromptMessageClass::User
     )));
     assert!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .all(|prompt| prompt.text != completion_prompt),
@@ -8724,10 +8848,14 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
 
     let cancel_cid = ensure_test_user_agent(&mut h);
     publish_test_tool_declaration(&mut h, &cancel_cid, "live-cancel-bg-with-other-agent");
-    let cancel_agent_id = h.agents[&cancel_cid].agent_id.clone().expect("agent id");
+    let cancel_agent_id = h.agent_registry.agents[&cancel_cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     let other_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&other_cid)
         .expect("other conversation")
         .pending_prompts
@@ -8766,10 +8894,13 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
     );
 
     assert!(
-        h.agents[&cancel_cid].pending_prompts.iter().any(|prompt| {
-            prompt.text == background_completion_prompt(&call_id)
-                && prompt.is_passive_background_completion()
-        }),
+        h.agent_registry.agents[&cancel_cid]
+            .pending_prompts
+            .iter()
+            .any(|prompt| {
+                prompt.text == background_completion_prompt(&call_id)
+                    && prompt.is_passive_background_completion()
+            }),
         "canceled agent should keep only a passive completion notice"
     );
     assert!(!event_log_contains_any_source(&h, |event| matches!(
@@ -8782,7 +8913,7 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
         Event::AgentPromptSubmitted(submitted) if submitted.text == "other agent prompt"
     )));
     assert!(matches!(
-        h.agents[&other_cid].turn_state,
+        h.agent_registry.agents[&other_cid].turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
 
@@ -8813,7 +8944,10 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-live-mixed-cancel");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let target_agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid.clone());
     let bg_call_id: ToolCallId = "live-bg-sibling".into();
     let fg_call_id: ToolCallId = "live-fg-sibling".into();
@@ -8861,10 +8995,10 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
 
     assert!(h.tool_runtime.tool_turn.is_backgrounded(&bg_call_id));
     assert!(matches!(
-        h.agents[&cid].turn_state,
+        h.agent_registry.agents[&cid].turn_state,
         AgentTurnState::ToolsRunning { .. }
     ));
-    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
 
     h.handle_cancel_prompt(
         crate::harness::harness_connection_id(),
@@ -8885,10 +9019,13 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
         Event::ToolCancelled(cancelled) if cancelled.call_id == bg_call_id
     )));
     assert!(
-        h.agents[&cid].pending_prompts.iter().any(|prompt| {
-            prompt.text == background_completion_prompt(&bg_call_id)
-                && prompt.is_passive_background_completion()
-        }),
+        h.agent_registry.agents[&cid]
+            .pending_prompts
+            .iter()
+            .any(|prompt| {
+                prompt.text == background_completion_prompt(&bg_call_id)
+                    && prompt.is_passive_background_completion()
+            }),
         "backgrounded sibling should receive a passive completion notice"
     );
     assert!(!h.tool_runtime.tool_turn.is_backgrounded(&bg_call_id));
@@ -8994,7 +9131,10 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
     let parent_cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-builtin-agent-start-bg");
     seed_agent_thinking(&mut h, &parent_cid, spid.as_str());
-    let parent_agent_id = h.agents[&parent_cid].agent_id.clone().expect("agent id");
+    let parent_agent_id = h.agent_registry.agents[&parent_cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.prompt_agents.insert(spid.clone(), parent_cid.clone());
     let call_id: ToolCallId = "builtin-agent-start-bg".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -9034,7 +9174,8 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
     let query_id = format!("test-agent-start-{call_id}");
     let side_cid = ext_query_cid(&h, &query_id).expect("side conversation");
     assert_eq!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&side_cid)
             .and_then(|agent| agent.parent_tool_call_id.as_ref()),
         Some(&call_id)
@@ -9080,7 +9221,10 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
     let parent_cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-live-builtin-agent-start-bg");
     seed_agent_thinking(&mut h, &parent_cid, spid.as_str());
-    let parent_agent_id = h.agents[&parent_cid].agent_id.clone().expect("agent id");
+    let parent_agent_id = h.agent_registry.agents[&parent_cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.prompt_agents.insert(spid.clone(), parent_cid.clone());
     let call_id: ToolCallId = "live-builtin-agent-start-bg".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
@@ -9132,10 +9276,13 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
         Event::ToolCancelled(cancelled) if cancelled.call_id == call_id
     )));
     assert!(
-        h.agents[&parent_cid].pending_prompts.iter().any(|prompt| {
-            prompt.text == background_completion_prompt(&call_id)
-                && prompt.is_passive_background_completion()
-        }),
+        h.agent_registry.agents[&parent_cid]
+            .pending_prompts
+            .iter()
+            .any(|prompt| {
+                prompt.text == background_completion_prompt(&call_id)
+                    && prompt.is_passive_background_completion()
+            }),
         "live builtin cancellation should not lose the passive completion notice"
     );
     assert!(
@@ -9210,7 +9357,10 @@ fn cancel_clears_active_wait_state() {
     let target_call_id: ToolCallId = "wait-target".into();
     let wait_call_id: ToolCallId = "wait-call".into();
 
-    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let target_agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     seed_assistant_tool_round(
         &mut h,
         &cid,
@@ -9268,7 +9418,7 @@ fn cancel_clears_active_wait_state() {
             agent_prompt_id: None,
         },
     );
-    assert!(h.agents[&cid].pending_cancel.is_some());
+    assert!(h.agent_registry.agents[&cid].pending_cancel.is_some());
     assert!(h.tool_runtime.tool_agents.contains_key(&target_call_id));
     assert!(h.tool_runtime.tool_agents.contains_key(&wait_call_id));
     h.handle_extension_event(
@@ -9278,7 +9428,7 @@ fn cancel_clears_active_wait_state() {
         })),
     )
     .expect("commit first cancellation");
-    assert!(h.agents[&cid].pending_cancel.is_some());
+    assert!(h.agent_registry.agents[&cid].pending_cancel.is_some());
     h.handle_extension_event(
         "user-cancel-terminal-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -9286,7 +9436,7 @@ fn cancel_clears_active_wait_state() {
         })),
     )
     .expect("commit final cancellation");
-    assert!(h.agents[&cid].pending_cancel.is_none());
+    assert!(h.agent_registry.agents[&cid].pending_cancel.is_none());
 
     let second_wait_call = AgentToolCall {
         call_ref: None,
@@ -9322,11 +9472,13 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = test_agent_prompt_id("sp-cancel-thinking");
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("conversation")
         .in_flight_prompt = Some(spid.clone());
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("conversation")
         .activation_dispatch = path_crate_agent::ActivationDispatchState::DispatchUncertain {
@@ -9337,7 +9489,10 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         operation: Some(tau_proto::PromptOperation::Inference),
         activation_cut: Some(tau_proto::AgentHead::Root),
     };
-    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let target_agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_cancel_prompt(
@@ -9349,11 +9504,14 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         },
     );
 
-    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
-    assert!(h.agents[&cid].in_flight_prompt.is_none());
-    assert!(h.agents[&cid].pending_cancel.is_none());
     assert!(matches!(
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].turn_state,
+        AgentTurnState::Idle
+    ));
+    assert!(h.agent_registry.agents[&cid].in_flight_prompt.is_none());
+    assert!(h.agent_registry.agents[&cid].pending_cancel.is_none());
+    assert!(matches!(
+        h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
     assert!(h.canceled_prompts.contains(&spid));
@@ -9432,8 +9590,11 @@ fn cancel_while_thinking_keeps_standalone_dispatch_ownership() {
     seed_agent_thinking(&mut h, &cid, spid.as_str());
     let transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-cancel-standalone").expect("valid id");
-    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
-    let agent = h.agents.get_mut(&cid).expect("conversation");
+    let target_agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
+    let agent = h.agent_registry.agents.get_mut(&cid).expect("conversation");
     agent.in_flight_prompt = Some(spid.clone());
     agent.activation_dispatch = path_crate_agent::ActivationDispatchState::DispatchUncertain {
         owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
@@ -9457,7 +9618,7 @@ fn cancel_while_thinking_keeps_standalone_dispatch_ownership() {
     );
 
     assert!(matches!(
-        &h.agents[&cid].activation_dispatch,
+        &h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::DispatchUncertain {
             owner: crate::agent::InferenceCheckpointOwner::Standalone { id },
             agent_prompt_id,
@@ -9486,8 +9647,11 @@ fn cancel_while_thinking_keeps_mismatched_inference_dispatch_ownership() {
     let canceled_id: AgentPromptId = test_agent_prompt_id("sp-cancel-mismatched-thinking");
     let owned_id: AgentPromptId = test_agent_prompt_id("sp-owned-by-other-dispatch");
     seed_agent_thinking(&mut h, &cid, canceled_id.as_str());
-    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
-    let agent = h.agents.get_mut(&cid).expect("conversation");
+    let target_agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
+    let agent = h.agent_registry.agents.get_mut(&cid).expect("conversation");
     agent.in_flight_prompt = Some(canceled_id.clone());
     agent.activation_dispatch = path_crate_agent::ActivationDispatchState::DispatchUncertain {
         owner: path_crate_agent::InferenceCheckpointOwner::Inference,
@@ -9509,7 +9673,7 @@ fn cancel_while_thinking_keeps_mismatched_inference_dispatch_ownership() {
     );
 
     assert!(matches!(
-        &h.agents[&cid].activation_dispatch,
+        &h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::DispatchUncertain {
             owner: crate::agent::InferenceCheckpointOwner::Inference,
             agent_prompt_id,
@@ -9541,7 +9705,8 @@ fn cross_session_submission_is_rejected() {
         other => panic!("expected Rejected, got {other:?}"),
     }
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .values()
             .all(|agent| agent.pending_prompts.is_empty()),
         "rejected prompt must not queue"
@@ -9849,7 +10014,11 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
-    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&watcher_cid)
+        .expect("watcher")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("watcher-busy"),
     };
     h.set_agent_watch(
@@ -9861,6 +10030,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     h.dispatch_prompt_for_agent(&watched_cid, PendingPrompt::user("hello".to_owned()))
         .expect("dispatch watched prompt");
     let spid = h
+        .agent_registry
         .agents
         .get(&watched_cid)
         .and_then(|agent| agent.in_flight_prompt.clone())
@@ -9923,7 +10093,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         "wrong-source events must not consume the pending owner"
     );
     assert!(matches!(
-        h.agents[&watched_cid].turn_state,
+        h.agent_registry.agents[&watched_cid].turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
     assert!(event_log_contains(&h, "provider-other", |event| matches!(
@@ -9988,7 +10158,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
 
     assert!(!h.pending_provider_prompts.contains_key(&spid));
     assert!(matches!(
-        h.agents[&watched_cid].turn_state,
+        h.agent_registry.agents[&watched_cid].turn_state,
         AgentTurnState::Idle
     ));
     assert_eq!(
@@ -10618,10 +10788,10 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
 
         append_user_message_via_event(&mut h, "s1", "first branch point");
         let cid = ensure_test_user_agent(&mut h);
-        first_user_head = h.agents[&cid].head.expect("first user head");
+        first_user_head = h.agent_registry.agents[&cid].head.expect("first user head");
         append_user_message_via_event(&mut h, "s1", "second branch point");
         agent_id = crate::parse_agent_id(
-            h.agents[&cid]
+            h.agent_registry.agents[&cid]
                 .agent_id
                 .clone()
                 .expect("default conversation agent id"),
@@ -10637,7 +10807,7 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
         )
         .expect("navigate tree");
 
-        assert_eq!(h.agents[&cid].head, Some(first_user_head));
+        assert_eq!(h.agent_registry.agents[&cid].head, Some(first_user_head));
         assert!(loaded_agent_events(&h, "s1").into_iter().any(|event| {
             matches!(
                 event,
@@ -10668,7 +10838,7 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
         )
         .expect("reselect tree head after resume");
 
-        assert_eq!(h.agents[&cid].head, Some(first_user_head));
+        assert_eq!(h.agent_registry.agents[&cid].head, Some(first_user_head));
 
         append_user_message_via_event(&mut h, "s1", "branched after resume");
         let branched = default_agent_tree(&h)
@@ -10691,7 +10861,11 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
-    h.agents.get_mut(&cid).expect("agent").terminating = true;
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .terminating = true;
     h.commit_message_fact(
         None,
         Event::MessageDelivered(tau_proto::MessageDelivered::new(
@@ -10708,10 +10882,18 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
             "raw message fact before prompt",
         )),
     );
-    let message_fact_node = h.agents[&cid].head.expect("raw message fact node");
-    h.agents.get_mut(&cid).expect("agent").terminating = false;
+    let message_fact_node = h.agent_registry.agents[&cid]
+        .head
+        .expect("raw message fact node");
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .terminating = false;
     append_user_message_via_event(&mut h, "s1", "first prompt");
-    let first_prompt_node = h.agents[&cid].head.expect("first prompt node");
+    let first_prompt_node = h.agent_registry.agents[&cid]
+        .head
+        .expect("first prompt node");
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(provider_text_response(
@@ -10720,7 +10902,7 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
             "assistant answer",
         )),
     );
-    let assistant_node = h.agents[&cid].head.expect("assistant node");
+    let assistant_node = h.agent_registry.agents[&cid].head.expect("assistant node");
     assert_ne!(first_prompt_node, assistant_node);
 
     h.handle_ui_navigate_tree(
@@ -10733,7 +10915,7 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
     )
     .expect("navigate to first prompt anchor");
     assert_eq!(
-        h.agents[&cid].head,
+        h.agent_registry.agents[&cid].head,
         Some(message_fact_node),
         "anchor 1 rewinds to the exact durable parent before the first prompt"
     );
@@ -10747,7 +10929,7 @@ fn ui_tree_prompt_anchor_preserves_raw_message_fact_parent_sequence() {
         },
     )
     .expect("navigate to raw assistant node explicitly");
-    assert_eq!(h.agents[&cid].head, Some(assistant_node));
+    assert_eq!(h.agent_registry.agents[&cid].head, Some(assistant_node));
 }
 
 #[test]
@@ -10802,7 +10984,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
             "assistant answer",
         )),
     );
-    let assistant_node = h.agents[&cid].head.expect("assistant node");
+    let assistant_node = h.agent_registry.agents[&cid].head.expect("assistant node");
     append_user_message_via_event(&mut h, "s1", "second prompt");
 
     h.handle_ui_navigate_tree(
@@ -10814,7 +10996,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
         },
     )
     .expect("navigate before second prompt");
-    assert_eq!(h.agents[&cid].head, Some(assistant_node));
+    assert_eq!(h.agent_registry.agents[&cid].head, Some(assistant_node));
 
     append_user_message_via_event(&mut h, "s1", "replacement second prompt");
     let branched = default_agent_tree(&h)
@@ -10848,7 +11030,7 @@ fn ui_tree_root_navigation_persists_across_resume() {
             },
         )
         .expect("navigate to root");
-        assert_eq!(h.agents[&cid].head, None);
+        assert_eq!(h.agent_registry.agents[&cid].head, None);
         assert!(loaded_agent_events(&h, "s1").into_iter().any(|event| {
             matches!(
                 event,
@@ -10868,7 +11050,7 @@ fn ui_tree_root_navigation_persists_across_resume() {
             quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
                 .expect("resume");
         let cid = ensure_test_user_agent(&mut h);
-        assert_eq!(h.agents[&cid].head, None);
+        assert_eq!(h.agent_registry.agents[&cid].head, None);
 
         append_user_message_via_event(&mut h, "s1", "root branch after resume");
         let branched = default_agent_tree(&h)
@@ -10906,7 +11088,9 @@ fn resume_keeps_prompt_appended_after_root_rewind_as_head() {
         )
         .expect("navigate to root");
         append_user_message_via_event(&mut h, "s1", "replacement root prompt");
-        replacement_node = h.agents[&cid].head.expect("replacement node");
+        replacement_node = h.agent_registry.agents[&cid]
+            .head
+            .expect("replacement node");
 
         h.shutdown().expect("shutdown");
     }
@@ -10917,7 +11101,9 @@ fn resume_keeps_prompt_appended_after_root_rewind_as_head() {
             quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
                 .expect("resume");
         let cid = ensure_test_user_agent(&mut h);
-        let restored_head = h.agents[&cid].head.expect("restored selected head");
+        let restored_head = h.agent_registry.agents[&cid]
+            .head
+            .expect("restored selected head");
         assert!(
             default_agent_tree(&h)
                 .branch_node_ids_from(Some(restored_head))
@@ -10926,10 +11112,15 @@ fn resume_keeps_prompt_appended_after_root_rewind_as_head() {
         );
 
         append_user_message_via_event(&mut h, "s1", "continues after replacement");
-        assert_eq!(h.agents[&cid].head, Some(restored_head));
+        assert_eq!(h.agent_registry.agents[&cid].head, Some(restored_head));
         let checkpoint = h
             .agent_store
-            .agent(h.agents[&cid].agent_id.as_deref().expect("agent id"))
+            .agent(
+                h.agent_registry.agents[&cid]
+                    .agent_id
+                    .as_deref()
+                    .expect("agent id"),
+            )
             .and_then(tau_core::AgentTree::unresolved_marked_inference_checkpoint)
             .cloned()
             .expect("restored owner");
@@ -10992,7 +11183,9 @@ fn resume_keeps_prompt_appended_after_anchor_rewind_as_head() {
         )
         .expect("navigate before second prompt");
         append_user_message_via_event(&mut h, "s1", "replacement second prompt");
-        replacement_node = h.agents[&cid].head.expect("replacement node");
+        replacement_node = h.agent_registry.agents[&cid]
+            .head
+            .expect("replacement node");
 
         h.shutdown().expect("shutdown");
     }
@@ -11003,7 +11196,9 @@ fn resume_keeps_prompt_appended_after_anchor_rewind_as_head() {
             quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
                 .expect("resume");
         let cid = ensure_test_user_agent(&mut h);
-        let restored_head = h.agents[&cid].head.expect("restored selected head");
+        let restored_head = h.agent_registry.agents[&cid]
+            .head
+            .expect("restored selected head");
         assert!(
             default_agent_tree(&h)
                 .branch_node_ids_from(Some(restored_head))
@@ -11169,7 +11364,11 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     // The conversation must be in `ToolsRunning` so `submit_user_prompt`
     // takes the queued path rather than dispatching.
     assert!(matches!(
-        h.agents.get(&cid).expect("default").turn_state,
+        h.agent_registry
+            .agents
+            .get(&cid)
+            .expect("default")
+            .turn_state,
         AgentTurnState::ToolsRunning { .. }
     ));
 
@@ -11188,7 +11387,12 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     )
     .expect("submit interactive UI prompt");
     assert_eq!(
-        h.agents.get(&cid).expect("default").pending_prompts.len(),
+        h.agent_registry
+            .agents
+            .get(&cid)
+            .expect("default")
+            .pending_prompts
+            .len(),
         1,
         "the steering message should sit in pending_prompts until the next-round seam",
     );
@@ -11196,7 +11400,8 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     drive_harness_until_call_completes(&mut h, "c1");
 
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("default")
             .pending_prompts
@@ -11386,7 +11591,7 @@ fn watch_notification_folded_by_tool_terminal_starts_continuation() {
     })
     .expect("dispatch watcher tool");
     assert!(matches!(
-        h.agents[&watcher_cid].turn_state,
+        h.agent_registry.agents[&watcher_cid].turn_state,
         AgentTurnState::ToolsRunning { .. }
     ));
 
@@ -11483,8 +11688,12 @@ fn watch_notification_folded_by_tool_terminal_starts_continuation() {
         ]),
     ))
     .expect("dispatch second watcher tool");
-    let AgentTurnState::ToolsRunning { remaining_calls } =
-        &mut h.agents.get_mut(&watcher_cid).expect("watcher").turn_state
+    let AgentTurnState::ToolsRunning { remaining_calls } = &mut h
+        .agent_registry
+        .agents
+        .get_mut(&watcher_cid)
+        .expect("watcher")
+        .turn_state
     else {
         panic!("second tool round must be running");
     };
@@ -11593,7 +11802,11 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
 
     let cid = ensure_test_user_agent(&mut h);
     assert!(matches!(
-        h.agents.get(&cid).expect("default").turn_state,
+        h.agent_registry
+            .agents
+            .get(&cid)
+            .expect("default")
+            .turn_state,
         AgentTurnState::Idle
     ));
     assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
@@ -11601,7 +11814,11 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
     h.submit_user_prompt(test_session_id("s1"), "again".to_owned())
         .expect("submit again");
     assert!(matches!(
-        h.agents.get(&cid).expect("default").turn_state,
+        h.agent_registry
+            .agents
+            .get(&cid)
+            .expect("default")
+            .turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
 
@@ -12467,6 +12684,7 @@ fn queued_prompt_extends_completed_first_prompt() {
         .expect("submit first");
     assert_eq!(first, PromptSubmission::Dispatched);
     let first_agent_id = h
+        .agent_registry
         .agents
         .get(&test_user_agent(&h))
         .and_then(|conv| conv.agent_id.clone())
@@ -12616,7 +12834,7 @@ fn existing_agent_loaded_into_different_session_gets_session_state_notice() {
     );
     agent.role = Some("engineer".to_owned());
     agent.agent_id = Some(agent_id.to_string());
-    h.agents.insert(cid.clone(), agent);
+    h.agent_registry.agents.insert(cid.clone(), agent);
     h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
 
     assert!(
@@ -12838,9 +13056,9 @@ fn resume_dispatches_true_activation_without_first_checkpoint() {
                 let cid = test_user_agent(&h);
                 panic!(
                     "{text}: no successor; state={:?}, dispatch={:?}, wakes={:?}, events={:?}",
-                    h.agents[&cid].turn_state,
-                    h.agents[&cid].activation_dispatch,
-                    h.agents[&cid].pending_message_wakes,
+                    h.agent_registry.agents[&cid].turn_state,
+                    h.agent_registry.agents[&cid].activation_dispatch,
+                    h.agent_registry.agents[&cid].pending_message_wakes,
                     event_log_events(&h)
                         .iter()
                         .map(Event::name)
@@ -12997,9 +13215,9 @@ fn resume_supersedes_uncertain_v1_owner_for_each_activation_variant() {
                 let cid = test_user_agent(&h);
                 panic!(
                     "{text}: no successor; state={:?}, dispatch={:?}, wakes={:?}, events={:?}",
-                    h.agents[&cid].turn_state,
-                    h.agents[&cid].activation_dispatch,
-                    h.agents[&cid].pending_message_wakes,
+                    h.agent_registry.agents[&cid].turn_state,
+                    h.agent_registry.agents[&cid].activation_dispatch,
+                    h.agent_registry.agents[&cid].pending_message_wakes,
                     event_log_events(&h)
                         .iter()
                         .map(Event::name)
@@ -13334,7 +13552,8 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
         Event::AgentPromptCreated(_) | Event::AgentInferenceDispatchStarted(_)
     )));
     let uncertain = h
-        .agent_watch_provider_status
+        .agent_watch
+        .provider_status
         .get("main")
         .expect("restored uncertain watcher snapshot");
     assert!(matches!(
@@ -13519,11 +13738,13 @@ fn restored_background_notices_are_delivered_to_owning_agent() {
     let main_notice = restored_background_notice("main-lost-bg");
     let side_notice = restored_background_notice("side-lost-bg");
     let main_cid = h
+        .agent_registry
         .agent_routes
         .get("main")
         .cloned()
         .expect("main agent route");
     let side_cid = h
+        .agent_registry
         .agent_routes
         .get("side_agent")
         .cloned()
@@ -13828,12 +14049,15 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         .add_received(&model, 34_000);
 
     let cid = ensure_test_user_agent(&mut h);
-    assert_eq!(h.agents[&cid].session_id.as_str(), "s1");
-    h.agents
+    assert_eq!(h.agent_registry.agents[&cid].session_id.as_str(), "s1");
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("default conversation")
         .agent_id = Some("old-agent".to_owned());
-    h.agent_routes.insert("old-agent".to_owned(), cid.clone());
+    h.agent_registry
+        .agent_routes
+        .insert("old-agent".to_owned(), cid.clone());
     let transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-session-reset").expect("transaction");
     h.pending_agent_publish_completions.insert(
@@ -13870,7 +14094,8 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     )
     .expect("register rollover interceptor");
     let checkpoint_prompt_id = test_agent_prompt_id("ap-old-checkpoint");
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("old agent")
         .activation_dispatch = path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
@@ -13985,8 +14210,8 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         h.current_session_state.token_usage,
         tau_proto::TokenUsageStats::default()
     );
-    assert!(h.agents.is_empty());
-    assert!(h.agent_routes.is_empty());
+    assert!(h.agent_registry.agents.is_empty());
+    assert!(h.agent_registry.agent_routes.is_empty());
 
     // Drive the new session through init so submit_user_prompt
     // actually dispatches (rather than queuing).
@@ -14009,7 +14234,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         .expect("submit");
     assert_eq!(submission, PromptSubmission::Dispatched);
     let new_cid = test_user_agent(&h);
-    let new_agent_id = h.agents[&new_cid]
+    let new_agent_id = h.agent_registry.agents[&new_cid]
         .agent_id
         .clone()
         .expect("new session agent id");
@@ -14027,7 +14252,10 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
     enable_remote_compaction_for_test_model(&mut h);
 
     let cid = ensure_test_user_agent(&mut h);
-    let target_agent_id = h.agents[&cid].agent_id.clone().expect("durable agent id");
+    let target_agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent id");
     let selected_role = h.selected_role.clone();
     h.available_roles
         .get_mut(&selected_role)
@@ -14121,10 +14349,10 @@ fn named_context_size_alerts_queue_once_per_usage_crossing() {
     let alerts = role.context_size_alerts.clone();
 
     h.queue_crossed_context_size_alerts(&cid, Some(100), &alerts);
-    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
 
     h.queue_crossed_context_size_alerts(&cid, Some(250), &alerts);
-    let prompts = h.agents[&cid]
+    let prompts = h.agent_registry.agents[&cid]
         .pending_prompts
         .iter()
         .map(|prompt| (prompt.text.as_str(), prompt.message_class))
@@ -14138,14 +14366,14 @@ fn named_context_size_alerts_queue_once_per_usage_crossing() {
     );
 
     h.queue_crossed_context_size_alerts(&cid, Some(300), &alerts);
-    assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
+    assert_eq!(h.agent_registry.agents[&cid].pending_prompts.len(), 2);
     h.queue_crossed_context_size_alerts(&cid, Some(50), &alerts);
     h.queue_crossed_context_size_alerts(&cid, Some(250), &alerts);
-    assert_eq!(h.agents[&cid].pending_prompts.len(), 4);
+    assert_eq!(h.agent_registry.agents[&cid].pending_prompts.len(), 4);
     h.clear_agent_context_usage(&cid);
-    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
     h.queue_crossed_context_size_alerts(&cid, Some(250), &alerts);
-    assert_eq!(h.agents[&cid].pending_prompts.len(), 2);
+    assert_eq!(h.agent_registry.agents[&cid].pending_prompts.len(), 2);
 
     h.shutdown().expect("shutdown");
 }
@@ -14375,7 +14603,8 @@ fn inline_compaction_response_resets_context_size_alerts_without_injection() {
                 },
             },
         );
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("agent")
         .fired_context_size_alerts
@@ -14403,8 +14632,12 @@ fn inline_compaction_response_resets_context_size_alerts_without_injection() {
         event,
         Event::AgentPromptSubmitted(submitted) if submitted.text == "stale compact advice"
     )));
-    assert!(h.agents[&cid].fired_context_size_alerts.is_empty());
-    assert_eq!(h.agents[&cid].context_input_tokens, None);
+    assert!(
+        h.agent_registry.agents[&cid]
+            .fired_context_size_alerts
+            .is_empty()
+    );
+    assert_eq!(h.agent_registry.agents[&cid].context_input_tokens, None);
     h.shutdown().expect("shutdown");
 }
 
@@ -14479,7 +14712,7 @@ fn inline_compaction_discards_other_queued_context_size_alerts() {
         Event::AgentPromptSubmitted(submitted) if submitted.text == "stale second alert"
     )));
     assert!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .all(|prompt| !prompt.is_context_size_alert())
@@ -14587,23 +14820,37 @@ fn cold_resume_restores_usage_for_first_activation_compaction_projection() {
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(900);
     let cid = ensure_test_user_agent(&mut h);
-    assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
-    assert_eq!(h.agents[&cid].context_cached_tokens, Some(450));
-    assert!(h.agents[&cid].context_usage_head.is_some());
     assert_eq!(
-        h.agents[&cid].context_usage_model.as_ref(),
+        h.agent_registry.agents[&cid].context_input_tokens,
+        Some(900)
+    );
+    assert_eq!(
+        h.agent_registry.agents[&cid].context_cached_tokens,
+        Some(450)
+    );
+    assert!(h.agent_registry.agents[&cid].context_usage_head.is_some());
+    assert_eq!(
+        h.agent_registry.agents[&cid].context_usage_model.as_ref(),
         Some(&tau_proto::ModelId::from("test/model"))
     );
     assert_eq!(
-        h.model_for_agent_role(&h.agents[&cid]),
+        h.model_for_agent_role(&h.agent_registry.agents[&cid]),
         Some("test/model".into())
     );
-    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("other/model".into());
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_usage_model = Some("other/model".into());
     assert!(
         !h.schedule_standalone_auto_compaction_for_activation(&cid, true, None),
         "scheduler must fail closed on a stale usage model"
     );
-    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_usage_model = Some("test/model".into());
 
     h.dispatch_prompt_for_agent(
         &cid,
@@ -14650,9 +14897,9 @@ fn rewind_discards_off_branch_usage_before_tiny_and_new_agent_activations() {
             ctx_id: None,
         }),
     );
-    let old_branch = h.agents[&cid].head.expect("old branch head");
+    let old_branch = h.agent_registry.agents[&cid].head.expect("old branch head");
     {
-        let agent = h.agents.get_mut(&cid).expect("agent");
+        let agent = h.agent_registry.agents.get_mut(&cid).expect("agent");
         agent.context_input_tokens = Some(10_000);
         agent.context_cached_tokens = Some(5_000);
         agent.context_usage_head = Some(old_branch);
@@ -14666,8 +14913,8 @@ fn rewind_discards_off_branch_usage_before_tiny_and_new_agent_activations() {
             head: tau_proto::AgentHead::Root,
         }),
     );
-    assert_eq!(h.agents[&cid].context_input_tokens, None);
-    assert_eq!(h.agents[&cid].context_usage_head, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_input_tokens, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_usage_head, None);
     assert!(event_log_events(&h).iter().rev().any(|event| {
         matches!(
             event,
@@ -14738,7 +14985,7 @@ fn off_branch_usage_baseline_is_ineligible_for_scheduling_and_telemetry() {
             }),
         );
         if text == "branch A" {
-            let branch_a = h.agents[&cid].head.expect("branch A");
+            let branch_a = h.agent_registry.agents[&cid].head.expect("branch A");
             h.publish_for_agent(
                 &cid,
                 Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
@@ -14746,11 +14993,15 @@ fn off_branch_usage_baseline_is_ineligible_for_scheduling_and_telemetry() {
                     head: tau_proto::AgentHead::Root,
                 }),
             );
-            h.agents.get_mut(&cid).expect("agent").context_usage_head = Some(branch_a);
+            h.agent_registry
+                .agents
+                .get_mut(&cid)
+                .expect("agent")
+                .context_usage_head = Some(branch_a);
         }
     }
     {
-        let agent = h.agents.get_mut(&cid).expect("agent");
+        let agent = h.agent_registry.agents.get_mut(&cid).expect("agent");
         agent.context_input_tokens = Some(10_000);
         agent.context_cached_tokens = Some(5_000);
         agent.context_usage_model = Some("test/model".into());
@@ -14762,7 +15013,11 @@ fn off_branch_usage_baseline_is_ineligible_for_scheduling_and_telemetry() {
         &"test/model".into(),
         tau_proto::PromptOperation::Inference,
     );
-    h.agents.get_mut(&cid).expect("agent").context_input_tokens = None;
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_input_tokens = None;
     let without_baseline = h.prompt_context_limit_snapshot(
         &cid,
         &"test/model".into(),
@@ -14807,7 +15062,9 @@ fn navigation_reconciles_usage_from_selected_branch_response() {
     });
     h.handle_provider_response_finished(response)
         .expect("finish measured response");
-    let measured_head = h.agents[&cid].head.expect("measured response head");
+    let measured_head = h.agent_registry.agents[&cid]
+        .head
+        .expect("measured response head");
 
     h.publish_for_agent(
         &cid,
@@ -14816,7 +15073,7 @@ fn navigation_reconciles_usage_from_selected_branch_response() {
             head: tau_proto::AgentHead::Root,
         }),
     );
-    assert_eq!(h.agents[&cid].context_input_tokens, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_input_tokens, None);
     h.publish_for_agent(
         &cid,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
@@ -14824,10 +15081,16 @@ fn navigation_reconciles_usage_from_selected_branch_response() {
             head: tau_proto::AgentHead::Node(measured_head),
         }),
     );
-    assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
-    assert_eq!(h.agents[&cid].context_cached_tokens, Some(450));
     assert_eq!(
-        h.agents[&cid].context_usage_model.as_ref(),
+        h.agent_registry.agents[&cid].context_input_tokens,
+        Some(900)
+    );
+    assert_eq!(
+        h.agent_registry.agents[&cid].context_cached_tokens,
+        Some(450)
+    );
+    assert_eq!(
+        h.agent_registry.agents[&cid].context_usage_model.as_ref(),
         Some(&tau_proto::ModelId::from("test/model"))
     );
     h.shutdown().expect("shutdown");
@@ -14852,8 +15115,14 @@ fn restored_usage_survives_staggered_provider_discovery() {
         .model = Some(model_b.clone());
     h.rehydrate_agents_from_session();
     let cid = ensure_test_user_agent(&mut h);
-    assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
-    assert_eq!(h.agents[&cid].context_usage_model.as_ref(), Some(&model_b));
+    assert_eq!(
+        h.agent_registry.agents[&cid].context_input_tokens,
+        Some(900)
+    );
+    assert_eq!(
+        h.agent_registry.agents[&cid].context_usage_model.as_ref(),
+        Some(&model_b)
+    );
 
     let base_info = h
         .provider_model_info
@@ -14864,7 +15133,7 @@ fn restored_usage_survives_staggered_provider_discovery() {
     model_a_info.id = "provider-a/model".into();
     h.set_provider_models(&crate::test_connection_id("provider-a"), vec![model_a_info]);
     assert_eq!(
-        h.agents[&cid].context_input_tokens,
+        h.agent_registry.agents[&cid].context_input_tokens,
         Some(900),
         "unresolved model B must survive provider A discovery"
     );
@@ -14875,9 +15144,12 @@ fn restored_usage_survives_staggered_provider_discovery() {
     model_b_info.supports_standalone_compaction = true;
     model_b_info.standalone_compaction_threshold = Some(900);
     h.set_provider_models(&crate::test_connection_id("provider-b"), vec![model_b_info]);
-    assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
     assert_eq!(
-        h.model_for_agent_role(&h.agents[&cid]),
+        h.agent_registry.agents[&cid].context_input_tokens,
+        Some(900)
+    );
+    assert_eq!(
+        h.model_for_agent_role(&h.agent_registry.agents[&cid]),
         Some(model_b.clone())
     );
 
@@ -14905,7 +15177,7 @@ fn restored_context_usage_requires_current_model_and_resets_on_model_change() {
             quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
                 .expect("resume");
         let cid = ensure_test_user_agent(&mut h);
-        assert_eq!(h.agents[&cid].context_input_tokens, None);
+        assert_eq!(h.agent_registry.agents[&cid].context_input_tokens, None);
         h.shutdown().expect("shutdown");
     }
 
@@ -14916,7 +15188,10 @@ fn restored_context_usage_requires_current_model_and_resets_on_model_change() {
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("resume");
     let cid = ensure_test_user_agent(&mut h);
-    assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
+    assert_eq!(
+        h.agent_registry.agents[&cid].context_input_tokens,
+        Some(900)
+    );
     let alternate: tau_proto::ModelId = "test/alternate".into();
     let route = h
         .provider_model_routes
@@ -14937,7 +15212,7 @@ fn restored_context_usage_requires_current_model_and_resets_on_model_change() {
         crate::harness::harness_connection_id(),
         tau_proto::UiAgentModelSelect {
             session_id: h.current_session_id.clone(),
-            target_agent_id: h.agents[&cid]
+            target_agent_id: h.agent_registry.agents[&cid]
                 .agent_id
                 .as_deref()
                 .map(crate::parse_agent_id),
@@ -14945,10 +15220,10 @@ fn restored_context_usage_requires_current_model_and_resets_on_model_change() {
         },
     )
     .expect("select alternate model");
-    assert_eq!(h.agents[&cid].context_input_tokens, None);
-    assert_eq!(h.agents[&cid].context_usage_head, None);
-    assert_eq!(h.agents[&cid].context_cached_tokens, None);
-    assert_eq!(h.agents[&cid].context_percent_used, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_input_tokens, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_usage_head, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_cached_tokens, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_percent_used, None);
     h.shutdown().expect("shutdown");
 }
 
@@ -15190,19 +15465,19 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
         },
     )
     .expect("set role model");
-    assert_eq!(h.agents[&cid].context_input_tokens, None);
-    assert_eq!(h.agents[&cid].context_usage_head, None);
-    assert_eq!(h.agents[&cid].context_usage_model, None);
-    assert_eq!(h.agents[&cid].context_cached_tokens, None);
-    assert_eq!(h.agents[&cid].context_percent_used, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_input_tokens, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_usage_head, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_usage_model, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_cached_tokens, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_percent_used, None);
     h.rehydrate_agents_from_session();
     assert_eq!(
-        h.agents[&cid].context_input_tokens, None,
+        h.agent_registry.agents[&cid].context_input_tokens, None,
         "same-daemon rehydrate must not revive usage from the prior model"
     );
 
     {
-        let conv = h.agents.get_mut(&cid).expect("agent");
+        let conv = h.agent_registry.agents.get_mut(&cid).expect("agent");
         conv.context_input_tokens = Some(800);
         conv.context_usage_head = conv.head;
         conv.context_usage_model = Some(alternate.clone());
@@ -15217,10 +15492,10 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
         },
     )
     .expect("delete role override");
-    assert_eq!(h.agents[&cid].context_input_tokens, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_input_tokens, None);
 
     {
-        let conv = h.agents.get_mut(&cid).expect("agent");
+        let conv = h.agent_registry.agents.get_mut(&cid).expect("agent");
         conv.model_override = Some("test/model".into());
         conv.context_input_tokens = Some(700);
         conv.context_usage_head = conv.head;
@@ -15238,9 +15513,12 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
         },
     )
     .expect("set role model under explicit agent override");
-    assert_eq!(h.agents[&cid].context_input_tokens, Some(700));
     assert_eq!(
-        h.agents[&cid].context_usage_model.as_ref(),
+        h.agent_registry.agents[&cid].context_input_tokens,
+        Some(700)
+    );
+    assert_eq!(
+        h.agent_registry.agents[&cid].context_usage_model.as_ref(),
         Some(&tau_proto::ModelId::from("test/model"))
     );
     h.shutdown().expect("shutdown");
@@ -15258,7 +15536,10 @@ fn agent_compacted_resets_live_and_restored_context_usage() {
             quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
                 .expect("resume");
         let cid = ensure_test_user_agent(&mut h);
-        assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
+        assert_eq!(
+            h.agent_registry.agents[&cid].context_input_tokens,
+            Some(900)
+        );
         h.publish_for_agent(
             &cid,
             Event::AgentCompacted(tau_proto::AgentCompacted {
@@ -15281,8 +15562,8 @@ fn agent_compacted_resets_live_and_restored_context_usage() {
                 })],
             }),
         );
-        assert_eq!(h.agents[&cid].context_input_tokens, None);
-        assert_eq!(h.agents[&cid].context_usage_head, None);
+        assert_eq!(h.agent_registry.agents[&cid].context_input_tokens, None);
+        assert_eq!(h.agent_registry.agents[&cid].context_usage_head, None);
         h.shutdown().expect("shutdown");
     }
     wait_for_session_unlock(&state, "s1");
@@ -15291,8 +15572,8 @@ fn agent_compacted_resets_live_and_restored_context_usage() {
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("resume after compact");
     let cid = ensure_test_user_agent(&mut h);
-    assert_eq!(h.agents[&cid].context_input_tokens, None);
-    assert_eq!(h.agents[&cid].context_cached_tokens, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_input_tokens, None);
+    assert_eq!(h.agent_registry.agents[&cid].context_cached_tokens, None);
     h.shutdown().expect("shutdown");
 }
 
@@ -15311,9 +15592,12 @@ fn standalone_compaction_boundary_with_measurements(
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
     if let Some(model) = baseline_model {
-        let agent = h.agents.get_mut(&cid).expect("agent");
+        let agent = h.agent_registry.agents.get_mut(&cid).expect("agent");
         agent.context_input_tokens = Some(226_200);
         agent.context_usage_model = Some(model);
         agent.context_usage_head = baseline_head.or(agent.head);
@@ -15407,7 +15691,10 @@ fn manual_standalone_compact_installs_one_boundary() {
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(900);
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
 
     h.handle_compact_request(
         crate::harness::harness_connection_id(),
@@ -15646,7 +15933,7 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
     serving_model.est_cached_input_cost_1m_usd =
         tau_proto::EstimatedUsdPerMillion::checked_from_usd(2);
     serving_model.est_output_cost_1m_usd = tau_proto::EstimatedUsdPerMillion::checked_from_usd(2);
-    let turn_generation = h.agents[&cid].turn_generation;
+    let turn_generation = h.agent_registry.agents[&cid].turn_generation;
     let mut rejected = context_overflow_response(&inference);
     rejected.usage = Some(tau_proto::ProviderTokenUsage {
         prompt_sent_tokens: 1_000_000,
@@ -15761,10 +16048,16 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
         } if failed_agent_prompt_id == &inference.agent_prompt_id
     ));
     assert_eq!(start.compact_prompt_id, compact.agent_prompt_id);
-    assert_eq!(h.agents[&cid].turn_generation, turn_generation);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    assert_eq!(
+        h.agent_registry.agents[&cid].turn_generation,
+        turn_generation
+    );
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     assert!(matches!(
-        h.agent_watch_provider_status[agent_id.as_str()].state,
+        h.agent_watch.provider_status[agent_id.as_str()].state,
         tau_proto::AgentWatchProviderState::RecoveringContext { .. }
     ));
 
@@ -15790,7 +16083,7 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
         tau_proto::PromptOperation::Inference
     );
     assert_eq!(
-        h.agents[&cid].turn_generation, turn_generation,
+        h.agent_registry.agents[&cid].turn_generation, turn_generation,
         "recovery and continuation remain one logical watched turn"
     );
     assert!(
@@ -16096,8 +16389,9 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     capable.id = "provider-b/model".into();
     let provider_owner = h.provider_model_routes[&"test/model".into()].to_string();
     h.rehydrate_agents_from_session();
-    let restored_cid = h.agent_routes["main"].clone();
-    h.agents
+    let restored_cid = h.agent_registry.agent_routes["main"].clone();
+    h.agent_registry
+        .agents
         .get_mut(&restored_cid)
         .expect("restored agent")
         .model_override = Some("provider-b/model".into());
@@ -16112,7 +16406,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
         },
     );
     assert!(matches!(
-        h.agents[&restored_cid].activation_dispatch,
+        h.agent_registry.agents[&restored_cid].activation_dispatch,
         crate::agent::ActivationDispatchState::ContextRecoveryPending { .. }
     ));
     assert!(
@@ -16130,11 +16424,11 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
     h.drain_publish_idle_dispatches();
     assert!(
         matches!(
-            h.agents[&restored_cid].activation_dispatch,
+            h.agent_registry.agents[&restored_cid].activation_dispatch,
             crate::agent::ActivationDispatchState::Running { .. }
         ),
         "{:?}",
-        h.agents[&restored_cid].activation_dispatch
+        h.agent_registry.agents[&restored_cid].activation_dispatch
     );
     assert_eq!(
         event_log_events(&h)
@@ -16253,7 +16547,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
         },
     );
     assert!(matches!(
-        h.agent_watch_provider_status["main"].state,
+        h.agent_watch.provider_status["main"].state,
         tau_proto::AgentWatchProviderState::Blocked { .. }
     ));
     h.provider_model_info
@@ -16287,7 +16581,10 @@ fn reactive_context_overflow_ui_cancel_is_terminal_once() {
             .expect("test model")
             .supports_standalone_compaction = true;
         let cid = ensure_test_user_agent(&mut h);
-        agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+        agent_id = h.agent_registry.agents[&cid]
+            .agent_id
+            .clone()
+            .expect("agent id");
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))
             .expect("dispatch inference");
         let inference = read_nth_prompt_created(&h, 0);
@@ -16331,7 +16628,7 @@ fn reactive_context_overflow_ui_cancel_is_terminal_once() {
         "terminal cancelled compaction is not replay-dispatched"
     );
     assert!(matches!(
-        resumed.agent_watch_provider_status[&agent_id].state,
+        resumed.agent_watch.provider_status[&agent_id].state,
         tau_proto::AgentWatchProviderState::Blocked { .. }
     ));
     resumed.shutdown().expect("shutdown");
@@ -16360,7 +16657,7 @@ fn reactive_context_overflow_side_failure_completes_request() {
     h.handle_provider_response_finished(context_overflow_response(&compact))
         .expect("fail compact");
 
-    assert!(!h.agents.contains_key(&side_cid));
+    assert!(!h.agent_registry.agents.contains_key(&side_cid));
     let results: Vec<_> = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
@@ -16420,6 +16717,7 @@ fn reactive_context_overflow_claimed_crash_is_not_redispatched() {
     );
     let tree = resumed.agent_store.agent(
         resumed
+            .agent_registry
             .agent_routes
             .keys()
             .next()
@@ -16632,8 +16930,12 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
                                 == Some(tau_proto::ProviderFailureKind::Unknown)
                 ))
         );
-        let cid = h.agent_routes["main"].clone();
-        h.agents.get_mut(&cid).expect("agent").model_override = Some("provider-b/model".into());
+        let cid = h.agent_registry.agent_routes["main"].clone();
+        h.agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent")
+            .model_override = Some("provider-b/model".into());
         let owner = h.provider_model_routes[&"test/model".into()].to_string();
         let mut model = h.provider_model_info[&"test/model".into()].clone();
         model.id = "provider-b/model".into();
@@ -16719,12 +17021,20 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id =
-        crate::parse_agent_id(h.agents[&cid].agent_id.as_deref().expect("durable agent"));
+    let agent_id = crate::parse_agent_id(
+        h.agent_registry.agents[&cid]
+            .agent_id
+            .as_deref()
+            .expect("durable agent"),
+    );
     let watcher_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
-    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&watcher_cid)
+        .expect("watcher")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("ap-busy-removal-watcher"),
     };
     h.set_agent_watch(
@@ -16789,19 +17099,22 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
             tau_proto::UnixMicros::now(),
         )
         .expect("seed success");
-    h.agents.get_mut(&cid).expect("agent").activation_dispatch =
-        path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
-            owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
-                id: transaction_id.clone(),
-            },
-            agent_prompt_id: checkpoint_prompt_id.clone(),
-            through: tau_proto::AgentHead::Root,
-            dispatch: crate::agent::InferenceDispatchOwnership {
-                model: model.clone(),
-                operation: tau_proto::PromptOperation::Inference,
-                activation_cut: tau_proto::AgentHead::Root,
-            },
-        };
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .activation_dispatch = path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
+        owner: path_crate_agent::InferenceCheckpointOwner::Standalone {
+            id: transaction_id.clone(),
+        },
+        agent_prompt_id: checkpoint_prompt_id.clone(),
+        through: tau_proto::AgentHead::Root,
+        dispatch: crate::agent::InferenceDispatchOwnership {
+            model: model.clone(),
+            operation: tau_proto::PromptOperation::Inference,
+            activation_cut: tau_proto::AgentHead::Root,
+        },
+    };
     let other_model: tau_proto::ModelId = "other/current".into();
     let mut other_info = h.provider_model_info[&model].clone();
     other_info.id = other_model.clone();
@@ -16812,7 +17125,11 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
         tau_proto::ConnectionId::parse("other-provider")
             .expect("test connection id must satisfy the identifier grammar"),
     );
-    h.agents.get_mut(&cid).expect("agent").model_override = Some(other_model);
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .model_override = Some(other_model);
 
     h.publish_provider_models_update(
         &crate::test_connection_id(&provider),
@@ -16842,7 +17159,7 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
                 && response.failure_kind == Some(tau_proto::ProviderFailureKind::Unknown)
     )));
     assert!(matches!(
-        h.agent_watch_provider_status[agent_id.as_str()].state,
+        h.agent_watch.provider_status[agent_id.as_str()].state,
         tau_proto::AgentWatchProviderState::TerminalError { .. }
     ));
     assert!(
@@ -16892,7 +17209,10 @@ fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
         })
         .expect("start");
     assert_eq!(start.cut, tau_proto::AgentHead::Root);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -16932,7 +17252,10 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
         .expect("test model")
         .supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -16948,8 +17271,12 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
             ctx_id: None,
         }),
     );
-    let prefix = h.agents[&cid].head.expect("prefix");
-    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+    let prefix = h.agent_registry.agents[&cid].head.expect("prefix");
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("busy-before-wakes"),
     };
     for (message_id, body) in [
@@ -16973,8 +17300,10 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
             }),
         );
     }
-    assert_eq!(h.agents[&cid].pending_message_wakes.len(), 2);
-    let captured_cut = h.agents[&cid].head.expect("last message wake");
+    assert_eq!(h.agent_registry.agents[&cid].pending_message_wakes.len(), 2);
+    let captured_cut = h.agent_registry.agents[&cid]
+        .head
+        .expect("last message wake");
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -16990,7 +17319,9 @@ fn reactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
             ctx_id: None,
         }),
     );
-    let through = h.agents[&cid].head.expect("second wake head");
+    let through = h.agent_registry.agents[&cid]
+        .head
+        .expect("second wake head");
     h.set_agent_turn_state(&cid, AgentTurnState::Idle);
     h.drain_publish_idle_dispatches();
     h.try_advance_queue();
@@ -17059,7 +17390,10 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(1);
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -17075,8 +17409,12 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
             ctx_id: None,
         }),
     );
-    let prefix = h.agents[&cid].head.expect("prefix");
-    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+    let prefix = h.agent_registry.agents[&cid].head.expect("prefix");
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("busy-before-proactive-wakes"),
     };
     for (message_id, body) in [
@@ -17100,7 +17438,9 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
             }),
         );
     }
-    let captured_cut = h.agents[&cid].head.expect("last message wake");
+    let captured_cut = h.agent_registry.agents[&cid]
+        .head
+        .expect("last message wake");
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -17116,9 +17456,11 @@ fn proactive_compaction_cuts_before_earliest_coalesced_agent_message_wake() {
             ctx_id: None,
         }),
     );
-    let through = h.agents[&cid].head.expect("second wake head");
+    let through = h.agent_registry.agents[&cid]
+        .head
+        .expect("second wake head");
     {
-        let agent = h.agents.get_mut(&cid).expect("agent");
+        let agent = h.agent_registry.agents.get_mut(&cid).expect("agent");
         agent.context_input_tokens = Some(1);
         agent.context_usage_model = Some("test/model".into());
         agent.turn_state = AgentTurnState::Idle;
@@ -17193,9 +17535,13 @@ fn reactive_context_overflow_extension_preemption_cancels_once() {
         1
     );
     let side_cid = ext_query_cid(&h, "q-preempt-reactive").expect("side agent retained");
-    assert!(h.agents[&side_cid].in_flight_prompt.is_none());
+    assert!(
+        h.agent_registry.agents[&side_cid]
+            .in_flight_prompt
+            .is_none()
+    );
     assert!(matches!(
-        h.agents[&side_cid].turn_state,
+        h.agent_registry.agents[&side_cid].turn_state,
         AgentTurnState::Idle
     ));
     h.shutdown().expect("shutdown");
@@ -17259,7 +17605,10 @@ fn reactive_context_overflow_session_switch_cancels_and_cleans_state() {
         .expect("test model")
         .supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))
         .expect("dispatch inference");
     let inference = read_nth_prompt_created(&h, 0);
@@ -17283,7 +17632,7 @@ fn reactive_context_overflow_session_switch_cancels_and_cleans_state() {
     );
     assert!(h.prompt_semantic_output.is_empty());
     assert!(!h.prompt_agents.contains_key(&compact.agent_prompt_id));
-    assert!(!h.agent_watch_provider_status.contains_key(&agent_id));
+    assert!(!h.agent_watch.provider_status.contains_key(&agent_id));
     h.handle_provider_response_finished(context_overflow_response(&compact))
         .expect("late old-session response is ignored");
     assert!(
@@ -17310,7 +17659,10 @@ fn standalone_compaction_rejects_response_after_head_navigation() {
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
 
     h.handle_compact_request(
         crate::harness::harness_connection_id(),
@@ -17322,7 +17674,7 @@ fn standalone_compaction_rejects_response_after_head_navigation() {
         &cid,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
             agent_id: crate::parse_agent_id(&agent_id),
-            head: h.agents[&cid]
+            head: h.agent_registry.agents[&cid]
                 .head
                 .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
         }),
@@ -17377,7 +17729,10 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
 
     h.handle_compact_request(
         crate::harness::harness_connection_id(),
@@ -17414,14 +17769,14 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
 
     assert!(
         matches!(
-            h.agents[&cid].activation_dispatch,
+            h.agent_registry.agents[&cid].activation_dispatch,
             crate::agent::ActivationDispatchState::Blocked { .. }
         ),
         "unexpected activation state: {:?}",
-        h.agents[&cid].activation_dispatch
+        h.agent_registry.agents[&cid].activation_dispatch
     );
     assert!(matches!(
-        h.agent_watch_provider_status[agent_id.as_str()].state,
+        h.agent_watch.provider_status[agent_id.as_str()].state,
         tau_proto::AgentWatchProviderState::Blocked {
             category: tau_proto::AgentWatchProviderCategory::Compaction
         }
@@ -17429,7 +17784,11 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     let watcher_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
-    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&watcher_cid)
+        .expect("watcher")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("blocked-watcher-busy"),
     };
     h.set_agent_watch(
@@ -17684,9 +18043,12 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
         info.supports_compaction = false;
         info.supports_standalone_compaction = true;
         let cid = ensure_test_user_agent(&mut h);
-        let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
-        let head = h.agents[&cid].head;
-        let agent = h.agents.get_mut(&cid).expect("agent");
+        let agent_id = h.agent_registry.agents[&cid]
+            .agent_id
+            .clone()
+            .expect("durable agent");
+        let head = h.agent_registry.agents[&cid].head;
+        let agent = h.agent_registry.agents.get_mut(&cid).expect("agent");
         agent.context_input_tokens = Some(55);
         agent.context_cached_tokens = Some(21);
         agent.context_usage_model = Some("test/model".into());
@@ -17698,25 +18060,26 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
         );
         let compact = read_nth_prompt_created(&h, 0);
         let context_before = (
-            h.agents[&cid].context_input_tokens,
-            h.agents[&cid].context_cached_tokens,
-            h.agents[&cid].context_usage_model.clone(),
-            h.agents[&cid].context_usage_head,
-            h.agents[&cid].context_percent_used,
+            h.agent_registry.agents[&cid].context_input_tokens,
+            h.agent_registry.agents[&cid].context_cached_tokens,
+            h.agent_registry.agents[&cid].context_usage_model.clone(),
+            h.agent_registry.agents[&cid].context_usage_head,
+            h.agent_registry.agents[&cid].context_percent_used,
         );
-        let head_before = h.agents[&cid].head;
+        let head_before = h.agent_registry.agents[&cid].head;
         let stored_head_before = h.agent_store.agent(&agent_id).expect("agent tree").head();
         let billable_before = h.current_session_state.token_usage.total;
         let cache_deadline_before = h.provider_cache_residency.next_deadline();
-        let (transaction_id, cut, resume_through) = match &h.agents[&cid].activation_dispatch {
-            ActivationDispatchState::Running {
-                id,
-                cut,
-                resume_through,
-                ..
-            } => (id.clone(), *cut, *resume_through),
-            state => panic!("expected running compaction, got {state:?}"),
-        };
+        let (transaction_id, cut, resume_through) =
+            match &h.agent_registry.agents[&cid].activation_dispatch {
+                ActivationDispatchState::Running {
+                    id,
+                    cut,
+                    resume_through,
+                    ..
+                } => (id.clone(), *cut, *resume_through),
+                state => panic!("expected running compaction, got {state:?}"),
+            };
 
         h.handle_provider_response_finished(ProviderResponseFinished {
             automatic_compaction_decision: None,
@@ -17752,11 +18115,11 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
 
         assert_eq!(
             (
-                h.agents[&cid].context_input_tokens,
-                h.agents[&cid].context_cached_tokens,
-                h.agents[&cid].context_usage_model.clone(),
-                h.agents[&cid].context_usage_head,
-                h.agents[&cid].context_percent_used,
+                h.agent_registry.agents[&cid].context_input_tokens,
+                h.agent_registry.agents[&cid].context_cached_tokens,
+                h.agent_registry.agents[&cid].context_usage_model.clone(),
+                h.agent_registry.agents[&cid].context_usage_head,
+                h.agent_registry.agents[&cid].context_percent_used,
             ),
             context_before,
             "{label}"
@@ -17766,7 +18129,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
             cache_deadline_before,
             "{label}"
         );
-        assert_eq!(h.agents[&cid].head, head_before, "{label}");
+        assert_eq!(h.agent_registry.agents[&cid].head, head_before, "{label}");
         assert_eq!(
             h.agent_store.agent(&agent_id).expect("agent tree").head(),
             stored_head_before,
@@ -17798,7 +18161,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
             "{label}"
         );
         assert!(matches!(
-            h.agents[&cid].activation_dispatch,
+            h.agent_registry.agents[&cid].activation_dispatch,
             ActivationDispatchState::Blocked {
                 ref failed_id,
                 cut: blocked_cut,
@@ -17841,7 +18204,10 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
     h.handle_compact_request(
         crate::harness::harness_connection_id(),
         test_session_id("s1"),
@@ -17907,8 +18273,11 @@ fn finished_response_normalizes_cached_usage_before_context_update() {
     h.handle_provider_response_finished(response)
         .expect("finish response");
 
-    assert_eq!(h.agents[&cid].context_input_tokens, Some(10));
-    assert_eq!(h.agents[&cid].context_cached_tokens, Some(10));
+    assert_eq!(h.agent_registry.agents[&cid].context_input_tokens, Some(10));
+    assert_eq!(
+        h.agent_registry.agents[&cid].context_cached_tokens,
+        Some(10)
+    );
     let canonical = event_log_events(&h)
         .into_iter()
         .find_map(|event| match event {
@@ -17947,7 +18316,10 @@ fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
         info.supports_compaction = false;
         info.supports_standalone_compaction = true;
         let cid = ensure_test_user_agent(&mut h);
-        agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+        agent_id = h.agent_registry.agents[&cid]
+            .agent_id
+            .clone()
+            .expect("durable agent");
         h.handle_compact_request(
             crate::harness::harness_connection_id(),
             test_session_id("s1"),
@@ -17987,11 +18359,11 @@ fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("resume");
     assert!(matches!(
-        resumed.agent_watch_provider_status[&agent_id].state,
+        resumed.agent_watch.provider_status[&agent_id].state,
         tau_proto::AgentWatchProviderState::Blocked { .. }
     ));
     assert_eq!(
-        resumed.agent_watch_provider_status[&agent_id].agent_prompt_id,
+        resumed.agent_watch.provider_status[&agent_id].agent_prompt_id,
         compact_prompt_id
     );
     resumed.shutdown().expect("shutdown");
@@ -18015,9 +18387,20 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
         info.supports_standalone_compaction = true;
         info.standalone_compaction_threshold = Some(900);
         let cid = ensure_test_user_agent(&mut h);
-        agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
-        h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(900);
-        h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+        agent_id = h.agent_registry.agents[&cid]
+            .agent_id
+            .clone()
+            .expect("durable agent");
+        h.agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent")
+            .context_input_tokens = Some(900);
+        h.agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent")
+            .context_usage_model = Some("test/model".into());
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation".to_owned()))
             .expect("start automatic compaction");
         let compact = read_nth_prompt_created(&h, 0);
@@ -18060,7 +18443,7 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
     let mut resumed =
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("resume");
-    let status = &resumed.agent_watch_provider_status[&agent_id];
+    let status = &resumed.agent_watch.provider_status[&agent_id];
     assert_eq!(status.agent_prompt_id, inference_prompt_id);
     assert!(matches!(
         status.state,
@@ -18086,9 +18469,20 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(900);
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
-    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(900);
-    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_input_tokens = Some(900);
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_usage_model = Some("test/model".into());
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation A".to_owned()))
         .expect("start automatic compact");
@@ -18165,8 +18559,16 @@ fn standalone_auto_compaction_schedules_at_threshold() {
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(900);
     let cid = ensure_test_user_agent(&mut h);
-    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(900);
-    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_input_tokens = Some(900);
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_usage_model = Some("test/model".into());
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("queued once".to_owned()))
         .expect("schedule compact before user turn");
     let compact = read_nth_prompt_created(&h, 0);
@@ -18180,7 +18582,10 @@ fn standalone_auto_compaction_schedules_at_threshold() {
             .contains("queued once")
     );
 
-    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -18237,9 +18642,12 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
     seed_assistant_tool_round(&mut h, &cid, &[("call-image", "read_image")]);
-    let assistant_head = h.agents[&cid].head.expect("assistant head");
+    let assistant_head = h.agent_registry.agents[&cid].head.expect("assistant head");
 
     let mut encoded = path_std_io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgb8(2, 2)
@@ -18268,7 +18676,9 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
             originator: tau_proto::PromptOriginator::User,
         }),
     );
-    let result_head = h.agents[&cid].head.expect("image result head");
+    let result_head = h.agent_registry.agents[&cid]
+        .head
+        .expect("image result head");
     let image_entry = &h
         .agent_store
         .agent(&agent_id)
@@ -18297,7 +18707,7 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
         info.standalone_compaction_threshold = Some(projected + reserve + 1);
     }
     {
-        let agent = h.agents.get_mut(&cid).expect("agent");
+        let agent = h.agent_registry.agents.get_mut(&cid).expect("agent");
         agent.context_input_tokens = Some(0);
         agent.context_usage_model = Some("test/model".into());
         agent.context_usage_head = Some(assistant_head);
@@ -18374,7 +18784,10 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(900);
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
 
     h.publish_for_agent(
         &cid,
@@ -18391,7 +18804,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
             ctx_id: None,
         }),
     );
-    let prefix = h.agents[&cid].head.expect("prefix head");
+    let prefix = h.agent_registry.agents[&cid].head.expect("prefix head");
     let calls = [
         (
             "call-success",
@@ -18439,7 +18852,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
             ws_pool_delta: None,
         }),
     );
-    let assistant = h.agents[&cid].head.expect("assistant head");
+    let assistant = h.agent_registry.agents[&cid].head.expect("assistant head");
     h.publish_for_agent(
         &cid,
         Event::ProviderToolResult(ToolResult {
@@ -18477,11 +18890,19 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
             display: None,
         }),
     );
-    let results = h.agents[&cid].head.expect("results head");
+    let results = h.agent_registry.agents[&cid].head.expect("results head");
     assert_ne!(results, assistant);
 
-    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(900);
-    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_input_tokens = Some(900);
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_usage_model = Some("test/model".into());
     assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
 
     let started = event_log_events(&h)
@@ -18626,7 +19047,10 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
         .expect("test model")
         .supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -18642,7 +19066,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
             ctx_id: None,
         }),
     );
-    let prefix = tau_proto::AgentHead::Node(h.agents[&cid].head.expect("prefix"));
+    let prefix = tau_proto::AgentHead::Node(h.agent_registry.agents[&cid].head.expect("prefix"));
     h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -18690,7 +19114,7 @@ fn reactive_context_overflow_after_tool_round_uses_closed_prefix() {
             originator: tau_proto::PromptOriginator::User,
         }),
     );
-    let results = tau_proto::AgentHead::Node(h.agents[&cid].head.expect("results"));
+    let results = tau_proto::AgentHead::Node(h.agent_registry.agents[&cid].head.expect("results"));
     h.dispatch_activation_after_publish_idle(&cid);
     let inference = read_nth_prompt_created(&h, 0);
     let checkpoint = event_log_events(&h)
@@ -18766,7 +19190,10 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(1);
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -18782,9 +19209,17 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
             ctx_id: None,
         }),
     );
-    let prefix = h.agents[&cid].head.expect("prefix");
-    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(100);
-    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+    let prefix = h.agent_registry.agents[&cid].head.expect("prefix");
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_input_tokens = Some(100);
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_usage_model = Some("test/model".into());
     set_test_agent_context_wait(
         &mut h,
         crate::parse_agent_id(&agent_id),
@@ -18807,7 +19242,7 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
             message: "readiness message suffix".to_owned(),
         }),
     );
-    let message_node = h.agents[&cid].head.expect("message wake");
+    let message_node = h.agent_registry.agents[&cid].head.expect("message wake");
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation A".to_owned()))
         .expect("park activation");
@@ -18861,8 +19296,16 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
     info.standalone_compaction_threshold = Some(10_000);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(0);
-    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_input_tokens = Some(0);
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_usage_model = Some("test/model".into());
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
@@ -18872,7 +19315,9 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
         .expect("park branch A activation");
-    let branch_a = h.agents[&cid].head.expect("branch A activation node");
+    let branch_a = h.agent_registry.agents[&cid]
+        .head
+        .expect("branch A activation node");
     assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
     h.provider_model_info
         .get_mut(&"test/model".into())
@@ -18895,11 +19340,11 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
     );
     assert!(
         matches!(
-            h.agents[&cid].activation_dispatch,
+            h.agent_registry.agents[&cid].activation_dispatch,
             crate::agent::ActivationDispatchState::None
         ),
         "off-branch state: {:?}",
-        h.agents[&cid].activation_dispatch
+        h.agent_registry.agents[&cid].activation_dispatch
     );
     assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
 
@@ -18938,8 +19383,16 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
     info.standalone_compaction_threshold = Some(1);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(100);
-    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_input_tokens = Some(100);
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .context_usage_model = Some("test/model".into());
     set_test_agent_context_wait(
         &mut h,
         agent_id.clone(),
@@ -18949,7 +19402,9 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
         .expect("park branch A activation");
-    let branch_a = h.agents[&cid].head.expect("branch A activation node");
+    let branch_a = h.agent_registry.agents[&cid]
+        .head
+        .expect("branch A activation node");
     h.provider_model_info
         .get_mut(&"test/model".into())
         .expect("test model")
@@ -18976,7 +19431,7 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
         )
     }));
     assert!(matches!(
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
     assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
@@ -18997,7 +19452,7 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
         .unwrap_or_else(|| {
             panic!(
                 "reselected activation compaction; state={:?}, deferred={}",
-                h.agents[&cid].activation_dispatch,
+                h.agent_registry.agents[&cid].activation_dispatch,
                 h.pending_publish_idle_dispatches.len()
             )
         });
@@ -19026,10 +19481,10 @@ fn readiness_deferred_linear_activations_share_one_checkpoint() {
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("linear activation A".to_owned()))
         .expect("park A");
-    let branch_a = h.agents[&cid].head.expect("A");
+    let branch_a = h.agent_registry.agents[&cid].head.expect("A");
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("linear activation B".to_owned()))
         .expect("park B");
-    let branch_b = h.agents[&cid].head.expect("B");
+    let branch_b = h.agent_registry.agents[&cid].head.expect("B");
     assert_ne!(branch_a, branch_b);
     assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
 
@@ -19184,11 +19639,11 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
     assert!(retained_obligation.obligation.is_committed());
     assert!(ready_obligation.obligation.is_committed());
     assert!(matches!(
-        h.agents[&retained_cid].activation_dispatch,
+        h.agent_registry.agents[&retained_cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
     assert!(matches!(
-        h.agents[&ready_cid].activation_dispatch,
+        h.agent_registry.agents[&ready_cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
 
@@ -19210,9 +19665,9 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         ready_obligation.activation_cut,
         ExpectedProviderSubmission::Pending,
     );
-    assert_inference_dispatch_owner(&h.agents[&ready_cid], &ready_checkpoint);
+    assert_inference_dispatch_owner(&h.agent_registry.agents[&ready_cid], &ready_checkpoint);
     assert!(matches!(
-        h.agents[&retained_cid].activation_dispatch,
+        h.agent_registry.agents[&retained_cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
     assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
@@ -19286,7 +19741,10 @@ fn reverse_agent_context_readiness_dispatches_each_obligation_once() {
         retained_obligation.activation_cut,
         ExpectedProviderSubmission::Pending,
     );
-    assert_inference_dispatch_owner(&h.agents[&retained_cid], &retained_checkpoint);
+    assert_inference_dispatch_owner(
+        &h.agent_registry.agents[&retained_cid],
+        &retained_checkpoint,
+    );
     assert!(h.pending_publish_idle_dispatches.is_empty());
 
     let retained_provider =
@@ -19359,7 +19817,8 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
     let runnable_obligation = h.pending_publish_idle_dispatches[1].clone();
     finish_test_agent_context_wait(&mut h, &blocked_agent_id);
     finish_test_agent_context_wait(&mut h, &runnable_agent_id);
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&blocked_cid)
         .expect("blocked agent")
         .activation_dispatch = path_crate_agent::ActivationDispatchState::DispatchUncertain {
@@ -19436,7 +19895,8 @@ fn blocked_deferred_dispatch_does_not_head_of_line_block_other_agent() {
             .all(|deferred| deferred.cid != runnable_cid)
     );
 
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&blocked_cid)
         .expect("release blocked agent")
         .activation_dispatch = path_crate_agent::ActivationDispatchState::None;
@@ -19493,7 +19953,8 @@ fn retained_unroutable_dispatch_does_not_head_of_line_block_other_agent() {
             ..Default::default()
         },
     );
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&unroutable_cid)
         .expect("unroutable agent")
         .role = Some("unroutable-test-role".to_owned());
@@ -19648,7 +20109,7 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
         .expect("park branch A");
-    let branch_a = h.agents[&cid].head.expect("branch A");
+    let branch_a = h.agent_registry.agents[&cid].head.expect("branch A");
     h.publish_for_agent(
         &cid,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
@@ -19658,7 +20119,7 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
     );
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch B activation".to_owned()))
         .expect("park branch B");
-    let branch_b = h.agents[&cid].head.expect("branch B");
+    let branch_b = h.agent_registry.agents[&cid].head.expect("branch B");
     assert_ne!(branch_a, branch_b);
     assert_eq!(h.pending_publish_idle_dispatches.len(), 2);
 
@@ -19724,7 +20185,7 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("branch A activation".to_owned()))
         .expect("park branch A");
-    let branch_a = h.agents[&cid].head.expect("branch A");
+    let branch_a = h.agent_registry.agents[&cid].head.expect("branch A");
     h.publish_for_agent(
         &cid,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
@@ -19732,7 +20193,11 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
             head: tau_proto::AgentHead::Root,
         }),
     );
-    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("branch-b-readiness-hold"),
     };
     h.publish_for_agent(
@@ -19751,14 +20216,16 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
             message: "branch B wake".to_owned(),
         }),
     );
-    let branch_b = h.agents[&cid].head.expect("branch B wake node");
+    let branch_b = h.agent_registry.agents[&cid]
+        .head
+        .expect("branch B wake node");
     assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
     assert_eq!(
-        h.agents[&cid].pending_message_wakes.len(),
+        h.agent_registry.agents[&cid].pending_message_wakes.len(),
         1,
         "branch_a={branch_a:?} branch_b={branch_b:?} head={:?} state={:?} checkpoints={:?}",
-        h.agents[&cid].head,
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].head,
+        h.agent_registry.agents[&cid].activation_dispatch,
         event_log_events(&h)
             .into_iter()
             .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
@@ -19781,7 +20248,11 @@ fn readiness_deferred_activation_does_not_absorb_sibling_message_wake() {
         tau_proto::AgentHead::Node(branch_b)
     );
     assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
-    assert!(h.agents[&cid].pending_message_wakes.is_empty());
+    assert!(
+        h.agent_registry.agents[&cid]
+            .pending_message_wakes
+            .is_empty()
+    );
 
     h.handle_provider_response_finished(provider_text_response(
         &branch_b_prompt.agent_prompt_id,
@@ -19832,7 +20303,7 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
             activation_cut: Some(tau_proto::AgentHead::Root),
         });
 
-    h.agents.get_mut(&cid).expect("agent").head = None;
+    h.agent_registry.agents.get_mut(&cid).expect("agent").head = None;
     assert!(!h.activation_successor_matches_selected_head(&checkpoint));
     h.resume_restored_compaction_checkpoints(RestoredCheckpointAuthority::DiscoveryComplete);
     assert!(h.enqueued_standalone_inference_checkpoints.is_empty());
@@ -19845,14 +20316,14 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
     );
     h.rollback_rejected_activation_successor(&checkpoint);
     assert!(matches!(
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::AwaitingCheckpoint {
             owner: crate::agent::InferenceCheckpointOwner::Standalone { .. },
             ..
         }
     ));
 
-    h.agents.get_mut(&cid).expect("agent").head = through.as_option();
+    h.agent_registry.agents.get_mut(&cid).expect("agent").head = through.as_option();
     let event_path = state_dir
         .join("agents")
         .join(agent_id.as_str())
@@ -19864,7 +20335,7 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
         .insert((agent_id.clone(), transaction_id.clone()));
     h.publish_for_agent(&cid, checkpoint);
     assert!(matches!(
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::AwaitingCheckpoint {
             owner: crate::agent::InferenceCheckpointOwner::Standalone { .. },
             ..
@@ -19885,7 +20356,7 @@ fn standalone_checkpoint_storage_rejection_retries_after_recovery() {
         }),
     );
     assert!(matches!(
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::AwaitingCheckpoint { .. }
     ));
     h.publish_for_agent(
@@ -20442,7 +20913,7 @@ fn canceled_no_status_turn_persists_eager_decision_from_prompt_snapshot() {
             },
         );
     {
-        let agent = h.agents.get_mut(&cid).expect("agent");
+        let agent = h.agent_registry.agents.get_mut(&cid).expect("agent");
         agent.context_input_tokens = Some(100);
         agent.context_usage_model = Some("test/model".into());
         agent.context_usage_head = agent.head;
@@ -20527,7 +20998,7 @@ fn automatic_policy_terminal_matrix_commits_owned_suffix_once() {
                     },
                 );
             {
-                let agent = h.agents.get_mut(&cid).expect("agent");
+                let agent = h.agent_registry.agents.get_mut(&cid).expect("agent");
                 agent.context_input_tokens = Some(100);
                 agent.context_usage_model = Some("test/model".into());
                 agent.context_usage_head = agent.head;
@@ -20743,7 +21214,7 @@ fn outer_finish_alert_uses_terminal_snapshot_and_retains_hysteresis() {
             .terminal_context_size_alerts
             .insert("captured".to_owned(), alert.clone());
     };
-    arm(h.agents.get_mut(&cid).expect("agent"));
+    arm(h.agent_registry.agents.get_mut(&cid).expect("agent"));
     h.available_roles
         .get_mut(&h.selected_role)
         .expect("role")
@@ -20751,17 +21222,17 @@ fn outer_finish_alert_uses_terminal_snapshot_and_retains_hysteresis() {
         .clear();
     h.queue_outer_turn_finished_context_size_alerts(&cid, &outer_turn_id);
     assert_eq!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .filter(|prompt| prompt.is_context_size_alert())
             .count(),
         1
     );
-    arm(h.agents.get_mut(&cid).expect("agent"));
+    arm(h.agent_registry.agents.get_mut(&cid).expect("agent"));
     h.queue_outer_turn_finished_context_size_alerts(&cid, &outer_turn_id);
     assert_eq!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .filter(|prompt| prompt.is_context_size_alert())
@@ -20781,7 +21252,8 @@ fn after_response_alert_prefers_frozen_status_absence_over_stale_terminal_state(
     let cid = ensure_test_user_agent(&mut h);
     let prompt_id = tau_proto::AgentPromptId::parse("ap-no-status").expect("prompt");
     h.prompt_tool_specs.insert(prompt_id.clone(), Vec::new());
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("agent")
         .terminal_status_was_available = true;
@@ -20799,7 +21271,7 @@ fn after_response_alert_prefers_frozen_status_absence_over_stale_terminal_state(
     )]);
     h.queue_crossed_context_size_alerts_for_prompt(&cid, &prompt_id, Some(200), &alerts);
     assert!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .any(PendingPrompt::is_context_size_alert)
@@ -20857,7 +21329,10 @@ fn seed_historical_open_prefix_failure(
     tau_proto::AgentHead,
     tau_proto::AgentHead,
 ) {
-    let agent_id = h.agents[cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
     h.publish_for_agent(
         cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -20873,7 +21348,7 @@ fn seed_historical_open_prefix_failure(
             ctx_id: None,
         }),
     );
-    let prefix = tau_proto::AgentHead::Node(h.agents[cid].head.expect("prefix"));
+    let prefix = tau_proto::AgentHead::Node(h.agent_registry.agents[cid].head.expect("prefix"));
     h.publish_for_agent(
         cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -20907,7 +21382,8 @@ fn seed_historical_open_prefix_failure(
             ws_pool_delta: None,
         }),
     );
-    let assistant = tau_proto::AgentHead::Node(h.agents[cid].head.expect("assistant"));
+    let assistant =
+        tau_proto::AgentHead::Node(h.agent_registry.agents[cid].head.expect("assistant"));
     h.publish_for_agent(
         cid,
         Event::ProviderToolResult(ToolResult {
@@ -20922,7 +21398,7 @@ fn seed_historical_open_prefix_failure(
             originator: tau_proto::PromptOriginator::User,
         }),
     );
-    let results = tau_proto::AgentHead::Node(h.agents[cid].head.expect("results"));
+    let results = tau_proto::AgentHead::Node(h.agent_registry.agents[cid].head.expect("results"));
     let transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-historical-open-prefix").expect("id");
     h.publish_for_agent(
@@ -20967,11 +21443,14 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
         .expect("model")
         .supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
     let (prefix, assistant, results) =
         seed_historical_open_prefix_failure(&mut h, &cid, "test/model");
     assert!(matches!(
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
     h.handle_cancel_prompt(
@@ -20983,7 +21462,7 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
         },
     );
     assert!(matches!(
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
     assert!(!event_log_events(&h).into_iter().any(|event| matches!(
@@ -21069,7 +21548,10 @@ fn compact_repairs_cold_historical_open_prefix_failure() {
             .expect("model")
             .supports_standalone_compaction = true;
         let cid = ensure_test_user_agent(&mut h);
-        agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+        agent_id = h.agent_registry.agents[&cid]
+            .agent_id
+            .clone()
+            .expect("durable agent");
         (prefix, _, _) = seed_historical_open_prefix_failure(&mut h, &cid, "test/model");
         failed_transaction = event_log_events(&h)
             .into_iter()
@@ -21122,6 +21604,7 @@ fn compact_repairs_cold_historical_open_prefix_failure() {
     );
     assert!(!matches!(
         resumed
+            .agent_registry
             .agents
             .values()
             .find(|agent| agent.agent_id.as_deref() == Some(agent_id.as_str()))
@@ -21144,7 +21627,10 @@ fn compact_refuses_warm_blocked_recovery_off_owed_branch() {
         .expect("model")
         .supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
     let (prefix, _, _) = seed_historical_open_prefix_failure(&mut h, &cid, "test/model");
     h.publish_for_agent(
         &cid,
@@ -21167,7 +21653,7 @@ fn compact_refuses_warm_blocked_recovery_off_owed_branch() {
         1
     );
     assert!(matches!(
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
     assert!(event_log_events(&h).into_iter().any(|event| matches!(
@@ -21193,7 +21679,10 @@ fn compact_refuses_cold_blocked_recovery_off_owed_branch() {
             .expect("model")
             .supports_standalone_compaction = true;
         let cid = ensure_test_user_agent(&mut h);
-        agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+        agent_id = h.agent_registry.agents[&cid]
+            .agent_id
+            .clone()
+            .expect("durable agent");
         let (prefix, _, _) = seed_historical_open_prefix_failure(&mut h, &cid, "test/model");
         h.publish_for_agent(
             &cid,
@@ -21229,6 +21718,7 @@ fn compact_refuses_cold_blocked_recovery_off_owed_branch() {
         "cold recovery must emit no successor start"
     );
     let recovered = resumed
+        .agent_registry
         .agents
         .values()
         .find(|agent| agent.agent_id.as_deref() == Some(agent_id.as_str()))
@@ -21327,6 +21817,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
         .expect("agent tree");
     assert!(tree.has_complete_tool_round_for(started.cut.as_option(), &compact_call.id));
     let suffix_end = h
+        .agent_registry
         .agents
         .get(&cid)
         .and_then(|agent| agent.head)
@@ -21708,6 +22199,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
         .supports_standalone_compaction = true;
     install_scheduler_compaction_tools(&mut resumed);
     let resumed_cid = resumed
+        .agent_registry
         .agent_routes
         .get(caller_id.as_str())
         .cloned()
@@ -21901,7 +22393,10 @@ fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
     )
     .expect("register placeholder interceptor");
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     let prompt_id: AgentPromptId = test_agent_prompt_id("sp-scheduler-compact");
     seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
     h.prompt_agents.insert(prompt_id.clone(), cid.clone());
@@ -22011,8 +22506,14 @@ fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live(
     let caller_cid = ensure_test_user_agent(&mut h);
     let target_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
-    let caller_id = h.agents[&caller_cid].agent_id.clone().expect("caller id");
-    let target_id = h.agents[&target_cid].agent_id.clone().expect("target id");
+    let caller_id = h.agent_registry.agents[&caller_cid]
+        .agent_id
+        .clone()
+        .expect("caller id");
+    let target_id = h.agent_registry.agents[&target_cid]
+        .agent_id
+        .clone()
+        .expect("target id");
     let prompt_id: AgentPromptId = test_agent_prompt_id("sp-scheduler-agent-compact");
     seed_agent_thinking(&mut h, &caller_cid, prompt_id.as_str());
     h.prompt_agents
@@ -22201,7 +22702,10 @@ fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
             ..
         }))
     ));
-    let public_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let public_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
     drop(h);
     wait_for_session_unlock(&state, "s1");
     let resumed =
@@ -22348,7 +22852,10 @@ fn manual_self_compaction_failure_delivers_error_once() {
         Some(Event::AgentInferenceDispatchStarted(started))
             if started.transaction_id.is_none()
     ));
-    let public_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let public_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
     drop(h);
     wait_for_session_unlock(&state, "s1");
     let resumed =
@@ -22463,7 +22970,10 @@ fn manual_self_compaction_cold_failure_before_delivery() {
         Some(Event::AgentPromptSteered(steered))
             if steered.self_compaction_terminal.is_some()
     ));
-    let public_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    let public_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
     drop(h);
     wait_for_session_unlock(&state, "s1");
     let resumed =
@@ -23549,9 +24059,9 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             ref durable
         )) if durable == &durable_checkpoint
     ));
-    let second_cid = second.agent_routes[agent_id.as_str()].clone();
+    let second_cid = second.agent_registry.agent_routes[agent_id.as_str()].clone();
     assert!(matches!(
-        second.agents[&second_cid].activation_dispatch,
+        second.agent_registry.agents[&second_cid].activation_dispatch,
         crate::agent::ActivationDispatchState::DispatchUncertain {
             owner: crate::agent::InferenceCheckpointOwner::Standalone { ref id },
             ref agent_prompt_id,
@@ -23565,7 +24075,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             && durable_model == &model
             && cut == compact_cut
     ));
-    let status = &second.agent_watch_provider_status[agent_id.as_str()];
+    let status = &second.agent_watch.provider_status[agent_id.as_str()];
     assert_eq!(status.agent_prompt_id, durable_checkpoint.agent_prompt_id);
     assert!(matches!(
         status.state,
@@ -24032,8 +24542,9 @@ fn setup_manual_cross_compaction_test() -> (
     );
     target.agent_id = Some("unrelated-target".to_owned());
     target.role = Some(h.selected_role.clone());
-    h.agents.insert(target_cid.clone(), target);
-    h.agent_routes
+    h.agent_registry.agents.insert(target_cid.clone(), target);
+    h.agent_registry
+        .agent_routes
         .insert("unrelated-target".to_owned(), target_cid.clone());
     h.publish_for_agent(
         &target_cid,
@@ -24204,7 +24715,7 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
         "standalone failure must not advance the ordinary generation"
     );
     assert!(matches!(
-        h.agents[&target_cid].activation_dispatch,
+        h.agent_registry.agents[&target_cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
     assert_eq!(
@@ -24240,11 +24751,13 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
             .expect("echo model")
             .supports_standalone_compaction = true;
         let resumed_caller = resumed
+            .agent_registry
             .agent_routes
             .get(caller_id.as_str())
             .cloned()
             .expect("restored caller");
         let resumed_target = resumed
+            .agent_registry
             .agent_routes
             .get(target_id.as_str())
             .cloned()
@@ -24358,7 +24871,7 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
         .count();
     assert_eq!(successor_outcomes, 1);
     assert!(!matches!(
-        h.agents[&target_cid].activation_dispatch,
+        h.agent_registry.agents[&target_cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
     h.shutdown().expect("shutdown");
@@ -24384,10 +24897,10 @@ fn manual_cross_compaction_cold_replay_recovers_failed_tool_at_same_generation()
 fn manual_cross_compaction_blocked_repeat_requires_exact_recovery_ownership() {
     let (_td, mut h, _caller, target, _call, target_id) = setup_manual_cross_compaction_test();
     let (prefix, _, _) = seed_historical_open_prefix_failure(&mut h, &target, "echo/model");
-    let current_head = h.agents[&target]
+    let current_head = h.agent_registry.agents[&target]
         .head
         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-    let valid = h.agents[&target].activation_dispatch.clone();
+    let valid = h.agent_registry.agents[&target].activation_dispatch.clone();
     assert!(h.has_matching_blocked_recovery(target_id.as_str(), &valid, current_head));
 
     let path_crate_agent::ActivationDispatchState::Blocked {
@@ -24439,8 +24952,8 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     seed_historical_open_prefix_failure(&mut h, &cid, "echo/model");
-    let blocked = h.agents[&cid].activation_dispatch.clone();
-    let current_head = h.agents[&cid]
+    let blocked = h.agent_registry.agents[&cid].activation_dispatch.clone();
+    let current_head = h.agent_registry.agents[&cid]
         .head
         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
     assert!(h.has_matching_blocked_recovery(agent_id.as_str(), &blocked, current_head));
@@ -24518,7 +25031,9 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
     assert_eq!(durable_compaction_counts(&h, &agent_id), (1, 1, 1, 0));
     assert!(!h.tool_runtime.tool_turn.is_backgrounded(&call.id));
     assert_eq!(
-        h.agents[&cid].activation_dispatch.blocked_recovery(),
+        h.agent_registry.agents[&cid]
+            .activation_dispatch
+            .blocked_recovery(),
         blocked.blocked_recovery()
     );
     h.shutdown().expect("shutdown");
@@ -24588,7 +25103,8 @@ fn manual_cross_compaction_successful_repeat_at_same_generation_is_not_needed() 
         durable_compaction_counts(&h, &target_id),
         (1, 1, 0, 1),
         "{:?}",
-        h.agents
+        h.agent_registry
+            .agents
             .values()
             .find(|agent| agent.agent_id.as_deref() == Some(target_id.as_str()))
             .map(|agent| (&agent.turn_state, &agent.activation_dispatch))
@@ -24640,6 +25156,7 @@ fn ordinary_prompt_started_advances_persisted_inference_generation() {
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("ordinary inference".to_owned()))
         .expect("dispatch ordinary inference");
     let prompt_id = h
+        .agent_registry
         .agents
         .get(&cid)
         .and_then(|agent| agent.in_flight_prompt.clone())
@@ -24750,7 +25267,7 @@ fn cold_reopen_preserves_unterminated_outer_turn_and_accounts_next_turn() {
     first
         .dispatch_prompt_for_agent(&cid, PendingPrompt::user("crash boundary".to_owned()))
         .expect("dispatch unresolved prompt");
-    let unresolved_prompt_id = first.agents[&cid]
+    let unresolved_prompt_id = first.agent_registry.agents[&cid]
         .in_flight_prompt
         .clone()
         .expect("unresolved prompt");
@@ -24779,7 +25296,7 @@ fn cold_reopen_preserves_unterminated_outer_turn_and_accounts_next_turn() {
         tau_proto::SessionStartReason::Resume,
     )
     .expect("second harness");
-    let resumed_cid = second.agent_routes[agent_id.as_str()].clone();
+    let resumed_cid = second.agent_registry.agent_routes[agent_id.as_str()].clone();
     let resumed_records = second
         .agent_store
         .agent_events(agent_id.as_str())
@@ -24808,7 +25325,7 @@ fn cold_reopen_preserves_unterminated_outer_turn_and_accounts_next_turn() {
             PendingPrompt::user("completed after restart".to_owned()),
         )
         .expect("dispatch completed prompt");
-    let completed_prompt_id = second.agents[&resumed_cid]
+    let completed_prompt_id = second.agent_registry.agents[&resumed_cid]
         .in_flight_prompt
         .clone()
         .expect("completed prompt");
@@ -24896,6 +25413,7 @@ fn manual_compaction_accepts_later_inference_generation() {
     h.dispatch_prompt_for_agent(&target, PendingPrompt::user("new target work".to_owned()))
         .expect("dispatch later ordinary inference");
     let prompt_id = h
+        .agent_registry
         .agents
         .get(&target)
         .and_then(|agent| agent.in_flight_prompt.clone())
@@ -25127,7 +25645,7 @@ fn manual_cross_compaction_repairs_blocked_open_prefix_target() {
     ))
     .expect("accept cross-agent recovery");
     assert!(!matches!(
-        h.agents[&target_cid].activation_dispatch,
+        h.agent_registry.agents[&target_cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
     h.shutdown().expect("shutdown");
@@ -25173,7 +25691,7 @@ fn manual_cross_compaction_refuses_blocked_target_off_owed_branch() {
                     == tau_proto::ManualCompactionRequestFailureReason::StaleBranch
     )));
     assert!(matches!(
-        h.agents[&target_cid].activation_dispatch,
+        h.agent_registry.agents[&target_cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
     h.shutdown().expect("shutdown");
@@ -25224,7 +25742,11 @@ fn manual_cross_compaction_post_start_cancel_is_exact() {
 #[test]
 fn manual_cross_compaction_rejects_busy_target() {
     let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
-    h.agents.get_mut(&target).expect("target").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&target)
+        .expect("target")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("ap-busy"),
     };
     h.request_agent_tool_compaction(
@@ -25241,7 +25763,8 @@ fn manual_cross_compaction_rejects_busy_target() {
 #[test]
 fn manual_cross_compaction_rejects_uncertain_dispatch() {
     let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&target)
         .expect("target")
         .activation_dispatch = path_crate_agent::ActivationDispatchState::DispatchUncertain {
@@ -25300,7 +25823,7 @@ fn manual_cross_compaction_rejects_unavailable_target() {
 fn manual_cross_compaction_rejects_caller_limit() {
     let (_td, mut h, caller, _target, call, target_id) = setup_manual_cross_compaction_test();
     let caller_public = crate::parse_agent_id(
-        h.agents[&caller]
+        h.agent_registry.agents[&caller]
             .agent_id
             .as_deref()
             .expect("caller public id"),
@@ -25336,7 +25859,7 @@ fn manual_cross_compaction_rejects_repeat_guard_and_mismatched_block() {
     let historical = tau_proto::AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse("cr-historical").expect("request id"),
         caller_agent_id: crate::parse_agent_id(
-            h.agents[&caller]
+            h.agent_registry.agents[&caller]
                 .agent_id
                 .as_deref()
                 .expect("caller public id"),
@@ -25373,7 +25896,8 @@ fn manual_cross_compaction_rejects_repeat_guard_and_mismatched_block() {
 
     let mismatched_call =
         register_manual_cross_compaction_call(&mut h, &caller, "call-mismatched-block");
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&target)
         .expect("target")
         .activation_dispatch = path_crate_agent::ActivationDispatchState::Blocked {
@@ -25419,7 +25943,8 @@ fn instant_background_test_tool_spec(name: &str) -> ToolSpec {
 }
 
 fn active_prompt_for(h: &Harness, cid: &AgentId) -> AgentPromptId {
-    h.agents
+    h.agent_registry
+        .agents
         .get(cid)
         .expect("conversation exists")
         .in_flight_prompt
@@ -25499,7 +26024,11 @@ fn start_background_tool_and_finish_placeholder_turn(
     ))
     .expect("finish placeholder followup");
     assert!(matches!(
-        h.agents.get(cid).expect("conversation exists").turn_state,
+        h.agent_registry
+            .agents
+            .get(cid)
+            .expect("conversation exists")
+            .turn_state,
         AgentTurnState::Idle
     ));
 }
@@ -25630,7 +26159,7 @@ fn no_arg_wait_before_background_completion_suppresses_completion_prompt() {
         Event::AgentPromptSteered(steered) if steered.text == completion_prompt
     )));
     assert!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .all(|prompt| prompt.text != completion_prompt)
@@ -25672,7 +26201,7 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
         "Tool call `bg-any-after` completed. Its result is queued; use `wait` to consume it."
     );
     assert!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .any(|prompt| prompt.text == completion_prompt && prompt.is_internal())
@@ -25695,7 +26224,7 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
             .contains(&call_id)
     );
     assert!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .all(|prompt| prompt.text != completion_prompt)
@@ -25907,7 +26436,10 @@ fn agent_message_interrupts_recipient_active_wait() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
-    let recipient_id = h.agents[&cid].agent_id.clone().expect("recipient id");
+    let recipient_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("recipient id");
     let background_call_id: ToolCallId = "bg-msg-wait".into();
     start_background_tool_and_finish_placeholder_turn(
         &mut h,
@@ -26012,7 +26544,8 @@ fn wait_start_is_interrupted_by_already_queued_user_prompt() {
         background_call_id.as_str(),
         "slow_queued_wait",
     );
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("agent")
         .pending_prompts
@@ -26093,7 +26626,10 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
     let wait_call_id: ToolCallId = "wait-queued-message".into();
     let wait_call = wait_no_args_call(wait_call_id.as_str());
     seed_tools_running(&mut h, &cid, vec![wait_call_id.clone()]);
-    let recipient_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let recipient_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.publish_event(
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
@@ -26165,7 +26701,10 @@ fn input_wait_returns_immediately_for_already_queued_activation() {
     let cid = ensure_test_user_agent(&mut h);
     let call = wait_input_call("wait-input-queued");
     seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
-    let durable_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let durable_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     let submission = h
         .submit_prompt_to_agent(
             h.current_session_id.clone(),
@@ -26197,14 +26736,17 @@ fn input_wait_wakes_once_when_activating_prompt_is_queued() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
-    let durable_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let durable_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     let call = wait_input_call("wait-input-arrives");
     seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
     h.handle_wait_tool_call(&cid, &call, ToolName::new("wait"))
         .expect("register input wait");
     assert_eq!(tool_result_count(&h, call.id.as_str()), 0);
     assert!(matches!(
-        h.agents[&cid].turn_state,
+        h.agent_registry.agents[&cid].turn_state,
         AgentTurnState::ToolsRunning { .. }
     ));
 
@@ -26250,7 +26792,7 @@ fn input_wait_timeout_completes_once_inside_running_turn() {
     assert!(!h.input_wait_pending_for(&cid));
     assert!(!h.tool_runtime.tool_agents.contains_key(&call.id));
     assert!(matches!(
-        h.agents[&cid].turn_state,
+        h.agent_registry.agents[&cid].turn_state,
         AgentTurnState::ToolsRunning { .. }
     ));
     assert!(event_log_contains_any_source(&h, |event| matches!(
@@ -27102,7 +27644,7 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
     )));
     assert!(h.input_wait_pending_for(&cid));
     assert!(matches!(
-        h.agents[&cid].turn_state,
+        h.agent_registry.agents[&cid].turn_state,
         AgentTurnState::ToolsRunning { .. }
     ));
     assert!(h.agent_has_open_foreground_tool_round(&cid));
@@ -27170,11 +27712,11 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
         submissions_before
     );
     assert!(matches!(
-        h.agents[&cid].turn_state,
+        h.agent_registry.agents[&cid].turn_state,
         AgentTurnState::ToolsRunning { .. }
     ));
     assert!(matches!(
-        h.agents[&cid].activation_dispatch,
+        h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::None
     ));
     assert_eq!(
@@ -27190,7 +27732,8 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
     h.process_runtime_deadlines_at(deadline);
     assert!(!h.input_wait_pending_for(&cid));
     assert!(!h.agent_has_open_foreground_tool_round(&cid));
-    let through = tau_proto::AgentHead::Node(h.agents[&cid].head.expect("wait terminal"));
+    let through =
+        tau_proto::AgentHead::Node(h.agent_registry.agents[&cid].head.expect("wait terminal"));
     let continuation = read_nth_prompt_created(&h, 1);
     let continuation_provider = h.pending_provider_prompts[&continuation.agent_prompt_id].clone();
     h.handle_extension_event_inner(
@@ -27381,7 +27924,10 @@ fn passive_background_notice_does_not_wake_input_wait() {
     h.queue_passive_background_completion_prompt(&cid, &passive_call);
     assert_eq!(tool_result_count(&h, call.id.as_str()), 0);
 
-    let durable_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let durable_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.submit_prompt_to_agent(
         h.current_session_id.clone(),
         &durable_id,
@@ -27400,7 +27946,10 @@ fn agent_unload_discards_registered_input_wait() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
-    let durable_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let durable_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     let call = wait_input_call("wait-input-unload");
     seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
     h.handle_wait_tool_call(&cid, &call, ToolName::new("wait"))
@@ -27670,11 +28219,11 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
     let target_cid = ensure_test_user_agent(&mut h);
     let waiter_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
-    let target_agent_id = h.agents[&target_cid]
+    let target_agent_id = h.agent_registry.agents[&target_cid]
         .agent_id
         .clone()
         .expect("target agent id");
-    let waiter_agent_id = h.agents[&waiter_cid]
+    let waiter_agent_id = h.agent_registry.agents[&waiter_cid]
         .agent_id
         .clone()
         .expect("waiter agent id");
@@ -27702,7 +28251,8 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             CborValue::Text(background_call_id.to_string()),
         )]),
     };
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&waiter_cid)
         .expect("waiter agent")
         .pending_prompts
@@ -27863,6 +28413,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
 
     assert!(matches!(h.turn_state, TurnState::Idle));
     let default_turn = &h
+        .agent_registry
         .agents
         .get(&test_user_agent(&h))
         .expect("default conversation")
@@ -27885,12 +28436,14 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
 
     let side_cid = ext_query_cid(&h, "q1").expect("side conversation");
     let side_agent_id = h
+        .agent_registry
         .agents
         .get(&side_cid)
         .and_then(|conv| conv.agent_id.clone())
         .expect("side agent id");
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .values()
             .all(|conv| conv.pending_prompts.is_empty()),
         "side prompt must dispatch immediately"
@@ -27982,11 +28535,13 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     assert_eq!(result.text, "delegated answer");
 
     let side_cid = h
+        .agent_registry
         .agent_routes
         .get(&side_agent_id)
         .expect("completed delegate remains targetable")
         .clone();
     let side_conv = h
+        .agent_registry
         .agents
         .get(&side_cid)
         .expect("completed delegate conversation is kept");
@@ -28045,12 +28600,16 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
         h.handle_provider_response_finished(completed)
             .expect("complete worker");
 
-        let worker = h.agents.get(&worker_cid).expect("detached worker");
+        let worker = h
+            .agent_registry
+            .agents
+            .get(&worker_cid)
+            .expect("detached worker");
         assert!(worker.originator.is_user());
         assert!(worker.source_connection.is_none());
         assert!(worker.parent_tool_call_id.is_none());
         assert_eq!(
-            h.agent_navigation_modes.get(&worker_agent_id),
+            h.agent_registry.navigation_modes.get(&worker_agent_id),
             Some(&tau_proto::AgentNavigationMode::ActiveAuto)
         );
         let creation = h
@@ -28072,15 +28631,20 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
         .expect("resume");
     h.selected_model = Some("test/model".into());
     let worker_cid = h
+        .agent_registry
         .agent_routes
         .get(worker_agent_id.as_str())
         .cloned()
         .expect("restored worker route");
-    let worker = h.agents.get(&worker_cid).expect("restored worker");
+    let worker = h
+        .agent_registry
+        .agents
+        .get(&worker_cid)
+        .expect("restored worker");
     assert!(worker.originator.is_user());
     assert!(matches!(worker.turn_state, AgentTurnState::Idle));
     assert_eq!(
-        h.agent_navigation_modes.get(&worker_agent_id),
+        h.agent_registry.navigation_modes.get(&worker_agent_id),
         Some(&tau_proto::AgentNavigationMode::ActiveAuto)
     );
 
@@ -28098,7 +28662,7 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
     )
     .expect("submit fresh worker turn");
     assert_eq!(
-        h.agent_navigation_modes.get(&worker_agent_id),
+        h.agent_registry.navigation_modes.get(&worker_agent_id),
         Some(&tau_proto::AgentNavigationMode::Active),
         "accepted direct UI input overrides the restored delegated default"
     );
@@ -28119,18 +28683,19 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
     ))
     .expect("finish fresh worker turn");
     assert_eq!(
-        h.agent_navigation_modes.get(&worker_agent_id),
+        h.agent_registry.navigation_modes.get(&worker_agent_id),
         Some(&tau_proto::AgentNavigationMode::Active),
         "the implicit write survives the turn becoming idle"
     );
 
     assert_eq!(
-        h.agent_routes.get(worker_agent_id.as_str()),
+        h.agent_registry.agent_routes.get(worker_agent_id.as_str()),
         Some(&worker_cid)
     );
-    assert!(h.session_loaded_agents.contains(&worker_agent_id));
+    assert!(h.agent_registry.session_loaded.contains(&worker_agent_id));
     assert!(matches!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&worker_cid)
             .expect("worker remains loaded")
             .turn_state,
@@ -28178,7 +28743,10 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
         echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
             .expect("second cold resume");
     assert_eq!(
-        restored_again.agent_navigation_modes.get(&worker_agent_id),
+        restored_again
+            .agent_registry
+            .navigation_modes
+            .get(&worker_agent_id),
         Some(&tau_proto::AgentNavigationMode::ActiveAuto),
         "cold replay must recompute the delegated default instead of replaying Active"
     );
@@ -28206,7 +28774,7 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
             .expect("start explicit-parent worker");
         let worker_cid = ext_query_cid(&h, "q-explicit-parent-cut").expect("worker conversation");
         let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
-        let worker_prompt_id = h.agents[&worker_cid]
+        let worker_prompt_id = h.agent_registry.agents[&worker_cid]
             .in_flight_prompt
             .clone()
             .expect("worker prompt");
@@ -28225,11 +28793,15 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
         // StartAgentResult and call complete_finished_side_conversation.
         h.publish_finished_response_for_agent(&worker_cid, None, &terminal, None, false);
         assert!(matches!(
-            h.agents[&worker_cid].originator,
+            h.agent_registry.agents[&worker_cid].originator,
             tau_proto::PromptOriginator::Extension { .. }
         ));
-        assert!(h.agents[&worker_cid].parent_agent_id.is_some());
-        assert!(h.session_loaded_agents.contains(&worker_agent_id));
+        assert!(
+            h.agent_registry.agents[&worker_cid]
+                .parent_agent_id
+                .is_some()
+        );
+        assert!(h.agent_registry.session_loaded.contains(&worker_agent_id));
         h.shutdown().expect("shutdown at terminal cut");
         worker_agent_id
     };
@@ -28238,18 +28810,23 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
         .expect("resume terminal cut");
     h.selected_model = Some("test/model".into());
     let worker_cid = h
+        .agent_registry
         .agent_routes
         .get(worker_agent_id.as_str())
         .cloned()
         .expect("restored worker route");
-    let worker = h.agents.get(&worker_cid).expect("restored worker");
+    let worker = h
+        .agent_registry
+        .agents
+        .get(&worker_cid)
+        .expect("restored worker");
     assert!(worker.originator.is_user());
     assert!(worker.source_connection.is_none());
     assert!(worker.parent_agent_id.is_none());
     assert!(worker.parent_tool_call_id.is_none());
     assert!(matches!(worker.turn_state, AgentTurnState::Idle));
     assert_eq!(
-        h.agent_navigation_modes.get(&worker_agent_id),
+        h.agent_registry.navigation_modes.get(&worker_agent_id),
         Some(&tau_proto::AgentNavigationMode::ActiveAuto)
     );
 
@@ -28266,7 +28843,7 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
         },
     )
     .expect("submit fresh worker turn");
-    let fresh_prompt_id = h.agents[&worker_cid]
+    let fresh_prompt_id = h.agent_registry.agents[&worker_cid]
         .in_flight_prompt
         .clone()
         .expect("fresh worker prompt");
@@ -28277,8 +28854,8 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
     ))
     .expect("complete fresh worker turn");
 
-    assert!(h.agents.contains_key(&worker_cid));
-    assert!(h.session_loaded_agents.contains(&worker_agent_id));
+    assert!(h.agent_registry.agents.contains_key(&worker_cid));
+    assert!(h.agent_registry.session_loaded.contains(&worker_agent_id));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::StartAgentResult(result) if result.query_id == "q-explicit-parent-cut"
@@ -28342,7 +28919,7 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
         h.handle_provider_response_finished(response)
             .expect("finish first worker round");
         assert!(matches!(
-            h.agents[&worker_cid].originator,
+            h.agent_registry.agents[&worker_cid].originator,
             tau_proto::PromptOriginator::Extension { .. }
         ));
         assert!(
@@ -28371,31 +28948,35 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
         echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
             .expect("resume continuation cut");
     let worker_cid = resumed
+        .agent_registry
         .agent_routes
         .get(worker_agent_id.as_str())
         .cloned()
         .expect("interrupted worker remains routed");
     assert!(matches!(
-        resumed.agents[&worker_cid].originator,
+        resumed.agent_registry.agents[&worker_cid].originator,
         tau_proto::PromptOriginator::Extension { .. }
     ));
     assert_eq!(
-        resumed.agents[&worker_cid].source_connection.as_ref(),
+        resumed.agent_registry.agents[&worker_cid]
+            .source_connection
+            .as_ref(),
         Some(&crate::test_connection_id(HARNESS_CONNECTION_ID))
     );
-    assert!(resumed.agents[&worker_cid].restored_tool_backed_start);
+    assert!(resumed.agent_registry.agents[&worker_cid].restored_tool_backed_start);
     assert_eq!(
         path_crate_internal_tools::InternalToolHost::new(&mut resumed)
             .agent_id_for_harness_start_query("delegate-3"),
         Some(worker_agent_id.to_string())
     );
     let parent_cid = resumed
+        .agent_registry
         .agent_routes
         .get(parent_agent_id.as_str())
         .cloned()
         .expect("restored parent");
     assert_eq!(
-        resumed.agents[&worker_cid].parent_agent_id,
+        resumed.agent_registry.agents[&worker_cid].parent_agent_id,
         Some(parent_cid.clone())
     );
     resumed
@@ -28413,7 +28994,7 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
             "continue after restart".to_owned(),
         )
         .expect("message restored worker");
-    let continued_prompt_id = resumed.agents[&worker_cid]
+    let continued_prompt_id = resumed.agent_registry.agents[&worker_cid]
         .in_flight_prompt
         .clone()
         .expect("message continuation prompt");
@@ -28444,7 +29025,7 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
     resumed
         .handle_provider_response_finished(reply)
         .expect("worker replies to parent");
-    let final_prompt_id = resumed.agents[&worker_cid]
+    let final_prompt_id = resumed.agent_registry.agents[&worker_cid]
         .in_flight_prompt
         .clone()
         .expect("worker continuation after reply");
@@ -28482,7 +29063,12 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
             .count(),
         1
     );
-    assert!(resumed.agent_routes.contains_key(worker_agent_id.as_str()));
+    assert!(
+        resumed
+            .agent_registry
+            .agent_routes
+            .contains_key(worker_agent_id.as_str())
+    );
     assert!(!event_log_contains_any_source(&resumed, |event| matches!(
         event,
         Event::SessionAgentUnloaded(unloaded) if unloaded.agent_id == worker_agent_id
@@ -28532,10 +29118,16 @@ fn cold_restore_classifies_unroutable_extension_worker_as_unavailable() {
     let mut resumed =
         echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
             .expect("resume");
-    assert!(!resumed.agent_routes.contains_key(worker_agent_id.as_str()));
+    assert!(
+        !resumed
+            .agent_registry
+            .agent_routes
+            .contains_key(worker_agent_id.as_str())
+    );
     assert!(
         resumed
-            .restored_unavailable_agents
+            .agent_registry
+            .restored_unavailable
             .contains_key(worker_agent_id.as_str())
     );
     assert_eq!(
@@ -28552,6 +29144,7 @@ fn cold_restore_classifies_unroutable_extension_worker_as_unavailable() {
         .expect_err("unavailable target must reject watch");
     assert!(watch_error.contains("cannot resume its pre-restart delegation"));
     let parent_cid = resumed
+        .agent_registry
         .agent_routes
         .get(parent_agent_id.as_str())
         .cloned()
@@ -28655,9 +29248,14 @@ fn cold_restore_classifies_legacy_extension_worker_without_creator_as_unavailabl
 
     let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
         .expect("resume");
-    assert!(!h.agent_routes.contains_key(agent_id.as_str()));
     assert!(
-        h.restored_unavailable_agents
+        !h.agent_registry
+            .agent_routes
+            .contains_key(agent_id.as_str())
+    );
+    assert!(
+        h.agent_registry
+            .restored_unavailable
             .contains_key(agent_id.as_str())
     );
     assert_eq!(
@@ -28699,11 +29297,13 @@ fn route_loss_emits_one_typed_lifecycle_before_watch_prune() {
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&worker_cid)
         .expect("worker")
         .source_connection = None;
     let prompt_id = h
+        .agent_registry
         .agents
         .get(&worker_cid)
         .and_then(|agent| agent.in_flight_prompt.clone())
@@ -28809,7 +29409,7 @@ fn cold_restore_does_not_classify_reactive_recovery_as_completed_worker() {
             tau_proto::PromptOperation::StandaloneCompaction
         );
         assert!(matches!(
-            h.agents[&worker_cid].originator,
+            h.agent_registry.agents[&worker_cid].originator,
             tau_proto::PromptOriginator::Extension { .. }
         ));
         h.shutdown().expect("shutdown reactive cut");
@@ -28856,10 +29456,18 @@ fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
         let compact = read_nth_prompt_created(&h, 1);
         h.handle_provider_response_finished(context_overflow_response(&compact))
             .expect("fail reactive compaction");
-        assert!(h.agents[&worker_cid].originator.is_user());
-        assert!(h.agents[&worker_cid].parent_agent_id.is_none());
-        assert!(h.agents[&worker_cid].parent_tool_call_id.is_none());
-        assert!(h.session_loaded_agents.contains(&worker_agent_id));
+        assert!(h.agent_registry.agents[&worker_cid].originator.is_user());
+        assert!(
+            h.agent_registry.agents[&worker_cid]
+                .parent_agent_id
+                .is_none()
+        );
+        assert!(
+            h.agent_registry.agents[&worker_cid]
+                .parent_tool_call_id
+                .is_none()
+        );
+        assert!(h.agent_registry.session_loaded.contains(&worker_agent_id));
         assert_eq!(
             event_log_count(&h, |event| matches!(
                 event,
@@ -28880,17 +29488,25 @@ fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
             .expect("resume completed failure");
     resumed.selected_model = Some("test/model".into());
     let worker_cid = resumed
+        .agent_registry
         .agent_routes
         .get(worker_agent_id.as_str())
         .cloned()
         .expect("restored worker route");
-    assert!(resumed.agents[&worker_cid].originator.is_user());
+    assert!(
+        resumed.agent_registry.agents[&worker_cid]
+            .originator
+            .is_user()
+    );
     assert!(matches!(
-        resumed.agents[&worker_cid].turn_state,
+        resumed.agent_registry.agents[&worker_cid].turn_state,
         AgentTurnState::Idle
     ));
     assert_eq!(
-        resumed.agent_navigation_modes.get(&worker_agent_id),
+        resumed
+            .agent_registry
+            .navigation_modes
+            .get(&worker_agent_id),
         Some(&tau_proto::AgentNavigationMode::ActiveAuto)
     );
     resumed
@@ -28908,14 +29524,17 @@ fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
         )
         .expect("submit fresh worker turn");
     assert!(
-        resumed.agents[&worker_cid]
+        resumed.agent_registry.agents[&worker_cid]
             .pending_prompts
             .iter()
             .any(|prompt| prompt.text == "fresh after compaction failure"),
         "the durable blocked recovery may queue the turn, but restored request ownership must be ordinary"
     );
     assert_eq!(
-        resumed.agent_routes.get(worker_agent_id.as_str()),
+        resumed
+            .agent_registry
+            .agent_routes
+            .get(worker_agent_id.as_str()),
         Some(&worker_cid)
     );
     assert!(!event_log_contains_any_source(&resumed, |event| matches!(
@@ -28996,7 +29615,7 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
         .expect("dispatch query");
     let side_cid = ext_query_cid(&h, "q-reentrant").expect("side conversation");
     assert_eq!(
-        h.agents[&side_cid].agent_id.as_deref(),
+        h.agent_registry.agents[&side_cid].agent_id.as_deref(),
         Some(side_agent_id.as_str())
     );
     *target_agent_id.lock().expect("target agent id") = Some(side_agent_id.clone());
@@ -29013,13 +29632,13 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
     };
     h.handle_provider_response_finished(terminal)
         .expect("side finished");
-    assert!(h.agents[&side_cid].originator.is_user());
-    let replacement_spid = h.agents[&side_cid]
+    assert!(h.agent_registry.agents[&side_cid].originator.is_user());
+    let replacement_spid = h.agent_registry.agents[&side_cid]
         .in_flight_prompt
         .clone()
         .expect("reentrant completion prompt remains owned");
     assert!(matches!(
-        h.agents[&side_cid].turn_state,
+        h.agent_registry.agents[&side_cid].turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
     assert!(h.dispatch_blocked_for(&side_cid));
@@ -29029,10 +29648,11 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
         PromptSubmission::Queued
     ));
     assert_eq!(
-        h.agents[&side_cid].in_flight_prompt.as_ref(),
+        h.agent_registry.agents[&side_cid].in_flight_prompt.as_ref(),
         Some(&replacement_spid)
     );
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&side_cid)
         .expect("side conversation")
         .pending_prompts
@@ -29048,11 +29668,11 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
         .expect("late completion response");
 
     assert!(
-        h.agent_routes.contains_key(&side_agent_id),
+        h.agent_registry.agent_routes.contains_key(&side_agent_id),
         "a stale extension originator must not tear down the detached delegate"
     );
     assert!(matches!(
-        h.agents[&side_cid].turn_state,
+        h.agent_registry.agents[&side_cid].turn_state,
         AgentTurnState::Idle
     ));
     let result_count = event_log_count(&h, |event| {
@@ -29105,6 +29725,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
     .expect("query");
     let side_cid = ext_query_cid(&h, "q-user").expect("side conversation");
     let side_agent_id = h
+        .agent_registry
         .agents
         .get(&side_cid)
         .and_then(|conv| conv.agent_id.clone())
@@ -29158,7 +29779,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
     .expect("side finished");
 
     assert!(
-        h.agent_routes.contains_key(&side_agent_id),
+        h.agent_registry.agent_routes.contains_key(&side_agent_id),
         "interacted delegate remains targetable"
     );
 
@@ -29204,6 +29825,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         })
         .expect("side prompt id");
     let recipient_id = h
+        .agent_registry
         .agents
         .get(&side_cid)
         .and_then(|conv| conv.agent_id.clone())
@@ -29262,7 +29884,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     .expect("side first response");
 
     assert!(
-        h.agents.contains_key(&side_cid),
+        h.agent_registry.agents.contains_key(&side_cid),
         "side conversation must stay alive to process queued agent.message_received"
     );
     assert!(
@@ -29325,7 +29947,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     .expect("side message response");
 
     assert!(
-        h.agents.contains_key(&side_cid),
+        h.agent_registry.agents.contains_key(&side_cid),
         "tool-backed side conversation stays targetable after message turn"
     );
     let events = delegate_events.lock().expect("delegate events");
@@ -29379,7 +30001,7 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
         ext_query("q-named"),
     )
     .expect("query");
-    let mut side_agents = h.agents.iter().filter(|(_, conv)| {
+    let mut side_agents = h.agent_registry.agents.iter().filter(|(_, conv)| {
         matches!(
             &conv.originator,
             tau_proto::PromptOriginator::Extension { query_id, .. } if query_id == "q-named"
@@ -29391,15 +30013,16 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
     assert_eq!(cid.as_str(), public_agent_id);
     assert!(!cid.as_str().starts_with("start-agent-"));
     let cid = cid.clone();
-    let agent_count = h.agents.len();
+    let agent_count = h.agent_registry.agents.len();
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate-b"),
         ext_query("q-named"),
     )
     .expect("duplicate query");
-    assert_eq!(h.agents.len(), agent_count);
+    assert_eq!(h.agent_registry.agents.len(), agent_count);
     assert_eq!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .and_then(|conv| conv.source_connection.as_deref()),
         Some("conn-delegate-b")
@@ -29650,7 +30273,12 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
         ws_pool_delta: None,
     })
     .expect("main response");
-    let parent_head_before = h.agents.get(&cid).expect("default conv").head;
+    let parent_head_before = h
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("default conv")
+        .head;
     assert!(
         parent_head_before.is_some(),
         "parent conv should have advanced its head after the agent's reply",
@@ -29741,7 +30369,12 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
     // the side conv's publish — both convs are now downstream of the
     // parent's previous tip, but the side conv folded onto its own
     // child node.
-    let parent_head_after = h.agents.get(&cid).expect("default conv").head;
+    let parent_head_after = h
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("default conv")
+        .head;
     assert_eq!(
         parent_head_before, parent_head_after,
         "side conv's UserMessage must not advance the parent conv's head",
@@ -30014,13 +30647,18 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
         .prompt_agents
         .iter()
         .find(|(_, prompt_cid)| {
-            h.agents
+            h.agent_registry
+                .agents
                 .get(*prompt_cid)
                 .is_some_and(|conv| !conv.originator.is_user())
         })
         .map(|(spid, cid)| (cid.clone(), spid.clone()))
         .expect("side conv must exist");
-    let side_conv = h.agents.get(&side_cid).expect("side conv present");
+    let side_conv = h
+        .agent_registry
+        .agents
+        .get(&side_cid)
+        .expect("side conv present");
     assert_eq!(
         side_conv.in_flight_prompt.as_ref(),
         Some(&side_spid),
@@ -30033,7 +30671,11 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
     h.submit_user_prompt(test_session_id("s1"), "interrupting prompt".to_owned())
         .expect("submit user");
 
-    let side_conv = h.agents.get(&side_cid).expect("side conv still tracked");
+    let side_conv = h
+        .agent_registry
+        .agents
+        .get(&side_cid)
+        .expect("side conv still tracked");
     assert!(
         side_conv.in_flight_prompt.is_none(),
         "user prompt must clear the side conv's in-flight spid so the agent's \
@@ -30497,7 +31139,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     })
     .expect("finish side conversation");
     assert!(
-        h.agents.contains_key(&side_cid),
+        h.agent_registry.agents.contains_key(&side_cid),
         "tool-backed delegate conversation is detached/preserved after completion"
     );
     assert_eq!(h.tool_runtime.tool_agents.get("slow-call"), Some(&side_cid));
@@ -30546,6 +31188,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     .expect("background display projection");
     assert!(canonical_position < display_position);
     let parent = h
+        .agent_registry
         .agents
         .get(&parent_cid)
         .expect("parent conversation remains live");
@@ -30606,7 +31249,10 @@ fn background_completion_from_removed_side_conversation_is_retired() {
     )
     .expect("side query");
     let side_cid = ext_query_cid(&h, "q-removed-bg").expect("side conversation");
-    let side_agent_id = h.agents[&side_cid].agent_id.clone().expect("side agent id");
+    let side_agent_id = h.agent_registry.agents[&side_cid]
+        .agent_id
+        .clone()
+        .expect("side agent id");
     let call_id: ToolCallId = "removed-slow-call".into();
 
     h.tool_runtime.pending_tools.insert(
@@ -30635,7 +31281,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
 
     h.remove_agent(&side_cid);
 
-    assert!(!h.agents.contains_key(&side_cid));
+    assert!(!h.agent_registry.agents.contains_key(&side_cid));
     assert!(!h.tool_runtime.tool_agents.contains_key(&call_id));
     assert!(
         !h.tool_runtime
@@ -30643,6 +31289,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
             .contains_key(&call_id)
     );
     let parent = h
+        .agent_registry
         .agents
         .get(&parent_cid)
         .expect("parent conversation remains live");
@@ -30702,6 +31349,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
         Event::ToolBackgroundResult(result) if result.call_id == call_id
     )));
     let parent = h
+        .agent_registry
         .agents
         .get(&parent_cid)
         .expect("parent conversation remains live");
@@ -30718,7 +31366,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
     )
     .expect("fault side query");
     let fault_cid = ext_query_cid(&h, "q-removed-bg-fault").expect("fault side conversation");
-    let fault_agent_id = h.agents[&fault_cid]
+    let fault_agent_id = h.agent_registry.agents[&fault_cid]
         .agent_id
         .clone()
         .expect("fault side agent id");
@@ -30757,7 +31405,8 @@ fn background_completion_from_removed_side_conversation_is_retired() {
     h.remove_agent(&fault_cid);
 
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&fault_cid)
             .is_some_and(|agent| agent.terminating)
     );
@@ -30777,6 +31426,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
             if unloaded.agent_id.as_str() == fault_agent_id
     )));
     let parent = h
+        .agent_registry
         .agents
         .get(&parent_cid)
         .expect("parent remains after failed child terminal");
@@ -30846,7 +31496,10 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         scheduled_test_tool_spec("foreground_slow", tau_proto::BackgroundSupport::Never),
     );
     let parent_cid = ensure_test_user_agent(&mut h);
-    let parent_agent_id = h.agents[&parent_cid].agent_id.clone().expect("agent id");
+    let parent_agent_id = h.agent_registry.agents[&parent_cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     let main_spid: AgentPromptId = test_agent_prompt_id("sp-main-cancel");
     seed_agent_thinking(&mut h, &parent_cid, "sp-main-cancel");
     h.prompt_agents
@@ -30905,7 +31558,10 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
-    let side_agent_id = h.agents[&side_cid].agent_id.clone().expect("agent id");
+    let side_agent_id = h.agent_registry.agents[&side_cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -30968,7 +31624,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
 
     h.cancel_start_agent_request("q-bg-cancel", &"delegate-call-cancel".into(), false)
         .expect("cancel delegate");
-    assert!(h.agents[&side_cid].terminating);
+    assert!(h.agent_registry.agents[&side_cid].terminating);
     assert!(
         h.tool_runtime
             .tool_agents
@@ -30981,7 +31637,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         })),
     )
     .expect("commit delegate cancellation");
-    assert!(!h.agents.contains_key(&side_cid));
+    assert!(!h.agent_registry.agents.contains_key(&side_cid));
     assert!(!h.tool_runtime.tool_agents.contains_key("slow-call-cancel"));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -31021,6 +31677,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         Event::ToolBackgroundResult(result) if result.call_id.as_str() == "slow-call-cancel"
     )));
     let parent = h
+        .agent_registry
         .agents
         .get(&parent_cid)
         .expect("parent conversation remains live");
@@ -31142,7 +31799,11 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
             Event::ToolError(error) if error.call_id.as_str() == "fail-call"
         )
     ));
-    let conv = h.agents.get(&cid).expect("conversation remains live");
+    let conv = h
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("conversation remains live");
     assert!(
         conv.pending_prompts
             .iter()
@@ -31165,7 +31826,8 @@ fn background_notification_unsuppress_before_completion_allows_later_prompt() {
     h.suppress_background_completion_prompt(call_id.clone());
     h.unsuppress_background_completion_prompt(call_id.clone());
 
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("default conversation remains live")
         .turn_state = AgentTurnState::ToolsRunning {
@@ -31177,6 +31839,7 @@ fn background_notification_unsuppress_before_completion_allows_later_prompt() {
     h.queue_background_completion_prompt(&cid, &call_id);
 
     let conv = h
+        .agent_registry
         .agents
         .get(&cid)
         .expect("default conversation remains live");
@@ -31203,7 +31866,8 @@ fn background_notification_unsuppress_after_suppressed_completion_queues_prompt(
         .insert(call_id.clone(), cid.clone());
     h.queue_background_completion_prompt(&cid, &call_id);
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("default conversation remains live")
             .pending_prompts
@@ -31211,7 +31875,8 @@ fn background_notification_unsuppress_after_suppressed_completion_queues_prompt(
             .all(|prompt| prompt.text != background_completion_prompt(&call_id))
     );
 
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("default conversation remains live")
         .turn_state = AgentTurnState::ToolsRunning {
@@ -31220,6 +31885,7 @@ fn background_notification_unsuppress_after_suppressed_completion_queues_prompt(
     h.unsuppress_background_completion_prompt(call_id.clone());
 
     let conv = h
+        .agent_registry
         .agents
         .get(&cid)
         .expect("default conversation remains live");
@@ -31246,7 +31912,8 @@ fn background_notification_repeated_suppress_unsuppress_after_completion_requeue
     h.queue_background_completion_prompt(&cid, &call_id);
     h.suppress_background_completion_prompt(call_id.clone());
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("default conversation remains live")
             .pending_prompts
@@ -31257,7 +31924,8 @@ fn background_notification_repeated_suppress_unsuppress_after_completion_requeue
     h.unsuppress_background_completion_prompt(call_id.clone());
     h.suppress_background_completion_prompt(call_id.clone());
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("default conversation remains live")
             .pending_prompts
@@ -31267,6 +31935,7 @@ fn background_notification_repeated_suppress_unsuppress_after_completion_requeue
 
     h.unsuppress_background_completion_prompt(call_id.clone());
     let conv = h
+        .agent_registry
         .agents
         .get(&cid)
         .expect("default conversation remains live");
@@ -31391,7 +32060,8 @@ fn background_notification_suppression_removes_queued_prompt() {
     let cid = ensure_test_user_agent(&mut h);
     let call_id: ToolCallId = "bg".into();
 
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("default conversation exists")
         .pending_prompts
@@ -31399,7 +32069,8 @@ fn background_notification_suppression_removes_queued_prompt() {
             &call_id,
         )));
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("default conversation exists")
             .pending_prompts
@@ -31409,7 +32080,8 @@ fn background_notification_suppression_removes_queued_prompt() {
 
     h.suppress_background_completion_prompt(call_id.clone());
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .expect("default conversation exists")
             .pending_prompts
@@ -31436,7 +32108,7 @@ fn shared_start_agent_requests_start_concurrently() {
 
     assert!(ext_query_cid(&h, "q-a").is_some());
     assert!(ext_query_cid(&h, "q-b").is_some());
-    assert!(h.pending_start_agent_requests.is_empty());
+    assert!(h.agent_registry.pending_start_requests.is_empty());
 
     h.shutdown().expect("shutdown");
 }
@@ -31478,7 +32150,7 @@ fn start_agent_requests_do_not_block_independent_queries() {
             "{query_id} should start immediately"
         );
     }
-    assert!(h.pending_start_agent_requests.is_empty());
+    assert!(h.agent_registry.pending_start_requests.is_empty());
 
     h.shutdown().expect("shutdown");
 }
@@ -31511,7 +32183,7 @@ fn nested_start_agent_request_starts_independently() {
 
     let nested_cid = ext_query_cid(&h, "q-nested").expect("nested started");
     assert_ne!(outer_cid, nested_cid);
-    assert!(h.pending_start_agent_requests.is_empty());
+    assert!(h.agent_registry.pending_start_requests.is_empty());
 
     h.shutdown().expect("shutdown");
 }
@@ -31582,7 +32254,11 @@ fn manually_created_agent_has_no_default_display_name() {
 
     assert_eq!(started.role, "engineer-junior");
     assert_eq!(started.display_name, None);
-    let conversation = h.agents.get(&cid).expect("manual agent conversation");
+    let conversation = h
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("manual agent conversation");
     assert!(conversation.display_name.is_none());
 
     h.shutdown().expect("shutdown");
@@ -31609,7 +32285,8 @@ fn explicit_display_name_equal_to_role_survives_restore() {
         )
         .expect("set explicit display name");
         assert_eq!(
-            h.agents
+            h.agent_registry
+                .agents
                 .get(&cid)
                 .and_then(|conversation| conversation.display_name.as_deref()),
             Some("engineer-junior")
@@ -31622,11 +32299,13 @@ fn explicit_display_name_equal_to_role_survives_restore() {
         echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
             .expect("resume");
     let cid = resumed
+        .agent_registry
         .agent_routes
         .get(agent_id.as_str())
         .expect("restored agent route");
     assert_eq!(
         resumed
+            .agent_registry
             .agents
             .get(cid)
             .and_then(|conversation| conversation.display_name.as_deref()),
@@ -31665,11 +32344,13 @@ fn custom_role_display_name_survives_restore_under_built_in_template() {
         echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
             .expect("resume under built-in template");
     let cid = resumed
+        .agent_registry
         .agent_routes
         .get(agent_id.as_str())
         .expect("restored agent route");
     assert_eq!(
         resumed
+            .agent_registry
             .agents
             .get(cid)
             .expect("restored agent conversation")
@@ -32104,6 +32785,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     .expect("query B");
 
     let cid_a = h
+        .agent_registry
         .agents
         .iter()
         .find_map(|(cid, conv)| {
@@ -32115,6 +32797,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         })
         .expect("conversation A");
     let cid_b = h
+        .agent_registry
         .agents
         .iter()
         .find_map(|(cid, conv)| {
@@ -32482,8 +33165,8 @@ fn generic_agent_watch_snapshots_replay_and_clear_on_session_switch() {
 
     h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch session");
-    assert!(h.agent_watches.is_empty());
-    assert!(h.agent_watchers.is_empty());
+    assert!(h.agent_watch.forward.is_empty());
+    assert!(h.agent_watch.reverse.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -32511,11 +33194,11 @@ fn agent_watch_enforces_acyclic_topology_without_rejection_mutation() {
     let disable = tau_proto::AgentWatchUpdateCause::AgentWatchDisable;
 
     h.try_set_agent_watch(a, b, true, enable).expect("A -> B");
-    let subscription = h.agent_watch_subscriptions[&(a.clone(), b.clone())].clone();
+    let subscription = h.agent_watch.subscriptions[&(a.clone(), b.clone())].clone();
     h.try_set_agent_watch(a, b, true, enable)
         .expect("re-enable existing edge");
     assert_eq!(
-        h.agent_watch_subscriptions[&(a.clone(), b.clone())],
+        h.agent_watch.subscriptions[&(a.clone(), b.clone())],
         subscription,
         "re-enable retains subscription identity"
     );
@@ -32531,11 +33214,11 @@ fn agent_watch_enforces_acyclic_topology_without_rejection_mutation() {
         .expect("non-closing diamond cross-edge");
 
     let maps_before = (
-        h.agent_watches.clone(),
-        h.agent_watchers.clone(),
-        h.agent_watch_subscriptions.clone(),
-        h.agent_watch_provider_status.clone(),
-        h.agent_watch_provider_deliveries.clone(),
+        h.agent_watch.forward.clone(),
+        h.agent_watch.reverse.clone(),
+        h.agent_watch.subscriptions.clone(),
+        h.agent_watch.provider_status.clone(),
+        h.agent_watch.provider_deliveries.clone(),
     );
     let events_before = event_log_events(&h).len();
     assert_eq!(
@@ -32544,11 +33227,11 @@ fn agent_watch_enforces_acyclic_topology_without_rejection_mutation() {
     );
     assert_eq!(
         (
-            h.agent_watches.clone(),
-            h.agent_watchers.clone(),
-            h.agent_watch_subscriptions.clone(),
-            h.agent_watch_provider_status.clone(),
-            h.agent_watch_provider_deliveries.clone(),
+            h.agent_watch.forward.clone(),
+            h.agent_watch.reverse.clone(),
+            h.agent_watch.subscriptions.clone(),
+            h.agent_watch.provider_status.clone(),
+            h.agent_watch.provider_deliveries.clone(),
         ),
         maps_before,
         "cycle rejection must leave all watch authority unchanged"
@@ -32576,29 +33259,37 @@ fn agent_watch_enforces_acyclic_topology_without_rejection_mutation() {
 
     // A deliberately invariant-violating fixture proves disable never consults
     // reachability and can dismantle malformed topology.
-    h.agent_watches
+    h.agent_watch
+        .forward
         .entry(b.clone())
         .or_default()
         .insert(a.clone());
-    h.agent_watchers
+    h.agent_watch
+        .reverse
         .entry(a.clone())
         .or_default()
         .insert(b.clone());
     h.try_set_agent_watch(b, a, false, disable)
         .expect("disable repairs malformed cycle");
-    assert!(!h.agent_watches.get(b).is_some_and(|ids| ids.contains(a)));
+    assert!(
+        !h.agent_watch
+            .forward
+            .get(b)
+            .is_some_and(|ids| ids.contains(a))
+    );
 
     h.remove_agent(&cids[3]);
-    h.agent_watches
+    h.agent_watch
+        .forward
         .entry(d.clone())
         .or_default()
         .insert(a.clone());
     let stopped_before = (
-        h.agent_watches.clone(),
-        h.agent_watchers.clone(),
-        h.agent_watch_subscriptions.clone(),
-        h.agent_watch_provider_status.clone(),
-        h.agent_watch_provider_deliveries.clone(),
+        h.agent_watch.forward.clone(),
+        h.agent_watch.reverse.clone(),
+        h.agent_watch.subscriptions.clone(),
+        h.agent_watch.provider_status.clone(),
+        h.agent_watch.provider_deliveries.clone(),
     );
     let stopped_events_before = event_log_events(&h).len();
     assert_eq!(
@@ -32608,11 +33299,11 @@ fn agent_watch_enforces_acyclic_topology_without_rejection_mutation() {
     );
     assert_eq!(
         (
-            h.agent_watches.clone(),
-            h.agent_watchers.clone(),
-            h.agent_watch_subscriptions.clone(),
-            h.agent_watch_provider_status.clone(),
-            h.agent_watch_provider_deliveries.clone(),
+            h.agent_watch.forward.clone(),
+            h.agent_watch.reverse.clone(),
+            h.agent_watch.subscriptions.clone(),
+            h.agent_watch.provider_status.clone(),
+            h.agent_watch.provider_deliveries.clone(),
         ),
         stopped_before
     );
@@ -32628,16 +33319,19 @@ fn agent_watch_reachability_is_iterative_and_cycle_defensive() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     for index in 0..4_000 {
-        h.agent_watches
+        h.agent_watch
+            .forward
             .entry(format!("node-{index}"))
             .or_default()
             .insert(format!("node-{}", index + 1));
     }
-    h.agent_watches
+    h.agent_watch
+        .forward
         .entry("malformed-a".to_owned())
         .or_default()
         .insert("malformed-b".to_owned());
-    h.agent_watches
+    h.agent_watch
+        .forward
         .entry("malformed-b".to_owned())
         .or_default()
         .insert("malformed-a".to_owned());
@@ -32665,7 +33359,11 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
     let late_id = durable_agent_id_for_conversation(&h, &late_cid).to_string();
     for cid in [&watcher_cid, &late_cid] {
-        h.agents.get_mut(cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+        h.agent_registry
+            .agents
+            .get_mut(cid)
+            .expect("watcher")
+            .turn_state = AgentTurnState::AgentThinking {
             agent_prompt_id: test_agent_prompt_id(format!("busy-{cid}")),
         };
     }
@@ -32704,7 +33402,7 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
         }),
     );
     assert!(matches!(
-        h.agent_watch_provider_status[&watched_id].state,
+        h.agent_watch.provider_status[&watched_id].state,
         tau_proto::AgentWatchProviderState::Retrying { attempt: 50, .. }
     ));
     h.update_agent_watch_provider_status(
@@ -32748,7 +33446,7 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
         }
     ));
     assert!(matches!(
-        h.agent_watch_provider_status[&watched_id].state,
+        h.agent_watch.provider_status[&watched_id].state,
         tau_proto::AgentWatchProviderState::TerminalError { attempt: 51, .. }
     ));
     assert!(
@@ -32779,7 +33477,8 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
         tau_proto::AgentWatchProviderState::TerminalError { attempt: 51, .. }
     ));
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&late_cid)
             .expect("late watcher")
             .pending_prompts
@@ -32808,7 +33507,11 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
         })
         .count();
     assert_eq!(reenabled_initials, 2);
-    assert!(h.agents[&late_cid].pending_prompts.is_empty());
+    assert!(
+        h.agent_registry.agents[&late_cid]
+            .pending_prompts
+            .is_empty()
+    );
 
     h.set_agent_watch(
         &watcher_id,
@@ -32817,10 +33520,12 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
         tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
     );
     assert!(
-        h.agent_watch_provider_deliveries
+        h.agent_watch
+            .provider_deliveries
             .keys()
             .all(|subscription_id| {
-                h.agent_watch_subscriptions
+                h.agent_watch
+                    .subscriptions
                     .values()
                     .any(|active| active == subscription_id)
             }),
@@ -32845,7 +33550,7 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
     h.prune_agent_watch(&late_id, &watched_id);
     assert!(h.watchers_for_agent(&watched_id).is_empty());
     assert!(
-        h.agent_watch_provider_deliveries.is_empty(),
+        h.agent_watch.provider_deliveries.is_empty(),
         "pruning the final relation drops its delivery bucket"
     );
 
@@ -32854,9 +33559,9 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
         tau_proto::SessionStartReason::New,
     )
     .expect("switch session");
-    assert!(h.agent_watch_provider_status.is_empty());
-    assert!(h.agent_watch_provider_deliveries.is_empty());
-    assert!(h.agent_watch_subscriptions.is_empty());
+    assert!(h.agent_watch.provider_status.is_empty());
+    assert!(h.agent_watch.provider_deliveries.is_empty());
+    assert!(h.agent_watch.subscriptions.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -32875,7 +33580,11 @@ fn agent_watch_provider_retry_threshold_enforces_exact_delivery_boundary() {
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
     let late_id = durable_agent_id_for_conversation(&h, &late_cid).to_string();
-    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&watcher_cid)
+        .expect("watcher")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("watcher-busy"),
     };
     h.set_agent_watch(
@@ -32926,7 +33635,9 @@ fn agent_watch_provider_retry_threshold_enforces_exact_delivery_boundary() {
         }
     ));
     assert!(
-        h.agents[&late_cid].pending_prompts.is_empty(),
+        h.agent_registry.agents[&late_cid]
+            .pending_prompts
+            .is_empty(),
         "a suppressed late-watch snapshot must not prompt the watcher"
     );
     for (category, attempt) in [
@@ -32994,7 +33705,11 @@ fn agent_watch_provider_retry_threshold_zero_preserves_category_dedupe() {
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
-    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&watcher_cid)
+        .expect("watcher")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("watcher-busy"),
     };
     h.set_agent_watch(
@@ -33112,8 +33827,8 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
     );
 
     h.remove_agent(&watcher_cid);
-    assert!(!h.agent_watches.contains_key(&watcher_id));
-    assert!(!h.agent_watchers.contains_key(&watcher_id));
+    assert!(!h.agent_watch.forward.contains_key(&watcher_id));
+    assert!(!h.agent_watch.reverse.contains_key(&watcher_id));
     // Exercise the local fallback after the committed unload reaction.
     h.retire_agent_watch_endpoint(
         &watcher_id,
@@ -33144,19 +33859,22 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
         durable_before,
         "post-unload provider phases must not append recipient facts"
     );
-    assert!(!h.agent_watches.contains_key(&watcher_id));
-    assert!(!h.agent_watchers.contains_key(&watcher_id));
+    assert!(!h.agent_watch.forward.contains_key(&watcher_id));
+    assert!(!h.agent_watch.reverse.contains_key(&watcher_id));
     assert!(
-        h.agent_watch_subscriptions
+        h.agent_watch
+            .subscriptions
             .keys()
             .all(|(watcher, watched)| watcher != &watcher_id && watched != &watcher_id)
     );
-    assert!(!h.agent_watch_provider_status.contains_key(&watcher_id));
+    assert!(!h.agent_watch.provider_status.contains_key(&watcher_id));
     assert!(
-        h.agent_watch_provider_deliveries
+        h.agent_watch
+            .provider_deliveries
             .keys()
             .all(|subscription| h
-                .agent_watch_subscriptions
+                .agent_watch
+                .subscriptions
                 .values()
                 .any(|id| id == subscription))
     );
@@ -33206,7 +33924,7 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
         status(tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 2 }),
     );
     let retired_subscription =
-        h.agent_watch_subscriptions[&(watcher_id.clone(), watched_id.clone())].clone();
+        h.agent_watch.subscriptions[&(watcher_id.clone(), watched_id.clone())].clone();
     let snapshots_before_unload = event_log_events(&h)
         .iter()
         .filter(|event| {
@@ -33220,12 +33938,12 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
 
     h.remove_agent(&watched_cid);
     assert!(h.watchers_for_agent(&watched_id).is_empty());
-    assert!(!h.agent_watch_provider_status.contains_key(&watched_id));
-    let watches_after_unload = h.agent_watches.clone();
-    let watchers_after_unload = h.agent_watchers.clone();
-    let subscriptions_after_unload = h.agent_watch_subscriptions.clone();
-    let provider_status_after_unload = h.agent_watch_provider_status.clone();
-    let provider_deliveries_after_unload = h.agent_watch_provider_deliveries.clone();
+    assert!(!h.agent_watch.provider_status.contains_key(&watched_id));
+    let watches_after_unload = h.agent_watch.forward.clone();
+    let watchers_after_unload = h.agent_watch.reverse.clone();
+    let subscriptions_after_unload = h.agent_watch.subscriptions.clone();
+    let provider_status_after_unload = h.agent_watch.provider_status.clone();
+    let provider_deliveries_after_unload = h.agent_watch.provider_deliveries.clone();
     let enable_error = path_crate_internal_tools::InternalToolHost::new(&mut h)
         .try_set_agent_watch(
             &watcher_id,
@@ -33235,12 +33953,12 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
         )
         .expect_err("an unloaded target must reject a new watch");
     assert!(enable_error.contains("not live"));
-    assert_eq!(h.agent_watches, watches_after_unload);
-    assert_eq!(h.agent_watchers, watchers_after_unload);
-    assert_eq!(h.agent_watch_subscriptions, subscriptions_after_unload);
-    assert_eq!(h.agent_watch_provider_status, provider_status_after_unload);
+    assert_eq!(h.agent_watch.forward, watches_after_unload);
+    assert_eq!(h.agent_watch.reverse, watchers_after_unload);
+    assert_eq!(h.agent_watch.subscriptions, subscriptions_after_unload);
+    assert_eq!(h.agent_watch.provider_status, provider_status_after_unload);
     assert_eq!(
-        h.agent_watch_provider_deliveries,
+        h.agent_watch.provider_deliveries,
         provider_deliveries_after_unload
     );
     let unknown_error = path_crate_internal_tools::InternalToolHost::new(&mut h)
@@ -33252,12 +33970,12 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
         )
         .expect_err("an unknown target must reject a new watch");
     assert!(unknown_error.contains("unknown agent"));
-    assert_eq!(h.agent_watches, watches_after_unload);
-    assert_eq!(h.agent_watchers, watchers_after_unload);
-    assert_eq!(h.agent_watch_subscriptions, subscriptions_after_unload);
-    assert_eq!(h.agent_watch_provider_status, provider_status_after_unload);
+    assert_eq!(h.agent_watch.forward, watches_after_unload);
+    assert_eq!(h.agent_watch.reverse, watchers_after_unload);
+    assert_eq!(h.agent_watch.subscriptions, subscriptions_after_unload);
+    assert_eq!(h.agent_watch.provider_status, provider_status_after_unload);
     assert_eq!(
-        h.agent_watch_provider_deliveries,
+        h.agent_watch.provider_deliveries,
         provider_deliveries_after_unload
     );
     // Exercise the local fallback after the committed unload reaction.
@@ -33316,14 +34034,15 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
         durable_before,
         "post-unload terminal status must not append a recipient fact"
     );
-    assert!(!h.agent_watch_provider_status.contains_key(&watched_id));
+    assert!(!h.agent_watch.provider_status.contains_key(&watched_id));
     assert!(h.watchers_for_agent(&watched_id).is_empty());
     assert!(
-        h.agent_watch_subscriptions
+        h.agent_watch
+            .subscriptions
             .keys()
             .all(|(_, watched)| watched != &watched_id)
     );
-    assert!(h.agent_watch_provider_deliveries.is_empty());
+    assert!(h.agent_watch.provider_deliveries.is_empty());
     assert_eq!(h.agent_watch_provider_status_summary(&watched_id), None);
     let replacement_snapshots: Vec<_> = event_log_events(&h)
         .into_iter()
@@ -33345,17 +34064,19 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
     let reloaded_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let minted_id = durable_agent_id_for_conversation(&h, &reloaded_cid).to_string();
-    h.agent_routes.remove(&minted_id);
-    h.agents
+    h.agent_registry.agent_routes.remove(&minted_id);
+    h.agent_registry
+        .agents
         .get_mut(&reloaded_cid)
         .expect("reloaded agent")
         .agent_id = Some(watched_id.clone());
-    h.agent_routes
+    h.agent_registry
+        .agent_routes
         .insert(watched_id.clone(), reloaded_cid.clone());
     h.ensure_loaded_agent_for_agent(&reloaded_cid, &watched_id);
     assert!(h.watchers_for_agent(&watched_id).is_empty());
     assert_eq!(h.agent_watch_provider_status_summary(&watched_id), None);
-    assert!(!h.agent_watches.contains_key(&watcher_id));
+    assert!(!h.agent_watch.forward.contains_key(&watcher_id));
     path_crate_internal_tools::InternalToolHost::new(&mut h)
         .try_set_agent_watch(
             &watcher_id,
@@ -33365,9 +34086,9 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
         )
         .expect("a freshly reloaded live target accepts a new watch");
     assert_eq!(h.watchers_for_agent(&watched_id), vec![watcher_id.clone()]);
-    assert_eq!(h.agent_watch_subscriptions.len(), 1);
+    assert_eq!(h.agent_watch.subscriptions.len(), 1);
     assert_ne!(
-        h.agent_watch_subscriptions[&(watcher_id.clone(), watched_id.clone())],
+        h.agent_watch.subscriptions[&(watcher_id.clone(), watched_id.clone())],
         retired_subscription,
         "same-session reload requires a freshly minted subscription"
     );
@@ -33390,7 +34111,11 @@ fn agent_watch_provider_dedupe_isolated_across_watched_agents() {
     let a_id = durable_agent_id_for_conversation(&h, &a_cid).to_string();
     let b_id = durable_agent_id_for_conversation(&h, &b_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
-    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&watcher_cid)
+        .expect("watcher")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("watcher-busy"),
     };
     for watched in [&a_id, &b_id] {
@@ -33495,10 +34220,13 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
             h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
         watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
         watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
-        h.agents.get_mut(&watcher_cid).expect("watcher").turn_state =
-            AgentTurnState::AgentThinking {
-                agent_prompt_id: test_agent_prompt_id("watcher-busy"),
-            };
+        h.agent_registry
+            .agents
+            .get_mut(&watcher_cid)
+            .expect("watcher")
+            .turn_state = AgentTurnState::AgentThinking {
+            agent_prompt_id: test_agent_prompt_id("watcher-busy"),
+        };
         h.set_agent_watch(
             &watcher_id,
             &watched_id,
@@ -33527,10 +34255,11 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
     let mut resumed =
         echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
             .expect("resume");
-    assert!(resumed.agent_watch_provider_status.is_empty());
-    assert!(resumed.agent_watch_provider_deliveries.is_empty());
-    assert!(resumed.agent_watches.is_empty());
+    assert!(resumed.agent_watch.provider_status.is_empty());
+    assert!(resumed.agent_watch.provider_deliveries.is_empty());
+    assert!(resumed.agent_watch.forward.is_empty());
     let watcher_cid = resumed
+        .agent_registry
         .agent_routes
         .get(&watcher_id)
         .cloned()
@@ -33554,7 +34283,9 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
         "durable live status remains transcript context"
     );
     assert!(
-        resumed.agents[&watcher_cid].pending_prompts.is_empty(),
+        resumed.agent_registry.agents[&watcher_cid]
+            .pending_prompts
+            .is_empty(),
         "replay must not queue the historical status as fresh model input"
     );
     resumed
@@ -33594,7 +34325,11 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
-    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&watcher_cid)
+        .expect("watcher")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("watcher-busy"),
     };
     h.set_agent_watch(
@@ -33606,17 +34341,19 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
 
     let terminal_prompt: tau_proto::AgentPromptId = test_agent_prompt_id("sp-watch-terminal");
     seed_agent_thinking(&mut h, &watched_cid, terminal_prompt.as_str());
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&watched_cid)
         .expect("watched")
         .published_runtime_state = tau_proto::AgentRuntimeState::Running;
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&watched_cid)
         .expect("watched")
         .turn_generation = 1;
     h.prompt_agents
         .insert(terminal_prompt.clone(), watched_cid.clone());
-    let generation = h.agents[&watched_cid].turn_generation;
+    let generation = h.agent_registry.agents[&watched_cid].turn_generation;
     h.update_agent_watch_provider_status(
         &watched_id,
         tau_proto::AgentWatchProviderStatusNotification {
@@ -33721,7 +34458,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         tau_proto::AgentWatchProviderStatusNotification {
             session_id: h.current_session_id.clone(),
             subscription_id: String::new(),
-            turn_generation: h.agents[&watched_cid].turn_generation,
+            turn_generation: h.agent_registry.agents[&watched_cid].turn_generation,
             agent_prompt_id: success_prompt.clone(),
             state: tau_proto::AgentWatchProviderState::Retrying {
                 category: tau_proto::AgentWatchProviderCategory::Transport,
@@ -33738,7 +34475,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
     ))
     .expect("successful response");
     assert!(
-        !h.agent_watch_provider_status.contains_key(&watched_id),
+        !h.agent_watch.provider_status.contains_key(&watched_id),
         "success must clear a prior retry snapshot"
     );
 
@@ -33758,7 +34495,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
     h.handle_provider_response_finished(first_attempt_terminal)
         .expect("first-attempt terminal");
     assert!(matches!(
-        h.agent_watch_provider_status[&watched_id].state,
+        h.agent_watch.provider_status[&watched_id].state,
         tau_proto::AgentWatchProviderState::TerminalError { attempt: 1, .. }
     ));
     h.shutdown().expect("shutdown");
@@ -33770,8 +34507,13 @@ fn disabling_agent_watch_removes_response_fanout_route() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let sender_cid = ensure_test_user_agent(&mut h);
-    h.agents.get_mut(&sender_cid).expect("sender").agent_id = Some("child-agent".to_owned());
-    h.agent_routes
+    h.agent_registry
+        .agents
+        .get_mut(&sender_cid)
+        .expect("sender")
+        .agent_id = Some("child-agent".to_owned());
+    h.agent_registry
+        .agent_routes
         .insert("child-agent".to_owned(), sender_cid.clone());
     h.set_agent_watch(
         "watcher-agent",
@@ -33816,7 +34558,11 @@ fn agent_watch_reports_structured_work_status() {
         .expect("initial status");
     assert!(initial.initial);
     assert_eq!(initial.phase, tau_proto::AgentWorkStatusPhase::Unreported);
-    assert!(h.agents[&watcher_cid].pending_prompts.is_empty());
+    assert!(
+        h.agent_registry.agents[&watcher_cid]
+            .pending_prompts
+            .is_empty()
+    );
 
     assert!(
         h.report_agent_work_status(
@@ -33915,7 +34661,8 @@ fn agent_stats_snapshots_publish_work_status_transitions_and_replay() {
     }));
 
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get_mut(&cid)
             .expect("loaded agent")
             .work_status
@@ -33979,9 +34726,9 @@ fn working_final_gate_uses_bounded_escape() {
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("finish gate".to_owned()))
         .expect("dispatch production user prompt");
-    let outer_generation = h.agents[&cid].turn_generation;
+    let outer_generation = h.agent_registry.agents[&cid].turn_generation;
     for index in 0..2 {
-        let prompt_id = match &h.agents[&cid].turn_state {
+        let prompt_id = match &h.agent_registry.agents[&cid].turn_state {
             AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
             state => panic!("candidate {index} lacks an active prompt: {state:?}"),
         };
@@ -34002,20 +34749,20 @@ fn working_final_gate_uses_bounded_escape() {
             "Working candidate {index} must not reach its watcher"
         );
         assert!(matches!(
-            h.agents[&cid].turn_state,
+            h.agent_registry.agents[&cid].turn_state,
             AgentTurnState::AgentThinking { .. }
         ));
         assert!(
-            !h.agents[&cid].terminal_notice_eligible,
+            !h.agent_registry.agents[&cid].terminal_notice_eligible,
             "challenged final must not arm an outer-finish notice"
         );
     }
-    let final_prompt_id = match &h.agents[&cid].turn_state {
+    let final_prompt_id = match &h.agent_registry.agents[&cid].turn_state {
         AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
         state => panic!("escape continuation lacks an active prompt: {state:?}"),
     };
     assert!(
-        !h.agents[&cid].lifecycle_notification_only_turn,
+        !h.agent_registry.agents[&cid].lifecycle_notification_only_turn,
         "Working challenge continuation remains an ordinary outer turn"
     );
     h.handle_provider_response_finished(provider_text_response(
@@ -34024,7 +34771,7 @@ fn working_final_gate_uses_bounded_escape() {
         "accepted by bounded escape",
     ))
     .expect("finish through bounded escape");
-    let agent = h.agents.get(&cid).expect("agent");
+    let agent = h.agent_registry.agents.get(&cid).expect("agent");
     assert_eq!(
         agent.work_status.phase(),
         tau_proto::AgentWorkStatusPhase::Unknown
@@ -34073,7 +34820,7 @@ fn unreported_final_gate_uses_frozen_status_availability_and_bounded_escape() {
         .expect("dispatch status-capable prompt");
     let mut completed_prompt_ids = Vec::new();
     for index in 0..2 {
-        let prompt_id = match &h.agents[&cid].turn_state {
+        let prompt_id = match &h.agent_registry.agents[&cid].turn_state {
             AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
             state => panic!("candidate {index} lacks an active prompt: {state:?}"),
         };
@@ -34091,11 +34838,11 @@ fn unreported_final_gate_uses_frozen_status_availability_and_bounded_escape() {
         .expect("challenge unreported final");
         completed_prompt_ids.push(prompt_id);
         assert!(matches!(
-            h.agents[&cid].turn_state,
+            h.agent_registry.agents[&cid].turn_state,
             AgentTurnState::AgentThinking { .. }
         ));
     }
-    let escape_prompt_id = match &h.agents[&cid].turn_state {
+    let escape_prompt_id = match &h.agent_registry.agents[&cid].turn_state {
         AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
         state => panic!("escape lacks an active prompt: {state:?}"),
     };
@@ -34106,9 +34853,12 @@ fn unreported_final_gate_uses_frozen_status_availability_and_bounded_escape() {
     ))
     .expect("accept bounded unreported escape");
     completed_prompt_ids.push(escape_prompt_id);
-    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+    assert!(matches!(
+        h.agent_registry.agents[&cid].turn_state,
+        AgentTurnState::Idle
+    ));
     assert_eq!(
-        h.agents[&cid].work_status.phase(),
+        h.agent_registry.agents[&cid].work_status.phase(),
         tau_proto::AgentWorkStatusPhase::Unreported
     );
     assert!(
@@ -34130,7 +34880,8 @@ fn unreported_final_gate_uses_frozen_status_availability_and_bounded_escape() {
             PendingPrompt::user("finish without status tool".to_owned()),
         )
         .expect("dispatch status-less prompt");
-    let statusless_prompt_id = match &statusless_h.agents[&statusless_cid].turn_state {
+    let statusless_prompt_id = match &statusless_h.agent_registry.agents[&statusless_cid].turn_state
+    {
         AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
         state => panic!("status-less prompt is not active: {state:?}"),
     };
@@ -34148,7 +34899,7 @@ fn unreported_final_gate_uses_frozen_status_availability_and_bounded_escape() {
         ))
         .expect("accept status-less final");
     assert!(matches!(
-        statusless_h.agents[&statusless_cid].turn_state,
+        statusless_h.agent_registry.agents[&statusless_cid].turn_state,
         AgentTurnState::Idle
     ));
     assert_eq!(
@@ -34223,10 +34974,14 @@ fn delegated_working_final_projects_after_bounded_escape() {
         h.handle_provider_response_finished(response)
             .expect("challenge delegated Working final");
         assert!(matches!(
-            h.agents[&child_cid].turn_state,
+            h.agent_registry.agents[&child_cid].turn_state,
             AgentTurnState::AgentThinking { .. }
         ));
-        assert!(h.agents[&child_cid].parent_tool_call_id.is_some());
+        assert!(
+            h.agent_registry.agents[&child_cid]
+                .parent_tool_call_id
+                .is_some()
+        );
         assert!(frames.lock().expect("frames").iter().all(|routed| {
             !matches!(
                 peel_inner_event(&routed.frame),
@@ -34259,7 +35014,7 @@ fn delegated_working_final_projects_after_bounded_escape() {
         .collect::<Vec<_>>();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].text, "delegated answer");
-    let child = &h.agents[&child_cid];
+    let child = &h.agent_registry.agents[&child_cid];
     assert!(child.parent_tool_call_id.is_none());
     assert!(child.parent_agent_id.is_none());
     assert!(matches!(child.turn_state, AgentTurnState::Idle));
@@ -34267,7 +35022,7 @@ fn delegated_working_final_projects_after_bounded_escape() {
         child.work_status.phase(),
         tau_proto::AgentWorkStatusPhase::Unknown
     );
-    assert!(h.session_loaded_agents.contains(&child_agent_id));
+    assert!(h.agent_registry.session_loaded.contains(&child_agent_id));
     h.shutdown().expect("shutdown");
 }
 
@@ -34316,10 +35071,10 @@ fn unsuccessful_working_terminal_bypasses_reminders() {
     h.handle_provider_response_finished(response)
         .expect("finish unsuccessful terminal");
     assert_eq!(
-        h.agents[&cid].work_status.phase(),
+        h.agent_registry.agents[&cid].work_status.phase(),
         tau_proto::AgentWorkStatusPhase::Unknown
     );
-    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -34350,15 +35105,18 @@ fn synthetic_dispatch_terminal_emits_one_unknown_without_reminder() {
         .expect("valid work status report"),
     )
     .expect("working");
-    h.agents.get_mut(&cid).expect("agent").activation_dispatch =
-        path_crate_agent::ActivationDispatchState::DispatchUncertain {
-            owner: path_crate_agent::InferenceCheckpointOwner::Inference,
-            agent_prompt_id: test_agent_prompt_id("synthetic-terminal"),
-            through: tau_proto::AgentHead::Root,
-            model: Some("test/model".into()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: None,
-        };
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .activation_dispatch = path_crate_agent::ActivationDispatchState::DispatchUncertain {
+        owner: path_crate_agent::InferenceCheckpointOwner::Inference,
+        agent_prompt_id: test_agent_prompt_id("synthetic-terminal"),
+        through: tau_proto::AgentHead::Root,
+        model: Some("test/model".into()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: None,
+    };
     h.terminalize_owned_dispatch_error(&cid, "route failed".to_owned());
     h.terminalize_owned_dispatch_error(&cid, "duplicate route failure".to_owned());
 
@@ -34372,7 +35130,7 @@ fn synthetic_dispatch_terminal_emits_one_unknown_without_reminder() {
         })
         .count();
     assert_eq!(unknowns, 1);
-    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -34405,14 +35163,15 @@ fn foreground_settlement_follows_current_working_status() {
             )
             .expect("accept Working");
         }
-        h.agents
+        h.agent_registry
+            .agents
             .get_mut(&cid)
             .expect("agent")
             .work_status
             .record_substantive_tool_admission();
         h.queue_working_reminder_if_needed(&cid);
         assert_eq!(
-            h.agents[&cid]
+            h.agent_registry.agents[&cid]
                 .pending_prompts
                 .iter()
                 .filter(|prompt| prompt.text == STATUS_REMINDER)
@@ -34430,7 +35189,8 @@ fn cancelled_tool_round_does_not_leak_working_reminder() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("agent")
         .work_status
@@ -34439,7 +35199,7 @@ fn cancelled_tool_round_does_not_leak_working_reminder() {
     h.finalize_cancelled_tool_turn(&cid);
     h.queue_working_reminder_if_needed(&cid);
 
-    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -34455,7 +35215,7 @@ fn background_completion_substantive_tool_admission_records_working_reminder() {
         PendingPrompt::activating_background_completion("background work ready".to_owned()),
     )
     .expect("dispatch activating background completion");
-    let prompt_id = match &h.agents[&cid].turn_state {
+    let prompt_id = match &h.agent_registry.agents[&cid].turn_state {
         AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
         state => panic!("background completion did not activate: {state:?}"),
     };
@@ -34483,7 +35243,8 @@ fn background_completion_substantive_tool_admission_records_working_reminder() {
         .expect("admit background substantive work");
 
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get_mut(&cid)
             .expect("agent")
             .work_status
@@ -34739,7 +35500,7 @@ fn self_info_after_cold_resume_uses_resumed_identity_and_new_prompt_route() {
         .expect("resume harness");
     let recorded = path_std_sync::Arc::new(RecordingSelfInfoTool(path_std_sync::Mutex::new(None)));
     h.install_internal_tool_handlers(vec![recorded.clone()]);
-    let cid = h.agent_routes[agent_id.as_str()].clone();
+    let cid = h.agent_registry.agent_routes[agent_id.as_str()].clone();
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("inspect resumed self".to_owned()))
         .expect("dispatch resumed prompt");
     let prompt = read_nth_prompt_created(&h, 0);
@@ -34790,7 +35551,12 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
     h.prompt_tool_call_prompts
         .insert(unavailable_surface_call.id.clone(), unavailable_prompt);
     {
-        let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
+        let status = &mut h
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent")
+            .work_status;
         assert!(!status.record_input_wait_timeout());
         assert!(!status.record_input_wait_timeout());
         assert!(status.record_input_wait_timeout());
@@ -34798,14 +35564,20 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
     h.execute_agent_tool_call(&cid, &unavailable_surface_call)
         .expect("accept status-unavailable skill");
     assert!(
-        !h.agents
+        !h.agent_registry
+            .agents
             .get_mut(&cid)
             .expect("agent")
             .work_status
             .take_working_reminder()
     );
     {
-        let status = &mut h.agents.get_mut(&cid).expect("agent").work_status;
+        let status = &mut h
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent")
+            .work_status;
         assert!(!status.record_input_wait_timeout());
         assert!(!status.record_input_wait_timeout());
         assert!(
@@ -34837,7 +35609,8 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
     h.execute_agent_tool_call(&cid, &call)
         .expect("accept substantive skill call");
     assert!(
-        h.agents
+        h.agent_registry
+            .agents
             .get_mut(&cid)
             .expect("agent")
             .work_status
@@ -34856,7 +35629,8 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
     h.execute_agent_tool_call(&cid, &wait)
         .expect("accept lifecycle wait");
     assert!(
-        !h.agents
+        !h.agent_registry
+            .agents
             .get_mut(&cid)
             .expect("agent")
             .work_status
@@ -34873,7 +35647,8 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
     h.execute_agent_tool_call(&cid, &unavailable)
         .expect("reject unknown call in band");
     assert!(
-        !h.agents
+        !h.agent_registry
+            .agents
             .get_mut(&cid)
             .expect("agent")
             .work_status
@@ -34908,7 +35683,7 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
         .expect("settle rejected status-only call");
     h.queue_working_reminder_if_needed(&cid);
     assert!(
-        h.agents[&cid]
+        h.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .all(|prompt| prompt.text != STATUS_REMINDER),
@@ -34963,7 +35738,8 @@ fn isolated_watch_notification_does_not_request_status_acknowledgement() {
     );
     h.prompt_tool_call_prompts
         .insert("isolated-watch-call".into(), prompt_id);
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("agent")
         .lifecycle_notification_only_turn = true;
@@ -34983,14 +35759,15 @@ fn isolated_watch_notification_does_not_request_status_acknowledgement() {
     .expect("admit isolated substantive call");
 
     h.queue_working_reminder_if_needed(&cid);
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("agent")
         .lifecycle_notification_only_turn = false;
     h.queue_working_reminder_if_needed(&cid);
 
     assert!(
-        h.agents[&cid].pending_prompts.is_empty(),
+        h.agent_registry.agents[&cid].pending_prompts.is_empty(),
         "isolated watched-agent progress must not demand Working status"
     );
     h.shutdown().expect("shutdown");
@@ -35086,11 +35863,11 @@ fn watch_chain_provider_status_turn_does_not_fan_out_final_response() {
             initial: false,
         },
     );
-    let response_prompt_id = match &h.agents[&b_cid].turn_state {
+    let response_prompt_id = match &h.agent_registry.agents[&b_cid].turn_state {
         AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
         state => panic!("status notification should dispatch b: {state:?}"),
     };
-    assert!(h.agents[&b_cid].lifecycle_notification_only_turn);
+    assert!(h.agent_registry.agents[&b_cid].lifecycle_notification_only_turn);
     h.handle_provider_response_finished(provider_text_response(
         &response_prompt_id,
         crate::parse_agent_id(&b_id),
@@ -35295,7 +36072,7 @@ fn accepted_provider_usage_updates_creator_cost_stats() {
     model_info.est_cache_write_input_cost_1m_usd =
         tau_proto::EstimatedUsdPerMillion::checked_from_usd(3);
     h.provider_model_info.insert(model.clone(), model_info);
-    let prompt_id = h.agents[&child_cid]
+    let prompt_id = h.agent_registry.agents[&child_cid]
         .in_flight_prompt
         .clone()
         .expect("child provider prompt");
@@ -35494,7 +36271,8 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
 
     let cid = ext_query_cid(&h, "q-explicit").expect("side conversation");
     assert_eq!(
-        h.agents
+        h.agent_registry
+            .agents
             .get(&cid)
             .and_then(|conversation| conversation.role.as_deref()),
         Some("explicit-role")
@@ -36410,7 +37188,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         .iter()
         .find_map(|(spid, prompt_cid)| {
             matches!(
-                h.agents
+                h.agent_registry.agents
                     .get(prompt_cid)
                     .map(|conv| &conv.originator),
                 Some(tau_proto::PromptOriginator::Extension { query_id, .. }) if query_id == "q-leaf"
@@ -36472,7 +37250,11 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
     h.prompt_agents.insert(old_spid.clone(), cid.clone());
     h.prompt_agents.insert(new_spid.clone(), cid.clone());
     {
-        let conv = h.agents.get_mut(&cid).expect("default conversation");
+        let conv = h
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("default conversation");
         conv.in_flight_prompt = Some(new_spid.clone());
         conv.last_prompt_id = Some(new_spid.clone());
     }
@@ -36526,7 +37308,11 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
         "stale prompt must publish a terminal lifecycle event",
     );
     assert!(!h.prompt_agents.contains_key(old_spid.as_str()));
-    let conv = h.agents.get(&cid).expect("default conversation");
+    let conv = h
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("default conversation");
     assert_eq!(conv.in_flight_prompt.as_ref(), Some(&new_spid));
     assert!(matches!(conv.turn_state, AgentTurnState::Idle));
 
@@ -36676,7 +37462,11 @@ fn external_agent_message_request_publishes_received_projection() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
-    h.agents.get_mut(&cid).expect("conversation").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("conversation")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("external-message-target"),
     };
 
@@ -36709,7 +37499,11 @@ fn external_agent_message_request_publishes_received_projection() {
     );
     assert_eq!(received[0].recipient_id.as_str(), recipient_id);
     assert_eq!(received[0].message, "hello from outside");
-    let recipient = h.agents.get(&cid).expect("recipient conversation");
+    let recipient = h
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("recipient conversation");
     assert!(recipient.pending_prompts.is_empty());
     assert!(matches!(
         recipient.pending_message_wakes.front(),
@@ -37081,6 +37875,7 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
         .ensure_agent_id_for_agent(&target_cid)
         .expect("target agent id");
     target
+        .agent_registry
         .agents
         .get_mut(&target_cid)
         .expect("target conversation")
@@ -37308,13 +38103,19 @@ fn external_agent_message_two_harness_live_success_commits_before_ack() {
     assert_eq!(result.failure, None);
     let recipient_id = result.recipient_id.expect("resolved auto-start recipient");
     assert!(result.started);
-    assert!(target.agent_routes.contains_key(recipient_id.as_str()));
-    assert_eq!(target.agents.len(), 1);
+    assert!(
+        target
+            .agent_registry
+            .agent_routes
+            .contains_key(recipient_id.as_str())
+    );
+    assert_eq!(target.agent_registry.agents.len(), 1);
     assert_eq!(
-        target.agent_navigation_modes.get(&recipient_id),
+        target.agent_registry.navigation_modes.get(&recipient_id),
         Some(&tau_proto::AgentNavigationMode::Active)
     );
     let recipient_cid = target
+        .agent_registry
         .agent_routes
         .get(recipient_id.as_str())
         .expect("auto-started recipient route");
@@ -37752,7 +38553,8 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
     );
     let busy = ensure_test_user_agent(&mut h);
     let busy_id = h.ensure_agent_id_for_agent(&busy).expect("busy id");
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&busy)
         .expect("busy agent")
         .published_runtime_state = tau_proto::AgentRuntimeState::Running;
@@ -37824,7 +38626,7 @@ fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     configure_inter_session_receivers(&mut h, &[("engineer", true)]);
-    let agents_before = h.agents.len();
+    let agents_before = h.agent_registry.agents.len();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "auto-start".to_owned(),
         message_id: tau_proto::AgentMessageId::parse("auto-start-message")
@@ -37842,13 +38644,18 @@ fn bare_peer_route_starts_explicit_role_without_remote_ancestry() {
 
     assert_eq!(result.failure, None);
     assert!(result.started);
-    assert_eq!(h.agents.len(), agents_before + 1);
+    assert_eq!(h.agent_registry.agents.len(), agents_before + 1);
     let recipient_id = result.recipient_id.expect("resolved recipient");
     let cid = h
+        .agent_registry
         .agent_routes
         .get(recipient_id.as_str())
         .expect("auto-started route");
-    let agent = h.agents.get(cid).expect("auto-started agent");
+    let agent = h
+        .agent_registry
+        .agents
+        .get(cid)
+        .expect("auto-started agent");
     assert_eq!(agent.role.as_deref(), Some("engineer"));
     assert_eq!(agent.parent_agent_id, None);
     assert_eq!(agent.parent_tool_call_id, None);
@@ -37919,10 +38726,14 @@ fn bare_peer_auto_start_uses_first_configured_candidate() {
     assert_eq!(result.failure, None);
     let recipient = result.recipient_id.expect("auto-started recipient");
     let cid = h
+        .agent_registry
         .agent_routes
         .get(recipient.as_str())
         .expect("recipient route");
-    assert_eq!(h.agents[cid].role.as_deref(), Some("preferred-receiver"));
+    assert_eq!(
+        h.agent_registry.agents[cid].role.as_deref(),
+        Some("preferred-receiver")
+    );
 }
 
 /// Auto-start walks past a role pruned from runtime availability and a receiver
@@ -37963,10 +38774,14 @@ fn bare_peer_auto_start_skips_unavailable_role_model() {
     assert_eq!(result.failure, None);
     let recipient = result.recipient_id.expect("fallback recipient");
     let cid = h
+        .agent_registry
         .agent_routes
         .get(recipient.as_str())
         .expect("recipient route");
-    assert_eq!(h.agents[cid].role.as_deref(), Some("engineer"));
+    assert_eq!(
+        h.agent_registry.agents[cid].role.as_deref(),
+        Some("engineer")
+    );
 }
 
 /// The explicit durable peer-purpose marker survives a cold resume before any
@@ -38019,14 +38834,17 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
     let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
         .expect("resume");
     let cid = h
+        .agent_registry
         .agent_routes
         .get(recipient_id.as_str())
         .cloned()
         .expect("restored peer endpoint");
 
-    assert!(h.agents[&cid].peer_entrypoint_endpoint);
+    assert!(h.agent_registry.agents[&cid].peer_entrypoint_endpoint);
     assert!(!h.is_non_tool_extension_query(&cid));
-    assert!(Harness::is_peer_entrypoint_agent(&h.agents[&cid]));
+    assert!(Harness::is_peer_entrypoint_agent(
+        &h.agent_registry.agents[&cid]
+    ));
     h.shutdown().expect("shutdown resumed harness");
 }
 
@@ -38080,20 +38898,21 @@ fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
     );
     let recipient = result.recipient_id.expect("peer recipient");
     let cid = h
+        .agent_registry
         .agent_routes
         .get(recipient.as_str())
         .cloned()
         .expect("peer route");
-    let prompt_id = h.agents[&cid]
+    let prompt_id = h.agent_registry.agents[&cid]
         .in_flight_prompt
         .clone()
         .expect("peer prompt in flight");
-    let originator = h.agents[&cid].originator.clone();
+    let originator = h.agent_registry.agents[&cid].originator.clone();
     assert!(
         !h.complete_failed_compaction_side_conversation(&cid, None),
         "peer endpoint compaction failure follows ordinary blocked-agent recovery"
     );
-    assert!(h.agents.contains_key(&cid));
+    assert!(h.agent_registry.agents.contains_key(&cid));
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -38126,8 +38945,12 @@ fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
     })
     .expect("dispatch peer tool call");
 
-    assert!(h.agent_routes.contains_key(recipient.as_str()));
-    assert!(h.agents.contains_key(&cid));
+    assert!(
+        h.agent_registry
+            .agent_routes
+            .contains_key(recipient.as_str())
+    );
+    assert!(h.agent_registry.agents.contains_key(&cid));
     assert_eq!(
         h.tool_runtime
             .pending_tool_providers
@@ -38162,11 +38985,13 @@ fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
     let recipient = first.recipient_id.clone().expect("first recipient");
     assert!(first.started);
     let cid = h
+        .agent_registry
         .agent_routes
         .get(recipient.as_str())
         .cloned()
         .expect("auto-started route");
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("auto-started agent")
         .published_runtime_state = tau_proto::AgentRuntimeState::Running;
@@ -38176,7 +39001,7 @@ fn bare_peer_auto_start_is_live_single_flight_and_reuses_busy_agent() {
     assert_eq!(second.failure, None);
     assert_eq!(second.recipient_id, Some(recipient));
     assert!(!second.started);
-    assert_eq!(h.agents.len(), 1);
+    assert_eq!(h.agent_registry.agents.len(), 1);
 }
 
 /// Queue admission counts uncheckpointed peer wakes before any auto-start or
@@ -38188,7 +39013,8 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
     configure_inter_session_receivers(&mut h, &[("engineer", true)]);
     let cid = h.create_durable_user_agent(test_session_id("s1"), "engineer");
     for index in 0..32 {
-        h.agents
+        h.agent_registry
+            .agents
             .get_mut(&cid)
             .expect("agent")
             .pending_message_wakes
@@ -38204,7 +39030,7 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
                 source_observation: None,
             });
     }
-    let agents_before = h.agents.len();
+    let agents_before = h.agent_registry.agents.len();
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "queue-full".to_owned(),
         message_id: tau_proto::AgentMessageId::parse("queue-full-message")
@@ -38224,7 +39050,7 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
         result.failure,
         Some(tau_proto::ExternalAgentMessageFailure::Rejected)
     );
-    assert_eq!(h.agents.len(), agents_before);
+    assert_eq!(h.agent_registry.agents.len(), agents_before);
     assert!(durable_agent_message_received_events(&h).is_empty());
 }
 
@@ -38248,7 +39074,8 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
         })
         .expect("reserve pending endpoint");
     let pending = h
-        .pending_start_agent_requests
+        .agent_registry
+        .pending_start_requests
         .iter_mut()
         .find(|pending| pending.agent_id == pending_id)
         .expect("pending endpoint");
@@ -38272,7 +39099,8 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
     );
 
     let pending = h
-        .pending_start_agent_requests
+        .agent_registry
+        .pending_start_requests
         .iter_mut()
         .find(|pending| pending.agent_id == pending_id)
         .expect("pending endpoint");
@@ -38379,10 +39207,13 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
         .expect("switch session");
     let replacement_cid = ensure_test_user_agent(&mut h);
     let replacement_agent = h
+        .agent_registry
         .agents
         .remove(&replacement_cid)
         .expect("replacement agent");
-    h.agents.insert(cid.clone(), replacement_agent);
+    h.agent_registry
+        .agents
+        .insert(cid.clone(), replacement_agent);
     h.tool_runtime
         .tool_agents
         .insert(call_id.clone(), cid.clone());
@@ -38603,7 +39434,7 @@ fn message_tool_stopped_recipient_errors_without_agent_message() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let stopped_cid: AgentId = crate::parse_agent_id("stopped-recipient");
-    h.agents.insert(
+    h.agent_registry.agents.insert(
         stopped_cid.clone(),
         Agent::new(
             stopped_cid.clone(),
@@ -38652,7 +39483,7 @@ fn cold_resume_reports_historically_unloaded_message_recipient_as_stopped() {
     let recipient_id = {
         let mut h = echo_harness(&sp).expect("start");
         let stopped_cid: AgentId = crate::parse_agent_id("cold-stopped-recipient");
-        h.agents.insert(
+        h.agent_registry.agents.insert(
             stopped_cid.clone(),
             Agent::new(
                 stopped_cid.clone(),
@@ -38737,7 +39568,7 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
     .expect("register recipient input wait");
     assert!(h.input_wait_pending_for(&recipient_cid));
     assert!(matches!(
-        h.agents[&recipient_cid].turn_state,
+        h.agent_registry.agents[&recipient_cid].turn_state,
         AgentTurnState::ToolsRunning { .. }
     ));
 
@@ -38810,11 +39641,11 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
         1
     );
 
-    let sender_successor_id = h.agents[&sender_cid]
+    let sender_successor_id = h.agent_registry.agents[&sender_cid]
         .in_flight_prompt
         .clone()
         .expect("sender successor");
-    let recipient_successor_id = h.agents[&recipient_cid]
+    let recipient_successor_id = h.agent_registry.agents[&recipient_cid]
         .in_flight_prompt
         .clone()
         .expect("recipient successor");
@@ -39000,8 +39831,15 @@ fn terminating_agent_route_rejects_direct_work() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
-    let recipient_id = h.agents[&cid].agent_id.clone().expect("durable agent");
-    h.agents.get_mut(&cid).expect("agent").terminating = true;
+    let recipient_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent");
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .terminating = true;
 
     assert_ne!(
         h.agent_message_recipient_status(&recipient_id),
@@ -39028,7 +39866,7 @@ fn terminating_agent_route_rejects_direct_work() {
             selected_head_id: None,
         }),
     );
-    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
     assert!(
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("rejected".to_owned()))
             .is_err()
@@ -39053,7 +39891,11 @@ fn message_tool_to_agent_uses_canonical_projection_and_payload_free_wake() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
-    h.agents.get_mut(&cid).expect("conversation").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("conversation")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("sp-message-target"),
     };
 
@@ -39085,7 +39927,7 @@ fn message_tool_to_agent_uses_canonical_projection_and_payload_free_wake() {
     assert_eq!(durable_sent[0].message_id, sent[0].message_id);
     assert_eq!(durable_received[0].message_id, received[0].message_id);
 
-    let conv = h.agents.get(&cid).expect("conversation");
+    let conv = h.agent_registry.agents.get(&cid).expect("conversation");
     assert!(conv.pending_prompts.is_empty());
     assert_eq!(conv.pending_message_wakes.len(), 1);
     let tree = h.agent_store.agent(&recipient_id).expect("self-send tree");
@@ -39137,8 +39979,15 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
     let mut h = echo_harness(&state).expect("start");
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
-    let recipient_id = h.agents[&cid].agent_id.clone().expect("agent id");
-    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+    let recipient_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("agent id");
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("branch-message-busy"),
     };
 
@@ -39173,12 +40022,12 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
             "branch-owned raw input",
         )),
     );
-    let wake_node = h.agents[&cid]
+    let wake_node = h.agent_registry.agents[&cid]
         .pending_message_wakes
         .back()
         .and_then(|wake| wake.node_id)
         .expect("materialized message wake");
-    assert_eq!(h.agents[&cid].pending_message_wakes.len(), 2);
+    assert_eq!(h.agent_registry.agents[&cid].pending_message_wakes.len(), 2);
     h.set_agent_turn_state(&cid, AgentTurnState::Idle);
     let checkpoints_before = event_log_events(&h)
         .iter()
@@ -39208,7 +40057,7 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
         checkpoints_before,
         "off-branch wake must remain dormant"
     );
-    assert_eq!(h.agents[&cid].pending_message_wakes.len(), 2);
+    assert_eq!(h.agent_registry.agents[&cid].pending_message_wakes.len(), 2);
     h.shutdown().expect("shutdown before cold replay");
     drop(h);
     wait_for_session_unlock(&state, "s1");
@@ -39216,12 +40065,13 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
     let mut h = echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
         .expect("cold resume");
     let cid = h
+        .agent_registry
         .agent_routes
         .get(&recipient_id)
         .cloned()
         .expect("restored durable agent route");
     assert_eq!(
-        h.agents[&cid].pending_message_wakes.len(),
+        h.agent_registry.agents[&cid].pending_message_wakes.len(),
         2,
         "typed and raw occurrences remain dormant on the incomparable branch; records={:?}",
         h.agent_store
@@ -39249,7 +40099,11 @@ fn agent_message_wake_stays_dormant_off_branch_until_reselected() {
             .count(),
         checkpoints_before + 1
     );
-    assert!(h.agents[&cid].pending_message_wakes.is_empty());
+    assert!(
+        h.agent_registry.agents[&cid]
+            .pending_message_wakes
+            .is_empty()
+    );
 }
 
 /// Provider loss preserves one deferred live occurrence through receipt and
@@ -39291,7 +40145,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
         .expect("register terminal interceptor");
         h.handle_disconnect(&provider);
         assert!(matches!(
-            h.agents[&cid].activation_dispatch,
+            h.agent_registry.agents[&cid].activation_dispatch,
             crate::agent::ActivationDispatchState::DispatchUncertain { .. }
         ));
         assert!(
@@ -39340,7 +40194,9 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
             input(),
         );
         assert!(
-            h.agents[&cid].pending_message_wakes.is_empty(),
+            h.agent_registry.agents[&cid]
+                .pending_message_wakes
+                .is_empty(),
             "failed receipt append creates no runtime obligation"
         );
         assert!(
@@ -39355,11 +40211,11 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
             input(),
         );
         assert_eq!(
-            h.agents[&cid].pending_message_wakes.len(),
+            h.agent_registry.agents[&cid].pending_message_wakes.len(),
             1,
             "retry creates one sequence-owned wake"
         );
-        let source_seq = h.agents[&cid]
+        let source_seq = h.agent_registry.agents[&cid]
             .pending_message_wakes
             .back()
             .expect("retry commits one wake")
@@ -39374,7 +40230,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
         );
 
         assert!(matches!(
-            h.agents[&cid].activation_dispatch,
+            h.agent_registry.agents[&cid].activation_dispatch,
             crate::agent::ActivationDispatchState::DispatchUncertain { .. }
         ));
         assert!(
@@ -39394,7 +40250,7 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
         )
         .expect("release terminal into append failure");
         assert!(matches!(
-            h.agents[&cid].activation_dispatch,
+            h.agent_registry.agents[&cid].activation_dispatch,
             crate::agent::ActivationDispatchState::DispatchUncertain { .. }
         ));
         assert!(
@@ -39507,7 +40363,11 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
                 .count(),
             1
         );
-        assert!(h.agents[&cid].pending_message_wakes.is_empty());
+        assert!(
+            h.agent_registry.agents[&cid]
+                .pending_message_wakes
+                .is_empty()
+        );
         h.shutdown().expect("shutdown");
     }
 }
@@ -39528,17 +40388,17 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
     let request_count_before = h.current_session_state.token_usage.total.requests;
     let model_request_counts_before = h.current_session_state.token_usage.by_model.clone();
     assert_eq!(
-        h.agents[&cid].in_flight_prompt.as_ref(),
+        h.agent_registry.agents[&cid].in_flight_prompt.as_ref(),
         Some(&second_prompt_id)
     );
     assert!(matches!(
-        &h.agents[&cid].activation_dispatch,
+        &h.agent_registry.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::DispatchUncertain {
             agent_prompt_id,
             ..
         } if agent_prompt_id == &second_prompt_id
     ));
-    let parent = h.agents[&cid]
+    let parent = h.agent_registry.agents[&cid]
         .head
         .map(tau_core::AgentEventParent::Under)
         .unwrap_or(tau_core::AgentEventParent::Root);
@@ -39648,7 +40508,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
                         == tau_proto::AgentPromptTerminationReason::Canceled
         )
     }));
-    let agent = &h.agents[&cid];
+    let agent = &h.agent_registry.agents[&cid];
     assert!(agent.in_flight_prompt.is_none());
     assert!(agent.last_prompt_id.is_none());
     assert!(matches!(
@@ -39792,7 +40652,11 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
     let watcher_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid);
-    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&watcher_cid)
+        .expect("watcher")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("busy-standalone-race-watcher"),
     };
     h.set_agent_watch(
@@ -39820,7 +40684,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         "standalone dispatch must capture harness-owned telemetry evidence"
     );
 
-    let parent = h.agents[&cid]
+    let parent = h.agent_registry.agents[&cid]
         .head
         .map(tau_core::AgentEventParent::Under)
         .unwrap_or(tau_core::AgentEventParent::Root);
@@ -39863,10 +40727,10 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         )
         .expect("open racing round without moving the runtime branch cursor");
     let context_before = (
-        h.agents[&cid].context_input_tokens,
-        h.agents[&cid].context_cached_tokens,
-        h.agents[&cid].context_usage_model.clone(),
-        h.agents[&cid].context_usage_head,
+        h.agent_registry.agents[&cid].context_input_tokens,
+        h.agent_registry.agents[&cid].context_cached_tokens,
+        h.agent_registry.agents[&cid].context_usage_model.clone(),
+        h.agent_registry.agents[&cid].context_usage_head,
     );
     let watcher_receives_before = session_agent_message_received_events(&h)
         .into_iter()
@@ -39926,15 +40790,15 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
     }));
     assert_eq!(
         (
-            h.agents[&cid].context_input_tokens,
-            h.agents[&cid].context_cached_tokens,
-            h.agents[&cid].context_usage_model.clone(),
-            h.agents[&cid].context_usage_head,
+            h.agent_registry.agents[&cid].context_input_tokens,
+            h.agent_registry.agents[&cid].context_cached_tokens,
+            h.agent_registry.agents[&cid].context_usage_model.clone(),
+            h.agent_registry.agents[&cid].context_usage_head,
         ),
         context_before
     );
     assert!(matches!(
-        h.agent_watch_provider_status[agent_id.as_str()].state,
+        h.agent_watch.provider_status[agent_id.as_str()].state,
         tau_proto::AgentWatchProviderState::Blocked {
             category: tau_proto::AgentWatchProviderCategory::Compaction
         }
@@ -39994,7 +40858,11 @@ fn agent_watch_response_uses_distinct_canonical_projection() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
-    h.agents.get_mut(&cid).expect("conversation").turn_state = AgentTurnState::AgentThinking {
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("conversation")
+        .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("sp-watch-target"),
     };
 
@@ -40010,7 +40878,7 @@ fn agent_watch_response_uses_distinct_canonical_projection() {
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].kind, tau_proto::AgentMessageKind::WatchResponse);
 
-    let conv = h.agents.get(&cid).expect("conversation");
+    let conv = h.agent_registry.agents.get(&cid).expect("conversation");
     assert!(conv.pending_prompts.is_empty());
     assert_eq!(conv.pending_message_wakes.len(), 1);
     let context = crate::prompt::assemble_prompt_context_from(
@@ -40047,11 +40915,11 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     let watched_cid = ensure_test_user_agent(&mut h);
     let watcher_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
-    let watched_id = h.agents[&watched_cid]
+    let watched_id = h.agent_registry.agents[&watched_cid]
         .agent_id
         .clone()
         .expect("watched agent id");
-    let watcher_id = h.agents[&watcher_cid]
+    let watcher_id = h.agent_registry.agents[&watcher_cid]
         .agent_id
         .clone()
         .expect("watcher agent id");
@@ -40059,7 +40927,8 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
         &mut h,
         &tau_proto::AgentId::parse(&watcher_id).expect("watcher id"),
     );
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&watcher_cid)
         .expect("watcher conversation")
         .turn_state = AgentTurnState::AgentThinking {
@@ -40096,7 +40965,11 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     assert_eq!(received[0].sender_id, crate::parse_agent_id(&watched_id));
     assert_eq!(received[0].recipient_id, crate::parse_agent_id(&watcher_id));
 
-    let watcher = h.agents.get(&watcher_cid).expect("watcher conversation");
+    let watcher = h
+        .agent_registry
+        .agents
+        .get(&watcher_cid)
+        .expect("watcher conversation");
     assert!(watcher.pending_prompts.is_empty());
     assert_eq!(
         watcher.pending_message_wakes.len(),
@@ -40138,11 +41011,11 @@ fn internal_prompt_to_watched_agent_does_not_notify_watchers() {
     let watched_cid = ensure_test_user_agent(&mut h);
     let watcher_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
-    let watched_id = h.agents[&watched_cid]
+    let watched_id = h.agent_registry.agents[&watched_cid]
         .agent_id
         .clone()
         .expect("watched agent id");
-    let watcher_id = h.agents[&watcher_cid]
+    let watcher_id = h.agent_registry.agents[&watcher_cid]
         .agent_id
         .clone()
         .expect("watcher agent id");
@@ -40191,11 +41064,11 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
     let watched_cid = ensure_test_user_agent(&mut h);
     let watcher_cid =
         h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
-    let watched_id = h.agents[&watched_cid]
+    let watched_id = h.agent_registry.agents[&watched_cid]
         .agent_id
         .clone()
         .expect("watched agent id");
-    let watcher_id = h.agents[&watcher_cid]
+    let watcher_id = h.agent_registry.agents[&watcher_cid]
         .agent_id
         .clone()
         .expect("watcher agent id");
@@ -40203,13 +41076,15 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
         &mut h,
         &tau_proto::AgentId::parse(&watcher_id).expect("watcher id"),
     );
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&watched_cid)
         .expect("watched conversation")
         .turn_state = AgentTurnState::AgentThinking {
         agent_prompt_id: test_agent_prompt_id("sp-watched-current"),
     };
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&watcher_cid)
         .expect("watcher conversation")
         .turn_state = AgentTurnState::AgentThinking {
@@ -40222,7 +41097,7 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
     let watched_agent_id = tau_proto::AgentId::parse(&watched_id).expect("watched id");
-    h.agent_navigation_modes.insert(
+    h.agent_registry.navigation_modes.insert(
         watched_agent_id.clone(),
         tau_proto::AgentNavigationMode::Suspended,
     );
@@ -40248,7 +41123,7 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
         "queued prompt must not notify watchers before it becomes active"
     );
     assert_eq!(
-        h.agent_navigation_modes.get(&watched_agent_id),
+        h.agent_registry.navigation_modes.get(&watched_agent_id),
         Some(&tau_proto::AgentNavigationMode::Active),
         "accepted queued UI input resumes immediately"
     );
@@ -40258,7 +41133,8 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
     )
     .expect("explicit suspend after queue admission");
 
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&watched_cid)
         .expect("watched conversation")
         .turn_state = AgentTurnState::Idle;
@@ -40272,7 +41148,7 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
     assert_eq!(received[0].kind, tau_proto::AgentMessageKind::WatchPrompt);
     assert_eq!(received[0].message, "queued follow-up");
     assert_eq!(
-        h.agent_navigation_modes.get(&watched_agent_id),
+        h.agent_registry.navigation_modes.get(&watched_agent_id),
         Some(&tau_proto::AgentNavigationMode::Suspended),
         "later queue dispatch or steer must not reapply the implicit write"
     );
@@ -40293,10 +41169,10 @@ fn agent_id_generation_is_stable_and_cleaned_up() {
     let second = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     assert_eq!(first, second);
     assert_role_hex_agent_id(&first, "engineer");
-    assert_eq!(h.agent_routes.get(&first), Some(&cid));
+    assert_eq!(h.agent_registry.agent_routes.get(&first), Some(&cid));
 
     h.remove_agent(&cid);
-    assert!(!h.agent_routes.contains_key(&first));
+    assert!(!h.agent_registry.agent_routes.contains_key(&first));
 
     h.shutdown().expect("shutdown");
 }
@@ -40886,7 +41762,7 @@ fn queued_extension_internal_prompt_submit_requests_preserve_individual_ctx_ids(
         .expect("queue prompt request");
     }
 
-    let queued_ctx_ids: Vec<_> = h.agents[&cid]
+    let queued_ctx_ids: Vec<_> = h.agent_registry.agents[&cid]
         .pending_prompts
         .iter()
         .map(|prompt| prompt.ctx_id.as_deref())
@@ -40924,7 +41800,7 @@ fn agent_metadata_validation_rejects_bad_key_size_value_and_unknown_target() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     let agent_id = tau_proto::AgentId::parse("metadata-target").expect("agent id");
-    h.session_loaded_agents.insert(agent_id.clone());
+    h.agent_registry.session_loaded.insert(agent_id.clone());
 
     let valid = tau_proto::AgentMetadataSet {
         agent_id: agent_id.clone(),
@@ -41027,6 +41903,7 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
     h.submit_user_prompt(test_session_id("s1"), "parent prompt".to_owned())
         .expect("submit parent");
     let parent_agent_id = h
+        .agent_registry
         .agents
         .get(&test_user_agent(&h))
         .and_then(|conversation| conversation.agent_id.clone())
@@ -41099,13 +41976,17 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
     h.handle_provider_response_finished(response)
         .expect("complete explicit-parent child");
 
-    let child = h.agents.get(&child_cid).expect("completed child retained");
+    let child = h
+        .agent_registry
+        .agents
+        .get(&child_cid)
+        .expect("completed child retained");
     assert!(child.originator.is_user());
     assert!(child.source_connection.is_none());
     assert!(child.parent_tool_call_id.is_none());
     assert!(child.parent_agent_id.is_none());
     assert_eq!(
-        h.agent_navigation_modes.get(&child_agent_id),
+        h.agent_registry.navigation_modes.get(&child_agent_id),
         Some(&tau_proto::AgentNavigationMode::ActiveAuto)
     );
     assert_eq!(
@@ -41135,6 +42016,7 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
     )
     .expect("submit fresh child turn");
     let fresh_prompt_id = h
+        .agent_registry
         .agents
         .get(&child_cid)
         .and_then(|child| child.in_flight_prompt.clone())
@@ -41146,8 +42028,8 @@ fn explicit_parent_typed_start_inherits_metadata_and_remains_loaded_after_comple
     ))
     .expect("complete fresh child turn");
 
-    assert!(h.agents.contains_key(&child_cid));
-    assert!(h.session_loaded_agents.contains(&child_agent_id));
+    assert!(h.agent_registry.agents.contains_key(&child_cid));
+    assert!(h.agent_registry.session_loaded.contains(&child_agent_id));
     assert_eq!(
         result_frames
             .lock()
@@ -41507,7 +42389,8 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     h.submit_user_prompt(h.current_session_id.clone(), "hello".to_owned())
         .expect("create user agent");
     let agent_id = h
-        .session_loaded_agents
+        .agent_registry
+        .session_loaded
         .iter()
         .next()
         .cloned()
@@ -41524,7 +42407,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     requester.lock().expect("requester frames").clear();
     observer.lock().expect("observer frames").clear();
     assert_eq!(
-        h.agent_navigation_modes.get(&agent_id),
+        h.agent_registry.navigation_modes.get(&agent_id),
         Some(&tau_proto::AgentNavigationMode::Active)
     );
 
@@ -41555,7 +42438,10 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
             }),
         )
         .expect("UI navigation request");
-        assert_eq!(h.agent_navigation_modes.get(&agent_id), Some(&expected));
+        assert_eq!(
+            h.agent_registry.navigation_modes.get(&agent_id),
+            Some(&expected)
+        );
     }
 
     h.handle_client_event_inner(
@@ -41569,7 +42455,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     )
     .expect("stale UI request");
     assert_eq!(
-        h.agent_navigation_modes.get(&agent_id),
+        h.agent_registry.navigation_modes.get(&agent_id),
         Some(&tau_proto::AgentNavigationMode::Active)
     );
 
@@ -41595,7 +42481,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     )
     .expect("external request consumed");
     assert_eq!(
-        h.agent_navigation_modes.get(&agent_id),
+        h.agent_registry.navigation_modes.get(&agent_id),
         Some(&tau_proto::AgentNavigationMode::Active)
     );
     assert!(external.lock().expect("external frames").is_empty());
@@ -41610,7 +42496,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     )
     .expect("promoted external request consumed");
     assert_eq!(
-        h.agent_navigation_modes.get(&agent_id),
+        h.agent_registry.navigation_modes.get(&agent_id),
         Some(&tau_proto::AgentNavigationMode::Active)
     );
     assert!(
@@ -41716,7 +42602,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     )
     .expect("accepted prompt before reconnect");
     assert_eq!(
-        h.agent_navigation_modes.get(&agent_id),
+        h.agent_registry.navigation_modes.get(&agent_id),
         Some(&tau_proto::AgentNavigationMode::Active)
     );
     h.bus
@@ -41759,7 +42645,7 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
     )
     .expect("extension intake");
     assert_eq!(
-        h.agent_navigation_modes.get(&agent_id),
+        h.agent_registry.navigation_modes.get(&agent_id),
         Some(&tau_proto::AgentNavigationMode::Active)
     );
     h.react_to_committed_event(
@@ -41771,15 +42657,16 @@ fn shared_agent_navigation_mode_writes_are_ui_only_and_absolute() {
         true,
         None,
     );
-    assert!(!h.agent_navigation_modes.contains_key(&agent_id));
-    h.agent_navigation_modes
+    assert!(!h.agent_registry.navigation_modes.contains_key(&agent_id));
+    h.agent_registry
+        .navigation_modes
         .insert(agent_id.clone(), tau_proto::AgentNavigationMode::Suspended);
     h.switch_session(
         test_session_id("navigation-next"),
         tau_proto::SessionStartReason::New,
     )
     .expect("switch session");
-    assert!(h.agent_navigation_modes.is_empty());
+    assert!(h.agent_registry.navigation_modes.is_empty());
     h.shutdown().expect("shutdown");
 }
 
@@ -41840,7 +42727,7 @@ fn ui_create_agent_rejection_is_correlated_and_point_to_point() {
                 Some(Event::UiCreateAgentResult(_))
             ))
     );
-    assert!(h.session_loaded_agents.is_empty());
+    assert!(h.agent_registry.session_loaded.is_empty());
 }
 
 /// Admission rejects malformed request and prompt correlations before creating
@@ -41874,7 +42761,7 @@ fn ui_create_agent_validates_correlations_and_accepts_promptless_creation() {
         )
         .expect("reject malformed correlation");
     }
-    assert!(h.session_loaded_agents.is_empty());
+    assert!(h.agent_registry.session_loaded.is_empty());
 
     for (request_id, request_session, metadata, parent_agent) in [
         (
@@ -41923,7 +42810,7 @@ fn ui_create_agent_validates_correlations_and_accepts_promptless_creation() {
         )
         .expect("reject pre-creation request");
     }
-    assert!(h.session_loaded_agents.is_empty());
+    assert!(h.agent_registry.session_loaded.is_empty());
 
     h.handle_ui_create_agent_from(
         &crate::test_connection_id("correlation-ui"),
@@ -41943,7 +42830,7 @@ fn ui_create_agent_validates_correlations_and_accepts_promptless_creation() {
         },
     )
     .expect("create promptless agent");
-    assert_eq!(h.session_loaded_agents.len(), 1);
+    assert_eq!(h.agent_registry.session_loaded.len(), 1);
     let outcomes = requester
         .lock()
         .expect("requester frames")
@@ -42042,7 +42929,7 @@ fn ui_create_agent_skill_rejection_reports_partial_creation() {
     else {
         panic!("expected queued create admission");
     };
-    assert!(h.session_loaded_agents.contains(&agent_id));
+    assert!(h.agent_registry.session_loaded.contains(&agent_id));
     assert!(event_log_events(&h).into_iter().any(|event| matches!(
         event,
         Event::AgentPromptFailed(failed)
@@ -42055,7 +42942,7 @@ fn ui_create_agent_skill_rejection_reports_partial_creation() {
         event,
         Event::AgentPromptSubmitted(prompt) if prompt.agent_id == agent_id
     )));
-    let cid = h.agent_routes[agent_id.as_str()].clone();
+    let cid = h.agent_registry.agent_routes[agent_id.as_str()].clone();
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after missing skill".to_owned()))
         .expect("dispatch later no-ctx prompt");
     assert!(event_log_events(&h).iter().all(|event| !matches!(
@@ -42153,7 +43040,7 @@ fn initial_prompt_materialization_error_publishes_precreated_terminal() {
 fn queued_initial_skill_is_resolved_before_steering_drain() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
-    h.resolving_initial_extension_collisions = true;
+    h.extensions.resolving_initial_collisions = true;
     h.handle_ui_create_agent_from(
         &crate::test_connection_id("ui-create-test"),
         tau_proto::UiCreateAgent {
@@ -42186,7 +43073,7 @@ fn queued_initial_skill_is_resolved_before_steering_drain() {
         event,
         Event::AgentPromptSteered(prompt) if prompt.text == ":skill missing-steered-skill"
     )));
-    h.resolving_initial_extension_collisions = false;
+    h.extensions.resolving_initial_collisions = false;
     h.dispatch_prompt_for_agent(
         &cid,
         PendingPrompt::user("after steered missing skill".to_owned()),
@@ -42206,7 +43093,7 @@ fn queued_initial_skill_is_resolved_before_steering_drain() {
 fn recalled_initial_prompt_publishes_correlated_terminal() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
-    h.resolving_initial_extension_collisions = true;
+    h.extensions.resolving_initial_collisions = true;
     h.handle_ui_create_agent_from(
         &crate::test_connection_id("ui-create-test"),
         tau_proto::UiCreateAgent {
@@ -42240,7 +43127,7 @@ fn recalled_initial_prompt_publishes_correlated_terminal() {
                 && failed.ctx_id == "prompt-recalled"
                 && failed.stage == tau_proto::AgentPromptFailureStage::Canceled
     )));
-    h.resolving_initial_extension_collisions = false;
+    h.extensions.resolving_initial_collisions = false;
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after recall".to_owned()))
         .expect("dispatch later no-ctx prompt");
     assert!(event_log_events(&h).iter().all(|event| !matches!(
@@ -42292,22 +43179,30 @@ fn accepted_ui_prompt_resumes_exact_target_before_queue_or_dispatch() {
         let other_cid =
             h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
         let target_id = h
+            .agent_registry
             .agents
             .get(&target_cid)
             .and_then(|agent| agent.agent_id.as_deref())
             .map(crate::parse_agent_id)
             .expect("target id");
         let other_id = h
+            .agent_registry
             .agents
             .get(&other_cid)
             .and_then(|agent| agent.agent_id.as_deref())
             .map(crate::parse_agent_id)
             .expect("other id");
-        h.agent_navigation_modes
+        h.agent_registry
+            .navigation_modes
             .insert(target_id.clone(), prior_mode);
-        h.agent_navigation_modes
+        h.agent_registry
+            .navigation_modes
             .insert(other_id.clone(), tau_proto::AgentNavigationMode::Suspended);
-        let target = h.agents.get_mut(&target_cid).expect("target conversation");
+        let target = h
+            .agent_registry
+            .agents
+            .get_mut(&target_cid)
+            .expect("target conversation");
         target.turn_state = turn_state;
         target.published_runtime_state = expected_runtime;
         let requester = connect_test_client_with_origin(
@@ -42349,12 +43244,12 @@ fn accepted_ui_prompt_resumes_exact_target_before_queue_or_dispatch() {
         .expect("authenticated UI prompt");
 
         assert_eq!(
-            h.agent_navigation_modes.get(&target_id),
+            h.agent_registry.navigation_modes.get(&target_id),
             Some(&tau_proto::AgentNavigationMode::Active),
             "{case}"
         );
         assert_eq!(
-            h.agent_navigation_modes.get(&other_id),
+            h.agent_registry.navigation_modes.get(&other_id),
             Some(&tau_proto::AgentNavigationMode::Suspended),
             "{case}: a textual mention is not a route"
         );
@@ -42455,12 +43350,14 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
         let mut h = echo_harness(td.path().join(case_name)).expect("harness");
         let cid = ensure_test_user_agent(&mut h);
         let target_id = h
+            .agent_registry
             .agents
             .get(&cid)
             .and_then(|agent| agent.agent_id.as_deref())
             .map(crate::parse_agent_id)
             .expect("target id");
-        h.agent_navigation_modes
+        h.agent_registry
+            .navigation_modes
             .insert(target_id.clone(), tau_proto::AgentNavigationMode::Suspended);
         let observer = connect_test_client(&mut h, "prompt-observer", tau_proto::ClientKind::Ui);
         h.bus
@@ -42534,13 +43431,17 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
             }
         };
         if matches!(case, Case::TerminatingTarget) {
-            h.agents.get_mut(&cid).expect("target").terminating = true;
+            h.agent_registry
+                .agents
+                .get_mut(&cid)
+                .expect("target")
+                .terminating = true;
         }
         if matches!(case, Case::MissingMembership) {
-            h.session_loaded_agents.remove(&target_id);
+            h.agent_registry.session_loaded.remove(&target_id);
         }
         if matches!(case, Case::MissingMode) {
-            h.agent_navigation_modes.remove(&target_id);
+            h.agent_registry.navigation_modes.remove(&target_id);
         }
         let session_id = if matches!(case, Case::StaleSession) {
             test_session_id("stale-session")
@@ -42596,12 +43497,12 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
 
         if matches!(case, Case::MissingMode) {
             assert!(
-                !h.agent_navigation_modes.contains_key(&target_id),
+                !h.agent_registry.navigation_modes.contains_key(&target_id),
                 "{case_name}"
             );
         } else {
             assert_eq!(
-                h.agent_navigation_modes.get(&target_id),
+                h.agent_registry.navigation_modes.get(&target_id),
                 Some(&tau_proto::AgentNavigationMode::Suspended),
                 "{case_name}"
             );
@@ -42653,7 +43554,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
                 "{case_name}: unauthorized or invalid input must not execute"
             );
             assert!(
-                h.agents.values().all(|agent| agent
+                h.agent_registry.agents.values().all(|agent| agent
                     .pending_prompts
                     .iter()
                     .all(|prompt| prompt.ctx_id.as_deref() != Some(case_name))),
@@ -42661,9 +43562,14 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
             );
         }
 
-        h.agents.get_mut(&cid).expect("target").terminating = false;
-        h.session_loaded_agents.insert(target_id.clone());
-        h.agent_navigation_modes
+        h.agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("target")
+            .terminating = false;
+        h.agent_registry.session_loaded.insert(target_id.clone());
+        h.agent_registry
+            .navigation_modes
             .entry(target_id)
             .or_insert(tau_proto::AgentNavigationMode::Suspended);
         h.shutdown().expect("shutdown");
@@ -42679,12 +43585,14 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
     let mut h = echo_harness(&state_dir).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
     let target_id = h
+        .agent_registry
         .agents
         .get(&cid)
         .and_then(|agent| agent.agent_id.as_deref())
         .map(crate::parse_agent_id)
         .expect("target id");
-    h.agent_navigation_modes
+    h.agent_registry
+        .navigation_modes
         .insert(target_id.clone(), tau_proto::AgentNavigationMode::Suspended);
     connect_test_client_with_origin(
         &mut h,
@@ -42746,7 +43654,7 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
 
     assert!(matches!(result, Err(HarnessError::AgentStore(_))));
     assert_eq!(
-        h.agent_navigation_modes.get(&target_id),
+        h.agent_registry.navigation_modes.get(&target_id),
         Some(&tau_proto::AgentNavigationMode::Suspended)
     );
     assert!(
@@ -42779,7 +43687,7 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
         }
         _ => true,
     }));
-    assert!(h.agents.values().all(|agent| {
+    assert!(h.agent_registry.agents.values().all(|agent| {
         agent
             .pending_prompts
             .iter()

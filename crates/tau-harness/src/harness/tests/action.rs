@@ -290,7 +290,7 @@ fn dropped_startup_action_schema_releases_activation_reservation() {
 fn oversized_startup_action_schema_replacement_releases_reservation() {
     let temp = TempDir::new().expect("temp dir");
     let mut h = quiet_provider_harness(temp.path()).expect("harness");
-    h.initial_extension_tool_preflight_complete = false;
+    h.extensions.initial_tool_preflight_complete = false;
     let _extension = connect_action_provider(&mut h, "email-ext");
     h.extensions
         .entries

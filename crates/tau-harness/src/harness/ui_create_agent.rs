@@ -60,7 +60,7 @@ impl Harness {
         let prompt_ctx_id = req.ctx_id.clone();
         let parent_ephemeral = parent_cid
             .as_ref()
-            .and_then(|cid| self.agents.get(cid))
+            .and_then(|cid| self.agent_registry.agents.get(cid))
             .is_some_and(|agent| agent.persistence.is_ephemeral());
         let persistence = if req.ephemeral || parent_ephemeral {
             tau_core::AgentPersistenceMode::Ephemeral
@@ -109,7 +109,7 @@ impl Harness {
             );
             return Ok(true);
         }
-        if let Some(conv) = self.agents.get_mut(&cid) {
+        if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
             conv.next_ctx_id = prompt_ctx_id.clone();
             conv.model_override = req.model_override;
         }
@@ -184,7 +184,7 @@ impl Harness {
             tau_proto::UiCreateAgentInitialPrompt::Queued,
         );
         if self.dispatch_blocked_for(cid) || !self.session_initialized(&session_id) {
-            if let Some(conv) = self.agents.get_mut(cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
                 conv.pending_prompts.push_back(prompt.clone());
             }
             self.publish_event(
@@ -303,7 +303,12 @@ impl Harness {
             );
         }
         let parent_cid = if let Some(agent_id) = req.parent_agent.as_ref() {
-            let Some(cid) = self.agent_routes.get(agent_id.as_str()).cloned() else {
+            let Some(cid) = self
+                .agent_registry
+                .agent_routes
+                .get(agent_id.as_str())
+                .cloned()
+            else {
                 let message =
                     format!("parent_agent `{agent_id}` is not loaded in the current session");
                 return reject(
@@ -351,10 +356,11 @@ impl Harness {
         message: &str,
     ) {
         if let Some(cid) = self
+            .agent_registry
             .agent_routes
             .get(correlation.agent_id.as_str())
             .cloned()
-            && let Some(agent) = self.agents.get_mut(&cid)
+            && let Some(agent) = self.agent_registry.agents.get_mut(&cid)
             && agent.next_ctx_id.as_deref() == Some(correlation.ctx_id.as_str())
         {
             agent.next_ctx_id = None;
@@ -379,6 +385,7 @@ impl Harness {
         message: &str,
     ) {
         let mut correlations = self
+            .agent_registry
             .agents
             .get_mut(cid)
             .map(|agent| {

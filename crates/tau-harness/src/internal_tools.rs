@@ -233,6 +233,7 @@ impl<'a> InternalToolHost<'a> {
     pub fn discovered_skills(&self, conversation_id: &AgentId) -> Vec<InternalSkill> {
         let skills = self
             .harness
+            .agent_registry
             .agents
             .get(conversation_id)
             .and_then(|agent| agent.agent_id.as_deref())
@@ -282,6 +283,7 @@ impl<'a> InternalToolHost<'a> {
     pub fn current_agent_summaries(&self) -> Vec<InternalAgentSummary> {
         let mut summaries = self
             .harness
+            .agent_registry
             .agents
             .values()
             .filter(|agent| !agent.terminating)
@@ -310,7 +312,7 @@ impl<'a> InternalToolHost<'a> {
                 state: InternalAgentState::Pending,
             },
         ));
-        summaries.extend(self.harness.restored_unavailable_agents.iter().map(
+        summaries.extend(self.harness.agent_registry.restored_unavailable.iter().map(
             |(agent_id, role)| InternalAgentSummary {
                 group: self.harness.role_group_name_for_role(role),
                 agent_id: agent_id.clone(),
@@ -324,7 +326,8 @@ impl<'a> InternalToolHost<'a> {
             .collect::<std::collections::HashSet<_>>();
         summaries.extend(
             self.harness
-                .stopped_agent_ids
+                .agent_registry
+                .stopped_ids
                 .iter()
                 .filter(|agent_id| !represented.contains(agent_id.as_str()))
                 .map(|agent_id| {
@@ -359,6 +362,7 @@ impl<'a> InternalToolHost<'a> {
     /// process-local map.
     pub fn agent_id_for_harness_start_query(&self, query_id: &str) -> Option<String> {
         self.harness
+            .agent_registry
             .pending_builtin_delegates
             .get(query_id)
             .cloned()
@@ -599,7 +603,11 @@ impl<'a> InternalToolHost<'a> {
     /// model, and effort come from this frozen prompt ownership; work
     /// status is read at call time from the current loaded-agent reducer.
     pub(crate) fn self_info(&self, owner: &AgentOwnedInternalToolCall) -> Option<InternalSelfInfo> {
-        let agent = self.harness.agents.get(owner.conversation_id())?;
+        let agent = self
+            .harness
+            .agent_registry
+            .agents
+            .get(owner.conversation_id())?;
         let agent_id = tau_proto::AgentId::parse(agent.agent_id.as_deref()?).ok()?;
         let prompt_id = self
             .harness
@@ -640,6 +648,7 @@ impl<'a> InternalToolHost<'a> {
     ) -> Result<(), HarnessError> {
         let cid = self
             .harness
+            .agent_registry
             .agent_routes
             .get(agent_id)
             .cloned()
@@ -948,6 +957,7 @@ impl<'a> InternalToolHost<'a> {
 
     fn sender_conversation_id(&self, sender_agent_id: &str) -> Result<AgentId, String> {
         self.harness
+            .agent_registry
             .agent_routes
             .get(sender_agent_id)
             .cloned()

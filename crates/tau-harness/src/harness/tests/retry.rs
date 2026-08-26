@@ -52,8 +52,10 @@ fn add_routed_prompt(h: &mut Harness, agent_id: &str, prompt_id: &str, provider_
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
     );
-    h.agents.insert(cid.clone(), agent);
-    h.agent_routes.insert(agent_id.to_owned(), cid.clone());
+    h.agent_registry.agents.insert(cid.clone(), agent);
+    h.agent_registry
+        .agent_routes
+        .insert(agent_id.to_owned(), cid.clone());
     h.prompt_agents.insert(
         prompt_id
             .parse::<tau_proto::AgentPromptId>()
@@ -222,8 +224,10 @@ fn retry_rejects_invalid_targets_and_duplicate_request_ids() {
         None,
     );
     idle_agent.agent_id = Some("idle-agent".to_owned());
-    h.agents.insert(idle.clone(), idle_agent);
-    h.agent_routes.insert("idle-agent".to_owned(), idle);
+    h.agent_registry.agents.insert(idle.clone(), idle_agent);
+    h.agent_registry
+        .agent_routes
+        .insert("idle-agent".to_owned(), idle);
 
     for request in [
         retry_request("stale", "old", Some("no-route")),

@@ -5,6 +5,49 @@
 
 use super::*;
 
+/// Agent identity, membership, routing, and lifecycle state owned by the
+/// harness.
+pub(crate) struct AgentRegistryState {
+    /// All live agent runtimes keyed by stable agent id.
+    pub(crate) agents: HashMap<AgentId, Agent>,
+    /// Public agent id to current-session conversation route.
+    pub(crate) agent_routes: HashMap<String, AgentId>,
+    /// Next process-local loaded-agent runtime incarnation.
+    pub(super) next_runtime_incarnation: u64,
+    /// Next process-local opaque agent-initialization correlation.
+    pub(super) next_initialization_id: u64,
+    /// Random identity stamped on outer turns authored by this harness runtime.
+    pub(super) accounting_runtime_id: tau_proto::AccountingRuntimeId,
+    /// Random stream used by agent-id template expansion.
+    pub(super) id_rng: StdRng,
+    /// Authenticated creator relationships for the active session.
+    pub(super) creator_topology: AgentCreatorTopology,
+    /// Runtime-only self and creator-subtree estimated-cost totals.
+    pub(super) cost_ledger: AgentCostLedger,
+    /// Creation facts committed before their normal publish pipeline.
+    pub(super) precommitted_starts: HashSet<String>,
+    /// Agent ids loaded or awaiting a must-pass membership publication.
+    pub(crate) session_loaded: HashSet<AgentId>,
+    /// Agent ids that have appeared in current-session membership history.
+    pub(crate) session_ever_loaded: HashSet<AgentId>,
+    /// Successfully committed current membership used by roster snapshots.
+    pub(super) roster_loaded: HashSet<AgentId>,
+    /// Successfully committed membership history used by roster snapshots.
+    pub(super) roster_ever_loaded: HashSet<AgentId>,
+    /// Whether restored and newly committed roster membership remains valid.
+    pub(super) roster_valid: bool,
+    /// Harness-owned navigation classification for loaded agents.
+    pub(crate) navigation_modes: HashMap<AgentId, tau_proto::AgentNavigationMode>,
+    /// Agent ids that were once known but can no longer receive messages.
+    pub(crate) stopped_ids: HashSet<String>,
+    /// Restored members whose pre-restart request route is unavailable.
+    pub(crate) restored_unavailable: HashMap<String, String>,
+    /// Outstanding built-in delegation query to child correlation.
+    pub(crate) pending_builtin_delegates: HashMap<String, String>,
+    /// Extension-started agents waiting for ordered creation and dispatch.
+    pub(super) pending_start_requests: VecDeque<PendingStartAgentRequest>,
+}
+
 pub(super) fn agent_runtime_state_for_turn(state: &AgentTurnState) -> tau_proto::AgentRuntimeState {
     match state {
         AgentTurnState::Idle => tau_proto::AgentRuntimeState::Idle,
@@ -289,7 +332,7 @@ pub(super) fn mint_agent_id_for_role(role: &str) -> String {
 
 impl Harness {
     pub(crate) fn agent_display_name_for_cid(&self, cid: &AgentId) -> Option<String> {
-        self.agents.get(cid).and_then(|conv| {
+        self.agent_registry.agents.get(cid).and_then(|conv| {
             normalize_display_name(conv.display_name.as_deref())
                 .or_else(|| conv.agent_id.as_ref().cloned())
         })
@@ -407,7 +450,9 @@ impl Harness {
             None,
             HarnessOutputMessage::deliver(Event::StartAgentAccepted(accepted)),
         );
-        self.pending_start_agent_requests.push_back(pending);
+        self.agent_registry
+            .pending_start_requests
+            .push_back(pending);
         self.drain_pending_start_agent_requests()
     }
 
@@ -456,7 +501,9 @@ impl Harness {
             None,
             HarnessOutputMessage::deliver(Event::StartAgentAccepted(accepted)),
         );
-        self.pending_start_agent_requests.push_back(pending);
+        self.agent_registry
+            .pending_start_requests
+            .push_back(pending);
         Ok(agent_id)
     }
 
@@ -480,8 +527,11 @@ impl Harness {
         &mut self,
         agent_id: &tau_proto::AgentId,
     ) -> Result<(), String> {
-        if self.session_loaded_agents.contains(agent_id)
-            || self.agent_routes.contains_key(agent_id.as_str())
+        if self.agent_registry.session_loaded.contains(agent_id)
+            || self
+                .agent_registry
+                .agent_routes
+                .contains_key(agent_id.as_str())
         {
             return Ok(());
         }
@@ -561,7 +611,8 @@ impl Harness {
             .parent_agent
             .as_ref()
             .map(|agent_id| {
-                self.agent_routes
+                self.agent_registry
+                    .agent_routes
                     .get(agent_id.as_str())
                     .cloned()
                     .ok_or_else(|| {
@@ -583,10 +634,11 @@ impl Harness {
     }
 
     pub(super) fn parent_agent_id_for_cid(&self, cid: &AgentId) -> Option<tau_proto::AgentId> {
-        self.agents
+        self.agent_registry
+            .agents
             .get(cid)
             .and_then(|agent| agent.parent_agent_id.as_ref())
-            .and_then(|parent_cid| self.agents.get(parent_cid))
+            .and_then(|parent_cid| self.agent_registry.agents.get(parent_cid))
             .and_then(|parent| parent.agent_id.as_ref())
             .map(crate::parse_agent_id)
     }
@@ -624,7 +676,7 @@ impl Harness {
             .authenticated_source_name(source_id)
             .ok_or_else(|| "the requesting extension connection is unavailable".to_owned())?;
         let role = self.resolve_start_agent_request_role(&query)?;
-        let duplicate_active = self.agents.iter().find_map(|(cid, conv)| {
+        let duplicate_active = self.agent_registry.agents.iter().find_map(|(cid, conv)| {
             let matches_query = conv.source_connection.is_some()
                 && matches!(
                     &conv.originator,
@@ -638,7 +690,7 @@ impl Harness {
             })?
         });
         if let Some((cid, agent_id)) = duplicate_active {
-            if let Some(conv) = self.agents.get_mut(&cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 conv.source_connection = Some(source_id.clone());
             }
             self.accept_duplicate_start_agent_request(source_id, &query.query_id, &agent_id);
@@ -649,15 +701,18 @@ impl Harness {
             return Ok(None);
         }
         if let Some(idx) = self
-            .pending_start_agent_requests
+            .agent_registry
+            .pending_start_requests
             .iter()
             .position(|pending| {
                 *pending.extension_name == *extension_name
                     && pending.query.query_id == query.query_id
             })
         {
-            let agent_id = self.pending_start_agent_requests[idx].agent_id.clone();
-            self.pending_start_agent_requests[idx].source_id = source_id.to_owned();
+            let agent_id = self.agent_registry.pending_start_requests[idx]
+                .agent_id
+                .clone();
+            self.agent_registry.pending_start_requests[idx].source_id = source_id.to_owned();
             self.accept_duplicate_start_agent_request(source_id, &query.query_id, &agent_id);
             self.emit_info(&format!(
                 "rebound duplicate start-agent-request `{}` from `{}` to pending agent `{}`",
@@ -675,7 +730,7 @@ impl Harness {
         let parent_cid = self.resolve_start_agent_parent_cid(&query)?;
         let persistence = parent_cid
             .as_ref()
-            .and_then(|cid| self.agents.get(cid))
+            .and_then(|cid| self.agent_registry.agents.get(cid))
             .map(|agent| agent.persistence)
             .unwrap_or_default();
         if persistence.is_ephemeral()
@@ -708,7 +763,8 @@ impl Harness {
                 return Ok(());
             };
             let pending = self
-                .pending_start_agent_requests
+                .agent_registry
+                .pending_start_requests
                 .remove(idx)
                 .expect("index just located");
             let source_id = pending.source_id.clone();
@@ -728,14 +784,14 @@ impl Harness {
     }
 
     pub(super) fn next_dispatchable_start_agent_request_index(&self) -> Option<usize> {
-        (!self.pending_start_agent_requests.is_empty()).then_some(0)
+        (!self.agent_registry.pending_start_requests.is_empty()).then_some(0)
     }
 
     /// Compatibility hook for older teardown paths. Start-agent dispatch no
     /// longer holds harness-side update/exclusive locks, so release only tries
     /// to drain any queued requests left by earlier errors.
     pub(super) fn release_start_agent_request(&mut self, _cid: &AgentId) {
-        if !self.pending_start_agent_requests.is_empty()
+        if !self.agent_registry.pending_start_requests.is_empty()
             && let Err(error) = self.drain_pending_start_agent_requests()
         {
             self.emit_harness_failure(&format!("queued start-agent dispatch failed: {error}"));
@@ -800,19 +856,20 @@ impl Harness {
             None
         };
         let parent_agent_id = parent_cid.as_ref().and_then(|parent_cid| {
-            self.agents
+            self.agent_registry
+                .agents
                 .contains_key(parent_cid)
                 .then(|| parent_cid.clone())
         });
         let session_id = parent_agent_id
             .as_ref()
-            .and_then(|parent_cid| self.agents.get(parent_cid))
+            .and_then(|parent_cid| self.agent_registry.agents.get(parent_cid))
             .map(|parent| parent.session_id.clone())
             .unwrap_or_else(|| self.current_session_id.clone());
         let creator = if query.tool_call_id.is_some() {
             let parent = parent_cid
                 .as_ref()
-                .and_then(|parent_cid| self.agents.get(parent_cid))
+                .and_then(|parent_cid| self.agent_registry.agents.get(parent_cid))
                 .ok_or_else(|| {
                     HarnessError::Participant(
                         "tool-backed agent creation lost its authenticated parent".to_owned(),
@@ -840,7 +897,8 @@ impl Harness {
             query_id: query.query_id.clone(),
         };
         if is_tool_backed && &source_id == harness_connection_id() {
-            self.pending_builtin_delegates
+            self.agent_registry
+                .pending_builtin_delegates
                 .insert(query.query_id.clone(), agent_id.clone());
         }
         let initial_metadata: Vec<_> = peer_entrypoint_endpoint
@@ -904,10 +962,12 @@ impl Harness {
         {
             conv.head = Some(last_node_id);
         }
-        self.agent_routes.insert(agent_id.clone(), cid.clone());
-        self.agents.insert(cid.clone(), conv);
+        self.agent_registry
+            .agent_routes
+            .insert(agent_id.clone(), cid.clone());
+        self.agent_registry.agents.insert(cid.clone(), conv);
         let buffered_activations = self
-            .agents
+            .agent_registry.agents
             .get(&cid)
             .into_iter()
             .flat_map(|agent| agent.pending_message_wakes.iter())
@@ -935,7 +995,9 @@ impl Harness {
         for (observation, kind, source_observation) in buffered_activations {
             self.append_activation_queued(&cid, observation, kind, source_observation, None);
         }
-        self.precommitted_agent_starts.insert(agent_id.clone());
+        self.agent_registry
+            .precommitted_starts
+            .insert(agent_id.clone());
         self.enqueue_publish(
             None,
             started,
@@ -953,6 +1015,7 @@ impl Harness {
         );
         self.ensure_loaded_agent_for_agent_with_metadata(&cid, &agent_id, initial_metadata);
         if let Some(display_name) = self
+            .agent_registry
             .agents
             .get(&cid)
             .and_then(|conv| normalize_display_name(conv.display_name.as_deref()))
@@ -993,7 +1056,7 @@ impl Harness {
     }
 
     pub(super) fn detach_completed_parented_start_agent(&mut self, cid: &AgentId) {
-        if let Some(conv) = self.agents.get_mut(cid) {
+        if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
             // A completed parented worker remains addressable by its `agent_id`,
             // but it is no longer fulfilling the parent request or owned by the
             // extension query that started it. Clearing the transient side-query
@@ -1011,7 +1074,7 @@ impl Harness {
     }
 
     pub(super) fn agent_stats_snapshot(&self, cid: &AgentId) -> Option<AgentStatsUpdated> {
-        let agent = self.agents.get(cid)?;
+        let agent = self.agent_registry.agents.get(cid)?;
         let agent_id = agent.agent_id.as_ref()?;
         let stable_agent_id = crate::parse_agent_id(agent_id);
         let context_window = agent.context_input_tokens.and_then(|_| {
@@ -1028,7 +1091,8 @@ impl Harness {
             )
             .expect("harness work status is canonical"),
             navigation_mode: self
-                .agent_navigation_modes
+                .agent_registry
+                .navigation_modes
                 .get(&stable_agent_id)
                 .copied()
                 .unwrap_or_else(|| {
@@ -1051,8 +1115,9 @@ impl Harness {
                 context_window,
                 percent_used: agent.context_percent_used,
             },
-            estimated_api_cost: self.cost_ledger.self_cost(&stable_agent_id),
+            estimated_api_cost: self.agent_registry.cost_ledger.self_cost(&stable_agent_id),
             creator_subtree_estimated_api_cost: self
+                .agent_registry
                 .cost_ledger
                 .creator_subtree_cost(&stable_agent_id),
         })
@@ -1066,6 +1131,7 @@ impl Harness {
         cid: &AgentId,
     ) -> tau_proto::AgentTurnActivity {
         if self
+            .agent_registry
             .agents
             .get(cid)
             .is_some_and(|agent| agent.in_flight_prompt.is_some())
@@ -1115,9 +1181,10 @@ impl Harness {
                 && entry.state != ExtensionState::Disconnected
         });
         let targets_current_live_agent = self
+            .agent_registry
             .agent_routes
             .get(declaration.agent_id.as_str())
-            .and_then(|cid| self.agents.get(cid))
+            .and_then(|cid| self.agent_registry.agents.get(cid))
             .is_some_and(|agent| {
                 !agent.terminating
                     && agent.session_id == self.current_session_id
@@ -1175,6 +1242,7 @@ impl Harness {
             });
         if before != after
             && let Some(cid) = self
+                .agent_registry
                 .agent_routes
                 .get(declaration.agent_id.as_str())
                 .cloned()
@@ -1194,7 +1262,12 @@ impl Harness {
         };
         let affected = removed.keys().cloned().collect::<Vec<_>>();
         for agent_id in affected {
-            if let Some(cid) = self.agent_routes.get(agent_id.as_str()).cloned() {
+            if let Some(cid) = self
+                .agent_registry
+                .agent_routes
+                .get(agent_id.as_str())
+                .cloned()
+            {
                 self.emit_agent_stats_updated(&cid);
             }
         }
@@ -1235,14 +1308,19 @@ impl Harness {
         agent_id: &tau_proto::AgentId,
         mode: tau_proto::AgentNavigationMode,
     ) -> Result<(), tau_proto::UiSetAgentNavigationModeRejection> {
-        if !self.session_loaded_agents.contains(agent_id) {
+        if !self.agent_registry.session_loaded.contains(agent_id) {
             return Err(tau_proto::UiSetAgentNavigationModeRejection::AgentNotLoaded);
         }
-        let Some(current_mode) = self.agent_navigation_modes.get_mut(agent_id) else {
+        let Some(current_mode) = self.agent_registry.navigation_modes.get_mut(agent_id) else {
             return Err(tau_proto::UiSetAgentNavigationModeRejection::AgentNotLoaded);
         };
         *current_mode = mode;
-        if let Some(cid) = self.agent_routes.get(agent_id.as_str()).cloned() {
+        if let Some(cid) = self
+            .agent_registry
+            .agent_routes
+            .get(agent_id.as_str())
+            .cloned()
+        {
             self.emit_agent_stats_updated(&cid);
         }
         Ok(())
@@ -1290,7 +1368,7 @@ impl Harness {
 
     pub(super) fn set_agent_turn_state(&mut self, cid: &AgentId, state: AgentTurnState) {
         let new_state = agent_runtime_state_for_turn(&state);
-        let changed_agent_id = self.agents.get(cid).and_then(|agent| {
+        let changed_agent_id = self.agent_registry.agents.get(cid).and_then(|agent| {
             let old_state = agent.published_runtime_state;
             if old_state == new_state {
                 return None;
@@ -1298,7 +1376,7 @@ impl Harness {
             agent.agent_id.clone()
         });
 
-        if let Some(agent) = self.agents.get_mut(cid) {
+        if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
             agent.turn_state = state;
             if changed_agent_id.is_some() {
                 agent.published_runtime_state = new_state;
@@ -1314,7 +1392,7 @@ impl Harness {
         if new_state == tau_proto::AgentRuntimeState::Running {
             self.ensure_outer_turn_started(cid);
         } else {
-            let finish = self.agents.get_mut(cid).and_then(|agent| {
+            let finish = self.agent_registry.agents.get_mut(cid).and_then(|agent| {
                 let path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id) =
                     &agent.outer_turn
                 else {
@@ -1338,13 +1416,14 @@ impl Harness {
             }
         }
         if new_state == tau_proto::AgentRuntimeState::Running {
-            self.agent_watch_provider_status.remove(&agent_id);
+            self.agent_watch.provider_status.remove(&agent_id);
             for watcher_id in self.watchers_for_agent(&agent_id) {
                 if let Some(subscription_id) = self
-                    .agent_watch_subscriptions
+                    .agent_watch
+                    .subscriptions
                     .get(&(watcher_id, agent_id.clone()))
                 {
-                    self.agent_watch_provider_deliveries.remove(subscription_id);
+                    self.agent_watch.provider_deliveries.remove(subscription_id);
                 }
             }
         }
@@ -1357,14 +1436,14 @@ impl Harness {
         );
         self.emit_agent_stats_updated(cid);
         if new_state == tau_proto::AgentRuntimeState::Idle
-            && let Some(agent) = self.agents.get_mut(cid)
+            && let Some(agent) = self.agent_registry.agents.get_mut(cid)
         {
             agent.lifecycle_notification_only_turn = false;
         }
     }
 
     pub(super) fn remove_agent(&mut self, cid: &AgentId) {
-        let marked_owner = self.agents.get(cid).and_then(|agent| {
+        let marked_owner = self.agent_registry.agents.get(cid).and_then(|agent| {
             let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
             let checkpoint = tree.unresolved_marked_inference_checkpoint()?;
             Some((
@@ -1379,7 +1458,7 @@ impl Harness {
             marked_owner
         {
             if !already_terminating {
-                if let Some(agent) = self.agents.get_mut(cid) {
+                if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
                     agent.terminating = true;
                 }
                 self.publish_event_for_agent(
@@ -1402,12 +1481,16 @@ impl Harness {
     /// Remove an endpoint as part of a normal completion or explicit cleanup.
     pub(super) fn remove_agent_expected(&mut self, cid: &AgentId) {
         if let Some(agent_id) = self
+            .agent_registry
             .agents
             .get(cid)
             .and_then(|agent| agent.agent_id.clone())
-            && !self.pending_agent_unload_reasons.contains_key(&agent_id)
+            && !self
+                .agent_watch
+                .pending_unload_reasons
+                .contains_key(&agent_id)
         {
-            self.expected_agent_unloads.insert(agent_id);
+            self.agent_watch.expected_unloads.insert(agent_id);
         }
         self.remove_agent(cid);
     }
@@ -1447,6 +1530,7 @@ impl Harness {
         }
         self.retire_background_work_before_agent_unload(cid);
         let unloading_agent_id = self
+            .agent_registry
             .agents
             .get(cid)
             .and_then(|agent| agent.agent_id.clone());
@@ -1493,30 +1577,33 @@ impl Harness {
             tau_proto::AgentPromptFailureStage::LifecycleTeardown,
             "agent teardown discarded initial prompt",
         );
-        let Some((session_id, agent_id)) = self.agents.get_mut(cid).and_then(|conv| {
-            conv.terminating = true;
-            conv.pending_prompts.clear();
-            conv.pending_message_wakes.clear();
-            conv.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
-            conv.agent_id
-                .clone()
-                .map(|agent_id| (conv.session_id.clone(), agent_id))
-        }) else {
+        let Some((session_id, agent_id)) =
+            self.agent_registry.agents.get_mut(cid).and_then(|conv| {
+                conv.terminating = true;
+                conv.pending_prompts.clear();
+                conv.pending_message_wakes.clear();
+                conv.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
+                conv.agent_id
+                    .clone()
+                    .map(|agent_id| (conv.session_id.clone(), agent_id))
+            })
+        else {
             return;
         };
         self.cancel_agent_synchronized_publications(cid);
         if !self.unload_agent_from_session_if_loaded(&session_id, &agent_id) {
             let reason = self
-                .pending_agent_unload_reasons
+                .agent_watch
+                .pending_unload_reasons
                 .remove(&agent_id)
                 .or_else(|| {
-                    (!self.expected_agent_unloads.remove(&agent_id))
+                    (!self.agent_watch.expected_unloads.remove(&agent_id))
                         .then_some(tau_proto::AgentWatchLifecycleReason::UnexpectedUnload)
                 });
             self.retire_agent_watch_endpoint(&agent_id, reason);
-            self.agent_routes.remove(&agent_id);
-            self.stopped_agent_ids.insert(agent_id);
-            self.agents.remove(cid);
+            self.agent_registry.agent_routes.remove(&agent_id);
+            self.agent_registry.stopped_ids.insert(agent_id);
+            self.agent_registry.agents.remove(cid);
         }
     }
 
@@ -1530,7 +1617,7 @@ impl Harness {
             return false;
         }
         let agent_id_proto: tau_proto::AgentId = crate::parse_agent_id(agent_id);
-        let already_loaded = self.session_loaded_agents.contains(&agent_id_proto)
+        let already_loaded = self.agent_registry.session_loaded.contains(&agent_id_proto)
             || match self.store.load_session(session_id.as_str()) {
                 Ok(Some(membership)) => membership.contains_agent(&agent_id_proto),
                 Ok(None) => false,
@@ -1566,7 +1653,8 @@ impl Harness {
     /// Return public id and creation role for pending start requests without
     /// exposing their parent, prompt, source, or tool ownership.
     pub(crate) fn pending_agent_summary_data(&self) -> Vec<(String, String)> {
-        self.pending_start_agent_requests
+        self.agent_registry
+            .pending_start_requests
             .iter()
             .map(|pending| (pending.agent_id.clone(), pending.role.clone()))
             .collect()
@@ -1590,7 +1678,7 @@ impl Harness {
             agent_id,
             task_name,
             0,
-            &mut self.agent_id_rng,
+            &mut self.agent_registry.id_rng,
         ) {
             Ok(rendered) => normalize_display_name(Some(&rendered)).or(fallback),
             Err(error) => {
@@ -1606,10 +1694,10 @@ impl Harness {
         let template = self.agent_id_template.clone();
         let mut warnings = Vec::new();
         let role_group = self.role_group_name_for_role(role);
-        let agent_routes = &self.agent_routes;
-        let stopped_agent_ids = &self.stopped_agent_ids;
+        let agent_routes = &self.agent_registry.agent_routes;
+        let stopped_agent_ids = &self.agent_registry.stopped_ids;
         let agent_store = &self.agent_store;
-        let pending_start_agent_requests = &self.pending_start_agent_requests;
+        let pending_start_agent_requests = &self.agent_registry.pending_start_requests;
         let agent_id = mint_available_agent_id_for_role_with(
             role,
             &role_group,
@@ -1622,7 +1710,7 @@ impl Harness {
                         .iter()
                         .any(|pending| pending.agent_id == agent_id)
             },
-            &mut self.agent_id_rng,
+            &mut self.agent_registry.id_rng,
             |kind, warning| warnings.push((kind, warning)),
         );
         for (kind, warning) in warnings {
@@ -1710,7 +1798,7 @@ impl Harness {
             agent_id: crate::parse_agent_id(&agent_id),
             parent_agent: parent_cid
                 .as_ref()
-                .and_then(|parent| self.agents.get(parent))
+                .and_then(|parent| self.agent_registry.agents.get(parent))
                 .and_then(|agent| agent.agent_id.as_deref())
                 .map(crate::parse_agent_id),
             role: role.to_owned(),
@@ -1723,9 +1811,12 @@ impl Harness {
             tau_core::AgentEventParent::InheritHead,
             started.clone(),
         )?;
-        self.session_ever_loaded_agents
+        self.agent_registry
+            .session_ever_loaded
             .insert(crate::parse_agent_id(&agent_id));
-        self.precommitted_agent_starts.insert(agent_id.clone());
+        self.agent_registry
+            .precommitted_starts
+            .insert(agent_id.clone());
         let runtime_incarnation = self.mint_agent_runtime_incarnation();
         let mut conv = Agent::new(
             cid.clone(),
@@ -1740,7 +1831,7 @@ impl Harness {
         conv.agent_id = Some(agent_id.clone());
         conv.display_name = display_name;
         conv.persistence = persistence;
-        self.agents.insert(cid.clone(), conv);
+        self.agent_registry.agents.insert(cid.clone(), conv);
         self.enqueue_publish(
             None,
             started,
@@ -1762,18 +1853,20 @@ impl Harness {
     }
 
     pub(crate) fn ensure_agent_id_for_agent(&mut self, cid: &AgentId) -> Option<String> {
-        if let Some(agent_id) = self.agents.get(cid)?.agent_id.clone() {
+        if let Some(agent_id) = self.agent_registry.agents.get(cid)?.agent_id.clone() {
             self.ensure_loaded_agent_for_agent(cid, &agent_id);
             self.emit_agent_stats_updated(cid);
             return Some(agent_id);
         }
         let role = self
+            .agent_registry
             .agents
             .get(cid)
             .map(|conv| self.role_name_for_agent(conv))?;
         let agent_id = self.mint_available_agent_id_for_role(&role);
         let display_name = self.display_name_for_new_agent(&agent_id, &role, None);
         let persistence = self
+            .agent_registry
             .agents
             .get(cid)
             .map(|conv| conv.persistence)
@@ -1793,7 +1886,8 @@ impl Harness {
             parent_agent: self.parent_agent_id_for_cid(cid),
             role: role.clone(),
             display_name: normalize_display_name(display_name.as_deref()).or_else(|| {
-                self.agents
+                self.agent_registry
+                    .agents
                     .get(cid)
                     .and_then(|agent| normalize_display_name(agent.display_name.as_deref()))
             }),
@@ -1810,10 +1904,13 @@ impl Harness {
             ));
             return None;
         }
-        self.session_ever_loaded_agents
+        self.agent_registry
+            .session_ever_loaded
             .insert(crate::parse_agent_id(&agent_id));
-        self.precommitted_agent_starts.insert(agent_id.clone());
-        if let Some(conv) = self.agents.get_mut(cid) {
+        self.agent_registry
+            .precommitted_starts
+            .insert(agent_id.clone());
+        if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
             conv.agent_id = Some(agent_id.clone());
             if normalize_display_name(conv.display_name.as_deref()).is_none() {
                 conv.display_name = display_name;
@@ -1850,7 +1947,7 @@ impl Harness {
         &mut self,
         agent_id: &tau_proto::AgentId,
     ) -> bool {
-        if self.session_ever_loaded_agents.contains(agent_id) {
+        if self.agent_registry.session_ever_loaded.contains(agent_id) {
             return false;
         }
         match self.agent_store.agent_events(agent_id) {
@@ -1870,14 +1967,15 @@ impl Harness {
         agent_id: &str,
         initial_metadata: Vec<tau_proto::AgentInitialMetadata>,
     ) {
-        self.stopped_agent_ids.remove(agent_id);
-        self.restored_unavailable_agents.remove(agent_id);
+        self.agent_registry.stopped_ids.remove(agent_id);
+        self.agent_registry.restored_unavailable.remove(agent_id);
         let agent_id_proto = crate::parse_agent_id(agent_id);
         let has_creation = self
             .agent_store
             .agent_has_committed_identity(&agent_id_proto);
         if !has_creation {
             let persistence = self
+                .agent_registry
                 .agents
                 .get(cid)
                 .map(|agent| agent.persistence)
@@ -1888,11 +1986,13 @@ impl Harness {
                 agent_id: crate::parse_agent_id(agent_id),
                 parent_agent: self.parent_agent_id_for_cid(cid),
                 role: self
+                    .agent_registry
                     .agents
                     .get(cid)
                     .map(|agent| self.role_name_for_agent(agent))
                     .unwrap_or_else(|| self.selected_role.clone()),
                 display_name: self
+                    .agent_registry
                     .agents
                     .get(cid)
                     .and_then(|agent| normalize_display_name(agent.display_name.as_deref())),
@@ -1909,7 +2009,9 @@ impl Harness {
                 ));
                 return;
             }
-            self.precommitted_agent_starts.insert(agent_id.to_owned());
+            self.agent_registry
+                .precommitted_starts
+                .insert(agent_id.to_owned());
             self.enqueue_publish(
                 None,
                 started,
@@ -1933,25 +2035,32 @@ impl Harness {
         }
         // New agents reached this point only after their creation record
         // committed; existing agents already have validated journal identity.
-        self.agent_routes.insert(agent_id.to_owned(), cid.clone());
+        self.agent_registry
+            .agent_routes
+            .insert(agent_id.to_owned(), cid.clone());
         let default_navigation_mode = self
+            .agent_registry
             .agents
             .get(cid)
             .map(|agent| default_navigation_mode(&agent.originator))
             .unwrap_or_default();
-        self.agent_navigation_modes
+        self.agent_registry
+            .navigation_modes
             .entry(agent_id_proto.clone())
             .or_insert(default_navigation_mode);
         let role = self
+            .agent_registry
             .agents
             .get(cid)
             .map(|conv| self.role_name_for_agent(conv));
         let persistence = self
+            .agent_registry
             .agents
             .get(cid)
             .map(|conv| conv.persistence)
             .unwrap_or_default();
         let prompt_index_initialized = self
+            .agent_registry
             .agents
             .get(cid)
             .is_some_and(|agent| agent.prompt_index_initialized);
@@ -1966,12 +2075,12 @@ impl Harness {
                     0
                 }
             };
-            if let Some(agent) = self.agents.get_mut(cid) {
+            if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
                 agent.next_prompt_index = next_prompt_index;
                 agent.prompt_index_initialized = true;
             }
         }
-        let already_loaded = self.session_loaded_agents.contains(&agent_id_proto)
+        let already_loaded = self.agent_registry.session_loaded.contains(&agent_id_proto)
             || match self.store.load_session(self.current_session_id.as_str()) {
                 Ok(Some(membership)) => membership.contains_agent(&agent_id_proto),
                 Ok(None) => false,
@@ -1990,9 +2099,12 @@ impl Harness {
                     .changed_session_agents
                     .insert((self.current_session_id.clone(), agent_id_proto.clone()));
             }
-            self.session_ever_loaded_agents
+            self.agent_registry
+                .session_ever_loaded
                 .insert(agent_id_proto.clone());
-            self.session_loaded_agents.insert(agent_id_proto.clone());
+            self.agent_registry
+                .session_loaded
+                .insert(agent_id_proto.clone());
             let _ = (role, initial_metadata);
             for (key, entry) in self.inherited_metadata_for_cid(cid) {
                 self.enqueue_publish(

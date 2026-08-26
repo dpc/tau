@@ -48,9 +48,10 @@ use self::agent_registry::{
     render_agent_template,
 };
 use self::agent_registry::{
-    PendingStartAgentRequest, agent_runtime_state_for_turn, default_navigation_mode,
+    AgentRegistryState, agent_runtime_state_for_turn, default_navigation_mode,
     normalize_display_name,
 };
+use self::agent_watch::AgentWatchState;
 #[cfg(any(test, feature = "echo-agent"))]
 pub(crate) use self::construction::InProcessTool;
 use self::context_limit_telemetry::{
@@ -1713,30 +1714,16 @@ pub struct Harness {
     /// completion can acquire current-generation authority even if the
     /// switch later fails.
     pub(crate) current_session_generation: u64,
-    /// Next process-local loaded-agent runtime incarnation.
-    next_agent_runtime_incarnation: u64,
-    /// Next process-local opaque agent-initialization correlation.
-    next_agent_initialization_id: u64,
-    /// Random identity stamped on outer turns authored by this harness runtime.
-    accounting_runtime_id: tau_proto::AccountingRuntimeId,
     /// Reason associated with the current session binding. Late UI subscribers
     /// receive a replayed `SessionStarted` snapshot with this reason.
     pub(crate) current_session_start_reason: tau_proto::SessionStartReason,
-    /// Random stream for agent-id template helpers. Production harnesses seed
-    /// it from OS entropy; tests can replace it with a deterministic stream
-    /// to stabilize generated agent ids. Advanced on each agent creation so
-    /// one harness does not mint the same random candidate repeatedly.
-    agent_id_rng: StdRng,
     /// Live and completed tool ownership, routing, and turn coordination.
     pub(crate) tool_runtime: ToolRuntimeState,
     /// Runtime event sequencer. Replay for reconnecting clients is rebuilt from
     /// semantic state instead of retained event payloads.
     pub(crate) event_log: std::sync::Arc<EventLog>,
-    /// Authenticated creator relationships retained for the active harness
-    /// session.
-    creator_topology: AgentCreatorTopology,
-    /// Runtime-only self and creator-subtree estimated-cost totals.
-    cost_ledger: AgentCostLedger,
+    /// Agent identity, membership, routing, and lifecycle state.
+    pub(crate) agent_registry: AgentRegistryState,
     /// Attached-client and human-UI command runtime state.
     pub(crate) ui_runtime: UiRuntimeState,
     /// External peer authentication, delivery, I/O, and routing state.
@@ -1755,22 +1742,10 @@ pub struct Harness {
     pub(crate) replayable_harness_notices: Vec<tau_proto::HarnessNotice>,
     /// Extension process lifecycle and pre-`Ready` activation state.
     pub(crate) extensions: ExtensionRuntimeState,
-    /// True after the one global initial-registration collision preflight has
-    /// completed. Respawns and later registrations never enter startup winner
-    /// selection.
-    initial_extension_tool_preflight_complete: bool,
-    /// True while collision losers are disconnected before survivor activation.
-    /// Prompt and session advancement remain suppressed during this interval.
-    resolving_initial_extension_collisions: bool,
-    /// Monotonic arrival order for operational frames held behind activation.
-    next_deferred_extension_message_order: u64,
-    /// Names enabled by final startup resolution, including optional extensions
-    /// that could not be started.
-    pub(crate) enabled_extension_names: BTreeSet<String>,
     /// Maps agent_prompt_id → owning agent for in-flight
     /// prompts. The conversation knows its `session_id`, so older
     /// `prompt_sessions[spid]` lookups become two hops:
-    /// `prompt_agents[spid]` → `agents[cid].session_id`.
+    /// `prompt_agents[spid]` → `agent_registry.agents[cid].session_id`.
     pub(crate) prompt_agents: std::collections::HashMap<AgentPromptId, AgentId>,
     /// Prompt ids that belonged to ephemeral agents before their live route was
     /// cleared. Retained only for the current session so late provider reports
@@ -1781,13 +1756,6 @@ pub struct Harness {
     ephemeral_provider_retry_requests: HashSet<tau_proto::RetryPromptRequestId>,
     /// Source inherited by synchronous successors of a committed event/report.
     derived_publish_source: Option<ConnectionId>,
-    /// All in-flight agents keyed by stable `AgentId`. User agents and side
-    /// agents use the same identity; there is no default/main alias.
-    pub(crate) agents: std::collections::HashMap<AgentId, Agent>,
-    /// Agent id to conversation routing for addressable agents in the current
-    /// session. Suspended agents remain here so `:agent resume` and follow-up
-    /// prompts can continue their conversation.
-    pub(crate) agent_routes: HashMap<String, AgentId>,
     /// Harness-local acceptance order for visible user interactions.
     ///
     /// This is routing authority for untargeted live shell output; wall-clock
@@ -1795,61 +1763,13 @@ pub struct Harness {
     user_interaction_order: HashMap<String, u64>,
     /// Next process-local visible interaction ordinal.
     next_user_interaction_order: u64,
-    /// Creation facts already committed before their normal publish pipeline.
-    precommitted_agent_starts: HashSet<String>,
     /// Counts interaction facts journal-appended before central delivery.
     precommitted_user_interactions: HashMap<String, u64>,
-    /// Agent ids already loaded, or with a must-pass membership publish queued,
-    /// for the current session. This closes the race where interception parks
-    /// `session.agent_loaded` before the durable session store can fold it.
-    pub(crate) session_loaded_agents: HashSet<AgentId>,
-    /// Agents that have appeared in the current session's membership history,
-    /// including agents that are presently unloaded.
-    pub(crate) session_ever_loaded_agents: HashSet<tau_proto::AgentId>,
-    /// Successfully committed current membership used by roster snapshots.
-    session_roster_loaded_agents: HashSet<tau_proto::AgentId>,
-    /// Successfully validated/committed membership history used by rosters.
-    session_roster_ever_loaded_agents: HashSet<tau_proto::AgentId>,
-    /// False after membership restore/persistence failure until a new session.
-    session_roster_valid: bool,
-    /// Harness-owned navigation classification for loaded current-session
-    /// agents.
-    pub(crate) agent_navigation_modes: HashMap<tau_proto::AgentId, tau_proto::AgentNavigationMode>,
-    /// Session-local watch sets keyed by watcher public agent id.
-    pub(crate) agent_watches: HashMap<String, BTreeSet<String>>,
-    /// Reverse session-local watch index keyed by watched public agent id.
-    pub(crate) agent_watchers: HashMap<String, BTreeSet<String>>,
-    /// Subscription identity for each directed session-local watch relation.
-    pub(crate) agent_watch_subscriptions: HashMap<(String, String), String>,
-    /// Current sanitized provider-work snapshot by watched public agent id.
-    pub(crate) agent_watch_provider_status:
-        HashMap<String, tau_proto::AgentWatchProviderStatusNotification>,
-    /// Bounded already-delivered provider-status state by watch subscription.
-    pub(crate) agent_watch_provider_deliveries: HashMap<String, AgentWatchProviderDeliveries>,
-    /// Compact long-wait crossings captured for pre-existing subscriptions and
-    /// awaiting bounded durable materialization.
-    pending_long_wait_notifications: VecDeque<subagents_tool::PendingLongWaitNotifications>,
-    /// Remaining long-wait materialization budget inside the active scheduler
-    /// call, or `None` outside deadline processing.
-    long_wait_materialization_budget: Option<usize>,
+    /// Agent watch topology, delivery deduplication, and retirement state.
+    pub(crate) agent_watch: AgentWatchState,
     /// Last diagnostic-only warning about a pathologically lagging live
     /// follower.
     last_live_egress_lag_warning: Option<Instant>,
-    /// Agent ids that were once known but can no longer receive messages.
-    pub(crate) stopped_agent_ids: HashSet<String>,
-    /// Restored members whose pre-restart request route is not reconstructible,
-    /// keyed by stable id with their durable creation role.
-    pub(crate) restored_unavailable_agents: HashMap<String, String>,
-    /// Closed reason selected before an unexpected watched endpoint unloads.
-    pending_agent_unload_reasons: HashMap<String, tau_proto::AgentWatchLifecycleReason>,
-    /// Endpoint ids whose pending unload is an expected completion or cleanup.
-    expected_agent_unloads: HashSet<String>,
-    /// Unexpected endpoint retirements waiting for all watcher lifecycle
-    /// appends.
-    pending_watch_retirements: HashMap<String, subagents_tool::PendingWatchRetirement>,
-    /// Outstanding built-in delegation query to child correlation. Cold restore
-    /// rebuilds this map from durable child originators before input admission.
-    pub(crate) pending_builtin_delegates: HashMap<String, String>,
     /// Global harness state. Currently only tracks per-session init
     /// (waiting on extensions to announce skills + AGENTS.md). Agent
     /// turn state is per-agent; multiple agents may have
@@ -2079,9 +1999,6 @@ pub struct Harness {
     /// Prompt ids canceled by `:cancel`. Late agent events for these
     /// prompts are ignored and never folded into session state.
     pub(crate) canceled_prompts: std::collections::HashSet<AgentPromptId>,
-    /// Extension-started side agents waiting for dispatch after their
-    /// requested role, initial prompt, and queued messages have been resolved.
-    pending_start_agent_requests: VecDeque<PendingStartAgentRequest>,
     /// State for harness-owned delegate/wait tools.
     pub(crate) subagents: SubagentToolState,
 }
@@ -2399,7 +2316,7 @@ impl Harness {
     /// should not wedge fresh prompt dispatch. Provider disconnects are handled
     /// as fatal by the event loop before this predicate matters for new work.
     pub(crate) fn extensions_all_ready(&self) -> bool {
-        !self.resolving_initial_extension_collisions
+        !self.extensions.resolving_initial_collisions
             && self.extensions.entries.values().all(|e| {
                 matches!(
                     e.state,
@@ -2488,6 +2405,7 @@ impl Harness {
             .expect("known-safe SessionId must be valid");
         self.dispatch_user_prompt(target_session_id.clone(), text.to_owned())?;
         let (target_agent_id, target_outer_turn_id) = self
+            .agent_registry
             .agents
             .values()
             .find(|agent| {
@@ -3364,13 +3282,18 @@ impl Harness {
         request: &tau_proto::ExtInternalPromptSubmitRequest,
     ) -> Result<(), HarnessError> {
         let agent_id = request.agent_id.to_string();
-        let Some(cid) = self.agent_routes.get(&agent_id).cloned() else {
+        let Some(cid) = self.agent_registry.agent_routes.get(&agent_id).cloned() else {
             self.emit_info(&format!(
                 "extension prompt submit rejected: unknown or unloaded agent `{agent_id}`"
             ));
             return Ok(());
         };
-        let Some(session_id) = self.agents.get(&cid).map(|agent| agent.session_id.clone()) else {
+        let Some(session_id) = self
+            .agent_registry
+            .agents
+            .get(&cid)
+            .map(|agent| agent.session_id.clone())
+        else {
             self.emit_info(&format!(
                 "extension prompt submit rejected: unloaded agent `{agent_id}`"
             ));

@@ -274,6 +274,7 @@ impl Harness {
             return Ok(PromptSubmission::Rejected { reason });
         }
         let cid = self
+            .agent_registry
             .agents
             .iter()
             .find_map(|(cid, conv)| {
@@ -295,7 +296,7 @@ impl Harness {
         {
             self.reset_loop_guard_for_progress(&cid);
             let activation = tau_proto::ObservationId::random();
-            if let Some(conv) = self.agents.get_mut(&cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 let mut prompt = PendingPrompt::user(text);
                 prompt.activation_observation = Some(activation);
                 conv.pending_prompts.push_back(prompt);
@@ -314,7 +315,7 @@ impl Harness {
         if self.dispatch_blocked_for(&cid) {
             self.reset_loop_guard_for_progress(&cid);
             let activation = tau_proto::ObservationId::random();
-            if let Some(conv) = self.agents.get_mut(&cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 let mut prompt = PendingPrompt::user(text);
                 prompt.activation_observation = Some(activation);
                 conv.pending_prompts.push_back(prompt);
@@ -359,12 +360,17 @@ impl Harness {
             );
             return Ok(PromptSubmission::Rejected { reason });
         }
-        let Some(cid) = self.agent_routes.get(agent_id).cloned() else {
+        let Some(cid) = self.agent_registry.agent_routes.get(agent_id).cloned() else {
             return Ok(PromptSubmission::Rejected {
                 reason: format!("unknown agent `{agent_id}`"),
             });
         };
-        if self.agents.get(&cid).is_none_or(|agent| agent.terminating) {
+        if self
+            .agent_registry
+            .agents
+            .get(&cid)
+            .is_none_or(|agent| agent.terminating)
+        {
             let reason = format!("agent `{agent_id}` is terminating");
             return Ok(PromptSubmission::Rejected { reason });
         }
@@ -379,7 +385,7 @@ impl Harness {
             if !prompt.is_internal() {
                 self.reset_loop_guard_for_progress(&cid);
             }
-            if let Some(conv) = self.agents.get_mut(&cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 let mut queued_prompt = prompt.clone();
                 queued_prompt.activation_observation = activation;
                 conv.pending_prompts.push_back(queued_prompt);
@@ -408,7 +414,7 @@ impl Harness {
             if !prompt.is_internal() {
                 self.reset_loop_guard_for_progress(&cid);
             }
-            if let Some(conv) = self.agents.get_mut(&cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 let mut queued_prompt = prompt.clone();
                 queued_prompt.activation_observation = activation;
                 conv.pending_prompts.push_back(queued_prompt);
@@ -459,6 +465,7 @@ impl Harness {
     /// processing.
     pub(super) fn preempt_blocking_ext_side_agents(&mut self, session_id: &SessionId) {
         let to_cancel: Vec<(AgentId, SessionId, AgentPromptId, PromptOriginator)> = self
+            .agent_registry
             .agents
             .iter()
             .filter_map(|(cid, conv)| {
@@ -495,6 +502,7 @@ impl Harness {
 
         for (cid, prompt_session_id, spid, originator) in &to_cancel {
             let marked_owner = self
+                .agent_registry
                 .agents
                 .get(cid)
                 .and_then(|agent| agent.agent_id.as_deref())
@@ -529,7 +537,7 @@ impl Harness {
                 tau_proto::AgentPromptFailureStage::Canceled,
                 "initial prompt was canceled",
             );
-            if let Some(conv) = self.agents.get_mut(cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
                 conv.in_flight_prompt = None;
                 conv.pending_prompts.clear();
             }
@@ -603,7 +611,11 @@ impl Harness {
         };
         let lines: Vec<String> = match self.agent_store.agent(&agent_id) {
             Some(tree) if !tree.nodes().is_empty() => {
-                let selected_head = self.agents.get(&cid).and_then(|conv| conv.head);
+                let selected_head = self
+                    .agent_registry
+                    .agents
+                    .get(&cid)
+                    .and_then(|conv| conv.head);
                 let mut lines = Vec::new();
                 let root_marker = if selected_head.is_none() { '*' } else { ' ' };
                 lines.push(format!(
@@ -778,10 +790,16 @@ impl Harness {
         // for it are abandoned (the user explicitly switched away), and
         // each agent's per-turn state is reset.
         self.turn_state = TurnState::Idle;
-        let agent_ids = self.agents.keys().cloned().collect::<Vec<_>>();
+        let agent_ids = self
+            .agent_registry
+            .agents
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         for cid in agent_ids {
             self.cancel_pending_context_claim(&cid);
             if let Some(prompt_id) = self
+                .agent_registry
                 .agents
                 .get(&cid)
                 .and_then(|agent| agent.in_flight_prompt.clone())
@@ -793,7 +811,7 @@ impl Harness {
                 tau_proto::AgentPromptFailureStage::LifecycleTeardown,
                 "session switch discarded initial prompt",
             );
-            if let Some(conv) = self.agents.get_mut(&cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 conv.pending_prompts.clear();
                 conv.in_flight_prompt = None;
             }
@@ -849,7 +867,7 @@ impl Harness {
         self.pending_notices.changed_session_agents.clear();
         self.pending_notices.tool_availability.clear();
         self.pending_notices.unavailable_tools_delivered.clear();
-        self.pending_start_agent_requests.clear();
+        self.agent_registry.pending_start_requests.clear();
         let canceled_message_ids = self
             .peer_messaging
             .pending_external_receive_acks
@@ -936,31 +954,31 @@ impl Harness {
         // the new session do not inherit the previous transcript's
         // cumulative totals.
         self.current_session_state = CurrentSessionState::default();
-        self.creator_topology = AgentCreatorTopology::default();
-        self.cost_ledger = AgentCostLedger::default();
+        self.agent_registry.creator_topology = AgentCreatorTopology::default();
+        self.agent_registry.cost_ledger = AgentCostLedger::default();
 
         // Drop agents from the previous bound session. New user agents are
         // created explicitly by `UiCreateAgent`/first prompt in the new session.
-        self.agents.clear();
-        self.agent_routes.clear();
-        self.session_loaded_agents.clear();
-        self.session_ever_loaded_agents.clear();
-        self.session_roster_loaded_agents.clear();
-        self.session_roster_ever_loaded_agents.clear();
-        self.session_roster_valid = true;
-        self.agent_navigation_modes.clear();
-        self.agent_watches.clear();
-        self.agent_watchers.clear();
-        self.agent_watch_subscriptions.clear();
-        self.agent_watch_provider_status.clear();
-        self.agent_watch_provider_deliveries.clear();
-        self.pending_long_wait_notifications.clear();
-        self.stopped_agent_ids.clear();
-        self.restored_unavailable_agents.clear();
-        self.pending_agent_unload_reasons.clear();
-        self.expected_agent_unloads.clear();
-        self.pending_watch_retirements.clear();
-        self.pending_builtin_delegates.clear();
+        self.agent_registry.agents.clear();
+        self.agent_registry.agent_routes.clear();
+        self.agent_registry.session_loaded.clear();
+        self.agent_registry.session_ever_loaded.clear();
+        self.agent_registry.roster_loaded.clear();
+        self.agent_registry.roster_ever_loaded.clear();
+        self.agent_registry.roster_valid = true;
+        self.agent_registry.navigation_modes.clear();
+        self.agent_watch.forward.clear();
+        self.agent_watch.reverse.clear();
+        self.agent_watch.subscriptions.clear();
+        self.agent_watch.provider_status.clear();
+        self.agent_watch.provider_deliveries.clear();
+        self.agent_watch.pending_long_wait_notifications.clear();
+        self.agent_registry.stopped_ids.clear();
+        self.agent_registry.restored_unavailable.clear();
+        self.agent_watch.pending_unload_reasons.clear();
+        self.agent_watch.expected_unloads.clear();
+        self.agent_watch.pending_retirements.clear();
+        self.agent_registry.pending_builtin_delegates.clear();
 
         self.current_session_id = new_session_id.clone();
         self.current_session_start_reason = reason;
@@ -1244,7 +1262,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
     ) -> Vec<PendingPrompt> {
-        let Some((session_id, agent_id)) = self.agents.get(cid).map(|conv| {
+        let Some((session_id, agent_id)) = self.agent_registry.agents.get(cid).map(|conv| {
             let agent_id = conv
                 .agent_id
                 .as_deref()
@@ -1299,7 +1317,7 @@ impl Harness {
         &mut self,
         cid: &AgentId,
     ) -> Vec<PendingPrompt> {
-        let Some(conv) = self.agents.get_mut(cid) else {
+        let Some(conv) = self.agent_registry.agents.get_mut(cid) else {
             return Vec::new();
         };
         let mut prompts = Vec::new();
@@ -1326,6 +1344,7 @@ impl Harness {
         let mut count = 0;
         for cid in self.restored_agent_ids(session_id) {
             let calls: Vec<ToolCallItem> = self
+                .agent_registry
                 .agents
                 .get(&cid)
                 .and_then(|conv| conv.agent_id.as_deref())
@@ -1387,10 +1406,11 @@ impl Harness {
         &self,
         cid: &AgentId,
     ) -> Vec<tau_core::BackgroundToolCallState> {
-        let Some(head) = self.agents.get(cid).map(|conv| conv.head) else {
+        let Some(head) = self.agent_registry.agents.get(cid).map(|conv| conv.head) else {
             return Vec::new();
         };
         let Some(agent_id) = self
+            .agent_registry
             .agents
             .get(cid)
             .and_then(|conv| conv.agent_id.as_deref())
@@ -1411,7 +1431,8 @@ impl Harness {
         if session_id != &self.current_session_id {
             return Vec::new();
         }
-        self.agents
+        self.agent_registry
+            .agents
             .iter()
             .filter_map(|(cid, conv)| {
                 (conv.session_id == *session_id && conv.agent_id.is_some()).then_some(cid.clone())
@@ -1452,10 +1473,11 @@ impl Harness {
         }
         let mut count = 0;
         for cid in self.restored_agent_ids(session_id) {
-            let Some(head) = self.agents.get(&cid).map(|conv| conv.head) else {
+            let Some(head) = self.agent_registry.agents.get(&cid).map(|conv| conv.head) else {
                 continue;
             };
             let Some(agent_id) = self
+                .agent_registry
                 .agents
                 .get(&cid)
                 .and_then(|conv| conv.agent_id.as_deref())
@@ -1813,6 +1835,7 @@ impl Harness {
         // Start one fresh correlated initialization for every restored member
         // before any replay activation or queued prompt can dispatch.
         let restored = self
+            .agent_registry
             .agents
             .iter()
             .filter_map(|(cid, agent)| {
@@ -2122,7 +2145,7 @@ impl Harness {
             .store
             .lock_and_load_session(self.current_session_id.as_str())
         {
-            self.session_roster_valid = false;
+            self.agent_registry.roster_valid = false;
             self.emit_harness_failure(&format!(
                 "failed to recover session membership during restore: {error}"
             ));
@@ -2156,7 +2179,7 @@ impl Harness {
                 return;
             }
             (history, ephemeral_history, membership) => {
-                self.session_roster_valid = false;
+                self.agent_registry.roster_valid = false;
                 self.emit_harness_failure(&format!(
                     "failed to load session membership during restore: history={:?}, ephemeral={:?}, current={:?}",
                     history.err(),
@@ -2179,10 +2202,11 @@ impl Harness {
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
-        self.session_ever_loaded_agents
+        self.agent_registry
+            .session_ever_loaded
             .extend(ever_loaded.iter().cloned());
-        self.session_roster_ever_loaded_agents = ever_loaded;
-        self.session_roster_loaded_agents = loaded_agents.iter().cloned().collect();
+        self.agent_registry.roster_ever_loaded = ever_loaded;
+        self.agent_registry.roster_loaded = loaded_agents.iter().cloned().collect();
         let mut restored_parent_edges = Vec::new();
         let mut restored_output_length_steers = Vec::new();
         let mut restored_output_length_dormant = Vec::new();
@@ -2227,7 +2251,7 @@ impl Harness {
                 .or_else(|| meta.and_then(|meta| meta.display_name));
             let restored_runtime = self.restored_agent_runtime_from_log(agent_id.as_str());
             if !restored_runtime.resumable {
-                self.restored_unavailable_agents.insert(
+                self.agent_registry.restored_unavailable.insert(
                     agent_id_string,
                     restored_runtime
                         .role
@@ -2306,7 +2330,7 @@ impl Harness {
                             && !self.self_compaction_terminal_delivered(&requested)
                     )
                 });
-            if let Some(conv) = self.agents.get_mut(&cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 conv.agent_id = Some(agent_id_string.clone());
                 conv.head = head;
                 conv.originator = originator;
@@ -2331,12 +2355,12 @@ impl Harness {
                 conv.display_name = display_name.clone();
                 conv.persistence = persistence;
                 conv.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
-                self.agents.insert(cid.clone(), conv);
+                self.agent_registry.agents.insert(cid.clone(), conv);
             }
             if let Some(parent_agent) = parent_agent {
                 restored_parent_edges.push((cid.clone(), parent_agent));
             }
-            if let Some(conv) = self.agents.get_mut(&cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 conv.restored_tool_backed_start = tool_backed_start;
                 if dormant_output_length_repair.is_none()
                     && let Some(outer_turn_id) = restored_output_length_spent
@@ -2407,11 +2431,12 @@ impl Harness {
                 restored_output_length_dormant.push(cid.clone());
             }
             if let Some(query_id) = builtin_query_id {
-                self.pending_builtin_delegates
+                self.agent_registry
+                    .pending_builtin_delegates
                     .insert(query_id, agent_id_string.clone());
             }
             let restored_next_prompt_index = self.next_prompt_index_from_log(agent_id.as_str());
-            if let Some(conv) = self.agents.get_mut(&cid)
+            if let Some(conv) = self.agent_registry.agents.get_mut(&cid)
                 && !conv.prompt_index_initialized
             {
                 conv.next_prompt_index = restored_next_prompt_index;
@@ -2420,7 +2445,7 @@ impl Harness {
             self.clear_agent_context_usage(&cid);
             let restored_context_usage = self.restored_agent_context_usage(agent_id.as_str());
             if let Some((model, input_tokens, cached_tokens, usage_head)) = restored_context_usage
-                && let Some(conv) = self.agents.get_mut(&cid)
+                && let Some(conv) = self.agent_registry.agents.get_mut(&cid)
             {
                 conv.context_input_tokens = Some(input_tokens);
                 conv.context_cached_tokens = Some(cached_tokens);
@@ -2430,7 +2455,8 @@ impl Harness {
                     context_window_for_model(&self.provider_model_info, &model)
                         .map(|window| context_percent_used(input_tokens, window));
             }
-            self.agent_routes
+            self.agent_registry
+                .agent_routes
                 .insert(agent_id_string.clone(), cid.clone());
             if let Some(terminal) = restored_output_length_terminal {
                 self.project_agent_watch_provider_state(
@@ -2442,7 +2468,8 @@ impl Harness {
                     },
                 );
             }
-            self.agent_navigation_modes
+            self.agent_registry
+                .navigation_modes
                 .entry(agent_id.clone())
                 .or_insert(navigation_mode);
             match restored_compaction.clone() {
@@ -2451,7 +2478,7 @@ impl Harness {
                     finish_committed,
                     ..
                 }) => {
-                    if let Some(conv) = self.agents.get_mut(&cid) {
+                    if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                         conv.pending_automatic_compaction_decision =
                             Some(decision.transaction_id.clone());
                         if !finish_committed {
@@ -2466,7 +2493,7 @@ impl Harness {
                     failed,
                     compact_prompt_id,
                 }) => {
-                    if let Some(conv) = self.agents.get_mut(&cid) {
+                    if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                         conv.activation_dispatch =
                             path_crate_agent::ActivationDispatchState::Blocked {
                                 failed_id: failed.transaction_id,
@@ -2495,7 +2522,7 @@ impl Harness {
                     self.stage_restored_compaction_recovery(&cid, recovery)
                         .expect("restored agent exists");
                     if let Some(owner) = lineage_owner
-                        && let Some(conv) = self.agents.get_mut(&cid)
+                        && let Some(conv) = self.agent_registry.agents.get_mut(&cid)
                         && let path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
                             agent_prompt_id,
                             through,
@@ -2534,7 +2561,7 @@ impl Harness {
                         self.agent_store.agent(agent_id.as_str()).and_then(|tree| {
                             tree.output_length_lineage_owner_for_prompt(&checkpoint.agent_prompt_id)
                         });
-                    if let Some(conv) = self.agents.get_mut(&cid) {
+                    if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                         if let Some(owner) = restored_lineage_owner
                             && let (Some(model), Some(operation), Some(activation_cut)) = (
                                 checkpoint.model.clone(),
@@ -2594,7 +2621,7 @@ impl Harness {
                 && let Some(tau_core::InferenceDispatchRecovery::ContextRecoveryRequired(
                     checkpoint,
                 )) = restored_inference.clone()
-                && let Some(conv) = self.agents.get_mut(&cid)
+                && let Some(conv) = self.agent_registry.agents.get_mut(&cid)
             {
                 if let Some(owner) = self.agent_store.agent(agent_id.as_str()).and_then(|tree| {
                     tree.output_length_lineage_owner_for_prompt(&checkpoint.agent_prompt_id)
@@ -2632,7 +2659,7 @@ impl Harness {
                     restored_inference.clone()
             {
                 let status_prompt_id = checkpoint.agent_prompt_id.clone();
-                if let Some(conv) = self.agents.get_mut(&cid) {
+                if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                     conv.activation_dispatch =
                         path_crate_agent::ActivationDispatchState::DispatchUncertain {
                             owner: match checkpoint.transaction_id {
@@ -2669,7 +2696,7 @@ impl Harness {
             let replay_message_wakes = self.derive_replay_message_wakes(agent_id.as_str());
             let replay_prompt_activations =
                 self.derive_replay_prompt_activations(agent_id.as_str());
-            if let Some(conv) = self.agents.get_mut(&cid) {
+            if let Some(conv) = self.agent_registry.agents.get_mut(&cid) {
                 conv.pending_message_wakes = replay_message_wakes;
             }
             if derive_activations && !replay_prompt_activations.is_empty() {
@@ -2695,7 +2722,7 @@ impl Harness {
                     Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(_))
                 )
                 && (uncertain_prompt_activation
-                    || self.agents.get(&cid).is_some_and(|agent| {
+                    || self.agent_registry.agents.get(&cid).is_some_and(|agent| {
                         agent
                             .pending_message_wakes
                             .iter()
@@ -2704,8 +2731,11 @@ impl Harness {
             if uncertain_with_deferred_activation
                 && let Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) =
                     restored_inference.clone()
-                && let Some(originator) =
-                    self.agents.get(&cid).map(|agent| agent.originator.clone())
+                && let Some(originator) = self
+                    .agent_registry
+                    .agents
+                    .get(&cid)
+                    .map(|agent| agent.originator.clone())
             {
                 self.pending_replay_uncertain_stale.insert(
                     cid.clone(),
@@ -2718,7 +2748,7 @@ impl Harness {
                     },
                 );
             }
-            self.session_loaded_agents.insert(agent_id.clone());
+            self.agent_registry.session_loaded.insert(agent_id.clone());
             if let Some(tau_core::StandaloneCompactionRecovery::AwaitingAutomaticStart {
                 decision,
                 cut,
@@ -2747,7 +2777,7 @@ impl Harness {
             if dormant_output_length_repair.is_none()
                 && let Some(outer_turn_id) = finish_repair
             {
-                if let Some(agent) = self.agents.get_mut(&cid) {
+                if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
                     agent.outer_turn = path_crate_agent::OuterTurnRuntimeState::FinishInFlight(
                         outer_turn_id.clone(),
                     );
@@ -2781,14 +2811,18 @@ impl Harness {
             }
         }
         for (child_cid, parent_agent_id) in restored_parent_edges {
-            if let Some(parent_cid) = self.agent_routes.get(parent_agent_id.as_str()).cloned()
-                && let Some(child) = self.agents.get_mut(&child_cid)
+            if let Some(parent_cid) = self
+                .agent_registry
+                .agent_routes
+                .get(parent_agent_id.as_str())
+                .cloned()
+                && let Some(child) = self.agent_registry.agents.get_mut(&child_cid)
             {
                 child.parent_agent_id = Some(parent_cid);
             }
         }
         for cid in restored_output_length_steers {
-            if let Some(agent) = self.agents.get_mut(&cid) {
+            if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
                 agent
                     .pending_prompts
                     .push_back(PendingPrompt::output_length_continuation());
@@ -2804,6 +2838,7 @@ impl Harness {
             self.reconcile_agent_context_usage_models();
         }
         let restored_manual_compactions = self
+            .agent_registry
             .agents
             .iter()
             .flat_map(|(cid, agent)| {

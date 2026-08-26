@@ -101,11 +101,14 @@ fn long_wait_thresholds_use_fake_monotonic_deadlines_without_late_replay() {
     let watcher_id = durable_agent_id_for_conversation(&harness, &watcher_cid).to_string();
     let start = Instant::now() + Duration::from_secs(60);
     assert_eq!(
-        harness.agents[&watched_cid].work_status.phase(),
+        harness.agent_registry.agents[&watched_cid]
+            .work_status
+            .phase(),
         tau_proto::AgentWorkStatusPhase::Unreported
     );
     assert!(
         harness
+            .agent_registry
             .agents
             .get_mut(&watched_cid)
             .expect("watched agent")
@@ -186,7 +189,11 @@ fn long_wait_thresholds_use_fake_monotonic_deadlines_without_late_replay() {
     };
     assert_eq!(thresholds_for(&watcher_id), [30, 60, 120, 240, 360, 480]);
     assert_eq!(thresholds_for(&late_id), [120, 240, 360, 480]);
-    assert!(harness.agents[&watched_cid].pending_prompts.is_empty());
+    assert!(
+        harness.agent_registry.agents[&watched_cid]
+            .pending_prompts
+            .is_empty()
+    );
     assert_eq!(
         harness.next_work_wait_threshold_deadline(),
         Some(start + Duration::from_secs(600 * 60))
@@ -210,6 +217,7 @@ fn overlapping_waits_accumulate_until_the_last_wait_settles() {
     let start = Instant::now();
     assert!(
         harness
+            .agent_registry
             .agents
             .get_mut(&cid)
             .expect("agent")
@@ -255,6 +263,7 @@ fn claimed_wait_keeps_accounting_until_rollback_or_commit() {
     let start = Instant::now();
     assert!(
         harness
+            .agent_registry
             .agents
             .get_mut(&cid)
             .expect("agent")
@@ -376,7 +385,11 @@ fn installed_waits_feed_the_combined_runtime_deadline_scheduler() {
     harness.process_runtime_deadlines_at(work_deadline);
     assert!(harness.input_wait_pending_for(&cid));
     assert_eq!(harness.next_input_wait_deadline(), Some(input_deadline));
-    assert!(harness.agents[&cid].pending_prompts.is_empty());
+    assert!(
+        harness.agent_registry.agents[&cid]
+            .pending_prompts
+            .is_empty()
+    );
     harness.shutdown().expect("shutdown");
 }
 
@@ -391,6 +404,7 @@ fn agent_unload_cancels_semantic_wait_deadline() {
     let wait_call = {
         assert!(
             harness
+                .agent_registry
                 .agents
                 .get_mut(&cid)
                 .expect("agent")
@@ -430,6 +444,7 @@ fn agent_unload_retires_ordinary_wait_without_notification() {
     let now = Instant::now();
     assert!(
         harness
+            .agent_registry
             .agents
             .get_mut(&cid)
             .expect("agent")
@@ -479,6 +494,7 @@ fn overdue_wait_threshold_catchup_is_bounded_per_scheduler_cycle() {
     let start = Instant::now();
     assert!(
         harness
+            .agent_registry
             .agents
             .get_mut(&cid)
             .expect("agent")
@@ -513,7 +529,7 @@ fn overdue_wait_threshold_catchup_is_bounded_per_scheduler_cycle() {
         super::super::RuntimeEventWait::Event(_)
     ));
     assert_eq!(long_wait_deliveries(&harness).len(), 64);
-    assert_eq!(harness.pending_long_wait_notifications.len(), 1);
+    assert_eq!(harness.agent_watch.pending_long_wait_notifications.len(), 1);
     harness.process_runtime_deadlines_at(far_future);
     assert_eq!(long_wait_deliveries(&harness).len(), 128);
     while harness.has_pending_long_wait_notifications() {
@@ -555,6 +571,7 @@ fn pruning_partial_long_wait_batch_preserves_exactly_once_cursor() {
     let start = Instant::now();
     assert!(
         harness
+            .agent_registry
             .agents
             .get_mut(&watched_cid)
             .expect("watched")
@@ -619,7 +636,7 @@ fn pruning_partial_long_wait_batch_preserves_exactly_once_cursor() {
         .filter(|watcher_id| *watcher_id != &removed_watcher)
     {
         let subscription =
-            harness.agent_watch_subscriptions[&(watcher_id.clone(), watched_id.clone())].clone();
+            harness.agent_watch.subscriptions[&(watcher_id.clone(), watched_id.clone())].clone();
         let thresholds = deliveries
             .iter()
             .filter_map(|message| {
@@ -649,6 +666,7 @@ fn received_event_at_threshold_equality_drains_deadline_first() {
     let start = Instant::now() + Duration::from_secs(60);
     assert!(
         harness
+            .agent_registry
             .agents
             .get_mut(&cid)
             .expect("agent")
@@ -723,6 +741,7 @@ fn cold_resume_replays_long_wait_context_without_runtime_state() {
         let start = Instant::now();
         assert!(
             harness
+                .agent_registry
                 .agents
                 .get_mut(&watched_cid)
                 .expect("watched")
@@ -760,13 +779,18 @@ fn cold_resume_replays_long_wait_context_without_runtime_state() {
         echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
             .expect("resume");
     assert_eq!(resumed.next_work_wait_threshold_deadline(), None);
-    assert!(resumed.agent_watches.is_empty());
+    assert!(resumed.agent_watch.forward.is_empty());
     let watcher_cid = resumed
+        .agent_registry
         .agent_routes
         .get(&watcher_id)
         .cloned()
         .expect("restored watcher");
-    assert!(resumed.agents[&watcher_cid].pending_prompts.is_empty());
+    assert!(
+        resumed.agent_registry.agents[&watcher_cid]
+            .pending_prompts
+            .is_empty()
+    );
     assert!(
         agent_tree_for_conversation(&resumed, &watcher_cid)
             .nodes()
@@ -796,6 +820,7 @@ fn session_rollover_discards_semantic_wait_deadlines() {
     let start = Instant::now();
     assert!(
         harness
+            .agent_registry
             .agents
             .get_mut(&cid)
             .expect("agent")

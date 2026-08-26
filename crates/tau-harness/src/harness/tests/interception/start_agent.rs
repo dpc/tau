@@ -66,7 +66,8 @@ fn first_committed_matching(
 
 /// Count side agents carrying one extension query correlation.
 fn query_agent_count(h: &Harness, query_id: &str) -> usize {
-    h.agents
+    h.agent_registry
+        .agents
         .values()
         .filter(|agent| {
             matches!(
@@ -573,6 +574,7 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
     )
     .expect("start first request");
     let side_cid = h
+        .agent_registry
         .agents
         .iter()
         .find_map(|(cid, agent)| {
@@ -584,7 +586,7 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
             .then(|| cid.clone())
         })
         .expect("side agent");
-    let side_agent_id = h.agents[&side_cid]
+    let side_agent_id = h.agent_registry.agents[&side_cid]
         .agent_id
         .clone()
         .expect("public side agent id");
@@ -603,7 +605,9 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
 
     assert_eq!(query_agent_count(&h, "q-duplicate"), 1);
     assert_eq!(
-        h.agents[&side_cid].source_connection.as_deref(),
+        h.agent_registry.agents[&side_cid]
+            .source_connection
+            .as_deref(),
         Some("new-requester")
     );
     assert_eq!(
@@ -660,7 +664,7 @@ fn pending_duplicate_rebinds_without_minting_or_dispatching() {
         .expect("prepare")
         .expect("new pending request");
     let expected_agent_id = pending.agent_id.clone();
-    h.pending_start_agent_requests.push_back(pending);
+    h.agent_registry.pending_start_requests.push_back(pending);
 
     let new_sink = connect_ready_configured_extension(
         &mut h,
@@ -674,10 +678,13 @@ fn pending_duplicate_rebinds_without_minting_or_dispatching() {
     )
     .expect("rebind pending duplicate");
 
-    assert_eq!(h.pending_start_agent_requests.len(), 1);
-    assert_eq!(h.pending_start_agent_requests[0].source_id, "new-requester");
+    assert_eq!(h.agent_registry.pending_start_requests.len(), 1);
     assert_eq!(
-        h.pending_start_agent_requests[0].agent_id,
+        h.agent_registry.pending_start_requests[0].source_id,
+        "new-requester"
+    );
+    assert_eq!(
+        h.agent_registry.pending_start_requests[0].agent_id,
         expected_agent_id
     );
     assert_eq!(query_agent_count(&h, "q-pending"), 0);
@@ -691,6 +698,7 @@ fn pending_duplicate_rebinds_without_minting_or_dispatching() {
     h.drain_pending_start_agent_requests()
         .expect("dispatch rebound pending request");
     let side_cid = h
+        .agent_registry
         .agent_routes
         .get(&expected_agent_id)
         .cloned()

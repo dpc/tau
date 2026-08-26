@@ -867,6 +867,7 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
         cid.clone(),
     );
     harness
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("agent")
@@ -875,7 +876,12 @@ fn finished_report_parks_canonical_after_terminal_side_effects() {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
     );
-    harness.agents.get_mut(&cid).expect("agent").last_prompt_id = Some(
+    harness
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .last_prompt_id = Some(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -975,6 +981,7 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
         cid.clone(),
     );
     harness
+        .agent_registry
         .agents
         .get_mut(&cid)
         .expect("agent")
@@ -983,7 +990,12 @@ fn finished_report_tool_rejection_successors_use_harness_source() {
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
     );
-    harness.agents.get_mut(&cid).expect("agent").last_prompt_id = Some(
+    harness
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .last_prompt_id = Some(
         "prompt-1"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -1125,7 +1137,7 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
         cid.clone(),
     );
     {
-        let agent = harness.agents.get_mut(&cid).expect("agent");
+        let agent = harness.agent_registry.agents.get_mut(&cid).expect("agent");
         agent.in_flight_prompt = Some(
             "prompt-1"
                 .parse::<tau_proto::AgentPromptId>()
@@ -1196,6 +1208,7 @@ fn finished_report_keeps_terminal_effects_when_canonical_store_fails() {
     assert!(!harness.pending_provider_prompts.contains_key("prompt-1"));
     assert!(
         harness
+            .agent_registry
             .agents
             .get(&cid)
             .expect("agent")
@@ -1317,7 +1330,7 @@ fn stale_finished_report_termination_uses_harness_source() {
         cid.clone(),
     );
     {
-        let agent = harness.agents.get_mut(&cid).expect("agent");
+        let agent = harness.agent_registry.agents.get_mut(&cid).expect("agent");
         agent.in_flight_prompt = Some(
             "prompt-1"
                 .parse::<tau_proto::AgentPromptId>()

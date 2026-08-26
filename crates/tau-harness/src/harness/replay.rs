@@ -309,7 +309,7 @@ impl Harness {
         }
         let stats_events = loaded_agents
             .iter()
-            .filter_map(|agent_id| self.agent_routes.get(agent_id.as_str()))
+            .filter_map(|agent_id| self.agent_registry.agent_routes.get(agent_id.as_str()))
             .filter_map(|cid| self.agent_stats_snapshot(cid))
             .map(Event::AgentStatsUpdated)
             .collect::<Vec<_>>();
@@ -539,7 +539,7 @@ impl Harness {
                     errors.push(message.clone());
                 }
             }
-            if let Some(cid) = self.agent_routes.get(agent_id.as_str())
+            if let Some(cid) = self.agent_registry.agent_routes.get(agent_id.as_str())
                 && let Some(stats) = self.agent_stats_snapshot(cid)
             {
                 let event = Event::AgentStatsUpdated(stats);
@@ -588,11 +588,12 @@ impl Harness {
         selectors: &[EventSelector],
     ) {
         let mut agent_by_conversation = path_std_collections::HashMap::new();
-        for (agent_id, conversation_id) in &self.agent_routes {
+        for (agent_id, conversation_id) in &self.agent_registry.agent_routes {
             agent_by_conversation.insert(conversation_id.clone(), agent_id.clone());
         }
 
         let queued_prompt_events = self
+            .agent_registry
             .agents
             .iter()
             .flat_map(|(conversation_id, conversation)| {
@@ -645,6 +646,7 @@ impl Harness {
         }
 
         let mut agent_state_events = self
+            .agent_registry
             .agents
             .values()
             .filter(|agent| agent.session_id == self.current_session_id)
@@ -851,7 +853,7 @@ impl Harness {
         if selector_matches_event(selectors, &context_event) {
             self.send_catch_up_event(client_id, None, context_event);
         }
-        let mut watch_entries = self.agent_watches.iter().collect::<Vec<_>>();
+        let mut watch_entries = self.agent_watch.forward.iter().collect::<Vec<_>>();
         watch_entries.sort_by_key(|(watcher, _)| *watcher);
         let watch_events: Vec<_> = watch_entries
             .into_iter()

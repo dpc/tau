@@ -530,7 +530,7 @@ impl Harness {
         }
         let prompt = background_completion_prompt(call_id);
         let activation = tau_proto::ObservationId::random();
-        let queued = if let Some(conv) = self.agents.get_mut(cid) {
+        let queued = if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
             if conv
                 .pending_prompts
                 .iter()
@@ -583,7 +583,7 @@ impl Harness {
             .suppressed_background_completion_prompts
             .insert(call_id.clone());
         let prompt = background_completion_prompt(&call_id);
-        for conv in self.agents.values_mut() {
+        for conv in self.agent_registry.agents.values_mut() {
             conv.pending_prompts
                 .retain(|pending| pending.text != prompt);
         }
@@ -686,7 +686,7 @@ impl Harness {
         // mapping is cleared.
         let owner = self.tool_runtime.tool_agents.get(call_id).cloned();
         if let Some(cid) = owner.as_ref()
-            && let Some(conv) = self.agents.get_mut(cid)
+            && let Some(conv) = self.agent_registry.agents.get_mut(cid)
         {
             conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
         }
@@ -701,7 +701,7 @@ impl Harness {
     /// the moment an agent starts a new call rather than waiting for
     /// completion.
     pub(crate) fn bump_tools_started_for(&mut self, cid: &AgentId) {
-        if let Some(conv) = self.agents.get_mut(cid) {
+        if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
             conv.tools_in_flight = conv.tools_in_flight.saturating_add(1);
             conv.tools_total = conv.tools_total.saturating_add(1);
         }
@@ -721,7 +721,7 @@ impl Harness {
     }
 
     pub(super) fn maybe_complete_agent_turn_for(&mut self, cid: &AgentId, completed_call_id: &str) {
-        let should_send = if let Some(conv) = self.agents.get_mut(cid) {
+        let should_send = if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
             if let AgentTurnState::ToolsRunning { remaining_calls } = &mut conv.turn_state {
                 remaining_calls.retain(|id| id.as_str() != completed_call_id);
                 if remaining_calls.is_empty() {
@@ -742,7 +742,7 @@ impl Harness {
             if let Some(pending) = pending_ui {
                 let remains_valid = pending.wait_call_id.as_str() == completed_call_id
                     && pending.session_generation == self.current_session_generation
-                    && self.agents.get(cid).is_some_and(|agent| {
+                    && self.agent_registry.agents.get(cid).is_some_and(|agent| {
                         !agent.terminating
                             && agent.agent_id.as_deref() == Some(pending.agent_id.as_str())
                             && matches!(agent.turn_state, AgentTurnState::Idle)
@@ -761,6 +761,7 @@ impl Harness {
                 );
             }
             let deferred_request = self
+                .agent_registry
                 .agents
                 .get(cid)
                 .and_then(|agent| agent.agent_id.as_deref())
@@ -781,10 +782,11 @@ impl Harness {
             self.resolve_materialized_message_wakes(cid);
             let has_ready_message_wake = self.has_ready_message_wake_on_selected_branch(cid);
             if self
+                .agent_registry
                 .agents
                 .get(cid)
                 .is_some_and(|conv| conv.loop_guard.stop_automatic_continuation())
-                && let Some(conv) = self.agents.get_mut(cid)
+                && let Some(conv) = self.agent_registry.agents.get_mut(cid)
             {
                 conv.pending_prompts
                     .retain(|prompt| !prompt.is_loop_guard());
@@ -816,10 +818,10 @@ impl Harness {
         cid: &AgentId,
         completed_call_id: &ToolCallId,
     ) {
-        let projected_running = self
-            .agents
-            .get(cid)
-            .is_some_and(|agent| matches!(agent.turn_state, AgentTurnState::ToolsRunning { .. }));
+        let projected_running =
+            self.agent_registry.agents.get(cid).is_some_and(|agent| {
+                matches!(agent.turn_state, AgentTurnState::ToolsRunning { .. })
+            });
         let live_foreground_call = self
             .tool_runtime
             .tool_agents
@@ -840,7 +842,7 @@ impl Harness {
             call_id = %completed_call_id,
             "repairing closed foreground tool round left in the runtime projection"
         );
-        if let Some(agent) = self.agents.get_mut(cid) {
+        if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
             agent.turn_state = AgentTurnState::ToolsRunning {
                 remaining_calls: vec![completed_call_id.clone()],
             };
@@ -851,7 +853,7 @@ impl Harness {
     /// Fold one pending Working reminder into the complete foreground
     /// tool-round continuation after every parallel terminal has settled.
     pub(super) fn queue_working_reminder_if_needed(&mut self, cid: &AgentId) {
-        let Some(agent) = self.agents.get_mut(cid) else {
+        let Some(agent) = self.agent_registry.agents.get_mut(cid) else {
             return;
         };
         if agent.lifecycle_notification_only_turn {
@@ -877,6 +879,7 @@ impl Harness {
         for (index, prompt) in prompts.into_iter().enumerate() {
             self.promote_lifecycle_notification_turn(cid);
             let agent_id = self
+                .agent_registry
                 .agents
                 .get(cid)
                 .and_then(|conv| conv.agent_id.clone())
@@ -952,6 +955,7 @@ impl Harness {
         completion: Option<AgentPublishCompletion>,
     ) -> bool {
         let mut pending: Vec<PendingPrompt> = self
+            .agent_registry
             .agents
             .get_mut(cid)
             .map(|c| c.pending_prompts.drain(..).collect())
@@ -976,7 +980,7 @@ impl Harness {
                 }
             }
             if !passive.is_empty()
-                && let Some(conv) = self.agents.get_mut(cid)
+                && let Some(conv) = self.agent_registry.agents.get_mut(cid)
             {
                 for prompt in passive.into_iter().rev() {
                     conv.pending_prompts.push_front(prompt);
@@ -1079,7 +1083,8 @@ impl Harness {
     }
 
     pub(super) fn tool_owner_agent_id(&self, cid: &AgentId) -> AgentId {
-        self.agents
+        self.agent_registry
+            .agents
             .get(cid)
             .and_then(|conv| conv.agent_id.clone())
             .map(crate::parse_agent_id)
@@ -1087,14 +1092,15 @@ impl Harness {
     }
 
     pub(super) fn tool_owner_originator(&self, cid: &AgentId) -> PromptOriginator {
-        self.agents
+        self.agent_registry
+            .agents
             .get(cid)
             .map(|conv| conv.originator.clone())
             .unwrap_or_default()
     }
 
     pub(super) fn reset_loop_guard_for_progress(&mut self, cid: &AgentId) {
-        if let Some(conv) = self.agents.get_mut(cid) {
+        if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
             conv.loop_guard.reset_for_progress();
             conv.pending_prompts
                 .retain(|prompt| !prompt.is_loop_guard());
@@ -1106,7 +1112,7 @@ impl Harness {
         cid: &AgentId,
         signature: LoopTurnSignature,
     ) -> Option<LoopGuardTrigger> {
-        let conv = self.agents.get_mut(cid)?;
+        let conv = self.agent_registry.agents.get_mut(cid)?;
         let guard = &mut conv.loop_guard;
         guard.push_recent(signature.clone(), LOOP_GUARD_RECENT_LIMIT);
 
@@ -1160,7 +1166,7 @@ impl Harness {
         cycle_key: String,
         reason: String,
     ) {
-        let Some(conv) = self.agents.get_mut(cid) else {
+        let Some(conv) = self.agent_registry.agents.get_mut(cid) else {
             return;
         };
         if let Some(state) = conv.loop_guard.cycle_state(&cycle_key) {
@@ -1199,7 +1205,7 @@ impl Harness {
     }
 
     pub(super) fn mark_loop_guard_breakers_dispatched(&mut self, cid: &AgentId) {
-        let Some(conv) = self.agents.get_mut(cid) else {
+        let Some(conv) = self.agent_registry.agents.get_mut(cid) else {
             return;
         };
         conv.loop_guard.mark_pending_breakers_dispatched();
@@ -1210,7 +1216,7 @@ impl Harness {
         cid: &AgentId,
         call: &AgentToolCall,
     ) {
-        let Some(conv) = self.agents.get_mut(cid) else {
+        let Some(conv) = self.agent_registry.agents.get_mut(cid) else {
             return;
         };
         let signature = format!(
@@ -1233,7 +1239,8 @@ impl Harness {
         cid: &AgentId,
         call_id: &ToolCallId,
     ) -> Option<String> {
-        self.agents
+        self.agent_registry
+            .agents
             .get_mut(cid)?
             .loop_guard
             .take_tool_call_signature(call_id)
@@ -1258,7 +1265,7 @@ impl Harness {
             "{call_signature}:{}",
             bounded_loop_text(&error.message, LOOP_GUARD_TOOL_ERROR_CHARS)
         );
-        if let Some(conv) = self.agents.get_mut(cid) {
+        if let Some(conv) = self.agent_registry.agents.get_mut(cid) {
             conv.loop_guard
                 .push_tool_failure(failure.clone(), LOOP_GUARD_RECENT_LIMIT);
         }
@@ -1455,10 +1462,11 @@ impl Harness {
                     });
                 if !matches!(visible_tool_name.as_str(), "status" | "wait")
                     && self
+                        .agent_registry
                         .agents
                         .get(cid)
                         .is_some_and(|agent| !agent.lifecycle_notification_only_turn)
-                    && let Some(agent) = self.agents.get_mut(cid)
+                    && let Some(agent) = self.agent_registry.agents.get_mut(cid)
                 {
                     if status_was_available {
                         agent.work_status.record_substantive_tool_admission();

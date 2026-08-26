@@ -520,8 +520,8 @@ impl Harness {
             ));
         }
         // ast-grep-ignore: debug-assert-expression-must-not-mutate
-        debug_assert!(self.long_wait_materialization_budget.is_none());
-        self.long_wait_materialization_budget =
+        debug_assert!(self.agent_watch.long_wait_materialization_budget.is_none());
+        self.agent_watch.long_wait_materialization_budget =
             Some(subagents_tool::MAX_WORK_WAIT_THRESHOLDS_PER_RUNTIME_CYCLE);
         self.drain_pending_long_wait_notifications_for_scheduler();
         loop {
@@ -546,7 +546,10 @@ impl Harness {
                 break;
             };
             if work_wait == Some(deadline) {
-                let budget = self.long_wait_materialization_budget.unwrap_or_default();
+                let budget = self
+                    .agent_watch
+                    .long_wait_materialization_budget
+                    .unwrap_or_default();
                 let next_non_work = [input, background, extension, cache]
                     .into_iter()
                     .flatten()
@@ -565,7 +568,7 @@ impl Harness {
                 self.process_extension_deadlines_at(deadline, now);
             }
         }
-        self.long_wait_materialization_budget = None;
+        self.agent_watch.long_wait_materialization_budget = None;
     }
 
     pub(super) fn next_runtime_deadline(&self) -> Option<Instant> {

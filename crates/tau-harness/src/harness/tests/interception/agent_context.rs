@@ -867,6 +867,7 @@ fn interceptor_disconnect_removes_context_before_readiness_dispatch() {
     )
     .expect("dispatch prompt");
     let agent_id = h
+        .agent_registry
         .agents
         .values()
         .find_map(|agent| agent.agent_id.clone())

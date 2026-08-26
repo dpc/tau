@@ -567,7 +567,8 @@ impl Harness {
             return;
         }
         let pending =
-            self.agents
+            self.agent_registry
+                .agents
                 .iter()
                 .filter_map(|(cid, agent)| match &agent.activation_dispatch {
                     path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
@@ -1130,7 +1131,7 @@ impl Harness {
         &mut self,
         source_id: Option<&tau_proto::ConnectionId>,
     ) -> Result<(), HarnessError> {
-        if self.initial_extension_tool_preflight_complete {
+        if self.extensions.initial_tool_preflight_complete {
             return source_id.map_or(Ok(()), |source_id| {
                 self.finish_ready_extension_activation(source_id)
             });
@@ -1138,13 +1139,13 @@ impl Harness {
         if !self.initial_extension_preflight_ready() {
             return Ok(());
         }
-        self.resolving_initial_extension_collisions = true;
+        self.extensions.resolving_initial_collisions = true;
         let preflight = self.preflight_initial_extension_tools();
         if let Err(error) = preflight {
-            self.resolving_initial_extension_collisions = false;
+            self.extensions.resolving_initial_collisions = false;
             return Err(error);
         }
-        self.initial_extension_tool_preflight_complete = true;
+        self.extensions.initial_tool_preflight_complete = true;
         let mut ready = self
             .extensions
             .ready_received
@@ -1182,7 +1183,7 @@ impl Harness {
                 deferred.admission,
             )?;
         }
-        self.resolving_initial_extension_collisions = false;
+        self.extensions.resolving_initial_collisions = false;
         self.drain_pending_tool_invocations()?;
         self.try_advance_queue();
         Ok(())
@@ -1204,7 +1205,7 @@ impl Harness {
         let Some((name, required)) = lifecycle else {
             return Err(HarnessError::Participant(message));
         };
-        let initial_startup = !self.initial_extension_tool_preflight_complete;
+        let initial_startup = !self.extensions.initial_tool_preflight_complete;
         if required && initial_startup {
             return Err(HarnessError::Participant(message));
         }
@@ -1299,9 +1300,11 @@ impl Harness {
         message: HarnessInputMessage,
         admission: ExtensionFrameAdmission,
     ) {
-        let order = self.next_deferred_extension_message_order;
-        self.next_deferred_extension_message_order =
-            self.next_deferred_extension_message_order.saturating_add(1);
+        let order = self.extensions.next_deferred_message_order;
+        self.extensions.next_deferred_message_order = self
+            .extensions
+            .next_deferred_message_order
+            .saturating_add(1);
         self.extension_activation_stage_mut(source_id)
             .deferred_messages
             .push(DeferredExtensionMessage {
@@ -1539,7 +1542,7 @@ impl Harness {
                         diagnostic,
                     ),
                 );
-                if !self.initial_extension_tool_preflight_complete {
+                if !self.extensions.initial_tool_preflight_complete {
                     if !optional {
                         return Err(HarnessError::Participant(format!(
                             "required extension `{name}` rejected its config: {diagnostic}"

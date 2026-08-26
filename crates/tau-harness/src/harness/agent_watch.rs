@@ -4,6 +4,32 @@
 
 use super::*;
 
+/// Watch topology, delivery deduplication, and endpoint-retirement state.
+#[derive(Default)]
+pub(crate) struct AgentWatchState {
+    /// Watched agent ids keyed by watcher public agent id.
+    pub(crate) forward: HashMap<String, BTreeSet<String>>,
+    /// Watcher agent ids keyed by watched public agent id.
+    pub(crate) reverse: HashMap<String, BTreeSet<String>>,
+    /// Subscription identity for every directed watch relation.
+    pub(crate) subscriptions: HashMap<(String, String), String>,
+    /// Current sanitized provider-work snapshot by watched agent id.
+    pub(crate) provider_status: HashMap<String, tau_proto::AgentWatchProviderStatusNotification>,
+    /// Bounded provider-status delivery state by subscription.
+    pub(crate) provider_deliveries: HashMap<String, AgentWatchProviderDeliveries>,
+    /// Long-wait crossings awaiting bounded durable materialization.
+    pub(super) pending_long_wait_notifications:
+        VecDeque<subagents_tool::PendingLongWaitNotifications>,
+    /// Remaining long-wait materialization budget in the active scheduler call.
+    pub(super) long_wait_materialization_budget: Option<usize>,
+    /// Selected reason for an unexpected watched endpoint unload.
+    pub(super) pending_unload_reasons: HashMap<String, tau_proto::AgentWatchLifecycleReason>,
+    /// Endpoint ids whose pending unload is expected completion or cleanup.
+    pub(super) expected_unloads: HashSet<String>,
+    /// Unexpected retirements awaiting watcher lifecycle appends.
+    pub(super) pending_retirements: HashMap<String, subagents_tool::PendingWatchRetirement>,
+}
+
 /// Dedupe projection for one provider status notification.
 ///
 /// Attempts and retry delays intentionally do not participate: repeated
@@ -70,7 +96,7 @@ pub(super) fn watch_category_for_retry(
 impl Harness {
     pub(super) fn notify_agent_watchers_about_user_prompt(&mut self, agent_id: &str, text: &str) {
         for watcher_id in self.watchers_for_agent(agent_id) {
-            let Some(sender_cid) = self.agent_routes.get(agent_id).cloned() else {
+            let Some(sender_cid) = self.agent_registry.agent_routes.get(agent_id).cloned() else {
                 return;
             };
             if self
@@ -91,6 +117,7 @@ impl Harness {
     /// provider response itself has committed.
     pub(super) fn notify_agent_watchers_about_response(&mut self, cid: &AgentId, message: String) {
         let Some(agent_id) = self
+            .agent_registry
             .agents
             .get(cid)
             .and_then(|agent| agent.agent_id.clone())

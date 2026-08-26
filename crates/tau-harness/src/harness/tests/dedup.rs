@@ -159,7 +159,7 @@ fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_
                 )
     )));
 
-    let agent_id = h.agents[&cid]
+    let agent_id = h.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .expect("durable agent id");
@@ -290,6 +290,7 @@ fn run_tool_result(
     .expect("tool result");
 
     let agent_id = h
+        .agent_registry
         .agents
         .get(cid)
         .and_then(|conv| conv.agent_id.as_deref())
@@ -362,6 +363,7 @@ fn run_tool_error(
     .expect("tool error");
 
     let agent_id = h
+        .agent_registry
         .agents
         .get(cid)
         .and_then(|conv| conv.agent_id.as_deref())
@@ -516,8 +518,11 @@ fn pointer_entries_are_not_themselves_dedup_anchors() {
     // Force a rebuild on the next intake by clearing the cached dedup map. The
     // next result rebuilds from [Request_orig, Result_orig (real), Request_dup,
     // Result_dup (pointer)], where the pointer remains below the threshold.
-    h.agents.get_mut(&cid).expect("default conv").result_dedup =
-        path_crate_dedup::ResultDedupMap::new();
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("default conv")
+        .result_dedup = path_crate_dedup::ResultDedupMap::new();
 
     let third = run_tool_result(&mut h, "s1", &cid, "call_third", "read", big.clone());
     assert_eq!(third.status, ToolResultStatus::Success);
@@ -637,7 +642,12 @@ fn dedup_map_rebuilds_on_session_restore() {
         .expect("resume");
     let cid = ensure_test_user_agent(&mut h);
     assert!(
-        h.agents.get(&cid).expect("default conv").head.is_some(),
+        h.agent_registry
+            .agents
+            .get(&cid)
+            .expect("default conv")
+            .head
+            .is_some(),
         "resumed default conversation must have a non-empty branch head",
     );
 
@@ -678,7 +688,11 @@ fn new_session_reset_does_not_dedup_against_previous_branch() {
 
     let cid = ensure_test_user_agent(&mut h);
     assert_eq!(
-        h.agents.get(&cid).expect("default conv").head,
+        h.agent_registry
+            .agents
+            .get(&cid)
+            .expect("default conv")
+            .head,
         None,
         "a :session new reset must start from a fresh branch head",
     );
@@ -725,7 +739,7 @@ fn dedup_is_scoped_to_a_single_branch() {
     // the side conv's model has no visibility into the default
     // conv's history.
     let side_cid: crate::AgentId = crate::parse_agent_id("side-test");
-    h.agents.insert(
+    h.agent_registry.agents.insert(
         side_cid.clone(),
         path_crate_agent::Agent::new(
             side_cid.clone(),

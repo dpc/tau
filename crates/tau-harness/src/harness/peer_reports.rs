@@ -1255,9 +1255,10 @@ impl Harness {
         match self.registry.route_tool_request(request.clone()) {
             Ok(route) => {
                 let Some(cid) = self
+                    .agent_registry
                     .agent_routes
                     .get(request.agent_id.as_str())
-                    .filter(|cid| self.agents.contains_key(*cid))
+                    .filter(|cid| self.agent_registry.agents.contains_key(*cid))
                     .cloned()
                 else {
                     self.reject_peer_tool_request(
@@ -1530,12 +1531,14 @@ impl Harness {
             .as_ref()
             .and_then(|status| status.retry.clone())
             && !self
+                .agent_registry
                 .agents
                 .get(&updated.agent_id)
                 .is_some_and(|agent| agent.lifecycle_notification_only_turn)
             && let Some(public_id) = self.ensure_agent_id_for_agent(&updated.agent_id)
         {
             let turn_generation = self
+                .agent_registry
                 .agents
                 .get(&updated.agent_id)
                 .map_or(0, |agent| agent.turn_generation);
@@ -2355,7 +2358,8 @@ impl Harness {
             let validation = if has_provider_image && !allows_provider_image {
                 Err("the originating tool is not authorized for image output".to_owned())
             } else {
-                self.agents
+                self.agent_registry
+                    .agents
                     .get(&cid)
                     .and_then(|agent| {
                         let agent_id = agent.agent_id.clone()?;

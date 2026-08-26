@@ -728,7 +728,7 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
 fn oversized_startup_snapshot_replacement_fails_activation() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    h.initial_extension_tool_preflight_complete = false;
+    h.extensions.initial_tool_preflight_complete = false;
     connect_ready_configured_extension(
         &mut h,
         "snapshot-owner",

@@ -1256,7 +1256,8 @@ impl Harness {
             _ => None,
         };
         let agent_id = self.agent_id_for_event(&event).or_else(|| {
-            self.agents
+            self.agent_registry
+                .agents
                 .get(cid)
                 .and_then(|agent| agent.agent_id.as_deref())
                 .map(crate::parse_agent_id)
@@ -1452,6 +1453,7 @@ impl Harness {
     ) {
         let _ = self.ensure_agent_id_for_agent(cid);
         let state = self
+            .agent_registry
             .agents
             .get(cid)
             .map(|agent| agent.activation_dispatch.clone());
@@ -1468,7 +1470,7 @@ impl Harness {
         if !self.agent_can_start_deferred_inference_dispatch(cid) {
             return;
         }
-        let output_length_owner_ready = self.agents.get(cid).is_some_and(|agent| {
+        let output_length_owner_ready = self.agent_registry.agents.get(cid).is_some_and(|agent| {
             matches!(
                 agent.output_length_continuation,
                 path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
@@ -1520,13 +1522,14 @@ impl Harness {
             );
             return;
         }
-        let output_length_continuation = self.agents.get(&cid).is_some_and(|agent| {
-            matches!(
-                agent.output_length_continuation,
-                crate::agent::OutputLengthContinuationState::Planned(_)
-                    | crate::agent::OutputLengthContinuationState::OwnerReady(_)
-            )
-        });
+        let output_length_continuation =
+            self.agent_registry.agents.get(&cid).is_some_and(|agent| {
+                matches!(
+                    agent.output_length_continuation,
+                    crate::agent::OutputLengthContinuationState::Planned(_)
+                        | crate::agent::OutputLengthContinuationState::OwnerReady(_)
+                )
+            });
         self.pending_publish_idle_dispatches
             .push_back(DeferredPromptDispatch {
                 cid,
@@ -1554,7 +1557,7 @@ impl Harness {
     /// provider request.
     fn agent_can_start_deferred_inference_dispatch(&self, cid: &AgentId) -> bool {
         self.agent_context_ready_for(cid)
-            && self.agents.get(cid).is_some_and(|agent| {
+            && self.agent_registry.agents.get(cid).is_some_and(|agent| {
                 !agent.terminating
                     && matches!(
                         agent.outer_turn,
@@ -1590,17 +1593,21 @@ impl Harness {
         if !selected {
             return false;
         }
-        if !self.agents.contains_key(&deferred.cid) {
+        if !self.agent_registry.agents.contains_key(&deferred.cid) {
             return true;
         }
-        let owner_can_advance = self.agents.get(&deferred.cid).is_some_and(|agent| {
-            (matches!(
-                agent.activation_dispatch,
-                crate::agent::ActivationDispatchState::Running { .. }
-            ) && !agent.terminating
-                && self.agent_context_ready_for(&deferred.cid))
-                || self.agent_can_start_deferred_inference_dispatch(&deferred.cid)
-        });
+        let owner_can_advance =
+            self.agent_registry
+                .agents
+                .get(&deferred.cid)
+                .is_some_and(|agent| {
+                    (matches!(
+                        agent.activation_dispatch,
+                        crate::agent::ActivationDispatchState::Running { .. }
+                    ) && !agent.terminating
+                        && self.agent_context_ready_for(&deferred.cid))
+                        || self.agent_can_start_deferred_inference_dispatch(&deferred.cid)
+                });
         owner_can_advance
             && !self
                 .pending_agent_publish_completions
@@ -1609,7 +1616,7 @@ impl Harness {
 
     /// Returns the runtime-selected durable head for one loaded agent.
     pub(super) fn selected_head_for_agent(&self, cid: &AgentId) -> Option<tau_proto::AgentHead> {
-        self.agents.get(cid).map(|agent| {
+        self.agent_registry.agents.get(cid).map(|agent| {
             agent
                 .head
                 .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
@@ -1621,7 +1628,7 @@ impl Harness {
         let Some(owner) = deferred.activation_through else {
             return false;
         };
-        let Some(agent) = self.agents.get(&deferred.cid) else {
+        let Some(agent) = self.agent_registry.agents.get(&deferred.cid) else {
             return false;
         };
         let Some(tree) = agent
@@ -1668,7 +1675,8 @@ impl Harness {
         activation_through: Option<tau_proto::AgentHead>,
     ) {
         let activation_cut = activation_through.and_then(|_| {
-            self.agents
+            self.agent_registry
+                .agents
                 .get(&cid)
                 .and_then(|agent| agent.agent_id.as_deref())
                 .and_then(|agent_id| self.agent_store.agent(agent_id))
@@ -1717,6 +1725,7 @@ impl Harness {
         through: tau_proto::AgentHead,
     ) {
         let tree = self
+            .agent_registry
             .agents
             .get(cid)
             .and_then(|agent| agent.agent_id.as_deref())
@@ -1766,7 +1775,7 @@ impl Harness {
         &self,
         cid: &AgentId,
     ) -> Option<tau_proto::AgentHead> {
-        let agent = self.agents.get(cid)?;
+        let agent = self.agent_registry.agents.get(cid)?;
         let head = agent.head?;
         let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
         let provisional = tree
@@ -2251,6 +2260,7 @@ impl Harness {
                     self.pending_publish_idle_dispatches[index].activation_source_seq
                 {
                     let materialized = self
+                        .agent_registry
                         .agents
                         .get(&cid)
                         .and_then(|agent| agent.agent_id.as_deref())
@@ -2295,7 +2305,7 @@ impl Harness {
             };
             let deferred = self.pending_publish_idle_dispatches[index].clone();
             let cid = deferred.cid.clone();
-            if !self.agents.contains_key(&cid) {
+            if !self.agent_registry.agents.contains_key(&cid) {
                 self.pending_publish_idle_dispatches.remove(index);
                 continue;
             }

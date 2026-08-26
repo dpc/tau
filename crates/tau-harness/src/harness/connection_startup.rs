@@ -496,7 +496,10 @@ impl Harness {
                 if command.session_generation != self.current_session_generation
                     || self.tool_runtime.tool_agents.get(&command.call_id)
                         != Some(&command.conversation_id)
-                    || !self.agents.contains_key(&command.conversation_id)
+                    || !self
+                        .agent_registry
+                        .agents
+                        .contains_key(&command.conversation_id)
                 {
                     tracing::debug!(
                         target: "tau_harness::external_agent_message",
@@ -597,7 +600,10 @@ impl Harness {
                 if command.session_generation != self.current_session_generation
                     || self.tool_runtime.tool_agents.get(&command.call_id)
                         != Some(&command.conversation_id)
-                    || !self.agents.contains_key(&command.conversation_id)
+                    || !self
+                        .agent_registry
+                        .agents
+                        .contains_key(&command.conversation_id)
                 {
                     tracing::debug!(
                         target: "tau_harness::session_discovery",

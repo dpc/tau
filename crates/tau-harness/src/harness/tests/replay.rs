@@ -442,6 +442,7 @@ fn durable_session_late_replay_merges_ephemeral_agent_overlay() {
         })
         .expect("ephemeral agent id");
     let cid = h
+        .agent_registry
         .agent_routes
         .get(agent_id.as_str())
         .cloned()
@@ -584,7 +585,11 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
             _ => None,
         })
         .expect("target agent");
-    assert!(h.agent_routes.contains_key(agent_id.as_str()));
+    assert!(
+        h.agent_registry
+            .agent_routes
+            .contains_key(agent_id.as_str())
+    );
     let delivered = Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::parse("bridge")
             .expect("canonical publisher id must satisfy the identifier grammar"),
@@ -713,11 +718,16 @@ fn live_message_fact_projection_activates_only_valid_incoming_facts() {
     );
 
     let cid = h
+        .agent_registry
         .agent_routes
         .get(agent_id.as_str())
         .cloned()
         .expect("target conversation");
-    h.agents.get_mut(&cid).expect("target runtime").terminating = true;
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("target runtime")
+        .terminating = true;
     h.commit_message_fact(
         None,
         Event::MessageDelivered(tau_proto::MessageDelivered::new(
@@ -761,7 +771,7 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     h.selected_model = Some("test/model".into());
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid]
+    let agent_id = h.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .map(crate::parse_agent_id)
@@ -799,7 +809,7 @@ fn live_message_fact_waits_for_tool_result_placement_before_single_wake() {
         "fact projection must remain pending while tool adjacency is open"
     );
     assert!(matches!(
-        h.agents[&cid].pending_message_wakes.front(),
+        h.agent_registry.agents[&cid].pending_message_wakes.front(),
         Some(crate::agent::PendingMessageWake {
             source: crate::agent::PendingMessageWakeSource::MessageFact { .. },
             node_id: None,
@@ -1021,8 +1031,15 @@ fn received_agent_message_replay_restores_context_and_activation() {
     let (agent_id, live_projection) = {
         let mut h = quiet_provider_harness(&state_dir).expect("start");
         let cid = ensure_test_user_agent(&mut h);
-        let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
-        h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+        let agent_id = h.agent_registry.agents[&cid]
+            .agent_id
+            .clone()
+            .expect("agent id");
+        h.agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent")
+            .turn_state = AgentTurnState::AgentThinking {
             agent_prompt_id: "live-message-before-crash"
                 .parse::<tau_proto::AgentPromptId>()
                 .expect("known-safe AgentPromptId must be valid"),
@@ -1043,7 +1060,7 @@ fn received_agent_message_replay_restores_context_and_activation() {
                 message: "persisted <message>& body".to_owned(),
             }),
         );
-        assert_eq!(h.agents[&cid].pending_message_wakes.len(), 1);
+        assert_eq!(h.agent_registry.agents[&cid].pending_message_wakes.len(), 1);
         let projection = h
             .agent_store
             .agent(agent_id.as_str())
@@ -1074,13 +1091,19 @@ fn received_agent_message_replay_restores_context_and_activation() {
         live_projection
     );
     let cid = resumed
+        .agent_registry
         .agent_routes
         .get(agent_id.as_str())
         .expect("restored route");
-    assert!(resumed.agents[cid].pending_message_wakes.is_empty());
-    let context = crate::prompt::assemble_prompt_context_from(tree, resumed.agents[cid].head)
-        .context
-        .flatten();
+    assert!(
+        resumed.agent_registry.agents[cid]
+            .pending_message_wakes
+            .is_empty()
+    );
+    let context =
+        crate::prompt::assemble_prompt_context_from(tree, resumed.agent_registry.agents[cid].head)
+            .context
+            .flatten();
     assert!(context.iter().any(|item| {
         matches!(
             item,
@@ -1788,10 +1811,14 @@ fn restore_rejects_membership_without_committed_agent_creation() {
             echo_harness_with_start_reason("s1", &state_dir, tau_proto::SessionStartReason::Resume)
                 .expect("resume");
         assert!(
-            !h.agent_routes.contains_key("orphan"),
+            !h.agent_registry.agent_routes.contains_key("orphan"),
             "{journal_kind} journal became routable"
         );
-        assert!(!h.agents.contains_key(&crate::parse_agent_id("orphan")));
+        assert!(
+            !h.agent_registry
+                .agents
+                .contains_key(&crate::parse_agent_id("orphan"))
+        );
         h.commit_message_fact(
             Some(&crate::test_connection_id("bridge")),
             Event::MessageDelivered(tau_proto::MessageDelivered::new(
@@ -1992,7 +2019,8 @@ fn resume_repairs_unresolved_tool_call_before_next_prompt_context() {
             let cid = test_user_agent(&h);
             panic!(
                 "deferred input did not dispatch after repair: state={:?}, wakes={:?}",
-                h.agents[&cid].turn_state, h.agents[&cid].pending_message_wakes
+                h.agent_registry.agents[&cid].turn_state,
+                h.agent_registry.agents[&cid].pending_message_wakes
             )
         });
     let repaired = prompt_tool_result(&prompt, "interrupted-call")
@@ -2532,10 +2560,13 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
         None,
     );
     agent.agent_id = Some(agent_id.to_string());
-    h.agents.insert(cid.clone(), agent);
-    h.agent_routes.insert(agent_id.to_string(), cid.clone());
-    h.session_loaded_agents.insert(agent_id.clone());
-    h.agent_navigation_modes
+    h.agent_registry.agents.insert(cid.clone(), agent);
+    h.agent_registry
+        .agent_routes
+        .insert(agent_id.to_string(), cid.clone());
+    h.agent_registry.session_loaded.insert(agent_id.clone());
+    h.agent_registry
+        .navigation_modes
         .insert(agent_id.clone(), tau_proto::AgentNavigationMode::Active);
 
     h.publish_event(
@@ -2874,7 +2905,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     let agent_id = h
         .ensure_agent_id_for_agent(&cid)
         .expect("default conversation has an agent id");
-    let session_id = h.agents[&cid].session_id.clone();
+    let session_id = h.agent_registry.agents[&cid].session_id.clone();
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.publish_event(
         None,
@@ -3009,7 +3040,8 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
     let agent_id = h
         .ensure_agent_id_for_agent(&cid)
         .expect("default conversation has an agent id");
-    h.agents
+    h.agent_registry
+        .agents
         .get_mut(&cid)
         .expect("default conversation")
         .pending_prompts
@@ -3333,6 +3365,7 @@ fn resumed_harness_replays_persisted_session_history() {
             .expect("first prompt conversation")
             .clone();
         let agent_id = h
+            .agent_registry
             .agents
             .get(&cid)
             .and_then(|conv| conv.agent_id.as_ref())

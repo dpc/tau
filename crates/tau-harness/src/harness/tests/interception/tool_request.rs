@@ -1185,8 +1185,8 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
             .get("peer-internal"),
         Some(&cid)
     );
-    assert_eq!(harness.agents[&cid].tools_in_flight, 1);
-    assert_eq!(harness.agents[&cid].tools_total, 1);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 1);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_total, 1);
     assert!(harness.wait_tracks_call_for_test(&"peer-internal".into()));
     let transcript_nodes = default_agent_tree(&harness).nodes().len();
 
@@ -1212,7 +1212,7 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
             .pending_tools
             .contains_key("peer-internal")
     );
-    assert_eq!(harness.agents[&cid].tools_in_flight, 0);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
     assert_eq!(default_agent_tree(&harness).nodes().len(), transcript_nodes);
 
     harness
@@ -1243,10 +1243,10 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
             .pending_tools
             .contains_key("peer-internal-error")
     );
-    assert_eq!(harness.agents[&cid].tools_in_flight, 0);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
     assert_eq!(default_agent_tree(&harness).nodes().len(), transcript_nodes);
 
-    let total_before_message = harness.agents[&cid].tools_total;
+    let total_before_message = harness.agent_registry.agents[&cid].tools_total;
     harness
         .handle_extension_event(
             "requester",
@@ -1265,8 +1265,11 @@ fn peer_request_for_internal_tool_uses_loaded_agent_correlation() {
             .iter()
             .any(|(_, event)| matches!(event, Event::ToolError(_)))
     );
-    assert_eq!(harness.agents[&cid].tools_total, total_before_message + 1);
-    assert_eq!(harness.agents[&cid].tools_in_flight, 0);
+    assert_eq!(
+        harness.agent_registry.agents[&cid].tools_total,
+        total_before_message + 1
+    );
+    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
     assert!(
         !harness
             .tool_runtime
@@ -1429,8 +1432,8 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
                     if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
             ))
     );
-    assert_eq!(harness.agents[&cid].tools_total, 1);
-    assert_eq!(harness.agents[&cid].tools_in_flight, 1);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_total, 1);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 1);
 
     harness.finish_prebuilt_internal_tool_result(tau_proto::ToolResult {
         presentation: Default::default(),
@@ -1448,7 +1451,7 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
         Event::ToolBackgroundResult(result)
             if result.call_id.as_str() == "peer-internal-background"
     )));
-    assert_eq!(harness.agents[&cid].tools_in_flight, 0);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
     assert!(
         !harness
             .tool_runtime
@@ -1480,7 +1483,7 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
             .contains_key("peer-internal-background")
     );
     assert!(
-        harness.agents[&cid]
+        harness.agent_registry.agents[&cid]
             .pending_prompts
             .iter()
             .all(|prompt| !prompt.is_activating_background_completion())
@@ -1515,7 +1518,7 @@ fn peer_internal_background_handler_completes_without_transcript_fold() {
         Event::ToolBackgroundError(error)
             if error.call_id.as_str() == "peer-internal-background-error"
     )));
-    assert_eq!(harness.agents[&cid].tools_in_flight, 0);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
     assert!(
         !harness
             .tool_runtime

@@ -162,8 +162,13 @@ fn parked_ownerless_result_settles_once_after_canonical_commit() {
         .tool_runtime
         .peer_internal_tool_agents
         .insert(call_id.clone(), cid.clone());
-    harness.agents.get_mut(&cid).expect("agent").tools_in_flight = 1;
-    let agent_id = harness.agents[&cid]
+    harness
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .tools_in_flight = 1;
+    let agent_id = harness.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("durable agent id");
@@ -195,7 +200,7 @@ fn parked_ownerless_result_settles_once_after_canonical_commit() {
         Some(&cid)
     );
     assert!(!harness.tool_runtime.tool_agents.contains_key(&call_id));
-    assert_eq!(harness.agents[&cid].tools_in_flight, 1);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 1);
     assert_eq!(stats_count(&harness), stats_before);
     assert!(committed_terminal_events(&harness, call_id.as_str()).is_empty());
 
@@ -209,7 +214,7 @@ fn parked_ownerless_result_settles_once_after_canonical_commit() {
             .contains_key(&call_id)
     );
     assert!(!harness.tool_runtime.tool_agents.contains_key(&call_id));
-    assert_eq!(harness.agents[&cid].tools_in_flight, 0);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
     assert_eq!(stats_count(&harness), stats_before + 1);
     let events = committed_terminal_events(&harness, call_id.as_str());
     assert!(matches!(
@@ -243,7 +248,12 @@ fn parked_ownerless_error_settles_once_after_canonical_commit() {
         .tool_runtime
         .peer_internal_tool_agents
         .insert(call_id.clone(), cid.clone());
-    harness.agents.get_mut(&cid).expect("agent").tools_in_flight = 1;
+    harness
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .tools_in_flight = 1;
     intercept_terminal_names(
         &mut harness,
         vec![
@@ -262,7 +272,7 @@ fn parked_ownerless_error_settles_once_after_canonical_commit() {
         harness.tool_runtime.peer_internal_tool_agents.get(&call_id),
         Some(&cid)
     );
-    assert_eq!(harness.agents[&cid].tools_in_flight, 1);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 1);
     assert!(committed_terminal_events(&harness, call_id.as_str()).is_empty());
 
     reply(
@@ -281,7 +291,7 @@ fn parked_ownerless_error_settles_once_after_canonical_commit() {
             .peer_internal_tool_agents
             .contains_key(&call_id)
     );
-    assert_eq!(harness.agents[&cid].tools_in_flight, 0);
+    assert_eq!(harness.agent_registry.agents[&cid].tools_in_flight, 0);
     reply(
         &mut harness,
         InterceptAction::Pass(Some(Box::new(Event::ToolError(tool_error(
@@ -518,8 +528,8 @@ fn parked_ownerless_disconnect_error_defers_teardown_until_canonical_commit() {
 fn provider_terminal_append_failure_remains_retryable() {
     let (_tmp, mut harness) = setup_routed_test_tool_call("store-fault", "owned_tool");
     let cid = harness.tool_runtime.tool_agents["store-fault"].clone();
-    let tools_in_flight = harness.agents[&cid].tools_in_flight;
-    let agent_id = harness.agents[&cid]
+    let tools_in_flight = harness.agent_registry.agents[&cid].tools_in_flight;
+    let agent_id = harness.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .expect("durable agent id")
@@ -540,7 +550,10 @@ fn provider_terminal_append_failure_remains_retryable() {
         .expect("raw report remains a bounded observation");
 
     assert!(harness.tool_runtime.tool_agents.contains_key("store-fault"));
-    assert_eq!(harness.agents[&cid].tools_in_flight, tools_in_flight);
+    assert_eq!(
+        harness.agent_registry.agents[&cid].tools_in_flight,
+        tools_in_flight
+    );
     assert!(
         !committed_terminal_events(&harness, "store-fault")
             .iter()
@@ -563,7 +576,11 @@ fn provider_terminal_append_failure_remains_retryable() {
         .expect("later observation remains bounded");
     assert!(harness.pending_intercept.is_none());
     assert!(harness.deferred_publishes.is_empty());
-    assert!(harness.agents[&cid].pending_prompts.is_empty());
+    assert!(
+        harness.agent_registry.agents[&cid]
+            .pending_prompts
+            .is_empty()
+    );
     let notices_before = event_log_events(&harness)
         .iter()
         .filter(|event| matches!(event, Event::HarnessNotice(_)))
@@ -577,7 +594,10 @@ fn provider_terminal_append_failure_remains_retryable() {
         notices_before + 1
     );
     assert!(!harness.tool_runtime.tool_agents.contains_key("store-fault"));
-    assert_eq!(harness.agents[&cid].tools_in_flight, tools_in_flight - 1);
+    assert_eq!(
+        harness.agent_registry.agents[&cid].tools_in_flight,
+        tools_in_flight - 1
+    );
     assert!(
         committed_terminal_events(&harness, "store-fault")
             .iter()
@@ -605,7 +625,7 @@ fn provider_terminal_validation_rejection_does_not_fail_stop() {
         Event::ProviderToolResult(final_tool_result("missing-open-call", "missing", "invalid")),
     );
 
-    let agent_id = harness.agents[&cid]
+    let agent_id = harness.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("durable agent id");
@@ -637,7 +657,7 @@ fn provider_terminal_validation_rejection_does_not_fail_stop() {
 fn direct_append_fault_discards_deferred_terminal() {
     let (_tmp, mut harness) = setup_routed_test_tool_call("deferred-fault", "owned_tool");
     let cid = harness.tool_runtime.tool_agents["deferred-fault"].clone();
-    let agent_id = harness.agents[&cid]
+    let agent_id = harness.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("durable agent id");
@@ -1424,7 +1444,11 @@ fn parked_background_terminal_defers_cleanup_and_completion_prompt() {
             .pending_terminal_observations
             .contains_key(&call_id)
     );
-    assert!(harness.agents[&cid].pending_prompts.is_empty());
+    assert!(
+        harness.agent_registry.agents[&cid]
+            .pending_prompts
+            .is_empty()
+    );
 
     reply(&mut harness, InterceptAction::Pass(None));
     assert!(harness.pending_intercept.is_none());
@@ -1444,10 +1468,10 @@ fn background_terminal_append_failure_remains_retryable() {
     let call_id = ToolCallId::from("background-store-fault");
     let (_tmp, mut harness) = setup_routed_test_tool_call(call_id.as_str(), "owned_tool");
     let cid = harness.tool_runtime.tool_agents[&call_id].clone();
-    let tools_in_flight = harness.agents[&cid].tools_in_flight;
+    let tools_in_flight = harness.agent_registry.agents[&cid].tools_in_flight;
     assert!(harness.tool_runtime.tool_turn.begin_backgrounding(&call_id));
     assert!(harness.tool_runtime.tool_turn.mark_backgrounded(&call_id));
-    let agent_id = harness.agents[&cid]
+    let agent_id = harness.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("durable agent");
@@ -1466,7 +1490,10 @@ fn background_terminal_append_failure_remains_retryable() {
         .handle_extension_event("conn-owner", TestProtocolItem::Event(report.clone()))
         .expect("raw report remains observable");
     assert!(harness.tool_runtime.tool_agents.contains_key(&call_id));
-    assert_eq!(harness.agents[&cid].tools_in_flight, tools_in_flight);
+    assert_eq!(
+        harness.agent_registry.agents[&cid].tools_in_flight,
+        tools_in_flight
+    );
     assert!(
         harness
             .tool_runtime
@@ -1480,7 +1507,10 @@ fn background_terminal_append_failure_remains_retryable() {
         .handle_extension_event("conn-owner", TestProtocolItem::Event(report))
         .expect("retry report");
     assert!(!harness.tool_runtime.tool_agents.contains_key(&call_id));
-    assert_eq!(harness.agents[&cid].tools_in_flight, tools_in_flight - 1);
+    assert_eq!(
+        harness.agent_registry.agents[&cid].tools_in_flight,
+        tools_in_flight - 1
+    );
 }
 
 /// A competing disconnect terminal after an append failure must supersede the
@@ -1490,7 +1520,7 @@ fn failed_result_then_disconnect_commits_fresh_disconnected_classification() {
     let call_id = ToolCallId::from("failed-result-disconnect");
     let (_tmp, mut harness) = setup_routed_test_tool_call(call_id.as_str(), "owned_tool");
     let cid = harness.tool_runtime.tool_agents[&call_id].clone();
-    let agent_id = harness.agents[&cid]
+    let agent_id = harness.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("durable agent");
@@ -1537,7 +1567,7 @@ fn failed_result_then_cancellation_commits_fresh_cancellation_classification() {
     let call_id = ToolCallId::from("failed-result-cancel");
     let (_tmp, mut harness) = setup_routed_test_tool_call(call_id.as_str(), "owned_tool");
     let cid = harness.tool_runtime.tool_agents[&call_id].clone();
-    let agent_id = harness.agents[&cid]
+    let agent_id = harness.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("durable agent");

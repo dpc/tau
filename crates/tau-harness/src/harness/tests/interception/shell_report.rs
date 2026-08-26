@@ -47,7 +47,7 @@ fn seed_shell_provider_and_default_agent(
     register_shell_provider(harness, source, kind);
     let cid = ensure_test_user_agent(harness);
     crate::parse_agent_id(
-        harness.agents[&cid]
+        harness.agent_registry.agents[&cid]
             .agent_id
             .as_deref()
             .expect("durable agent id"),
@@ -99,7 +99,7 @@ fn targetless_unroutable_shell_start_and_terminal_keep_none_target() {
         .expect("subscribe shell UI");
     register_shell_provider(&mut harness, "shell-owner", tau_proto::ClientKind::Tool);
     let _ = ensure_test_user_agent(&mut harness);
-    for conversation in harness.agents.values_mut() {
+    for conversation in harness.agent_registry.agents.values_mut() {
         if conversation.originator.is_user() {
             conversation.terminating = true;
         }
@@ -1023,10 +1023,18 @@ fn canonical_shell_replacement_target_cannot_suppress_raw_reply_audit() {
     let tmp = TempDir::new().expect("tempdir");
     let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut harness);
-    let forged_ephemeral_target =
-        crate::parse_agent_id(harness.agents[&cid].agent_id.as_deref().expect("agent id"));
-    harness.agents.get_mut(&cid).expect("agent").persistence =
-        tau_core::AgentPersistenceMode::Ephemeral;
+    let forged_ephemeral_target = crate::parse_agent_id(
+        harness.agent_registry.agents[&cid]
+            .agent_id
+            .as_deref()
+            .expect("agent id"),
+    );
+    harness
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .persistence = tau_core::AgentPersistenceMode::Ephemeral;
     let debug_dir = tmp.path().join("debug");
     harness.debug_log =
         Some(path_crate_debug_log::DebugEventLog::open(&debug_dir).expect("open debug log"));
@@ -1301,10 +1309,18 @@ fn shell_report_ephemeral_classification_ignores_peer_target_claim() {
     let tmp = TempDir::new().expect("tempdir");
     let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut harness);
-    let claimed_agent_id =
-        crate::parse_agent_id(harness.agents[&cid].agent_id.as_deref().expect("agent id"));
-    harness.agents.get_mut(&cid).expect("agent").persistence =
-        tau_core::AgentPersistenceMode::Ephemeral;
+    let claimed_agent_id = crate::parse_agent_id(
+        harness.agent_registry.agents[&cid]
+            .agent_id
+            .as_deref()
+            .expect("agent id"),
+    );
+    harness
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .persistence = tau_core::AgentPersistenceMode::Ephemeral;
     let route_id = UiShellRouteId::new(test_shell_command_id("durable-route"));
     harness.ui_runtime.pending_ui_shell_commands.insert(
         route_id.clone(),

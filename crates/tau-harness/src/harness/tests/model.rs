@@ -685,7 +685,12 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
         .expect("submit prompt"),
         PromptSubmission::Queued,
     );
-    assert_eq!(h.agents[&test_user_agent(&h)].pending_prompts.len(), 1,);
+    assert_eq!(
+        h.agent_registry.agents[&test_user_agent(&h)]
+            .pending_prompts
+            .len(),
+        1,
+    );
 
     h.extensions.pending_connects = 0;
     let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
@@ -699,7 +704,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
 
     assert_eq!(h.selected_model.as_ref(), Some(&model_id));
     assert_eq!(h.selected_model_params().effort, Effort::High);
-    let conv = &h.agents[&test_user_agent(&h)];
+    let conv = &h.agent_registry.agents[&test_user_agent(&h)];
     assert!(conv.pending_prompts.is_empty());
     assert!(matches!(
         conv.turn_state,
@@ -727,7 +732,7 @@ fn settled_empty_model_inventory_rejects_queued_prompt_and_later_recovers() {
         PromptSubmission::Queued,
     );
     let cid = test_user_agent(&h);
-    assert_eq!(h.agents[&cid].pending_prompts.len(), 1);
+    assert_eq!(h.agent_registry.agents[&cid].pending_prompts.len(), 1);
     assert!(
         event_log_events(&h)
             .iter()
@@ -737,7 +742,7 @@ fn settled_empty_model_inventory_rejects_queued_prompt_and_later_recovers() {
     h.extensions.pending_connects = 0;
     h.try_advance_queue();
 
-    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
     let rejected = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
@@ -772,9 +777,9 @@ fn settled_empty_model_inventory_rejects_queued_prompt_and_later_recovers() {
     )
     .expect("submit recovery prompt");
 
-    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
     assert!(matches!(
-        h.agents[&cid].turn_state,
+        h.agent_registry.agents[&cid].turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
     assert_eq!(
@@ -816,11 +821,11 @@ fn settled_empty_model_inventory_fails_queued_initial_prompt_once() {
     )
     .expect("create agent");
     let cid = test_user_agent(&h);
-    let agent_id = h.agents[&cid]
+    let agent_id = h.agent_registry.agents[&cid]
         .agent_id
         .clone()
         .expect("created durable agent");
-    assert_eq!(h.agents[&cid].pending_prompts.len(), 1);
+    assert_eq!(h.agent_registry.agents[&cid].pending_prompts.len(), 1);
 
     h.extensions.pending_connects = 0;
     h.try_advance_queue();
@@ -852,8 +857,11 @@ fn settled_empty_model_inventory_fails_queued_initial_prompt_once() {
             .iter()
             .all(|event| !matches!(event, Event::AgentPromptCreated(_)))
     );
-    assert!(h.agents[&cid].pending_prompts.is_empty());
-    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+    assert!(h.agent_registry.agents[&cid].pending_prompts.is_empty());
+    assert!(matches!(
+        h.agent_registry.agents[&cid].turn_state,
+        AgentTurnState::Idle
+    ));
 }
 
 /// An inter-agent message accepted during startup must not dispatch before
@@ -866,7 +874,7 @@ fn settled_empty_model_inventory_terminalizes_message_wake_and_later_recovers() 
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid]
+    let agent_id = h.agent_registry.agents[&cid]
         .agent_id
         .as_deref()
         .map(crate::parse_agent_id)
@@ -924,7 +932,7 @@ fn settled_empty_model_inventory_terminalizes_message_wake_and_later_recovers() 
     publish_message(&mut h, "recovery-message", "providers recovered");
 
     assert!(matches!(
-        h.agents[&cid].turn_state,
+        h.agent_registry.agents[&cid].turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
     assert!(
@@ -949,7 +957,10 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
             .expect("known-safe SessionId must be valid"),
         &role,
     );
-    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent id");
+    let agent_id = h.agent_registry.agents[&cid]
+        .agent_id
+        .clone()
+        .expect("durable agent id");
 
     let default_model: ModelId = "test/default".parse().expect("model id");
     let selected_model: ModelId = "test/selected".parse().expect("model id");
@@ -976,14 +987,14 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     )
     .expect("handle model select");
 
-    let conv = &h.agents[&cid];
+    let conv = &h.agent_registry.agents[&cid];
     assert_eq!(conv.role.as_deref(), Some(role.as_str()));
     assert_eq!(conv.model_override.as_ref(), Some(&selected_model));
     assert_eq!(h.model_for_agent_role(conv), Some(selected_model.clone()));
 
-    h.agents.get_mut(&cid).expect("agent").role = None;
+    h.agent_registry.agents.get_mut(&cid).expect("agent").role = None;
     assert_eq!(
-        h.model_for_agent_role(&h.agents[&cid]),
+        h.model_for_agent_role(&h.agent_registry.agents[&cid]),
         Some(selected_model)
     );
 }
@@ -1033,7 +1044,7 @@ fn ui_create_agent_applies_initial_model_override() {
     .expect("create agent");
 
     let cid = test_user_agent(&h);
-    let conv = &h.agents[&cid];
+    let conv = &h.agent_registry.agents[&cid];
     assert_eq!(conv.model_override.as_ref(), Some(&selected_model));
     assert_eq!(h.model_for_agent_role(conv), Some(selected_model));
     let created = read_nth_prompt_created(&h, 0);
@@ -1079,7 +1090,7 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
 
     let cid = test_user_agent(&h);
     assert_eq!(
-        h.agents[&cid].model_override.as_ref(),
+        h.agent_registry.agents[&cid].model_override.as_ref(),
         Some(&selected_model)
     );
     assert!(
@@ -1140,7 +1151,7 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
         tau_proto::SkillName::new("same"),
         make_skill(baseline_path, "baseline"),
     );
-    h.resolving_initial_extension_collisions = true;
+    h.extensions.resolving_initial_collisions = true;
     h.handle_ui_create_agent_from(
         &crate::test_connection_id("ui-create-test"),
         tau_proto::UiCreateAgent {
@@ -1163,7 +1174,12 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
     .expect("create queued agent");
 
     let cid = test_user_agent(&h);
-    let agent_id = crate::parse_agent_id(h.agents[&cid].agent_id.as_deref().expect("agent id"));
+    let agent_id = crate::parse_agent_id(
+        h.agent_registry.agents[&cid]
+            .agent_id
+            .as_deref()
+            .expect("agent id"),
+    );
     let frozen = h
         .frozen_agent_discovery
         .get_mut(&agent_id)
@@ -1172,7 +1188,7 @@ fn ui_create_agent_expands_initial_skill_from_frozen_agent_snapshot() {
         tau_proto::SkillName::new("same"),
         make_skill(frozen_path, "frozen"),
     );
-    h.resolving_initial_extension_collisions = false;
+    h.extensions.resolving_initial_collisions = false;
     h.try_advance_queue();
 
     let submitted = event_log_events(&h)
@@ -1222,10 +1238,16 @@ fn unavailable_agent_model_override_falls_back_to_role_model() {
     )
     .expect("handle provider snapshot");
 
-    h.agents.get_mut(&cid).expect("agent").model_override =
-        Some("test/missing".parse().expect("model id"));
+    h.agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .model_override = Some("test/missing".parse().expect("model id"));
 
-    assert_eq!(h.model_for_agent_role(&h.agents[&cid]), Some(role_model));
+    assert_eq!(
+        h.model_for_agent_role(&h.agent_registry.agents[&cid]),
+        Some(role_model)
+    );
 }
 
 /// A target-less `:model` request is only safe when the session has exactly one
@@ -1269,8 +1291,8 @@ fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
     )
     .expect("handle model select");
 
-    assert!(h.agents[&first].model_override.is_none());
-    assert!(h.agents[&second].model_override.is_none());
+    assert!(h.agent_registry.agents[&first].model_override.is_none());
+    assert!(h.agent_registry.agents[&second].model_override.is_none());
 }
 
 /// A role with an explicit model that no provider advertised is a terminal
@@ -1307,7 +1329,12 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
         .expect("submit prompt"),
         PromptSubmission::Queued,
     );
-    assert_eq!(h.agents[&test_user_agent(&h)].pending_prompts.len(), 1);
+    assert_eq!(
+        h.agent_registry.agents[&test_user_agent(&h)]
+            .pending_prompts
+            .len(),
+        1
+    );
 
     h.extensions.pending_connects = 0;
     let available_model: ModelId = "openai/available".parse().expect("model id");
@@ -1319,7 +1346,7 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     )
     .expect("handle provider snapshot");
 
-    let conv = &h.agents[&test_user_agent(&h)];
+    let conv = &h.agent_registry.agents[&test_user_agent(&h)];
     assert!(conv.pending_prompts.is_empty());
     assert!(matches!(conv.turn_state, AgentTurnState::Idle));
     assert!(

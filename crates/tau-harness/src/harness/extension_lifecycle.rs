@@ -203,7 +203,7 @@ impl Harness {
             let Some(cid) = self.prompt_agents.get(&prompt_id).cloned() else {
                 continue;
             };
-            let deferred_activation = self.agents.get(&cid).is_some_and(|agent| {
+            let deferred_activation = self.agent_registry.agents.get(&cid).is_some_and(|agent| {
                 agent
                     .pending_message_wakes
                     .iter()
@@ -217,13 +217,14 @@ impl Harness {
                         })
             });
             let checkpoint = self
+                .agent_registry
                 .agents
                 .get(&cid)
                 .and_then(|agent| agent.agent_id.as_deref())
                 .and_then(|agent_id| self.agent_store.agent(agent_id))
                 .and_then(|tree| tree.marked_inference_checkpoint(&prompt_id).cloned());
             if let Some(checkpoint) = checkpoint {
-                if let Some(agent) = self.agents.get_mut(&cid) {
+                if let Some(agent) = self.agent_registry.agents.get_mut(&cid) {
                     agent.activation_dispatch =
                         path_crate_agent::ActivationDispatchState::DispatchUncertain {
                             owner: path_crate_agent::InferenceCheckpointOwner::Inference,
@@ -236,12 +237,13 @@ impl Harness {
                     agent.in_flight_prompt = None;
                 }
                 if deferred_activation
-                    && let Some((agent_id, originator)) = self.agents.get(&cid).and_then(|agent| {
-                        Some((
-                            crate::parse_agent_id(agent.agent_id.as_deref()?),
-                            agent.originator.clone(),
-                        ))
-                    })
+                    && let Some((agent_id, originator)) =
+                        self.agent_registry.agents.get(&cid).and_then(|agent| {
+                            Some((
+                                crate::parse_agent_id(agent.agent_id.as_deref()?),
+                                agent.originator.clone(),
+                            ))
+                        })
                 {
                     self.publish_for_agent(
                         &cid,
@@ -325,7 +327,7 @@ impl Harness {
         {
             self.refresh_provider_models_and_publish_state();
         }
-        if !self.resolving_initial_extension_collisions {
+        if !self.extensions.resolving_initial_collisions {
             if self.disconnect_terminal_batch_pending.is_empty() {
                 self.drain_pending_tool_invocations_or_report();
                 for (call_id, cid) in completed_foreground_calls {
@@ -1103,7 +1105,7 @@ impl Harness {
             .cloned();
         if owner
             .as_ref()
-            .and_then(|cid| self.agents.get(cid))
+            .and_then(|cid| self.agent_registry.agents.get(cid))
             .is_some_and(|agent| agent.persistence.is_ephemeral())
         {
             self.tool_runtime
@@ -1606,7 +1608,7 @@ impl Harness {
         let cid = self.prompt_agents.get(&agent_prompt_id).cloned();
         let agent_id = crate::parse_agent_id(
             cid.as_ref()
-                .and_then(|cid| self.agents.get(cid))
+                .and_then(|cid| self.agent_registry.agents.get(cid))
                 .and_then(|conv| conv.agent_id.clone())
                 .expect("agent has durable id"),
         );
@@ -1689,10 +1691,11 @@ impl Harness {
     }
 
     pub(super) fn mint_agent_initialization_id(&mut self) -> tau_proto::AgentInitializationId {
-        let next = self.next_agent_initialization_id;
-        self.next_agent_initialization_id = self.next_agent_initialization_id.saturating_add(1);
+        let next = self.agent_registry.next_initialization_id;
+        self.agent_registry.next_initialization_id =
+            self.agent_registry.next_initialization_id.saturating_add(1);
         agent_initialization_id(
-            &self.accounting_runtime_id,
+            &self.agent_registry.accounting_runtime_id,
             self.current_session_generation,
             next,
         )
@@ -1723,6 +1726,7 @@ impl Harness {
 
     pub(crate) fn agent_context_ready_for(&self, cid: &AgentId) -> bool {
         let Some(agent_id) = self
+            .agent_registry
             .agents
             .get(cid)
             .and_then(|agent| agent.agent_id.as_ref())
@@ -1737,6 +1741,7 @@ impl Harness {
     /// generation that its eager initial prompt must render against.
     pub(crate) fn agent_initialization_ready_for(&self, cid: &AgentId) -> bool {
         let Some(agent_id) = self
+            .agent_registry
             .agents
             .get(cid)
             .and_then(|agent| agent.agent_id.as_ref())
@@ -1751,7 +1756,8 @@ impl Harness {
     /// Returns whether the durable agent tree has one unfinished foreground
     /// provider tool round on any branch.
     pub(crate) fn agent_has_open_foreground_tool_round(&self, cid: &AgentId) -> bool {
-        self.agents
+        self.agent_registry
+            .agents
             .get(cid)
             .and_then(|agent| agent.agent_id.as_deref())
             .and_then(|agent_id| self.agent_store.agent(agent_id))
@@ -1762,7 +1768,7 @@ impl Harness {
         &self,
         agent_id: &tau_proto::AgentId,
     ) -> bool {
-        !self.session_loaded_agents.contains(agent_id)
+        !self.agent_registry.session_loaded.contains(agent_id)
             || (self.frozen_agent_discovery.contains_key(agent_id)
                 && !self.pending_agent_discovery.contains_key(agent_id))
     }

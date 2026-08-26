@@ -462,7 +462,7 @@ fn dropped_startup_prompt_fragment_releases_activation_reservation() {
 fn oversized_startup_prompt_fragment_replacement_fails_activation() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    h.initial_extension_tool_preflight_complete = false;
+    h.extensions.initial_tool_preflight_complete = false;
     connect_ready_configured_extension(
         &mut h,
         "fragment-owner",

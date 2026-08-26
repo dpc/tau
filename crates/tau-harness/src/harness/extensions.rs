@@ -169,4 +169,12 @@ pub(crate) struct ExtensionRuntimeState {
     /// harness loop. Startup waits on this before treating an empty extension
     /// map as ready.
     pub(super) pending_connects: usize,
+    /// Whether initial deterministic tool-collision preflight has completed.
+    pub(super) initial_tool_preflight_complete: bool,
+    /// Whether startup collision losers are being disconnected.
+    pub(super) resolving_initial_collisions: bool,
+    /// Next arrival order for operational frames deferred behind activation.
+    pub(super) next_deferred_message_order: u64,
+    /// Names enabled by final startup resolution, including skipped optionals.
+    pub(crate) enabled_names: std::collections::BTreeSet<String>,
 }

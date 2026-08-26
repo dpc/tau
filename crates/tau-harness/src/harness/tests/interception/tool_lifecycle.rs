@@ -224,7 +224,7 @@ fn startup_register_then_unregister_exposes_no_intermediate_tool_state() {
 fn required_intercepted_tool_replacement_overflow_fails_startup() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    h.initial_extension_tool_preflight_complete = false;
+    h.extensions.initial_tool_preflight_complete = false;
     connect_ready_configured_extension(
         &mut h,
         "tool-provider",
@@ -295,7 +295,7 @@ fn required_intercepted_tool_replacement_overflow_fails_startup() {
 fn intercepted_tool_resolution_propagates_initial_tool_collision() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    h.initial_extension_tool_preflight_complete = false;
+    h.extensions.initial_tool_preflight_complete = false;
     for source in ["required-a", "required-b"] {
         connect_ready_configured_extension(&mut h, source, source, tau_proto::ClientKind::Tool);
         h.extensions

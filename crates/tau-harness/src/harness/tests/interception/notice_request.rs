@@ -395,7 +395,7 @@ fn pre_ready_request_is_dropped_on_disconnect() {
 fn ready_received_requests_wait_for_global_barrier_in_wire_order() {
     let temp = TempDir::new().expect("tempdir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.initial_extension_tool_preflight_complete = false;
+    harness.extensions.initial_tool_preflight_complete = false;
     connect_handshaking_configured_extension(&mut harness, "first");
     connect_handshaking_configured_extension(&mut harness, "blocker");
 
@@ -472,7 +472,7 @@ fn ready_received_requests_wait_for_global_barrier_in_wire_order() {
 fn pre_hello_request_follows_protocol_failure_path() {
     let temp = TempDir::new().expect("tempdir");
     let mut harness = quiet_provider_harness(temp.path()).expect("harness");
-    harness.initial_extension_tool_preflight_complete = true;
+    harness.extensions.initial_tool_preflight_complete = true;
     connect_ready_configured_extension(
         &mut harness,
         "spawning-requester",

@@ -15,13 +15,15 @@ impl Harness {
     #[cfg(test)]
     pub(super) fn send_prompt_to_agent(&mut self, session_id: &str) -> AgentPromptId {
         let cid = self
+            .agent_registry
             .agents
             .iter()
             .find(|(_, conv)| conv.session_id.as_str() == session_id && conv.originator.is_user())
             .map(|(cid, _)| cid.clone())
             .expect("test requires an existing user agent");
         self.dispatch_activation_after_publish_idle(&cid);
-        self.agents
+        self.agent_registry
+            .agents
             .get(&cid)
             .and_then(|agent| agent.in_flight_prompt.clone())
             .expect("test prompt requires a selected model and durable dispatch owner")
@@ -33,14 +35,14 @@ impl Harness {
         let activation = self.outer_turn_activation(cid);
         let restored_turn = activation.as_ref().and_then(|(_, prompt_id)| {
             let turn_id = tau_proto::AgentOuterTurnId::for_prompt(prompt_id);
-            let agent = self.agents.get(cid)?;
+            let agent = self.agent_registry.agents.get(cid)?;
             self.agent_store
                 .agent(agent.agent_id.as_deref()?)
                 .is_some_and(|tree| tree.outer_turn_is_open(&turn_id))
                 .then_some(turn_id)
         });
         if let Some(turn_id) = restored_turn {
-            if let Some(agent) = self.agents.get_mut(cid) {
+            if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
                 agent.outer_turn = path_crate_agent::OuterTurnRuntimeState::Active(turn_id);
                 agent.terminal_status_was_available = false;
                 agent.terminal_notice_eligible = false;
@@ -49,8 +51,8 @@ impl Harness {
             }
             return;
         }
-        let runtime_id = self.accounting_runtime_id.clone();
-        let start = self.agents.get_mut(cid).and_then(|agent| {
+        let runtime_id = self.agent_registry.accounting_runtime_id.clone();
+        let start = self.agent_registry.agents.get_mut(cid).and_then(|agent| {
             let (activation, prompt_id) = activation?;
             if !matches!(
                 agent.outer_turn,
@@ -86,7 +88,7 @@ impl Harness {
         &self,
         cid: &AgentId,
     ) -> Option<(tau_proto::AgentOuterTurnActivation, AgentPromptId)> {
-        let agent = self.agents.get(cid)?;
+        let agent = self.agent_registry.agents.get(cid)?;
         let (through, cut, prompt_id) = match &agent.activation_dispatch {
             path_crate_agent::ActivationDispatchState::AwaitingCheckpoint {
                 agent_prompt_id,
@@ -126,7 +128,7 @@ impl Harness {
     /// Convert a notification-only running generation into an observable mixed
     /// turn by emitting its delayed start before any eventual stop.
     pub(super) fn promote_lifecycle_notification_turn(&mut self, cid: &AgentId) {
-        if let Some(agent) = self.agents.get_mut(cid) {
+        if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
             if !agent.lifecycle_notification_only_turn
                 || agent.published_runtime_state != tau_proto::AgentRuntimeState::Running
             {
@@ -157,7 +159,7 @@ impl Harness {
             runtime_incarnation,
             agent_id,
             originator,
-        ) = self.agents.get(cid).and_then(|agent| {
+        ) = self.agent_registry.agents.get(cid).and_then(|agent| {
             let (prompt_id, model, operation) = match &agent.activation_dispatch {
                 path_crate_agent::ActivationDispatchState::Running {
                     compact_prompt_id,
@@ -231,6 +233,7 @@ impl Harness {
         self.ensure_outer_turn_started(cid);
         if prompt.operation == tau_proto::PromptOperation::Inference
             && self
+                .agent_registry
                 .agents
                 .get(cid)
                 .is_none_or(|agent| agent.outer_turn.active_id().is_none())
@@ -256,6 +259,7 @@ impl Harness {
         let mut started = tau_proto::AgentPromptStarted::from(&prompt);
         if started.operation == tau_proto::PromptOperation::Inference {
             started.outer_turn_id = self
+                .agent_registry
                 .agents
                 .get(cid)
                 .and_then(|agent| agent.outer_turn.active_id().cloned());
@@ -297,18 +301,20 @@ impl Harness {
         cid: &AgentId,
         message: String,
     ) -> bool {
-        let Some((agent_id, originator, continuation)) = self.agents.get(cid).and_then(|agent| {
-            let path_crate_agent::OutputLengthContinuationState::Active(continuation) =
-                &agent.output_length_continuation
-            else {
-                return None;
-            };
-            Some((
-                crate::parse_agent_id(agent.agent_id.as_deref()?),
-                agent.originator.clone(),
-                continuation.clone(),
-            ))
-        }) else {
+        let Some((agent_id, originator, continuation)) =
+            self.agent_registry.agents.get(cid).and_then(|agent| {
+                let path_crate_agent::OutputLengthContinuationState::Active(continuation) =
+                    &agent.output_length_continuation
+                else {
+                    return None;
+                };
+                Some((
+                    crate::parse_agent_id(agent.agent_id.as_deref()?),
+                    agent.originator.clone(),
+                    continuation.clone(),
+                ))
+            })
+        else {
             return false;
         };
         let started = tau_proto::AgentPromptStarted {
@@ -361,6 +367,7 @@ impl Harness {
             .insert(response.agent_prompt_id.clone());
         if prompt_start_committed {
             if self
+                .agent_registry
                 .agents
                 .get(cid)
                 .is_some_and(|agent| agent.pending_cancel.is_some())
@@ -423,7 +430,7 @@ impl Harness {
         if self.terminalize_output_length_before_prompt_start(cid, message) {
             return;
         }
-        let Some(agent) = self.agents.get(cid) else {
+        let Some(agent) = self.agent_registry.agents.get(cid) else {
             return;
         };
         let agent_id = agent.agent_id.as_deref().map(crate::parse_agent_id);
@@ -528,7 +535,7 @@ impl Harness {
         if self.terminalize_output_length_before_prompt_start(cid, message.clone()) {
             return;
         }
-        let Some(agent) = self.agents.get(cid) else {
+        let Some(agent) = self.agent_registry.agents.get(cid) else {
             return;
         };
         let Some(agent_id) = agent.agent_id.as_deref().map(crate::parse_agent_id) else {
@@ -593,6 +600,7 @@ impl Harness {
     /// bypasses the ordinary provider-response gate.
     pub(super) fn invalidate_working_status_after_unsuccessful_terminal(&mut self, cid: &AgentId) {
         let changed = self
+            .agent_registry
             .agents
             .get_mut(cid)
             .is_some_and(|agent| agent.work_status.invalidate_working());
@@ -611,6 +619,7 @@ impl Harness {
     ) -> Option<AgentPromptCreated> {
         let _ = self.ensure_agent_id_for_agent(cid);
         let conv = self
+            .agent_registry
             .agents
             .get(cid)
             .expect("prepare_agent_prompt_for_dispatch: unknown agent id");
@@ -792,11 +801,12 @@ impl Harness {
             .or_else(|| checkpointed_inference.map(|(prompt_id, _)| prompt_id))
             .unwrap_or_else(|| {
                 let prompt_index = self
+                    .agent_registry
                     .agents
                     .get_mut(cid)
                     .expect("prepare_agent_prompt_for_dispatch: unknown agent id")
                     .next_prompt_index;
-                if let Some(agent) = self.agents.get_mut(cid) {
+                if let Some(agent) = self.agent_registry.agents.get_mut(cid) {
                     agent.next_prompt_index += 1;
                 }
                 AgentPromptId::parse(format!("ap-{durable_agent_id}-{prompt_index}"))
@@ -804,8 +814,12 @@ impl Harness {
             });
         self.prompt_agents
             .insert(agent_prompt_id.clone(), cid.clone());
-        let ctx_id = self.agents.get_mut(cid).and_then(|c| c.next_ctx_id.take());
-        if let Some(c) = self.agents.get_mut(cid) {
+        let ctx_id = self
+            .agent_registry
+            .agents
+            .get_mut(cid)
+            .and_then(|c| c.next_ctx_id.take());
+        if let Some(c) = self.agent_registry.agents.get_mut(cid) {
             c.in_flight_prompt = Some(agent_prompt_id.clone());
         }
         self.set_agent_turn_state(
@@ -852,6 +866,7 @@ impl Harness {
         self.prompt_tool_specs
             .insert(agent_prompt_id.clone(), tool_specs);
         let session_id = self
+            .agent_registry
             .agents
             .get(cid)
             .expect("agent still exists")
@@ -884,7 +899,7 @@ impl Harness {
     /// Validate the current prompt surface before committing the durable
     /// inference-dispatch checkpoint.
     pub(crate) fn validate_prompt_render_for_dispatch(&mut self, cid: &AgentId) -> bool {
-        let Some(conv) = self.agents.get(cid) else {
+        let Some(conv) = self.agent_registry.agents.get(cid) else {
             return false;
         };
         let role_name = self.role_name_for_agent(conv);
@@ -973,7 +988,8 @@ impl Harness {
     }
 
     pub(super) fn role_name_for_agent_id(&self, cid: &AgentId) -> String {
-        self.agents
+        self.agent_registry
+            .agents
             .get(cid)
             .and_then(|conv| conv.role.clone())
             .unwrap_or_else(|| self.selected_role.clone())
@@ -1122,7 +1138,7 @@ impl Harness {
                 tool_specs
                     .iter()
                     .map(|spec| self.tool_model_visible_name(spec).to_string()),
-                self.enabled_extension_names.iter().cloned().chain(
+                self.extensions.enabled_names.iter().cloned().chain(
                     self.extensions
                         .entries
                         .values()
