@@ -1884,6 +1884,102 @@ fn assemble_conversation_preserves_new_compaction_suffix() {
     }
 }
 
+/// Repeated suffix-preserving compaction must consume the prior logical
+/// replacement plus a prefix of its preserved suffix, not resurrect the old
+/// physical prefix or discard the remainder.
+#[test]
+fn repeated_compaction_uses_logical_active_window_live_and_replay() {
+    let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let mut tree = tau_core::AgentTree::from_events(agent_id.clone(), &[]);
+    tree.apply_event(&user_prompt("old P"));
+    let first_cut = tau_proto::AgentHead::Node(tree.head().expect("old prefix"));
+    tree.apply_event(&user_prompt("suffix one"));
+    let suffix_one = tau_proto::AgentHead::Node(tree.head().expect("first suffix"));
+    tree.apply_event(&user_prompt("suffix two"));
+    let first_suffix_end = tau_proto::AgentHead::Node(tree.head().expect("second suffix"));
+    let boundary = |transaction: &str,
+                    cut: tau_proto::AgentHead,
+                    suffix_end: tau_proto::AgentHead,
+                    summary: &str| {
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
+            compact_prompt_id: None,
+            model: None,
+            operation: None,
+            agent_id: agent_id.clone(),
+            transaction_id: Some(
+                tau_proto::CompactionTransactionId::parse(transaction).expect("transaction id"),
+            ),
+            cut: Some(cut),
+            suffix_end: Some(suffix_end),
+            replacement_window: vec![materialized_message(summary)],
+        })
+    };
+    tree.apply_event(&boundary("ct-1", first_cut, first_suffix_end, "summary C1"));
+    let first_boundary = tau_proto::AgentHead::Node(tree.head().expect("first boundary"));
+    assert_eq!(
+        assemble_conversation_from(&tree, tree.head())
+            .iter()
+            .filter_map(context_text)
+            .collect::<Vec<_>>(),
+        vec!["summary C1", "suffix one", "suffix two"]
+    );
+    let compact_prefix = assemble_prompt_context_prefix_from(&tree, tree.head(), suffix_one)
+        .expect("logical rolling prefix");
+    assert_eq!(
+        compact_prefix
+            .context
+            .flatten()
+            .iter()
+            .filter_map(context_text)
+            .collect::<Vec<_>>(),
+        vec!["summary C1", "suffix one"]
+    );
+    let manual_prefix = assemble_prompt_context_prefix_from(&tree, tree.head(), first_boundary)
+        .expect("manual full active prefix");
+    assert_eq!(
+        manual_prefix
+            .context
+            .flatten()
+            .iter()
+            .filter_map(context_text)
+            .collect::<Vec<_>>(),
+        vec!["summary C1", "suffix one", "suffix two"]
+    );
+    let mut manual_tree = tree.clone();
+    manual_tree.apply_event(&boundary(
+        "ct-manual",
+        first_boundary,
+        first_boundary,
+        "manual summary",
+    ));
+    assert_eq!(
+        assemble_conversation_from(&manual_tree, manual_tree.head())
+            .iter()
+            .filter_map(context_text)
+            .collect::<Vec<_>>(),
+        vec!["manual summary"]
+    );
+
+    tree.apply_event(&boundary("ct-2", suffix_one, first_boundary, "summary C2"));
+    tree.apply_event(&user_prompt("new N"));
+    let live = assemble_prompt_context_from(&tree, tree.head());
+    let rendered = serde_json::to_string(&live.context).expect("serialize live context");
+    for absent in ["old P", "summary C1", "suffix one"] {
+        assert!(!rendered.contains(absent), "{absent} must stay consumed");
+    }
+    for retained in ["summary C2", "suffix two", "new N"] {
+        assert_eq!(rendered.matches(retained).count(), 1, "{retained}");
+    }
+
+    let replay = tree.clone();
+    assert_eq!(
+        assemble_prompt_context_from(&replay, replay.head()).context,
+        live.context
+    );
+}
+
 pub(crate) fn assemble_conversation_from(
     tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,

@@ -77,6 +77,18 @@ pub(super) fn serialized_transcript_delta_bytes<'a>(
 /// proactive compaction accounting.
 pub(super) fn projected_transcript_entry_tokens(entry: &AgentEntry) -> Option<u64> {
     let mut provider_projection = entry.clone();
+    if let AgentEntry::Compaction {
+        transaction_id,
+        cut,
+        suffix_end,
+        ..
+    } = &mut provider_projection
+    {
+        // Boundary correlation is durable harness metadata, not provider input.
+        *transaction_id = None;
+        *cut = None;
+        *suffix_end = None;
+    }
     let image_tokens = strip_and_count_agent_entry_images(&mut provider_projection)?;
     project_tool_result_outputs(&mut provider_projection);
     serialized_transcript_entry_bytes(&provider_projection)?.checked_add(image_tokens)

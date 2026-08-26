@@ -141,6 +141,7 @@ pub(crate) fn model(provider: &str) -> ProviderModelInfo {
         supports_compaction: false,
         supports_standalone_compaction: false,
         standalone_compaction_threshold: None,
+        standalone_compaction_prefix_budget: None,
         cache_policy: Some(ProviderCachePolicy {
             kind: ProviderCacheKind::AutomaticPrefix,
             ttl: ProviderCacheTtl::SlidingKnown {

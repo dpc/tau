@@ -2306,6 +2306,65 @@ fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
     );
 }
 
+/// Final compaction sizing must measure the exact fresh full WebSocket
+/// envelope, including mode-specific metadata, tools, system instructions,
+/// stable cache key, and the native trigger.
+#[test]
+fn full_ws_compaction_measurement_matches_exact_fresh_wire_envelope() {
+    let config = ResponsesConfig {
+        profile_namespace: "chatgpt".to_owned(),
+        mode: ResponsesMode::LiteCompatibility,
+        model_id: "gpt-5.6-sol".into(),
+        raw_context_window: 372_000,
+        supports_reasoning_effort: false,
+        supports_reasoning_summary: false,
+        supports_compaction: true,
+        supports_prompt_cache_key: true,
+        ..chain_test_config()
+    };
+    let tool = tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("shell"),
+        model_visible_name: None,
+        description: Some("run shell".to_owned()),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: None,
+        format: None,
+    };
+    let originator = tau_proto::PromptOriginator::User;
+    let session_id = tau_proto::SessionId::parse("session-cache").expect("session id");
+    let agent_id = tau_proto::AgentId::parse("agent-cache").expect("agent id");
+    let request = PromptPayload {
+        system_prompt: "stable system",
+        context: context(&[user_text("prefix"), ContextItem::CompactionTrigger]),
+        tools: std::slice::from_ref(&tool),
+        tool_choice: tau_proto::ToolChoice::None,
+        params: tau_proto::ModelParams::default(),
+        originator: &originator,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        compaction: None,
+        debug_provider_requests: false,
+    };
+    let measured = full_ws_request_bytes(&config, &request).expect("measure request");
+    let exact = serde_json::to_vec(&build_ws_envelope(&config, &request, None, Some(true)))
+        .expect("serialize exact envelope")
+        .len() as u64;
+    assert_eq!(measured, exact);
+    let body = serde_json::to_value(build_ws_envelope(&config, &request, None, Some(true)))
+        .expect("serialize envelope");
+    assert!(
+        body["prompt_cache_key"]
+            .as_str()
+            .is_some_and(|key| !key.is_empty())
+    );
+    assert_eq!(
+        body["input"].as_array().expect("input").last().unwrap()["type"],
+        "compaction_trigger"
+    );
+    assert!(body.get("previous_response_id").is_none());
+}
+
 /// Ensures the default GPT-5.6 route uses standard Responses lowering and
 /// truthfully enables parallel direct tool calls.
 #[test]

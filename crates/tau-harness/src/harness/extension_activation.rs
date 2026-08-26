@@ -620,6 +620,10 @@ impl Harness {
             if !self.provider_runtime.model_info.contains_key(model) && !absence_is_authoritative {
                 continue;
             }
+            if self.start_automatic_compaction_multipass(&checkpoint.cid, model, checkpoint.through)
+            {
+                continue;
+            }
             let key = (
                 checkpoint.agent_id.clone(),
                 checkpoint.transaction_id.clone(),

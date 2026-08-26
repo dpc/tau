@@ -7552,6 +7552,7 @@ fn provider_model_info(
         supports_compaction: false,
         supports_standalone_compaction: false,
         standalone_compaction_threshold: None,
+        standalone_compaction_prefix_budget: Some(u64::MAX),
         cache_policy: None,
         est_uncached_input_cost_1m_usd: Default::default(),
         est_cached_input_cost_1m_usd: Default::default(),
@@ -10533,6 +10534,7 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
                     supports_compaction: false,
                     supports_standalone_compaction: false,
                     standalone_compaction_threshold: None,
+                    standalone_compaction_prefix_budget: None,
                     cache_policy: None,
                     est_uncached_input_cost_1m_usd:
                         tau_proto::EstimatedUsdPerMillion::checked_from_usd(1),
@@ -10576,6 +10578,7 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            standalone_compaction_prefix_budget: None,
             cache_policy: None,
             est_uncached_input_cost_1m_usd: tau_proto::EstimatedUsdPerMillion::checked_from_usd(10),
             est_cached_input_cost_1m_usd: tau_proto::EstimatedUsdPerMillion::checked_from_usd(10),
@@ -10723,6 +10726,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
                     supports_compaction: false,
                     supports_standalone_compaction: false,
                     standalone_compaction_threshold: None,
+                    standalone_compaction_prefix_budget: None,
                     cache_policy: None,
                     est_uncached_input_cost_1m_usd: Default::default(),
                     est_cached_input_cost_1m_usd: Default::default(),
@@ -10752,6 +10756,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            standalone_compaction_prefix_budget: None,
             cache_policy: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
@@ -15751,6 +15756,22 @@ fn cold_resume_restores_usage_for_first_activation_compaction_projection() {
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(900);
     let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id.clone(),
+            text: "historical prefix ".repeat(80),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid].context_input_tokens,
         Some(900)
@@ -15774,23 +15795,6 @@ fn cold_resume_restores_usage_for_first_activation_compaction_projection() {
         h.model_for_agent_role(&h.agent_runtime.agent_registry.agents[&cid]),
         Some("test/model".into())
     );
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .get_mut(&cid)
-        .expect("agent")
-        .context_usage_model = Some("other/model".into());
-    assert!(
-        !h.schedule_standalone_auto_compaction_for_activation(&cid, true, None),
-        "scheduler must fail closed on a stale usage model"
-    );
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .get_mut(&cid)
-        .expect("agent")
-        .context_usage_model = Some("test/model".into());
-
     h.dispatch_prompt_for_agent(
         &cid,
         PendingPrompt::user("first resumed activation".to_owned()),
@@ -16905,6 +16909,25 @@ pub(super) fn context_overflow_response(
     }
 }
 
+fn seed_reactive_compaction_prefix(h: &mut Harness, cid: &AgentId) {
+    let agent_id = durable_agent_id_for_conversation(h, cid);
+    h.publish_for_agent(
+        cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id,
+            text: "stable reactive prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+}
+
 /// Build one successful standalone-compaction response with a single
 /// replacement summary.
 fn standalone_compaction_success_response(
@@ -16962,6 +16985,7 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
+    seed_reactive_compaction_prefix(&mut h, &cid);
     let model: tau_proto::ModelId = "test/model".into();
     let provider_owner = h.provider_runtime.model_routes[&model].clone();
     let serving_model = h
@@ -17657,6 +17681,7 @@ fn reactive_context_overflow_ui_cancel_is_terminal_once() {
             .expect("test model")
             .supports_standalone_compaction = true;
         let cid = ensure_test_user_agent(&mut h);
+        seed_reactive_compaction_prefix(&mut h, &cid);
         agent_id = h.agent_runtime.agent_registry.agents[&cid]
             .agent_id
             .clone()
@@ -17778,6 +17803,7 @@ fn reactive_context_overflow_claimed_crash_is_not_redispatched() {
             .expect("test model")
             .supports_standalone_compaction = true;
         let cid = ensure_test_user_agent(&mut h);
+        seed_reactive_compaction_prefix(&mut h, &cid);
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))
             .expect("dispatch inference");
         let inference = read_nth_prompt_created(&h, 0);
@@ -18297,6 +18323,27 @@ fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
         .expect("test model")
         .supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            agent_id: agent_id.clone(),
+            inference_activation: false,
+            text: "stable prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let prefix = tau_proto::AgentHead::Node(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .head
+            .expect("stable prefix"),
+    );
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation A".to_owned()))
         .expect("dispatch inference");
     let inference = read_nth_prompt_created(&h, 0);
@@ -18310,7 +18357,7 @@ fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
             _ => None,
         })
         .expect("start");
-    assert_eq!(start.cut, tau_proto::AgentHead::Root);
+    assert_eq!(start.cut, prefix);
     let agent_id = h.agent_runtime.agent_registry.agents[&cid]
         .agent_id
         .clone()
@@ -18731,6 +18778,7 @@ fn reactive_context_overflow_session_switch_cancels_and_cleans_state() {
         .expect("test model")
         .supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
+    seed_reactive_compaction_prefix(&mut h, &cid);
     let agent_id = h.agent_runtime.agent_registry.agents[&cid]
         .agent_id
         .clone()
@@ -19582,6 +19630,21 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
             .agent_id
             .clone()
             .expect("durable agent");
+        h.publish_for_agent(
+            &cid,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: false,
+                agent_id: crate::parse_agent_id(&agent_id),
+                text: "stable prefix ".repeat(80),
+                trusted_internal_spans: Vec::new(),
+                message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: Default::default(),
+                display_name: None,
+                ctx_id: None,
+            }),
+        );
         h.agent_runtime
             .agent_registry
             .agents
@@ -19667,6 +19730,21 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
         .agent_id
         .clone()
         .expect("durable agent");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "stable prefix ".repeat(80),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
     h.agent_runtime
         .agent_registry
         .agents
@@ -19756,6 +19834,22 @@ fn standalone_auto_compaction_schedules_at_threshold() {
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(900);
     let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id.clone(),
+            text: "historical prefix ".repeat(80),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
     h.agent_runtime
         .agent_registry
         .agents
@@ -19781,10 +19875,6 @@ fn standalone_auto_compaction_schedules_at_threshold() {
             .contains("queued once")
     );
 
-    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
-        .agent_id
-        .clone()
-        .expect("agent id");
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -19832,6 +19922,194 @@ fn standalone_auto_compaction_schedules_at_threshold() {
     h.shutdown().expect("shutdown");
 }
 
+/// A large provider-usage value from an older window cannot trigger protected
+/// compaction when the current active window measured from scratch is small.
+#[test]
+fn standalone_auto_compaction_ignores_stale_usage_baseline() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(900);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent");
+    agent.context_input_tokens = Some(100_000);
+    agent.context_usage_model = Some("test/model".into());
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("small current turn".to_owned()))
+        .expect("dispatch current turn");
+
+    assert_eq!(
+        read_nth_prompt_created(&h, 0).operation,
+        tau_proto::PromptOperation::Inference
+    );
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A bounded first pass preserves a large suffix, then a successful durable
+/// continuation compacts that suffix before exactly one inference dispatch.
+#[test]
+fn standalone_auto_compaction_rolls_fitting_logical_prefixes() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(500);
+    info.standalone_compaction_prefix_budget = Some(1_000);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    for marker in ["old-A", "old-B"] {
+        h.publish_for_agent(
+            &cid,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: false,
+                agent_id: agent_id.clone(),
+                text: format!("{marker}:{}", "x".repeat(600)),
+                trusted_internal_spans: Vec::new(),
+                message_class: tau_proto::PromptMessageClass::User,
+                internal_kind: None,
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: Default::default(),
+                display_name: None,
+                ctx_id: None,
+            }),
+        );
+    }
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("pending suffix".to_owned()))
+        .expect("start first bounded pass");
+    let first = read_nth_prompt_created(&h, 0);
+    let first_context = serde_json::to_string(&first.context).expect("first context");
+    assert!(first_context.contains("old-A"));
+    assert!(!first_context.contains("old-B"));
+    assert!(!first_context.contains("pending suffix"));
+    h.handle_provider_response_finished(provider_text_response(
+        &first.agent_prompt_id,
+        first.agent_id,
+        "summary-one",
+    ))
+    .expect("finish first pass");
+
+    let second = read_nth_prompt_created(&h, 1);
+    assert_eq!(
+        second.operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+    let second_context = serde_json::to_string(&second.context).expect("second context");
+    assert!(second_context.contains("summary-one"));
+    assert!(second_context.contains("old-B"));
+    assert!(!second_context.contains("old-A"));
+    assert!(!second_context.contains("pending suffix"));
+    h.handle_provider_response_finished(provider_text_response(
+        &second.agent_prompt_id,
+        second.agent_id,
+        "summary-two",
+    ))
+    .expect("finish second pass");
+
+    let inference = read_nth_prompt_created(&h, 2);
+    assert_eq!(inference.operation, tau_proto::PromptOperation::Inference);
+    let inference_context = serde_json::to_string(&inference.context).expect("inference context");
+    for expected in ["summary-two", "pending suffix"] {
+        assert_eq!(inference_context.matches(expected).count(), 1, "{expected}");
+    }
+    for absent in ["old-A", "old-B", "summary-one"] {
+        assert!(!inference_context.contains(absent), "{absent}");
+    }
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            trigger: tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. },
+            ..
+        })
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// An oversized first indivisible group commits one replay-stable local
+/// failure and never sends a provider request or falls through to inference.
+#[test]
+fn standalone_auto_compaction_blocks_oversized_indivisible_prefix() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(1);
+    info.standalone_compaction_prefix_budget = Some(100);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id,
+            text: "oversized".repeat(100),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("owed suffix".to_owned()))
+        .expect("commit local preflight failure");
+
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            trigger: tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                reason: tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
+                ..
+            },
+            ..
+        })
+    )));
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            reason: tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
+            ..
+        })
+    )));
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentPromptCreated(_)))
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Typed image growth must use canonical encoded bytes plus image patches for
 /// threshold projection, then preserve the closed image result through the
 /// standalone-compaction continuation when the corrected threshold is reached.
@@ -19845,6 +20123,21 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
         .agent_id
         .clone()
         .expect("durable agent");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "stable image prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
     seed_assistant_tool_round(&mut h, &cid, &[("call-image", "read_image")]);
     let assistant_head = h.agent_runtime.agent_registry.agents[&cid]
         .head
@@ -19899,6 +20192,18 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
         "fixture must distinguish canonical from JSON-expanded image bytes"
     );
     let reserve = path_crate_harness::context_limit_telemetry::context_projection_reserve(128_000);
+    let active_bytes = serde_json::to_vec(
+        &crate::prompt::assemble_prompt_context_from(
+            h.session_runtime
+                .agent_store
+                .agent(&agent_id)
+                .expect("agent tree"),
+            Some(result_head),
+        )
+        .context,
+    )
+    .expect("serialize active prompt context")
+    .len() as u64;
     {
         let info = h
             .provider_runtime
@@ -19907,7 +20212,7 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
             .expect("test model");
         info.supports_compaction = false;
         info.supports_standalone_compaction = true;
-        info.standalone_compaction_threshold = Some(projected + reserve + 1);
+        info.standalone_compaction_threshold = Some(active_bytes + 1);
     }
     {
         let agent = h
@@ -19943,9 +20248,14 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
         .model_info
         .get_mut(&"test/model".into())
         .expect("test model")
-        .standalone_compaction_threshold = Some(projected + reserve);
+        .standalone_compaction_threshold = Some(active_bytes);
     assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
     let compact = read_nth_prompt_created(&h, 0);
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .standalone_compaction_threshold = Some(u64::MAX);
     h.handle_provider_response_finished(provider_text_response(
         &compact.agent_prompt_id,
         compact.agent_id,
@@ -20143,6 +20453,11 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
             .all(|item| !matches!(item, ContextItem::ToolCall(_) | ContextItem::ToolResult(_))),
         "compact input must end before the complete mixed tool round"
     );
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .standalone_compaction_threshold = Some(u64::MAX);
 
     h.handle_provider_response_finished(
         strict_fake_compact_response(&compact)
@@ -20628,6 +20943,24 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
     info.standalone_compaction_threshold = Some(1);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id.clone(),
+            text: "compactable base".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let base = h.agent_runtime.agent_registry.agents[&cid]
+        .head
+        .expect("compactable base");
     h.agent_runtime
         .agent_registry
         .agents
@@ -20661,7 +20994,7 @@ fn readiness_deferred_activation_is_branch_owned_above_compaction_threshold() {
         &cid,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
             agent_id: agent_id.clone(),
-            head: tau_proto::AgentHead::Root,
+            head: tau_proto::AgentHead::Node(base),
         }),
     );
     finish_test_agent_context_wait(&mut h, &agent_id);
@@ -21727,6 +22060,7 @@ pub(super) fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             supports_compaction: true,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            standalone_compaction_prefix_budget: Some(u64::MAX),
             cache_policy: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
@@ -22034,7 +22368,6 @@ fn post_tool_automatic_policy_crash_cuts_repair_owed_suffix_once() {
         for reopen in 1..=3 {
             let expected = match (cut_name, reopen) {
                 ("continuation_started", _) => (1, 0, 0, 0),
-                ("terminal_decision" | "outer_finished", 1) => (2, 1, 1, 0),
                 ("terminal_decision" | "outer_finished", _) => (2, 1, 1, 1),
                 ("standalone_started", _) => (2, 1, 1, 1),
                 _ => unreachable!(),
@@ -22150,9 +22483,13 @@ fn automatic_policy_recovery_counts(
         .collect::<Vec<_>>();
     assert!(
         failures.iter().all(|failed| {
-            failed.reason == tau_proto::StandaloneCompactionFailureReason::Interrupted
+            matches!(
+                failed.reason,
+                tau_proto::StandaloneCompactionFailureReason::Interrupted
+                    | tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
+            )
         }),
-        "automatic recovery closed with a non-interrupted failure: {failures:?}"
+        "automatic recovery closed with an unexpected failure: {failures:?}"
     );
     (terminals, finishes, starts, failures.len())
 }
@@ -25140,6 +25477,7 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             cut,
             model: durable_model,
             through,
+            ..
         }) if durable_transaction_id == transaction_id
             && cut == compact_cut
             && durable_model == model

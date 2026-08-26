@@ -3174,6 +3174,20 @@ pub struct ProviderModelInfo {
     /// compaction. `None` means no provider default is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standalone_compaction_threshold: Option<u64>,
+    /// Conservative maximum provider-visible historical prefix projection that
+    /// one standalone compaction request can safely accept.
+    ///
+    /// Units are Tau's conservative provider-visible prefix projection. The
+    /// trailing compaction trigger is excluded because the adapter has already
+    /// reserved framing, tokenizer uncertainty, reasoning, and output needs.
+    /// Absence disables size-recoverable automatic prefix compaction without
+    /// disabling explicit/manual standalone compaction.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_nonzero_u64"
+    )]
+    pub standalone_compaction_prefix_budget: Option<u64>,
     /// Optional documented runtime cache contract for this exact route.
     ///
     /// Absence means that no operational cache contract is declared; it does
@@ -3195,6 +3209,19 @@ pub struct ProviderModelInfo {
     /// Estimated USD storage price per million token-hours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_cache_storage_cost_1m_token_hour_usd: Option<crate::EstimatedUsdPerMillionTokenHours>,
+}
+
+fn deserialize_optional_nonzero_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<u64>::deserialize(deserializer)?;
+    if value == Some(0) {
+        return Err(path_serde_de::Error::custom(
+            "standalone_compaction_prefix_budget must be nonzero",
+        ));
+    }
+    Ok(value)
 }
 
 impl ProviderModelInfo {
@@ -4340,6 +4367,9 @@ pub enum StandaloneCompactionFailureReason {
     StaleBranch,
     /// Replay found a started transaction with no durable outcome.
     Interrupted,
+    /// No indivisible provider-closed historical prefix fits the adapter's
+    /// published standalone compaction prefix budget.
+    PrefixTooLarge,
 }
 
 /// Durable start record for one standalone-compaction transaction.
@@ -4448,6 +4478,26 @@ pub enum StandaloneCompactionTrigger {
     /// Automatic compaction after the local context projection reached the
     /// configured role/model threshold.
     AutomaticThreshold,
+    /// Successful automatic pass still exceeded its effective guard and owns
+    /// this next durable rolling pass.
+    AutomaticContinuation {
+        /// Immediately preceding successful transaction whose checkpoint this
+        /// start claims instead.
+        previous_transaction_id: CompactionTransactionId,
+    },
+    /// Automatic planning found a deterministic local reason not to dispatch
+    /// provider work. The matching start makes the reason replay-stable until
+    /// its terminal failure commits.
+    AutomaticPreflightFailure {
+        /// Terminal-owned automatic decision claimed by this failure, when any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_id: Option<CompactionTransactionId>,
+        /// Prior successful rolling pass claimed by this failure, when any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_transaction_id: Option<CompactionTransactionId>,
+        /// Durable local failure to commit without provider dispatch.
+        reason: StandaloneCompactionFailureReason,
+    },
     /// Eager automatic compaction claiming terminal-owned durable authority.
     AutomaticPolicy {
         /// Decision and transaction identity carried by the canonical terminal.
@@ -4466,6 +4516,14 @@ pub enum StandaloneCompactionTrigger {
     ReactiveContextOverflow {
         /// Failed inference prompt uniquely claimed by this transaction.
         failed_agent_prompt_id: AgentPromptId,
+    },
+    /// Reactive recovery could not fit one provider-closed prefix and must
+    /// commit this deterministic local failure without provider work.
+    ReactivePreflightFailure {
+        /// Failed inference prompt uniquely claimed by this transaction.
+        failed_agent_prompt_id: AgentPromptId,
+        /// Durable local reason repeated by the matching terminal.
+        reason: StandaloneCompactionFailureReason,
     },
 }
 

@@ -148,5 +148,32 @@ pub fn replace_trailing_trigger(
     Ok(())
 }
 
+/// Measure the canonical historical `PromptContext` prefix without its final
+/// standalone trigger.
+///
+/// This is the adapter-side counterpart of the harness planner's published
+/// prefix-budget measurement. Provider-specific lowering may expand the
+/// request, so adapters must still check the exact final wire body separately.
+#[must_use]
+pub fn historical_prefix_json_bytes(context: &tau_proto::PromptContext) -> Option<u64> {
+    let mut historical = context.clone();
+    let tau_proto::ContextBlock::UserInput(block) = historical.blocks.last_mut()? else {
+        return None;
+    };
+    if !matches!(
+        block.items.last(),
+        Some(tau_proto::ContextItem::CompactionTrigger)
+    ) {
+        return None;
+    }
+    block.items.pop();
+    if block.items.is_empty() {
+        historical.blocks.pop();
+    }
+    serde_json::to_vec(&historical)
+        .ok()
+        .and_then(|encoded| u64::try_from(encoded.len()).ok())
+}
+
 #[cfg(test)]
 mod tests;

@@ -2687,7 +2687,15 @@ impl<'de> Deserialize<'de> for CompactionPolicyThreshold {
                 "compaction policy threshold must be positive",
             )),
             Wire::Tokens(tokens) => Ok(Self::Tokens(tokens)),
-            Wire::Name(name) if name == "provider_default" || name == "providerDefault" => {
+            Wire::Name(name)
+                if matches!(
+                    name.as_str(),
+                    "context_limit_safe"
+                        | "contextLimitSafe"
+                        | "provider_default"
+                        | "providerDefault"
+                ) =>
+            {
                 Ok(Self::ProviderDefault)
             }
             Wire::Name(name) => Err(D::Error::custom(format!(

@@ -129,6 +129,7 @@ impl Harness {
                 | AgentPublishCompletion::OutputLengthDormantRepair { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
+                | AgentPublishCompletion::RollingCompactionStart { .. }
                 | AgentPublishCompletion::StandaloneContinuation { .. } => None,
             }
         });
@@ -487,6 +488,9 @@ impl Harness {
         if let AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } = completion {
             return;
         }
+        if let AgentPublishCompletion::RollingCompactionStart { .. } = completion {
+            return;
+        }
         let AgentPublishCompletion::StandaloneContinuation {
             transaction_id,
             model,
@@ -501,6 +505,9 @@ impl Harness {
             unreachable!("gated final returned above")
         };
         if !complete_on_commit {
+            return;
+        }
+        if self.start_automatic_compaction_multipass(cid, &model, through) {
             return;
         }
         let Some((agent_id, agent_prompt_id)) = self
@@ -617,6 +624,9 @@ impl Harness {
             AgentPublishCompletion::ReactiveContextRecoveryFailure { retry_event, .. } => {
                 *retry_event = Some(Box::new(event.clone()));
             }
+            AgentPublishCompletion::RollingCompactionStart { retry_event } => {
+                *retry_event = Some(Box::new(event.clone()));
+            }
             AgentPublishCompletion::InitialPromptSubmission { .. } => {
                 unreachable!("initial submission returned above")
             }
@@ -639,10 +649,15 @@ impl Harness {
     pub(super) fn clear_rejected_eager_compaction_start(&mut self, event: &Event) {
         let (agent_id, decision_id) = match event {
             Event::AgentStandaloneCompactionStarted(started) => {
-                let tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id } =
-                    &started.trigger
-                else {
-                    return;
+                let decision_id = match &started.trigger {
+                    tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id } => {
+                        decision_id
+                    }
+                    tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                        decision_id: Some(decision_id),
+                        ..
+                    } => decision_id,
+                    _ => return,
                 };
                 (&started.agent_id, decision_id)
             }
@@ -722,6 +737,7 @@ impl Harness {
                 | AgentPublishCompletion::ReactiveContextRecovery { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
+                | AgentPublishCompletion::RollingCompactionStart { .. }
         ) {
             if matches!(
                 completion,
@@ -729,6 +745,7 @@ impl Harness {
                     | AgentPublishCompletion::ReactiveContextRecovery { .. }
                     | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
                     | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
+                    | AgentPublishCompletion::RollingCompactionStart { .. }
             ) {
                 let retry_event = match &completion {
                     AgentPublishCompletion::OutputLengthDormantRepair { retry_event, .. }
@@ -738,7 +755,8 @@ impl Harness {
                     }
                     | AgentPublishCompletion::ReactiveContextRecoveryFailure {
                         retry_event, ..
-                    } => retry_event,
+                    }
+                    | AgentPublishCompletion::RollingCompactionStart { retry_event } => retry_event,
                     _ => unreachable!("matched direct retry"),
                 };
                 let Some(event) = retry_event.clone() else {
@@ -753,7 +771,10 @@ impl Harness {
                     }
                     | AgentPublishCompletion::ReactiveContextRecoveryFailure {
                         retry_event, ..
-                    } => *retry_event = None,
+                    }
+                    | AgentPublishCompletion::RollingCompactionStart { retry_event } => {
+                        *retry_event = None;
+                    }
                     _ => unreachable!("matched direct retry"),
                 };
                 self.commit_approved_agent_retry(cid, *event, approved);
@@ -851,6 +872,9 @@ impl Harness {
                 unreachable!("returned above")
             }
             AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } => {
+                unreachable!("returned above")
+            }
+            AgentPublishCompletion::RollingCompactionStart { .. } => {
                 unreachable!("returned above")
             }
             AgentPublishCompletion::InitialPromptSubmission { .. } => {
@@ -2272,11 +2296,22 @@ impl Harness {
                     });
             }
             let suppression_key = (started.agent_id.clone(), started.transaction_id.clone());
-            let suppressed = self
+            let durable_preflight_reason = match &started.trigger {
+                tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                    reason,
+                    ..
+                }
+                | tau_proto::StandaloneCompactionTrigger::ReactivePreflightFailure {
+                    reason, ..
+                } => Some(*reason),
+                _ => None,
+            };
+            let runtime_suppressed = self
                 .prompt_coordination
                 .compaction_runtime
                 .suppressed_dispatches
                 .remove(&suppression_key);
+            let suppressed = durable_preflight_reason.is_some() || runtime_suppressed;
             let cancelled = suppressed
                 && self
                     .prompt_coordination
@@ -2286,6 +2321,35 @@ impl Harness {
             let cid = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()));
             if let Some(cid) = cid {
                 if suppressed {
+                    let runtime_reason = self
+                        .prompt_coordination
+                        .compaction_runtime
+                        .preflight_failures
+                        .remove(&(started.agent_id.clone(), started.transaction_id.clone()));
+                    if let Some(reason) = durable_preflight_reason.or(runtime_reason) {
+                        let batch_parent = self
+                            .selected_head_for_agent(&cid)
+                            .unwrap_or(tau_proto::AgentHead::Root);
+                        self.publish_event_for_agent_with_completion(
+                            &cid,
+                            None,
+                            Event::AgentStandaloneCompactionFailed(
+                                tau_proto::AgentStandaloneCompactionFailed {
+                                    agent_id: started.agent_id.clone(),
+                                    transaction_id: started.transaction_id.clone(),
+                                    cut: started.cut,
+                                    reason,
+                                    resume_through: started.resume_through,
+                                },
+                            ),
+                            Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
+                                batch_parent,
+                                retry_event: None,
+                            }),
+                            false,
+                        );
+                        return;
+                    }
                     if cancelled {
                         self.publish_event_for_agent_with_completion(
                             &cid,

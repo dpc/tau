@@ -1742,6 +1742,7 @@ fn representative_events() -> Vec<Event> {
                 supports_compaction: false,
                 supports_standalone_compaction: false,
                 standalone_compaction_threshold: None,
+                standalone_compaction_prefix_budget: None,
                 cache_policy: None,
                 est_uncached_input_cost_1m_usd: Default::default(),
                 est_cached_input_cost_1m_usd: Default::default(),
@@ -5881,6 +5882,27 @@ fn provider_model_supported_tool_types_json_roundtrip() {
         serde_json::json!(["text", "image"])
     );
     assert_eq!(encoded["supports_parallel_tool_calls"], false);
+}
+
+/// A published automatic-prefix capability must be positive; omission remains
+/// wire-compatible and distinct from an unusable zero budget.
+#[test]
+fn provider_model_rejects_zero_standalone_compaction_prefix_budget() {
+    let value = serde_json::json!({
+        "id": "openai/model",
+        "context_window": 1000,
+        "efforts": [],
+        "verbosities": [],
+        "thinking_summaries": [],
+        "standalone_compaction_prefix_budget": 0
+    });
+    let error = serde_json::from_value::<ProviderModelInfo>(value)
+        .expect_err("zero prefix budget must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("standalone_compaction_prefix_budget must be nonzero")
+    );
 }
 /// Terminal provider failure categories have stable snake-case wire values,
 /// while old response frames without the additive field remain decodable.

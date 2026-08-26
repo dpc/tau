@@ -131,6 +131,10 @@ struct ProviderModelInfo {
     efforts: Vec<Effort>,
     verbosities: Vec<Verbosity>,
     thinking_summaries: Vec<ThinkingSummary>,
+    supports_compaction: bool,
+    supports_standalone_compaction: bool,
+    standalone_compaction_threshold: Option<u64>,
+    standalone_compaction_prefix_budget: Option<u64>,
     cache_policy: Option<ProviderCachePolicy>,
     est_uncached_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
     est_cached_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
@@ -141,6 +145,13 @@ struct ProviderModelInfo {
 ```
 
 `context_window` is required for every published model.
+`standalone_compaction_prefix_budget`, when present, is a nonzero `u64` in
+bytes of the canonical JSON-serialized historical `PromptContext`. The native
+trigger is excluded. The adapter reserves its own framing, tokenizer, reasoning,
+and output needs and still fails closed after lowering and serializing the exact
+final wire request.
+Absence disables size-recoverable automatic prefix compaction, not manual
+standalone compaction.
 `input_modalities` declares what the exact provider/model route accepts as
 prompt input, while `tool_result_modalities` declares what it accepts inside
 native tool-result output. A tool that returns images is exposed only when both

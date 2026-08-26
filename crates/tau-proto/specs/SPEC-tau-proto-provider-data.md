@@ -192,6 +192,17 @@ response. It is an effective route capability, not abstract model metadata.
 Legacy publishers that omit it decode as `true`; publishers serialize their
 effective value explicitly.
 
+`ProviderModelInfo.standalone_compaction_prefix_budget` is an optional nonzero
+model/operation-specific bound in bytes of the canonical JSON-serialized
+`PromptContext` for the historical selected prefix. It excludes the trailing
+trigger. The adapter has already reserved system/tool/framing uncertainty plus
+compactor output, reasoning, and tokenizer needs. At or below the bound the
+adapter does not knowingly build an oversized compact request and still validates
+the fully lowered final serialized wire request. The capability does not promise network
+success, valid output, or that one indivisible item fits. Absence disables
+size-recoverable automatic prefix compaction while leaving explicit/manual
+standalone behavior available.
+
 `ProviderModelInfo` also carries optional fixed-point estimated USD prices per
 million ordinary input, provider-reported cached reads, cache writes, output
 tokens, and cache token-hours. Omitted ordinary/read/output categories resolve

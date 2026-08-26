@@ -47,6 +47,18 @@ chain, and sends the complete provider-visible window followed by one
 `compaction_trigger`. Per-request metadata identifies Tau truthfully and carries
 the model/service-tier routing hint; Tau does not claim a Codex installation or
 attestation identity.
+
+The model publishes a conservative standalone prefix budget. Prefix retreat
+keeps the fresh chain: Tau sends the exact ordinary full replay of the selected
+prefix with the same mode, system prompt, tools, controls, and stable
+`prompt_cache_key`, then appends only `compaction_trigger`. It never claims a
+retreated prefix through `previous_response_id`; compatible provider prefix
+caching may still hit. Final request lowering fails closed above the published
+bound.
+
+Native compact completion preserves provider usage, including cached-read and
+cache-write counters, in the ordinary `ProviderResponseFinished.usage` path.
+Each durable pass is accounted independently.
 The writer sends a 25-second `websocket_control_ping` WebSocket control frame
 only to keep an idle transport path alive. It is not a Responses envelope, never
 starts inference, and cannot refresh a prompt cache.

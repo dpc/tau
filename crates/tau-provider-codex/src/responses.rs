@@ -2484,6 +2484,25 @@ pub(super) fn build_ws_envelope(
     }
 }
 
+/// Return the exact unchained WebSocket request size for one fully lowered
+/// prompt.
+///
+/// Compaction uses the unchained shape as the conservative bound: a valid
+/// response-chain anchor may make the actual frame smaller, but never larger.
+pub(crate) fn full_ws_request_bytes(
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+) -> Result<u64, LlmError> {
+    let envelope = build_ws_envelope(config, request, None, Some(true));
+    serde_json::to_vec(&envelope)
+        .map_err(LlmError::Json)
+        .and_then(|encoded| {
+            u64::try_from(encoded.len()).map_err(|_| {
+                LlmError::InvalidResponse("serialized request is too large".to_owned())
+            })
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Phase capture
 // ---------------------------------------------------------------------------

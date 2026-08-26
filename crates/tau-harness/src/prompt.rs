@@ -1063,50 +1063,96 @@ pub(crate) fn assemble_prompt_context_from(
     tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,
 ) -> AssembledPromptContext {
+    assemble_prompt_context_window(tree, head, None, None)
+}
+
+/// Assemble a logical active-window prefix ending at `cut`.
+///
+/// Unlike physical ancestry assembly, this retains the latest replacement and
+/// addresses nodes in its preserved suffix, allowing a later rolling
+/// compaction pass to compact `replacement + prefix(suffix)`.
+pub(crate) fn assemble_prompt_context_prefix_from(
+    tree: &tau_core::AgentTree,
+    active_head: Option<tau_core::NodeId>,
+    cut: tau_proto::AgentHead,
+) -> Option<AssembledPromptContext> {
+    let window = tree.active_provider_window(active_head);
+    let cut_exists = match cut {
+        tau_proto::AgentHead::Root => window.replacement.is_none(),
+        tau_proto::AgentHead::Node(node_id) => {
+            window.replacement_boundary == Some(node_id)
+                || window
+                    .transcript
+                    .iter()
+                    .any(|(candidate, _)| *candidate == node_id)
+        }
+    };
+    cut_exists.then(|| assemble_prompt_context_window(tree, active_head, Some(cut), None))
+}
+
+/// Assemble the complete logical window once and return its exact canonical
+/// JSON byte length after every surviving transcript occurrence.
+pub(crate) fn active_prompt_prefix_json_measurements(
+    tree: &tau_core::AgentTree,
+    active_head: Option<tau_core::NodeId>,
+) -> Option<Vec<(tau_core::NodeId, u64)>> {
+    let mut measurements = Vec::new();
+    let _ = assemble_prompt_context_window(tree, active_head, None, Some(&mut measurements));
+    Some(measurements)
+}
+
+fn assemble_prompt_context_window(
+    tree: &tau_core::AgentTree,
+    head: Option<tau_core::NodeId>,
+    prefix_through: Option<tau_proto::AgentHead>,
+    mut measurements: Option<&mut Vec<(tau_core::NodeId, u64)>>,
+) -> AssembledPromptContext {
     let mut blocks: Vec<tau_proto::ContextBlock> = Vec::new();
     let mut contains_payload_envelope_provenance_projection = false;
-    let branch_ids = tree.branch_node_ids_from(head);
-    let branch: Vec<_> = branch_ids
-        .iter()
-        .filter_map(|node_id| tree.node(*node_id).map(|node| &node.entry))
-        .collect();
-    let mut selected: Vec<&AgentEntry> = branch.clone();
-    if let Some((boundary_index, replacement_window, cut)) =
-        branch.iter().enumerate().rev().find_map(|(index, entry)| {
-            let AgentEntry::Compaction {
-                replacement_window,
-                transaction_id: Some(_),
-                cut: Some(cut),
-                suffix_end: Some(_),
-            } = entry
-            else {
-                return None;
-            };
-            Some((index, replacement_window, *cut))
-        })
-    {
+    let mut active_window = tree.active_provider_window(head);
+    if let Some(prefix_through) = prefix_through {
+        match prefix_through {
+            tau_proto::AgentHead::Root => {
+                active_window.replacement = None;
+                active_window.replacement_boundary = None;
+                active_window.transcript.clear();
+            }
+            tau_proto::AgentHead::Node(node_id)
+                if active_window.replacement_boundary == Some(node_id) =>
+            {
+                // A physical head at the replacement boundary names the whole
+                // logical active window, including its preserved suffix.
+            }
+            tau_proto::AgentHead::Node(node_id) => {
+                if let Some(index) = active_window
+                    .transcript
+                    .iter()
+                    .position(|(candidate, _)| *candidate == node_id)
+                {
+                    active_window.transcript.truncate(index.saturating_add(1));
+                }
+            }
+        }
+    }
+    if let Some(replacement_window) = active_window.replacement {
         contains_payload_envelope_provenance_projection =
             context_items_contain_payload_envelope_provenance_projection(replacement_window);
         blocks.push(tau_proto::ContextBlock::UserInput(
             tau_proto::UserInputBlock {
-                items: replacement_window.clone(),
+                items: replacement_window.to_vec(),
             },
         ));
-        let suffix_start = match cut {
-            tau_proto::AgentHead::Root => 0,
-            tau_proto::AgentHead::Node(cut_node) => branch_ids
-                .iter()
-                .position(|node_id| *node_id == cut_node)
-                .map_or(boundary_index, |index| index.saturating_add(1)),
-        };
-        selected = branch[suffix_start..boundary_index]
-            .iter()
-            .chain(branch[boundary_index.saturating_add(1)..].iter())
-            .copied()
-            .collect();
     }
+    let mut serialized_bytes = serde_json::to_vec(&tau_proto::PromptContext {
+        blocks: blocks.clone(),
+    })
+    .ok()
+    .and_then(|encoded| u64::try_from(encoded.len()).ok())
+    .unwrap_or(u64::MAX);
+    let mut serialized_block_count = blocks.len();
 
-    for entry in selected {
+    for (node_id, entry) in active_window.transcript {
+        let blocks_before = blocks.len();
         match entry {
             AgentEntry::Compaction {
                 replacement_window, ..
@@ -1193,6 +1239,9 @@ pub(crate) fn assemble_prompt_context_from(
                     if *direction == tau_core::AgentMessageDirection::Outbound {
                         // The original tool call/result already records the sender turn.
                         // Replaying this routing fact would fabricate assistant output.
+                        if let Some(measurements) = measurements.as_deref_mut() {
+                            measurements.push((node_id, serialized_bytes));
+                        }
                         continue;
                     }
                     contains_payload_envelope_provenance_projection = true;
@@ -1392,6 +1441,20 @@ pub(crate) fn assemble_prompt_context_from(
                     },
                 ));
             }
+        }
+        for block in &blocks[blocks_before..] {
+            let block_bytes = serde_json::to_vec(block)
+                .ok()
+                .and_then(|encoded| u64::try_from(encoded.len()).ok())
+                .unwrap_or(u64::MAX);
+            serialized_bytes = serialized_bytes
+                .checked_add(block_bytes)
+                .and_then(|bytes| bytes.checked_add(u64::from(serialized_block_count != 0)))
+                .unwrap_or(u64::MAX);
+            serialized_block_count = serialized_block_count.saturating_add(1);
+        }
+        if let Some(measurements) = measurements.as_deref_mut() {
+            measurements.push((node_id, serialized_bytes));
         }
     }
 

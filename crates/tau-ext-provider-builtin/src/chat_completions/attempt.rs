@@ -52,6 +52,11 @@ pub fn models_for_provider(
                     model.context_window,
                 )
                 .map(SummaryCompactionConfig::proactive_threshold),
+                standalone_compaction_prefix_budget: super::resolved_local_summary_compaction(
+                    model.local_summary_compaction,
+                    model.context_window,
+                )
+                .map(SummaryCompactionConfig::max_input_bytes),
                 cache_policy: model.cache_contract.map(|contract| {
                     contract
                         .runtime_policy()

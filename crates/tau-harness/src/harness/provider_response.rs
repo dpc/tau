@@ -677,18 +677,21 @@ impl Harness {
                 &context_size_alerts,
             );
         }
-        if self.handle_finished_response_side_conversation(
-            &cid,
-            FinishedSideConversation {
-                response: &response,
-                requested_tool_calls,
-                is_non_tool_ext_query,
-                assistant_text: assistant_text.as_deref(),
-                tool_call_count: tool_calls.len(),
-            },
-            &mut normalized_tool_calls,
-            source,
-        ) {
+        if response.recovery_disposition
+            != tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
+            && self.handle_finished_response_side_conversation(
+                &cid,
+                FinishedSideConversation {
+                    response: &response,
+                    requested_tool_calls,
+                    is_non_tool_ext_query,
+                    assistant_text: assistant_text.as_deref(),
+                    tool_call_count: tool_calls.len(),
+                },
+                &mut normalized_tool_calls,
+                source,
+            )
+        {
             return Ok(());
         }
         if requested_tool_calls {
@@ -923,7 +926,10 @@ impl Harness {
                 .provider_runtime
                 .model_info
                 .get(&model)
-                .is_some_and(|info| info.supports_standalone_compaction)
+                .is_some_and(|info| {
+                    info.supports_standalone_compaction
+                        && info.standalone_compaction_prefix_budget.is_some()
+                })
         {
             return false;
         }
@@ -1005,11 +1011,14 @@ impl Harness {
             if !self.provider_runtime.model_info.contains_key(model) && !absence_is_authoritative {
                 continue;
             }
-            let capability_matches = self
-                .provider_runtime
-                .model_info
-                .get(model)
-                .is_some_and(|info| info.supports_standalone_compaction);
+            let capability_matches =
+                self.provider_runtime
+                    .model_info
+                    .get(model)
+                    .is_some_and(|info| {
+                        info.supports_standalone_compaction
+                            && info.standalone_compaction_prefix_budget.is_some()
+                    });
             let selected_or_continuation_model_matches = self
                 .agent_runtime
                 .agent_registry
@@ -1151,7 +1160,7 @@ impl Harness {
         let Some(model) = checkpoint.model.clone() else {
             return;
         };
-        let Some(cut) = checkpoint.activation_cut else {
+        let Some(provisional_cut) = checkpoint.activation_cut else {
             return;
         };
         let Some(agent_id) = self
@@ -1169,6 +1178,29 @@ impl Harness {
             .agents
             .get(cid)
             .map_or(0, |agent| agent.next_prompt_index);
+        let prefix_budget = self
+            .provider_runtime
+            .model_info
+            .get(&model)
+            .and_then(|info| info.standalone_compaction_prefix_budget);
+        let Some(prefix_budget) = prefix_budget else {
+            self.terminalize_replay_blocked_context_recovery(
+                cid,
+                checkpoint,
+                tau_proto::StandaloneCompactionFailureReason::RouteFailed,
+            );
+            return;
+        };
+        let fitting_cut = if provisional_cut == tau_proto::AgentHead::Root {
+            // Reactive recovery retains the established root-cut transaction:
+            // the activating input remains exact suffix and the compact request
+            // contains only fixed provider/system surface. Later inference may
+            // still reject one oversized indivisible activating item.
+            Some(tau_proto::AgentHead::Root)
+        } else {
+            self.fitting_automatic_compaction_cut(&agent_id, provisional_cut, prefix_budget)
+        };
+        let cut = fitting_cut.unwrap_or(provisional_cut);
         let transaction_id = tau_proto::CompactionTransactionId::parse(format!("ct-{next}"))
             .expect("generated compaction transaction id is valid");
         let compact_prompt_id = tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{next}"))
@@ -1187,12 +1219,21 @@ impl Harness {
                     transaction_id: transaction_id.clone(),
                 };
         }
+        let trigger = fitting_cut.map_or_else(
+            || tau_proto::StandaloneCompactionTrigger::ReactivePreflightFailure {
+                failed_agent_prompt_id: checkpoint.agent_prompt_id.clone(),
+                reason: tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
+            },
+            |_| tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                failed_agent_prompt_id: checkpoint.agent_prompt_id.clone(),
+            },
+        );
         self.publish_event_for_agent_with_completion(
             cid,
             source,
             Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
                 agent_id: crate::parse_agent_id(&agent_id),
-                transaction_id,
+                transaction_id: transaction_id.clone(),
                 compact_prompt_id,
                 cut,
                 resume_through: Some(checkpoint.through),
@@ -1200,9 +1241,7 @@ impl Harness {
                 operation: tau_proto::PromptOperation::StandaloneCompaction,
                 originator,
                 supersedes: None,
-                trigger: tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
-                    failed_agent_prompt_id: checkpoint.agent_prompt_id.clone(),
-                },
+                trigger,
             }),
             Some(AgentPublishCompletion::ReactiveContextRecoveryStart {
                 checkpoint: checkpoint.clone(),
@@ -3086,18 +3125,21 @@ impl Harness {
             .agents
             .get(cid)
             .is_some_and(|agent| !agent.lifecycle_notification_only_turn);
-        if self.handle_finished_response_side_conversation(
-            cid,
-            FinishedSideConversation {
-                response: &response,
-                requested_tool_calls,
-                is_non_tool_ext_query,
-                assistant_text: assistant_text.as_deref(),
-                tool_call_count: normalized_tool_calls.calls.len(),
-            },
-            &mut normalized_tool_calls,
-            source.as_ref(),
-        ) {
+        if response.recovery_disposition
+            != tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
+            && self.handle_finished_response_side_conversation(
+                cid,
+                FinishedSideConversation {
+                    response: &response,
+                    requested_tool_calls,
+                    is_non_tool_ext_query,
+                    assistant_text: assistant_text.as_deref(),
+                    tool_call_count: normalized_tool_calls.calls.len(),
+                },
+                &mut normalized_tool_calls,
+                source.as_ref(),
+            )
+        {
             return;
         }
         if notify_watchers

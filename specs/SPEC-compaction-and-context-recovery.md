@@ -375,7 +375,38 @@ projected tokens. Threshold-fired standalone compaction persists
 `manual` trigger.
 
 Named automatic-compaction policies are harness-scheduled standalone policies.
-`before_inference` policies retain the deferred runtime behavior above.
+The built-in named `default` policy runs at `before_inference` at the
+adapter-published context-limit-safe threshold. Other named policies augment it;
+only disabling `default` or legacy replace-all disabling removes that safety
+policy.
+
+Protected automatic scheduling measures the active provider-visible window from
+scratch. Core reconstructs that logical window by folding each durable
+replacement over its selected logical prefix; it never substitutes physical
+journal ancestry for `replacement + preserved suffix`. When the window exceeds
+the scheduling guard, Tau linearly selects its latest provider-closed logical
+position within the adapter's nonzero `standalone_compaction_prefix_budget`.
+Complete tool call/result rounds and each replacement are indivisible. The
+durable start records the selected logical node as `cut` and the exact source
+window head as `resume_through`, so success installs `compact(P)` followed by
+the exact logical suffix. A later pass may therefore cut inside a suffix that
+physically precedes its earlier replacement boundary without resurrecting the
+old prefix. No fitting progress-making group produces a bounded typed failure
+without provider work. An absent budget disables these size-recoverable
+automatic paths but not explicit/manual compaction.
+
+After each successful durable boundary Tau remeasures at the protected
+continuation seam using the same effective numeric or provider threshold. If
+the active window remains over the guard, that successful transaction owns one
+durable `automatic_continuation` start before any inference checkpoint. Each
+pass must consume another closed suffix group, which proves termination without
+an arbitrary pass ceiling. A deterministic preflight failure and its reason are
+recorded in the start itself, so live execution and restart commit the same
+terminal outcome without provider work. A failed provider pass is never
+recursively retried; provider, serialization, and indivisible-item failures
+remain explicit terminal outcomes.
+
+`before_inference` policies otherwise retain the deferred runtime behavior above.
 `outer_turn_finished` policies that match the logical terminal status coalesce
 into one `automatic_compaction_decision` on the final canonical
 `provider.response_finished`, or on the harness-authored canceled

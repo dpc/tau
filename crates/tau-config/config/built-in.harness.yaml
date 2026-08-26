@@ -34,6 +34,11 @@ tool_policy:
         - shell:lock
 agents:
   default_role: engineer
+  compactions:
+    default:
+      threshold: context_limit_safe
+      when:
+        at: before_inference
   id_template: "{{random_alphanumeric 6}}"
   # Only an explicit task supplies an initial display name. Persisted names,
   # including role-derived names written by older versions, remain authoritative.

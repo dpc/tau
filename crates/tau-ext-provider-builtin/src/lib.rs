@@ -6716,35 +6716,18 @@ where
         .runtime
         .compact(agent_prompt_id, config, request, retry_ctx)
     {
-        CompactOutcome::Finished(output_items) => {
+        CompactOutcome::Finished {
+            output_items,
+            usage,
+        } => {
             writer.write_message(&HarnessInputMessage::emit_transient(
-                Event::ProviderResponseFinishedReported(ProviderResponseFinished {
-                    automatic_compaction_decision: None,
-                    estimated_api_cost_rates: None,
-                    estimated_api_cost_increment: None,
-
-                    agent_prompt_id: agent_prompt_id.clone(),
-                    agent_id: prompt.agent_id.clone(),
+                Event::ProviderResponseFinishedReported(compact_finished_response(
+                    agent_prompt_id,
+                    prompt,
+                    backend_descriptor(config, ProviderBackendTransport::Websocket, false),
                     output_items,
-                    stop_reason: ProviderStopReason::EndTurn,
-                    error: None,
-                    failure_kind: None,
-                    context_limit_telemetry: None,
-                    recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-                    output_length_disposition: tau_proto::OutputLengthDisposition::None,
-                    originator: prompt.originator.clone(),
-                    usage: None,
-                    compaction_original_input_tokens: None,
-                    compaction_compacted_input_tokens: None,
-                    backend: Some(backend_descriptor(
-                        config,
-                        ProviderBackendTransport::Websocket,
-                        false,
-                    )),
-                    provider_attempt: Default::default(),
-                    provider_response_id: None,
-                    ws_pool_delta: None,
-                }),
+                    usage,
+                )),
             ))?;
             writer.flush()?;
             Ok(None)
@@ -6791,6 +6774,37 @@ where
             )?;
             Ok(None)
         }
+    }
+}
+
+fn compact_finished_response(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    backend: tau_proto::ProviderBackend,
+    output_items: Vec<tau_proto::ContextItem>,
+    usage: Option<tau_proto::ProviderTokenUsage>,
+) -> ProviderResponseFinished {
+    ProviderResponseFinished {
+        automatic_compaction_decision: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: agent_prompt_id.clone(),
+        agent_id: prompt.agent_id.clone(),
+        output_items,
+        stop_reason: ProviderStopReason::EndTurn,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        originator: prompt.originator.clone(),
+        usage,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: Some(backend),
+        provider_attempt: Default::default(),
+        provider_response_id: None,
+        ws_pool_delta: None,
     }
 }
 

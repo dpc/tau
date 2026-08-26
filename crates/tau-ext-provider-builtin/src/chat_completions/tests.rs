@@ -550,14 +550,17 @@ fn run_scripted_local_summary_attempt(
         context: tau_proto::PromptContext {
             blocks: vec![tau_proto::ContextBlock::UserInput(
                 tau_proto::UserInputBlock {
-                    items: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
-                        role: tau_proto::ContextRole::User,
-                        content: vec![tau_proto::ContentPart::Text {
-                            text: "history".to_owned(),
-                        }],
-                        phase: None,
-                        responses_raw_json: None,
-                    })],
+                    items: vec![
+                        tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                            role: tau_proto::ContextRole::User,
+                            content: vec![tau_proto::ContentPart::Text {
+                                text: "history".to_owned(),
+                            }],
+                            phase: None,
+                            responses_raw_json: None,
+                        }),
+                        tau_proto::ContextItem::CompactionTrigger,
+                    ],
                 },
             )],
         },

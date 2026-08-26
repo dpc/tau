@@ -896,12 +896,14 @@ fn superseding_compaction_allows_only_ancestor_cut_retreat() {
     }));
     let mut supersedes_success = compaction_start("ct-after-success");
     supersedes_success.supersedes = Some(successful.transaction_id);
+    let error = validation_error(
+        &successful_tree,
+        Event::AgentStandaloneCompactionStarted(supersedes_success),
+    );
     assert!(
-        validation_error(
-            &successful_tree,
-            Event::AgentStandaloneCompactionStarted(supersedes_success)
-        )
-        .contains("only a failed transaction")
+        error.contains("only a failed transaction")
+            || error.contains("explicitly linked continuation"),
+        "{error}"
     );
 }
 
@@ -1722,6 +1724,234 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
             "{label} must not consume its record sequence"
         );
     }
+}
+
+/// A successful automatic pass, its claimed rolling successor, second boundary,
+/// and final inference checkpoint must fold identically live and cold.
+#[test]
+fn automatic_compaction_continuation_chain_matches_live_and_cold_replay() {
+    let record = |seq, event| PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent: AgentEventParent::InheritHead,
+        fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+        recorded_at: tau_proto::UnixMicros::default(),
+    };
+    let user = |text: &str| {
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id(),
+            text: text.to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        })
+    };
+    let mut live = AgentTree::from_events(agent_id(), &[]);
+    let mut records = Vec::new();
+    for (seq, event) in [user("prefix"), user("suffix")].into_iter().enumerate() {
+        let record = record(seq as u64, event);
+        live.apply_persisted_record(&record).expect("append input");
+        records.push(record);
+    }
+    let prefix = AgentHead::Node(live.branch_node_ids_from(live.head())[0]);
+    let suffix = AgentHead::Node(live.head().expect("suffix head"));
+    let mut first = compaction_start("ct-auto-first");
+    first.cut = prefix;
+    first.resume_through = Some(suffix);
+    first.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticThreshold;
+    let first_start = record(2, Event::AgentStandaloneCompactionStarted(first.clone()));
+    live.apply_persisted_record(&first_start)
+        .expect("append first start");
+    records.push(first_start);
+    let first_boundary_event = Event::AgentCompacted(tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
+        agent_id: agent_id(),
+        replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::Assistant,
+            content: vec![tau_proto::ContentPart::Text {
+                text: "summary one".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+        transaction_id: Some(first.transaction_id.clone()),
+        cut: Some(first.cut),
+        suffix_end: Some(suffix),
+        compact_prompt_id: Some(first.compact_prompt_id.clone()),
+        model: Some(first.model.clone()),
+        operation: Some(first.operation),
+    });
+    let first_boundary_record = record(3, first_boundary_event);
+    live.apply_persisted_record(&first_boundary_record)
+        .expect("append first boundary");
+    records.push(first_boundary_record);
+    let first_boundary = AgentHead::Node(live.head().expect("first boundary"));
+
+    let mut unlinked = live.clone();
+    let mut invalid_manual = compaction_start("ct-unlinked-manual");
+    invalid_manual.compact_prompt_id = "ap-unlinked-manual".parse().expect("prompt id");
+    invalid_manual.cut = first_boundary;
+    invalid_manual.resume_through = Some(first_boundary);
+    assert!(
+        unlinked
+            .apply_persisted_record(&record(
+                4,
+                Event::AgentStandaloneCompactionStarted(invalid_manual),
+            ))
+            .is_err(),
+        "an unlinked manual start cannot steal the successful checkpoint"
+    );
+
+    let mut sibling = live.clone();
+    sibling
+        .apply_persisted_record(&record(
+            4,
+            Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                agent_id: agent_id(),
+                head: suffix,
+            }),
+        ))
+        .expect("select sibling base");
+    sibling
+        .apply_persisted_record(&record(5, user("sibling")))
+        .expect("append sibling");
+    let sibling_head = AgentHead::Node(sibling.head().expect("sibling head"));
+    let mut invalid_sibling = compaction_start("ct-auto-sibling");
+    invalid_sibling.compact_prompt_id = "ap-auto-sibling".parse().expect("prompt id");
+    invalid_sibling.cut = sibling_head;
+    invalid_sibling.resume_through = Some(sibling_head);
+    invalid_sibling.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+        previous_transaction_id: first.transaction_id.clone(),
+    };
+    assert!(
+        sibling
+            .apply_persisted_record(&record(
+                6,
+                Event::AgentStandaloneCompactionStarted(invalid_sibling),
+            ))
+            .is_err(),
+        "a sibling without the preceding replacement cannot claim its success"
+    );
+
+    let mut second = compaction_start("ct-auto-second");
+    second.compact_prompt_id = "ap-auto-second".parse().expect("prompt id");
+    second.cut = suffix;
+    second.resume_through = Some(first_boundary);
+    second.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+        previous_transaction_id: first.transaction_id.clone(),
+    };
+    let second_start = record(4, Event::AgentStandaloneCompactionStarted(second.clone()));
+    live.apply_persisted_record(&second_start)
+        .expect("append continuation start");
+    records.push(second_start);
+    let second_boundary_record = record(
+        5,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
+            agent_id: agent_id(),
+            replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
+                role: tau_proto::ContextRole::Assistant,
+                content: vec![tau_proto::ContentPart::Text {
+                    text: "summary two".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            transaction_id: Some(second.transaction_id.clone()),
+            cut: Some(second.cut),
+            suffix_end: Some(first_boundary),
+            compact_prompt_id: Some(second.compact_prompt_id.clone()),
+            model: Some(second.model.clone()),
+            operation: Some(second.operation),
+        }),
+    );
+    live.apply_persisted_record(&second_boundary_record)
+        .expect("append second boundary");
+    records.push(second_boundary_record);
+    let second_boundary = AgentHead::Node(live.head().expect("second boundary"));
+    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(),
+        transaction_id: Some(second.transaction_id.clone()),
+        agent_prompt_id: "ap-auto-final".parse().expect("prompt id"),
+        through: second_boundary,
+        model: Some(second.model.clone()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(second.cut),
+        output_length_continuation: None,
+    };
+    let checkpoint_record = record(6, Event::AgentInferenceDispatchStarted(checkpoint.clone()));
+    live.apply_persisted_record(&checkpoint_record)
+        .expect("append final checkpoint");
+    records.push(checkpoint_record);
+
+    let replay = AgentTree::from_events(agent_id(), &records);
+    assert_eq!(live, replay);
+    assert_eq!(
+        replay.standalone_compaction_recovery(),
+        Some(StandaloneCompactionRecovery::DispatchUncertain(checkpoint))
+    );
+}
+
+/// A successful idle compaction with no resume watermark owes no checkpoint
+/// and cannot prevent a later independent compaction transaction.
+#[test]
+fn no_resume_compaction_success_allows_later_independent_start() {
+    let record = |seq, event| PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent: AgentEventParent::InheritHead,
+        fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+        recorded_at: tau_proto::UnixMicros::default(),
+    };
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let mut first = compaction_start("ct-idle-first");
+    first.resume_through = None;
+    tree.apply_persisted_record(&record(
+        0,
+        Event::AgentStandaloneCompactionStarted(first.clone()),
+    ))
+    .expect("append idle start");
+    tree.apply_persisted_record(&record(
+        1,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
+            agent_id: agent_id(),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "idle summary".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            transaction_id: Some(first.transaction_id),
+            cut: Some(AgentHead::Root),
+            suffix_end: Some(AgentHead::Root),
+            compact_prompt_id: Some(first.compact_prompt_id),
+            model: Some(first.model),
+            operation: Some(first.operation),
+        }),
+    ))
+    .expect("append idle success");
+    let boundary = AgentHead::Node(tree.head().expect("idle boundary"));
+    let mut later = compaction_start("ct-idle-later");
+    later.compact_prompt_id = "ap-idle-later".parse().expect("prompt id");
+    later.cut = boundary;
+    later.resume_through = None;
+    tree.apply_persisted_record(&record(2, Event::AgentStandaloneCompactionStarted(later)))
+        .expect("independent start after no-resume success");
 }
 
 /// Watch provider-status messages must carry their structured payload, while

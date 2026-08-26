@@ -5692,6 +5692,22 @@ compactions:
     );
 }
 
+/// The clear context-limit spelling and compatibility spelling must resolve to
+/// one adapter-owned threshold and serialize canonically.
+#[test]
+fn context_limit_safe_aliases_provider_default_canonically() {
+    let safe: CompactionPolicyThreshold =
+        serde_yaml_ng::from_str("context_limit_safe").expect("safe spelling");
+    let compatibility: CompactionPolicyThreshold =
+        serde_yaml_ng::from_str("provider_default").expect("compatibility spelling");
+    assert_eq!(safe, CompactionPolicyThreshold::ProviderDefault);
+    assert_eq!(safe, compatibility);
+    assert_eq!(
+        serde_yaml_ng::to_string(&safe).expect("serialize"),
+        "provider_default\n"
+    );
+}
+
 /// An empty status set is almost certainly a configuration error; users must
 /// use null or omission to express an unrestricted policy.
 #[test]

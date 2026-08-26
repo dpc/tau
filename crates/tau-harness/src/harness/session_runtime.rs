@@ -3142,6 +3142,17 @@ impl Harness {
             if let Some(tau_core::StandaloneCompactionRecovery::Interrupted(started)) =
                 restored_compaction
             {
+                let reason = match &started.trigger {
+                    tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                        reason,
+                        ..
+                    }
+                    | tau_proto::StandaloneCompactionTrigger::ReactivePreflightFailure {
+                        reason,
+                        ..
+                    } => *reason,
+                    _ => tau_proto::StandaloneCompactionFailureReason::Interrupted,
+                };
                 self.publish_for_agent(
                     &cid,
                     Event::AgentStandaloneCompactionFailed(
@@ -3149,7 +3160,7 @@ impl Harness {
                             agent_id: started.agent_id,
                             transaction_id: started.transaction_id,
                             cut: started.cut,
-                            reason: tau_proto::StandaloneCompactionFailureReason::Interrupted,
+                            reason,
                             resume_through: started.resume_through,
                         },
                     ),

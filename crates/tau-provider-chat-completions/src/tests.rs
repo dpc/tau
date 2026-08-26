@@ -1054,6 +1054,14 @@ fn local_summary_compaction_is_an_ordinary_cache_aligned_prefix() {
                 }],
             },
         ));
+    created
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            },
+        ));
     let mut config = resolved_provider(&provider());
     config.compat.prompt_cache = Some(PromptCache::ExplicitSystemPrompt);
     config.local_summary_compaction = LocalSummaryCompactionConfig::new(
@@ -1069,6 +1077,7 @@ fn local_summary_compaction_is_an_ordinary_cache_aligned_prefix() {
     let request = try_build_request(&config, &model, &created).expect("enabled summary request");
     let mut ordinary_prompt = created.clone();
     ordinary_prompt.operation = tau_proto::PromptOperation::Inference;
+    ordinary_prompt.context.blocks.pop();
     let ordinary =
         try_build_request(&config, &model, &ordinary_prompt).expect("ordinary warmed request");
 
@@ -1324,6 +1333,14 @@ fn local_summary_compaction_uses_ordinary_request_debug_capture() {
 fn local_summary_compaction_enforces_complete_context_budget_boundary() {
     let mut created = prompt();
     created.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    created
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            },
+        ));
     let mut config = resolved_provider(&provider());
     let overhead = LOCAL_SUMMARY_COMPACTION_REQUEST_OVERHEAD_TOKENS;
     config.local_summary_compaction = LocalSummaryCompactionConfig::new(

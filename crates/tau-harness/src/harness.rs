@@ -1016,6 +1016,7 @@ fn standalone_compaction_failure_message(
         tau_proto::StandaloneCompactionFailureReason::Cancelled => "compaction_cancelled",
         tau_proto::StandaloneCompactionFailureReason::StaleBranch => "stale_branch",
         tau_proto::StandaloneCompactionFailureReason::Interrupted => "interrupted",
+        tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge => "prefix_too_large",
     }
 }
 
@@ -1769,6 +1770,7 @@ where
                 supports_compaction: true,
                 supports_standalone_compaction: false,
                 standalone_compaction_threshold: None,
+                standalone_compaction_prefix_budget: None,
                 cache_policy: None,
                 est_uncached_input_cost_1m_usd: Default::default(),
                 est_cached_input_cost_1m_usd: Default::default(),

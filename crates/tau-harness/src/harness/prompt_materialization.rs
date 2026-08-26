@@ -764,6 +764,14 @@ impl Harness {
             _ => None,
         };
         let head = conv.selected_prompt_context_head();
+        let standalone_window = match &conv.activation_dispatch {
+            path_crate_agent::ActivationDispatchState::Running {
+                cut,
+                resume_through,
+                ..
+            } => Some((resume_through.unwrap_or(*cut), *cut)),
+            _ => None,
+        };
 
         let agent_id_for_tree = conv.agent_id.clone();
         let tree = agent_id_for_tree
@@ -784,7 +792,18 @@ impl Harness {
             return None;
         }
         let prompt_context = tree
-            .map(|t| assemble_prompt_context_from(t, head))
+            .and_then(|tree| {
+                standalone_window.map_or_else(
+                    || Some(assemble_prompt_context_from(tree, head)),
+                    |(through, cut)| {
+                        crate::prompt::assemble_prompt_context_prefix_from(
+                            tree,
+                            through.as_option(),
+                            cut,
+                        )
+                    },
+                )
+            })
             .unwrap_or_else(|| crate::prompt::AssembledPromptContext {
                 context: tau_proto::PromptContext::default(),
                 contains_payload_envelope_provenance_projection: false,

@@ -61,6 +61,7 @@ fn provider_models_declaration(model: &str, context_window: u64) -> Event {
             supports_compaction: false,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
+            standalone_compaction_prefix_budget: None,
             cache_policy: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
@@ -3020,6 +3021,8 @@ fn intercepted_compaction_start_pins_materialized_model() {
             .expect("model");
         info.supports_standalone_compaction = true;
         info.standalone_compaction_threshold = Some(1);
+        info.standalone_compaction_prefix_budget = Some(u64::MAX);
+        info.standalone_compaction_prefix_budget = Some(u64::MAX);
         let agent = h
             .agent_runtime
             .agent_registry
@@ -3030,6 +3033,22 @@ fn intercepted_compaction_start_pins_materialized_model() {
         agent.context_usage_head = agent.head;
         agent.context_usage_model = Some("echo/model".into());
     }
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id,
+            text: "compactable prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
     let interceptor = connect_test_tool(&mut h, "compact-model-owner");
     h.handle_extension_event(
         "compact-model-owner",
@@ -3098,11 +3117,29 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
         agent.context_usage_head = agent.head;
         agent.context_usage_model = Some("test/model".into());
     }
-    assert!(h.schedule_standalone_auto_compaction_for_activation(
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
         &cid,
-        true,
-        Some(tau_proto::AgentHead::Root),
-    ));
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id,
+            text: "completion prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let activation_cut = h.agent_runtime.agent_registry.agents[&cid]
+        .head
+        .map(tau_proto::AgentHead::Node)
+        .expect("completion prefix");
+    assert!(
+        h.schedule_standalone_auto_compaction_for_activation(&cid, true, Some(activation_cut),)
+    );
     let compact_prompt = read_nth_prompt_created(&h, 0);
     let transaction_id = event_log_events(&h)
         .into_iter()
@@ -3133,6 +3170,11 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
         })),
     )
     .expect("register steer interceptor");
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .standalone_compaction_threshold = Some(u64::MAX);
 
     h.handle_provider_response_finished(provider_text_response(
         &compact_prompt.agent_prompt_id,
@@ -6283,6 +6325,24 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
     info.standalone_compaction_threshold = Some(900);
+    info.standalone_compaction_prefix_budget = Some(u64::MAX);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id,
+            text: "stable prefix ".repeat(80),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
 
     let _interceptor = connect_test_tool(&mut h, "interceptor-passive-batch");
     h.handle_extension_event(
@@ -6296,7 +6356,6 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     )
     .expect("intercept registration");
 
-    let cid = ensure_test_user_agent(&mut h);
     {
         let conv = h
             .agent_runtime

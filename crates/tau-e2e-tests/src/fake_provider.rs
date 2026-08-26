@@ -482,6 +482,9 @@ fn model_snapshot(capabilities: FakeModelCapabilities) -> ProviderModelsDeclared
             supports_compaction: false,
             supports_standalone_compaction: capabilities.standalone_compaction,
             standalone_compaction_threshold: None,
+            standalone_compaction_prefix_budget: capabilities
+                .standalone_compaction
+                .then_some(u64::MAX),
             cache_policy: None,
             est_uncached_input_cost_1m_usd: Some(
                 tau_proto::EstimatedUsdPerMillion::from_micro_usd(2_000_000),

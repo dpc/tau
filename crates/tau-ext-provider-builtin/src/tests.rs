@@ -2281,6 +2281,45 @@ fn minimal_prompt() -> tau_proto::AgentPromptCreated {
     }
 }
 
+/// Native compact usage must retain cache-read and cache-write observations
+/// when the adapter turns a finished compact outcome into its reported event.
+#[test]
+fn compact_finished_response_preserves_native_cache_usage() {
+    let prompt = minimal_prompt();
+    let usage = tau_proto::ProviderTokenUsage {
+        model: Some(prompt.model.clone()),
+        prompt_sent_tokens: 120,
+        prompt_cached_tokens: 80,
+        prompt_cache_read_ceiling_tokens: Some(100),
+        cache: Some(Box::new(tau_proto::ProviderCacheUsage {
+            read_tokens: Some(80),
+            write_tokens: Some(20),
+            ..Default::default()
+        })),
+        response_received_tokens: 7,
+        stats: Default::default(),
+    };
+    let finished = compact_finished_response(
+        &prompt.agent_prompt_id,
+        &prompt,
+        tau_proto::ProviderBackend {
+            kind: tau_proto::ProviderBackendKind::Responses,
+            base_url: "https://example.invalid".to_owned(),
+            transport: tau_proto::ProviderBackendTransport::Websocket,
+            stale_chain_fallback: false,
+        },
+        Vec::new(),
+        Some(usage.clone()),
+    );
+    assert_eq!(finished.usage, Some(usage));
+    let cache = finished
+        .usage
+        .and_then(|usage| usage.cache)
+        .expect("cache usage");
+    assert_eq!(cache.read_tokens, Some(80));
+    assert_eq!(cache.write_tokens, Some(20));
+}
+
 /// Ensures TRACE prompt diagnostics expose only fixed structural metadata,
 /// never model-visible prompt content that belongs in separately gated private
 /// capture.

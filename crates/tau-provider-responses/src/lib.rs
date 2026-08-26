@@ -1698,6 +1698,19 @@ fn build_request(
     })
 }
 
+/// Return the exact serialized public Responses request body after all
+/// provider-specific lowering.
+pub fn serialized_request_bytes(
+    prompt: &tau_proto::AgentPromptCreated,
+    config: &AttemptConfig,
+    model: &AttemptModel,
+) -> Option<u64> {
+    let body = build_request(prompt, config, model).ok()?;
+    serde_json::to_vec(&body)
+        .ok()
+        .and_then(|encoded| u64::try_from(encoded.len()).ok())
+}
+
 fn effort_wire(effort: Effort) -> &'static str {
     match effort {
         Effort::Off => "none",

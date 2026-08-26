@@ -284,6 +284,13 @@ agents:
                 at: before_inference
 ```
 
+Tau supplies a built-in `default` policy at `before_inference` with
+`threshold: context_limit_safe`. Additional named policies augment it rather
+than shadowing it. Set `compactions.default.enable: false` to opt out; legacy
+`compaction: disabled` remains a replace-all opt-out. `context_limit_safe`
+resolves the adapter-published safe scheduling threshold;
+`provider_default` remains a compatibility spelling for the same value.
+
 Matching policies at one lifecycle point OR together and produce one
 standalone compaction using the lowest resolved matching threshold. Omitted
 `statuses` means any status; an empty list is invalid. If the frozen prompt did

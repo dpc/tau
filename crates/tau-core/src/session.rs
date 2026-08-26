@@ -232,6 +232,23 @@ pub enum AgentEntry {
     },
 }
 
+/// One reconstructed provider-visible active window.
+///
+/// A suffix-preserving compaction boundary replaces a logical prefix even when
+/// the preserved suffix precedes that boundary in physical journal ancestry.
+/// Keeping the replacement and surviving transcript nodes separate lets
+/// callers select later logical prefixes without treating physical ancestry as
+/// provider-visible order.
+#[derive(Clone, Debug)]
+pub struct ActiveProviderWindow<'a> {
+    /// Latest compacted replacement, when the active window has one.
+    pub replacement: Option<&'a [ContextItem]>,
+    /// Boundary node that owns `replacement`.
+    pub replacement_boundary: Option<NodeId>,
+    /// Surviving ordinary transcript nodes in provider-visible order.
+    pub transcript: Vec<(NodeId, &'a AgentEntry)>,
+}
+
 /// One committed context input whose exact marked inference owns placement.
 #[derive(Clone, Debug, PartialEq)]
 struct PendingInferenceInput {
@@ -707,6 +724,8 @@ pub enum StandaloneCompactionRecovery {
         model: tau_proto::ModelId,
         /// Snapshot through which inference remains owed.
         through: tau_proto::AgentHead,
+        /// Whether the successful transaction permits automatic rolling.
+        automatic: bool,
     },
     /// A checkpoint exists without a matching durable provider terminal
     /// response.
@@ -785,6 +804,14 @@ impl AgentTree {
                         } else {
                             resume
                         },
+                        automatic: matches!(
+                            transaction.started.trigger,
+                            tau_proto::StandaloneCompactionTrigger::AutomaticThreshold
+                                | tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { .. }
+                                | tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+                                    ..
+                                }
+                        ),
                     }
                 })
             }
@@ -913,6 +940,83 @@ impl AgentTree {
             node.parent_id.map_or(AgentHead::Root, AgentHead::Node)
         } else {
             cut
+        }
+    }
+
+    /// Reconstruct the logical provider-visible window ending at `head`.
+    ///
+    /// Physical ancestry around a suffix-preserving boundary is
+    /// `cut < preserved suffix < boundary`, while provider order is
+    /// `replacement + preserved suffix`. Each boundary therefore consumes its
+    /// cut from the window accumulated immediately before the boundary rather
+    /// than slicing physical ancestry directly.
+    #[must_use]
+    pub fn active_provider_window(&self, head: Option<NodeId>) -> ActiveProviderWindow<'_> {
+        let mut window = ActiveProviderWindow {
+            replacement: None,
+            replacement_boundary: None,
+            transcript: Vec::new(),
+        };
+        for node_id in self.branch_node_ids_from(head) {
+            let Some(node) = self.node(node_id) else {
+                continue;
+            };
+            let AgentEntry::Compaction {
+                replacement_window,
+                transaction_id,
+                cut,
+                suffix_end,
+            } = &node.entry
+            else {
+                window.transcript.push((node_id, &node.entry));
+                continue;
+            };
+
+            if transaction_id.is_some() && suffix_end.is_some() {
+                match cut {
+                    Some(AgentHead::Root) => {}
+                    Some(AgentHead::Node(cut)) if window.replacement_boundary == Some(*cut) => {
+                        window.transcript.clear();
+                    }
+                    Some(AgentHead::Node(cut)) => {
+                        if let Some(index) = window
+                            .transcript
+                            .iter()
+                            .position(|(node_id, _)| node_id == cut)
+                        {
+                            window.transcript.drain(..=index);
+                        } else {
+                            // Validation rejects this shape. Clear rather than
+                            // resurrecting pre-boundary history if a caller is
+                            // inspecting a partially loaded invalid journal.
+                            window.transcript.clear();
+                        }
+                    }
+                    None => window.transcript.clear(),
+                }
+            } else {
+                window.transcript.clear();
+            }
+            window.replacement = Some(replacement_window);
+            window.replacement_boundary = Some(node_id);
+        }
+        window
+    }
+
+    /// Return whether `cut` names one occurrence in the logical active window
+    /// ending at `through`.
+    #[must_use]
+    pub fn active_provider_window_contains(&self, through: AgentHead, cut: AgentHead) -> bool {
+        let window = self.active_provider_window(through.as_option());
+        match cut {
+            AgentHead::Root => window.replacement.is_none(),
+            AgentHead::Node(node_id) => {
+                window.replacement_boundary == Some(node_id)
+                    || window
+                        .transcript
+                        .iter()
+                        .any(|(candidate, _)| *candidate == node_id)
+            }
         }
     }
 
@@ -1960,8 +2064,17 @@ impl AgentTree {
                         inference_finished: false,
                     },
                 );
-                if let tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id } =
-                    &started.trigger
+                let decision_id = match &started.trigger {
+                    tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id } => {
+                        Some(decision_id)
+                    }
+                    tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                        decision_id: Some(decision_id),
+                        ..
+                    } => Some(decision_id),
+                    _ => None,
+                };
+                if let Some(decision_id) = decision_id
                     && let Some(decision) = self.automatic_compaction_decisions.get_mut(decision_id)
                 {
                     decision.claimed = true;
@@ -2968,10 +3081,60 @@ impl AgentTree {
                 tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id }
                     if decision_id == &started.transaction_id
             )
+            && !matches!(
+                &started.trigger,
+                tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                    decision_id: Some(decision_id),
+                    ..
+                } if decision_id == &started.transaction_id
+            )
         {
             return Err(AgentEventValidationError::new(
                 "standalone compaction transaction id is reserved by an automatic decision",
             ));
+        }
+        if let tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+            decision_id,
+            previous_transaction_id,
+            reason,
+        } = &started.trigger
+        {
+            let valid_authority = match (decision_id, previous_transaction_id) {
+                (None, None) | (Some(_), None) | (None, Some(_)) => true,
+                (Some(_), Some(_)) => false,
+            };
+            if !valid_authority
+                || *reason != tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
+            {
+                return Err(AgentEventValidationError::new(
+                    "automatic preflight failure has invalid authority or reason",
+                ));
+            }
+        }
+        if let Some(previous_id) = self.compaction_transaction_order.last()
+            && let Some(previous) = self.compaction_transactions.get(previous_id)
+            && matches!(
+                previous.outcome,
+                Some(CompactionTransactionOutcome::Succeeded(_))
+            )
+            && previous.checkpoint.is_none()
+            && previous.started.resume_through.is_some()
+        {
+            let claimed = match &started.trigger {
+                tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+                    previous_transaction_id,
+                }
+                | tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                    previous_transaction_id: Some(previous_transaction_id),
+                    ..
+                } => previous_transaction_id == previous_id,
+                _ => false,
+            };
+            if !claimed {
+                return Err(AgentEventValidationError::new(
+                    "successful standalone compaction requires an explicitly linked continuation or checkpoint",
+                ));
+            }
         }
         if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
             request_id,
@@ -3024,10 +3187,28 @@ impl AgentTree {
                 ));
             }
         }
-        if let tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
-            failed_agent_prompt_id,
-        } = &started.trigger
-        {
+        let reactive_prompt_id = match &started.trigger {
+            tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                failed_agent_prompt_id,
+            }
+            | tau_proto::StandaloneCompactionTrigger::ReactivePreflightFailure {
+                failed_agent_prompt_id,
+                ..
+            } => Some(failed_agent_prompt_id),
+            _ => None,
+        };
+        if let Some(failed_agent_prompt_id) = reactive_prompt_id {
+            if matches!(
+                started.trigger,
+                tau_proto::StandaloneCompactionTrigger::ReactivePreflightFailure {
+                    reason,
+                    ..
+                } if reason != tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
+            ) {
+                return Err(AgentEventValidationError::new(
+                    "reactive preflight failure has invalid reason",
+                ));
+            }
             let Some(dispatch) = self.inference_dispatches.get(failed_agent_prompt_id) else {
                 return Err(AgentEventValidationError::new(
                     "reactive compaction references unknown inference checkpoint",
@@ -3040,13 +3221,18 @@ impl AgentTree {
                 || checkpoint.transaction_id.is_some()
                 || checkpoint.operation != Some(tau_proto::PromptOperation::Inference)
                 || checkpoint.model.as_ref() != Some(&started.model)
-                || checkpoint.activation_cut != Some(started.cut)
+                || checkpoint
+                    .activation_cut
+                    .is_none_or(|cut| !self.active_provider_window_contains(cut, started.cut))
                 || started.resume_through != Some(checkpoint.through)
                 || self.compaction_transactions.values().any(|transaction| {
                     matches!(
                         &transaction.started.trigger,
                         tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
                             failed_agent_prompt_id: claimed
+                        } | tau_proto::StandaloneCompactionTrigger::ReactivePreflightFailure {
+                            failed_agent_prompt_id: claimed,
+                            ..
                         } if claimed == failed_agent_prompt_id
                     )
                 })
@@ -3056,9 +3242,17 @@ impl AgentTree {
                 ));
             }
         }
-        if let tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id } =
-            &started.trigger
-        {
+        let automatic_decision_id = match &started.trigger {
+            tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { decision_id } => {
+                Some(decision_id)
+            }
+            tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                decision_id: Some(decision_id),
+                ..
+            } => Some(decision_id),
+            _ => None,
+        };
+        if let Some(decision_id) = automatic_decision_id {
             let Some(decision) = self.automatic_compaction_decisions.get(decision_id) else {
                 return Err(AgentEventValidationError::new(
                     "automatic compaction references unknown terminal decision",
@@ -3068,10 +3262,10 @@ impl AgentTree {
                 || decision.closed
                 || !decision.finish_committed
                 || started.transaction_id != *decision_id
-                || started.cut != decision.cut
+                || !self.is_ancestor_head(started.cut, decision.cut)
                 || started.model != decision.decision.model
                 || started.resume_through
-                    != (self.head != decision.cut.as_option()).then_some(
+                    != (self.head != started.cut.as_option()).then_some(
                         self.head
                             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
                     )
@@ -3082,9 +3276,67 @@ impl AgentTree {
                 ));
             }
         }
-        if !self.is_ancestor_head(started.cut, started.resume_through.unwrap_or(started.cut)) {
+        let automatic_previous_id = match &started.trigger {
+            tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+                previous_transaction_id,
+            } => Some(previous_transaction_id),
+            tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                previous_transaction_id: Some(previous_transaction_id),
+                ..
+            } => Some(previous_transaction_id),
+            _ => None,
+        };
+        if let Some(previous_transaction_id) = automatic_previous_id {
+            let Some(previous) = self.compaction_transactions.get(previous_transaction_id) else {
+                return Err(AgentEventValidationError::new(
+                    "automatic continuation references unknown transaction",
+                ));
+            };
+            let current = self
+                .head
+                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+            let current_window = self.active_provider_window(current.as_option());
+            let previous_boundary_matches = current_window
+                .replacement_boundary
+                .and_then(|node_id| self.node(node_id))
+                .is_some_and(|node| {
+                    matches!(
+                        &node.entry,
+                        AgentEntry::Compaction {
+                            transaction_id: Some(transaction_id),
+                            ..
+                        } if transaction_id == previous_transaction_id
+                    )
+                });
+            let previous_is_automatic = matches!(
+                previous.started.trigger,
+                tau_proto::StandaloneCompactionTrigger::AutomaticThreshold
+                    | tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { .. }
+                    | tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. }
+            );
+            if self.compaction_transaction_order.last() != Some(previous_transaction_id)
+                || !matches!(
+                    previous.outcome,
+                    Some(CompactionTransactionOutcome::Succeeded(_))
+                )
+                || previous.checkpoint.is_some()
+                || !previous_boundary_matches
+                || !previous_is_automatic
+                || previous.started.model != started.model
+                || started.resume_through != Some(current)
+                || started.supersedes.is_some()
+            {
+                return Err(AgentEventValidationError::new(
+                    "automatic continuation does not uniquely claim the preceding successful pass",
+                ));
+            }
+        }
+        if !self.active_provider_window_contains(
+            started.resume_through.unwrap_or(started.cut),
+            started.cut,
+        ) {
             return Err(AgentEventValidationError::new(
-                "standalone compaction cut must be an ancestor of resume_through",
+                "standalone compaction cut must occur in its selected logical active window",
             ));
         }
         if self
@@ -3834,6 +4086,22 @@ impl AgentTree {
                 "standalone compaction failure mismatched transaction or duplicate outcome",
             ));
         }
+        if let tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure { reason, .. } =
+            transaction.started.trigger
+            && failed.reason != reason
+        {
+            return Err(AgentEventValidationError::new(
+                "automatic preflight terminal reason mismatches its durable start",
+            ));
+        }
+        if let tau_proto::StandaloneCompactionTrigger::ReactivePreflightFailure { reason, .. } =
+            transaction.started.trigger
+            && failed.reason != reason
+        {
+            return Err(AgentEventValidationError::new(
+                "reactive preflight terminal reason mismatches its durable start",
+            ));
+        }
         Ok(())
     }
 
@@ -4001,9 +4269,9 @@ impl AgentTree {
                         "compaction suffix_end must equal the boundary parent",
                     ));
                 }
-                if !self.is_ancestor_head(cut, suffix_end) {
+                if !self.active_provider_window_contains(suffix_end, cut) {
                     return Err(AgentEventValidationError::new(
-                        "compaction cut must be an ancestor of suffix_end",
+                        "compaction cut must occur in the source logical active window",
                     ));
                 }
                 let transaction = self

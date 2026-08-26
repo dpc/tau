@@ -75,6 +75,7 @@ fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
         supports_compaction: false,
         supports_standalone_compaction: false,
         standalone_compaction_threshold: None,
+        standalone_compaction_prefix_budget: None,
         cache_policy: None,
         est_uncached_input_cost_1m_usd: Default::default(),
         est_cached_input_cost_1m_usd: Default::default(),

@@ -1343,7 +1343,14 @@ fn try_build_request(
             &mut messages,
         );
     }
-    if summary_config.is_some() {
+    if let Some(config) = summary_config {
+        let prefix_bytes =
+            tau_provider::local_summary_compaction::historical_prefix_json_bytes(&prompt.context);
+        if prefix_bytes.is_none_or(|bytes| bytes > config.max_input_bytes()) {
+            return Err(LlmError::InvalidCompaction(
+                "summary compaction prefix exceeds the published safe budget".to_owned(),
+            ));
+        }
         messages.push(serde_json::json!({
             "role": "user",
             "content": tau_provider::local_summary_compaction::REQUEST,
@@ -1369,7 +1376,7 @@ fn try_build_request(
             }
         },
     );
-    Ok(ChatRequest {
+    let request = ChatRequest {
         model: model.id.as_str().to_owned(),
         messages,
         stream: true,
@@ -1400,7 +1407,18 @@ fn try_build_request(
         extra_body: provider.extra_body.clone(),
         tools,
         tool_choice,
-    })
+    };
+    if let Some(config) = summary_config {
+        let final_wire_bytes = serde_json::to_vec(&request)
+            .ok()
+            .and_then(|encoded| u64::try_from(encoded.len()).ok());
+        if final_wire_bytes.is_none_or(|bytes| bytes > config.max_input_bytes()) {
+            return Err(LlmError::InvalidCompaction(
+                "summary compaction final wire request exceeds the adapter bound".to_owned(),
+            ));
+        }
+    }
+    Ok(request)
 }
 
 fn context_block_has_system_authority(block: &tau_proto::ContextBlock) -> bool {

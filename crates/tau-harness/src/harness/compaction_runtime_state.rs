@@ -11,6 +11,12 @@ pub(crate) struct CompactionRuntimeState {
     /// Starts whose post-commit reaction must not dispatch remote work.
     pub(super) suppressed_dispatches:
         HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
+    /// Automatic starts that must commit a bounded local failure instead of
+    /// dispatching an oversized indivisible prefix to a provider.
+    pub(super) preflight_failures: HashMap<
+        (tau_proto::AgentId, tau_proto::CompactionTransactionId),
+        tau_proto::StandaloneCompactionFailureReason,
+    >,
     /// Failures that clean runtime state without provider-watch projection.
     pub(super) silent_failure_prompts: HashSet<AgentPromptId>,
     /// Reactive claims that must terminalize immediately after start commit.

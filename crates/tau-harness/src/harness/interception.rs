@@ -442,6 +442,13 @@ pub(crate) enum AgentPublishCompletion {
         /// Exact interceptor-approved failure retained after rejection.
         retry_event: Option<Box<Event>>,
     },
+    /// Retain a successful pass's exact rolling successor until its durable
+    /// start append commits.
+    RollingCompactionStart {
+        /// Exact interceptor-approved successor start retained after append
+        /// rejection.
+        retry_event: Option<Box<Event>>,
+    },
     /// Resume the successful standalone compaction after the final steer in its
     /// completion batch commits.
     StandaloneContinuation {
@@ -488,6 +495,7 @@ impl AgentPublishCompletion {
             | Self::ReactiveContextRecovery { .. }
             | Self::ReactiveContextRecoveryStart { .. }
             | Self::ReactiveContextRecoveryFailure { .. }
+            | Self::RollingCompactionStart { .. }
             | Self::StandaloneContinuation { .. } => None,
         };
         response.is_some_and(|response| {
@@ -511,6 +519,7 @@ impl AgentPublishCompletion {
             | Self::ReactiveContextRecovery { .. }
             | Self::ReactiveContextRecoveryStart { .. }
             | Self::ReactiveContextRecoveryFailure { .. }
+            | Self::RollingCompactionStart { .. }
             | Self::InitialPromptSubmission { .. } => {
                 unreachable!("non-standalone completions do not own compaction transactions")
             }
@@ -1247,6 +1256,7 @@ impl Harness {
             AgentPublishCompletion::ReactiveContextRecovery { .. } => false,
             AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => false,
             AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } => false,
+            AgentPublishCompletion::RollingCompactionStart { .. } => false,
             AgentPublishCompletion::InitialPromptSubmission { .. } => false,
         };
         let fold_parent = match &completion {

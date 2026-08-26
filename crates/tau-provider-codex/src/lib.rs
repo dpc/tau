@@ -457,7 +457,13 @@ pub enum PrewarmOutcome {
 /// Typed outcome of one finite joined standalone-compaction operation.
 pub enum CompactOutcome {
     /// Provider returned an accepted replacement window.
-    Finished(Vec<tau_proto::ContextItem>),
+    Finished {
+        /// Provider-native replacement window.
+        output_items: Vec<tau_proto::ContextItem>,
+        /// Provider-reported usage for this compaction call, including cache
+        /// reads and writes when present.
+        usage: Option<tau_proto::ProviderTokenUsage>,
+    },
     /// The outer scheduler may retry according to the typed decision.
     Retry(tau_provider::retry_policy::RetryDecision),
     /// Trusted local cancellation ended the joined operation.
@@ -936,6 +942,25 @@ impl CodexRuntime {
         request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
     ) -> CompactOutcome {
+        let prefix_budget = (config.wire().raw_context_window * 9 / 10).max(1000);
+        let prefix_bytes =
+            tau_provider::local_summary_compaction::historical_prefix_json_bytes(request.context);
+        if prefix_bytes.is_none_or(|bytes| prefix_budget < bytes) {
+            return CompactOutcome::Terminal(CodexError(common::LlmError::ProviderFailure(
+                tau_proto::ProviderFailureKind::ContextWindowExceeded,
+                "standalone compaction prefix exceeds the published safe budget".to_owned(),
+            )));
+        }
+        let final_wire_bytes = responses::full_ws_request_bytes(config.wire(), request);
+        if final_wire_bytes
+            .ok()
+            .is_none_or(|bytes| bytes > config.wire().raw_context_window)
+        {
+            return CompactOutcome::Terminal(CodexError(common::LlmError::ProviderFailure(
+                tau_proto::ProviderFailureKind::ContextWindowExceeded,
+                "standalone compaction final wire request exceeds the adapter bound".to_owned(),
+            )));
+        }
         let identity = config.inference_identity();
         let probe = match self.acquire_compact_probe(identity, abort) {
             CompactAdmissionResult::Probe(probe) => Some(probe),
@@ -977,12 +1002,13 @@ impl CodexRuntime {
             abort,
             &mut |_| {},
         );
-        let provider_output = match compact_result {
+        let (provider_output, usage) = match compact_result {
             Ok(dispatch) => {
                 if let Some(probe) = probe {
                     probe.complete(CompactRouteState::Available);
                 }
-                dispatch.state.into_output_items()
+                let usage = dispatch.state.usage();
+                (dispatch.state.into_output_items(), usage)
             }
             Err(common::LlmError::Canceled) => return CompactOutcome::Canceled,
             Err(error) => {
@@ -1023,7 +1049,10 @@ impl CodexRuntime {
         if abort.is_aborted() {
             CompactOutcome::Canceled
         } else {
-            CompactOutcome::Finished(output)
+            CompactOutcome::Finished {
+                output_items: output,
+                usage,
+            }
         }
     }
 
@@ -1286,6 +1315,8 @@ fn model_info(
         supports_compaction: !is_gpt_5_6(model),
         supports_standalone_compaction: is_gpt_5_6(model),
         standalone_compaction_threshold: is_gpt_5_6(model)
+            .then_some((raw_context_window_for_model(model) * 9 / 10).max(1000)),
+        standalone_compaction_prefix_budget: is_gpt_5_6(model)
             .then_some((raw_context_window_for_model(model) * 9 / 10).max(1000)),
         cache_policy: Some(private_response_chain_cache_policy()),
         est_uncached_input_cost_1m_usd: Some(prices.uncached_input),
