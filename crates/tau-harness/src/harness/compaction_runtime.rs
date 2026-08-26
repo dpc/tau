@@ -80,6 +80,7 @@ impl Harness {
             return;
         }
         if self
+            .tool_runtime
             .pending_terminal_observations
             .contains_key(wait_call_id)
         {
@@ -90,7 +91,7 @@ impl Harness {
             return;
         }
         let wait_call_id = wait_call_id.clone();
-        let Some(tool) = self.pending_tools.get(&wait_call_id).cloned() else {
+        let Some(tool) = self.tool_runtime.pending_tools.get(&wait_call_id).cloned() else {
             self.send_ui_error_response(
                 client_id,
                 "cannot compact while a prompt or tool turn is in flight",
@@ -481,7 +482,7 @@ impl Harness {
                 visible_tool_name,
             },
         );
-        if self.tool_turn.begin_backgrounding(&call.id) {
+        if self.tool_runtime.tool_turn.begin_backgrounding(&call.id) {
             self.observe_tool_backgrounded(&call.id);
             self.publish_internal_background_placeholder(
                 &call.id,
@@ -1578,9 +1579,10 @@ impl Harness {
         caller_cid: &AgentId,
         request: &tau_proto::AgentManualCompactionRequested,
     ) {
-        self.tool_agents
+        self.tool_runtime
+            .tool_agents
             .insert(request.initiating_tool_call_id.clone(), caller_cid.clone());
-        self.pending_tools.insert(
+        self.tool_runtime.pending_tools.insert(
             request.initiating_tool_call_id.clone(),
             PendingTool {
                 name: request.visible_tool_name.clone(),
@@ -1589,7 +1591,8 @@ impl Harness {
                 allows_provider_image: false,
             },
         );
-        self.tool_turn
+        self.tool_runtime
+            .tool_turn
             .restore_backgrounded(caller_cid.clone(), request.initiating_tool_call_id.clone());
     }
 

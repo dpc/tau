@@ -1491,7 +1491,9 @@ fn deferred_compaction_rejection_is_requester_only_and_not_logged() {
             requester_client_id: requesting_ui_id.clone(),
         },
     );
-    h.tool_agents.insert(wait_call_id.clone(), cid.clone());
+    h.tool_runtime
+        .tool_agents
+        .insert(wait_call_id.clone(), cid.clone());
     let baseline_seq = h.event_log.next_seq();
 
     h.rollback_failed_wait_compaction_terminal(&Event::ToolCancelled(tau_proto::ToolCancelled {
@@ -5738,7 +5740,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
 
     assert!(sink_has_tool_invoke(&blocking_sink, "call-blocking"));
     assert!(!sink_has_tool_invoke(&staged_sink, "call-staged"));
-    assert_eq!(h.tool_turn.pending_len(), 1);
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 1);
 
     h.handle_extension_event(
         "conn-blocking-tool",
@@ -5747,8 +5749,8 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     .expect("blocking result");
 
     assert!(!sink_has_tool_invoke(&staged_sink, "call-staged"));
-    assert_eq!(h.tool_turn.pending_len(), 1);
-    assert_eq!(h.tool_turn.in_flight_len(), 0);
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 1);
+    assert_eq!(h.tool_runtime.tool_turn.in_flight_len(), 0);
 
     h.handle_extension_message(
         &crate::test_connection_id("conn-staged-tool"),
@@ -5760,7 +5762,8 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
 
     assert!(sink_has_tool_invoke(&staged_sink, "call-staged"));
     assert_eq!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .get("call-staged")
             .map(|provider| provider.as_str()),
         Some("conn-staged-tool")
@@ -5771,7 +5774,11 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
         TestProtocolItem::Event(test_tool_result("call-staged", "staged_tool")),
     )
     .expect("staged result");
-    assert!(!h.pending_tool_providers.contains_key("call-staged"));
+    assert!(
+        !h.tool_runtime
+            .pending_tool_providers
+            .contains_key("call-staged")
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -5856,7 +5863,7 @@ fn prompt_snapshot_does_not_expand_to_staged_registration() {
                 })
         )
     }));
-    assert_eq!(h.tool_turn.pending_len(), 0);
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
     assert!(!sink_has_tool_invoke(&staged_sink, "call-unadvertised"));
 
     h.handle_extension_message(
@@ -7683,8 +7690,10 @@ fn disconnected_tool_completes_pending_call() {
             ws_pool_delta: None,
         }),
     );
-    h.tool_agents.insert(call_id.clone(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         call_id.clone(),
         PendingTool {
             name: tool_name.clone(),
@@ -7693,9 +7702,10 @@ fn disconnected_tool_completes_pending_call() {
             allows_provider_image: false,
         },
     );
-    h.pending_tool_providers
+    h.tool_runtime
+        .pending_tool_providers
         .insert(call_id.clone(), crate::test_connection_id(conn_id.clone()));
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         cid.clone(),
         call_id.clone(),
         ToolTurnCategories::default(),
@@ -7721,8 +7731,8 @@ fn disconnected_tool_completes_pending_call() {
             .turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
-    assert!(!h.tool_agents.contains_key(&call_id));
-    assert!(!h.pending_tool_providers.contains_key(&call_id));
+    assert!(!h.tool_runtime.tool_agents.contains_key(&call_id));
+    assert!(!h.tool_runtime.pending_tool_providers.contains_key(&call_id));
 
     let expected = extension_disconnected_tool_call_error_message(&call_id);
     assert!(default_agent_tree(&h).nodes().iter().any(|node| {
@@ -8476,7 +8486,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
 
     // The call must be gone from both the pending queue and the
     // in-flight set — rejection fully completes it.
-    assert!(h.tool_turn.is_empty());
+    assert!(h.tool_runtime.tool_turn.is_empty());
 
     // The error should have been persisted on s1's history so the
     // agent sees it on the next turn — as a Requested + Error pair
@@ -8598,9 +8608,17 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
     })
     .expect("empty call ids should be terminalized as tool errors");
 
-    assert!(h.tool_turn.is_empty());
-    assert!(!h.pending_tools.contains_key(&ToolCallId::from("")));
-    assert!(!h.tool_agents.contains_key(&ToolCallId::from("")));
+    assert!(h.tool_runtime.tool_turn.is_empty());
+    assert!(
+        !h.tool_runtime
+            .pending_tools
+            .contains_key(&ToolCallId::from(""))
+    );
+    assert!(
+        !h.tool_runtime
+            .tool_agents
+            .contains_key(&ToolCallId::from(""))
+    );
 
     let mut assistant_call_ids = Vec::new();
     let mut tool_error_ids = Vec::new();
@@ -8687,7 +8705,7 @@ fn duplicate_tool_call_id_becomes_model_visible_tool_error() {
     })
     .expect("duplicate call ids should not wedge the harness");
 
-    assert!(h.tool_turn.is_empty());
+    assert!(h.tool_runtime.tool_turn.is_empty());
     let mut assistant_call_ids = Vec::new();
     let mut duplicate_error_ids = Vec::new();
     for node in default_agent_tree(&h).nodes() {
@@ -8728,7 +8746,9 @@ fn reused_prior_tool_call_id_becomes_model_visible_tool_error() {
     seed_agent_thinking(&mut h, &cid, "sp-y");
     h.prompt_agents
         .insert(test_agent_prompt_id("sp-y"), cid.clone());
-    h.completed_tool_calls.insert("old-call".into());
+    h.tool_runtime
+        .completed_tool_calls
+        .insert("old-call".into());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
@@ -8762,7 +8782,7 @@ fn reused_prior_tool_call_id_becomes_model_visible_tool_error() {
     })
     .expect("reused prior call id should not wedge the harness");
 
-    assert!(h.tool_turn.is_empty());
+    assert!(h.tool_runtime.tool_turn.is_empty());
     let mut assistant_call_ids = Vec::new();
     let mut reused_error_ids = Vec::new();
     for node in default_agent_tree(&h).nodes() {
@@ -8856,7 +8876,7 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
     })
     .expect("response");
 
-    assert!(h.tool_turn.is_empty());
+    assert!(h.tool_runtime.tool_turn.is_empty());
     assert!(matches!(
         h.agents.get(&cid).expect("conversation").turn_state,
         AgentTurnState::Idle
@@ -8937,9 +8957,17 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
         ws_pool_delta: None,
     })
     .expect("response");
-    assert!(h.tool_turn.is_in_flight(&ToolCallId::from("c1")));
-    assert!(h.tool_turn.is_in_flight(&ToolCallId::from("c2")));
-    assert_eq!(h.tool_turn.pending_len(), 0);
+    assert!(
+        h.tool_runtime
+            .tool_turn
+            .is_in_flight(&ToolCallId::from("c1"))
+    );
+    assert!(
+        h.tool_runtime
+            .tool_turn
+            .is_in_flight(&ToolCallId::from("c2"))
+    );
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
 
     h.handle_client_event(
         "ui",
@@ -8951,7 +8979,7 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
     )
     .expect("cancel");
 
-    assert!(h.tool_turn.is_empty());
+    assert!(h.tool_runtime.tool_turn.is_empty());
     assert!(matches!(
         h.agents.get(&cid).expect("conversation").turn_state,
         AgentTurnState::Idle
@@ -9980,8 +10008,10 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
             ws_pool_delta: None,
         }),
     );
-    h.tool_agents.insert(call_id.clone(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         call_id.clone(),
         PendingTool {
             name: ToolName::new("read"),
@@ -9990,9 +10020,10 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
             allows_provider_image: false,
         },
     );
-    h.pending_tool_providers
+    h.tool_runtime
+        .pending_tool_providers
         .insert(call_id.clone(), crate::test_connection_id("owner-ext"));
-    let completed_before = h.completed_tool_calls.clone();
+    let completed_before = h.tool_runtime.completed_tool_calls.clone();
     let (in_flight_before, total_before) = {
         let agent = &h.agents[&cid];
         (agent.tools_in_flight, agent.tools_total)
@@ -10014,18 +10045,22 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
     )
     .expect("reject reused extension call id");
 
-    assert_eq!(h.tool_agents.get(&call_id), Some(&cid));
+    assert_eq!(h.tool_runtime.tool_agents.get(&call_id), Some(&cid));
     assert_eq!(
-        h.pending_tools.get(&call_id).map(|tool| tool.name.as_str()),
+        h.tool_runtime
+            .pending_tools
+            .get(&call_id)
+            .map(|tool| tool.name.as_str()),
         Some("read")
     );
     assert_eq!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .get(&call_id)
             .map(tau_proto::ConnectionId::as_str),
         Some("owner-ext")
     );
-    assert_eq!(h.completed_tool_calls, completed_before);
+    assert_eq!(h.tool_runtime.completed_tool_calls, completed_before);
     assert_eq!(h.agents[&cid].tools_in_flight, in_flight_before);
     assert_eq!(h.agents[&cid].tools_total, total_before);
     assert!(!event_log_events(&h).iter().any(|event| {
@@ -10525,7 +10560,7 @@ fn length_stopped_tool_call_is_preserved_but_never_executed() {
     })
     .expect("length stop tool call terminalized");
 
-    assert!(!h.pending_tools.contains_key("length-call"));
+    assert!(!h.tool_runtime.pending_tools.contains_key("length-call"));
     assert!(
         !default_agent_tree(&h)
             .nodes()
@@ -11888,7 +11923,8 @@ fn output_length_tool_round_rearms_same_turn_and_cold_replay() {
     .expect("committed tool response");
     assert!(sink_has_tool_invoke(&tool_frames, "length-rearm-call"));
     assert_eq!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .get("length-rearm-call")
             .map(tau_proto::ConnectionId::as_str),
         Some("length-rearm-tool")
@@ -13805,7 +13841,11 @@ fn output_length_tool_calls_terminal_race_never_dispatches_calls() {
         ws_pool_delta: None,
     })
     .expect("park tool-calls terminal");
-    assert!(!h.pending_tools.contains_key("cancelled-successor-call"));
+    assert!(
+        !h.tool_runtime
+            .pending_tools
+            .contains_key("cancelled-successor-call")
+    );
     assert!(!event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::ToolResult(result) if result.call_id == "cancelled-successor-call"
@@ -13835,7 +13875,11 @@ fn output_length_tool_calls_terminal_race_never_dispatches_calls() {
         })),
     )
     .expect("commit cancellation-owned terminal");
-    assert!(!h.pending_tools.contains_key("cancelled-successor-call"));
+    assert!(
+        !h.tool_runtime
+            .pending_tools
+            .contains_key("cancelled-successor-call")
+    );
     assert!(!event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::ToolResult(result) if result.call_id == "cancelled-successor-call"
@@ -14243,12 +14287,14 @@ fn output_length_eligibility_matrix_is_exact() {
             case.name
         );
         assert!(
-            h.tool_turn.is_empty(),
+            h.tool_runtime.tool_turn.is_empty(),
             "row {index} ({}) must never dispatch a call",
             case.name
         );
         assert!(
-            !h.pending_tools.contains_key("eligibility-call"),
+            !h.tool_runtime
+                .pending_tools
+                .contains_key("eligibility-call"),
             "row {index} ({}) must not register a pending call",
             case.name
         );
@@ -14451,13 +14497,13 @@ fn output_length_successor_terminal_matrix_is_exact() {
             case.name
         );
         assert_eq!(
-            h.tool_turn.is_empty(),
+            h.tool_runtime.tool_turn.is_empty(),
             !case.expects_dispatch,
             "row {index} ({}) tool dispatch",
             case.name
         );
         assert_eq!(
-            h.pending_tools.contains_key("successor-call"),
+            h.tool_runtime.pending_tools.contains_key("successor-call"),
             case.expects_dispatch,
             "row {index} ({}) pending call",
             case.name

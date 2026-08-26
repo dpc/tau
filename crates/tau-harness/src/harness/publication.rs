@@ -286,6 +286,7 @@ impl Harness {
         cause: tau_proto::ToolTerminalCause,
     ) -> Option<tau_proto::ObservationId> {
         if let Some(terminal) = self
+            .tool_runtime
             .pending_terminal_observations
             .get(call_id)
             .filter(|terminal| terminal.cause == cause)
@@ -294,7 +295,7 @@ impl Harness {
         }
         let call = self.wait_tool_call_ref(call_id)?;
         let terminal = tau_proto::ObservationId::random();
-        self.pending_terminal_observations.insert(
+        self.tool_runtime.pending_terminal_observations.insert(
             call_id.clone(),
             PendingTerminalObservation {
                 observation_id: terminal,
@@ -361,7 +362,8 @@ impl Harness {
                 self.publish_for_agent_from(cid, source, Event::ProviderToolResult(result));
             }
             Some(cid) => {
-                self.tool_agents
+                self.tool_runtime
+                    .tool_agents
                     .entry(result.call_id.clone())
                     .or_insert_with(|| cid.clone());
                 let source = self.resolved_publish_source(source);
@@ -419,7 +421,8 @@ impl Harness {
                 self.publish_for_agent_from(cid, source, Event::ProviderToolError(error));
             }
             Some(cid) => {
-                self.tool_agents
+                self.tool_runtime
+                    .tool_agents
                     .entry(error.call_id.clone())
                     .or_insert_with(|| cid.clone());
                 let source = self.resolved_publish_source(source);

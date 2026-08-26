@@ -571,6 +571,7 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
     ) -> Vec<(ToolCallId, AgentId)> {
         let mut failed_call_ids: Vec<ToolCallId> = self
+            .tool_runtime
             .pending_tool_providers
             .iter()
             .filter_map(|(call_id, provider_id)| {
@@ -584,11 +585,15 @@ impl Harness {
         // Keep disconnect cleanup deterministic and publish background
         // terminals before a foreground terminal can complete the agent turn.
         // Queued work is drained only after the whole batch below.
-        failed_call_ids
-            .sort_by_key(|call_id| (!self.tool_turn.is_backgrounded(call_id), call_id.clone()));
+        failed_call_ids.sort_by_key(|call_id| {
+            (
+                !self.tool_runtime.tool_turn.is_backgrounded(call_id),
+                call_id.clone(),
+            )
+        });
         let foreground_batch = failed_call_ids
             .iter()
-            .filter(|call_id| !self.tool_turn.is_backgrounded(call_id))
+            .filter(|call_id| !self.tool_runtime.tool_turn.is_backgrounded(call_id))
             .cloned()
             .collect::<Vec<_>>();
         self.disconnect_terminal_batch_pending
@@ -597,7 +602,7 @@ impl Harness {
         let completed_foreground_calls: Vec<(ToolCallId, AgentId)> = Vec::new();
 
         for call_id in failed_call_ids {
-            let Some(tool) = self.pending_tools.get(&call_id).cloned() else {
+            let Some(tool) = self.tool_runtime.pending_tools.get(&call_id).cloned() else {
                 continue;
             };
             let mut error = ToolError {
@@ -611,9 +616,9 @@ impl Harness {
 
                 display: None,
             };
-            if self.tool_turn.is_backgrounded(&call_id) {
+            if self.tool_runtime.tool_turn.is_backgrounded(&call_id) {
                 error.message = extension_disconnected_background_tool_call_error_message(&call_id);
-                if self.tool_agents.contains_key(call_id.as_str()) {
+                if self.tool_runtime.tool_agents.contains_key(call_id.as_str()) {
                     self.handle_background_tool_error_inner(
                         Some(crate::harness::harness_connection_id()),
                         error,
@@ -639,7 +644,7 @@ impl Harness {
             // handling unregisters the dead provider first, then drains
             // the scheduler and completes turns after all interrupted calls
             // have been terminalized.
-            let owner = self.tool_agents.get(call_id.as_str()).cloned();
+            let owner = self.tool_runtime.tool_agents.get(call_id.as_str()).cloned();
             if let Some(cid) = owner.as_ref() {
                 self.publish_terminal_tool_error_with_cause(
                     Some(cid),
@@ -1037,7 +1042,7 @@ impl Harness {
     /// that does not have an owning agent. Agent-owned tool calls are tracked
     /// through the prompt/tool routing path instead.
     pub(super) fn track_extension_tool_request_metadata(&mut self, request: &ToolRequest) {
-        self.pending_tools.insert(
+        self.tool_runtime.pending_tools.insert(
             request.call_id.clone(),
             PendingTool {
                 name: request.tool_name.clone(),
@@ -1050,7 +1055,7 @@ impl Harness {
 
     /// Return loaded-agent correlation for one peer request routed internally.
     pub(crate) fn peer_internal_tool_agent(&self, call_id: &ToolCallId) -> Option<&AgentId> {
-        self.peer_internal_tool_agents.get(call_id)
+        self.tool_runtime.peer_internal_tool_agents.get(call_id)
     }
 
     pub(super) fn clear_prompt_tool_snapshot(&mut self, agent_prompt_id: &AgentPromptId) {
@@ -1065,36 +1070,51 @@ impl Harness {
     /// runtime metadata.
     pub(crate) fn clear_tool_call_tracking(&mut self, call_id: &str) {
         let owner = self
+            .tool_runtime
             .tool_agents
             .get(call_id)
-            .or_else(|| self.peer_internal_tool_agents.get(call_id))
+            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
             .cloned();
         if owner
             .as_ref()
             .and_then(|cid| self.agents.get(cid))
             .is_some_and(|agent| agent.persistence.is_ephemeral())
         {
-            self.completed_ephemeral_tool_calls.insert(call_id.into());
+            self.tool_runtime
+                .completed_ephemeral_tool_calls
+                .insert(call_id.into());
         }
-        self.completed_tool_calls.insert(call_id.into());
-        self.peer_tool_requests.remove(call_id);
-        self.peer_internal_tool_agents.remove(call_id);
+        self.tool_runtime
+            .completed_tool_calls
+            .insert(call_id.into());
+        self.tool_runtime.peer_tool_requests.remove(call_id);
+        self.tool_runtime.peer_internal_tool_agents.remove(call_id);
         if let Some(owner) = owner {
-            self.completed_tool_agents.insert(call_id.into(), owner);
+            self.tool_runtime
+                .completed_tool_agents
+                .insert(call_id.into(), owner);
         }
-        self.tool_agents.remove(call_id);
-        self.pending_tools.remove(call_id);
+        self.tool_runtime.tool_agents.remove(call_id);
+        self.tool_runtime.pending_tools.remove(call_id);
         self.cache_refresh_tool_window_calls.remove(call_id);
         if self.cache_refresh_tool_window_calls.is_empty() {
             let cancellations = self.provider_cache_residency.close_window();
             self.send_cache_refresh_cancellations(cancellations);
         }
-        self.pending_tool_providers.remove(call_id);
-        self.pending_terminal_observations.remove(call_id);
-        self.pending_wait_settlements.remove(call_id);
-        self.post_commit_runtime_only_tool_terminals.remove(call_id);
-        self.pending_background_completion_modes.remove(call_id);
-        self.pending_cancellation_observations.remove(call_id);
+        self.tool_runtime.pending_tool_providers.remove(call_id);
+        self.tool_runtime
+            .pending_terminal_observations
+            .remove(call_id);
+        self.tool_runtime.pending_wait_settlements.remove(call_id);
+        self.tool_runtime
+            .post_commit_runtime_only_tool_terminals
+            .remove(call_id);
+        self.tool_runtime
+            .pending_background_completion_modes
+            .remove(call_id);
+        self.tool_runtime
+            .pending_cancellation_observations
+            .remove(call_id);
         if let Some(prompt_id) = self.prompt_tool_call_prompts.remove(call_id)
             && !self
                 .prompt_tool_call_prompts
@@ -1110,7 +1130,7 @@ impl Harness {
         call_id: &ToolCallId,
         source_id: &tau_proto::ConnectionId,
     ) -> bool {
-        match self.pending_tool_providers.get(call_id) {
+        match self.tool_runtime.pending_tool_providers.get(call_id) {
             Some(provider_id) => provider_id == source_id,
             None if self.is_harness_owned_tool_call(call_id) => {
                 source_id == harness_connection_id()
@@ -1209,12 +1229,16 @@ impl Harness {
     }
 
     pub(super) fn is_harness_owned_tool_call(&self, call_id: &ToolCallId) -> bool {
-        self.tool_agents.contains_key(call_id)
-            && self.pending_tools.get(call_id).is_some_and(|tool| {
-                self.internal_tool_handlers
-                    .iter()
-                    .any(|handler| handler.handles(&tool.internal_name))
-            })
+        self.tool_runtime.tool_agents.contains_key(call_id)
+            && self
+                .tool_runtime
+                .pending_tools
+                .get(call_id)
+                .is_some_and(|tool| {
+                    self.internal_tool_handlers
+                        .iter()
+                        .any(|handler| handler.handles(&tool.internal_name))
+                })
     }
 
     // -----------------------------------------------------------------------

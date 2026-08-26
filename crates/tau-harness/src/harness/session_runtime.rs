@@ -799,20 +799,22 @@ impl Harness {
             }
             self.set_agent_turn_state(&cid, AgentTurnState::Idle);
         }
-        self.tool_turn.clear();
-        self.tool_agents.clear();
-        self.pending_tools.clear();
-        self.pending_declaration_observations.clear();
-        self.pending_terminal_observations.clear();
-        self.pending_wait_settlements.clear();
-        self.post_commit_runtime_only_tool_terminals.clear();
-        self.pending_cancellation_observations.clear();
-        self.peer_tool_requests.clear();
-        self.peer_internal_tool_agents.clear();
-        self.completed_tool_calls.clear();
-        self.completed_ephemeral_tool_calls.clear();
-        self.completed_tool_agents.clear();
-        self.pending_tool_providers.clear();
+        self.tool_runtime.tool_turn.clear();
+        self.tool_runtime.tool_agents.clear();
+        self.tool_runtime.pending_tools.clear();
+        self.tool_runtime.pending_declaration_observations.clear();
+        self.tool_runtime.pending_terminal_observations.clear();
+        self.tool_runtime.pending_wait_settlements.clear();
+        self.tool_runtime
+            .post_commit_runtime_only_tool_terminals
+            .clear();
+        self.tool_runtime.pending_cancellation_observations.clear();
+        self.tool_runtime.peer_tool_requests.clear();
+        self.tool_runtime.peer_internal_tool_agents.clear();
+        self.tool_runtime.completed_tool_calls.clear();
+        self.tool_runtime.completed_ephemeral_tool_calls.clear();
+        self.tool_runtime.completed_tool_agents.clear();
+        self.tool_runtime.pending_tool_providers.clear();
         self.completed_action_invocations
             .extend(self.pending_action_invocations.keys().cloned());
         self.pending_action_invocations.clear();
@@ -836,8 +838,10 @@ impl Harness {
         self.prompt_tool_specs.clear();
         self.prompt_tool_call_prompts.clear();
         self.shown_tool_failure_examples.clear();
-        self.suppressed_background_completion_prompts.clear();
-        self.background_completion_targets.clear();
+        self.tool_runtime
+            .suppressed_background_completion_prompts
+            .clear();
+        self.tool_runtime.background_completion_targets.clear();
         self.canceled_prompts.clear();
         self.pending_notices.restore_sessions.clear();
         self.pending_notices.restore_background_notices.clear();
@@ -1334,7 +1338,9 @@ impl Harness {
                     continue;
                 }
                 count += 1;
-                self.tool_agents.insert(call.call_id.clone(), cid.clone());
+                self.tool_runtime
+                    .tool_agents
+                    .insert(call.call_id.clone(), cid.clone());
                 let display = (call.name.as_str() == "wait")
                     .then(|| {
                         self.normalized_input_wait_timeout_minutes(&call.arguments)
@@ -1413,7 +1419,9 @@ impl Harness {
         for cid in self.restored_agent_ids(session_id) {
             for state in self.restored_background_tool_states_for_agent(&cid) {
                 let call_id = state.placeholder.call_id.clone();
-                self.tool_agents.insert(call_id.clone(), cid.clone());
+                self.tool_runtime
+                    .tool_agents
+                    .insert(call_id.clone(), cid.clone());
                 if let Some(call_ref) = state.call_ref {
                     self.record_wait_tool_call_ref(call_id.clone(), call_ref);
                 }
@@ -1489,7 +1497,9 @@ impl Harness {
                     continue;
                 }
                 count += 1;
-                self.tool_agents.insert(call.call_id.clone(), cid.clone());
+                self.tool_runtime
+                    .tool_agents
+                    .insert(call.call_id.clone(), cid.clone());
                 if let Some(call_ref) = call_refs.get(&call.call_id).copied() {
                     self.record_wait_tool_call_ref(call.call_id.clone(), call_ref);
                     self.observe_tool_terminal(
@@ -1508,10 +1518,12 @@ impl Harness {
 
                     display: None,
                 };
-                self.pending_background_completion_modes.insert(
-                    call.call_id.clone(),
-                    BackgroundCompletionPromptMode::DoNotQueue,
-                );
+                self.tool_runtime
+                    .pending_background_completion_modes
+                    .insert(
+                        call.call_id.clone(),
+                        BackgroundCompletionPromptMode::DoNotQueue,
+                    );
                 self.publish_terminal_background_error(
                     &cid,
                     Some(crate::harness::harness_connection_id()),

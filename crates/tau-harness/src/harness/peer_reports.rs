@@ -1270,9 +1270,10 @@ impl Harness {
                     );
                     return;
                 };
-                self.peer_internal_tool_agents
+                self.tool_runtime
+                    .peer_internal_tool_agents
                     .insert(request.call_id.clone(), cid.clone());
-                self.tool_turn.record_unqueued_in_flight(
+                self.tool_runtime.tool_turn.record_unqueued_in_flight(
                     cid.clone(),
                     request.call_id.clone(),
                     turn_categories,
@@ -1290,9 +1291,12 @@ impl Harness {
                         // Establish terminal-report authority before the selected
                         // tool can observe `tool.started` and immediately answer.
                         self.ensure_tool_started_subscription(provider_connection_id);
-                        self.pending_tool_providers
+                        self.tool_runtime
+                            .pending_tool_providers
                             .insert(request.call_id.clone(), provider_connection_id.clone());
-                        self.peer_tool_requests.insert(request.call_id.clone());
+                        self.tool_runtime
+                            .peer_tool_requests
+                            .insert(request.call_id.clone());
                     }
                 }
                 let event = Event::ToolStarted(route.invoke);
@@ -1624,19 +1628,29 @@ impl Harness {
                         && entry.state != ExtensionState::Disconnected
                 });
         let source_owns_route = self
+            .tool_runtime
             .pending_tool_providers
             .get(&progress.call_id)
             .is_some_and(|source| source == &extension.source);
         if !source_is_current
-            || !(self.tool_agents.contains_key(&progress.call_id)
-                || self.peer_tool_requests.contains(&progress.call_id))
+            || !(self
+                .tool_runtime
+                .tool_agents
+                .contains_key(&progress.call_id)
+                || self
+                    .tool_runtime
+                    .peer_tool_requests
+                    .contains(&progress.call_id))
             || !source_owns_route
-            || self.tool_turn.is_backgrounded(&progress.call_id)
+            || self
+                .tool_runtime
+                .tool_turn
+                .is_backgrounded(&progress.call_id)
         {
             return;
         }
         let mut progress = progress.clone();
-        if let Some(tool) = self.pending_tools.get(&progress.call_id) {
+        if let Some(tool) = self.tool_runtime.pending_tools.get(&progress.call_id) {
             progress.tool_name = tool.name.clone();
         }
         self.enqueue_publish(
@@ -1685,12 +1699,13 @@ impl Harness {
             _ => unreachable!("caller filters terminal tool reports"),
         };
         let source_owns_route = self
+            .tool_runtime
             .pending_tool_providers
             .get(call_id)
             .is_some_and(|source| source == &extension.source);
         if !source_is_current
-            || !(self.tool_agents.contains_key(call_id)
-                || self.peer_tool_requests.contains(call_id))
+            || !(self.tool_runtime.tool_agents.contains_key(call_id)
+                || self.tool_runtime.peer_tool_requests.contains(call_id))
             || !source_owns_route
         {
             return;
@@ -2231,7 +2246,7 @@ impl Harness {
         tool_name: ToolName,
         message: String,
     ) {
-        let owning_cid = self.tool_agents.get(&request.call_id).cloned();
+        let owning_cid = self.tool_runtime.tool_agents.get(&request.call_id).cloned();
         let rejected = ToolRejected {
             call_id: request.call_id.clone(),
             tool_name: tool_name.clone(),
@@ -2321,11 +2336,11 @@ impl Harness {
         if !self.validate_tool_event_source(&result.call_id, source_id) {
             return;
         }
-        if self.tool_turn.is_backgrounded(&result.call_id) {
+        if self.tool_runtime.tool_turn.is_backgrounded(&result.call_id) {
             self.handle_background_tool_result(crate::harness::harness_connection_id(), result);
-        } else if let Some(cid) = self.tool_agents.get(&result.call_id).cloned() {
+        } else if let Some(cid) = self.tool_runtime.tool_agents.get(&result.call_id).cloned() {
             let mut allows_provider_image = false;
-            if let Some(tool) = self.pending_tools.get(&result.call_id) {
+            if let Some(tool) = self.tool_runtime.pending_tools.get(&result.call_id) {
                 tool.restore_terminal_result_metadata(&mut result);
                 allows_provider_image = tool.allows_provider_image;
             }
@@ -2399,8 +2414,15 @@ impl Harness {
                 Some(crate::harness::harness_connection_id()),
                 result,
             );
-        } else if self.peer_tool_requests.contains(&result.call_id)
-            && let Some(tool) = self.pending_tools.get(&result.call_id).cloned()
+        } else if self
+            .tool_runtime
+            .peer_tool_requests
+            .contains(&result.call_id)
+            && let Some(tool) = self
+                .tool_runtime
+                .pending_tools
+                .get(&result.call_id)
+                .cloned()
         {
             result.tool_name = tool.name;
             result.tool_type = tool.tool_type;
@@ -2442,10 +2464,10 @@ impl Harness {
         if !self.validate_tool_event_source(&error.call_id, source_id) {
             return;
         }
-        if self.tool_turn.is_backgrounded(&error.call_id) {
+        if self.tool_runtime.tool_turn.is_backgrounded(&error.call_id) {
             self.handle_background_tool_error(Some(crate::harness::harness_connection_id()), error);
-        } else if let Some(cid) = self.tool_agents.get(&error.call_id).cloned() {
-            if let Some(tool) = self.pending_tools.get(&error.call_id) {
+        } else if let Some(cid) = self.tool_runtime.tool_agents.get(&error.call_id).cloned() {
+            if let Some(tool) = self.tool_runtime.pending_tools.get(&error.call_id) {
                 error.tool_name = tool.name.clone();
                 error.tool_type = tool.tool_type;
             }
@@ -2455,8 +2477,11 @@ impl Harness {
                 Some(crate::harness::harness_connection_id()),
                 error,
             );
-        } else if self.peer_tool_requests.contains(&error.call_id)
-            && let Some(tool) = self.pending_tools.get(&error.call_id).cloned()
+        } else if self
+            .tool_runtime
+            .peer_tool_requests
+            .contains(&error.call_id)
+            && let Some(tool) = self.tool_runtime.pending_tools.get(&error.call_id).cloned()
         {
             error.tool_name = tool.name;
             error.tool_type = tool.tool_type;
@@ -2481,19 +2506,29 @@ impl Harness {
         if !self.validate_tool_event_source(&cancelled.call_id, source_id) {
             return;
         }
-        if self.tool_turn.is_backgrounded(&cancelled.call_id) {
+        if self
+            .tool_runtime
+            .tool_turn
+            .is_backgrounded(&cancelled.call_id)
+        {
             self.handle_background_tool_cancelled(
                 crate::harness::harness_connection_id(),
                 cancelled,
             );
-        } else if let Some(cid) = self.tool_agents.get(&cancelled.call_id).cloned() {
+        } else if let Some(cid) = self
+            .tool_runtime
+            .tool_agents
+            .get(&cancelled.call_id)
+            .cloned()
+        {
             let call_id = cancelled.call_id.clone();
-            if let Some(tool) = self.pending_tools.get(&cancelled.call_id) {
+            if let Some(tool) = self.tool_runtime.pending_tools.get(&cancelled.call_id) {
                 cancelled.tool_name = tool.name.clone();
                 cancelled.tool_type = tool.tool_type;
             }
             if self.tool_terminal_has_open_durable_owner(&cid, &call_id) {
                 let cause = self
+                    .tool_runtime
                     .pending_cancellation_observations
                     .get(&call_id)
                     .copied()
@@ -2515,8 +2550,15 @@ impl Harness {
                 self.on_tool_call_complete(call_id.as_str());
                 self.clear_tool_call_tracking(call_id.as_str());
             }
-        } else if self.peer_tool_requests.contains(&cancelled.call_id)
-            && let Some(tool) = self.pending_tools.get(&cancelled.call_id).cloned()
+        } else if self
+            .tool_runtime
+            .peer_tool_requests
+            .contains(&cancelled.call_id)
+            && let Some(tool) = self
+                .tool_runtime
+                .pending_tools
+                .get(&cancelled.call_id)
+                .cloned()
         {
             cancelled.tool_name = tool.name;
             cancelled.tool_type = tool.tool_type;

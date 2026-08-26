@@ -45,8 +45,10 @@ fn image_result(call_id: &str, bytes: Vec<u8>) -> ToolResult {
 
 fn track_image_call(h: &mut Harness, cid: &crate::AgentId, call_id: &str, allowed: bool) {
     seed_assistant_tool_round(h, cid, &[(call_id, "read_image")]);
-    h.tool_agents.insert(call_id.into(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.into(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         call_id.into(),
         PendingTool {
             name: ToolName::new("read_image"),
@@ -55,7 +57,8 @@ fn track_image_call(h: &mut Harness, cid: &crate::AgentId, call_id: &str, allowe
             allows_provider_image: allowed,
         },
     );
-    h.pending_tool_providers
+    h.tool_runtime
+        .pending_tool_providers
         .insert(call_id.into(), crate::test_connection_id("shell"));
 }
 
@@ -124,8 +127,8 @@ fn typed_image_result_intake_fails_closed_before_success_and_retains_authorized_
             0,
             "rejection must happen before generic/provider success publication"
         );
-        assert!(!h.pending_tools.contains_key(call_id));
-        assert!(!h.tool_agents.contains_key(call_id));
+        assert!(!h.tool_runtime.pending_tools.contains_key(call_id));
+        assert!(!h.tool_runtime.tool_agents.contains_key(call_id));
     }
 
     let valid_bytes = encoded_test_png();
@@ -254,8 +257,10 @@ fn run_tool_result(
     let _ = h.ensure_agent_id_for_agent(cid);
     let name = ToolName::new(tool_name);
     seed_assistant_tool_round(h, cid, &[(call_id, tool_name)]);
-    h.tool_agents.insert(call_id_typed.clone(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id_typed.clone(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         call_id_typed.clone(),
         PendingTool {
             name: name.clone(),
@@ -264,7 +269,8 @@ fn run_tool_result(
             allows_provider_image: false,
         },
     );
-    h.pending_tool_providers
+    h.tool_runtime
+        .pending_tool_providers
         .insert(call_id_typed.clone(), crate::test_connection_id("shell"));
     h.handle_extension_event(
         "shell",
@@ -324,8 +330,10 @@ fn run_tool_error(
     let _ = h.ensure_agent_id_for_agent(cid);
     let name = ToolName::new(tool_name);
     seed_assistant_tool_round(h, cid, &[(call_id, tool_name)]);
-    h.tool_agents.insert(call_id_typed.clone(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id_typed.clone(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         call_id_typed.clone(),
         PendingTool {
             name: name.clone(),
@@ -334,7 +342,8 @@ fn run_tool_error(
             allows_provider_image: false,
         },
     );
-    h.pending_tool_providers
+    h.tool_runtime
+        .pending_tool_providers
         .insert(call_id_typed.clone(), crate::test_connection_id("shell"));
     h.handle_extension_event(
         "shell",

@@ -438,20 +438,28 @@ impl Harness {
         else {
             return;
         };
-        if self.tool_turn.any_in_flight_for(cid)
-            || self.tool_turn.backgrounded_calls_for(cid).is_empty()
+        if self.tool_runtime.tool_turn.any_in_flight_for(cid)
+            || self
+                .tool_runtime
+                .tool_turn
+                .backgrounded_calls_for(cid)
+                .is_empty()
         {
             return;
         }
 
         let remaining: std::collections::HashSet<ToolCallId> =
             remaining_calls.iter().cloned().collect();
-        let cancelled = self.tool_turn.cancel_queued_for(cid, &remaining);
+        let cancelled = self
+            .tool_runtime
+            .tool_turn
+            .cancel_queued_for(cid, &remaining);
         if cancelled.len() != remaining_calls.len() {
             return;
         }
         for (call_id, tool_name, tool_type) in cancelled {
-            self.tool_agents
+            self.tool_runtime
+                .tool_agents
                 .entry(call_id.clone())
                 .or_insert_with(|| cid.clone());
             self.publish_for_agent(

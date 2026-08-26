@@ -19,11 +19,12 @@ fn progress_report(call_id: &str, message: &str) -> Event {
 
 /// Seed the minimum routed-call ownership needed by progress validation.
 fn seed_routed_call(harness: &mut Harness, call_id: &str, source: &str) {
-    harness.tool_agents.insert(
+    harness.tool_runtime.tool_agents.insert(
         call_id.into(),
         tau_proto::AgentId::parse("agent").expect("valid agent id"),
     );
     harness
+        .tool_runtime
         .pending_tool_providers
         .insert(call_id.into(), crate::test_connection_id(source));
 }
@@ -163,6 +164,7 @@ fn dropped_progress_report_has_no_downstream_effect() {
     assert!(committed_progress(&harness, "call-dropped").is_empty());
     assert_eq!(
         harness
+            .tool_runtime
             .pending_tool_providers
             .get("call-dropped")
             .map(tau_proto::ConnectionId::as_str),
@@ -182,7 +184,7 @@ fn progress_report_without_exact_route_commits_without_canonical_fact() {
         "configured-tool",
         tau_proto::ClientKind::Tool,
     );
-    harness.tool_agents.insert(
+    harness.tool_runtime.tool_agents.insert(
         "call-unrouted".into(),
         tau_proto::AgentId::parse("agent").expect("valid agent id"),
     );
@@ -298,6 +300,7 @@ fn parked_stale_generation_cannot_publish_canonical_progress() {
     ));
     assert_eq!(
         harness
+            .tool_runtime
             .pending_tool_providers
             .get("call-stale")
             .map(tau_proto::ConnectionId::as_str),

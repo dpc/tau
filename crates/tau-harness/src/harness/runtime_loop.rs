@@ -528,7 +528,7 @@ impl Harness {
             // Drain one earliest deadline cohort at a time. Supplying that
             // cohort's deadline, rather than `now`, preserves deterministic
             // ordering when the event loop wakes after several classes are due.
-            let background = self.tool_turn.next_background_deadline();
+            let background = self.tool_runtime.tool_turn.next_background_deadline();
             let input = self.next_input_wait_deadline();
             let work_wait = self.next_work_wait_threshold_deadline();
             let extension = self.next_extension_deadline();
@@ -570,7 +570,7 @@ impl Harness {
 
     pub(super) fn next_runtime_deadline(&self) -> Option<Instant> {
         [
-            self.tool_turn.next_background_deadline(),
+            self.tool_runtime.tool_turn.next_background_deadline(),
             self.next_input_wait_deadline(),
             self.next_work_wait_threshold_deadline(),
             self.next_extension_deadline(),

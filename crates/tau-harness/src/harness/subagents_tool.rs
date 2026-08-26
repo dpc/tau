@@ -471,7 +471,7 @@ impl Harness {
 
     /// Reset retained wait correlation before dispatching a reused call ID.
     pub(crate) fn record_wait_tool_request(&mut self, call_id: &ToolCallId) {
-        if let Some(tool) = self.pending_tools.get(call_id) {
+        if let Some(tool) = self.tool_runtime.pending_tools.get(call_id) {
             let Some(owner) = self.wait_owner_for_call(call_id) else {
                 return;
             };
@@ -621,17 +621,23 @@ impl Harness {
     }
 
     fn wait_owner_for_call(&self, call_id: &ToolCallId) -> Option<AgentId> {
-        self.tool_agents
+        self.tool_runtime
+            .tool_agents
             .get(call_id)
-            .or_else(|| self.peer_internal_tool_agents.get(call_id))
-            .or_else(|| self.background_completion_targets.get(call_id))
+            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
+            .or_else(|| self.tool_runtime.background_completion_targets.get(call_id))
             .cloned()
     }
 
     /// Settle runtime accounting and clear one harness-owned internal call.
     pub(crate) fn finish_harness_owned_tool_tracking(&mut self, call_id: &ToolCallId) {
-        if let Some(cid) = self.peer_internal_tool_agents.get(call_id).cloned() {
-            self.tool_turn.mark_complete(call_id);
+        if let Some(cid) = self
+            .tool_runtime
+            .peer_internal_tool_agents
+            .get(call_id)
+            .cloned()
+        {
+            self.tool_runtime.tool_turn.mark_complete(call_id);
             if let Some(agent) = self.agents.get_mut(&cid) {
                 agent.tools_in_flight = agent.tools_in_flight.saturating_sub(1);
             }
@@ -652,7 +658,10 @@ impl Harness {
         cid: &'a AgentId,
         call_id: &ToolCallId,
     ) -> Option<&'a AgentId> {
-        (!self.peer_internal_tool_agents.contains_key(call_id)
+        (!self
+            .tool_runtime
+            .peer_internal_tool_agents
+            .contains_key(call_id)
             && self.tool_terminal_has_open_durable_owner(cid, call_id))
         .then_some(cid)
     }
@@ -2690,13 +2699,18 @@ impl Harness {
         call: &AgentToolCall,
         visible_tool_name: &ToolName,
     ) {
-        if self.tool_agents.contains_key(&call.id)
-            || self.peer_internal_tool_agents.contains_key(&call.id)
+        if self.tool_runtime.tool_agents.contains_key(&call.id)
+            || self
+                .tool_runtime
+                .peer_internal_tool_agents
+                .contains_key(&call.id)
         {
             return;
         }
-        self.tool_agents.insert(call.id.clone(), cid.clone());
-        self.pending_tools.insert(
+        self.tool_runtime
+            .tool_agents
+            .insert(call.id.clone(), cid.clone());
+        self.tool_runtime.pending_tools.insert(
             call.id.clone(),
             crate::harness::PendingTool {
                 name: visible_tool_name.clone(),
@@ -2806,14 +2820,15 @@ impl Harness {
     ) {
         let call_id = result.call_id.clone();
         let Some(owner_cid) = self
+            .tool_runtime
             .tool_agents
             .get(&call_id)
-            .or_else(|| self.peer_internal_tool_agents.get(&call_id))
+            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(&call_id))
             .cloned()
         else {
             return;
         };
-        if self.tool_turn.is_backgrounded(&call_id) {
+        if self.tool_runtime.tool_turn.is_backgrounded(&call_id) {
             self.handle_background_tool_result_inner(
                 crate::harness::harness_connection_id(),
                 result,
@@ -2842,14 +2857,15 @@ impl Harness {
     ) {
         let call_id = error.call_id.clone();
         let Some(owner_cid) = self
+            .tool_runtime
             .tool_agents
             .get(&call_id)
-            .or_else(|| self.peer_internal_tool_agents.get(&call_id))
+            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(&call_id))
             .cloned()
         else {
             return;
         };
-        if self.tool_turn.is_backgrounded(&call_id) {
+        if self.tool_runtime.tool_turn.is_backgrounded(&call_id) {
             self.handle_background_tool_error_inner(
                 Some(crate::harness::harness_connection_id()),
                 error,
@@ -2869,9 +2885,14 @@ impl Harness {
                 settlement.outcome == tau_proto::ToolWaitOutcome::TimedOut
             }) {
                 let owner = self
+                    .tool_runtime
                     .tool_agents
                     .get(&reply.wait_call_id)
-                    .or_else(|| self.peer_internal_tool_agents.get(&reply.wait_call_id))
+                    .or_else(|| {
+                        self.tool_runtime
+                            .peer_internal_tool_agents
+                            .get(&reply.wait_call_id)
+                    })
                     .cloned();
                 if owner
                     .and_then(|owner| self.agents.get_mut(&owner))
@@ -2890,9 +2911,14 @@ impl Harness {
             }
             let wait_call_id = reply.wait_call_id.clone();
             let Some(cid) = self
+                .tool_runtime
                 .tool_agents
                 .get(&wait_call_id)
-                .or_else(|| self.peer_internal_tool_agents.get(&wait_call_id))
+                .or_else(|| {
+                    self.tool_runtime
+                        .peer_internal_tool_agents
+                        .get(&wait_call_id)
+                })
                 .cloned()
             else {
                 continue;
@@ -2908,7 +2934,8 @@ impl Harness {
             if wait_terminal.is_some()
                 && let Some(settlement) = reply.settlement
             {
-                self.pending_wait_settlements
+                self.tool_runtime
+                    .pending_wait_settlements
                     .insert(wait_call_id.clone(), settlement);
             }
             match reply.kind {

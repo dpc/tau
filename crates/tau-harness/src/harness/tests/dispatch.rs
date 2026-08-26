@@ -200,7 +200,7 @@ fn agent_turn_activity_reduces_provider_tools_and_timer_in_order() {
     );
 
     let wait_id = ToolCallId::from("wait");
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         cid.clone(),
         wait_id.clone(),
         ToolTurnCategories::from_tags(&[tau_proto::ToolTag::new(tau_proto::TURN_WAIT_TOOL_TAG)]),
@@ -210,7 +210,7 @@ fn agent_turn_activity_reduces_provider_tools_and_timer_in_order() {
         tau_proto::AgentTurnActivity::Waiting
     );
     let fetch_id = ToolCallId::from("fetch");
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         cid.clone(),
         fetch_id.clone(),
         ToolTurnCategories::from_tags(&[tau_proto::ToolTag::new(
@@ -222,7 +222,7 @@ fn agent_turn_activity_reduces_provider_tools_and_timer_in_order() {
         tau_proto::AgentTurnActivity::Fetching
     );
     let manipulator_id = ToolCallId::from("manipulator");
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         cid.clone(),
         manipulator_id.clone(),
         ToolTurnCategories::default(),
@@ -484,7 +484,7 @@ fn completed_call_clears_all_runtime_observation_correlation_before_id_reuse() {
     let mut harness = quiet_provider_harness(td.path()).expect("harness");
     let call_id = ToolCallId::from("reused-call");
     let observation = tau_proto::ObservationId::from_bytes([7; 16]);
-    harness.pending_terminal_observations.insert(
+    harness.tool_runtime.pending_terminal_observations.insert(
         call_id.clone(),
         super::super::PendingTerminalObservation {
             observation_id: observation,
@@ -492,9 +492,10 @@ fn completed_call_clears_all_runtime_observation_correlation_before_id_reuse() {
         },
     );
     harness
+        .tool_runtime
         .pending_cancellation_observations
         .insert(call_id.clone(), observation);
-    harness.pending_wait_settlements.insert(
+    harness.tool_runtime.pending_wait_settlements.insert(
         call_id.clone(),
         path_crate_harness::subagents_tool::PendingWaitSettlement {
             wait_observation: observation,
@@ -509,13 +510,24 @@ fn completed_call_clears_all_runtime_observation_correlation_before_id_reuse() {
 
     harness.clear_tool_call_tracking(call_id.as_str());
 
-    assert!(!harness.pending_terminal_observations.contains_key(&call_id));
     assert!(
         !harness
+            .tool_runtime
+            .pending_terminal_observations
+            .contains_key(&call_id)
+    );
+    assert!(
+        !harness
+            .tool_runtime
             .pending_cancellation_observations
             .contains_key(&call_id)
     );
-    assert!(!harness.pending_wait_settlements.contains_key(&call_id));
+    assert!(
+        !harness
+            .tool_runtime
+            .pending_wait_settlements
+            .contains_key(&call_id)
+    );
 }
 
 /// Timer-origin internal prompts must retain their approved typed activation
@@ -3700,7 +3712,9 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
         let mut h = echo_harness(&sp).expect("start");
         h.selected_model = Some("test/model".into());
         let parent = ensure_test_user_agent(&mut h);
-        h.tool_agents.insert("delegate-call".into(), parent);
+        h.tool_runtime
+            .tool_agents
+            .insert("delegate-call".into(), parent);
         h.handle_start_agent_request(
             &crate::test_connection_id(HARNESS_CONNECTION_ID),
             StartAgentRequest {
@@ -4490,7 +4504,8 @@ pub(super) fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (Te
     })
     .expect("tool call routed");
     assert_eq!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .get(call_id)
             .map(|provider_id| provider_id.as_str()),
         Some("conn-owner")
@@ -5504,6 +5519,7 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
 
     assert!(h.pending_intercept.is_some());
     let parked_call_id = h
+        .tool_runtime
         .tool_agents
         .iter()
         .find_map(|(call_id, owner)| (owner == &side_cid).then(|| call_id.clone()))
@@ -5511,7 +5527,11 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
     let parked_side_agent = h.agents.get(&side_cid).expect("side agent remains parked");
     assert_eq!(parked_side_agent.tools_in_flight, 1);
     assert!(parked_side_agent.in_flight_prompt.is_none());
-    assert!(!h.completed_tool_calls.contains(&parked_call_id));
+    assert!(
+        !h.tool_runtime
+            .completed_tool_calls
+            .contains(&parked_call_id)
+    );
 
     h.handle_extension_event(
         "side-invalid-terminal-interceptor",
@@ -5532,7 +5552,11 @@ fn rejected_side_agent_tool_call_preserves_dispatched_continuation() {
         AgentTurnState::AgentThinking { .. }
     ));
     assert_eq!(side_agent.tools_in_flight, 0);
-    assert!(h.completed_tool_calls.contains(&parked_call_id));
+    assert!(
+        h.tool_runtime
+            .completed_tool_calls
+            .contains(&parked_call_id)
+    );
     assert_eq!(
         event_log_events(&h)
             .into_iter()
@@ -6091,8 +6115,10 @@ fn loop_guard_resets_on_successful_background_tool_result() {
         &cid,
         &loop_guard_tool_error("failed-call", "read", "missing file"),
     );
-    h.tool_agents.insert("bg-call".into(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert("bg-call".into(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         "bg-call".into(),
         PendingTool {
             name: ToolName::new("read"),
@@ -6586,8 +6612,8 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
         tool_invoke_call_ids(&tool_events),
         vec!["running-call".to_owned(), "queued-call".to_owned()]
     );
-    assert_eq!(h.tool_turn.pending_len(), 0);
-    h.tool_turn.push(
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
+    h.tool_runtime.tool_turn.push(
         cid.clone(),
         AgentToolCall {
             call_ref: None,
@@ -6612,7 +6638,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
 
     h.handle_disconnect(&crate::test_connection_id("conn-dead-tool"));
 
-    assert_eq!(h.tool_turn.pending_len(), 1);
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 1);
     h.handle_extension_event(
         "disconnect-terminal-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -6621,7 +6647,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     )
     .expect("commit first disconnect terminal");
     assert_eq!(
-        h.tool_turn.pending_len(),
+        h.tool_runtime.tool_turn.pending_len(),
         1,
         "first foreground commit must not drain work before the batch completes"
     );
@@ -6633,7 +6659,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     )
     .expect("commit second disconnect terminal");
     assert_eq!(
-        h.tool_turn.pending_len(),
+        h.tool_runtime.tool_turn.pending_len(),
         0,
         "queued work drains only after the full disconnect batch commits"
     );
@@ -6652,9 +6678,17 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
         vec!["running-call".to_owned(), "queued-call".to_owned()]
     );
     assert!(h.registry.providers_for("dead_slow").is_empty());
-    assert!(h.tool_turn.is_empty());
-    assert!(!h.pending_tool_providers.contains_key("running-call"));
-    assert!(!h.pending_tool_providers.contains_key("queued-call"));
+    assert!(h.tool_runtime.tool_turn.is_empty());
+    assert!(
+        !h.tool_runtime
+            .pending_tool_providers
+            .contains_key("running-call")
+    );
+    assert!(
+        !h.tool_runtime
+            .pending_tool_providers
+            .contains_key("queued-call")
+    );
 
     let running: ToolCallId = "running-call".into();
     let queued: ToolCallId = "queued-call".into();
@@ -6681,14 +6715,14 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
 #[test]
 fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
     let (_td, mut h) = setup_routed_test_tool_call("disconnect-fault", "owned_tool");
-    let cid = h.tool_agents["disconnect-fault"].clone();
+    let cid = h.tool_runtime.tool_agents["disconnect-fault"].clone();
     let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     let live_events = connect_test_tool(&mut h, "conn-live-after-fault");
     h.registry.register(
         &crate::test_connection_id("conn-live-after-fault"),
         shared_test_tool_spec("live_after_fault"),
     );
-    h.tool_turn.push(
+    h.tool_runtime.tool_turn.push(
         cid,
         AgentToolCall {
             call_ref: None,
@@ -6710,7 +6744,7 @@ fn disconnect_append_fault_retains_batch_without_draining_queued_work() {
     std::fs::create_dir(&journal).expect("block journal");
     h.handle_disconnect(&crate::test_connection_id("conn-owner"));
 
-    assert_eq!(h.tool_turn.pending_len(), 1);
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 1);
     assert!(tool_invoke_call_ids(&live_events).is_empty());
     assert!(!h.disconnect_terminal_batch_pending.is_empty());
     assert!(h.disconnect_terminal_batch_completed.is_empty());
@@ -7093,8 +7127,12 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
         vec!["bg-update-running".to_owned(), "queued-update".to_owned()]
     );
     assert_eq!(background_placeholder_count(&h, "bg-update-running"), 1);
-    assert!(h.tool_turn.is_backgrounded(&"bg-update-running".into()));
-    assert_eq!(h.tool_turn.pending_len(), 0);
+    assert!(
+        h.tool_runtime
+            .tool_turn
+            .is_backgrounded(&"bg-update-running".into())
+    );
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-bg-result-drain"),
@@ -7111,10 +7149,22 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
         vec!["bg-update-running".to_owned(), "queued-update".to_owned()]
     );
     assert_eq!(background_result_count(&h, "bg-update-running"), 1);
-    assert!(!h.tool_turn.is_backgrounded(&"bg-update-running".into()));
-    assert_eq!(h.tool_turn.pending_len(), 0);
-    assert!(!h.pending_tool_providers.contains_key("bg-update-running"));
-    assert!(h.pending_tool_providers.contains_key("queued-update"));
+    assert!(
+        !h.tool_runtime
+            .tool_turn
+            .is_backgrounded(&"bg-update-running".into())
+    );
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
+    assert!(
+        !h.tool_runtime
+            .pending_tool_providers
+            .contains_key("bg-update-running")
+    );
+    assert!(
+        h.tool_runtime
+            .pending_tool_providers
+            .contains_key("queued-update")
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -7201,8 +7251,12 @@ fn background_error_clears_actual_running_call() {
         ]
     );
     assert_eq!(background_placeholder_count(&h, "bg-exclusive-running"), 1);
-    assert!(h.tool_turn.is_backgrounded(&"bg-exclusive-running".into()));
-    assert_eq!(h.tool_turn.pending_len(), 0);
+    assert!(
+        h.tool_runtime
+            .tool_turn
+            .is_backgrounded(&"bg-exclusive-running".into())
+    );
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-bg-error-drain"),
@@ -7222,14 +7276,20 @@ fn background_error_clears_actual_running_call() {
         ]
     );
     assert_eq!(background_error_count(&h, "bg-exclusive-running"), 1);
-    assert!(!h.tool_turn.is_backgrounded(&"bg-exclusive-running".into()));
-    assert_eq!(h.tool_turn.pending_len(), 0);
     assert!(
-        !h.pending_tool_providers
+        !h.tool_runtime
+            .tool_turn
+            .is_backgrounded(&"bg-exclusive-running".into())
+    );
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
+    assert!(
+        !h.tool_runtime
+            .pending_tool_providers
             .contains_key("bg-exclusive-running")
     );
     assert!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .contains_key("queued-update-after-error")
     );
 
@@ -7322,10 +7382,11 @@ fn background_cancel_clears_actual_running_call() {
         1
     );
     assert!(
-        h.tool_turn
+        h.tool_runtime
+            .tool_turn
             .is_backgrounded(&"bg-exclusive-cancel-running".into())
     );
-    assert_eq!(h.tool_turn.pending_len(), 0);
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-bg-cancel-drain"),
@@ -7347,16 +7408,19 @@ fn background_cancel_clears_actual_running_call() {
         ]
     );
     assert!(
-        !h.tool_turn
+        !h.tool_runtime
+            .tool_turn
             .is_backgrounded(&"bg-exclusive-cancel-running".into())
     );
-    assert_eq!(h.tool_turn.pending_len(), 0);
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
     assert!(
-        !h.pending_tool_providers
+        !h.tool_runtime
+            .pending_tool_providers
             .contains_key("bg-exclusive-cancel-running")
     );
     assert!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .contains_key("queued-update-after-cancel")
     );
     assert!(!event_log_contains_any_source(&h, |event| matches!(
@@ -7371,7 +7435,8 @@ fn background_cancel_clears_actual_running_call() {
                 && error.message == "Tool cancelled"
     )));
     assert!(
-        h.background_completion_targets
+        h.tool_runtime
+            .background_completion_targets
             .contains_key("bg-exclusive-cancel-running")
     );
     assert!(!event_log_contains_any_source(&h, |event| matches!(
@@ -7463,13 +7528,15 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
     .expect("tool response");
 
     assert_eq!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .get("b-bg-shared")
             .map(|provider_id| provider_id.as_str()),
         Some("conn-bg-disconnect-batch")
     );
     assert_eq!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .get("a-bg-update")
             .map(|provider_id| provider_id.as_str()),
         Some("conn-bg-disconnect-batch")
@@ -7478,9 +7545,17 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
         tool_invoke_call_ids(&live_events),
         vec!["z-queued-update".to_owned()]
     );
-    assert_eq!(h.tool_turn.pending_len(), 0);
-    assert!(h.tool_turn.is_backgrounded(&"a-bg-update".into()));
-    assert!(h.tool_turn.is_backgrounded(&"b-bg-shared".into()));
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
+    assert!(
+        h.tool_runtime
+            .tool_turn
+            .is_backgrounded(&"a-bg-update".into())
+    );
+    assert!(
+        h.tool_runtime
+            .tool_turn
+            .is_backgrounded(&"b-bg-shared".into())
+    );
 
     h.handle_disconnect(&crate::test_connection_id("conn-bg-disconnect-batch"));
 
@@ -7490,10 +7565,19 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
     );
     assert_eq!(background_error_count(&h, "a-bg-update"), 1);
     assert_eq!(background_error_count(&h, "b-bg-shared"), 1);
-    assert!(!h.pending_tool_providers.contains_key("a-bg-update"));
-    assert!(!h.pending_tool_providers.contains_key("b-bg-shared"));
+    assert!(
+        !h.tool_runtime
+            .pending_tool_providers
+            .contains_key("a-bg-update")
+    );
+    assert!(
+        !h.tool_runtime
+            .pending_tool_providers
+            .contains_key("b-bg-shared")
+    );
     assert_eq!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .get("z-queued-update")
             .map(|provider_id| provider_id.as_str()),
         Some("conn-bg-disconnect-live")
@@ -7699,7 +7783,8 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
         ]
     );
     assert!(
-        h.tool_turn
+        h.tool_runtime
+            .tool_turn
             .is_backgrounded(&"b-background-disconnect".into())
     );
     assert!(matches!(
@@ -7790,7 +7875,7 @@ fn background_placeholder_repairs_stale_foreground_projection() {
     ))
     .expect("dispatch tool");
     let call_id: ToolCallId = "background-repair-call".into();
-    assert!(h.tool_turn.begin_backgrounding(&call_id));
+    assert!(h.tool_runtime.tool_turn.begin_backgrounding(&call_id));
     h.observe_tool_backgrounded(&call_id);
     let AgentTurnState::ToolsRunning { remaining_calls } =
         &mut h.agents.get_mut(&cid).expect("agent").turn_state
@@ -7838,9 +7923,10 @@ fn provider_owner_validation_rejects_wrong_tool_result() {
     )
     .expect("wrong result ignored");
 
-    assert!(h.tool_agents.contains_key("owner-result-call"));
+    assert!(h.tool_runtime.tool_agents.contains_key("owner-result-call"));
     assert_eq!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .get("owner-result-call")
             .map(|provider_id| provider_id.as_str()),
         Some("conn-owner")
@@ -7860,8 +7946,12 @@ fn provider_owner_validation_rejects_wrong_tool_result() {
     )
     .expect("owner result accepted");
 
-    assert!(!h.tool_agents.contains_key("owner-result-call"));
-    assert!(!h.pending_tool_providers.contains_key("owner-result-call"));
+    assert!(!h.tool_runtime.tool_agents.contains_key("owner-result-call"));
+    assert!(
+        !h.tool_runtime
+            .pending_tool_providers
+            .contains_key("owner-result-call")
+    );
     assert!(event_log_contains(
         &h,
         HARNESS_CONNECTION_ID,
@@ -7892,9 +7982,10 @@ fn provider_owner_validation_rejects_wrong_tool_error() {
     )
     .expect("wrong error ignored");
 
-    assert!(h.tool_agents.contains_key("owner-error-call"));
+    assert!(h.tool_runtime.tool_agents.contains_key("owner-error-call"));
     assert_eq!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .get("owner-error-call")
             .map(|provider_id| provider_id.as_str()),
         Some("conn-owner")
@@ -7910,8 +8001,12 @@ fn provider_owner_validation_rejects_wrong_tool_error() {
     )
     .expect("owner error accepted");
 
-    assert!(!h.tool_agents.contains_key("owner-error-call"));
-    assert!(!h.pending_tool_providers.contains_key("owner-error-call"));
+    assert!(!h.tool_runtime.tool_agents.contains_key("owner-error-call"));
+    assert!(
+        !h.tool_runtime
+            .pending_tool_providers
+            .contains_key("owner-error-call")
+    );
     assert!(event_log_contains(
         &h,
         HARNESS_CONNECTION_ID,
@@ -7947,7 +8042,11 @@ fn provider_owner_validation_rejects_wrong_tool_progress() {
             if progress.call_id.as_str() == "owner-progress-call"
                 && progress.message.as_deref() == Some("spoofed progress")
     )));
-    assert!(h.tool_agents.contains_key("owner-progress-call"));
+    assert!(
+        h.tool_runtime
+            .tool_agents
+            .contains_key("owner-progress-call")
+    );
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-owner"),
@@ -7991,7 +8090,11 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
     )
     .expect("wrong cancellation ignored");
 
-    assert!(h.tool_agents.contains_key("owner-cancelled-call"));
+    assert!(
+        h.tool_runtime
+            .tool_agents
+            .contains_key("owner-cancelled-call")
+    );
     assert!(event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
         Event::ToolCancelledReported(cancelled)
@@ -8008,7 +8111,11 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
     )
     .expect("owner result accepted");
 
-    assert!(!h.tool_agents.contains_key("owner-cancelled-call"));
+    assert!(
+        !h.tool_runtime
+            .tool_agents
+            .contains_key("owner-cancelled-call")
+    );
     assert!(event_log_contains(
         &h,
         HARNESS_CONNECTION_ID,
@@ -8043,7 +8150,11 @@ fn provider_owner_validation_rejects_external_background_result() {
     )
     .expect("wrong background result ignored");
 
-    assert!(h.tool_agents.contains_key("owner-background-call"));
+    assert!(
+        h.tool_runtime
+            .tool_agents
+            .contains_key("owner-background-call")
+    );
     assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
         Event::ToolBackgroundResult(result) if result.call_id.as_str() == "owner-background-call"
@@ -8071,7 +8182,11 @@ fn provider_owner_validation_rejects_external_background_error() {
     )
     .expect("wrong background error ignored");
 
-    assert!(h.tool_agents.contains_key("owner-background-error-call"));
+    assert!(
+        h.tool_runtime
+            .tool_agents
+            .contains_key("owner-background-error-call")
+    );
     assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
         Event::ToolBackgroundError(error)
@@ -8125,7 +8240,11 @@ fn provider_owner_validation_rejects_tool_event_message_emit() {
     )
     .expect("emitted cancellation ignored");
 
-    assert!(h.tool_agents.contains_key("emit-cancelled-call"));
+    assert!(
+        h.tool_runtime
+            .tool_agents
+            .contains_key("emit-cancelled-call")
+    );
     assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
         Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "emit-cancelled-call"
@@ -8193,7 +8312,11 @@ fn provider_owner_validation_rejects_late_tool_progress_after_completion() {
         )),
     )
     .expect("owner result accepted");
-    assert!(!h.tool_agents.contains_key("late-progress-call"));
+    assert!(
+        !h.tool_runtime
+            .tool_agents
+            .contains_key("late-progress-call")
+    );
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-owner"),
@@ -8302,8 +8425,10 @@ fn cancel_request_api_rejects_non_owner_conversation() {
     let attacker = AgentId::parse("attacker").expect("attacker id");
     let target: ToolCallId = "owned-running-call".into();
 
-    h.tool_agents.insert(target.clone(), owner.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(target.clone(), owner.clone());
+    h.tool_runtime.pending_tools.insert(
         target.clone(),
         PendingTool {
             name: ToolName::new("slow_tool"),
@@ -8347,8 +8472,10 @@ fn completed_tool_call_lookup_is_owner_scoped() {
     let attacker = AgentId::parse("attacker").expect("attacker id");
     let target: ToolCallId = "owned-completed-call".into();
 
-    h.tool_agents.insert(target.clone(), owner.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(target.clone(), owner.clone());
+    h.tool_runtime.pending_tools.insert(
         target.clone(),
         PendingTool {
             name: ToolName::new("slow_tool"),
@@ -8425,7 +8552,7 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
 
     let call_id: ToolCallId = "cancel-bg-call".into();
     assert_eq!(background_placeholder_count(&h, call_id.as_str()), 1);
-    assert!(h.tool_turn.is_backgrounded(&call_id));
+    assert!(h.tool_runtime.tool_turn.is_backgrounded(&call_id));
 
     h.cancel_remaining_tool_calls(
         &cid,
@@ -8450,9 +8577,9 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
         event,
         Event::HarnessNotice(notice) if notice.kind == tau_proto::notice_kind::HARNESS_FAILURE
     )));
-    assert!(!h.tool_turn.is_backgrounded(&call_id));
-    assert!(!h.pending_tool_providers.contains_key(&call_id));
-    assert!(!h.tool_agents.contains_key(&call_id));
+    assert!(!h.tool_runtime.tool_turn.is_backgrounded(&call_id));
+    assert!(!h.tool_runtime.pending_tool_providers.contains_key(&call_id));
+    assert!(!h.tool_runtime.tool_agents.contains_key(&call_id));
     assert!(
         h.agents[&cid].pending_prompts.iter().any(|prompt| {
             prompt.text == background_completion_prompt(&call_id) && prompt.is_internal()
@@ -8478,7 +8605,7 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
     publish_test_tool_declaration(&mut h, &cid, "live-cancel-bg-call");
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     let call_id: ToolCallId = "live-cancel-bg-call".into();
-    h.pending_tools.insert(
+    h.tool_runtime.pending_tools.insert(
         call_id.clone(),
         PendingTool {
             name: ToolName::new("live_cancel_bg_tool"),
@@ -8487,14 +8614,16 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
             allows_provider_image: false,
         },
     );
-    h.tool_agents.insert(call_id.clone(), cid.clone());
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         cid.clone(),
         call_id.clone(),
         ToolTurnCategories::default(),
     );
-    assert!(h.tool_turn.begin_backgrounding(&call_id));
-    assert!(h.tool_turn.mark_backgrounded(&call_id));
+    assert!(h.tool_runtime.tool_turn.begin_backgrounding(&call_id));
+    assert!(h.tool_runtime.tool_turn.mark_backgrounded(&call_id));
     h.publish_synthetic_background_result(&call_id);
     seed_tools_running(&mut h, &cid, vec![call_id.clone()]);
     h.agents
@@ -8573,9 +8702,9 @@ fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
             .all(|prompt| prompt.text != completion_prompt),
         "follow-up user prompt should consume the passive background notice"
     );
-    assert!(!h.tool_turn.is_backgrounded(&call_id));
-    assert!(!h.pending_tools.contains_key(&call_id));
-    assert!(!h.tool_agents.contains_key(&call_id));
+    assert!(!h.tool_runtime.tool_turn.is_backgrounded(&call_id));
+    assert!(!h.tool_runtime.pending_tools.contains_key(&call_id));
+    assert!(!h.tool_runtime.tool_agents.contains_key(&call_id));
 
     h.shutdown().expect("shutdown");
 }
@@ -8603,7 +8732,7 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
         .push_back(PendingPrompt::user("other agent prompt".to_owned()));
 
     let call_id: ToolCallId = "live-cancel-bg-with-other-agent".into();
-    h.pending_tools.insert(
+    h.tool_runtime.pending_tools.insert(
         call_id.clone(),
         PendingTool {
             name: ToolName::new("live_cancel_bg_tool"),
@@ -8612,14 +8741,16 @@ fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
             allows_provider_image: false,
         },
     );
-    h.tool_agents.insert(call_id.clone(), cancel_cid.clone());
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cancel_cid.clone());
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         cancel_cid.clone(),
         call_id.clone(),
         ToolTurnCategories::default(),
     );
-    assert!(h.tool_turn.begin_backgrounding(&call_id));
-    assert!(h.tool_turn.mark_backgrounded(&call_id));
+    assert!(h.tool_runtime.tool_turn.begin_backgrounding(&call_id));
+    assert!(h.tool_runtime.tool_turn.mark_backgrounded(&call_id));
     h.publish_synthetic_background_result(&call_id);
     seed_tools_running(&mut h, &cancel_cid, vec![call_id.clone()]);
 
@@ -8726,7 +8857,7 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
     })
     .expect("mixed tool turn starts");
 
-    assert!(h.tool_turn.is_backgrounded(&bg_call_id));
+    assert!(h.tool_runtime.tool_turn.is_backgrounded(&bg_call_id));
     assert!(matches!(
         h.agents[&cid].turn_state,
         AgentTurnState::ToolsRunning { .. }
@@ -8758,9 +8889,9 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
         }),
         "backgrounded sibling should receive a passive completion notice"
     );
-    assert!(!h.tool_turn.is_backgrounded(&bg_call_id));
-    assert!(!h.pending_tools.contains_key(&bg_call_id));
-    assert!(!h.pending_tools.contains_key(&fg_call_id));
+    assert!(!h.tool_runtime.tool_turn.is_backgrounded(&bg_call_id));
+    assert!(!h.tool_runtime.pending_tools.contains_key(&bg_call_id));
+    assert!(!h.tool_runtime.pending_tools.contains_key(&fg_call_id));
 
     h.shutdown().expect("shutdown");
 }
@@ -8896,7 +9027,7 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
     })
     .expect("builtin agent_start dispatched");
     assert_eq!(background_placeholder_count(&h, call_id.as_str()), 1);
-    assert!(h.tool_turn.is_backgrounded(&call_id));
+    assert!(h.tool_runtime.tool_turn.is_backgrounded(&call_id));
 
     let query_id = format!("test-agent-start-{call_id}");
     let side_cid = ext_query_cid(&h, &query_id).expect("side conversation");
@@ -8925,9 +9056,9 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
         event,
         Event::HarnessNotice(notice) if notice.kind == tau_proto::notice_kind::HARNESS_FAILURE
     )));
-    assert!(!h.tool_turn.is_backgrounded(&call_id));
-    assert!(!h.pending_tools.contains_key(&call_id));
-    assert!(!h.tool_agents.contains_key(&call_id));
+    assert!(!h.tool_runtime.tool_turn.is_backgrounded(&call_id));
+    assert!(!h.tool_runtime.pending_tools.contains_key(&call_id));
+    assert!(!h.tool_runtime.tool_agents.contains_key(&call_id));
 
     h.shutdown().expect("shutdown");
 }
@@ -8981,7 +9112,7 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
         ws_pool_delta: None,
     })
     .expect("builtin agent_start dispatched");
-    assert!(h.tool_turn.is_backgrounded(&call_id));
+    assert!(h.tool_runtime.tool_turn.is_backgrounded(&call_id));
 
     seed_tools_running(&mut h, &parent_cid, vec![call_id.clone()]);
     h.handle_cancel_prompt(
@@ -9006,12 +9137,13 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
         "live builtin cancellation should not lose the passive completion notice"
     );
     assert!(
-        !h.suppressed_background_completion_prompts
+        !h.tool_runtime
+            .suppressed_background_completion_prompts
             .contains(&call_id)
     );
-    assert!(!h.tool_turn.is_backgrounded(&call_id));
-    assert!(!h.pending_tools.contains_key(&call_id));
-    assert!(!h.tool_agents.contains_key(&call_id));
+    assert!(!h.tool_runtime.tool_turn.is_backgrounded(&call_id));
+    assert!(!h.tool_runtime.pending_tools.contains_key(&call_id));
+    assert!(!h.tool_runtime.tool_agents.contains_key(&call_id));
 
     h.shutdown().expect("shutdown");
 }
@@ -9039,8 +9171,8 @@ fn cancel_target_rechecks_background_state_after_cancel_request() {
             target_call_id: call_id.clone(),
         }),
     );
-    assert!(h.tool_turn.begin_backgrounding(&call_id));
-    assert!(h.tool_turn.mark_backgrounded(&call_id));
+    assert!(h.tool_runtime.tool_turn.begin_backgrounding(&call_id));
+    assert!(h.tool_runtime.tool_turn.mark_backgrounded(&call_id));
     h.publish_synthetic_background_result(&call_id);
 
     assert!(h.cancel_target_should_finish_as_background_error(&target));
@@ -9058,8 +9190,8 @@ fn cancel_target_rechecks_background_state_after_cancel_request() {
         Event::ToolBackgroundError(error)
             if error.call_id == call_id && error.message == "Tool call canceled"
     )));
-    assert!(!h.tool_turn.is_backgrounded(&call_id));
-    assert!(!h.tool_agents.contains_key(&call_id));
+    assert!(!h.tool_runtime.tool_turn.is_backgrounded(&call_id));
+    assert!(!h.tool_runtime.tool_agents.contains_key(&call_id));
 
     h.shutdown().expect("shutdown");
 }
@@ -9085,8 +9217,10 @@ fn cancel_clears_active_wait_state() {
             (wait_call_id.as_str(), "wait"),
         ],
     );
-    h.tool_agents.insert(target_call_id.clone(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(target_call_id.clone(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         target_call_id.clone(),
         PendingTool {
             name: ToolName::new("slow"),
@@ -9133,8 +9267,8 @@ fn cancel_clears_active_wait_state() {
         },
     );
     assert!(h.agents[&cid].pending_cancel.is_some());
-    assert!(h.tool_agents.contains_key(&target_call_id));
-    assert!(h.tool_agents.contains_key(&wait_call_id));
+    assert!(h.tool_runtime.tool_agents.contains_key(&target_call_id));
+    assert!(h.tool_runtime.tool_agents.contains_key(&wait_call_id));
     h.handle_extension_event(
         "user-cancel-terminal-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -10077,15 +10211,17 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
 
     for call_id in ["c1", "c2", "c3"] {
         assert!(
-            h.tool_turn.is_in_flight(&ToolCallId::from(call_id)),
+            h.tool_runtime
+                .tool_turn
+                .is_in_flight(&ToolCallId::from(call_id)),
             "{call_id} should dispatch immediately"
         );
     }
-    assert_eq!(h.tool_turn.pending_len(), 0);
-    assert_eq!(h.tool_turn.in_flight_len(), 3);
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
+    assert_eq!(h.tool_runtime.tool_turn.in_flight_len(), 3);
 
     drive_harness_until_tool_turn_empty(&mut h);
-    assert!(h.tool_turn.is_empty());
+    assert!(h.tool_runtime.tool_turn.is_empty());
 
     h.shutdown().expect("shutdown");
 }
@@ -11458,7 +11594,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
         h.agents.get(&cid).expect("default").turn_state,
         AgentTurnState::Idle
     ));
-    assert_eq!(h.tool_turn.pending_len(), 0);
+    assert_eq!(h.tool_runtime.tool_turn.pending_len(), 0);
 
     h.submit_user_prompt(test_session_id("s1"), "again".to_owned())
         .expect("submit again");
@@ -17076,7 +17212,7 @@ fn reactive_context_overflow_delegate_cancel_is_terminal_once() {
         .supports_standalone_compaction = true;
     let call_id = ToolCallId::from("delegate-reactive-call");
     let parent = ensure_test_user_agent(&mut h);
-    h.tool_agents.insert(call_id.clone(), parent);
+    h.tool_runtime.tool_agents.insert(call_id.clone(), parent);
     let mut query = ext_query("q-delegate-reactive");
     query.tool_call_id = Some(call_id.clone());
     h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
@@ -21120,8 +21256,10 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
         &[("call-compact", "compact"), ("call-sibling", "sibling")],
     );
     for (call_id, name) in [("call-compact", "compact"), ("call-sibling", "sibling")] {
-        h.tool_agents.insert(call_id.into(), cid.clone());
-        h.pending_tools.insert(
+        h.tool_runtime
+            .tool_agents
+            .insert(call_id.into(), cid.clone());
+        h.tool_runtime.pending_tools.insert(
             call_id.into(),
             PendingTool {
                 name: ToolName::new(name),
@@ -21130,7 +21268,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
                 allows_provider_image: false,
             },
         );
-        h.tool_turn.record_unqueued_in_flight(
+        h.tool_runtime.tool_turn.record_unqueued_in_flight(
             cid.clone(),
             call_id.into(),
             ToolTurnCategories::default(),
@@ -21153,8 +21291,8 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
             Event::AgentManualCompactionRequested(_)
         )),
         "tracked={} backgrounded={} events={:?}",
-        h.tool_agents.contains_key(&compact_call.id),
-        h.tool_turn.is_backgrounded(&compact_call.id),
+        h.tool_runtime.tool_agents.contains_key(&compact_call.id),
+        h.tool_runtime.tool_turn.is_backgrounded(&compact_call.id),
         event_log_events(&h)
     );
     assert!(!event_log_contains_any_source(&h, |event| matches!(
@@ -21370,7 +21508,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
         .expect("accept first compact call");
 
     assert_eq!(
-        h.tool_agents.get(&first_call_id),
+        h.tool_runtime.tool_agents.get(&first_call_id),
         Some(&caller_cid),
         "scheduler must commit the real call's caller ownership"
     );
@@ -21729,7 +21867,10 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
             .count(),
         1
     );
-    assert_eq!(resumed.tool_agents.get(&second_call_id), Some(&resumed_cid));
+    assert_eq!(
+        resumed.tool_runtime.tool_agents.get(&second_call_id),
+        Some(&resumed_cid)
+    );
     resumed.shutdown().expect("shutdown");
 }
 
@@ -21802,7 +21943,8 @@ fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
                 && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
     ));
     assert!(
-        !h.tool_turn
+        !h.tool_runtime
+            .tool_turn
             .is_backgrounded(&ToolCallId::from("scheduler-compact")),
         "parking the placeholder must also park dependent state"
     );
@@ -21836,7 +21978,8 @@ fn scheduler_compact_publishes_one_placeholder_and_keeps_publication_live() {
         event_log_events(&h)
     );
     assert!(
-        h.tool_turn
+        h.tool_runtime
+            .tool_turn
             .is_backgrounded(&ToolCallId::from("scheduler-compact"))
     );
     let notices_before = event_log_count(&h, |event| matches!(event, Event::HarnessNotice(_)));
@@ -21918,7 +22061,8 @@ fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live(
         1
     );
     assert!(
-        h.tool_turn
+        h.tool_runtime
+            .tool_turn
             .is_backgrounded(&ToolCallId::from("scheduler-agent-compact"))
     );
     let notices_before = event_log_count(&h, |event| matches!(event, Event::HarnessNotice(_)));
@@ -21954,8 +22098,10 @@ fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
         ("call-cancel-compact", "compact"),
         ("call-cancel-sibling", "sibling"),
     ] {
-        h.tool_agents.insert(call_id.into(), cid.clone());
-        h.pending_tools.insert(
+        h.tool_runtime
+            .tool_agents
+            .insert(call_id.into(), cid.clone());
+        h.tool_runtime.pending_tools.insert(
             call_id.into(),
             PendingTool {
                 name: ToolName::new(name),
@@ -21964,7 +22110,7 @@ fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
                 allows_provider_image: false,
             },
         );
-        h.tool_turn.record_unqueued_in_flight(
+        h.tool_runtime.tool_turn.record_unqueued_in_flight(
             cid.clone(),
             call_id.into(),
             ToolTurnCategories::default(),
@@ -22116,8 +22262,10 @@ fn manual_self_compaction_failure_delivers_error_once() {
     let cid = ensure_test_user_agent(&mut h);
     let call_id = ToolCallId::from("call-failed-self-compact");
     seed_assistant_tool_round(&mut h, &cid, &[(call_id.as_str(), "compact")]);
-    h.tool_agents.insert(call_id.clone(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         call_id.clone(),
         PendingTool {
             name: ToolName::new("compact"),
@@ -22126,7 +22274,7 @@ fn manual_self_compaction_failure_delivers_error_once() {
             allows_provider_image: false,
         },
     );
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         cid.clone(),
         call_id.clone(),
         ToolTurnCategories::default(),
@@ -22248,8 +22396,10 @@ fn manual_self_compaction_cold_failure_before_delivery() {
     let cid = ensure_test_user_agent(&mut h);
     let call_id = ToolCallId::from("call-cold-failed-self-compact");
     seed_assistant_tool_round(&mut h, &cid, &[(call_id.as_str(), "compact")]);
-    h.tool_agents.insert(call_id.clone(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         call_id.clone(),
         PendingTool {
             name: ToolName::new("compact"),
@@ -22258,7 +22408,7 @@ fn manual_self_compaction_cold_failure_before_delivery() {
             allows_provider_image: false,
         },
     );
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         cid.clone(),
         call_id.clone(),
         ToolTurnCategories::default(),
@@ -22363,8 +22513,10 @@ fn manual_self_compaction_success_delivers_directly() {
     let cid = ensure_test_user_agent(&mut h);
     let call_id = ToolCallId::from("call-success-self-compact");
     seed_assistant_tool_round(&mut h, &cid, &[(call_id.as_str(), "compact")]);
-    h.tool_agents.insert(call_id.clone(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         call_id.clone(),
         PendingTool {
             name: ToolName::new("compact"),
@@ -22373,7 +22525,7 @@ fn manual_self_compaction_success_delivers_directly() {
             allows_provider_image: false,
         },
     );
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         cid.clone(),
         call_id.clone(),
         ToolTurnCategories::default(),
@@ -22444,9 +22596,10 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
         .supports_standalone_compaction = true;
     let cid = ensure_test_user_agent(&mut h);
     seed_assistant_tool_round(&mut h, &cid, &[("call-replay-compact", "compact")]);
-    h.tool_agents
+    h.tool_runtime
+        .tool_agents
         .insert("call-replay-compact".into(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime.pending_tools.insert(
         "call-replay-compact".into(),
         PendingTool {
             name: ToolName::new("compact"),
@@ -22455,7 +22608,7 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
             allows_provider_image: false,
         },
     );
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         cid.clone(),
         "call-replay-compact".into(),
         ToolTurnCategories::default(),
@@ -23905,8 +24058,10 @@ fn register_manual_cross_compaction_call(
     call_id: &str,
 ) -> AgentToolCall {
     seed_assistant_tool_round(h, caller_cid, &[(call_id, "agent_compact")]);
-    h.tool_agents.insert(call_id.into(), caller_cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.into(), caller_cid.clone());
+    h.tool_runtime.pending_tools.insert(
         call_id.into(),
         PendingTool {
             name: ToolName::new("agent_compact"),
@@ -23915,7 +24070,7 @@ fn register_manual_cross_compaction_call(
             allows_provider_image: false,
         },
     );
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         caller_cid.clone(),
         call_id.into(),
         ToolTurnCategories::default(),
@@ -24316,9 +24471,10 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
     );
 
     seed_assistant_tool_round(&mut h, &cid, &[("call-self-blocked", "compact")]);
-    h.tool_agents
+    h.tool_runtime
+        .tool_agents
         .insert("call-self-blocked".into(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime.pending_tools.insert(
         "call-self-blocked".into(),
         PendingTool {
             name: ToolName::new("compact"),
@@ -24327,7 +24483,7 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
             allows_provider_image: false,
         },
     );
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         cid.clone(),
         "call-self-blocked".into(),
         ToolTurnCategories::default(),
@@ -24358,7 +24514,7 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
         1
     );
     assert_eq!(durable_compaction_counts(&h, &agent_id), (1, 1, 1, 0));
-    assert!(!h.tool_turn.is_backgrounded(&call.id));
+    assert!(!h.tool_runtime.tool_turn.is_backgrounded(&call.id));
     assert_eq!(
         h.agents[&cid].activation_dispatch.blocked_recovery(),
         blocked.blocked_recovery()
@@ -24903,8 +25059,8 @@ fn manual_cross_compaction_starts_for_unrelated_loaded_agent() {
             .count(),
         1,
         "tracked={} backgrounded={} events={:?}",
-        h.tool_agents.contains_key(&call.id),
-        h.tool_turn.is_backgrounded(&call.id),
+        h.tool_runtime.tool_agents.contains_key(&call.id),
+        h.tool_runtime.tool_turn.is_backgrounded(&call.id),
         event_log_events(&h)
             .into_iter()
             .filter(|event| match event {
@@ -25327,7 +25483,11 @@ fn start_background_tool_and_finish_placeholder_turn(
         ws_pool_delta: None,
     })
     .expect("start background tool");
-    assert!(h.tool_turn.is_backgrounded(&ToolCallId::from(call_id)));
+    assert!(
+        h.tool_runtime
+            .tool_turn
+            .is_backgrounded(&ToolCallId::from(call_id))
+    );
 
     let placeholder_followup = active_prompt_for(h, cid);
     h.handle_provider_response_finished(provider_text_response(
@@ -25367,7 +25527,8 @@ fn wait_returns_internal_background_error_after_extension_disconnect() {
         "slow_disconnect",
     );
     assert_eq!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .get(&call_id)
             .map(|provider| provider.as_str()),
         Some("conn-bg-disconnect")
@@ -25486,7 +25647,8 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     let cid = ensure_test_user_agent(&mut h);
     let call_id: ToolCallId = "bg-any-after".into();
 
-    h.background_completion_targets
+    h.tool_runtime
+        .background_completion_targets
         .insert(call_id.clone(), cid.clone());
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
@@ -25526,7 +25688,8 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
                 && cbor_map_text(&result.result, "output") == Some("already done")
     )));
     assert!(
-        h.suppressed_background_completion_prompts
+        h.tool_runtime
+            .suppressed_background_completion_prompts
             .contains(&call_id)
     );
     assert!(
@@ -26083,7 +26246,7 @@ fn input_wait_timeout_completes_once_inside_running_turn() {
     h.process_runtime_deadlines_at(deadline);
     assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
     assert!(!h.input_wait_pending_for(&cid));
-    assert!(!h.tool_agents.contains_key(&call.id));
+    assert!(!h.tool_runtime.tool_agents.contains_key(&call.id));
     assert!(matches!(
         h.agents[&cid].turn_state,
         AgentTurnState::ToolsRunning { .. }
@@ -26217,8 +26380,10 @@ fn background_wait_rejections_do_not_count_as_input_timeouts() {
     let mut h = echo_harness(td.path().join("state")).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let background_id = ToolCallId::from("completed-background-before-timeout");
-    h.tool_agents.insert(background_id.clone(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(background_id.clone(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         background_id.clone(),
         PendingTool {
             name: ToolName::new("slow"),
@@ -26842,7 +27007,7 @@ fn manual_compaction_rejects_already_terminalizing_wait() {
     seed_tools_running(&mut h, &cid, vec![wait.id.clone()]);
     h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
         .expect("install input wait");
-    h.pending_terminal_observations.insert(
+    h.tool_runtime.pending_terminal_observations.insert(
         wait.id.clone(),
         crate::harness::PendingTerminalObservation {
             observation_id: tau_proto::ObservationId::random(),
@@ -27121,8 +27286,10 @@ fn runtime_deadline_scheduler_orders_input_and_background_deadlines() {
         ToolCallId::from("background-deadline-first"),
         ToolCallId::from("background-deadline-after-input"),
     ] {
-        h.tool_agents.insert(call_id.clone(), cid.clone());
-        h.pending_tools.insert(
+        h.tool_runtime
+            .tool_agents
+            .insert(call_id.clone(), cid.clone());
+        h.tool_runtime.pending_tools.insert(
             call_id,
             PendingTool {
                 name: ToolName::new("slow"),
@@ -27143,20 +27310,25 @@ fn runtime_deadline_scheduler_orders_input_and_background_deadlines() {
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(Vec::new()),
     };
-    h.tool_turn.push(
+    h.tool_runtime.tool_turn.push(
         cid.clone(),
         background_call.clone(),
         tau_proto::BackgroundSupport::MinForegroundSeconds(30),
     );
     let background_start = input_deadline - Duration::from_secs(60);
-    h.tool_turn
+    h.tool_runtime
+        .tool_turn
         .pop_dispatchable(background_start)
         .expect("dispatch backgroundable call");
     let background_deadline = background_start + Duration::from_secs(30);
     assert_eq!(h.next_runtime_deadline(), Some(background_deadline));
 
     h.process_runtime_deadlines_at(background_deadline);
-    assert!(h.tool_turn.is_backgrounded(&background_call.id));
+    assert!(
+        h.tool_runtime
+            .tool_turn
+            .is_backgrounded(&background_call.id)
+    );
 
     let later_background_call = AgentToolCall {
         call_ref: None,
@@ -27165,12 +27337,13 @@ fn runtime_deadline_scheduler_orders_input_and_background_deadlines() {
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(Vec::new()),
     };
-    h.tool_turn.push(
+    h.tool_runtime.tool_turn.push(
         cid.clone(),
         later_background_call.clone(),
         tau_proto::BackgroundSupport::MinForegroundSeconds(60),
     );
-    h.tool_turn
+    h.tool_runtime
+        .tool_turn
         .pop_dispatchable(input_deadline - Duration::from_secs(30))
         .expect("dispatch later backgroundable call");
     let later_background_deadline = input_deadline + Duration::from_secs(30);
@@ -27179,7 +27352,11 @@ fn runtime_deadline_scheduler_orders_input_and_background_deadlines() {
     assert_eq!(tool_result_count(&h, input.id.as_str()), 1);
     assert_eq!(h.next_runtime_deadline(), Some(later_background_deadline));
     h.process_runtime_deadlines_at(later_background_deadline);
-    assert!(h.tool_turn.is_backgrounded(&later_background_call.id));
+    assert!(
+        h.tool_runtime
+            .tool_turn
+            .is_backgrounded(&later_background_call.id)
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -27196,7 +27373,8 @@ fn passive_background_notice_does_not_wake_input_wait() {
         .expect("register input wait");
 
     let passive_call: ToolCallId = "passive-input-wait-notice".into();
-    h.background_completion_targets
+    h.tool_runtime
+        .background_completion_targets
         .insert(passive_call.clone(), cid.clone());
     h.queue_passive_background_completion_prompt(&cid, &passive_call);
     assert_eq!(tool_result_count(&h, call.id.as_str()), 0);
@@ -27282,7 +27460,8 @@ fn background_completion_wakes_input_wait_without_consuming_result() {
         .expect("register input wait");
 
     let background_id: ToolCallId = "background-for-input".into();
-    h.background_completion_targets
+    h.tool_runtime
+        .background_completion_targets
         .insert(background_id.clone(), cid.clone());
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
@@ -27322,8 +27501,10 @@ fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
     let call_a: ToolCallId = "background-a".into();
     let call_b: ToolCallId = "background-b".into();
     for call_id in [&call_a, &call_b] {
-        h.tool_agents.insert(call_id.clone(), cid.clone());
-        h.pending_tools.insert(
+        h.tool_runtime
+            .tool_agents
+            .insert(call_id.clone(), cid.clone());
+        h.tool_runtime.pending_tools.insert(
             call_id.clone(),
             PendingTool {
                 name: ToolName::new("slow"),
@@ -27348,7 +27529,8 @@ fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
             Some(tau_proto::ObservationId::random()),
         );
     }
-    h.background_completion_targets
+    h.tool_runtime
+        .background_completion_targets
         .insert(call_b.clone(), cid.clone());
     h.record_wait_background_result(
         tau_proto::ToolBackgroundResult {
@@ -27408,7 +27590,8 @@ fn distinct_queued_completion_preempts_wait_with_consumable_candidate() {
         let call_a: ToolCallId = format!("completed-a-{exact}").into();
         let call_b: ToolCallId = format!("completed-b-{exact}").into();
         for call_id in [&call_a, &call_b] {
-            h.background_completion_targets
+            h.tool_runtime
+                .background_completion_targets
                 .insert(call_id.clone(), cid.clone());
             h.record_wait_background_result(
                 tau_proto::ToolBackgroundResult {
@@ -27775,7 +27958,9 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
 
     assert!(matches!(h.turn_state, TurnState::Idle));
     assert!(
-        h.tool_turn.is_in_flight(&ToolCallId::from("delegate-call")),
+        h.tool_runtime
+            .tool_turn
+            .is_in_flight(&ToolCallId::from("delegate-call")),
         "parent agent_start tool must remain in flight until its ToolResult arrives"
     );
     let events = delegate_events.lock().expect("delegate events");
@@ -27831,7 +28016,8 @@ fn cold_restored_completed_worker_is_ordinary_and_remains_loaded() {
         let _delegate_events = connect_test_tool(&mut h, "conn-cold-delegate");
         let parent_cid = ensure_test_user_agent(&mut h);
         let parent_agent_id = durable_agent_id_for_conversation(&h, &parent_cid);
-        h.tool_agents
+        h.tool_runtime
+            .tool_agents
             .insert("cold-delegate-call".into(), parent_cid);
 
         let mut query = ext_query("q-cold-completed");
@@ -28115,7 +28301,9 @@ fn cold_restore_does_not_detach_worker_with_message_continuation() {
         h.selected_model = Some("test/model".into());
         let parent_cid = ensure_test_user_agent(&mut h);
         let parent_agent_id = durable_agent_id_for_conversation(&h, &parent_cid);
-        h.tool_agents.insert("message-cut-call".into(), parent_cid);
+        h.tool_runtime
+            .tool_agents
+            .insert("message-cut-call".into(), parent_cid);
         let mut query = ext_query("delegate-3");
         query.tool_call_id = Some("message-cut-call".into());
         h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
@@ -28313,7 +28501,9 @@ fn cold_restore_classifies_unroutable_extension_worker_as_unavailable() {
         let _extension = connect_test_tool(&mut h, "external-delegate");
         let parent_cid = ensure_test_user_agent(&mut h);
         let parent_agent_id = durable_agent_id_for_conversation(&h, &parent_cid);
-        h.tool_agents.insert("external-call".into(), parent_cid);
+        h.tool_runtime
+            .tool_agents
+            .insert("external-call".into(), parent_cid);
         let mut query = ext_query("external-query");
         query.tool_call_id = Some("external-call".into());
         h.handle_start_agent_request(&crate::test_connection_id("external-delegate"), query)
@@ -28600,7 +28790,9 @@ fn cold_restore_does_not_classify_reactive_recovery_as_completed_worker() {
             .expect("test model")
             .supports_standalone_compaction = true;
         let parent_cid = ensure_test_user_agent(&mut h);
-        h.tool_agents.insert("reactive-cut-call".into(), parent_cid);
+        h.tool_runtime
+            .tool_agents
+            .insert("reactive-cut-call".into(), parent_cid);
         let mut query = ext_query("q-reactive-cut");
         query.tool_call_id = Some("reactive-cut-call".into());
         h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
@@ -28792,7 +28984,9 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
     let mut query = ext_query("q-reentrant");
     query.tool_call_id = Some("delegate-call".into());
     let parent = ensure_test_user_agent(&mut h);
-    h.tool_agents.insert("delegate-call".into(), parent);
+    h.tool_runtime
+        .tool_agents
+        .insert("delegate-call".into(), parent);
     let side_agent_id = h
         .enqueue_internal_start_agent_request_without_draining(query)
         .expect("enqueue query");
@@ -28889,7 +29083,9 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
     h.selected_model = Some("test/model".into());
     let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
     let parent = ensure_test_user_agent(&mut h);
-    h.tool_agents.insert("delegate-call".into(), parent);
+    h.tool_runtime
+        .tool_agents
+        .insert("delegate-call".into(), parent);
 
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
@@ -28979,7 +29175,9 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     h.selected_model = Some("test/model".into());
     let delegate_events = connect_test_tool(&mut h, "conn-delegate");
     let parent = ensure_test_user_agent(&mut h);
-    h.tool_agents.insert("delegate-call".into(), parent);
+    h.tool_runtime
+        .tool_agents
+        .insert("delegate-call".into(), parent);
 
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
@@ -30055,7 +30253,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         "side conversation's Shared tool must dispatch despite parent's in-flight Exclusive delegate"
     );
     assert_eq!(
-        h.tool_turn.pending_len(),
+        h.tool_runtime.tool_turn.pending_len(),
         0,
         "no entries should be left queued"
     );
@@ -30300,7 +30498,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         h.agents.contains_key(&side_cid),
         "tool-backed delegate conversation is detached/preserved after completion"
     );
-    assert_eq!(h.tool_agents.get("slow-call"), Some(&side_cid));
+    assert_eq!(h.tool_runtime.tool_agents.get("slow-call"), Some(&side_cid));
 
     h.handle_extension_event_inner(
         &crate::test_connection_id("conn-slow"),
@@ -30356,7 +30554,9 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
             .all(|prompt| prompt.text != background_completion_prompt(&"slow-call".into()))
     );
     assert_eq!(
-        h.background_completion_targets.get("slow-call"),
+        h.tool_runtime
+            .background_completion_targets
+            .get("slow-call"),
         Some(&side_cid),
         "late background completions stay routed to the preserved delegate"
     );
@@ -30407,7 +30607,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
     let side_agent_id = h.agents[&side_cid].agent_id.clone().expect("side agent id");
     let call_id: ToolCallId = "removed-slow-call".into();
 
-    h.pending_tools.insert(
+    h.tool_runtime.pending_tools.insert(
         call_id.clone(),
         PendingTool {
             name: ToolName::new("slow"),
@@ -30416,23 +30616,30 @@ fn background_completion_from_removed_side_conversation_is_retired() {
             allows_provider_image: false,
         },
     );
-    h.tool_agents.insert(call_id.clone(), side_cid.clone());
-    h.background_completion_targets
+    h.tool_runtime
+        .tool_agents
         .insert(call_id.clone(), side_cid.clone());
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime
+        .background_completion_targets
+        .insert(call_id.clone(), side_cid.clone());
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         side_cid.clone(),
         call_id.clone(),
         ToolTurnCategories::default(),
     );
-    assert!(h.tool_turn.begin_backgrounding(&call_id));
-    assert!(h.tool_turn.mark_backgrounded(&call_id));
+    assert!(h.tool_runtime.tool_turn.begin_backgrounding(&call_id));
+    assert!(h.tool_runtime.tool_turn.mark_backgrounded(&call_id));
     h.queue_background_completion_prompt(&side_cid, &call_id);
 
     h.remove_agent(&side_cid);
 
     assert!(!h.agents.contains_key(&side_cid));
-    assert!(!h.tool_agents.contains_key(&call_id));
-    assert!(!h.background_completion_targets.contains_key(&call_id));
+    assert!(!h.tool_runtime.tool_agents.contains_key(&call_id));
+    assert!(
+        !h.tool_runtime
+            .background_completion_targets
+            .contains_key(&call_id)
+    );
     let parent = h
         .agents
         .get(&parent_cid)
@@ -30514,7 +30721,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
         .clone()
         .expect("fault side agent id");
     let fault_call_id: ToolCallId = "removed-slow-call-fault".into();
-    h.pending_tools.insert(
+    h.tool_runtime.pending_tools.insert(
         fault_call_id.clone(),
         PendingTool {
             name: ToolName::new("slow"),
@@ -30523,17 +30730,19 @@ fn background_completion_from_removed_side_conversation_is_retired() {
             allows_provider_image: false,
         },
     );
-    h.tool_agents
+    h.tool_runtime
+        .tool_agents
         .insert(fault_call_id.clone(), fault_cid.clone());
-    h.background_completion_targets
+    h.tool_runtime
+        .background_completion_targets
         .insert(fault_call_id.clone(), fault_cid.clone());
-    h.tool_turn.record_unqueued_in_flight(
+    h.tool_runtime.tool_turn.record_unqueued_in_flight(
         fault_cid.clone(),
         fault_call_id.clone(),
         ToolTurnCategories::default(),
     );
-    assert!(h.tool_turn.begin_backgrounding(&fault_call_id));
-    assert!(h.tool_turn.mark_backgrounded(&fault_call_id));
+    assert!(h.tool_runtime.tool_turn.begin_backgrounding(&fault_call_id));
+    assert!(h.tool_runtime.tool_turn.mark_backgrounded(&fault_call_id));
     let journal = h
         .state_dir
         .join("agents")
@@ -30550,9 +30759,14 @@ fn background_completion_from_removed_side_conversation_is_retired() {
             .get(&fault_cid)
             .is_some_and(|agent| agent.terminating)
     );
-    assert_eq!(h.tool_agents.get(&fault_call_id), Some(&fault_cid));
     assert_eq!(
-        h.background_completion_targets.get(&fault_call_id),
+        h.tool_runtime.tool_agents.get(&fault_call_id),
+        Some(&fault_cid)
+    );
+    assert_eq!(
+        h.tool_runtime
+            .background_completion_targets
+            .get(&fault_call_id),
         Some(&fault_cid)
     );
     assert!(!event_log_contains_any_source(&h, |event| matches!(
@@ -30735,7 +30949,8 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     })
     .expect("side tool call");
     assert!(
-        h.tool_turn
+        h.tool_runtime
+            .tool_turn
             .is_backgrounded(&ToolCallId::from("slow-call-cancel")),
         "scheduler placeholder must commit before delegate cancellation"
     );
@@ -30752,7 +30967,11 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     h.cancel_start_agent_request("q-bg-cancel", &"delegate-call-cancel".into(), false)
         .expect("cancel delegate");
     assert!(h.agents[&side_cid].terminating);
-    assert!(h.tool_agents.contains_key("foreground-slow-call-cancel"));
+    assert!(
+        h.tool_runtime
+            .tool_agents
+            .contains_key("foreground-slow-call-cancel")
+    );
     h.handle_extension_event(
         "delegate-cancel-terminal-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
@@ -30761,7 +30980,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
     )
     .expect("commit delegate cancellation");
     assert!(!h.agents.contains_key(&side_cid));
-    assert!(!h.tool_agents.contains_key("slow-call-cancel"));
+    assert!(!h.tool_runtime.tool_agents.contains_key("slow-call-cancel"));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ToolBackgroundError(error)
@@ -30773,7 +30992,8 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "slow-call-cancel"
     )));
     assert!(
-        !h.background_completion_targets
+        !h.tool_runtime
+            .background_completion_targets
             .contains_key("slow-call-cancel")
     );
 
@@ -30949,7 +31169,8 @@ fn background_notification_unsuppress_before_completion_allows_later_prompt() {
         .turn_state = AgentTurnState::ToolsRunning {
         remaining_calls: Vec::new(),
     };
-    h.background_completion_targets
+    h.tool_runtime
+        .background_completion_targets
         .insert(call_id.clone(), cid.clone());
     h.queue_background_completion_prompt(&cid, &call_id);
 
@@ -30975,7 +31196,8 @@ fn background_notification_unsuppress_after_suppressed_completion_queues_prompt(
     let call_id: ToolCallId = "bg-unsuppress-after".into();
 
     h.suppress_background_completion_prompt(call_id.clone());
-    h.background_completion_targets
+    h.tool_runtime
+        .background_completion_targets
         .insert(call_id.clone(), cid.clone());
     h.queue_background_completion_prompt(&cid, &call_id);
     assert!(
@@ -31016,7 +31238,8 @@ fn background_notification_repeated_suppress_unsuppress_after_completion_requeue
     let cid = ensure_test_user_agent(&mut h);
     let call_id: ToolCallId = "bg-repeat".into();
 
-    h.background_completion_targets
+    h.tool_runtime
+        .background_completion_targets
         .insert(call_id.clone(), cid.clone());
     h.queue_background_completion_prompt(&cid, &call_id);
     h.suppress_background_completion_prompt(call_id.clone());
@@ -31275,7 +31498,8 @@ fn nested_start_agent_request_starts_independently() {
     .expect("outer query");
     let outer_cid = ext_query_cid(&h, "q-outer").expect("outer started");
 
-    h.tool_agents
+    h.tool_runtime
+        .tool_agents
         .insert("nested-call".into(), outer_cid.clone());
     let mut nested = ext_query("q-nested");
     nested.tool_call_id = Some("nested-call".into());
@@ -31309,7 +31533,9 @@ fn tool_backed_start_agent_display_name_does_not_include_parent_lineage() {
     .expect("parent query");
     let parent_cid = ext_query_cid(&h, "q-parent").expect("parent started");
 
-    h.tool_agents.insert("child-call".into(), parent_cid);
+    h.tool_runtime
+        .tool_agents
+        .insert("child-call".into(), parent_cid);
     let mut child = ext_query("q-child");
     child.tool_call_id = Some("child-call".into());
     child.task_name = Some("fix streaming ellipsis".to_owned());
@@ -31464,8 +31690,10 @@ fn wait_resolves_on_synthetic_tool_error() {
     let cid = ensure_test_user_agent(&mut h);
     let target_call_id: ToolCallId = "target-call".into();
 
-    h.tool_agents.insert(target_call_id.clone(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(target_call_id.clone(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         target_call_id.clone(),
         PendingTool {
             name: ToolName::new("missing"),
@@ -31518,7 +31746,7 @@ fn wait_resolves_on_synthetic_tool_error() {
     );
 
     assert!(h.pending_intercept.is_some());
-    assert!(h.tool_agents.contains_key("target-call"));
+    assert!(h.tool_runtime.tool_agents.contains_key("target-call"));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ToolError(error) if error.call_id.as_str() == "wait-call"
@@ -31724,9 +31952,13 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
     })
     .expect("main response");
 
-    assert!(h.tool_turn.is_in_flight(&ToolCallId::from("delegate-call")),);
+    assert!(
+        h.tool_runtime
+            .tool_turn
+            .is_in_flight(&ToolCallId::from("delegate-call")),
+    );
     assert_eq!(
-        h.tool_turn.pending_len(),
+        h.tool_runtime.tool_turn.pending_len(),
         0,
         "mutating tool must not remain queued behind the delegate launcher",
     );
@@ -31976,22 +32208,22 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     let mut_a_id: ToolCallId = "mut-A".to_owned().into();
     let mut_b_id: ToolCallId = "mut-B".to_owned().into();
     assert!(
-        h.tool_turn.is_in_flight(&mut_a_id),
+        h.tool_runtime.tool_turn.is_in_flight(&mut_a_id),
         "conversation A's mutating call should be in flight",
     );
     assert!(
-        h.tool_turn.is_in_flight(&mut_b_id),
+        h.tool_runtime.tool_turn.is_in_flight(&mut_b_id),
         "conversation B's mutating call should be in flight too",
     );
-    assert_eq!(h.tool_agents.get("mut-A"), Some(&cid_a));
-    assert_eq!(h.tool_agents.get("mut-B"), Some(&cid_b));
+    assert_eq!(h.tool_runtime.tool_agents.get("mut-A"), Some(&cid_a));
+    assert_eq!(h.tool_runtime.tool_agents.get("mut-B"), Some(&cid_b));
     assert_ne!(
-        h.tool_agents.get("mut-A"),
-        h.tool_agents.get("mut-B"),
+        h.tool_runtime.tool_agents.get("mut-A"),
+        h.tool_runtime.tool_agents.get("mut-B"),
         "mutating calls must be attributed to different agents",
     );
     assert_eq!(
-        h.tool_turn.pending_len(),
+        h.tool_runtime.tool_turn.pending_len(),
         0,
         "cross-conversation mutating calls should not queue behind each other",
     );
@@ -33939,7 +34171,8 @@ fn delegated_working_final_projects_after_bounded_escape() {
     h.selected_model = Some("test/model".into());
     let frames = connect_test_tool(&mut h, "conn-working-final");
     let parent_cid = ensure_test_user_agent(&mut h);
-    h.tool_agents
+    h.tool_runtime
+        .tool_agents
         .insert("parent-agent-start".into(), parent_cid);
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-working-final"),
@@ -34904,7 +35137,9 @@ fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
     );
     h.bump_tools_started_for(&cid);
     h.update_agent_context_usage(&cid, Some(&"test/model".into()), Some(250), Some(50), None);
-    h.tool_agents.insert("counted-call".into(), cid.clone());
+    h.tool_runtime
+        .tool_agents
+        .insert("counted-call".into(), cid.clone());
     h.finish_tool_call_runtime_state("counted-call");
 
     let snapshots = drain_stats_updated(&stats);
@@ -35029,7 +35264,9 @@ fn accepted_provider_usage_updates_creator_cost_stats() {
     let _delegate = connect_test_tool(&mut h, "conn-delegate");
     let parent_cid = ensure_test_user_agent(&mut h);
     let parent_id = durable_agent_id_for_conversation(&h, &parent_cid);
-    h.tool_agents.insert("creator-cost-call".into(), parent_cid);
+    h.tool_runtime
+        .tool_agents
+        .insert("creator-cost-call".into(), parent_cid);
     h.handle_start_agent_request(
         &crate::test_connection_id("conn-delegate"),
         StartAgentRequest {
@@ -35219,7 +35456,9 @@ fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
     );
     let _delegate = connect_test_tool(&mut h, "conn-delegate");
     let parent = ensure_test_user_agent(&mut h);
-    h.tool_agents.insert("explicit-call".into(), parent);
+    h.tool_runtime
+        .tool_agents
+        .insert("explicit-call".into(), parent);
     h.registry.register(
         &crate::test_connection_id("conn-delegate"),
         ToolSpec {
@@ -37283,7 +37522,9 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let call_id: tau_proto::ToolCallId = "external-message-call".into();
-    h.tool_agents.insert(call_id.clone(), cid.clone());
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
 
     h.publish_external_agent_message_from_agent(
         &cid,
@@ -37339,7 +37580,9 @@ fn external_message_no_receiver_failure_is_actionable_to_caller() {
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let call_id: tau_proto::ToolCallId = "external-message-no-receiver".into();
-    h.tool_agents.insert(call_id.clone(), cid.clone());
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
 
     h.handle_harness_command(
         path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
@@ -37407,7 +37650,9 @@ fn external_message_success_results_hide_bare_recipient_start_state() {
 
     for (call_id, message_id, recipient_id, started) in completions {
         let call_id: tau_proto::ToolCallId = call_id.into();
-        h.tool_agents.insert(call_id.clone(), cid.clone());
+        h.tool_runtime
+            .tool_agents
+            .insert(call_id.clone(), cid.clone());
         h.handle_harness_command(
             path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
                 crate::event::ExternalMessageToolCompletedCommand {
@@ -37880,7 +38125,8 @@ fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
     assert!(h.agent_routes.contains_key(recipient.as_str()));
     assert!(h.agents.contains_key(&cid));
     assert_eq!(
-        h.pending_tool_providers
+        h.tool_runtime
+            .pending_tool_providers
             .get("peer-tool-call")
             .map(|connection| connection.as_str()),
         Some("peer-tool-owner")
@@ -38121,7 +38367,9 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
     let mut h = echo_harness(&sp).expect("start");
     let cid = ensure_test_user_agent(&mut h);
     let call_id: tau_proto::ToolCallId = "stale-external-message-call".into();
-    h.tool_agents.insert(call_id.clone(), cid.clone());
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
 
     h.switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
         .expect("switch session");
@@ -38131,7 +38379,9 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
         .remove(&replacement_cid)
         .expect("replacement agent");
     h.agents.insert(cid.clone(), replacement_agent);
-    h.tool_agents.insert(call_id.clone(), cid.clone());
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
 
     h.handle_harness_command(
         path_crate_event::HarnessCommand::ExternalMessageToolCompleted(Box::new(
@@ -39373,7 +39623,11 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
             .count(),
         provider_responses_before
     );
-    assert!(!h.tool_agents.contains_key("call-must-not-launch"));
+    assert!(
+        !h.tool_runtime
+            .tool_agents
+            .contains_key("call-must-not-launch")
+    );
     assert!(!event_log_events(&h).iter().any(|event| {
         matches!(event, Event::ToolRequest(request)
             if request.call_id.as_str() == "call-must-not-launch")

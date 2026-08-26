@@ -493,7 +493,8 @@ impl Harness {
                 self.pending_external_message_auth
                     .remove(&command.auth_message_id);
                 if command.session_generation != self.current_session_generation
-                    || self.tool_agents.get(&command.call_id) != Some(&command.conversation_id)
+                    || self.tool_runtime.tool_agents.get(&command.call_id)
+                        != Some(&command.conversation_id)
                     || !self.agents.contains_key(&command.conversation_id)
                 {
                     tracing::debug!(
@@ -590,7 +591,8 @@ impl Harness {
             }
             HarnessCommand::SessionDiscoveryCompleted(command) => {
                 if command.session_generation != self.current_session_generation
-                    || self.tool_agents.get(&command.call_id) != Some(&command.conversation_id)
+                    || self.tool_runtime.tool_agents.get(&command.call_id)
+                        != Some(&command.conversation_id)
                     || !self.agents.contains_key(&command.conversation_id)
                 {
                     tracing::debug!(

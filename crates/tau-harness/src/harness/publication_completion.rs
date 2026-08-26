@@ -144,7 +144,12 @@ impl Harness {
         let Event::ToolCancelled(cancelled) = event else {
             return;
         };
-        let Some(cid) = self.tool_agents.get(&cancelled.call_id).cloned() else {
+        let Some(cid) = self
+            .tool_runtime
+            .tool_agents
+            .get(&cancelled.call_id)
+            .cloned()
+        else {
             return;
         };
         let Some(pending) = self.pending_ui_compactions_after_wait.get(&cid) else {
@@ -157,7 +162,8 @@ impl Harness {
             &cid,
             "compaction canceled because wait cancellation could not be committed",
         );
-        self.pending_terminal_observations
+        self.tool_runtime
+            .pending_terminal_observations
             .remove(&cancelled.call_id);
         self.rollback_manual_compaction_wait_claim(&cid, &cancelled.call_id);
         self.process_input_wait_deadlines(Instant::now());
@@ -1568,9 +1574,10 @@ impl Harness {
         let runtime_only_cid = self.take_post_commit_runtime_only_tool_cid(call_id);
         if let Event::ProviderToolError(error) = event {
             let projection_cid = runtime_only_cid.clone().or_else(|| {
-                self.tool_agents
+                self.tool_runtime
+                    .tool_agents
                     .get(call_id)
-                    .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                    .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
                     .cloned()
             });
             match projection_cid.as_ref() {
@@ -1582,9 +1589,10 @@ impl Harness {
         }
         if let Event::ProviderToolResult(result) = event {
             let projection_cid = self
+                .tool_runtime
                 .tool_agents
                 .get(call_id)
-                .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
                 .cloned();
             self.publish_tool_result_projections(projection_cid.as_ref(), source, result);
         }
@@ -1592,13 +1600,16 @@ impl Harness {
             Event::ProviderToolResult(result)
                 if result.kind == ToolResultKind::BackgroundPlaceholder =>
             {
-                if !self.tool_agents.contains_key(call_id)
-                    && !self.peer_internal_tool_agents.contains_key(call_id)
+                if !self.tool_runtime.tool_agents.contains_key(call_id)
+                    && !self
+                        .tool_runtime
+                        .peer_internal_tool_agents
+                        .contains_key(call_id)
                 {
                     return;
                 }
-                let newly_backgrounded = self.tool_turn.mark_backgrounded(call_id);
-                if !newly_backgrounded && !self.tool_turn.is_backgrounded(call_id) {
+                let newly_backgrounded = self.tool_runtime.tool_turn.mark_backgrounded(call_id);
+                if !newly_backgrounded && !self.tool_runtime.tool_turn.is_backgrounded(call_id) {
                     return;
                 }
                 self.record_wait_tool_result(result.clone(), None);
@@ -1612,18 +1623,20 @@ impl Harness {
         let Some(append_outcome) = append_outcome else {
             let disconnect_batch_pending = self.disconnect_terminal_batch_pending.contains(call_id);
             let runtime_cid = runtime_only_cid.clone().or_else(|| {
-                self.tool_agents
+                self.tool_runtime
+                    .tool_agents
                     .get(call_id)
-                    .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                    .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
                     .cloned()
             });
             match event {
                 Event::ProviderToolResult(result) => {
                     self.record_wait_tool_result(result.clone(), None);
                     if let Some(cid) = self
+                        .tool_runtime
                         .tool_agents
                         .get(call_id)
-                        .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                        .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
                         .cloned()
                     {
                         self.reset_loop_guard_for_progress(&cid);
@@ -1632,9 +1645,10 @@ impl Harness {
                 }
                 Event::ProviderToolError(error) => {
                     if let Some(cid) = runtime_only_cid.clone().or_else(|| {
-                        self.tool_agents
+                        self.tool_runtime
+                            .tool_agents
                             .get(call_id)
-                            .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
                             .cloned()
                     }) {
                         self.record_tool_failure_loop_signature(&cid, error);
@@ -1658,15 +1672,20 @@ impl Harness {
             return;
         };
         let Some(cid) = runtime_only_cid.clone().or_else(|| {
-            self.tool_agents
+            self.tool_runtime
+                .tool_agents
                 .get(call_id)
-                .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
                 .cloned()
         }) else {
             return;
         };
         if let Event::ToolBackgroundResult(result) = event {
-            let Some(mode) = self.pending_background_completion_modes.remove(call_id) else {
+            let Some(mode) = self
+                .tool_runtime
+                .pending_background_completion_modes
+                .remove(call_id)
+            else {
                 return;
             };
             self.finish_tool_call_runtime_state(call_id.as_str());
@@ -1682,7 +1701,11 @@ impl Harness {
             return;
         }
         if let Event::ToolBackgroundError(error) = event {
-            let Some(mode) = self.pending_background_completion_modes.remove(call_id) else {
+            let Some(mode) = self
+                .tool_runtime
+                .pending_background_completion_modes
+                .remove(call_id)
+            else {
                 return;
             };
             self.finish_tool_call_runtime_state(call_id.as_str());
@@ -1690,8 +1713,10 @@ impl Harness {
             self.finish_committed_background_completion(&cid, call_id, mode);
             return;
         }
-        self.pending_cancellation_observations.remove(call_id);
-        if let Some(settlement) = self.pending_wait_settlements.remove(call_id) {
+        self.tool_runtime
+            .pending_cancellation_observations
+            .remove(call_id);
+        if let Some(settlement) = self.tool_runtime.pending_wait_settlements.remove(call_id) {
             self.append_best_effort_observation(
                 &cid,
                 tau_proto::ObservationId::random(),
@@ -1740,10 +1765,13 @@ impl Harness {
         if deferred_teardown {
             self.finish_tool_call_runtime_state(call_id.as_str());
             self.clear_tool_call_tracking(call_id.as_str());
-            let foreground_remains = self
-                .tool_agents
-                .iter()
-                .any(|(pending, owner)| owner == &cid && !self.tool_turn.is_backgrounded(pending));
+            let foreground_remains =
+                self.tool_runtime
+                    .tool_agents
+                    .iter()
+                    .any(|(pending, owner)| {
+                        owner == &cid && !self.tool_runtime.tool_turn.is_backgrounded(pending)
+                    });
             if !foreground_remains {
                 if self.agents.get(&cid).is_some_and(|agent| agent.terminating) {
                     self.finish_cancel_delegate_side_conversation(&cid);
@@ -1752,7 +1780,11 @@ impl Harness {
                 }
             }
         } else {
-            if self.peer_internal_tool_agents.contains_key(call_id) {
+            if self
+                .tool_runtime
+                .peer_internal_tool_agents
+                .contains_key(call_id)
+            {
                 self.finish_harness_owned_tool_tracking(call_id);
             } else {
                 self.on_tool_call_complete(call_id.as_str());
@@ -1792,8 +1824,13 @@ impl Harness {
     /// Clear one non-durable disconnect terminal without draining scheduler
     /// work before the complete disconnect batch commits.
     pub(super) fn finish_non_durable_disconnect_tool_tracking(&mut self, call_id: &ToolCallId) {
-        if let Some(cid) = self.peer_internal_tool_agents.get(call_id).cloned() {
-            self.tool_turn.mark_complete(call_id);
+        if let Some(cid) = self
+            .tool_runtime
+            .peer_internal_tool_agents
+            .get(call_id)
+            .cloned()
+        {
+            self.tool_runtime.tool_turn.mark_complete(call_id);
             if let Some(agent) = self.agents.get_mut(&cid) {
                 agent.tools_in_flight = agent.tools_in_flight.saturating_sub(1);
             }
@@ -1810,13 +1847,18 @@ impl Harness {
         &mut self,
         call_id: &ToolCallId,
     ) -> Option<AgentId> {
-        if !self.post_commit_runtime_only_tool_terminals.remove(call_id) {
+        if !self
+            .tool_runtime
+            .post_commit_runtime_only_tool_terminals
+            .remove(call_id)
+        {
             return None;
         }
         let cid = self
+            .tool_runtime
             .tool_agents
             .get(call_id)
-            .or_else(|| self.peer_internal_tool_agents.get(call_id))
+            .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
             .cloned()?;
         self.finish_tool_call_runtime_state(call_id.as_str());
         self.clear_tool_call_tracking(call_id.as_str());
@@ -1825,7 +1867,11 @@ impl Harness {
 
     /// Settle one non-journal terminal after its canonical event commits.
     pub(super) fn finish_non_durable_tool_tracking_after_terminal(&mut self, call_id: &ToolCallId) {
-        if self.post_commit_runtime_only_tool_terminals.remove(call_id) {
+        if self
+            .tool_runtime
+            .post_commit_runtime_only_tool_terminals
+            .remove(call_id)
+        {
             self.finish_tool_call_runtime_state(call_id.as_str());
             self.clear_tool_call_tracking(call_id.as_str());
         } else {
@@ -2766,7 +2812,7 @@ impl Harness {
         message: &str,
         passive: bool,
     ) {
-        if passive && self.tool_turn.is_backgrounded(&call_id) {
+        if passive && self.tool_runtime.tool_turn.is_backgrounded(&call_id) {
             self.handle_background_tool_error_inner(
                 Some(crate::harness::harness_connection_id()),
                 ToolError {
@@ -2976,9 +3022,10 @@ impl Harness {
             _ => None,
         } && !persist
             && self
+                .tool_runtime
                 .tool_agents
                 .get(call_id)
-                .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
                 .is_none_or(|cid| !self.tool_terminal_has_open_durable_owner(cid, call_id))
         {
             // Harness-owned wait and peer completions can have a live agent route
@@ -3025,6 +3072,7 @@ impl Harness {
         };
         let outcome = if let Event::ProviderResponseFinished(response) = event
             && let Some(observation_id) = self
+                .tool_runtime
                 .pending_declaration_observations
                 .get(&response.agent_prompt_id)
                 .copied()
@@ -3037,11 +3085,13 @@ impl Harness {
                 recorded_at,
                 observation_id,
             )?;
-            self.pending_declaration_observations
+            self.tool_runtime
+                .pending_declaration_observations
                 .remove(&response.agent_prompt_id);
             outcome
         } else if let Some(call_id) = canonical_tool_terminal_call_id(event)
             && let Some(observation_id) = self
+                .tool_runtime
                 .pending_terminal_observations
                 .get(call_id)
                 .map(|terminal| terminal.observation_id)
@@ -3054,7 +3104,9 @@ impl Harness {
                 recorded_at,
                 observation_id,
             )?;
-            self.pending_terminal_observations.remove(call_id);
+            self.tool_runtime
+                .pending_terminal_observations
+                .remove(call_id);
             outcome
         } else {
             self.agent_store.append_agent_event_at(
@@ -3406,11 +3458,14 @@ impl Harness {
         &self,
         call_id: &tau_proto::ToolCallId,
     ) -> bool {
-        self.completed_ephemeral_tool_calls.contains(call_id)
+        self.tool_runtime
+            .completed_ephemeral_tool_calls
+            .contains(call_id)
             || self
+                .tool_runtime
                 .tool_agents
                 .get(call_id)
-                .or_else(|| self.peer_internal_tool_agents.get(call_id))
+                .or_else(|| self.tool_runtime.peer_internal_tool_agents.get(call_id))
                 .and_then(|cid| self.agents.get(cid))
                 .is_some_and(|agent| agent.persistence.is_ephemeral())
     }
@@ -3449,6 +3504,7 @@ impl Harness {
             Event::ShellCommandFinished(finished) => finished.target_agent_id.clone(),
             Event::ProviderResponseFinished(finished) => Some(finished.agent_id.clone()),
             Event::ProviderToolResult(result) => self
+                .tool_runtime
                 .tool_agents
                 .get(&result.call_id)
                 .and_then(|cid| self.agents.get(cid))
@@ -3456,6 +3512,7 @@ impl Harness {
                 .cloned()
                 .map(crate::parse_agent_id),
             Event::ProviderToolError(error) | Event::ToolError(error) => self
+                .tool_runtime
                 .tool_agents
                 .get(&error.call_id)
                 .and_then(|cid| self.agents.get(cid))
@@ -3463,6 +3520,7 @@ impl Harness {
                 .cloned()
                 .map(crate::parse_agent_id),
             Event::ToolBackgroundResult(result) => self
+                .tool_runtime
                 .tool_agents
                 .get(&result.call_id)
                 .and_then(|cid| self.agents.get(cid))
@@ -3470,6 +3528,7 @@ impl Harness {
                 .cloned()
                 .map(crate::parse_agent_id),
             Event::ToolBackgroundError(error) => self
+                .tool_runtime
                 .tool_agents
                 .get(&error.call_id)
                 .and_then(|cid| self.agents.get(cid))

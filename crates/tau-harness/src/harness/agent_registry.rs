@@ -572,7 +572,7 @@ impl Harness {
         let tool_parent = query
             .tool_call_id
             .as_ref()
-            .and_then(|call_id| self.tool_agents.get(call_id))
+            .and_then(|call_id| self.tool_runtime.tool_agents.get(call_id))
             .cloned();
         if let (Some(explicit), Some(tool_parent)) = (&explicit, &tool_parent)
             && explicit != tool_parent
@@ -1072,7 +1072,7 @@ impl Harness {
         {
             return tau_proto::AgentTurnActivity::Responding;
         }
-        let categories = self.tool_turn.active_categories_for(cid);
+        let categories = self.tool_runtime.tool_turn.active_categories_for(cid);
         if categories.manipulator() {
             return tau_proto::AgentTurnActivity::Manipulating;
         }
@@ -1423,13 +1423,14 @@ impl Harness {
         self.pending_publish_idle_dispatches
             .retain(|dispatch| &dispatch.cid != cid);
         let mut peer_internal_calls = self
+            .tool_runtime
             .peer_internal_tool_agents
             .iter()
             .filter_map(|(call_id, owner)| (owner == cid).then_some(call_id.clone()))
             .collect::<Vec<_>>();
         peer_internal_calls.sort();
         for call_id in peer_internal_calls {
-            let Some(tool) = self.pending_tools.get(&call_id).cloned() else {
+            let Some(tool) = self.tool_runtime.pending_tools.get(&call_id).cloned() else {
                 self.clear_tool_call_tracking(call_id.as_str());
                 continue;
             };

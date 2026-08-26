@@ -850,7 +850,7 @@ impl Harness {
                     "compaction canceled by a competing turn cancellation",
                 );
                 let mut cancelled_calls = remaining_calls;
-                cancelled_calls.extend(self.tool_turn.backgrounded_calls_for(cid));
+                cancelled_calls.extend(self.tool_runtime.tool_turn.backgrounded_calls_for(cid));
                 cancelled_calls.sort();
                 cancelled_calls.dedup();
                 let foreground_pending = self.cancel_remaining_tool_calls(
@@ -1184,10 +1184,10 @@ impl Harness {
         target: CancelTarget,
         completion_prompt_mode: BackgroundCompletionPromptMode,
     ) {
-        if !self.tool_turn.is_backgrounded(&target.call_id) {
+        if !self.tool_runtime.tool_turn.is_backgrounded(&target.call_id) {
             return;
         }
-        if !self.tool_agents.contains_key(&target.call_id) {
+        if !self.tool_runtime.tool_agents.contains_key(&target.call_id) {
             return;
         }
         if let Some(accepted) = self
@@ -1234,7 +1234,7 @@ impl Harness {
         // while live-branch turn cancellation keeps a queued internal notice so
         // the placeholder has an observable completion on that branch without
         // immediately auto-advancing the model.
-        if let Some(cid) = self.tool_agents.get(&target.call_id).cloned() {
+        if let Some(cid) = self.tool_runtime.tool_agents.get(&target.call_id).cloned() {
             self.observe_tool_terminal(
                 &cid,
                 &target.call_id,
@@ -1276,7 +1276,7 @@ impl Harness {
             AgentTurnState::ToolsRunning { remaining_calls } => remaining_calls,
             _ => Vec::new(),
         };
-        cancelled_calls.extend(self.tool_turn.backgrounded_calls_for(&cid));
+        cancelled_calls.extend(self.tool_runtime.tool_turn.backgrounded_calls_for(&cid));
         cancelled_calls.extend(self.background_completion_call_ids_for_teardown(&cid));
         cancelled_calls.sort();
         cancelled_calls.dedup();
@@ -2112,6 +2112,7 @@ impl Harness {
         let remaining: std::collections::HashSet<ToolCallId> =
             remaining_calls.iter().cloned().collect();
         let mut to_cancel: Vec<CancelTarget> = self
+            .tool_runtime
             .tool_turn
             .cancel_queued_for(cid, &remaining)
             .into_iter()
@@ -2126,10 +2127,10 @@ impl Harness {
             if to_cancel.iter().any(|target| target.call_id == call_id) {
                 continue;
             }
-            let Some(tool) = self.pending_tools.get(&call_id).cloned() else {
+            let Some(tool) = self.tool_runtime.pending_tools.get(&call_id).cloned() else {
                 continue;
             };
-            let backgrounded = self.tool_turn.is_backgrounded(&call_id);
+            let backgrounded = self.tool_runtime.tool_turn.is_backgrounded(&call_id);
             to_cancel.push(CancelTarget {
                 call_id,
                 tool_name: tool.name,
@@ -2156,7 +2157,8 @@ impl Harness {
                     background_completion_prompt_mode,
                     BackgroundCompletionPromptMode::QueuePassive
                 ) {
-                    self.suppressed_background_completion_prompts
+                    self.tool_runtime
+                        .suppressed_background_completion_prompts
                         .remove(&call_id);
                 }
                 self.finish_backgrounded_tool_cancelled_by_harness(
@@ -2171,10 +2173,15 @@ impl Harness {
                 }
                 continue;
             }
-            if !self.pending_tools.contains_key(&target.call_id) {
+            if !self
+                .tool_runtime
+                .pending_tools
+                .contains_key(&target.call_id)
+            {
                 continue;
             }
-            self.tool_agents
+            self.tool_runtime
+                .tool_agents
                 .entry(target.call_id.clone())
                 .or_insert_with(|| cid.clone());
             let call_id = target.call_id;
@@ -2205,18 +2212,18 @@ impl Harness {
         }
         foreground_call_ids
             .iter()
-            .any(|call_id| self.tool_agents.get(call_id) == Some(cid))
+            .any(|call_id| self.tool_runtime.tool_agents.get(call_id) == Some(cid))
     }
 
     pub(super) fn cancel_target_should_finish_as_background_error(
         &self,
         target: &CancelTarget,
     ) -> bool {
-        target.backgrounded || self.tool_turn.is_backgrounded(&target.call_id)
+        target.backgrounded || self.tool_runtime.tool_turn.is_backgrounded(&target.call_id)
     }
 
     pub(crate) fn is_running_tool_call(&self, target_call_id: &ToolCallId) -> bool {
-        self.pending_tools.contains_key(target_call_id)
+        self.tool_runtime.pending_tools.contains_key(target_call_id)
     }
 
     pub(crate) fn is_running_cancellable_tool_call_for(
@@ -2224,8 +2231,8 @@ impl Harness {
         conversation_id: &AgentId,
         target_call_id: &ToolCallId,
     ) -> bool {
-        self.pending_tools.contains_key(target_call_id)
-            && self.tool_agents.get(target_call_id) == Some(conversation_id)
+        self.tool_runtime.pending_tools.contains_key(target_call_id)
+            && self.tool_runtime.tool_agents.get(target_call_id) == Some(conversation_id)
     }
 
     pub(crate) fn is_completed_tool_call_for(
@@ -2233,7 +2240,7 @@ impl Harness {
         conversation_id: &AgentId,
         target_call_id: &ToolCallId,
     ) -> bool {
-        self.completed_tool_agents.get(target_call_id) == Some(conversation_id)
+        self.tool_runtime.completed_tool_agents.get(target_call_id) == Some(conversation_id)
     }
 
     pub(crate) fn publish_tool_cancel_request_for(
@@ -2249,7 +2256,8 @@ impl Harness {
             (cancel_call, self.wait_tool_call_ref(&target_call_id))
         {
             let request = tau_proto::ObservationId::random();
-            self.pending_cancellation_observations
+            self.tool_runtime
+                .pending_cancellation_observations
                 .entry(target_call_id.clone())
                 .or_insert(request);
             self.append_best_effort_observation(

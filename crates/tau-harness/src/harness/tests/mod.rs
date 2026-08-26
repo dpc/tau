@@ -1794,7 +1794,7 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
 fn drive_harness_until_tool_turn_empty(h: &mut Harness) {
     let started = Instant::now();
     loop {
-        if h.tool_turn.is_empty() {
+        if h.tool_runtime.tool_turn.is_empty() {
             return;
         }
         if started.elapsed() >= Duration::from_secs(3) {

@@ -149,6 +149,7 @@ use crate::harness::interception::{
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
 use crate::harness::provider_startup::ProviderStartupSnapshot;
 use crate::harness::subagents_tool::SubagentToolState;
+use crate::harness::tool_runtime::ToolRuntimeState;
 use crate::internal_tools::InternalToolHandlers;
 use crate::model::{
     LoadedRoles, MissingDefaultRole, baseline_params_for_selection, context_percent_used,
@@ -1728,54 +1729,8 @@ pub struct Harness {
     /// Keeping it separate prevents shell traffic from changing later agent
     /// ids.
     ui_shell_route_rng: StdRng,
-    /// `call_id` → owning agent for every tool call currently
-    /// in flight. Used to attribute incoming `ToolResult` / `ToolError`
-    /// / `ToolProgress` events back to the originating conversation.
-    pub(crate) tool_agents: std::collections::HashMap<ToolCallId, AgentId>,
-    /// `call_id` → pending tool metadata for in-flight calls. Used to
-    /// enrich terminal runtime events before they are folded into transcript
-    /// facts.
-    pub(crate) pending_tools: std::collections::HashMap<ToolCallId, PendingTool>,
-    /// Preallocated envelope identities for provider declarations awaiting
-    /// commit.
-    pending_declaration_observations: HashMap<AgentPromptId, tau_proto::ObservationId>,
-    /// Preallocated envelope identities for canonical tool terminals awaiting
-    /// journal append.
-    pending_terminal_observations: HashMap<ToolCallId, PendingTerminalObservation>,
-    /// Wait settlements held until their canonical wait terminal commits.
-    pending_wait_settlements:
-        HashMap<ToolCallId, path_crate_harness::subagents_tool::PendingWaitSettlement>,
-    /// Calls whose canonical terminal clears runtime state without advancing
-    /// the owning tool turn.
-    post_commit_runtime_only_tool_terminals: HashSet<ToolCallId>,
-    /// Background completion prompt policy retained until its canonical
-    /// terminal commits.
-    pending_background_completion_modes: HashMap<ToolCallId, BackgroundCompletionPromptMode>,
-    /// First accepted provider cancellation observation for each live target.
-    pending_cancellation_observations: HashMap<ToolCallId, tau_proto::ObservationId>,
-    /// Ownerless calls accepted from committed configured-peer requests.
-    peer_tool_requests: std::collections::HashSet<ToolCallId>,
-    /// `call_id` to loaded-agent runtime correlation for peer requests routed
-    /// internally. Kept separate from `tool_agents` because these calls do not
-    /// own transcript branches.
-    peer_internal_tool_agents: std::collections::HashMap<ToolCallId, AgentId>,
-    /// Tool call ids that were known to this harness and reached a terminal
-    /// state. Used for same-session known-id collection; owner-scoped
-    /// cancellation diagnostics use `completed_tool_agents`.
-    pub(crate) completed_tool_calls: std::collections::HashSet<ToolCallId>,
-    /// Completed tool calls that targeted ephemeral agents. Retained for the
-    /// session so duplicate or late reports remain excluded from durable debug
-    /// logs after live call tracking and the runtime agent are removed.
-    completed_ephemeral_tool_calls: std::collections::HashSet<ToolCallId>,
-    /// `call_id` → owning agent for completed tool calls whose owner was known
-    /// at completion time. Used by internal tools to keep completion
-    /// diagnostics scoped to the caller's conversation.
-    pub(crate) completed_tool_agents: std::collections::HashMap<ToolCallId, AgentId>,
-    /// `call_id` → connection id of the extension currently servicing
-    /// the call. Needed to route cancellation requests back to the
-    /// right provider.
-    pub(crate) pending_tool_providers:
-        std::collections::HashMap<ToolCallId, tau_proto::ConnectionId>,
+    /// Live and completed tool ownership, routing, and turn coordination.
+    pub(crate) tool_runtime: ToolRuntimeState,
     /// Harness-private provider route id → selected provider and canonical UI
     /// request identity for commands awaiting a terminal extension event.
     pending_ui_shell_commands: HashMap<UiShellRouteId, PendingUiShellCommand>,
@@ -2179,21 +2134,11 @@ pub struct Harness {
     /// Model-visible notices waiting to be folded into the next real user
     /// prompt.
     pub(crate) pending_notices: PendingPromptNoticeState,
-    /// Pure scheduler state for queued and in-flight tool invocations.
-    pub(crate) tool_turn: ToolTurnMachine,
     /// Complete transient ambient-indicator contributions by source and agent.
     agent_runtime_indicators: HashMap<
         tau_proto::ConnectionId,
         HashMap<AgentId, std::collections::BTreeSet<tau_proto::AgentRuntimeIndicator>>,
     >,
-    /// Backgrounded calls whose real completion should not enqueue an internal
-    /// model-visible steering prompt. The real result/error event is still
-    /// published normally.
-    pub(crate) suppressed_background_completion_prompts: HashSet<ToolCallId>,
-    /// Owning agents for background calls that have delivered their real
-    /// completion. Kept so suppression can remove and later restore queued
-    /// completion prompts across repeated wait/interrupt cycles.
-    pub(crate) background_completion_targets: HashMap<ToolCallId, AgentId>,
     /// Prompt ids canceled by `:cancel`. Late agent events for these
     /// prompts are ignored and never folded into session state.
     pub(crate) canceled_prompts: std::collections::HashSet<AgentPromptId>,

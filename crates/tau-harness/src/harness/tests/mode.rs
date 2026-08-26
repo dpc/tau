@@ -566,7 +566,9 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         }),
     );
     let tool_call_id = ToolCallId::from("ephemeral-debug-tool-call");
-    h.tool_agents.insert(tool_call_id.clone(), cid.clone());
+    h.tool_runtime
+        .tool_agents
+        .insert(tool_call_id.clone(), cid.clone());
     let progress_owner = "ephemeral-progress-owner";
     let _progress_sink = connect_ready_configured_extension(
         &mut h,
@@ -574,7 +576,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
         "configured-progress-owner",
         tau_proto::ClientKind::Tool,
     );
-    h.pending_tool_providers.insert(
+    h.tool_runtime.pending_tool_providers.insert(
         tool_call_id.clone(),
         crate::test_connection_id(progress_owner),
     );
@@ -870,7 +872,7 @@ fn tool_backed_start_agent_request_targets_ephemeral_agent() {
         .cloned()
         .expect("ephemeral route");
     let tool_call_id = ToolCallId::from("ephemeral-delegate-tool-call");
-    h.tool_agents.insert(tool_call_id.clone(), cid);
+    h.tool_runtime.tool_agents.insert(tool_call_id.clone(), cid);
 
     assert!(
         h.event_targets_ephemeral_agent(

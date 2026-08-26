@@ -464,7 +464,12 @@ impl<'a> InternalToolHost<'a> {
     /// Background an internal tool call with a custom placeholder and release
     /// the foreground turn after that placeholder commits.
     pub fn background_tool_call(&mut self, call_id: &ToolCallId, result: CborValue) {
-        if self.harness.tool_turn.begin_backgrounding(call_id) {
+        if self
+            .harness
+            .tool_runtime
+            .tool_turn
+            .begin_backgrounding(call_id)
+        {
             self.harness.observe_tool_backgrounded(call_id);
             self.harness
                 .publish_internal_background_placeholder(call_id, result);
@@ -528,11 +533,17 @@ impl<'a> InternalToolHost<'a> {
     ) -> Option<(AgentId, AgentToolCall, ToolName)> {
         let cid = self
             .harness
+            .tool_runtime
             .tool_agents
             .get(&started.call_id)
             .or_else(|| self.harness.peer_internal_tool_agent(&started.call_id))?
             .clone();
-        let pending = self.harness.pending_tools.get(&started.call_id)?.clone();
+        let pending = self
+            .harness
+            .tool_runtime
+            .pending_tools
+            .get(&started.call_id)?
+            .clone();
         let call = AgentToolCall {
             call_ref: self.harness.wait_tool_call_ref(&started.call_id),
             id: started.call_id.clone(),
@@ -549,8 +560,18 @@ impl<'a> InternalToolHost<'a> {
         &mut self,
         started: &tau_proto::ToolStarted,
     ) -> Option<AgentOwnedInternalToolCall> {
-        let cid = self.harness.tool_agents.get(&started.call_id)?.clone();
-        let pending = self.harness.pending_tools.get(&started.call_id)?.clone();
+        let cid = self
+            .harness
+            .tool_runtime
+            .tool_agents
+            .get(&started.call_id)?
+            .clone();
+        let pending = self
+            .harness
+            .tool_runtime
+            .pending_tools
+            .get(&started.call_id)?
+            .clone();
         let call = AgentToolCall {
             call_ref: self.harness.wait_tool_call_ref(&started.call_id),
             id: started.call_id.clone(),

@@ -389,7 +389,8 @@ impl Harness {
                 tool_calls_with_non_tool_stop,
             );
             let declaration = tau_proto::ObservationId::random();
-            self.pending_declaration_observations
+            self.tool_runtime
+                .pending_declaration_observations
                 .insert(response.agent_prompt_id.clone(), declaration);
             let item_indices = response
                 .output_items
@@ -2329,8 +2330,12 @@ impl Harness {
                 .get(cid)
                 .and_then(|conv| conv.in_flight_prompt.as_ref())
                 .is_some_and(|prompt_id| Some(prompt_id) != completed_prompt_id);
-        let replacement_tool_terminal_in_flight =
-            keep_parented_conversation && self.tool_agents.values().any(|owner| owner == cid);
+        let replacement_tool_terminal_in_flight = keep_parented_conversation
+            && self
+                .tool_runtime
+                .tool_agents
+                .values()
+                .any(|owner| owner == cid);
         // Release before removing or detaching the side agent so
         // queued descendants can still resolve their parent agent
         // while starting. Active descendants keep their own copied state. Result
@@ -2395,7 +2400,7 @@ impl Harness {
                     source,
                 );
             } else {
-                self.tool_turn.push_from(
+                self.tool_runtime.tool_turn.push_from(
                     cid.clone(),
                     call,
                     entry.background_support,
@@ -2412,7 +2417,7 @@ impl Harness {
         normalized_calls: &[NormalizedFinishedToolCall],
     ) {
         for entry in normalized_calls {
-            self.pending_tools.insert(
+            self.tool_runtime.pending_tools.insert(
                 entry.call.id.clone(),
                 PendingTool {
                     name: entry.call.name.clone(),
@@ -2846,10 +2851,11 @@ impl Harness {
 
     pub(super) fn known_tool_call_ids(&self) -> HashSet<ToolCallId> {
         let mut ids: HashSet<ToolCallId> = self
+            .tool_runtime
             .tool_agents
             .keys()
-            .chain(self.pending_tools.keys())
-            .chain(self.completed_tool_calls.iter())
+            .chain(self.tool_runtime.pending_tools.keys())
+            .chain(self.tool_runtime.completed_tool_calls.iter())
             .cloned()
             .collect();
         for tree in self.agent_store.agents() {

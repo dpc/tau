@@ -2050,7 +2050,9 @@ fn local_peer_parked_across_rollover_has_no_stale_terminal() {
     configure_inter_session_receivers(&mut h, &[("engineer", false)]);
     let cid = ensure_test_user_agent(&mut h);
     let call_id: ToolCallId = "local-rollover-call".into();
-    h.tool_agents.insert(call_id.clone(), cid.clone());
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
     let _interceptor = connect_test_tool(&mut h, "local-rollover-interceptor");
     h.handle_extension_event(
         "local-rollover-interceptor",
@@ -4649,8 +4651,10 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     let agent_id = h
         .ensure_agent_id_for_agent(&cid)
         .expect("default conversation has an agent id");
-    h.tool_agents.insert(call_id.clone(), cid.clone());
-    h.pending_tools.insert(
+    h.tool_runtime
+        .tool_agents
+        .insert(call_id.clone(), cid.clone());
+    h.tool_runtime.pending_tools.insert(
         call_id.clone(),
         PendingTool {
             name: tool_name.clone(),
@@ -4659,7 +4663,8 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
             allows_provider_image: false,
         },
     );
-    h.pending_tool_providers
+    h.tool_runtime
+        .pending_tool_providers
         .insert(call_id.clone(), crate::test_connection_id("tool-provider"));
     let _provider = connect_ready_configured_extension(
         &mut h,
@@ -4735,7 +4740,7 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     )
     .expect("defer tool result");
     assert!(
-        h.tool_agents.contains_key(&call_id),
+        h.tool_runtime.tool_agents.contains_key(&call_id),
         "tool call tracking must remain until the deferred report commits"
     );
 
@@ -4747,7 +4752,7 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
     )
     .expect("intercept reply");
     assert!(
-        !h.tool_agents.contains_key(&call_id),
+        !h.tool_runtime.tool_agents.contains_key(&call_id),
         "post-commit terminal processing clears routed-call tracking"
     );
 
@@ -6261,9 +6266,9 @@ fn rejected_activating_append_leaves_no_stale_dispatch() {
     );
     assert_eq!(conv.loop_guard.consecutive_tool_failures(), 0);
     assert!(!conv.loop_guard.stop_automatic_continuation());
-    assert!(h.pending_tools.is_empty());
-    assert!(h.tool_agents.is_empty());
-    assert!(h.peer_internal_tool_agents.is_empty());
+    assert!(h.tool_runtime.pending_tools.is_empty());
+    assert!(h.tool_runtime.tool_agents.is_empty());
+    assert!(h.tool_runtime.peer_internal_tool_agents.is_empty());
     std::fs::remove_dir(&event_path).expect("remove append blocker");
     std::fs::rename(&backup_path, &event_path).expect("restore agent journal");
 

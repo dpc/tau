@@ -42,9 +42,10 @@ fn install_exact_wait_at(
 ) -> ToolCallId {
     let target_call_id = ToolCallId::from(target_call_id);
     harness
+        .tool_runtime
         .tool_agents
         .insert(target_call_id.clone(), owner.clone());
-    harness.pending_tools.insert(
+    harness.tool_runtime.pending_tools.insert(
         target_call_id.clone(),
         super::super::PendingTool {
             name: ToolName::new("slow"),
