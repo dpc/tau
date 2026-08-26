@@ -25,12 +25,123 @@ fn legacy_debug_harness_input_json(message: &HarnessInputMessage) -> serde_json:
     serde_json::to_value(redacted).unwrap_or_default()
 }
 
+/// Reproduces the former generic published-event projection for regression
+/// comparisons.
+fn legacy_debug_event_json(event: &Event) -> serde_json::Value {
+    if let Event::AgentPromptCreated(prompt) = event {
+        return prompt_created_debug_summary(prompt);
+    }
+    if let Event::ProviderResponseUpdated(updated) | Event::ProviderResponseUpdatedReported(updated) =
+        event
+        && updated
+            .status
+            .as_ref()
+            .and_then(|status| status.retry.as_ref())
+            .is_some()
+    {
+        return provider_retry_debug_projection(event.name(), updated);
+    }
+    let mut redacted = event.clone();
+    redact_event_binary_content(&mut redacted);
+    serde_json::to_value(redacted).unwrap_or_default()
+}
+
 /// Applies the established string compaction before comparing complete JSON
 /// rows.
 fn compacted_json_bytes(value: serde_json::Value) -> Vec<u8> {
     let mut value = value;
     compact_debug_json_strings(&mut value);
     serde_json::to_vec(&value).expect("serialize compacted debug JSON")
+}
+
+fn debug_provider_finished(output_items: Vec<tau_proto::ContextItem>) -> ProviderResponseFinished {
+    ProviderResponseFinished {
+        automatic_compaction_decision: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: AgentPromptId::parse("sp-debug").expect("prompt id"),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items,
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        originator: PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_attempt: Default::default(),
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
+}
+
+fn debug_image_tool_result(data: Vec<u8>) -> tau_proto::ToolResult {
+    tau_proto::ToolResult {
+        presentation: Default::default(),
+        call_id: "call-image".into(),
+        tool_name: tau_proto::ToolName::new("read_image"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("safe image metadata".to_owned()),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: data.into(),
+                width: 1,
+                height: 1,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+        kind: tau_proto::ToolResultKind::Final,
+        display: None,
+        originator: PromptOriginator::User,
+    }
+}
+
+fn debug_image_context_item(data: Vec<u8>) -> tau_proto::ContextItem {
+    tau_proto::ContextItem::ToolResult(tau_proto::ToolResultItem {
+        presentation: Default::default(),
+        call_id: "call-image".into(),
+        tool_type: tau_proto::ToolType::Function,
+        status: tau_proto::ToolResultStatus::Success,
+        output: tau_proto::ToolResponse::from_cbor(&CborValue::Text("image".into())),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: data.into(),
+                width: 1,
+                height: 1,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+    })
+}
+
+fn debug_binary_events(data: Vec<u8>) -> Vec<Event> {
+    let compacted = tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compacted_input_tokens: None,
+        compact_prompt_id: None,
+        model: None,
+        operation: None,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        transaction_id: None,
+        cut: None,
+        suffix_end: None,
+        replacement_window: vec![debug_image_context_item(data.clone())],
+    };
+    let finished = debug_provider_finished(vec![debug_image_context_item(data.clone())]);
+    vec![
+        Event::ToolResultReported(debug_image_tool_result(data.clone())),
+        Event::ToolResult(debug_image_tool_result(data.clone())),
+        Event::ProviderToolResult(debug_image_tool_result(data.clone())),
+        Event::AgentCompacted(compacted),
+        Event::ProviderResponseFinishedReported(finished.clone()),
+        Event::ProviderResponseFinished(finished),
+    ]
 }
 
 /// Append timing must report exact content-free EOF boundaries so slow-write
@@ -515,6 +626,127 @@ fn submitted_prompt_debug_projection_borrows_and_matches_legacy_json() {
         compacted_json_bytes(legacy),
         "bounded debug output must remain byte-exact"
     );
+}
+
+/// Published canonical events without image bytes borrow their original values,
+/// so large prompts and ordinary provider updates/terminals avoid the former
+/// full-event clone without changing their compacted debug JSON.
+#[test]
+fn published_binary_free_events_borrow_and_match_legacy_json() {
+    let submitted = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        inference_activation: true,
+        text: format!("prefix-{}-suffix", "submitted-prompt-body-".repeat(1_000)),
+        trusted_internal_spans: Vec::new(),
+        message_class: Default::default(),
+        internal_kind: None,
+        originator: PromptOriginator::User,
+        submission_source: Default::default(),
+        display_name: None,
+        ctx_id: None,
+    });
+    let updated = Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: AgentPromptId::parse("sp-ordinary").expect("prompt id"),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: vec![ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "ordinary public delta".to_owned(),
+            phase: None,
+        }],
+        compaction: None,
+        status: None,
+        response_stats: None,
+        originator: PromptOriginator::User,
+    });
+    let finished = Event::ProviderResponseFinished(debug_provider_finished(Vec::new()));
+
+    for event in [&submitted, &updated, &finished] {
+        let DebugEventProjection::Borrowed(borrowed) = debug_event_projection(event) else {
+            panic!("binary-free published event must not require an owned redaction copy");
+        };
+        assert!(
+            std::ptr::eq(borrowed, event),
+            "borrowed published projection must retain event identity"
+        );
+
+        let current = debug_event_json(event);
+        let legacy = legacy_debug_event_json(event);
+        assert_eq!(
+            serde_json::to_vec(&current).expect("serialize current JSON"),
+            serde_json::to_vec(&legacy).expect("serialize legacy JSON"),
+            "published debug JSON changed for {}",
+            event.name()
+        );
+        assert_eq!(
+            compacted_json_bytes(current),
+            compacted_json_bytes(legacy),
+            "bounded published debug JSON changed for {}",
+            event.name()
+        );
+    }
+}
+
+/// Every event shape selected by the shared image classifier takes the owned
+/// path and clears bytes before published JSON serialization, matching the
+/// former clone-and-redact projection exactly.
+#[test]
+fn published_binary_events_redact_every_classified_nested_image() {
+    let image_bytes = b"published-debug-image-sentinel".to_vec();
+    let serialized_bytes =
+        serde_json::to_string(&image_bytes).expect("serialize original image bytes");
+
+    for event in debug_binary_events(image_bytes) {
+        assert!(
+            matches!(
+                debug_event_projection(&event),
+                DebugEventProjection::Redacted(_)
+            ),
+            "{} with image bytes must own a redacted debug projection",
+            event.name()
+        );
+        let current = debug_event_json(&event);
+        let rendered = serde_json::to_string(&current).expect("render debug JSON");
+        assert!(
+            !rendered.contains(&serialized_bytes),
+            "{} retained original image bytes in debug JSON",
+            event.name()
+        );
+        assert!(
+            rendered.contains("\"data\":[]"),
+            "{} did not retain its byte-free image shape",
+            event.name()
+        );
+        assert_eq!(
+            compacted_json_bytes(current),
+            compacted_json_bytes(legacy_debug_event_json(&event)),
+            "bounded published debug JSON changed for {}",
+            event.name()
+        );
+    }
+}
+
+/// Empty image buffers serialize identically without redaction, so every shared
+/// classifier shape borrows its original event rather than allocating a copy.
+#[test]
+fn published_empty_binary_events_borrow_and_match_legacy_json() {
+    for event in debug_binary_events(Vec::new()) {
+        let DebugEventProjection::Borrowed(borrowed) = debug_event_projection(&event) else {
+            panic!(
+                "{} with an empty image must not require an owned redaction copy",
+                event.name()
+            );
+        };
+        assert!(
+            std::ptr::eq(borrowed, &event),
+            "borrowed published projection must retain event identity"
+        );
+        assert_eq!(
+            compacted_json_bytes(debug_event_json(&event)),
+            compacted_json_bytes(legacy_debug_event_json(&event)),
+            "bounded published debug JSON changed for empty {}",
+            event.name()
+        );
+    }
 }
 
 /// A large malformed-config diagnostic remains borrowed and receives the same

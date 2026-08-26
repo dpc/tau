@@ -809,9 +809,37 @@ fn debug_event_json(event: &Event) -> serde_json::Value {
     {
         return provider_retry_debug_projection(event.name(), updated);
     }
-    let mut redacted = event.clone();
-    redact_event_binary_content(&mut redacted);
-    serde_json::to_value(redacted).unwrap_or_default()
+    debug_event_projection(event).into_json()
+}
+
+/// The borrowed or binary-redacted published event selected for debug JSON
+/// serialization.
+enum DebugEventProjection<'event> {
+    /// The original event, which has no image bytes requiring redaction.
+    Borrowed(&'event Event),
+    /// A copy whose image bytes have been cleared before serialization.
+    Redacted(Box<Event>),
+}
+
+impl DebugEventProjection<'_> {
+    /// Converts this selected projection into the established debug JSON shape.
+    fn into_json(self) -> serde_json::Value {
+        match self {
+            Self::Borrowed(event) => serde_json::to_value(event).unwrap_or_default(),
+            Self::Redacted(event) => serde_json::to_value(event).unwrap_or_default(),
+        }
+    }
+}
+
+/// Selects borrowed serialization unless binary redaction needs an owned copy.
+fn debug_event_projection(event: &Event) -> DebugEventProjection<'_> {
+    if event_has_binary_content(event) {
+        let mut redacted = event.clone();
+        redact_event_binary_content(&mut redacted);
+        DebugEventProjection::Redacted(Box::new(redacted))
+    } else {
+        DebugEventProjection::Borrowed(event)
+    }
 }
 
 fn provider_retry_debug_projection(
