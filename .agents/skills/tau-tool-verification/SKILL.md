@@ -146,6 +146,12 @@ minutes, plus independent graceful shutdown and safe crash cleanup.
 Caller-requested result limits and grep'"'"'s per-line shortening retain their
 native limit metadata and do not by themselves imply a saved artifact.
 
+For complete terminal-frame budgeting, verify an oversized `read_image` result
+fails as typed content without base64/text fallback. For an oversized
+`edit`/`apply_patch` structured diff, verify only the optional UI diff becomes
+an explicit truncation marker while success or partial failure and changed-file
+evidence remain truthful.
+
 `grep` renders matches heading-grouped: each file's path appears once as a
 heading line, followed by `LINE:CONTENT` for match lines and `LINE-CONTENT`
 for context lines. Over-long path headings are truncated to the same

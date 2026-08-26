@@ -14,7 +14,7 @@ advertise: false
 Model-visible tools:
 
 - `read` — reads UTF-8 and non-UTF-8 files with line numbers, line-ending markers, Unicode replacement for invalid bytes plus `invalid-utf8` flags, range/ranges support, line/byte truncation metadata, a 10 MiB input safety cap, a rendered-range expansion cap that can reject large overlapping multi-range requests before rendering, and a bounded nearby-sibling suggestion for simple missing-path typos.
-- `read_image` — reads one local PNG, JPEG, or WebP under the same filesystem authority as `read`, validates and re-encodes it under strict byte/dimension/pixel/decoded-memory limits, strips source metadata, and returns bounded high-detail typed image content. Bare calls keep the 2048-side/2,500-patch high profile. Explicit experimental `mode: "overview"` uses 1024-side/600-patch local preparation for coarse inspection only. An optional half-open `region` uses EXIF-oriented source pixels and crops before profile resizing. It is visible only when the exact provider route publishes native image tool-result support, including audited GPT-5.6 ChatGPT Responses routes and explicitly declared multimodal llama.cpp Chat Completions models. Generic UI/debug output shows source/oriented/region/output geometry, profile, patches, format, and byte count, never pixels or base64.
+- `read_image` — reads one local PNG, JPEG, or WebP under the same filesystem authority as `read`, validates and re-encodes it under strict byte/dimension/pixel/decoded-memory limits, strips source metadata, and returns bounded high-detail typed image content. Bare calls keep the 2048-side/2,500-patch high profile. Explicit experimental `mode: "overview"` uses 1024-side/600-patch local preparation for coarse inspection only. An optional half-open `region` uses EXIF-oriented source pixels and crops before profile resizing. It is visible only when the exact provider route publishes native image tool-result support, including audited GPT-5.6 ChatGPT Responses routes and explicitly declared multimodal llama.cpp Chat Completions models. Generic UI/debug output shows source/oriented/region/output geometry, profile, patches, format, and byte count, never pixels or base64. The complete encoded terminal envelope must fit the shared 8 MiB client frame limit; an oversized typed result fails locally without base64 or text fallback.
 - `edit` with explicit `shell:tool-style:edit` — exposes the legacy internal
   `edit` implementation, which applies context-checked line-oriented
   replacements. `newText` fully replaces the 1-based half-open
@@ -30,7 +30,9 @@ Model-visible tools:
    endings. Context mismatches report the preceding `context_line_number`. The
    agent-visible result is minimal status only; the UI receives
   a separate structured diff payload for changed UTF-8 files, including inline
-  changed-token segments.
+  changed-token segments. If that optional diff would exceed the complete
+  terminal-frame budget, it becomes an explicit truncation marker while the
+  minimal result and file/range display facts remain intact.
 - `edit` — normally exposes the exact-text internal `replace` implementation:
   it replaces exact `oldText` ranges in one existing UTF-8 file. It matches all
   edits in the same original snapshot after CRLF/CR-to-LF normalization and
@@ -38,9 +40,11 @@ Model-visible tools:
   targets cannot overlap. It validates before one write, preserves BOM and
   untouched bytes, maps inserted newlines to local source context, and returns
   only `edits`, `changed`, and `total_bytes`. A changed file uses the ordinary
-  structured UI-only diff; a no-op writes nothing and has no diff. Model calls
+  structured UI-only diff; an oversized optional diff becomes an explicit
+  truncation marker while the minimal result and path display facts remain
+  intact. A no-op writes nothing and has no diff. Model calls
   and results use `edit`; ext-shell lifecycle events retain `replace`.
-- `apply_patch` — applies patch-style file edits and also sends structured UI-only diffs for changed UTF-8 files. It carries the neutral `shell:edit:apply_patch` tag; the harness built-in ChatGPT policy re-enables it after disabling the broader `shell:*` family.
+- `apply_patch` — applies patch-style file edits and also sends structured UI-only diffs for changed UTF-8 files. If an optional structured diff would make the complete terminal frame exceed 8 MiB, the terminal keeps its truthful success/error and changed-file evidence but replaces only the UI diff with an explicit truncation marker. It carries the neutral `shell:edit:apply_patch` tag; the harness built-in ChatGPT policy re-enables it after disabling the broader `shell:*` family.
 - `shell` — runs `sh -c`-style commands with an optional call-local `cwd` and timeout (300 seconds when omitted), stdout/stderr capture, Unicode replacement for invalid output bytes plus `invalid-utf8` flags, truncation, and tool cancellation support. Its `cwd` never changes remembered state. It is the generic shell execution alternative.
 - `workdir` — with no path, reads this shell instance's current per-agent path/status; with a path, validates, canonicalizes, commits, and persistently changes it. State uses inheritable instance-scoped metadata (for the built-in shell, `ext_core-shell_cwd`). Dependent shell/filesystem calls belong in a later turn after a setter succeeds. It carries `shell:workdir`.
 - `gpt_shell` — shell-like execution surface advertised as model-visible `shell_command` for GPT-style tool compatibility. Its optional call-local `workdir` resolves from the remembered persistent workdir and never changes later calls; the separate top-level `workdir(path)` tool reads or changes persistent state, and dependent calls must occur after a successful setter in a later turn. It does not accept the removed GPT `cwd` spelling. It carries the neutral `shell:exec:shell_command` tag; the harness built-in ChatGPT policy re-enables it after disabling the broader `shell:*` family.

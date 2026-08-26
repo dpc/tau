@@ -21,6 +21,10 @@ a local transform. The typed transformed image is provider/transcript data and
 therefore drives request/context accounting; generic display metadata contains
 safe source/oriented/region/output geometry, profile, patches, format, and byte
 count without bytes.
+Terminal producers measure the actual transient emit envelope against
+tau-client's shared 8 MiB outbound-frame limit. A typed image whose complete
+terminal envelope does not fit becomes a local byte-free tool error; it is never
+converted to base64 or generic text.
 
 ## Per-agent instance workdir metadata
 
@@ -76,6 +80,13 @@ re-registration deliberately uses synchronous
 `register_local_tool`: tau-client buffers that declaration behind static startup
 defaults and flushes the configured override before `Ready`. Tests can use an
 mpsc-backed adapter for direct state-machine coverage.
+
+Before mandatory tool-terminal output, ext-shell measures the complete encoded
+report envelope. If optional structured UI diff data alone makes a successful
+or partially successful file-mutation report too large, ext-shell replaces only
+that diff with an explicit truncation marker. It preserves the model-visible
+success or error, changed-file summary/details, display status, and path/range
+arguments, so an already-applied effect remains truthfully reportable.
 
 ## User-shell reports
 

@@ -46,6 +46,7 @@ mod runtime;
 mod scheduler;
 mod shell_output_spool;
 mod shell_process;
+mod terminal_frame;
 mod tool_lifecycle;
 mod tools;
 mod truncate;
@@ -215,14 +216,12 @@ impl Output {
             ))
         })?;
         self.scope_tool_name(outcome.tool_name_mut());
+        let message = terminal_frame::budget_terminal_report(outcome.into_reported_event())?;
         let result = match &self.inner {
-            OutputInner::Client(handle) => handle.report_tool_terminal(outcome),
+            OutputInner::Client(handle) => handle.send(message),
             #[cfg(test)]
             OutputInner::Channel(tx) => tx
-                .send(HarnessInputMessage::emit_with_persist(
-                    outcome.into_reported_event(),
-                    false,
-                ))
+                .send(message)
                 .map_err(|_| tau_client::ClientError::WriterClosed),
         };
         self.retain_mandatory_failure(result)

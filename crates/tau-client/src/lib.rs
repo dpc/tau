@@ -44,6 +44,7 @@ pub use contexts::{
     ActionContext, ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext,
     RawConfigureContext, RawEventContext, ToolContext,
 };
+pub use detached_output::{MAX_OUTBOUND_FRAME_BYTES, encoded_outbound_frame_bytes};
 pub use event_payload::EventPayload;
 pub use extension_trait::{ExtensionPlugin, TauExtension};
 pub use intercept_decision::InterceptDecision;

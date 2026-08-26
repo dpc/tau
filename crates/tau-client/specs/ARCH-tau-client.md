@@ -99,6 +99,9 @@ Synchronous and runner-owned startup output may backpressure on the transport,
 preserving flush acknowledgement and startup ordering. Admission measures
 serialization without retaining a second full payload, and the writer owns later
 encode/flush errors for accepted detached frames.
+The client exports this same counting measurement and individual-frame limit so
+effectful producers can budget an actual complete envelope before submitting it;
+payload byte counts are not a substitute for frame admission.
 
 Before `Ready`, the FIFO retains accepted output without writing it. The writer
 activates ordered draining only after flushing `Ready`, so runtime output cannot

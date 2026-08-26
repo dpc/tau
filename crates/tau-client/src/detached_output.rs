@@ -7,10 +7,20 @@ use crate::{ClientError, ClientResult};
 /// Maximum detached frames retained for the protocol writer.
 pub(crate) const MAX_FRAMES: usize = 64;
 
+/// Maximum encoded size accepted for one complete outbound protocol frame.
+pub const MAX_OUTBOUND_FRAME_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Maximum aggregate encoded bytes retained for the protocol writer.
 const MAX_ENCODED_BYTES: EncodedBytes = EncodedBytes {
-    bytes: 8 * 1024 * 1024,
+    bytes: MAX_OUTBOUND_FRAME_BYTES,
 };
+
+/// Measure the complete encoded peer-to-harness protocol frame.
+///
+/// Producers can use this to budget a complete frame before submitting it.
+pub fn encoded_outbound_frame_bytes(message: &tau_proto::HarnessInputMessage) -> ClientResult<u64> {
+    Ok(EncodedBytes::measure(message)?.bytes)
+}
 
 /// Encoded protocol-frame size used for admission accounting.
 #[derive(Clone, Copy, Default)]

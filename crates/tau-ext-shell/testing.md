@@ -31,6 +31,13 @@ diff for changed UTF-8 files. Harness lifecycle coverage preserves visible
 including single-file updates, add/modify/delete multi-file patches, moves,
 escaped paths, and partial failures. CLI rendering tests require exactly one
 path header per changed file before its hunks.
+Complete-terminal frame tests measure the exact transient emit envelope at the
+shared 8 MiB boundary, including producer output after local-to-wire tool-name
+scoping. They also require oversized typed images to become byte-free local
+errors and require singular edit/replace and path-labelled apply-patch UI diffs
+to become explicit truncation markers while success, partial-failure details,
+display facts, and changed paths remain intact. A focused duplicated-path-label
+case requires the rewritten final frame itself to fit.
 
 Workdir coverage includes initialization, replay precedence, malformed state,
 setter admission/commit/cancellation, concurrent rejection, and call-local
