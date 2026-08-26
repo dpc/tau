@@ -1,5 +1,7 @@
 //! Owns terminal dimensions, redraw coordination, and lifecycle flags.
 
+use crate::OutputFailure;
+
 /// Terminal dimensions, redraw coordination, and lifecycle flags.
 pub(super) struct TerminalRuntimeState {
     /// Current terminal width in columns.
@@ -11,6 +13,11 @@ pub(super) struct TerminalRuntimeState {
     /// Set by another UI owner or virtual input disconnect to ask the blocking
     /// input loop to return sticky EOF.
     pub(super) input_shutdown: bool,
+    /// First reported renderer write or flush failure for this attachment.
+    ///
+    /// Once set, the redraw owner exits without performing another normal
+    /// write.
+    pub(super) output_failure: Option<OutputFailure>,
     /// Set while the terminal is released to an external program.
     /// The redraw thread must not write to stdout in this state.
     pub(super) external_paused: bool,
@@ -53,6 +60,7 @@ impl TerminalRuntimeState {
             height,
             shutdown: false,
             input_shutdown: false,
+            output_failure: None,
             external_paused: false,
             invalidate_screen: false,
             sync_requested: 0,

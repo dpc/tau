@@ -119,6 +119,8 @@ pub enum CliError {
     /// The attachment stopped because terminal foreground ownership is
     /// unconfirmed.
     ForegroundOwnershipUnconfirmed(String),
+    /// The attachment stopped after its first reported terminal output failure.
+    TerminalOutputFailed(String),
 }
 
 impl fmt::Display for CliError {
@@ -136,6 +138,7 @@ impl fmt::Display for CliError {
             Self::PromptStdin(error) => error.fmt(f),
             Self::SessionNotFound(id) => write!(f, "session not found: `{id}`"),
             Self::ForegroundOwnershipUnconfirmed(message) => f.write_str(message),
+            Self::TerminalOutputFailed(message) => f.write_str(message),
         }
     }
 }
@@ -143,7 +146,10 @@ impl fmt::Display for CliError {
 impl CliError {
     /// Returns whether the top-level CLI may write this failure to stderr.
     fn should_report_to_terminal(&self) -> bool {
-        !matches!(self, Self::ForegroundOwnershipUnconfirmed(_))
+        !matches!(
+            self,
+            Self::ForegroundOwnershipUnconfirmed(_) | Self::TerminalOutputFailed(_)
+        )
     }
 }
 

@@ -150,6 +150,17 @@ terminal-releasing shell actions should terminate the owned process group before
 Tau resumes raw-mode/redraw ownership. Redraw and input coordination assumes a
 single foreground reader thread; background renderer threads must not write
 while the terminal is released to an external program.
+The raw terminal's sole synchronous redraw writer fail-stops the affected
+attachment on its first reported render, write, or flush error. It does not
+retry or impose an output deadline because the terminal may already have
+accepted an unknowable frame prefix. The input owner receives that failure and
+uses the ordinary detach/keep-harness route so a fresh UI can reattach; raw-mode
+and feature cleanup remain best-effort.
+The final `Term::Drop` repaint is post-disposition exit cleanup: the input owner
+has already selected quit or detach, so cleanup errors are unreported and do
+not retroactively change daemon disposition. If a live redraw already
+fail-stopped, the redraw owner has exited and Drop performs no final repaint or
+normal-frame retry.
 
 Agent-selection input routing is mirrored immediately on the input thread so a
 prompt submitted during renderer handoff reaches the new target. The renderer

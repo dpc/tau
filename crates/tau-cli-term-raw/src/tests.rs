@@ -3150,6 +3150,352 @@ fn concurrent_redraw_syncs_all_complete() {
     }
 }
 
+/// Controls one flush that blocks until released and then reports an error.
+#[derive(Clone)]
+struct FailingFlushWriter {
+    /// Shared writer observations and failure gate.
+    inner: Arc<(Mutex<FailingFlushWriterState>, path_std_sync::Condvar)>,
+}
+
+/// Mutable observations for [`FailingFlushWriter`].
+struct FailingFlushWriterState {
+    /// Whether the first flush may return its injected error.
+    release_failure: bool,
+    /// Whether the renderer is currently inside the failing flush.
+    flush_blocked: bool,
+    /// Number of writes attempted against the underlying writer.
+    writes: usize,
+    /// Number of flushes attempted against the underlying writer.
+    flushes: usize,
+}
+
+impl FailingFlushWriter {
+    /// Creates a writer whose first flush waits for explicit release.
+    fn new() -> Self {
+        Self {
+            inner: Arc::new((
+                Mutex::new(FailingFlushWriterState {
+                    release_failure: false,
+                    flush_blocked: false,
+                    writes: 0,
+                    flushes: 0,
+                }),
+                path_std_sync::Condvar::new(),
+            )),
+        }
+    }
+
+    /// Waits until the redraw owner reaches the injected flush.
+    fn wait_until_blocked(&self) {
+        let (state, condvar) = &*self.inner;
+        let guard = state.lock().expect("failing writer poisoned");
+        drop(
+            condvar
+                .wait_while(guard, |state| !state.flush_blocked)
+                .expect("failing writer poisoned"),
+        );
+    }
+
+    /// Lets the first flush return its injected error.
+    fn release_failure(&self) {
+        let (state, condvar) = &*self.inner;
+        state
+            .lock()
+            .expect("failing writer poisoned")
+            .release_failure = true;
+        condvar.notify_all();
+    }
+
+    /// Returns the underlying write and flush attempt counts.
+    fn counts(&self) -> (usize, usize) {
+        let (state, _) = &*self.inner;
+        let state = state.lock().expect("failing writer poisoned");
+        (state.writes, state.flushes)
+    }
+}
+
+impl io::Write for FailingFlushWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let (state, _) = &*self.inner;
+        state.lock().expect("failing writer poisoned").writes += 1;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let (state, condvar) = &*self.inner;
+        let mut state = state.lock().expect("failing writer poisoned");
+        state.flushes += 1;
+        state.flush_blocked = true;
+        condvar.notify_all();
+        drop(
+            condvar
+                .wait_while(state, |state| !state.release_failure)
+                .expect("failing writer poisoned"),
+        );
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "first flush failed",
+        ))
+    }
+}
+
+/// The first reported output failure must wake input and every redraw waiter,
+/// retain its identity, stop all later writes, and let `Drop` join the failed
+/// renderer without retrying terminal cleanup through the virtual writer.
+#[test]
+fn output_failure_fail_stops_attachment_and_releases_all_waiters() {
+    let writer = FailingFlushWriter::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(40, 5, "> ", Box::new(writer.clone()), CursorShape::Bar);
+    writer.wait_until_blocked();
+
+    let sync_threads: Vec<_> = (0..4)
+        .map(|_| {
+            let handle = handle.clone();
+            thread::spawn(move || handle.redraw_sync())
+        })
+        .collect();
+    let (term_tx, term_rx) = path_std_sync::mpsc::channel();
+    thread::spawn(move || {
+        let result = term.get_next_event();
+        let _ = term_tx.send((result, term));
+    });
+
+    writer.release_failure();
+    for thread in sync_threads {
+        thread.join().expect("redraw waiter should be released");
+    }
+    let (result, term) = term_rx
+        .recv_timeout(path_std_time::Duration::from_secs(2))
+        .expect("output failure should wake input");
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("input owner should receive output failure"),
+    };
+    assert!(is_output_failure(&error));
+    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    assert!(error.to_string().contains("first flush failed"));
+
+    let counts_after_failure = writer.counts();
+    handle.redraw();
+    handle.redraw_sync();
+    assert_eq!(writer.counts(), counts_after_failure);
+
+    fail_terminal_output(
+        &handle.state,
+        &handle.input_tx,
+        &handle.sync_condvar,
+        io::Error::new(io::ErrorKind::PermissionDenied, "later cleanup failed"),
+    );
+    let retained = handle
+        .lock()
+        .terminal
+        .output_failure
+        .as_ref()
+        .expect("first output failure retained")
+        .clone();
+    assert_eq!(retained.kind, io::ErrorKind::BrokenPipe);
+    assert_eq!(retained.message, "first flush failed");
+
+    drop(term);
+    assert_eq!(writer.counts(), counts_after_failure);
+}
+
+/// A writer that rejects every byte at the selected render helper boundary.
+struct RejectWrites;
+
+impl io::Write for RejectWrites {
+    fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+        Err(io::Error::other("injected helper write failure"))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        panic!("helper-level write failure must return before pass flush")
+    }
+}
+
+/// Builds one ordinary redraw pass without spawning the production redraw
+/// owner, allowing tests to inject directly at helper writes.
+fn prepared_test_redraw(
+    force_full: bool,
+) -> (
+    Arc<Mutex<SharedState>>,
+    HistoryLayoutCache,
+    TerminalModel,
+    RedrawPass,
+) {
+    let state = Arc::new(Mutex::new(SharedState::new(40, 5, "> ".into())));
+    state
+        .lock()
+        .expect("term state mutex poisoned")
+        .terminal
+        .invalidate_screen = force_full;
+    let mut history_cache = HistoryLayoutCache::default();
+    let terminal_model = TerminalModel::default();
+    let pass = prepare_redraw_pass(
+        &state,
+        &mut history_cache,
+        &terminal_model,
+        40,
+        5,
+        &path_std_sync::Condvar::new(),
+    )
+    .expect("test redraw should prepare");
+    (state, history_cache, terminal_model, pass)
+}
+
+/// Returns a zero-capacity buffer so selected helper writes reach the injected
+/// writer immediately rather than moving the error to the pass-ending flush.
+fn rejecting_buffer() -> BufWriter<Box<dyn Write + Send>> {
+    BufWriter::with_capacity(0, Box::new(RejectWrites))
+}
+
+/// Pending raw side effects must return their write error from
+/// `render_redraw_pass` before the normal frame renderer runs.
+#[test]
+fn pending_raw_write_error_propagates_from_redraw_pass() {
+    let (state, history_cache, mut terminal_model, mut pass) = prepared_test_redraw(false);
+    pass.pending_raw.push("\x07".to_owned());
+    let mut screen = Screen::new(40);
+    let error = render_redraw_pass(
+        &state,
+        &mut rejecting_buffer(),
+        &mut screen,
+        &history_cache,
+        &mut terminal_model,
+        &pass,
+    )
+    .expect_err("pending raw write should fail");
+    assert_eq!(error.to_string(), "injected helper write failure");
+}
+
+/// Differential screen updates must return their helper-level write error
+/// instead of advancing a stale terminal model.
+#[test]
+fn differential_write_error_propagates_from_render_helper() {
+    let all_lines = plain_lines(&["line", "> "]);
+    let layout = LayoutAll {
+        line_sources: (0..all_lines.len())
+            .map(|wrapped_row| LineSource::Input { wrapped_row })
+            .collect(),
+        all_lines,
+        log_end: 1,
+        history_generation: 0,
+        history_width: 40,
+        history_height: 1,
+        cursor_row: 1,
+        cursor_col: 2,
+    };
+    let mut terminal_model = TerminalModel::default();
+    let plan = terminal_model.plan_view(&layout, 5);
+    let (_, _, _, pass) = prepared_test_redraw(false);
+    let mut screen = Screen::new(40);
+    render_diff_frame(
+        &mut rejecting_buffer(),
+        &mut screen,
+        &mut terminal_model,
+        &pass,
+        &layout,
+        plan,
+    )
+    .expect_err("differential helper write should fail");
+}
+
+/// Full renders must return synchronized-output helper write errors from the
+/// redraw pass rather than swallowing them and reporting a successful frame.
+#[test]
+fn full_render_write_error_propagates_from_redraw_pass() {
+    let (state, history_cache, mut terminal_model, pass) = prepared_test_redraw(true);
+    assert!(matches!(pass.frame, RenderFrame::Full { .. }));
+    let mut screen = Screen::new(40);
+    render_redraw_pass(
+        &state,
+        &mut rejecting_buffer(),
+        &mut screen,
+        &history_cache,
+        &mut terminal_model,
+        &pass,
+    )
+    .expect_err("full-render helper write should fail");
+}
+
+/// Native scrolling must return its helper-level write error before resetting
+/// the terminal model to an undelivered layout.
+#[test]
+fn scrolling_write_error_propagates_from_render_helper() {
+    let all_lines = plain_lines(&["0", "1", "2", "3", "4", "5", "> "]);
+    let layout = LayoutAll {
+        line_sources: (0..all_lines.len())
+            .map(|wrapped_row| LineSource::Input { wrapped_row })
+            .collect(),
+        all_lines,
+        log_end: 6,
+        history_generation: 0,
+        history_width: 40,
+        history_height: 6,
+        cursor_row: 6,
+        cursor_col: 2,
+    };
+    let mut terminal_model = TerminalModel::default();
+    let plan = terminal_model.plan_view(&layout, 5);
+    assert!(terminal_model.viewport_start < plan.viewport_start);
+    let (_, _, _, pass) = prepared_test_redraw(false);
+    let mut screen = Screen::new(40);
+    render_scrolling_frame(
+        &mut rejecting_buffer(),
+        &mut screen,
+        &mut terminal_model,
+        &pass,
+        &layout,
+        plan,
+    )
+    .expect_err("scroll helper write should fail");
+}
+
+/// Records underlying writes while rejecting only the first attempt.
+#[derive(Clone)]
+struct FailFirstBufferedWrite {
+    /// Attempt count and bytes accepted after the injected first failure.
+    inner: Arc<Mutex<(usize, Vec<u8>)>>,
+}
+
+impl io::Write for FailFirstBufferedWrite {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let mut inner = self.inner.lock().expect("failure probe poisoned");
+        inner.0 += 1;
+        if inner.0 == 1 {
+            return Err(io::Error::other("first buffered write failed"));
+        }
+        inner.1.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A failed `BufWriter::flush_buf` retains the normal frame bytes, so fail-stop
+/// must consume the buffer without letting `BufWriter::drop` retry them.
+#[test]
+fn failed_buffered_frame_is_discarded_without_drop_retry() {
+    let probe = FailFirstBufferedWrite {
+        inner: Arc::new(Mutex::new((0, Vec::new()))),
+    };
+    let mut writer: BufWriter<Box<dyn Write + Send>> =
+        BufWriter::with_capacity(1024, Box::new(probe.clone()));
+    writer.write_all(b"normal frame").expect("buffer frame");
+
+    writer
+        .flush()
+        .expect_err("first buffered write should fail");
+    discard_failed_output(writer);
+
+    let inner = probe.inner.lock().expect("failure probe poisoned");
+    assert_eq!(inner.0, 1, "failed frame bytes must not be retried");
+    assert!(inner.1.is_empty(), "failed frame bytes must be discarded");
+}
+
 /// A writer that can block on flush() and counts completed
 /// flushes. Each flush corresponds to one render cycle.
 #[derive(Clone)]

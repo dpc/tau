@@ -1293,8 +1293,15 @@ impl TermHandle {
     /// processed it. Uses a generation counter: the caller bumps
     /// `sync_requested`, the redraw thread sets `sync_completed`
     /// atomically with going idle (right before blocking on recv).
+    ///
+    /// After terminal output fail-stop, this returns immediately without
+    /// requesting or retrying a redraw. The failed attachment can no longer
+    /// promise that any terminal frame was delivered.
     pub fn redraw_sync(&self) {
         let mut st = self.lock();
+        if st.terminal.output_failure.is_some() {
+            return;
+        }
         st.terminal.sync_requested += 1;
         let target = st.terminal.sync_requested;
         drop(st);
@@ -1672,6 +1679,47 @@ enum InputMessage {
     Error(io::Error),
 }
 
+/// The first reported output failure that permanently stops one terminal
+/// attachment.
+#[derive(Clone, Debug)]
+struct OutputFailure {
+    /// Original standard I/O error classification.
+    kind: io::ErrorKind,
+    /// Stable error text retained after the originating error is consumed.
+    message: String,
+}
+
+impl OutputFailure {
+    /// Captures an output error for later delivery to the input owner.
+    fn new(error: io::Error) -> Self {
+        Self {
+            kind: error.kind(),
+            message: error.to_string(),
+        }
+    }
+
+    /// Reconstructs an I/O error carrying the attachment-failure marker.
+    fn io_error(&self) -> io::Error {
+        io::Error::new(self.kind, self.clone())
+    }
+}
+
+impl std::fmt::Display for OutputFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "terminal output failed: {}", self.message)
+    }
+}
+
+impl std::error::Error for OutputFailure {}
+
+/// Returns whether an I/O error reports fail-stop of this terminal attachment.
+#[must_use]
+pub fn is_output_failure(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.is::<OutputFailure>())
+}
+
 /// The terminal prompt engine.
 ///
 /// Owns the input event loop. Call [`Term::get_next_event`] in a loop to
@@ -1762,8 +1810,15 @@ impl Term {
         let redraw_state = Arc::clone(&state);
         let redraw_writer: Box<dyn Write + Send> = Box::new(io::stdout());
         let redraw_sync_cv = Arc::clone(&sync_condvar);
+        let redraw_input_tx = input_tx.clone();
         let redraw_thread = thread::spawn(move || {
-            redraw_loop(redraw_state, redraw_rx, redraw_writer, &redraw_sync_cv);
+            redraw_loop(
+                redraw_state,
+                redraw_rx,
+                redraw_writer,
+                redraw_input_tx,
+                &redraw_sync_cv,
+            );
         });
 
         let handle = TermHandle {
@@ -1818,8 +1873,15 @@ impl Term {
 
         let redraw_state = Arc::clone(&state);
         let redraw_sync_cv = Arc::clone(&sync_condvar);
+        let redraw_input_tx = input_tx.clone();
         let redraw_thread = thread::spawn(move || {
-            redraw_loop(redraw_state, redraw_rx, output, &redraw_sync_cv);
+            redraw_loop(
+                redraw_state,
+                redraw_rx,
+                output,
+                redraw_input_tx,
+                &redraw_sync_cv,
+            );
         });
 
         let (term_input_tx, term_input_rx) = path_std_sync::mpsc::channel();
@@ -1878,8 +1940,9 @@ impl Term {
     /// # Errors
     ///
     /// Returns terminal I/O errors from crossterm reading on real terminals.
-    /// Virtual terminals return EOF when their injected input channel is
-    /// disconnected.
+    /// Both real and virtual terminals return the typed retained output failure
+    /// after their redraw owner fail-stops. Virtual terminals otherwise return
+    /// EOF when their injected input channel is disconnected.
     pub fn get_next_event(&self) -> io::Result<Event> {
         loop {
             let raw = match self.next_raw()? {
@@ -1951,8 +2014,14 @@ impl Term {
     /// later helper result is dropped by the closed or shutdown channel
     /// path.
     fn next_raw(&self) -> io::Result<Option<RawEvent>> {
-        if self.handle.lock().terminal.input_shutdown {
-            return Ok(None);
+        {
+            let st = self.handle.lock();
+            if let Some(error) = &st.terminal.output_failure {
+                return Err(error.io_error());
+            }
+            if st.terminal.input_shutdown {
+                return Ok(None);
+            }
         }
 
         if self.owns_raw_mode {
@@ -1970,8 +2039,14 @@ impl Term {
             Ok(message) => message,
             Err(_) => return Ok(None),
         };
-        if self.handle.lock().terminal.input_shutdown {
-            return Ok(None);
+        {
+            let st = self.handle.lock();
+            if let Some(error) = &st.terminal.output_failure {
+                return Err(error.io_error());
+            }
+            if st.terminal.input_shutdown {
+                return Ok(None);
+            }
         }
         match message {
             InputMessage::Raw(raw) => Ok(Some(raw)),
@@ -3741,6 +3816,7 @@ fn redraw_loop(
     state: Arc<Mutex<SharedState>>,
     notify_rx: tau_blocking_notify_channel::Receiver,
     writer: Box<dyn Write + Send>,
+    input_tx: path_std_sync::mpsc::Sender<InputMessage>,
     sync_condvar: &std::sync::Condvar,
 ) {
     let mut writer = BufWriter::new(writer);
@@ -3797,7 +3873,7 @@ fn redraw_loop(
             target: "tau_cli_term_raw::frontend_progress",
             "terminal write started"
         );
-        render_redraw_pass(
+        let render_result = render_redraw_pass(
             &state,
             &mut writer,
             &mut screen,
@@ -3808,15 +3884,20 @@ fn redraw_loop(
         let write_elapsed = write_started.elapsed();
 
         let flush_started = path_std_time::Instant::now();
-        tracing::trace!(
-            target: "tau_cli_term_raw::frontend_progress",
-            write_us = write_elapsed.as_micros(),
-            "terminal write finished; flush started"
-        );
-        if let Err(e) = writer.flush() {
-            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "render flush error");
-        }
+        let output_result = render_result.and_then(|()| {
+            tracing::trace!(
+                target: "tau_cli_term_raw::frontend_progress",
+                write_us = write_elapsed.as_micros(),
+                "terminal write finished; flush started"
+            );
+            writer.flush()
+        });
         let flush_elapsed = flush_started.elapsed();
+        if let Err(error) = output_result {
+            fail_terminal_output(&state, &input_tx, sync_condvar, error);
+            discard_failed_output(writer);
+            return;
+        }
         tracing::trace!(
             target: "tau_cli_term_raw::frontend_progress",
             write_us = write_elapsed.as_micros(),
@@ -3840,6 +3921,12 @@ fn redraw_loop(
 
         complete_redraw_sync(&state, pass.sync_gen, sync_condvar);
     }
+}
+
+/// Drops a failed buffered writer without retrying bytes retained in its
+/// userspace buffer.
+fn discard_failed_output(writer: BufWriter<Box<dyn Write + Send>>) {
+    let _ = writer.into_parts();
 }
 
 fn render_shutdown_if_requested(
@@ -3971,14 +4058,14 @@ fn render_redraw_pass(
     history_cache: &HistoryLayoutCache,
     terminal_model: &mut TerminalModel,
     pass: &RedrawPass,
-) {
+) -> io::Result<()> {
     // Pending escape sequences: emit before the frame so they sit outside any
     // synchronized-update bracket the renderer installs. SetUserVar and similar
     // OSC sequences don't affect visible state, so ordering relative to the
     // frame doesn't matter for correctness — putting them first just avoids any
     // chance of interleaving with a deferred frame.
     for seq in &pass.pending_raw {
-        let _ = writer.write_all(seq.as_bytes());
+        writer.write_all(seq.as_bytes())?;
     }
     if pass.force_full {
         // The terminal was clobbered by an external program ($EDITOR returned).
@@ -3997,12 +4084,13 @@ fn render_redraw_pass(
                 pass,
                 tail,
                 metrics,
-            );
+            )?;
         }
         RenderFrame::Full { layout } => {
-            render_full_frame(state, writer, screen, terminal_model, pass, layout);
+            render_full_frame(state, writer, screen, terminal_model, pass, layout)?;
         }
     }
+    Ok(())
 }
 
 fn render_fast_frame(
@@ -4013,7 +4101,7 @@ fn render_fast_frame(
     pass: &RedrawPass,
     tail: &TailLayout,
     metrics: &PlanMetrics,
-) {
+) -> io::Result<()> {
     screen.set_width(pass.width);
     if terminal_model.viewport_start < metrics.viewport_start {
         let previous_viewport_start = terminal_model.viewport_start;
@@ -4023,23 +4111,20 @@ fn render_fast_frame(
         // terminal scrollback.
         let suffix = scrolling_suffix(&history_cache.lines, tail, metrics, terminal_model);
         let cursor_row = metrics.cursor_row.saturating_sub(previous_viewport_start);
-        if let Err(e) = screen.render_scrolling(
+        screen.render_scrolling(
             writer,
             &suffix,
             0,
             pass.height,
             (cursor_row, tail.cursor_col),
-        ) {
-            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "scroll render error");
-        }
+        )?;
     } else {
         let visible = visible_lines_from_parts(&history_cache.lines, tail, metrics);
         let cursor_in_visible = metrics.cursor_row.saturating_sub(metrics.viewport_start);
-        if let Err(e) = screen.update(writer, &visible, (cursor_in_visible, tail.cursor_col)) {
-            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
-        }
+        screen.update(writer, &visible, (cursor_in_visible, tail.cursor_col))?;
     }
     terminal_model.apply_fast_plan(history_cache, tail, metrics);
+    Ok(())
 }
 
 fn render_full_frame(
@@ -4049,7 +4134,7 @@ fn render_full_frame(
     terminal_model: &mut TerminalModel,
     pass: &RedrawPass,
     layout: &LayoutAll,
-) {
+) -> io::Result<()> {
     if pass.size_changed || pass.force_full {
         let reason = if pass.size_changed {
             "size_changed"
@@ -4068,11 +4153,11 @@ fn render_full_frame(
                 changed_line: None,
                 previous_source: None,
             },
-        );
-        return;
+        )?;
+        return Ok(());
     }
 
-    render_incremental_or_scroll_frame(state, writer, screen, terminal_model, pass, layout);
+    render_incremental_or_scroll_frame(state, writer, screen, terminal_model, pass, layout)
 }
 
 fn render_incremental_or_scroll_frame(
@@ -4082,7 +4167,7 @@ fn render_incremental_or_scroll_frame(
     terminal_model: &mut TerminalModel,
     pass: &RedrawPass,
     layout: &LayoutAll,
-) {
+) -> io::Result<()> {
     screen.set_width(pass.width);
 
     let hidden_prefix_changed = terminal_model.hidden_prefix_changed(layout);
@@ -4090,9 +4175,9 @@ fn render_incremental_or_scroll_frame(
     let incremental_visible_start = incremental_plan.viewport_start;
 
     if incremental_visible_start < terminal_model.viewport_start {
-        render_viewport_moved_up_frame(state, writer, screen, terminal_model, pass, layout);
+        render_viewport_moved_up_frame(state, writer, screen, terminal_model, pass, layout)
     } else if hidden_prefix_changed {
-        render_hidden_prefix_changed_frame(state, writer, screen, terminal_model, pass, layout);
+        render_hidden_prefix_changed_frame(state, writer, screen, terminal_model, pass, layout)
     } else if terminal_model.viewport_start < incremental_visible_start {
         render_scrolling_frame(
             writer,
@@ -4101,7 +4186,7 @@ fn render_incremental_or_scroll_frame(
             pass,
             layout,
             incremental_plan,
-        );
+        )
     } else {
         render_diff_frame(
             writer,
@@ -4110,7 +4195,7 @@ fn render_incremental_or_scroll_frame(
             pass,
             layout,
             incremental_plan,
-        );
+        )
     }
 }
 
@@ -4122,7 +4207,7 @@ fn render_marked_full_frame(
     pass: &RedrawPass,
     layout: &LayoutAll,
     mark_input: FullRenderMarkInput,
-) {
+) -> io::Result<()> {
     let plan = TerminalModel::full_redraw_plan(layout, pass.height);
     let mark = FullRenderMark {
         reason: mark_input.reason,
@@ -4133,7 +4218,7 @@ fn render_marked_full_frame(
         previous_source: mark_input.previous_source,
     };
     mark_full_render(state, layout, mark);
-    if let Err(e) = full_render(
+    full_render(
         writer,
         screen,
         layout,
@@ -4141,10 +4226,9 @@ fn render_marked_full_frame(
         pass.width,
         pass.height,
         pass.redraw_history_size,
-    ) {
-        tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
-    }
+    )?;
     reset_model_after_rendered_full_frame(terminal_model, pass, layout, plan);
+    Ok(())
 }
 
 fn render_viewport_moved_up_frame(
@@ -4154,7 +4238,7 @@ fn render_viewport_moved_up_frame(
     terminal_model: &mut TerminalModel,
     pass: &RedrawPass,
     layout: &LayoutAll,
-) {
+) -> io::Result<()> {
     // The desired viewport moved upward to keep the input cursor visible. Rows
     // that should re-enter the screen may currently exist only in terminal
     // scrollback, which cannot be pulled back incrementally. Since we are
@@ -4172,7 +4256,7 @@ fn render_viewport_moved_up_frame(
             changed_line: None,
             previous_source: None,
         },
-    );
+    )
 }
 
 fn render_hidden_prefix_changed_frame(
@@ -4182,7 +4266,7 @@ fn render_hidden_prefix_changed_frame(
     terminal_model: &mut TerminalModel,
     pass: &RedrawPass,
     layout: &LayoutAll,
-) {
+) -> io::Result<()> {
     // The terminal scrollback may contain rows whose logical content changed.
     // Clear it instead of trying to patch it incrementally. Since we are
     // repainting from scratch, discard any rubber and paint the new viewport
@@ -4203,7 +4287,7 @@ fn render_hidden_prefix_changed_frame(
             changed_line,
             previous_source,
         },
-    );
+    )
 }
 
 fn render_scrolling_frame(
@@ -4213,20 +4297,19 @@ fn render_scrolling_frame(
     pass: &RedrawPass,
     layout: &LayoutAll,
     plan: ViewPlan,
-) {
+) -> io::Result<()> {
     // Content pushed log rows off the top. Use the scrolling renderer
     // (Pi-style). Rubber is part of the virtual tail, so it shrinks before any
     // extra log row enters scrollback.
-    if let Err(e) = screen.render_scrolling(
+    screen.render_scrolling(
         writer,
         &plan.render_lines,
         terminal_model.viewport_start,
         pass.height,
         (plan.cursor_row, layout.cursor_col),
-    ) {
-        tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "scroll render error");
-    }
+    )?;
     terminal_model.reset_to_layout(layout, plan.viewport_start, plan.rubber_height);
+    Ok(())
 }
 
 fn render_diff_frame(
@@ -4236,15 +4319,14 @@ fn render_diff_frame(
     pass: &RedrawPass,
     layout: &LayoutAll,
     plan: ViewPlan,
-) {
+) -> io::Result<()> {
     // No new scrollback rows — normal differential update. This includes visible
     // shrinkage: rubber grows instead of moving the viewport upward.
     let visible = plan.visible_lines(pass.height);
     let cursor_in_visible = plan.cursor_in_visible(pass.height);
-    if let Err(e) = screen.update(writer, visible, (cursor_in_visible, layout.cursor_col)) {
-        tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
-    }
+    screen.update(writer, visible, (cursor_in_visible, layout.cursor_col))?;
     terminal_model.reset_to_layout(layout, plan.viewport_start, plan.rubber_height);
+    Ok(())
 }
 
 fn reset_model_after_rendered_full_frame(
@@ -4271,6 +4353,30 @@ fn complete_redraw_sync(
         st.terminal.sync_completed = st.terminal.sync_completed.max(sync_gen);
     }
     sync_condvar.notify_all();
+}
+
+/// Records the first output error, releases terminal waiters, and wakes the
+/// attachment's input owner.
+fn fail_terminal_output(
+    state: &Arc<Mutex<SharedState>>,
+    input_tx: &path_std_sync::mpsc::Sender<InputMessage>,
+    sync_condvar: &std::sync::Condvar,
+    error: io::Error,
+) {
+    let mut st = state.lock().expect("term state mutex poisoned");
+    if st.terminal.output_failure.is_none() {
+        tracing::error!(
+            target: "tau_cli_term_raw::redraw",
+            error = %error,
+            "terminal output failed; stopping attachment renderer"
+        );
+        st.terminal.output_failure = Some(OutputFailure::new(error));
+    }
+    st.terminal.input_shutdown = true;
+    st.terminal.sync_completed = st.terminal.sync_requested;
+    drop(st);
+    sync_condvar.notify_all();
+    let _ = input_tx.send(InputMessage::Shutdown);
 }
 
 fn changed_line_in_range(

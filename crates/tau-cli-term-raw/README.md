@@ -237,6 +237,28 @@ Several execution contexts cooperate:
   senders are dropped.
 - **Redraw thread** — blocks on a coalescing notify channel, wakes up, reads
   shared state under a mutex, and renders via one of the three paths above.
+  It is the sole terminal-output writer. Writes and the pass-ending flush stay
+  synchronous and have no deadline: a syscall that never returns remains an
+  operating-system limitation rather than triggering an unsafe concurrent
+  writer or replay.
+
+The first reported render, write, or flush error permanently fail-stops only
+that terminal attachment. The redraw owner retains the first error, releases
+all redraw and shutdown waiters, wakes the input owner with the output failure,
+and performs no later normal terminal writes. A failed synchronized-update body
+still attempts its closing marker; a later flush failure is unrecoverable.
+Dropping the attachment attempts raw-mode and terminal-feature cleanup only
+best-effort. The CLI then follows its ordinary detach path, leaving the
+harness and agent available for a fresh attachment. Tau does not retry a frame
+whose prefix may already have reached terminal scrollback or changed terminal
+state.
+
+This fail-stop boundary covers the live attachment's normal redraw passes while
+an input owner can still select disposition. The final repaint performed from
+`Term::Drop` runs only after the caller has already selected quit or detach; it
+is post-disposition exit cleanup, and its errors remain best-effort and
+unreported. A prior live-output failure exits the redraw owner first, so Drop
+does not perform that final repaint or retry retained normal frame bytes.
 
 Any thread holding a `TermHandle` can mutate zones and trigger a redraw.
 Multiple redraws coalesce into one via the notify channel.

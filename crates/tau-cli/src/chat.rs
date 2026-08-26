@@ -1561,10 +1561,13 @@ pub(crate) fn run_chat(
             agent_estimated_api_costs,
         },
     );
-    let (exit, foreground_ownership_error) = match input_result {
+    let (exit, attachment_error) = match input_result {
         Ok(exit) => (exit, None),
         Err(CliError::ForegroundOwnershipUnconfirmed(message)) => {
             (InputLoopExit::ForegroundOwnershipUnconfirmed, Some(message))
+        }
+        Err(CliError::TerminalOutputFailed(message)) => {
+            (InputLoopExit::TerminalOutputFailed, Some(message))
         }
         Err(error) => return Err(error),
     };
@@ -1595,9 +1598,15 @@ pub(crate) fn run_chat(
 
     tracing::info!(target: "tau_cli::ui", reason, "terminal UI exiting");
 
-    match foreground_ownership_error {
-        Some(message) => Err(CliError::ForegroundOwnershipUnconfirmed(message)),
-        None => Ok(()),
+    match (exit, attachment_error) {
+        (InputLoopExit::ForegroundOwnershipUnconfirmed, Some(message)) => {
+            Err(CliError::ForegroundOwnershipUnconfirmed(message))
+        }
+        (InputLoopExit::TerminalOutputFailed, Some(message)) => {
+            Err(CliError::TerminalOutputFailed(message))
+        }
+        (_, None) => Ok(()),
+        _ => Ok(()),
     }
 }
 
@@ -1695,6 +1704,8 @@ enum InputLoopExit {
     Detach,
     /// Foreground ownership is unconfirmed, so only this attachment may exit.
     ForegroundOwnershipUnconfirmed,
+    /// Terminal output failed, so only this attachment may exit.
+    TerminalOutputFailed,
 }
 
 impl InputLoopExit {
@@ -1703,20 +1714,25 @@ impl InputLoopExit {
             Self::Quit => "quit",
             Self::Detach => "detach",
             Self::ForegroundOwnershipUnconfirmed => "foreground-ownership-unconfirmed",
+            Self::TerminalOutputFailed => "terminal-output-failed",
         }
     }
 
     fn harness_disconnect_reason(self) -> &'static str {
         match self {
             Self::Quit => "quit",
-            Self::Detach | Self::ForegroundOwnershipUnconfirmed => "detach",
+            Self::Detach | Self::ForegroundOwnershipUnconfirmed | Self::TerminalOutputFailed => {
+                "detach"
+            }
         }
     }
 
     fn daemon_disposition(self) -> DaemonDisposition {
         match self {
             Self::Quit => DaemonDisposition::StopOwned,
-            Self::Detach | Self::ForegroundOwnershipUnconfirmed => DaemonDisposition::KeepRunning,
+            Self::Detach | Self::ForegroundOwnershipUnconfirmed | Self::TerminalOutputFailed => {
+                DaemonDisposition::KeepRunning
+            }
         }
     }
 }
@@ -1744,7 +1760,10 @@ fn shutdown_ui_connection(
 }
 
 fn send_ui_exit_frames(exit: InputLoopExit, writer: &WriterHandle) {
-    if exit == InputLoopExit::ForegroundOwnershipUnconfirmed {
+    if matches!(
+        exit,
+        InputLoopExit::ForegroundOwnershipUnconfirmed | InputLoopExit::TerminalOutputFailed
+    ) {
         let _ = send_ui_detach_request(writer);
     }
     let _ = send_frame(
@@ -2492,6 +2511,8 @@ impl<'a> TerminalInputSession<'a> {
             let event = self.term.get_next_event().map_err(|error| {
                 if tau_cli_term::is_foreground_ownership_unconfirmed(&error) {
                     CliError::ForegroundOwnershipUnconfirmed(error.to_string())
+                } else if tau_cli_term::is_output_failure(&error) {
+                    CliError::TerminalOutputFailed(error.to_string())
                 } else {
                     CliError::Io(error)
                 }
