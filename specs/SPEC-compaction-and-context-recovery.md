@@ -392,8 +392,12 @@ window head as `resume_through`, so success installs `compact(P)` followed by
 the exact logical suffix. A later pass may therefore cut inside a suffix that
 physically precedes its earlier replacement boundary without resurrecting the
 old prefix. No fitting progress-making group produces a bounded typed failure
-without provider work. An absent budget disables these size-recoverable
-automatic paths but not explicit/manual compaction.
+without provider work. The sole exception is an active window containing only
+an earlier replacement: another automatic pass cannot consume transcript or
+make progress, so an already-durable activation proceeds to ordinary inference
+and leaves provider context-limit recovery authoritative. An absent budget
+disables these size-recoverable automatic paths but not explicit/manual
+compaction.
 
 After each successful durable boundary Tau remeasures at the protected
 continuation seam using the same effective numeric or provider threshold. If

@@ -2855,6 +2855,7 @@ mod agent_metadata;
 mod agent_runtime;
 mod cancellation_and_background;
 mod compaction;
+mod compaction_replay;
 mod configuration;
 mod extension_routing;
 mod loop_guard;

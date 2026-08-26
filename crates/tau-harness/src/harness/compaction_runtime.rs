@@ -1473,6 +1473,21 @@ impl Harness {
         });
         let fitting_cut =
             self.fitting_automatic_compaction_cut(&agent_id, provisional_cut, prefix_budget);
+        if fitting_cut.is_none()
+            && self
+                .session_runtime
+                .agent_store
+                .agent(&agent_id)
+                .is_some_and(|tree| {
+                    let window = tree.active_provider_window(provisional_cut.as_option());
+                    window.replacement.is_some() && window.transcript.is_empty()
+                })
+        {
+            // A replacement-only window has no progress-making automatic cut.
+            // Let the already-durable activation claim ordinary inference rather
+            // than terminally blocking it with an impossible compaction pass.
+            return false;
+        }
         let cut = fitting_cut
             .unwrap_or_else(|| self.closed_provider_prefix_for_agent(&agent_id, provisional_cut));
         let resume_through = (selected_head != cut)
