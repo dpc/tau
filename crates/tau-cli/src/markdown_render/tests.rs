@@ -1541,3 +1541,172 @@ fn live_stream_preserves_fence_state_across_blank_lines() {
         .expect("post-fence bold span");
     assert!(bold.style.bold);
 }
+
+/// Proves completed ordinary lines advance with work proportional to the newly
+/// appended bytes instead of reparsing the full accumulated prefix. The fixed
+/// 1 KiB chunks and doubling update counts make a quadratic regression
+/// deterministic without relying on wall-clock timing.
+#[test]
+fn live_stream_append_work_is_linear_for_stable_lines() {
+    let theme = markdown_test_theme();
+    let chunk = format!("*stable* {}\n", "x".repeat(1_024 - "*stable* \n".len()));
+    assert_eq!(chunk.len(), 1_024);
+
+    let mut observations = Vec::new();
+    for updates in [32, 64, 128] {
+        let mut cache = MarkdownStreamCache::default();
+        let mut source = String::new();
+        for _ in 0..updates {
+            source.push_str(&chunk);
+            let streaming = markdown_streaming_block_with_osc8(
+                &theme,
+                names::SHELL_OUTPUT,
+                &source,
+                &mut cache,
+                MarkdownStreamUpdate::Append,
+                true,
+            );
+            let final_block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
+            let (progress, body) = streaming
+                .content
+                .spans()
+                .split_last()
+                .expect("streaming progress span");
+            assert_eq!(progress.text, tau_proto::PROGRESS_INDICATOR_TEXT);
+            assert_eq!(
+                normalized_spans(body),
+                normalized_spans(final_block.content.spans())
+            );
+        }
+        assert!(
+            cache.work_bytes <= source.len() * 3,
+            "{} bytes of source caused {} bytes of parser/scanner work",
+            source.len(),
+            cache.work_bytes
+        );
+        observations.push(cache.work_bytes);
+    }
+    assert!(observations[1] <= observations[0] * 2 + 1_024);
+    assert!(observations[2] <= observations[1] * 2 + 1_024);
+}
+
+/// Ensures an irreversibly rejected table does not keep every later
+/// leading-pipe row grammar-live. A column mismatch cannot be repaired by
+/// appending rows, so only the final possible header may remain in the suffix.
+#[test]
+fn live_stream_rejected_table_work_remains_linear() {
+    let theme = markdown_test_theme();
+    let row_overhead = "|  | y | z |\n".len();
+    let chunk = format!("| {} | y | z |\n", "x".repeat(1_024 - row_overhead));
+    assert_eq!(chunk.len(), 1_024);
+
+    for updates in [32, 64, 128] {
+        let mut cache = MarkdownStreamCache::default();
+        let mut source = "| A | B |\n| --- | --- |\n".to_owned();
+        let _ = markdown_streaming_block_with_osc8(
+            &theme,
+            names::SHELL_OUTPUT,
+            &source,
+            &mut cache,
+            MarkdownStreamUpdate::Append,
+            true,
+        );
+        for _ in 0..updates {
+            source.push_str(&chunk);
+            let _ = markdown_streaming_block_with_osc8(
+                &theme,
+                names::SHELL_OUTPUT,
+                &source,
+                &mut cache,
+                MarkdownStreamUpdate::Append,
+                true,
+            );
+        }
+        assert!(
+            cache.work_bytes <= source.len() * 6,
+            "{} bytes of rejected table source caused {} bytes of work",
+            source.len(),
+            cache.work_bytes
+        );
+    }
+}
+
+/// Exercises every grammar dependency retained by the suffix cache and checks
+/// each legal completed-line boundary against the full parser. Replacement,
+/// middle insertion, and OSC 8 changes must discard prior semantic state.
+#[test]
+fn live_stream_suffix_transitions_match_full_parser() {
+    let theme = markdown_test_theme();
+    let mut cache = MarkdownStreamCache::default();
+    let updates = [
+        ("plain\n", MarkdownStreamUpdate::Append, true),
+        ("plain\n*incomplete*", MarkdownStreamUpdate::Append, true),
+        ("plain\n*incomplete*\n", MarkdownStreamUpdate::Append, true),
+        (
+            "plain\n*incomplete*\n\n",
+            MarkdownStreamUpdate::Append,
+            true,
+        ),
+        (
+            "plain\n*incomplete*\n\n```\n[code](https://example.test)\n",
+            MarkdownStreamUpdate::Append,
+            true,
+        ),
+        (
+            "plain\n*incomplete*\n\n```\n[code](https://example.test)\n```\n",
+            MarkdownStreamUpdate::Append,
+            true,
+        ),
+        (
+            "| A | B |\n| :--- | ---: |\n| [x](https://x.test) | y |\n",
+            MarkdownStreamUpdate::Replace,
+            true,
+        ),
+        (
+            "| A | B |\n| :--- | ---: |\n| [x](https://x.test) | y |\n| wider | z |\n",
+            MarkdownStreamUpdate::Append,
+            true,
+        ),
+        (
+            "| inserted | B |\n| :--- | ---: |\n| [x](https://x.test) | y |\n",
+            MarkdownStreamUpdate::Replace,
+            true,
+        ),
+        (
+            "| inserted | B |\n| :--- | ---: |\n| [x](https://x.test) | y |\n",
+            MarkdownStreamUpdate::Append,
+            false,
+        ),
+        ("", MarkdownStreamUpdate::Replace, false),
+    ];
+
+    for (source, update, osc8_links) in updates {
+        let streaming = markdown_streaming_block_with_osc8(
+            &theme,
+            names::SHELL_OUTPUT,
+            source,
+            &mut cache,
+            update,
+            osc8_links,
+        );
+        let final_block = markdown_block_with_osc8(&theme, names::SHELL_OUTPUT, source, osc8_links);
+        let (progress, body) = streaming
+            .content
+            .spans()
+            .split_last()
+            .expect("streaming progress span");
+        assert_eq!(progress.text, tau_proto::PROGRESS_INDICATOR_TEXT);
+        if !source.is_empty() && !source.ends_with('\n') {
+            assert!(
+                body.iter().any(|span| span.text.contains("*incomplete*")),
+                "incomplete line must remain visible and plain"
+            );
+            continue;
+        }
+        assert_eq!(
+            normalized_spans(body),
+            normalized_spans(final_block.content.spans()),
+            "source: {source:?}"
+        );
+    }
+}

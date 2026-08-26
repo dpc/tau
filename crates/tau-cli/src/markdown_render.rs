@@ -22,11 +22,12 @@
 //! sequences use a separate escape style so opt-outs remain visible. Table
 //! padding is disabled in code contexts.
 //!
-//! Live rendering uses [`MarkdownStreamCache`]. Blank lines seal earlier text;
-//! sealed chunks are parsed once and cached. The current unsealed block is also
-//! parsed through its last completed newline, while the currently incomplete
-//! streamed line remains plain until it receives a newline or final/static
-//! rendering parses the complete string.
+//! Live rendering uses [`MarkdownStreamCache`]. Complete lines become stable as
+//! soon as later input can no longer reinterpret them as a table; stable runs
+//! are parsed once and cached. A possible table header or growing table remains
+//! live because later rows can change its widths. The currently incomplete line
+//! remains plain until it receives a newline or final/static rendering parses
+//! the complete string.
 //!
 //! Inline recognition indexes the suffix once before rendering it. Unmatched
 //! code backticks, link labels and targets, autolink brackets, and emphasis,
@@ -207,78 +208,114 @@ struct MarkdownRun {
     hyperlink: Option<String>,
 }
 
+/// Borrowed semantic projections used to construct one styled block.
+struct RenderRuns<'run> {
+    /// Stable cached runs whose grammar can no longer change.
+    stable: &'run [MarkdownRun],
+    /// Runs for the grammar-unstable complete-line suffix.
+    live: &'run [MarkdownRun],
+    /// Current incomplete line, which remains base/plain.
+    incomplete: &'run str,
+}
+
 /// Append-aware cache for Markdown-lite live response/thinking rendering.
 ///
-/// `source` is the latest full provider snapshot. `finalized_until` is a UTF-8
-/// byte boundary into `source`; everything before it has been sealed by a blank
-/// line, parsed exactly once, and stored in `finalized_runs`. `in_fence` is the
-/// parser context after those sealed runs, so a fenced code block remains plain
-/// even when blank lines inside it cause multiple sealed chunks.
+/// `source_len` is the byte length classified by the accumulator on the
+/// previous update. `stable_until` is a UTF-8 boundary before which grammar can
+/// no longer change: those bytes exist only in `stable_runs`, not in another
+/// source copy. `stable_fence` is the parser state at that boundary.
 ///
-/// `live_start..live_complete_until` identifies the provisionally parsed
-/// completed-line range after `finalized_until`. `live_source` stores the exact
-/// text for that range, and `live_runs` may be reused only when both the byte
-/// boundaries and source text still match. The provisional parse uses a local
-/// copy of `in_fence`; only blank-line finalization commits parser state.
+/// `live_runs` covers `stable_until..complete_until`. That suffix contains only
+/// grammar that can still change: a possible table header or a growing table
+/// whose later rows can revise all column widths. The incomplete line after
+/// `complete_until` is borrowed directly from the caller while constructing
+/// themed spans and is never copied into this cache.
 /// `osc8_links` records the visible-link projection used to derive cached table
 /// widths, so changing that setting invalidates the cache rather than retaining
 /// stale alignment spaces.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MarkdownStreamCache {
-    source: String,
-    finalized_until: usize,
-    finalized_runs: Vec<MarkdownRun>,
-    in_fence: Option<FenceKind>,
-    live_start: usize,
-    live_complete_until: usize,
-    live_source: String,
+    source_len: usize,
+    stable_until: usize,
+    stable_runs: Vec<MarkdownRun>,
+    stable_fence: Option<FenceKind>,
+    complete_until: usize,
     live_runs: Vec<MarkdownRun>,
     osc8_links: Option<bool>,
+    #[cfg(test)]
+    work_bytes: usize,
+    #[cfg(test)]
+    test_source: String,
 }
 
 impl MarkdownStreamCache {
     fn reset_for_replacement(&mut self) {
-        self.source.clear();
-        self.finalized_until = 0;
-        self.finalized_runs.clear();
-        self.in_fence = None;
-        self.live_start = 0;
-        self.live_complete_until = 0;
-        self.live_source.clear();
+        self.source_len = 0;
+        self.stable_until = 0;
+        self.stable_runs.clear();
+        self.stable_fence = None;
+        self.complete_until = 0;
         self.live_runs.clear();
         self.osc8_links = None;
+        #[cfg(test)]
+        self.test_source.clear();
     }
 
-    fn advance_finalized(&mut self, text: &str, sealed_until: usize, osc8_links: bool) {
-        self.finalized_runs.extend(parse_markdown_with_state(
-            &text[self.finalized_until..sealed_until],
-            &mut self.in_fence,
-            osc8_links,
-        ));
-        self.finalized_until = sealed_until;
-        if self.live_start != self.finalized_until {
-            self.live_start = self.finalized_until;
-            self.live_complete_until = self.finalized_until;
-            self.live_source.clear();
-            self.live_runs.clear();
-        }
-    }
-
-    fn refresh_live_runs(&mut self, text: &str, complete_until: usize, osc8_links: bool) {
-        let live_source = &text[self.finalized_until..complete_until];
-        if self.live_start == self.finalized_until
-            && self.live_complete_until == complete_until
-            && self.live_source == live_source
+    fn parse_counted(
+        &mut self,
+        text: &str,
+        in_fence: &mut Option<FenceKind>,
+        osc8_links: bool,
+    ) -> Vec<MarkdownRun> {
+        #[cfg(test)]
         {
-            return;
+            self.work_bytes += text.len();
         }
-
-        let mut live_fence = self.in_fence;
-        self.live_runs = parse_markdown_with_state(live_source, &mut live_fence, osc8_links);
-        self.live_start = self.finalized_until;
-        self.live_complete_until = complete_until;
-        self.live_source = live_source.to_owned();
+        parse_markdown_with_state(text, in_fence, osc8_links)
     }
+
+    fn advance_append(&mut self, text: &str, osc8_links: bool) {
+        let appended = &text[self.source_len..];
+        #[cfg(test)]
+        {
+            self.work_bytes += appended.len();
+            self.test_source.clear();
+            self.test_source.push_str(text);
+        }
+        let Some(last_newline) = appended.rfind('\n') else {
+            self.source_len = text.len();
+            return;
+        };
+        self.complete_until = self.source_len + last_newline + 1;
+        self.source_len = text.len();
+
+        let pending = &text[self.stable_until..self.complete_until];
+        #[cfg(test)]
+        {
+            self.work_bytes += pending.len();
+        }
+        let retain_at = unstable_suffix_start(pending, self.stable_fence, osc8_links);
+        if 0 < retain_at {
+            let stable = &pending[..retain_at];
+            let mut fence = self.stable_fence;
+            let runs = self.parse_counted(stable, &mut fence, osc8_links);
+            self.stable_runs.extend(runs);
+            self.stable_until += retain_at;
+            self.stable_fence = fence;
+        }
+        let live = &text[self.stable_until..self.complete_until];
+        let mut live_fence = self.stable_fence;
+        self.live_runs = self.parse_counted(live, &mut live_fence, osc8_links);
+    }
+}
+
+/// Exact source mutation classification supplied by provider accumulation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MarkdownStreamUpdate {
+    /// The new snapshot consists of the prior bytes followed by a suffix.
+    Append,
+    /// Existing bytes were cleared, replaced, or inserted before the end.
+    Replace,
 }
 
 #[cfg(test)]
@@ -317,7 +354,12 @@ fn markdown_streaming_block(
     text: &str,
     cache: &mut MarkdownStreamCache,
 ) -> tau_cli_term::StyledBlock {
-    markdown_streaming_block_with_osc8(theme, base_style_name, text, cache, true)
+    let update = if text.starts_with(&cache.test_source) {
+        MarkdownStreamUpdate::Append
+    } else {
+        MarkdownStreamUpdate::Replace
+    };
+    markdown_streaming_block_with_osc8(theme, base_style_name, text, cache, update, true)
 }
 
 #[cfg(test)]
@@ -328,12 +370,18 @@ fn markdown_prefixed_streaming_block(
     text: &str,
     cache: &mut MarkdownStreamCache,
 ) -> tau_cli_term::StyledBlock {
+    let update = if text.starts_with(&cache.test_source) {
+        MarkdownStreamUpdate::Append
+    } else {
+        MarkdownStreamUpdate::Replace
+    };
     markdown_prefixed_streaming_block_with_osc8(
         theme,
         base_style_name,
         prefix_text,
         text,
         cache,
+        update,
         true,
     )
 }
@@ -367,7 +415,11 @@ pub(crate) fn markdown_prefixed_block_with_osc8(
         theme,
         base_style_name,
         &prefix,
-        &parse_markdown_with_state(text, &mut in_fence, osc8_links),
+        RenderRuns {
+            stable: &parse_markdown_with_state(text, &mut in_fence, osc8_links),
+            live: &[],
+            incomplete: "",
+        },
         false,
         osc8_links,
     )
@@ -392,23 +444,35 @@ pub(crate) fn markdown_prompt_block_with_osc8(
         theme,
         base_style_name,
         &prefix,
-        &parse_markdown_with_state(text, &mut in_fence, osc8_links),
+        RenderRuns {
+            stable: &parse_markdown_with_state(text, &mut in_fence, osc8_links),
+            live: &[],
+            incomplete: "",
+        },
         false,
         osc8_links,
     )
 }
 
-/// Render live append-only text with sealed paragraphs cached, completed lines
-/// in the current block formatted provisionally, and only the current
-/// incomplete line left plain.
+/// Render live text with stable complete lines cached, table-dependent complete
+/// lines formatted provisionally, and only the current incomplete line plain.
 pub(crate) fn markdown_streaming_block_with_osc8(
     theme: &tau_themes::Theme,
     base_style_name: &str,
     text: &str,
     cache: &mut MarkdownStreamCache,
+    update: MarkdownStreamUpdate,
     osc8_links: bool,
 ) -> tau_cli_term::StyledBlock {
-    markdown_prefixed_streaming_block_with_osc8(theme, base_style_name, "", text, cache, osc8_links)
+    markdown_prefixed_streaming_block_with_osc8(
+        theme,
+        base_style_name,
+        "",
+        text,
+        cache,
+        update,
+        osc8_links,
+    )
 }
 
 /// Render live append-only text with a stable base-styled state marker before
@@ -419,49 +483,43 @@ pub(crate) fn markdown_prefixed_streaming_block_with_osc8(
     prefix_text: &str,
     text: &str,
     cache: &mut MarkdownStreamCache,
+    update: MarkdownStreamUpdate,
     osc8_links: bool,
 ) -> tau_cli_term::StyledBlock {
     if cache.osc8_links.is_some_and(|cached| cached != osc8_links) {
         cache.reset_for_replacement();
     }
     cache.osc8_links = Some(osc8_links);
-    if !text.starts_with(&cache.source) {
+    if update == MarkdownStreamUpdate::Replace || text.len() < cache.source_len {
         cache.reset_for_replacement();
         cache.osc8_links = Some(osc8_links);
     }
+    cache.advance_append(text, osc8_links);
 
-    let sealed_until = latest_sealed_boundary(text).unwrap_or(0);
-    if cache.finalized_until < sealed_until {
-        cache.advance_finalized(text, sealed_until, osc8_links);
-    }
-    let complete_until = latest_complete_line_boundary(text)
-        .unwrap_or(cache.finalized_until)
-        .max(cache.finalized_until);
-    cache.refresh_live_runs(text, complete_until, osc8_links);
-    cache.source = text.to_owned();
-
-    let mut runs = cache.finalized_runs.clone();
-    runs.extend(cache.live_runs.clone());
-    if complete_until < text.len() {
-        runs.push(MarkdownRun {
-            text: text[complete_until..].to_owned(),
-            style: MarkdownStyle::Base,
-            hyperlink: None,
-        });
-    }
     let prefix = [MarkdownRun {
         text: prefix_text.to_owned(),
         style: MarkdownStyle::Base,
         hyperlink: None,
     }];
-    styled_block_from_runs(theme, base_style_name, &prefix, &runs, true, osc8_links)
+    styled_block_from_runs(
+        theme,
+        base_style_name,
+        &prefix,
+        RenderRuns {
+            stable: &cache.stable_runs,
+            live: &cache.live_runs,
+            incomplete: &text[cache.complete_until..],
+        },
+        true,
+        osc8_links,
+    )
 }
 
 fn styled_block_from_runs(
     theme: &tau_themes::Theme,
     base_style_name: &str,
     prefix: &[MarkdownRun],
-    runs: &[MarkdownRun],
+    runs: RenderRuns<'_>,
     progress: bool,
     osc8_links: bool,
 ) -> tau_cli_term::StyledBlock {
@@ -493,9 +551,20 @@ fn styled_block_from_runs(
         link,
     };
     push_runs(&mut body_children, prefix, styles, false);
-    push_runs(&mut body_children, runs, styles, !osc8_links);
+    push_runs(&mut body_children, runs.stable, styles, !osc8_links);
+    push_runs(&mut body_children, runs.live, styles, !osc8_links);
+    if !runs.incomplete.is_empty() {
+        body_children.push(SpanTree::text(runs.incomplete));
+    }
 
-    let needs_space = progress && body_children_text_ends_non_whitespace(prefix, runs);
+    let needs_space = progress
+        && runs.incomplete.chars().next_back().map_or_else(
+            || {
+                body_children_text_ends_non_whitespace(prefix, runs.live)
+                    || runs_end_non_whitespace(runs.stable)
+            },
+            |character| !character.is_whitespace(),
+        );
 
     let mut root_children = Vec::new();
     if !body_children.is_empty() {
@@ -516,9 +585,11 @@ fn styled_block_from_runs(
     let mut rendered = themed_text(theme, &themed);
     let targets = prefix
         .iter()
-        .chain(runs)
+        .chain(runs.stable)
+        .chain(runs.live)
         .filter(|run| !run.text.is_empty())
-        .map(|run| run.hyperlink.as_deref());
+        .map(|run| run.hyperlink.as_deref())
+        .chain((!runs.incomplete.is_empty()).then_some(None));
     for (span, target) in rendered.spans_mut().iter_mut().zip(targets) {
         if osc8_links {
             span.hyperlink = target
@@ -613,20 +684,69 @@ fn visible_run_text(run: &MarkdownRun, show_link_target: bool) -> String {
     }
 }
 
-fn latest_sealed_boundary(text: &str) -> Option<usize> {
+/// Returns the first byte whose parsed projection can still change after an
+/// append. Every input line is complete.
+///
+/// A standalone leading-pipe row remains a possible table header. Once followed
+/// by a delimiter row, the entire trailing table remains live because each new
+/// row can revise every column width. All other complete lines, including fence
+/// lines and blank-line seals, are stable.
+fn unstable_suffix_start(text: &str, initial_fence: Option<FenceKind>, osc8_links: bool) -> usize {
+    let lines = text
+        .split_inclusive('\n')
+        .map(|line| {
+            let body = line.strip_suffix('\n').unwrap_or(line);
+            (body, line.len())
+        })
+        .collect::<Vec<_>>();
+    let parser_lines = lines
+        .iter()
+        .map(|(body, _)| (*body, "\n"))
+        .collect::<Vec<_>>();
+    let mut fence = initial_fence;
     let mut offset = 0;
-    let mut latest = None;
-    for line in text.split_inclusive('\n') {
-        offset += line.len();
-        if line.ends_with('\n') && line.trim().is_empty() {
-            latest = Some(offset);
+    let mut index = 0;
+    while index < lines.len() {
+        let (body, line_len) = lines[index];
+        let trimmed = body.trim_start();
+        if let Some(kind) = fence {
+            if trimmed.starts_with(kind.marker()) {
+                fence = None;
+            }
+            offset += line_len;
+            index += 1;
+            continue;
         }
+        if let Some(kind) = fence_marker(trimmed) {
+            fence = Some(kind);
+            offset += line_len;
+            index += 1;
+            continue;
+        }
+        if let Some(table_end) = table_block_end(&parser_lines, index)
+            && pad_table_lines(&parser_lines[index..table_end], osc8_links).is_some()
+        {
+            if table_end == lines.len() {
+                return offset;
+            }
+            offset += lines[index..table_end]
+                .iter()
+                .map(|(_, len)| len)
+                .sum::<usize>();
+            index = table_end;
+            continue;
+        }
+        if index + 1 == lines.len()
+            && !body.trim().is_empty()
+            && !is_indented_code(body)
+            && TableRow::parse(body).is_some()
+        {
+            return offset;
+        }
+        offset += line_len;
+        index += 1;
     }
-    latest
-}
-
-fn latest_complete_line_boundary(text: &str) -> Option<usize> {
-    text.rfind('\n').map(|index| index + 1)
+    offset
 }
 
 fn parse_markdown_with_state(

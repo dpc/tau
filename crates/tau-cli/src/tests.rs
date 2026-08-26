@@ -10958,6 +10958,57 @@ fn set_show_thinking_round_trip_restores_history() {
     assert!(thinking_row < response_row);
 }
 
+/// Ensures a middle insertion received while live thinking is hidden
+/// invalidates the prior append cache before the retained block is shown again.
+#[test]
+fn hidden_thinking_middle_insertion_reparses_on_show() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
+        model_params: tau_proto::ModelParams {
+            thinking_summary: tau_proto::ThinkingSummary::Auto,
+            ..Default::default()
+        },
+        ..agent_prompt_created("sp-middle-thinking", "s1")
+    }));
+    let reasoning_update = |output_index, text: &str| {
+        Event::ProviderResponseUpdated(ProviderResponseUpdated {
+            agent_prompt_id: test_agent_prompt_id("sp-middle-thinking"),
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            deltas: vec![tau_proto::ProviderResponseTextDelta::ReasoningText {
+                output_index,
+                kind: tau_proto::ReasoningTextKind::Summary,
+                text: text.to_owned(),
+            }],
+            compaction: None,
+            status: None,
+            response_stats: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+
+    renderer.handle(&reasoning_update(1, "later\n"));
+    renderer.apply_setting("show-thinking", "false");
+    renderer.handle(&reasoning_update(0, "éarlier\n"));
+    renderer.apply_setting("show-thinking", "true");
+    sync(&handle);
+
+    let lines = vt.screen_text(80);
+    let earlier = lines
+        .iter()
+        .position(|line| line.contains("éarlier"))
+        .unwrap_or_else(|| panic!("inserted thinking missing: {lines:?}"));
+    let later = lines
+        .iter()
+        .position(|line| line.contains("later"))
+        .unwrap_or_else(|| panic!("original thinking missing: {lines:?}"));
+    assert!(earlier < later, "middle insertion rendered out of order");
+}
+
 #[test]
 fn thinking_created_while_off_stays_invisible_after_toggle_on() {
     // Blocks that arrive while `show_thinking == false` are

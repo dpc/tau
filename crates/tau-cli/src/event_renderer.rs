@@ -27,9 +27,9 @@ use crate::chat::cold_attach_stager::ShellStartPresentation;
 use crate::chat::{DraftSlot, invalidate_pending_draft, retarget_prompt_draft_snapshot};
 use crate::estimated_cost::AgentCostSnapshot;
 use crate::markdown_render::{
-    MarkdownStreamCache, markdown_block_with_osc8, markdown_prefixed_block_with_osc8,
-    markdown_prefixed_streaming_block_with_osc8, markdown_prompt_block_with_osc8,
-    markdown_streaming_block_with_osc8,
+    MarkdownStreamCache, MarkdownStreamUpdate, markdown_block_with_osc8,
+    markdown_prefixed_block_with_osc8, markdown_prefixed_streaming_block_with_osc8,
+    markdown_prompt_block_with_osc8, markdown_streaming_block_with_osc8,
 };
 use crate::renderer_handle::RendererHandle;
 use crate::skill_commands::SkillCommandState;
@@ -3263,6 +3263,7 @@ impl EventRenderer {
                     names::AGENT_THINKING,
                     &display,
                     &mut state.thinking_markdown_cache,
+                    MarkdownStreamUpdate::Append,
                     self.osc8_links,
                 )
             } else {
@@ -3652,6 +3653,7 @@ impl EventRenderer {
                         names::AGENT_THINKING,
                         state.thinking_text.as_deref().unwrap_or_default(),
                         &mut state.thinking_markdown_cache,
+                        MarkdownStreamUpdate::Append,
                         self.osc8_links,
                     )
                 } else {
@@ -3685,7 +3687,11 @@ impl EventRenderer {
             })
             .collect::<Vec<_>>();
         for (prompt_id, thinking) in missing {
-            self.update_live_thinking_block(prompt_id.as_str(), Some(thinking.as_str()));
+            self.update_live_thinking_block(
+                prompt_id.as_str(),
+                Some(thinking.as_str()),
+                MarkdownStreamUpdate::Replace,
+            );
         }
     }
 
@@ -7183,15 +7189,21 @@ impl EventRenderer {
             self.update_editor_current_response(update, "");
             self.update_live_compaction_block(spid, update_compaction_status(update));
             if update.deltas.is_empty() {
-                self.update_live_response_block(spid, &status.text);
+                self.update_live_response_block(spid, &status.text, MarkdownStreamUpdate::Replace);
+                if let Some(state) = self.prompts.get_mut(spid) {
+                    // Status text is transient and is not the prefix of the next
+                    // accumulated assistant snapshot.
+                    state.response_markdown_cache = MarkdownStreamCache::default();
+                }
                 return;
             }
         }
-        let (text, thinking) = self.accumulate_response_update(update);
+        let (text, response_update, thinking, thinking_update) =
+            self.accumulate_response_update(update);
         self.update_editor_current_response(update, &text);
-        self.update_live_thinking_block(spid, thinking.as_deref());
+        self.update_live_thinking_block(spid, thinking.as_deref(), thinking_update);
         self.update_live_compaction_block(spid, update_compaction_status(update));
-        self.update_live_response_block(spid, &text);
+        self.update_live_response_block(spid, &text, response_update);
     }
 
     fn is_stale_terminal_stats_only_update(
@@ -7263,16 +7275,32 @@ impl EventRenderer {
     fn accumulate_response_update(
         &mut self,
         update: &tau_proto::ProviderResponseUpdated,
-    ) -> (String, Option<String>) {
+    ) -> (
+        String,
+        MarkdownStreamUpdate,
+        Option<String>,
+        MarkdownStreamUpdate,
+    ) {
+        use std::ops::Bound;
+
         let state = self
             .prompts
             .entry(update.agent_prompt_id.to_string())
             .or_default();
+        let mut response_update = MarkdownStreamUpdate::Append;
+        let mut thinking_update = MarkdownStreamUpdate::Append;
         for delta in &update.deltas {
             match delta {
                 ProviderResponseTextDelta::Message {
                     output_index, text, ..
                 } => {
+                    if state
+                        .response_text_by_index
+                        .range((Bound::Excluded(*output_index), Bound::Unbounded))
+                        .any(|(_, text)| !text.is_empty())
+                    {
+                        response_update = MarkdownStreamUpdate::Replace;
+                    }
                     state
                         .response_text_by_index
                         .entry(*output_index)
@@ -7282,6 +7310,13 @@ impl EventRenderer {
                 ProviderResponseTextDelta::ReasoningText {
                     output_index, text, ..
                 } => {
+                    if state
+                        .thinking_text_by_index
+                        .range((Bound::Excluded(*output_index), Bound::Unbounded))
+                        .any(|(_, text)| !text.is_empty())
+                    {
+                        thinking_update = MarkdownStreamUpdate::Replace;
+                    }
                     state
                         .thinking_text_by_index
                         .entry(*output_index)
@@ -7307,7 +7342,12 @@ impl EventRenderer {
             thinking.insert(0, '…');
         }
         state.thinking_text = (!thinking.is_empty()).then_some(thinking.clone());
-        (text, (!thinking.is_empty()).then_some(thinking))
+        (
+            text,
+            response_update,
+            (!thinking.is_empty()).then_some(thinking),
+            thinking_update,
+        )
     }
 
     fn update_editor_current_response(
@@ -7320,7 +7360,12 @@ impl EventRenderer {
         }
     }
 
-    fn update_live_thinking_block(&mut self, spid: &str, thinking: Option<&str>) {
+    fn update_live_thinking_block(
+        &mut self,
+        spid: &str,
+        thinking: Option<&str>,
+        update: MarkdownStreamUpdate,
+    ) {
         use tau_themes::names;
 
         let Some(thinking) = thinking else {
@@ -7334,6 +7379,12 @@ impl EventRenderer {
             .or_default()
             .thinking_text = Some(thinking.to_owned());
         if !self.verbose_mode || !self.show_thinking {
+            if update == MarkdownStreamUpdate::Replace {
+                self.prompts
+                    .entry(spid.to_owned())
+                    .or_default()
+                    .thinking_markdown_cache = MarkdownStreamCache::default();
+            }
             return;
         }
         let state = self.prompts.entry(spid.to_owned()).or_default();
@@ -7342,6 +7393,7 @@ impl EventRenderer {
             names::AGENT_THINKING,
             thinking,
             &mut state.thinking_markdown_cache,
+            update,
             self.osc8_links,
         );
         let existing_tbid = self.prompts.get(spid).and_then(|s| s.thinking_block_id);
@@ -7459,7 +7511,7 @@ impl EventRenderer {
         anchors
     }
 
-    fn update_live_response_block(&mut self, spid: &str, text: &str) {
+    fn update_live_response_block(&mut self, spid: &str, text: &str, update: MarkdownStreamUpdate) {
         use tau_themes::names;
 
         let verbose_mode = self.verbose_mode;
@@ -7483,6 +7535,7 @@ impl EventRenderer {
                     STREAMING_AGENT_RESPONSE_PREFIX,
                     text,
                     &mut state.response_markdown_cache,
+                    update,
                     self.osc8_links,
                 )
             };
