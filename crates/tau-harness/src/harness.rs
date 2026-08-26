@@ -68,10 +68,10 @@ use self::session_runtime::{
     restore_notice_prompt_for_elapsed_inner,
 };
 #[cfg(test)]
-use self::ui_runtime::{CancelTarget, shell_route_id, ui_shell_provider_ids};
 use self::ui_runtime::{
-    PendingActionInvocation, PendingRetryPrompt, PendingUiShellCommand, UiShellRouteId,
+    CancelTarget, PendingUiShellCommand, shell_route_id, ui_shell_provider_ids,
 };
+use self::ui_runtime::{PendingActionInvocation, UiShellRouteId};
 use crate::agent::{
     ActivationDispatchState, Agent, AgentTurnState, FinalStatusChallenge, FinalStatusInput,
     InferenceCheckpointOwner, InitialPromptCorrelation, LoopCycleState, LoopGuardTrigger,
@@ -150,6 +150,7 @@ use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvail
 use crate::harness::provider_startup::ProviderStartupSnapshot;
 use crate::harness::subagents_tool::SubagentToolState;
 use crate::harness::tool_runtime::ToolRuntimeState;
+use crate::harness::ui_runtime::UiRuntimeState;
 use crate::internal_tools::InternalToolHandlers;
 use crate::model::{
     LoadedRoles, MissingDefaultRole, baseline_params_for_selection, context_percent_used,
@@ -1725,46 +1726,8 @@ pub struct Harness {
     /// to stabilize generated agent ids. Advanced on each agent creation so
     /// one harness does not mint the same random candidate repeatedly.
     agent_id_rng: StdRng,
-    /// Independent random stream for opaque provider-side UI-shell route ids.
-    /// Keeping it separate prevents shell traffic from changing later agent
-    /// ids.
-    ui_shell_route_rng: StdRng,
     /// Live and completed tool ownership, routing, and turn coordination.
     pub(crate) tool_runtime: ToolRuntimeState,
-    /// Harness-private provider route id → selected provider and canonical UI
-    /// request identity for commands awaiting a terminal extension event.
-    pending_ui_shell_commands: HashMap<UiShellRouteId, PendingUiShellCommand>,
-    /// Process-lifetime private routes that targeted ephemeral agents.
-    ///
-    /// Retention keeps late or interception-replaced reports out of durable
-    /// debug JSONL. Opaque route ids are never reused after entering this set.
-    ephemeral_ui_shell_route_ids: HashSet<UiShellRouteId>,
-    /// Public UI shell ids whose next canonical fact targets an ephemeral
-    /// agent.
-    ///
-    /// Each marker lives only from canonical publication enqueue through
-    /// commit, so later reuse of the same UI id for a durable agent is
-    /// classified independently.
-    pending_ephemeral_ui_shell_canonical_events: HashMap<tau_proto::ShellCommandId, NonZeroUsize>,
-    /// UI command ids reserved from admission through terminal event commit.
-    /// This stays bounded by routed or interception-pending commands.
-    active_ui_shell_command_ids: HashSet<tau_proto::ShellCommandId>,
-    /// Canonical user-shell completions that must inject output after commit.
-    ///
-    /// Harness-authored routing failures intentionally do not enter this set.
-    pending_ui_shell_output_injections: HashSet<tau_proto::ShellCommandId>,
-    /// `invocation_id` → action provider/requester pair for UI-directed
-    /// action result routing and source validation.
-    pending_action_invocations: HashMap<ActionInvocationId, PendingActionInvocation>,
-    /// Process-lifetime terminal invocation ids that can never be routed again.
-    completed_action_invocations: HashSet<ActionInvocationId>,
-    /// Correlated manual retry requests awaiting their exact provider owner.
-    pending_retry_prompts: HashMap<tau_proto::RetryPromptRequestId, PendingRetryPrompt>,
-    /// Process-lifetime replay guard for UI-chosen retry correlation ids.
-    seen_retry_prompt_requests: HashSet<(tau_proto::ConnectionId, tau_proto::RetryPromptRequestId)>,
-    /// FIFO order for the bounded retry replay guard.
-    seen_retry_prompt_request_order:
-        VecDeque<(tau_proto::ConnectionId, tau_proto::RetryPromptRequestId)>,
     /// Runtime event sequencer. Replay for reconnecting clients is rebuilt from
     /// semantic state instead of retained event payloads.
     pub(crate) event_log: std::sync::Arc<EventLog>,
@@ -1773,9 +1736,8 @@ pub struct Harness {
     creator_topology: AgentCreatorTopology,
     /// Runtime-only self and creator-subtree estimated-cost totals.
     cost_ledger: AgentCostLedger,
-    /// Live-log cursor and transport lifecycle owners keyed by connection ID.
-    pub(crate) client_writers:
-        std::collections::HashMap<tau_proto::ConnectionId, ClientWriterLifecycle>,
+    /// Attached-client and human-UI command runtime state.
+    pub(crate) ui_runtime: UiRuntimeState,
     /// Socket clients that completed the narrow external-message RPC hello.
     external_message_peers: HashSet<tau_proto::ConnectionId>,
     /// Pending outbound external messages keyed by logical message id.
@@ -1796,10 +1758,6 @@ pub struct Harness {
     /// Inbound callback jobs grouped by the socket whose request owns them.
     pub(crate) inbound_peer_io_cancellations:
         HashMap<tau_proto::ConnectionId, Vec<std::sync::Weak<path_std_sync::atomic::AtomicBool>>>,
-    /// A UI sent `:detach` while the harness was still in startup gating.
-    /// The main event loop consumes this to preserve detach semantics after
-    /// startup completes.
-    startup_detach_requested: bool,
     /// Buffered human-readable lifecycle messages (extension init,
     /// model changes, etc.) surfaced to the UI as part of the next
     /// `InteractionOutcome`.

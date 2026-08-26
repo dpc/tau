@@ -1765,14 +1765,14 @@ fn detach_request_controls_startup_only_for_attached_socket_ui() {
         )
         .expect("deny socket tool detach")
     );
-    assert!(!h.startup_detach_requested);
+    assert!(!h.ui_runtime.startup_detach_requested);
 
     let (ui_id, mut ui) = connect_socket_ui(&mut h);
     assert!(
         !h.handle_startup_from_connection(&ui_id, detach_request())
             .expect("handle attached UI detach")
     );
-    assert!(h.startup_detach_requested);
+    assert!(h.ui_runtime.startup_detach_requested);
     assert_no_message(&mut ui);
 }
 
@@ -6710,7 +6710,7 @@ fn all_non_declaration_events_wait_for_the_global_activation_barrier() {
     h.initial_extension_tool_preflight_complete = false;
     connect_handshaking_tool(&mut h, "operational-owner");
     connect_handshaking_tool(&mut h, "activation-blocker");
-    h.pending_ui_shell_commands.insert(
+    h.ui_runtime.pending_ui_shell_commands.insert(
         UiShellRouteId::new(test_shell_command_id("startup-shell")),
         PendingUiShellCommand {
             provider_id: crate::test_connection_id("operational-owner"),
@@ -9469,7 +9469,7 @@ fn explicit_socket_disconnect_cleans_client_writer_and_bus_state() {
         .map(|metadata| metadata.id)
         .expect("socket client connection");
     assert!(h.bus.connection(&socket_conn).is_some());
-    assert!(h.client_writers.contains_key(&socket_conn));
+    assert!(h.ui_runtime.client_writers.contains_key(&socket_conn));
 
     h.tx.send(HarnessEvent::from_connection_for_test(
         socket_conn.clone(),
@@ -9482,7 +9482,7 @@ fn explicit_socket_disconnect_cleans_client_writer_and_bus_state() {
     h.run_event_loop(Some(1), false).expect("event loop exits");
 
     assert!(h.bus.connection(&socket_conn).is_none());
-    assert!(!h.client_writers.contains_key(&socket_conn));
+    assert!(!h.ui_runtime.client_writers.contains_key(&socket_conn));
 }
 
 /// Writer that exposes completed protocol writes and flushes to lifecycle
@@ -9687,7 +9687,7 @@ fn rejected_startup_handshake_flushes_disconnect_before_teardown() {
             .contains("disconnected during startup handshake")
     );
     assert!(h.bus.connection(&client_id).is_none());
-    assert!(!h.client_writers.contains_key(&client_id));
+    assert!(!h.ui_runtime.client_writers.contains_key(&client_id));
     assert_eq!(
         completed_flushes.load(Ordering::Acquire),
         1,
@@ -9753,7 +9753,7 @@ fn rejected_runtime_handshake_flushes_disconnect_before_teardown() {
     assert_eq!(served_clients, 1);
     assert!(exit_on_disconnect);
     assert!(h.bus.connection(&client_id).is_none());
-    assert!(!h.client_writers.contains_key(&client_id));
+    assert!(!h.ui_runtime.client_writers.contains_key(&client_id));
     assert_eq!(
         completed_flushes.load(Ordering::Acquire),
         1,

@@ -3221,6 +3221,7 @@ impl Harness {
             | Event::ProviderCacheMissDiagnostic(value) => Some(&value.agent_prompt_id),
             Event::ProviderRetryPromptResultReported(value) => {
                 return self
+                    .ui_runtime
                     .pending_retry_prompts
                     .get(&value.request_id)
                     .is_some_and(|pending| self.agent_is_ephemeral(&pending.target_agent_id))
@@ -3290,9 +3291,11 @@ impl Harness {
             Event::ShellCommandFinishedReported(finished) => Some(&finished.command_id),
             _ => None,
         };
-        if shell_report_route_id
-            .is_some_and(|command_id| self.ephemeral_ui_shell_route_ids.contains(command_id))
-        {
+        if shell_report_route_id.is_some_and(|command_id| {
+            self.ui_runtime
+                .ephemeral_ui_shell_route_ids
+                .contains(command_id)
+        }) {
             return true;
         }
         let canonical_shell_command_id = match event {
@@ -3301,7 +3304,8 @@ impl Harness {
             _ => None,
         };
         if canonical_shell_command_id.is_some_and(|command_id| {
-            self.pending_ephemeral_ui_shell_canonical_events
+            self.ui_runtime
+                .pending_ephemeral_ui_shell_canonical_events
                 .contains_key(command_id)
         }) {
             return true;
@@ -3315,15 +3319,19 @@ impl Harness {
     pub(super) fn debug_intercept_event_targets_ephemeral(&self, event: &Event) -> bool {
         match event {
             Event::ShellCommandProgressReported(progress) => self
+                .ui_runtime
                 .ephemeral_ui_shell_route_ids
                 .contains(&progress.command_id),
             Event::ShellCommandFinishedReported(finished) => self
+                .ui_runtime
                 .ephemeral_ui_shell_route_ids
                 .contains(&finished.command_id),
             Event::ShellCommandProgress(progress) => self
+                .ui_runtime
                 .pending_ephemeral_ui_shell_canonical_events
                 .contains_key(&progress.command_id),
             Event::ShellCommandFinished(finished) => self
+                .ui_runtime
                 .pending_ephemeral_ui_shell_canonical_events
                 .contains_key(&finished.command_id),
             _ => self.event_targets_ephemeral_agent(event, None),
@@ -3345,7 +3353,8 @@ impl Harness {
         &mut self,
         command_id: tau_proto::ShellCommandId,
     ) {
-        self.pending_ephemeral_ui_shell_canonical_events
+        self.ui_runtime
+            .pending_ephemeral_ui_shell_canonical_events
             .entry(command_id)
             .and_modify(|count| {
                 *count = NonZeroUsize::new(
@@ -3365,13 +3374,15 @@ impl Harness {
         command_id: &tau_proto::ShellCommandId,
     ) {
         let Some(count) = self
+            .ui_runtime
             .pending_ephemeral_ui_shell_canonical_events
             .get_mut(command_id)
         else {
             return;
         };
         if count.get() == 1 {
-            self.pending_ephemeral_ui_shell_canonical_events
+            self.ui_runtime
+                .pending_ephemeral_ui_shell_canonical_events
                 .remove(command_id);
         } else {
             *count = NonZeroUsize::new(count.get() - 1).expect("decremented count remains nonzero");

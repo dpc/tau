@@ -160,13 +160,14 @@ impl Harness {
 
         self.fail_pending_action_invocations_for_connection(connection_id);
         let failed_retries: Vec<_> = self
+            .ui_runtime
             .pending_retry_prompts
             .iter()
             .filter(|(_, pending)| pending.provider_connection_id == *connection_id)
             .map(|(id, pending)| (id.clone(), pending.clone()))
             .collect();
         for (request_id, pending) in failed_retries {
-            self.pending_retry_prompts.remove(&request_id);
+            self.ui_runtime.pending_retry_prompts.remove(&request_id);
             let _ = self.bus.send_to(
                 &pending.requester_client_id,
                 None,
@@ -181,7 +182,8 @@ impl Harness {
                 )),
             );
         }
-        self.pending_retry_prompts
+        self.ui_runtime
+            .pending_retry_prompts
             .retain(|_, pending| &pending.requester_client_id != connection_id);
         self.fail_pending_ui_shell_commands_for_provider(
             connection_id,
@@ -254,7 +256,9 @@ impl Harness {
                 }
             }
         }
-        self.client_writers.remove(&connection_id.clone());
+        self.ui_runtime
+            .client_writers
+            .remove(&connection_id.clone());
         self.external_message_peers.remove(&connection_id.clone());
         let canceled_peer_receives = self
             .pending_external_receive_acks
@@ -717,9 +721,11 @@ impl Harness {
             return Ok(true);
         }
         if self
+            .ui_runtime
             .pending_action_invocations
             .contains_key(&invoke.invocation_id)
             || self
+                .ui_runtime
                 .completed_action_invocations
                 .contains(&invoke.invocation_id)
         {
@@ -755,7 +761,7 @@ impl Harness {
             HarnessOutputMessage::deliver(Event::ActionInvoke(invoke.clone())),
         ) {
             Ok(report) if !report.delivered_to.is_empty() => {
-                self.pending_action_invocations.insert(
+                self.ui_runtime.pending_action_invocations.insert(
                     invoke.invocation_id.clone(),
                     PendingActionInvocation {
                         owner_name: provider.extension_name.clone(),
@@ -806,6 +812,7 @@ impl Harness {
     ) {
         let source_id = &publisher.source;
         let Some(pending) = self
+            .ui_runtime
             .pending_action_invocations
             .get(&result.invocation_id)
             .cloned()
@@ -829,9 +836,11 @@ impl Harness {
             );
             return;
         }
-        self.pending_action_invocations
+        self.ui_runtime
+            .pending_action_invocations
             .remove(&result.invocation_id);
-        self.completed_action_invocations
+        self.ui_runtime
+            .completed_action_invocations
             .insert(result.invocation_id.clone());
         let _ = self.bus.send_to(
             &pending.requester_client_id,
@@ -847,6 +856,7 @@ impl Harness {
     ) {
         let source_id = &publisher.source;
         let Some(pending) = self
+            .ui_runtime
             .pending_action_invocations
             .get(&error.invocation_id)
             .cloned()
@@ -870,8 +880,11 @@ impl Harness {
             );
             return;
         }
-        self.pending_action_invocations.remove(&error.invocation_id);
-        self.completed_action_invocations
+        self.ui_runtime
+            .pending_action_invocations
+            .remove(&error.invocation_id);
+        self.ui_runtime
+            .completed_action_invocations
             .insert(error.invocation_id.clone());
         let _ = self.bus.send_to(
             &pending.requester_client_id,
@@ -885,6 +898,7 @@ impl Harness {
         connection_id: &tau_proto::ConnectionId,
     ) {
         let mut failed: Vec<_> = self
+            .ui_runtime
             .pending_action_invocations
             .iter()
             .filter_map(|(invocation_id, pending)| {
@@ -894,8 +908,11 @@ impl Harness {
             .collect();
         failed.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
         for (invocation_id, pending) in failed {
-            self.pending_action_invocations.remove(&invocation_id);
-            self.completed_action_invocations
+            self.ui_runtime
+                .pending_action_invocations
+                .remove(&invocation_id);
+            self.ui_runtime
+                .completed_action_invocations
                 .insert(invocation_id.clone());
             if &pending.requester_client_id == connection_id {
                 continue;
@@ -911,6 +928,7 @@ impl Harness {
             );
         }
         let requester_disconnected = self
+            .ui_runtime
             .pending_action_invocations
             .iter()
             .filter_map(|(invocation_id, pending)| {
@@ -918,8 +936,12 @@ impl Harness {
             })
             .collect::<Vec<_>>();
         for invocation_id in requester_disconnected {
-            self.pending_action_invocations.remove(&invocation_id);
-            self.completed_action_invocations.insert(invocation_id);
+            self.ui_runtime
+                .pending_action_invocations
+                .remove(&invocation_id);
+            self.ui_runtime
+                .completed_action_invocations
+                .insert(invocation_id);
         }
     }
 

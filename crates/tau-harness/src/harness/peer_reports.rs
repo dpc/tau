@@ -1432,7 +1432,12 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         result: &tau_proto::ProviderRetryPromptResult,
     ) {
-        let Some(pending) = self.pending_retry_prompts.get(&result.request_id).cloned() else {
+        let Some(pending) = self
+            .ui_runtime
+            .pending_retry_prompts
+            .get(&result.request_id)
+            .cloned()
+        else {
             return;
         };
         if pending.provider_connection_id != *source_id
@@ -1450,7 +1455,9 @@ impl Harness {
             self.ephemeral_provider_retry_requests
                 .insert(result.request_id.clone());
         }
-        self.pending_retry_prompts.remove(&result.request_id);
+        self.ui_runtime
+            .pending_retry_prompts
+            .remove(&result.request_id);
         let message = match result.status {
             tau_proto::RetryPromptStatus::Accepted => {
                 format!("Retrying agent {} now.", pending.target_label)
@@ -2612,7 +2619,7 @@ impl Harness {
             Event::ShellCommandProgressReported(progress) => {
                 let mut progress = progress;
                 let route_id = UiShellRouteId::new(progress.command_id.clone());
-                let Some(pending) = self.pending_ui_shell_commands.get(&route_id) else {
+                let Some(pending) = self.ui_runtime.pending_ui_shell_commands.get(&route_id) else {
                     tracing::warn!(
                         target: "tau_harness",
                         command_id = %progress.command_id,
@@ -2646,7 +2653,12 @@ impl Harness {
             Event::ShellCommandFinishedReported(finished) => {
                 let mut finished = finished;
                 let route_id = UiShellRouteId::new(finished.command_id.clone());
-                let Some(pending) = self.pending_ui_shell_commands.get(&route_id).cloned() else {
+                let Some(pending) = self
+                    .ui_runtime
+                    .pending_ui_shell_commands
+                    .get(&route_id)
+                    .cloned()
+                else {
                     tracing::warn!(
                         target: "tau_harness",
                         command_id = %finished.command_id,
@@ -2671,7 +2683,7 @@ impl Harness {
                     );
                     return;
                 }
-                self.pending_ui_shell_commands.remove(&route_id);
+                self.ui_runtime.pending_ui_shell_commands.remove(&route_id);
                 finished.command_id = command.command_id.clone();
                 finished.session_id = command.session_id.clone();
                 finished.command.clone_from(&command.command);
@@ -2681,7 +2693,8 @@ impl Harness {
                     self.mark_pending_ephemeral_shell_canonical(finished.command_id.clone());
                 }
                 if finished.include_in_context {
-                    self.pending_ui_shell_output_injections
+                    self.ui_runtime
+                        .pending_ui_shell_output_injections
                         .insert(finished.command_id.clone());
                 }
                 // The canonical completion commits before any transcript

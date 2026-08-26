@@ -667,6 +667,7 @@ fn ephemeral_agent_traffic_is_suppressed_from_debug_log() {
     )
     .expect("request ephemeral retry");
     let retry_request_id = h
+        .ui_runtime
         .pending_retry_prompts
         .keys()
         .next()

@@ -3222,8 +3222,9 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
         .expect("subscribe shell ui");
     let command = routed_ui_shell_command(&mut h, "owned-shell", true);
     h.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
-    assert_eq!(h.pending_ui_shell_commands.len(), 1);
+    assert_eq!(h.ui_runtime.pending_ui_shell_commands.len(), 1);
     let first_route_id = h
+        .ui_runtime
         .pending_ui_shell_commands
         .keys()
         .next()
@@ -3313,6 +3314,7 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
 
     h.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
     let second_route_id = h
+        .ui_runtime
         .pending_ui_shell_commands
         .keys()
         .next()
@@ -3324,7 +3326,7 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
         Event::ShellCommandFinishedReported(finished.clone()),
     );
     assert_eq!(
-        h.pending_ui_shell_commands.len(),
+        h.ui_runtime.pending_ui_shell_commands.len(),
         1,
         "late first-route terminal must not consume the reused UI id's route"
     );
@@ -3335,7 +3337,7 @@ fn ui_shell_completion_validates_owner_identity_and_exactly_once_terminal() {
         &crate::test_connection_id("shell-owner"),
         Event::ShellCommandFinishedReported(second_finished),
     );
-    assert!(h.pending_ui_shell_commands.is_empty());
+    assert!(h.ui_runtime.pending_ui_shell_commands.is_empty());
     let provider_ids = owner
         .lock()
         .expect("owner sink")
@@ -3439,10 +3441,10 @@ fn ui_shell_command_id_bounds_apply_before_projection() {
         projected,
         vec![tau_proto::ShellCommandId::parse(accepted_id).expect("test identifier must be valid")]
     );
-    assert_eq!(h.pending_ui_shell_commands.len(), 1);
+    assert_eq!(h.ui_runtime.pending_ui_shell_commands.len(), 1);
     h.handle_disconnect(&crate::test_connection_id("bounded-shell-owner"));
-    assert!(h.pending_ui_shell_commands.is_empty());
-    assert!(h.active_ui_shell_command_ids.is_empty());
+    assert!(h.ui_runtime.pending_ui_shell_commands.is_empty());
+    assert!(h.ui_runtime.active_ui_shell_command_ids.is_empty());
 }
 
 /// Disconnect and session shutdown clear pending user-shell ownership and emit
@@ -3463,7 +3465,7 @@ fn ui_shell_pending_commands_fail_on_provider_disconnect_and_session_shutdown() 
             .count(),
         1
     );
-    assert!(h.pending_ui_shell_commands.is_empty());
+    assert!(h.ui_runtime.pending_ui_shell_commands.is_empty());
 
     configure_test_ui_shell_provider(&mut h, "replacement-shell");
     let shutdown = routed_ui_shell_command(&mut h, "shutdown-shell", false);
@@ -3478,7 +3480,7 @@ fn ui_shell_pending_commands_fail_on_provider_disconnect_and_session_shutdown() 
             .count(),
         1
     );
-    assert!(h.pending_ui_shell_commands.is_empty());
+    assert!(h.ui_runtime.pending_ui_shell_commands.is_empty());
 }
 
 #[test]

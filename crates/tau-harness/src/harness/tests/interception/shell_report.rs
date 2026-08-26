@@ -73,6 +73,7 @@ fn seed_routed_shell_command(
     };
     harness.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
     let route_id = harness
+        .ui_runtime
         .pending_ui_shell_commands
         .keys()
         .next()
@@ -172,12 +173,14 @@ fn targetless_shell_start_and_terminal_share_resolved_default_agent() {
     harness.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
 
     let route_id = harness
+        .ui_runtime
         .pending_ui_shell_commands
         .keys()
         .next()
         .expect("routed shell command")
         .clone();
     let routed = harness
+        .ui_runtime
         .pending_ui_shell_commands
         .get(&route_id)
         .expect("pending route")
@@ -515,7 +518,7 @@ fn running_shell_snapshot_bounds_only_attach_projection() {
         harness.handle_ui_shell_command(&crate::test_connection_id("ui"), command);
     }
     assert_eq!(
-        harness.pending_ui_shell_commands.len(),
+        harness.ui_runtime.pending_ui_shell_commands.len(),
         129,
         "live route admission must not inherit the replay cap"
     );
@@ -669,15 +672,22 @@ fn terminal_append_failure_settles_live_without_durable_side_effects() {
     assert_eq!(live, 1);
     assert!(
         !harness
+            .ui_runtime
             .active_ui_shell_command_ids
             .contains(&command.command_id)
     );
     assert!(
         !harness
+            .ui_runtime
             .pending_ui_shell_output_injections
             .contains(&command.command_id)
     );
-    assert!(!harness.pending_ui_shell_commands.contains_key(&route_id));
+    assert!(
+        !harness
+            .ui_runtime
+            .pending_ui_shell_commands
+            .contains_key(&route_id)
+    );
     assert!(
         !loaded_agent_events(&harness, command.session_id.as_str())
             .iter()
@@ -768,7 +778,7 @@ fn shell_report_authority_rejects_wrong_kind_and_canonical_spoofs() {
         .expect("reject canonical spoof");
 
     assert!(committed_shell_events(&harness).is_empty());
-    assert_eq!(harness.pending_ui_shell_commands.len(), 1);
+    assert_eq!(harness.ui_runtime.pending_ui_shell_commands.len(), 1);
 }
 
 /// A report parked across an extension generation replacement remains an
@@ -823,7 +833,7 @@ fn parked_stale_shell_report_cannot_publish_canonical_fact() {
         [(Some(source), Event::ShellCommandProgressReported(_))]
             if source == "shell-owner"
     ));
-    assert_eq!(harness.pending_ui_shell_commands.len(), 1);
+    assert_eq!(harness.ui_runtime.pending_ui_shell_commands.len(), 1);
 }
 
 /// Immutable publication context preserves an ephemeral original route even
@@ -840,11 +850,13 @@ fn intercepted_route_replacement_cannot_leak_ephemeral_report_to_debug_jsonl() {
         false,
     );
     harness
+        .ui_runtime
         .pending_ui_shell_commands
         .get_mut(&route_id)
         .expect("pending route")
         .targets_ephemeral = true;
     harness
+        .ui_runtime
         .ephemeral_ui_shell_route_ids
         .insert(route_id.clone());
     let debug_dir = tmp.path().join("debug");
@@ -923,11 +935,13 @@ fn multi_interceptor_replacements_keep_raw_reply_ephemeral_suppression() {
         false,
     );
     harness
+        .ui_runtime
         .pending_ui_shell_commands
         .get_mut(&route_id)
         .expect("pending route")
         .targets_ephemeral = true;
     harness
+        .ui_runtime
         .ephemeral_ui_shell_route_ids
         .insert(route_id.clone());
     let debug_dir = tmp.path().join("debug");
@@ -1154,7 +1168,7 @@ fn pre_ready_shell_report_cannot_bind_after_session_rollover() {
         )
         .expect("switch session");
     command.session_id = harness.current_session_id.clone();
-    harness.pending_ui_shell_commands.insert(
+    harness.ui_runtime.pending_ui_shell_commands.insert(
         route_id,
         PendingUiShellCommand {
             provider_id: crate::test_connection_id("shell-owner"),
@@ -1180,7 +1194,7 @@ fn pre_ready_shell_report_cannot_bind_after_session_rollover() {
             .iter()
             .any(|(_, event)| matches!(event, Event::ShellCommandProgress(_)))
     );
-    assert_eq!(harness.pending_ui_shell_commands.len(), 1);
+    assert_eq!(harness.ui_runtime.pending_ui_shell_commands.len(), 1);
 }
 
 /// Ephemeral classification uses harness-owned pending-route state rather than
@@ -1190,7 +1204,7 @@ fn shell_report_ephemeral_classification_uses_private_route_identity() {
     let tmp = TempDir::new().expect("tempdir");
     let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
     let route_id = UiShellRouteId::new(test_shell_command_id("ephemeral-shell-route"));
-    harness.pending_ui_shell_commands.insert(
+    harness.ui_runtime.pending_ui_shell_commands.insert(
         route_id.clone(),
         PendingUiShellCommand {
             provider_id: crate::test_connection_id("shell-owner"),
@@ -1206,12 +1220,16 @@ fn shell_report_ephemeral_classification_uses_private_route_identity() {
         },
     );
     harness
+        .ui_runtime
         .ephemeral_ui_shell_route_ids
         .insert(route_id.clone());
-    harness.pending_ephemeral_ui_shell_canonical_events.insert(
-        test_shell_command_id("ephemeral-shell-ui"),
-        path_std_num::NonZeroUsize::MIN,
-    );
+    harness
+        .ui_runtime
+        .pending_ephemeral_ui_shell_canonical_events
+        .insert(
+            test_shell_command_id("ephemeral-shell-ui"),
+            path_std_num::NonZeroUsize::MIN,
+        );
     let report = progress_report(&route_id, None, "private output");
     let canonical = Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
         command_id: tau_proto::ShellCommandId::parse("ephemeral-shell-ui")
@@ -1223,7 +1241,12 @@ fn shell_report_ephemeral_classification_uses_private_route_identity() {
 
     assert!(harness.event_targets_ephemeral_agent(&report, None));
     assert!(harness.event_targets_ephemeral_agent(&canonical, None));
-    assert!(harness.pending_ui_shell_commands.contains_key(&route_id));
+    assert!(
+        harness
+            .ui_runtime
+            .pending_ui_shell_commands
+            .contains_key(&route_id)
+    );
 }
 
 /// Unknown routes are not misclassified as ephemeral before or after rollover;
@@ -1254,6 +1277,7 @@ fn ephemeral_shell_route_tombstone_survives_session_rollover() {
     let mut harness = quiet_provider_harness(tmp.path()).expect("harness");
     let route_id = UiShellRouteId::new(test_shell_command_id("ephemeral-old-route"));
     harness
+        .ui_runtime
         .ephemeral_ui_shell_route_ids
         .insert(route_id.clone());
     let report = progress_report(&route_id, None, "old private output");
@@ -1282,7 +1306,7 @@ fn shell_report_ephemeral_classification_ignores_peer_target_claim() {
     harness.agents.get_mut(&cid).expect("agent").persistence =
         tau_core::AgentPersistenceMode::Ephemeral;
     let route_id = UiShellRouteId::new(test_shell_command_id("durable-route"));
-    harness.pending_ui_shell_commands.insert(
+    harness.ui_runtime.pending_ui_shell_commands.insert(
         route_id.clone(),
         PendingUiShellCommand {
             provider_id: crate::test_connection_id("shell-owner"),
@@ -1355,6 +1379,7 @@ fn dropping_canonical_progress_releases_ephemeral_marker() {
         .expect("register progress interceptor");
     let command_id: tau_proto::ShellCommandId = test_shell_command_id("reusable-ui-id");
     harness
+        .ui_runtime
         .pending_ephemeral_ui_shell_canonical_events
         .insert(command_id.clone(), path_std_num::NonZeroUsize::MIN);
     harness.publish_event(
@@ -1377,6 +1402,7 @@ fn dropping_canonical_progress_releases_ephemeral_marker() {
 
     assert!(
         !harness
+            .ui_runtime
             .pending_ephemeral_ui_shell_canonical_events
             .contains_key(&command_id)
     );
@@ -1396,11 +1422,13 @@ fn parked_progress_and_rollover_terminal_keep_ephemeral_debug_suppression() {
         false,
     );
     harness
+        .ui_runtime
         .pending_ui_shell_commands
         .get_mut(&route_id)
         .expect("pending route")
         .targets_ephemeral = true;
     harness
+        .ui_runtime
         .ephemeral_ui_shell_route_ids
         .insert(route_id.clone());
     let debug_dir = tmp.path().join("debug");
@@ -1439,6 +1467,7 @@ fn parked_progress_and_rollover_terminal_keep_ephemeral_debug_suppression() {
         .expect("queue rollover terminal");
     assert_eq!(
         harness
+            .ui_runtime
             .pending_ephemeral_ui_shell_canonical_events
             .get(&command.command_id)
             .map(|count| count.get()),
@@ -1456,6 +1485,7 @@ fn parked_progress_and_rollover_terminal_keep_ephemeral_debug_suppression() {
 
     assert!(
         !harness
+            .ui_runtime
             .pending_ephemeral_ui_shell_canonical_events
             .contains_key(&command.command_id)
     );

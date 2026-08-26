@@ -4,6 +4,75 @@
 
 use super::*;
 
+/// Runtime-only state for attached clients and human-UI command routes.
+///
+/// Lifetimes intentionally differ within this owner: client writers follow
+/// connection lifetime; pending commands follow their session or provider;
+/// retry and action tombstones plus private shell-route identities survive for
+/// the process lifetime. Session rollover resolves or invalidates session-bound
+/// work field by field instead of resetting the whole state. Normal connection
+/// teardown removes its writer lifecycle, while the startup-failure path may
+/// explicitly close a socket writer; the lifecycle owns no join handle or drop
+/// side effect. This state does not own the generic event bus.
+pub(crate) struct UiRuntimeState {
+    /// Random stream for opaque provider-side shell route identities.
+    ///
+    /// This stream stays independent from agent-id generation so shell traffic
+    /// cannot perturb later agent identities.
+    pub(super) ui_shell_route_rng: StdRng,
+    /// Provider routes and canonical requests awaiting shell terminals.
+    pub(super) pending_ui_shell_commands: HashMap<UiShellRouteId, PendingUiShellCommand>,
+    /// Process-lifetime shell routes whose target agent was ephemeral.
+    ///
+    /// Retention excludes late or interception-replaced reports from durable
+    /// debug output, and non-reuse keeps a later command from inheriting that
+    /// classification.
+    pub(super) ephemeral_ui_shell_route_ids: HashSet<UiShellRouteId>,
+    /// Public shell ids whose next canonical fact targets an ephemeral agent.
+    pub(super) pending_ephemeral_ui_shell_canonical_events:
+        HashMap<tau_proto::ShellCommandId, NonZeroUsize>,
+    /// Public shell ids reserved from admission through terminal commit.
+    pub(super) active_ui_shell_command_ids: HashSet<tau_proto::ShellCommandId>,
+    /// Canonical shell completions that inject output after commit.
+    pub(super) pending_ui_shell_output_injections: HashSet<tau_proto::ShellCommandId>,
+    /// Action invocations awaiting their exact provider and requester route.
+    pub(super) pending_action_invocations: HashMap<ActionInvocationId, PendingActionInvocation>,
+    /// Terminal action invocation ids that can never be routed again.
+    pub(super) completed_action_invocations: HashSet<ActionInvocationId>,
+    /// Manual retry requests awaiting their exact provider owner.
+    pub(super) pending_retry_prompts: HashMap<tau_proto::RetryPromptRequestId, PendingRetryPrompt>,
+    /// Process-lifetime replay guard for UI-chosen retry correlations.
+    pub(super) seen_retry_prompt_requests:
+        HashSet<(tau_proto::ConnectionId, tau_proto::RetryPromptRequestId)>,
+    /// FIFO order that bounds the retry replay guard.
+    pub(super) seen_retry_prompt_request_order:
+        VecDeque<(tau_proto::ConnectionId, tau_proto::RetryPromptRequestId)>,
+    /// Live-log cursors and transport lifecycles for attached clients.
+    pub(crate) client_writers: HashMap<tau_proto::ConnectionId, ClientWriterLifecycle>,
+    /// Startup-gated detach request awaiting main-loop consumption.
+    pub(super) startup_detach_requested: bool,
+}
+
+impl Default for UiRuntimeState {
+    fn default() -> Self {
+        Self {
+            ui_shell_route_rng: StdRng::from_entropy(),
+            pending_ui_shell_commands: HashMap::new(),
+            ephemeral_ui_shell_route_ids: HashSet::new(),
+            pending_ephemeral_ui_shell_canonical_events: HashMap::new(),
+            active_ui_shell_command_ids: HashSet::new(),
+            pending_ui_shell_output_injections: HashSet::new(),
+            pending_action_invocations: HashMap::new(),
+            completed_action_invocations: HashSet::new(),
+            pending_retry_prompts: HashMap::new(),
+            seen_retry_prompt_requests: HashSet::new(),
+            seen_retry_prompt_request_order: VecDeque::new(),
+            client_writers: HashMap::new(),
+            startup_detach_requested: false,
+        }
+    }
+}
+
 pub(super) fn shell_route_id(first: u64, second: u64) -> tau_proto::ShellCommandId {
     tau_proto::ShellCommandId::parse(format!("harness-shell-{first:016x}{second:016x}"))
         .expect("Tau-generated shell command id must be valid")
@@ -125,13 +194,15 @@ impl Harness {
         mut command: tau_proto::UiShellCommand,
     ) {
         if self
+            .ui_runtime
             .active_ui_shell_command_ids
             .contains(&command.command_id)
         {
             self.emit_info("discarding duplicate in-flight shell command id");
             return;
         }
-        self.active_ui_shell_command_ids
+        self.ui_runtime
+            .active_ui_shell_command_ids
             .insert(command.command_id.clone());
         if command.session_id != self.current_session_id {
             self.project_ui_shell_command_start(client_id, &command);
@@ -192,9 +263,11 @@ impl Harness {
         );
         if delivered.is_ok_and(|report| !report.delivered_to.is_empty()) {
             if targets_ephemeral {
-                self.ephemeral_ui_shell_route_ids.insert(route_id.clone());
+                self.ui_runtime
+                    .ephemeral_ui_shell_route_ids
+                    .insert(route_id.clone());
             }
-            self.pending_ui_shell_commands.insert(
+            self.ui_runtime.pending_ui_shell_commands.insert(
                 route_id,
                 PendingUiShellCommand {
                     provider_id: provider,
@@ -237,20 +310,25 @@ impl Harness {
         reason: &str,
     ) {
         let failed = self
+            .ui_runtime
             .pending_ui_shell_commands
             .iter()
             .filter(|(_, pending)| &pending.provider_id == provider_id)
             .map(|(command_id, _)| command_id.clone())
             .collect::<Vec<_>>();
         for command_id in failed {
-            if let Some(pending) = self.pending_ui_shell_commands.remove(&command_id) {
+            if let Some(pending) = self
+                .ui_runtime
+                .pending_ui_shell_commands
+                .remove(&command_id)
+            {
                 self.finish_unroutable_ui_shell(pending.command, reason, pending.targets_ephemeral);
             }
         }
     }
 
     pub(super) fn fail_all_pending_ui_shell_commands(&mut self, reason: &str) {
-        let pending = std::mem::take(&mut self.pending_ui_shell_commands);
+        let pending = std::mem::take(&mut self.ui_runtime.pending_ui_shell_commands);
         for (_, pending) in pending {
             self.finish_unroutable_ui_shell(pending.command, reason, pending.targets_ephemeral);
         }
@@ -552,7 +630,11 @@ impl Harness {
             );
         };
         let request_key = (client_id.to_owned(), req.request_id.clone());
-        if !self.seen_retry_prompt_requests.insert(request_key.clone()) {
+        if !self
+            .ui_runtime
+            .seen_retry_prompt_requests
+            .insert(request_key.clone())
+        {
             reject(
                 self,
                 req.target_agent_id,
@@ -561,10 +643,12 @@ impl Harness {
             );
             return;
         }
-        self.seen_retry_prompt_request_order.push_back(request_key);
-        while self.seen_retry_prompt_request_order.len() > RETRY_TOMBSTONE_LIMIT {
-            if let Some(expired) = self.seen_retry_prompt_request_order.pop_front() {
-                self.seen_retry_prompt_requests.remove(&expired);
+        self.ui_runtime
+            .seen_retry_prompt_request_order
+            .push_back(request_key);
+        while self.ui_runtime.seen_retry_prompt_request_order.len() > RETRY_TOMBSTONE_LIMIT {
+            if let Some(expired) = self.ui_runtime.seen_retry_prompt_request_order.pop_front() {
+                self.ui_runtime.seen_retry_prompt_requests.remove(&expired);
             }
         }
         if req.session_id != self.current_session_id {
@@ -619,11 +703,15 @@ impl Harness {
             );
             return;
         };
-        if self.pending_retry_prompts.len() >= PENDING_RETRY_LIMIT
-            || self.pending_retry_prompts.values().any(|pending| {
-                pending.requester_client_id == **client_id
-                    && pending.agent_prompt_id == agent_prompt_id
-            })
+        if self.ui_runtime.pending_retry_prompts.len() >= PENDING_RETRY_LIMIT
+            || self
+                .ui_runtime
+                .pending_retry_prompts
+                .values()
+                .any(|pending| {
+                    pending.requester_client_id == **client_id
+                        && pending.agent_prompt_id == agent_prompt_id
+                })
         {
             reject(
                 self,
@@ -661,7 +749,7 @@ impl Harness {
             self.ephemeral_provider_retry_requests
                 .insert(provider_request_id.clone());
         }
-        self.pending_retry_prompts.insert(
+        self.ui_runtime.pending_retry_prompts.insert(
             provider_request_id,
             PendingRetryPrompt {
                 ui_request_id: req.request_id,
@@ -1448,11 +1536,17 @@ impl Harness {
     pub(super) fn next_ui_shell_route_id(&mut self) -> UiShellRouteId {
         loop {
             let route_id = UiShellRouteId::new(shell_route_id(
-                self.ui_shell_route_rng.next_u64(),
-                self.ui_shell_route_rng.next_u64(),
+                self.ui_runtime.ui_shell_route_rng.next_u64(),
+                self.ui_runtime.ui_shell_route_rng.next_u64(),
             ));
-            if !self.pending_ui_shell_commands.contains_key(&route_id)
-                && !self.ephemeral_ui_shell_route_ids.contains(&route_id)
+            if !self
+                .ui_runtime
+                .pending_ui_shell_commands
+                .contains_key(&route_id)
+                && !self
+                    .ui_runtime
+                    .ephemeral_ui_shell_route_ids
+                    .contains(&route_id)
             {
                 return route_id;
             }

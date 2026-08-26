@@ -6808,6 +6808,7 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
         .next()
         .expect("shell provider");
     let first_route = h
+        .ui_runtime
         .pending_ui_shell_commands
         .keys()
         .next()
@@ -6828,11 +6829,15 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
         Event::ShellCommandFinishedReported(terminal),
     );
     let _ = intercepted_payload(&interceptor);
-    assert!(h.pending_ui_shell_commands.is_empty());
-    assert!(h.active_ui_shell_command_ids.contains(&command.command_id));
+    assert!(h.ui_runtime.pending_ui_shell_commands.is_empty());
+    assert!(
+        h.ui_runtime
+            .active_ui_shell_command_ids
+            .contains(&command.command_id)
+    );
 
     h.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
-    assert!(h.pending_ui_shell_commands.is_empty());
+    assert!(h.ui_runtime.pending_ui_shell_commands.is_empty());
     assert_eq!(
         ui.lock()
             .expect("ui sink")
@@ -6854,10 +6859,14 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
         })),
     )
     .expect("must-pass terminal");
-    assert!(!h.active_ui_shell_command_ids.contains(&command.command_id));
+    assert!(
+        !h.ui_runtime
+            .active_ui_shell_command_ids
+            .contains(&command.command_id)
+    );
 
     h.handle_ui_shell_command(&crate::test_connection_id("ui"), command.clone());
-    assert_eq!(h.pending_ui_shell_commands.len(), 1);
+    assert_eq!(h.ui_runtime.pending_ui_shell_commands.len(), 1);
     assert_eq!(
         ui.lock()
             .expect("ui sink")
@@ -6872,6 +6881,7 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
     );
 
     let second_route = h
+        .ui_runtime
         .pending_ui_shell_commands
         .keys()
         .next()
@@ -6898,7 +6908,7 @@ fn shell_command_ui_id_reservation_extends_through_terminal_commit() {
         })),
     )
     .expect("commit second terminal");
-    assert!(!h.active_ui_shell_command_ids.contains(
+    assert!(!h.ui_runtime.active_ui_shell_command_ids.contains(
         &tau_proto::ShellCommandId::parse("parked-ui-id").expect("test identifier must be valid")
     ));
 }

@@ -27,7 +27,8 @@ fn retry_result(
 }
 
 fn provider_request_id(h: &Harness, ui_id: &str) -> tau_proto::RetryPromptRequestId {
-    h.pending_retry_prompts
+    h.ui_runtime
+        .pending_retry_prompts
         .iter()
         .find(|(_, pending)| pending.ui_request_id.as_str() == ui_id)
         .map(|(id, _)| id.clone())
@@ -346,8 +347,8 @@ fn retry_request_tombstones_are_bounded() {
         )
         .expect("bounded rejection");
     }
-    assert_eq!(h.seen_retry_prompt_requests.len(), 1_024);
-    assert_eq!(h.seen_retry_prompt_request_order.len(), 1_024);
+    assert_eq!(h.ui_runtime.seen_retry_prompt_requests.len(), 1_024);
+    assert_eq!(h.ui_runtime.seen_retry_prompt_request_order.len(), 1_024);
 }
 
 /// Identical UI correlation IDs belong to the requesting connection, while
@@ -373,11 +374,17 @@ fn retry_same_ui_id_isolated_across_requesters() {
         )
         .expect("retry request");
     }
-    let tokens = h.pending_retry_prompts.keys().cloned().collect::<Vec<_>>();
+    let tokens = h
+        .ui_runtime
+        .pending_retry_prompts
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(tokens.len(), 2);
     assert_ne!(tokens[0], tokens[1], "provider tokens must be unique");
     for token in tokens {
         let requester = h
+            .ui_runtime
             .pending_retry_prompts
             .get(&token)
             .expect("pending")
@@ -437,7 +444,7 @@ fn retry_pending_nonresponsive_provider_is_bounded() {
         )
         .expect("request handled");
     }
-    assert_eq!(h.pending_retry_prompts.len(), 1_024);
+    assert_eq!(h.ui_runtime.pending_retry_prompts.len(), 1_024);
     assert_eq!(
         matching_events(&provider, |event| matches!(event, Event::UiRetryPrompt(_))),
         1_024
@@ -471,7 +478,7 @@ fn retry_tombstone_eviction_does_not_reuse_provider_token() {
     )
     .expect("old request");
     let old = provider_request_id(&h, "reuse");
-    h.pending_retry_prompts.remove(&old);
+    h.ui_runtime.pending_retry_prompts.remove(&old);
     for index in 0..1_024 {
         h.handle_client_event_inner(
             &crate::test_connection_id("requester"),
@@ -495,7 +502,7 @@ fn retry_tombstone_eviction_does_not_reuse_provider_token() {
         )),
     )
     .expect("late old result");
-    assert!(h.pending_retry_prompts.contains_key(&new));
+    assert!(h.ui_runtime.pending_retry_prompts.contains_key(&new));
     assert_eq!(
         matching_events(&requester, |event| matches!(
             event,

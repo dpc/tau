@@ -758,7 +758,7 @@ impl Harness {
         // Resolve requesters rather than silently dropping their pending request;
         // the shutdown event above concurrently tells providers to cancel the
         // scheduler-owned old-session jobs.
-        for (_, pending) in std::mem::take(&mut self.pending_retry_prompts) {
+        for (_, pending) in std::mem::take(&mut self.ui_runtime.pending_retry_prompts) {
             let _ = self.bus.send_to(
                 &pending.requester_client_id,
                 None,
@@ -815,9 +815,10 @@ impl Harness {
         self.tool_runtime.completed_ephemeral_tool_calls.clear();
         self.tool_runtime.completed_tool_agents.clear();
         self.tool_runtime.pending_tool_providers.clear();
-        self.completed_action_invocations
-            .extend(self.pending_action_invocations.keys().cloned());
-        self.pending_action_invocations.clear();
+        self.ui_runtime
+            .completed_action_invocations
+            .extend(self.ui_runtime.pending_action_invocations.keys().cloned());
+        self.ui_runtime.pending_action_invocations.clear();
         self.prompt_agents.clear();
         self.ephemeral_provider_prompts.clear();
         self.ephemeral_provider_retry_requests.clear();

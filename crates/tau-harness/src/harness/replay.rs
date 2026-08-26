@@ -356,7 +356,8 @@ impl Harness {
             return;
         }
         let (commands, omitted) = bounded_running_shell_snapshot(
-            self.pending_ui_shell_commands
+            self.ui_runtime
+                .pending_ui_shell_commands
                 .values()
                 .map(|pending| &pending.command),
         );

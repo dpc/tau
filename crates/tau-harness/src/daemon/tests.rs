@@ -577,7 +577,7 @@ fn post_accept_startup_error_cancels_a_blocked_socket_writer() {
         started.elapsed() < Duration::from_secs(1),
         "fatal startup handling must not wait for the blocked socket writer"
     );
-    assert!(harness.client_writers.is_empty());
+    assert!(harness.ui_runtime.client_writers.is_empty());
 
     let deadline = Instant::now() + Duration::from_secs(1);
     while event_log.consumer_count() != baseline_consumers && Instant::now() < deadline {

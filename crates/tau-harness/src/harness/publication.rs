@@ -1460,9 +1460,11 @@ impl Harness {
                     // The provider route has already completed. Settle the live UI
                     // exactly once even though this fact cannot enter replay, and
                     // never inject output whose canonical durability failed.
-                    self.pending_ui_shell_output_injections
+                    self.ui_runtime
+                        .pending_ui_shell_output_injections
                         .remove(&finished.command_id);
-                    self.active_ui_shell_command_ids
+                    self.ui_runtime
+                        .active_ui_shell_command_ids
                         .remove(&finished.command_id);
                     self.release_pending_ephemeral_shell_canonical_marker(&finished.command_id);
                     let frame = HarnessOutputMessage::deliver_live(
@@ -1774,9 +1776,11 @@ impl Harness {
         }
         if let Event::ShellCommandFinished(finished) = &event {
             self.release_pending_ephemeral_shell_canonical_marker(&finished.command_id);
-            self.active_ui_shell_command_ids
+            self.ui_runtime
+                .active_ui_shell_command_ids
                 .remove(&finished.command_id);
             if self
+                .ui_runtime
                 .pending_ui_shell_output_injections
                 .remove(&finished.command_id)
             {

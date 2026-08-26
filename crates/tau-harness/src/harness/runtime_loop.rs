@@ -397,17 +397,17 @@ impl Harness {
         mut exit_on_disconnect: bool,
     ) -> Result<(), HarnessError> {
         let mut served_clients = 0_usize;
-        if self.startup_detach_requested {
+        if self.ui_runtime.startup_detach_requested {
             exit_on_disconnect = false;
         }
-        let mut ever_attached = !self.client_writers.is_empty();
+        let mut ever_attached = !self.ui_runtime.client_writers.is_empty();
         loop {
             if Self::should_stop_run_loop(
                 max_clients,
                 served_clients,
                 exit_on_disconnect,
                 ever_attached,
-                self.client_writers.is_empty(),
+                self.ui_runtime.client_writers.is_empty(),
             ) {
                 break;
             }
@@ -896,7 +896,9 @@ impl Harness {
             Some(stream) => ClientWriterLifecycle::socket(consumer, stream),
             None => ClientWriterLifecycle::generic(consumer),
         };
-        self.client_writers.insert(conn_id.clone(), lifecycle);
+        self.ui_runtime
+            .client_writers
+            .insert(conn_id.clone(), lifecycle);
         spawn_reader_thread(conn_id.clone(), read, self.component_ingress_tx.clone());
         Ok(conn_id)
     }
@@ -916,7 +918,7 @@ impl Harness {
                 reason: Some(format!("harness startup failed: {error}")),
             }),
         );
-        let Some(writer) = self.client_writers.remove(client_id) else {
+        let Some(writer) = self.ui_runtime.client_writers.remove(client_id) else {
             return;
         };
         writer.close_after_current_for_startup(STARTUP_DISCONNECT_GRACE);
@@ -927,7 +929,7 @@ impl Harness {
     ///
     /// An absent or already-closed writer has no remaining queue to drain.
     pub(super) fn drain_client_writer(&self, client_id: &ConnectionId) {
-        let Some(writer) = self.client_writers.get(client_id) else {
+        let Some(writer) = self.ui_runtime.client_writers.get(client_id) else {
             return;
         };
         writer.flush();

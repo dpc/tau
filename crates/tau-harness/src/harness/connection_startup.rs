@@ -291,7 +291,7 @@ impl Harness {
                     self.is_authorized_ui_detach_request(connection_id, &message);
                 let subscribed = matches!(&message, HarnessInputMessage::Subscribe(_));
                 if detach_requested {
-                    self.startup_detach_requested = true;
+                    self.ui_runtime.startup_detach_requested = true;
                 }
                 let disposition = self.handle_client_message_disposition(connection_id, message)?;
                 let close = match disposition {
@@ -304,7 +304,7 @@ impl Harness {
                 };
                 if close {
                     self.handle_disconnect(connection_id);
-                    if self.startup_detach_requested {
+                    if self.ui_runtime.startup_detach_requested {
                         false
                     } else {
                         return Err(HarnessError::Participant(
@@ -366,7 +366,7 @@ impl Harness {
         }
         self.handle_disconnect(connection_id);
         if was_socket {
-            if self.startup_detach_requested {
+            if self.ui_runtime.startup_detach_requested {
                 return Ok(());
             }
             return Err(HarnessError::Participant(format!(

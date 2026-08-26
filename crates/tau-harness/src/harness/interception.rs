@@ -1822,7 +1822,11 @@ impl Harness {
             Event::ShellCommandFinishedReported(finished) => Some(&finished.command_id),
             _ => None,
         }
-        .is_some_and(|command_id| self.ephemeral_ui_shell_route_ids.contains(command_id));
+        .is_some_and(|command_id| {
+            self.ui_runtime
+                .ephemeral_ui_shell_route_ids
+                .contains(command_id)
+        });
         let extension = source.and_then(|source_id| self.extensions.entries.get(source_id));
         let activation_reservation = extension
             .filter(|entry| entry.state != path_crate_extension::ExtensionState::Ready)
