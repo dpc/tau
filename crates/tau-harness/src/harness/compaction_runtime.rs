@@ -5,6 +5,17 @@
 
 use super::*;
 
+/// Result of checking one durable successful compaction for rolling work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RollingCompactionPass {
+    /// No additional pass is authorized.
+    NotNeeded,
+    /// A provider-backed continuation start was published.
+    Started,
+    /// A linked typed local failure start was published and is terminalizing.
+    Terminalizing,
+}
+
 impl Harness {
     pub(super) fn handle_compact_request(
         &mut self,
@@ -842,15 +853,14 @@ impl Harness {
     pub(super) fn fitting_automatic_compaction_cut(
         &self,
         agent_id: &str,
-        provisional_cut: tau_proto::AgentHead,
+        active_head: tau_proto::AgentHead,
+        maximum_cut: Option<tau_proto::AgentHead>,
         budget: u64,
     ) -> Option<tau_proto::AgentHead> {
         let tree = self.session_runtime.agent_store.agent(agent_id)?;
-        let window = tree.active_provider_window(provisional_cut.as_option());
-        let measurements = crate::prompt::active_prompt_prefix_json_measurements(
-            tree,
-            provisional_cut.as_option(),
-        )?;
+        let window = tree.active_provider_window(active_head.as_option());
+        let measurements =
+            crate::prompt::active_prompt_prefix_json_measurements(tree, active_head.as_option())?;
         // A replacement alone is not a progress-making rolling pass: it can
         // produce an equally large replacement forever. Every automatic pass
         // must also consume at least one surviving transcript group.
@@ -872,27 +882,75 @@ impl Harness {
                 (!open_tool_round).then_some((tau_proto::AgentHead::Node(*id), bytes))
             })
             .collect::<Vec<_>>();
+        let candidate_limit = match maximum_cut {
+            None => candidates.len(),
+            Some(tau_proto::AgentHead::Node(maximum)) => candidates
+                .iter()
+                .position(|(cut, _)| *cut == tau_proto::AgentHead::Node(maximum))
+                .map(|index| index + 1)
+                .unwrap_or(0),
+            Some(tau_proto::AgentHead::Root) => 0,
+        };
         candidates
             .into_iter()
+            .take(candidate_limit)
             .take_while(|(_, bytes)| *bytes <= budget)
             .map(|(cut, _)| cut)
             .last()
     }
 
-    /// Start another bounded automatic pass after a durable successful boundary
-    /// when the active provider window still exceeds the safe scheduling guard.
-    pub(super) fn start_automatic_compaction_multipass(
+    /// Starts another bounded rolling pass after a durable successful boundary.
+    ///
+    /// Automatic work requires the active window to reach its local scheduling
+    /// threshold. An unfinished chain rooted at a provider context rejection
+    /// instead retains its durable recovery authority until it reaches the end
+    /// of the logical provider window preceding the rejected activation.
+    pub(super) fn start_rolling_compaction_pass(
         &mut self,
         cid: &AgentId,
         model: &ModelId,
         selected: tau_proto::AgentHead,
-    ) -> bool {
-        let Some(info) = self.provider_runtime.model_info.get(model) else {
-            return false;
+    ) -> RollingCompactionPass {
+        let Some(agent_id) = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.identity.agent_id.clone())
+        else {
+            return RollingCompactionPass::NotNeeded;
         };
-        let Some(budget) = info.standalone_compaction_prefix_budget else {
-            return false;
+        let Some(tree) = self.session_runtime.agent_store.agent(&agent_id) else {
+            return RollingCompactionPass::NotNeeded;
         };
+        let (previous_transaction_id, automatic) = match tree.standalone_compaction_recovery() {
+            Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint {
+                transaction_id,
+                through,
+                automatic,
+                ..
+            }) if through == selected => (transaction_id, automatic),
+            _ => return RollingCompactionPass::NotNeeded,
+        };
+        let reactive_progress = tree.reactive_compaction_progress(&previous_transaction_id);
+        if reactive_progress == Some(tau_core::ReactiveCompactionProgress::ReachedTargetCut) {
+            return RollingCompactionPass::NotNeeded;
+        }
+        let reactive_target_cut = match reactive_progress {
+            Some(tau_core::ReactiveCompactionProgress::NeedsContinuation { target_cut }) => {
+                Some(target_cut)
+            }
+            _ => None,
+        };
+        let reactive_continuation = reactive_target_cut.is_some();
+        if !automatic && !reactive_continuation {
+            return RollingCompactionPass::NotNeeded;
+        }
+        let info = self.provider_runtime.model_info.get(model);
+        let budget = info.and_then(|info| info.standalone_compaction_prefix_budget);
+        if !reactive_continuation && budget.is_none() {
+            return RollingCompactionPass::NotNeeded;
+        }
         let role_name = self.role_name_for_agent_id(cid);
         let role = self.config.available_roles.get(&role_name);
         let status_available = self
@@ -917,7 +975,7 @@ impl Harness {
                     .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault)
                 {
                     path_tau_config_settings::RoleCompaction::ProviderDefault => {
-                        info.standalone_compaction_threshold
+                        info.and_then(|info| info.standalone_compaction_threshold)
                     }
                     path_tau_config_settings::RoleCompaction::Threshold(tokens) => Some(tokens),
                     path_tau_config_settings::RoleCompaction::Disabled => None,
@@ -937,7 +995,7 @@ impl Harness {
                 })
                 .filter_map(|policy| match policy.threshold {
                     path_tau_config_settings::CompactionPolicyThreshold::ProviderDefault => {
-                        info.standalone_compaction_threshold
+                        info.and_then(|info| info.standalone_compaction_threshold)
                     }
                     path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
                         Some(tokens)
@@ -945,38 +1003,27 @@ impl Harness {
                 })
                 .min()
         });
-        let Some(threshold) = threshold else {
-            return false;
-        };
-        let Some(agent_id) = self
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get(cid)
-            .and_then(|agent| agent.identity.agent_id.clone())
-        else {
-            return false;
-        };
-        let Some(tree) = self.session_runtime.agent_store.agent(&agent_id) else {
-            return false;
-        };
-        let previous_transaction_id = match tree.standalone_compaction_recovery() {
-            Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint {
-                transaction_id,
-                through,
-                automatic: true,
-                ..
-            }) if through == selected => transaction_id,
-            _ => return false,
-        };
         let projection = self
             .automatic_compaction_projected_tokens(cid, model)
             .unwrap_or(u64::MAX);
-        if projection < threshold {
-            return false;
+        if !reactive_continuation {
+            let Some(threshold) = threshold else {
+                return RollingCompactionPass::NotNeeded;
+            };
+            if projection < threshold {
+                return RollingCompactionPass::NotNeeded;
+            }
         }
-        let fitting = self.fitting_automatic_compaction_cut(&agent_id, selected, budget);
-        let cut = fitting.unwrap_or(selected);
+        let provisional_cut = reactive_target_cut.unwrap_or(selected);
+        let fitting = budget.and_then(|budget| {
+            self.fitting_automatic_compaction_cut(&agent_id, selected, reactive_target_cut, budget)
+        });
+        let failure_reason = if budget.is_none() {
+            tau_proto::StandaloneCompactionFailureReason::RouteFailed
+        } else {
+            tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
+        };
+        let cut = fitting.unwrap_or(provisional_cut);
         let Some((next, originator)) =
             self.agent_runtime
                 .agent_registry
@@ -989,7 +1036,7 @@ impl Harness {
                     )
                 })
         else {
-            return false;
+            return RollingCompactionPass::NotNeeded;
         };
         let transaction_id = tau_proto::CompactionTransactionId::parse(format!("ct-{next}"))
             .expect("generated compaction transaction id is valid");
@@ -1007,16 +1054,13 @@ impl Harness {
             self.prompt_coordination
                 .compaction_runtime
                 .preflight_failures
-                .insert(
-                    key,
-                    tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
-                );
+                .insert(key, failure_reason);
         }
         let trigger = fitting.map_or_else(
             || tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
                 decision_id: None,
                 previous_transaction_id: Some(previous_transaction_id.clone()),
-                reason: tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
+                reason: failure_reason,
             },
             |_| tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
                 previous_transaction_id: previous_transaction_id.clone(),
@@ -1040,7 +1084,11 @@ impl Harness {
             Some(AgentPublishCompletion::RollingCompactionStart { retry_event: None }),
             false,
         );
-        true
+        if fitting.is_some() {
+            RollingCompactionPass::Started
+        } else {
+            RollingCompactionPass::Terminalizing
+        }
     }
 
     /// Returns the normalized failed cut only when the selected head still
@@ -1288,7 +1336,7 @@ impl Harness {
             .and_then(|info| info.standalone_compaction_prefix_budget);
         let fitting_cut = match prefix_budget {
             None => None,
-            Some(budget) => self.fitting_automatic_compaction_cut(&agent_id, cut, budget),
+            Some(budget) => self.fitting_automatic_compaction_cut(&agent_id, cut, None, budget),
         };
         let cut = fitting_cut.unwrap_or(cut);
         let compact_prompt_id = tau_proto::AgentPromptId::parse(format!(
@@ -1476,7 +1524,7 @@ impl Harness {
             }
         });
         let fitting_cut =
-            self.fitting_automatic_compaction_cut(&agent_id, provisional_cut, prefix_budget);
+            self.fitting_automatic_compaction_cut(&agent_id, provisional_cut, None, prefix_budget);
         if fitting_cut.is_none()
             && self
                 .session_runtime

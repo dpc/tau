@@ -4478,16 +4478,17 @@ pub enum StandaloneCompactionTrigger {
     /// Automatic compaction after the local context projection reached the
     /// configured role/model threshold.
     AutomaticThreshold,
-    /// Successful automatic pass still exceeded its effective guard and owns
-    /// this next durable rolling pass.
+    /// A successful automatic pass still exceeded its effective guard, or a
+    /// provider-rejected reactive chain still has suffix history to consume,
+    /// and owns this next durable rolling pass.
     AutomaticContinuation {
         /// Immediately preceding successful transaction whose checkpoint this
         /// start claims instead.
         previous_transaction_id: CompactionTransactionId,
     },
-    /// Automatic planning found a deterministic local reason not to dispatch
-    /// provider work. The matching start makes the reason replay-stable until
-    /// its terminal failure commits.
+    /// Automatic or rolling reactive planning found a deterministic local
+    /// reason not to dispatch provider work. The matching start makes the
+    /// reason replay-stable until its terminal failure commits.
     AutomaticPreflightFailure {
         /// Terminal-owned automatic decision claimed by this failure, when any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4495,7 +4496,10 @@ pub enum StandaloneCompactionTrigger {
         /// Prior successful rolling pass claimed by this failure, when any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         previous_transaction_id: Option<CompactionTransactionId>,
-        /// Durable local failure to commit without provider dispatch.
+        /// Durable local failure to commit without provider dispatch. Rolling
+        /// continuations use `prefix_too_large` for indivisible material.
+        /// Unfinished reactive-rooted predecessor chains use `route_failed`
+        /// when their captured route/capability disappears.
         reason: StandaloneCompactionFailureReason,
     },
     /// Eager automatic compaction claiming terminal-owned durable authority.

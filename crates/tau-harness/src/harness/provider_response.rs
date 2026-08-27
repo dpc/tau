@@ -858,7 +858,7 @@ impl Harness {
     }
 
     /// Durably claims an eligible no-output context rejection and starts the
-    /// single standalone-compaction transaction that may recover it.
+    /// bounded standalone-compaction chain that may recover it.
     pub(super) fn try_plan_reactive_context_recovery(
         &mut self,
         cid: &AgentId,
@@ -1226,7 +1226,7 @@ impl Harness {
             // still reject one oversized indivisible activating item.
             Some(tau_proto::AgentHead::Root)
         } else {
-            self.fitting_automatic_compaction_cut(&agent_id, provisional_cut, prefix_budget)
+            self.fitting_automatic_compaction_cut(&agent_id, provisional_cut, None, prefix_budget)
         };
         let cut = fitting_cut.unwrap_or(provisional_cut);
         let transaction_id = tau_proto::CompactionTransactionId::parse(format!("ct-{next}"))

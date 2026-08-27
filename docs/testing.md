@@ -705,6 +705,24 @@ quiescent. A prefix that already contains the standalone start owes the
 interrupted outcome on its first reopen. Do not call the intermediate reopen
 quiescent while protected provider work remains in flight.
 
+## Reactive rolling compaction coverage
+
+Treat the rejected inference terminal, initial reactive start, each partial
+success, each predecessor-linked rolling start, the final activation-cut
+arrival, and resumed inference as separate durable boundaries. Focused harness
+tests must cover live and cold continuation below local projection, a small
+retained activating input, and an activation cut whose logical provider window
+begins at an earlier suffix-preserving replacement. Restart with removed route
+or capability must commit one linked typed `route_failed` terminal instead of
+checkpointing inference.
+
+Keep replacement-plus-next-group no-progress separate: an unfitting rolling
+prefix must commit one durable `prefix_too_large` terminal with no provider
+prompt, no inference checkpoint, and the rejected activation retained. Core
+live/cold folds own logical target projection and rejection of cuts beyond that
+target; deterministic end-to-end coverage retains the existing opaque
+standalone restart oracle rather than multiplying a broad matrix.
+
 
 ## Output-length continuation coverage
 

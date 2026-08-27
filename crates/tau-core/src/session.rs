@@ -740,6 +740,22 @@ pub enum StandaloneCompactionRecovery {
     DispatchUncertain(tau_proto::AgentInferenceDispatchStarted),
 }
 
+/// Progress of a durable rolling chain rooted at a rejected inference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReactiveCompactionProgress {
+    /// Reducible provider-closed history remains before the rejected
+    /// inference's activation cut.
+    NeedsContinuation {
+        /// Furthest logical provider-window cut the rolling chain may consume
+        /// before inference resumes.
+        target_cut: tau_proto::AgentHead,
+    },
+    /// The latest successful cut reached the end of the logical provider
+    /// window preceding the rejected activation, so inference must resume with
+    /// the activating input retained.
+    ReachedTargetCut,
+}
+
 /// Recovery projection for the latest durable inference checkpoint.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InferenceDispatchRecovery {
@@ -831,6 +847,80 @@ impl AgentTree {
                 ))
             }
             (Some(CompactionTransactionOutcome::Succeeded(_)), Some(_)) => None,
+        }
+    }
+
+    /// Returns rolling progress when the given successful compaction belongs
+    /// to a chain rooted at a rejected inference.
+    ///
+    /// Automatic continuations retain only their immediately preceding
+    /// transaction id, so this follows the validated durable chain back to its
+    /// reactive context-overflow origin. Recovery stops when the latest cut has
+    /// consumed the history preceding the original activation cut; the rejected
+    /// activating input remains in the suffix for inference.
+    ///
+    /// Returns `None` when the transaction is unknown, unfinished, failed,
+    /// checkpointed, not rooted at reactive recovery, or has an invalid durable
+    /// predecessor/activation relation.
+    #[must_use]
+    pub fn reactive_compaction_progress(
+        &self,
+        transaction_id: &tau_proto::CompactionTransactionId,
+    ) -> Option<ReactiveCompactionProgress> {
+        let mut transaction = self.compaction_transactions.get(transaction_id)?;
+        if !matches!(
+            transaction.outcome,
+            Some(CompactionTransactionOutcome::Succeeded(_))
+        ) || transaction.checkpoint.is_some()
+        {
+            return None;
+        }
+        let latest_cut = transaction.started.cut;
+        loop {
+            match &transaction.started.trigger {
+                tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                    failed_agent_prompt_id,
+                } => {
+                    let activation_cut = self
+                        .inference_dispatches
+                        .get(failed_agent_prompt_id)
+                        .and_then(|dispatch| dispatch.checkpoint.activation_cut);
+                    return activation_cut.and_then(|activation_cut| {
+                        let activation_cut =
+                            self.closed_provider_prefix_at_or_before(activation_cut);
+                        let activation_window =
+                            self.active_provider_window(activation_cut.as_option());
+                        let target_cut = activation_window
+                            .transcript
+                            .last()
+                            .map(|(node_id, _)| tau_proto::AgentHead::Node(*node_id))
+                            .or_else(|| {
+                                activation_window
+                                    .replacement_boundary
+                                    .map(tau_proto::AgentHead::Node)
+                            })
+                            .unwrap_or(tau_proto::AgentHead::Root);
+                        self.is_ancestor_head(latest_cut, target_cut).then_some(
+                            if latest_cut == target_cut {
+                                ReactiveCompactionProgress::ReachedTargetCut
+                            } else {
+                                ReactiveCompactionProgress::NeedsContinuation { target_cut }
+                            },
+                        )
+                    });
+                }
+                tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+                    previous_transaction_id,
+                }
+                | tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
+                    previous_transaction_id: Some(previous_transaction_id),
+                    ..
+                } => {
+                    let previous = self.compaction_transactions.get(previous_transaction_id)?;
+                    transaction = previous;
+                }
+                _ => return None,
+            }
         }
     }
 
@@ -3225,9 +3315,19 @@ impl AgentTree {
                 (None, None) | (Some(_), None) | (None, Some(_)) => true,
                 (Some(_), Some(_)) => false,
             };
-            if !valid_authority
-                || *reason != tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
-            {
+            let valid_reason = *reason
+                == tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
+                || (*reason == tau_proto::StandaloneCompactionFailureReason::RouteFailed
+                    && decision_id.is_none()
+                    && previous_transaction_id
+                        .as_ref()
+                        .is_some_and(|previous_transaction_id| {
+                            matches!(
+                                self.reactive_compaction_progress(previous_transaction_id),
+                                Some(ReactiveCompactionProgress::NeedsContinuation { .. })
+                            )
+                        }));
+            if !valid_authority || !valid_reason {
                 return Err(AgentEventValidationError::new(
                     "automatic preflight failure has invalid authority or reason",
                 ));
@@ -3438,12 +3538,20 @@ impl AgentTree {
                         } if transaction_id == previous_transaction_id
                     )
                 });
-            let previous_is_automatic = matches!(
+            let previous_is_rolling = matches!(
                 previous.started.trigger,
                 tau_proto::StandaloneCompactionTrigger::AutomaticThreshold
                     | tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { .. }
                     | tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. }
+                    | tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow { .. }
             );
+            let reactive_progress = self.reactive_compaction_progress(previous_transaction_id);
+            let reactive_target_cut = match reactive_progress {
+                Some(ReactiveCompactionProgress::NeedsContinuation { target_cut }) => {
+                    Some(target_cut)
+                }
+                _ => None,
+            };
             if self.compaction_transaction_order.last() != Some(previous_transaction_id)
                 || !matches!(
                     previous.outcome,
@@ -3451,9 +3559,12 @@ impl AgentTree {
                 )
                 || previous.checkpoint.is_some()
                 || !previous_boundary_matches
-                || !previous_is_automatic
+                || !previous_is_rolling
                 || previous.started.model != started.model
                 || started.resume_through != Some(current)
+                || reactive_progress == Some(ReactiveCompactionProgress::ReachedTargetCut)
+                || reactive_target_cut
+                    .is_some_and(|target_cut| !self.is_ancestor_head(started.cut, target_cut))
                 || started.supersedes.is_some()
             {
                 return Err(AgentEventValidationError::new(

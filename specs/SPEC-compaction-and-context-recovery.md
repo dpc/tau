@@ -7,6 +7,9 @@ Compaction and recovery span core transcript cuts and boundaries, harness transa
 The user explicitly approved the durable failure, retry, suppression, replay,
 and successor semantics added for ticket `9dvw`, satisfying
 [GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
+The user separately approved the bounded, durable rolling recovery semantics
+for ticket `b1yw`, including provider-rejection authority, per-pass progress,
+replay, and typed no-progress termination, satisfying the same gate.
 
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and
@@ -83,7 +86,9 @@ is overwritten, and observations cannot automatically alter safety thresholds.
 
 ## Reactive context-overflow recovery
 
-An ordinary inference that receives a canonical, no-output context-window rejection may authorize exactly one standalone compaction when the captured model still matches, advertises standalone support, and role policy permits compaction. The terminal response and recovery disposition commit before a uniquely correlated compaction start. Compaction dispatch and continuation reuse the existing durable transaction machinery. Standalone-compaction overflow, a post-compaction inference overflow, a second overflow, and ambiguous dispatch are terminal rather than recursive. Partial output, cancellation, unsupported policy, legacy checkpoints, and branch/model mismatch never authorize recovery. Replay resumes an unclaimed planned recovery once, treats an interrupted compact dispatch as blocked, and retains the existing dispatch-uncertain rule after inference dispatch.
+An ordinary inference that receives a canonical, no-output context-window rejection may authorize one durable standalone-compaction chain when the captured model still matches, advertises standalone support, and role policy permits compaction. The terminal response and recovery disposition commit before a uniquely correlated compaction start. Each successful pass compacts the largest provider-closed prefix that fits the adapter's published budget. When that cut preserves reducible history before the original activation cut, the next durable pass consumes the replacement plus at least one more closed suffix group, independent of the local token projection. The rejected activating input remains in the suffix under the original resume watermark. The finite preceding transcript therefore bounds the chain: every pass removes a surviving group, or a typed `prefix_too_large` preflight failure terminates it without provider dispatch. Inference resumes only after the chain reaches the end of the logical provider window preceding the rejected activation.
+
+Compaction dispatch and continuation reuse the existing durable transaction machinery. A committed partial chain remains owed if its captured route or standalone capability disappears; replay commits one predecessor-linked typed `route_failed` terminal without provider dispatch instead of checkpointing inference. Standalone-compaction overflow, a post-chain inference overflow, a second overflow, and ambiguous dispatch are terminal rather than recursive. Partial output, cancellation, unsupported policy, legacy checkpoints, and branch/model mismatch never authorize recovery. Replay resumes an unclaimed planned recovery once, continues a committed successful partial chain from its durable predecessor, treats an interrupted compact dispatch as blocked, and retains the existing dispatch-uncertain rule after inference dispatch.
 
 ## Manual compaction
 

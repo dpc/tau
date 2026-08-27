@@ -51,8 +51,8 @@ pub use session::{
     BackgroundToolCallState, BackgroundToolCompletion, BackgroundToolPlaceholder,
     InferenceDispatchRecovery, ManualCompactionOutcome, ManualCompactionRecovery, NodeId,
     OutputLengthContinuationRecovery, OutputLengthDormantRepair, OutputLengthTerminalIncomplete,
-    PersistedAgentEvent, PersistedAgentEventSeq, PersistedEventSource, SessionMeta,
-    StandaloneCompactionRecovery,
+    PersistedAgentEvent, PersistedAgentEventSeq, PersistedEventSource, ReactiveCompactionProgress,
+    SessionMeta, StandaloneCompactionRecovery,
 };
 pub use session_store::{
     AppendOutcome, PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership,

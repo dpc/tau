@@ -1947,6 +1947,196 @@ fn automatic_compaction_continuation_chain_matches_live_and_cold_replay() {
     );
 }
 
+/// Reactive progress uses the origin activation's logical provider window, so
+/// a final preserved suffix reaches a prior replacement boundary without
+/// compacting the rejected activating input. Live append and cold replay must
+/// agree, and a continuation beyond that target must fail validation.
+#[test]
+fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
+    let record = |seq, event| PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([0_u8; 16]),
+        seq: PersistedAgentEventSeq::new(seq),
+        source: None,
+        event,
+        parent: AgentEventParent::InheritHead,
+        fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+        recorded_at: tau_proto::UnixMicros::default(),
+    };
+    let user = |text: &str, inference_activation| {
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation,
+            agent_id: agent_id(),
+            text: text.to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        })
+    };
+    let mut live = AgentTree::from_events(agent_id(), &[]);
+    let mut records = Vec::new();
+    for event in [user("old prefix", false), user("preserved suffix", false)] {
+        let persisted = record(records.len() as u64, event);
+        live.apply_persisted_record(&persisted)
+            .expect("append history");
+        records.push(persisted);
+    }
+    let ids = live.branch_node_ids_from(live.head());
+    let old_prefix = AgentHead::Node(ids[0]);
+    let preserved_suffix = AgentHead::Node(ids[1]);
+    let mut prior = compaction_start("ct-prior-logical-window");
+    prior.cut = old_prefix;
+    prior.resume_through = None;
+    let persisted = record(
+        records.len() as u64,
+        Event::AgentStandaloneCompactionStarted(prior.clone()),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append prior start");
+    records.push(persisted);
+    let persisted = record(
+        records.len() as u64,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
+            agent_id: agent_id(),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "prior summary".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            transaction_id: Some(prior.transaction_id),
+            cut: Some(old_prefix),
+            suffix_end: Some(preserved_suffix),
+            compact_prompt_id: Some(prior.compact_prompt_id),
+            model: Some(prior.model),
+            operation: Some(prior.operation),
+        }),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append prior boundary");
+    records.push(persisted);
+    let activation_cut = AgentHead::Node(live.head().expect("prior boundary"));
+    let persisted = record(records.len() as u64, user("retained activation", true));
+    live.apply_persisted_record(&persisted)
+        .expect("append activation");
+    records.push(persisted);
+    let through = AgentHead::Node(live.head().expect("activation"));
+    let failed_prompt_id = "ap-reactive-prior-boundary"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("prompt id");
+    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(),
+        transaction_id: None,
+        agent_prompt_id: failed_prompt_id.clone(),
+        through,
+        model: Some("provider/model".into()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(activation_cut),
+        output_length_continuation: None,
+    };
+    let persisted = record(
+        records.len() as u64,
+        Event::AgentInferenceDispatchStarted(checkpoint),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append rejected checkpoint");
+    records.push(persisted);
+    let persisted = record(
+        records.len() as u64,
+        Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+            automatic_compaction_decision: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            agent_prompt_id: failed_prompt_id.clone(),
+            agent_id: agent_id(),
+            output_items: Vec::new(),
+            stop_reason: tau_proto::ProviderStopReason::Error,
+            error: Some("bounded".to_owned()),
+            failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            originator: PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append rejection");
+    records.push(persisted);
+    let mut reactive = compaction_start("ct-reactive-prior-boundary");
+    reactive.cut = preserved_suffix;
+    reactive.resume_through = Some(through);
+    reactive.trigger = tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+        failed_agent_prompt_id: failed_prompt_id,
+    };
+    let persisted = record(
+        records.len() as u64,
+        Event::AgentStandaloneCompactionStarted(reactive.clone()),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append reactive start");
+    records.push(persisted);
+    let suffix_end = AgentHead::Node(live.head().expect("reactive suffix end"));
+    let persisted = record(
+        records.len() as u64,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compacted_input_tokens: None,
+            agent_id: agent_id(),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "reactive summary".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            transaction_id: Some(reactive.transaction_id.clone()),
+            cut: Some(reactive.cut),
+            suffix_end: Some(suffix_end),
+            compact_prompt_id: Some(reactive.compact_prompt_id.clone()),
+            model: Some(reactive.model.clone()),
+            operation: Some(reactive.operation),
+        }),
+    );
+    live.apply_persisted_record(&persisted)
+        .expect("append reactive boundary");
+    records.push(persisted);
+
+    let replay = AgentTree::from_events(agent_id(), &records);
+    for tree in [&live, &replay] {
+        assert_eq!(
+            tree.reactive_compaction_progress(&reactive.transaction_id),
+            Some(ReactiveCompactionProgress::ReachedTargetCut)
+        );
+    }
+    let current = AgentHead::Node(live.head().expect("reactive boundary"));
+    let mut beyond = compaction_start("ct-reactive-beyond-target");
+    beyond.cut = through;
+    beyond.resume_through = Some(current);
+    beyond.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+        previous_transaction_id: reactive.transaction_id,
+    };
+    assert!(
+        live.validate_event(&Event::AgentStandaloneCompactionStarted(beyond))
+            .is_err(),
+        "a durable continuation cannot compact the rejected activation"
+    );
+}
+
 /// A successful idle compaction with no resume watermark owes no checkpoint
 /// and cannot prevent a later independent compaction transaction.
 #[test]

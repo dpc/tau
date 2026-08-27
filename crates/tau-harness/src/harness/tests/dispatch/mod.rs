@@ -2857,6 +2857,7 @@ mod cancellation_and_background;
 mod compaction;
 mod compaction_failure_recovery;
 mod compaction_projection;
+mod compaction_reactive_rolling;
 mod compaction_replay;
 mod compaction_strict;
 mod configuration;

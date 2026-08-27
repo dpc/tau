@@ -195,6 +195,7 @@ fn standalone_auto_compaction_fits_fully_materialized_incident_prefixes() {
             h.fitting_automatic_compaction_cut(
                 &agent_id,
                 tau_proto::AgentHead::Node(incident_head),
+                None,
                 PREFIX_BUDGET,
             ),
             Some(tau_proto::AgentHead::Node(safe_head)),

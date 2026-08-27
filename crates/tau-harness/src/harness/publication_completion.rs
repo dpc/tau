@@ -4,6 +4,7 @@
 //! This boundary preserves the publication and recovery contracts governed by
 //! `GATE-persistence-and-extension-interface-change-approval`.
 
+use super::compaction_runtime::RollingCompactionPass;
 use super::*;
 
 impl Harness {
@@ -510,7 +511,9 @@ impl Harness {
         if !complete_on_commit {
             return;
         }
-        if self.start_automatic_compaction_multipass(cid, &model, through) {
+        if self.start_rolling_compaction_pass(cid, &model, through)
+            != RollingCompactionPass::NotNeeded
+        {
             return;
         }
         let Some((agent_id, agent_prompt_id)) = self

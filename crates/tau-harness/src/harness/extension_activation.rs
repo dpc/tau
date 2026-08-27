@@ -3,6 +3,7 @@
 //! The activation barrier and interface authority are governed by the
 //! persistence and extension-interface gate.
 
+use super::compaction_runtime::RollingCompactionPass;
 use super::*;
 
 impl Harness {
@@ -620,7 +621,8 @@ impl Harness {
             if !self.provider_runtime.model_info.contains_key(model) && !absence_is_authoritative {
                 continue;
             }
-            if self.start_automatic_compaction_multipass(&checkpoint.cid, model, checkpoint.through)
+            if self.start_rolling_compaction_pass(&checkpoint.cid, model, checkpoint.through)
+                != RollingCompactionPass::NotNeeded
             {
                 continue;
             }
