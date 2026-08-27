@@ -10,6 +10,7 @@ members = [
   "crates/tau-client",
   "crates/tau-config",
   "crates/tau-core",
+  "crates/tau-delivery-memory",
   "crates/tau-e2e-tests",
   "crates/tau-ext-pim",
   "crates/tau-ext-provider-builtin",
@@ -82,6 +83,7 @@ tau-cli-term-raw = { path = "crates/tau-cli-term-raw" }
 tau-client = { path = "crates/tau-client" }
 tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
+tau-delivery-memory = { path = "crates/tau-delivery-memory" }
 tau-ext-pim = { path = "crates/tau-ext-pim" }
 tau-ext-provider-builtin = { path = "crates/tau-ext-provider-builtin" }
 tau-ext-rhai = { path = "crates/tau-ext-rhai" }

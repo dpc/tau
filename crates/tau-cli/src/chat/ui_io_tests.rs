@@ -4,6 +4,7 @@ use std::sync::{atomic as path_std_sync_atomic, mpsc};
 
 use tau_proto::HarnessOutputWriter;
 
+use super::delivery_memory::DeliveryMemoryTracker;
 use super::*;
 
 /// Creates production-shaped renderer channels for focused scheduler tests.
@@ -20,7 +21,8 @@ fn renderer_scheduler_channels(
     let (remote_tx, remote_rx) = RemoteRendererSender::channel(remote_capacity, wake_tx.clone());
     let (local_tx, local_rx) =
         LocalRendererSender::channel(admitted.clone(), arbiter.clone(), wake_tx);
-    let scheduler = RendererCommandScheduler::new(remote_rx, local_rx, admitted, arbiter, wake_rx);
+    let scheduler =
+        RendererCommandScheduler::new(remote_rx, local_rx, admitted, arbiter, wake_rx, None);
     (remote_tx, local_tx, scheduler)
 }
 
@@ -274,9 +276,17 @@ fn renderer_admission_preserves_decoded_event_box() {
     let delivery = renderer_event_from_delivery(source, 1, 1).expect("ordinary delivery");
     let mut stager = cold_attach_stager::ColdAttachStager::pass_through();
     let delivery = stager.admit(delivery).pop().expect("staged delivery");
+    let delivery_memory = Arc::new(DeliveryMemoryTracker::new());
+    delivery_memory.force_enable_for_test();
+    delivery_memory.observe_decode(
+        1,
+        &tau_proto::HarnessOutputMessage::deliver(Event::TermBell(tau_proto::TermBell {})),
+        tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte"),
+    );
 
     assert!(enqueue_remote_delivery(
         delivery,
+        Some(delivery_memory.as_ref()),
         &remote_tx,
         &budget,
         &queued_items,
@@ -294,6 +304,11 @@ fn renderer_admission_preserves_decoded_event_box() {
         admitted,
         Arc::new(Mutex::new(())),
         wake_rx,
+        Some(Arc::clone(&delivery_memory)),
+    );
+    assert_eq!(
+        delivery_memory.cut_for_test(1),
+        Some(DeliveryMemoryCut::RendererFifo)
     );
     let RendererCmd::Remote { event, .. } = scheduler
         .recv_timeout(Duration::from_millis(10))
@@ -302,6 +317,133 @@ fn renderer_admission_preserves_decoded_event_box() {
         panic!("expected remote delivery");
     };
     assert_eq!(std::ptr::from_ref(event.as_ref()), source_allocation);
+    assert_eq!(
+        delivery_memory.cut_for_test(1),
+        Some(DeliveryMemoryCut::Scheduler)
+    );
+}
+
+/// Enabled folded-handler coordination must retain every source estimate
+/// through Handler and release all receipts without changing folded output.
+#[test]
+fn enabled_folded_handler_ownership_releases_every_source() {
+    let memory = DeliveryMemoryTracker::new();
+    memory.force_enable_for_test();
+    let encoded = tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte");
+    for id in [1, 2] {
+        memory.observe_decode(
+            id,
+            &tau_proto::HarnessOutputMessage::deliver(Event::TermBell(tau_proto::TermBell {})),
+            encoded,
+        );
+        memory.transition(id, DeliveryMemoryCut::Scheduler);
+    }
+    let folded = vec![RendererQueueFrame {
+        delivery_id: 2,
+        queue_bytes: 1,
+        enqueued_at: Instant::now(),
+    }];
+    let receipts = begin_remote_memory_handler(Some(&memory), 1, &folded);
+    assert_eq!(receipts, [2]);
+    assert_eq!(memory.cut_for_test(1), Some(DeliveryMemoryCut::Handler));
+    assert_eq!(memory.cut_for_test(2), Some(DeliveryMemoryCut::Handler));
+    finish_remote_memory_handler(Some(&memory), 1, receipts);
+    assert_eq!(memory.active_len_for_test(), 0);
+}
+
+/// Cold filtering and renderer admission failure must release exactly their
+/// enabled receipts while preserving the forwarded delivery.
+#[test]
+fn enabled_cold_filter_and_enqueue_failure_release_receipts() {
+    let memory = DeliveryMemoryTracker::new();
+    memory.force_enable_for_test();
+    let encoded = tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte");
+    for id in [1, 2] {
+        memory.observe_decode(
+            id,
+            &tau_proto::HarnessOutputMessage::deliver(Event::TermBell(tau_proto::TermBell {})),
+            encoded,
+        );
+        memory.transition(id, DeliveryMemoryCut::ColdStaging);
+    }
+    let forwarded = renderer_event_from_delivery(
+        tau_proto::EventDelivery::live(UnixMicros::new(2), Event::TermBell(tau_proto::TermBell {})),
+        1,
+        2,
+    )
+    .expect("forwarded delivery");
+    release_filtered_cold_memory(Some(&memory), vec![1, 2], std::slice::from_ref(&forwarded));
+    assert_eq!(memory.cut_for_test(1), None);
+    assert_eq!(memory.cut_for_test(2), Some(DeliveryMemoryCut::ColdStaging));
+
+    let (wake_tx, _wake_rx) = tau_blocking_notify_channel::channel();
+    let (remote_tx, remote_rx) = RemoteRendererSender::channel(1, wake_tx);
+    drop(remote_rx);
+    assert!(!enqueue_remote_delivery(
+        forwarded,
+        Some(&memory),
+        &remote_tx,
+        &RendererByteBudget::new(),
+        &path_std_sync_atomic::AtomicUsize::new(0),
+        &Mutex::new(()),
+        &path_std_sync_atomic::AtomicU64::new(0),
+    ));
+    assert_eq!(memory.active_len_for_test(), 0);
+}
+
+/// Real cold admission must move a replayed transcript row into ColdStaging
+/// before the replay boundary forwards it unchanged.
+#[test]
+fn enabled_real_cold_admission_tracks_retention_and_forwarding() {
+    let memory = DeliveryMemoryTracker::new();
+    memory.force_enable_for_test();
+    let event = Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+        literal: false,
+        session_id: "session-1".parse().expect("session id"),
+        text: "cold".to_owned(),
+        agent_id: "agent-1".parse().expect("agent id"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    });
+    memory.observe_decode(
+        41,
+        &tau_proto::HarnessOutputMessage::deliver(event.clone()),
+        tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte"),
+    );
+    let delivery = renderer_event_from_delivery(
+        tau_proto::EventDelivery::replay(UnixMicros::new(1), event),
+        1,
+        41,
+    )
+    .expect("replay delivery");
+    let mut stager = cold_attach_stager::ColdAttachStager::staging();
+    assert!(admit_cold_delivery(&mut stager, delivery, Some(&memory)).is_empty());
+    assert_eq!(
+        memory.cut_for_test(41),
+        Some(DeliveryMemoryCut::ColdStaging)
+    );
+    let forwarded = stager.finish_before_disconnect();
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0].delivery_id, 41);
+}
+
+/// Disconnect coordination must hold its enabled receipt through handler
+/// completion and release it afterward.
+#[test]
+fn enabled_disconnect_handler_releases_receipt() {
+    let memory = DeliveryMemoryTracker::new();
+    memory.force_enable_for_test();
+    memory.observe_decode(
+        9,
+        &tau_proto::HarnessOutputMessage::Disconnect(tau_proto::Disconnect { reason: None }),
+        tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte"),
+    );
+    memory.transition(9, DeliveryMemoryCut::Scheduler);
+    begin_disconnect_memory(Some(&memory), 9);
+    assert_eq!(memory.cut_for_test(9), Some(DeliveryMemoryCut::Handler));
+    finish_disconnect_memory(Some(&memory), 9);
+    assert_eq!(memory.active_len_for_test(), 0);
 }
 
 /// A remote reservation captured by a local watermark must not be
@@ -545,7 +687,7 @@ fn renderer_scheduler_stale_wakes_cannot_extend_deadline() {
     let (_local_tx, local_rx) =
         LocalRendererSender::channel(admitted.clone(), arbiter.clone(), wake_tx.clone());
     let mut scheduler =
-        RendererCommandScheduler::new(remote_rx, local_rx, admitted, arbiter, wake_rx);
+        RendererCommandScheduler::new(remote_rx, local_rx, admitted, arbiter, wake_rx, None);
     let mut hook_calls = 0;
     let mut before_each_wait = || {
         hook_calls += 1;

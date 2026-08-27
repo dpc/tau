@@ -75,10 +75,31 @@ struct EventLogInner {
     consumers: HashMap<tau_core::SharedConsumerId, ConsumerState>,
     /// Next owner-allocated consumer generation value.
     next_consumer: u64,
+    /// Guarded content-free measurement state, absent by default.
+    delivery_memory: Option<Box<DeliveryMemoryState>>,
+}
+
+/// Enabled-only estimates and high-water aggregates for the live suffix.
+#[derive(Default)]
+struct DeliveryMemoryState {
+    /// Immutable per-frame estimates cached by live position.
+    estimates: HashMap<EgressPosition, tau_delivery_memory::DecodedMemoryEstimate>,
+    /// Largest encoded retained-byte estimate.
+    high_encoded_bytes: u64,
+    /// Largest decoded logical-byte estimate.
+    high_logical_bytes: u64,
+    /// Largest decoded requested-capacity estimate.
+    high_requested_capacity: u64,
+    /// Largest retained shared-allocation count.
+    high_shared_allocations: u64,
+    /// Largest aggregate strong-reference fanout.
+    high_shared_fanout: u64,
+    /// Largest aggregate frozen attachment fanout.
+    high_pending_target_fanout: u64,
 }
 
 /// Contiguous process-local position in the logical egress stream.
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct EgressPosition(
     /// Contiguous owner-local position value.
     u64,
@@ -164,6 +185,7 @@ impl EventLog {
                 retained: VecDeque::new(),
                 consumers: HashMap::new(),
                 next_consumer: 1,
+                delivery_memory: None,
             }),
             changed: Condvar::new(),
         })
@@ -188,6 +210,7 @@ impl EventLog {
                 close_after: None,
             },
         );
+        Self::observe_delivery_memory_locked(&mut inner);
         consumer
     }
 
@@ -218,6 +241,7 @@ impl EventLog {
             pending_targets,
         });
         Self::prune_locked(&mut inner);
+        Self::observe_delivery_memory_locked(&mut inner);
         drop(inner);
         self.changed.notify_all();
         admitted
@@ -266,7 +290,7 @@ impl EventLog {
                 .get(index)
                 .expect("cursor before tail must name a retained entry");
             if entry.pending_targets.contains(&consumer) {
-                return Some(PendingEgress {
+                let pending = PendingEgress {
                     seq: entry.seq,
                     frame: Arc::clone(
                         entry
@@ -274,7 +298,9 @@ impl EventLog {
                             .as_ref()
                             .expect("pending target must retain its shared payload"),
                     ),
-                });
+                };
+                Self::observe_delivery_memory_locked(&mut inner);
+                return Some(pending);
             }
             inner
                 .consumers
@@ -282,6 +308,7 @@ impl EventLog {
                 .expect("consumer remains registered")
                 .cursor = state.cursor.next();
             Self::prune_locked(&mut inner);
+            Self::observe_delivery_memory_locked(&mut inner);
             self.changed.notify_all();
         }
     }
@@ -319,6 +346,7 @@ impl EventLog {
                 .cursor = pending.seq.next();
             Self::prune_locked(&mut inner);
         }
+        Self::observe_delivery_memory_locked(&mut inner);
         drop(inner);
         self.changed.notify_all();
     }
@@ -458,6 +486,103 @@ impl EventLog {
             }
         }
         Self::prune_locked(inner);
+        Self::observe_delivery_memory_locked(inner);
+    }
+
+    /// Recursively measures the canonical shared live suffix behind its
+    /// explicit trace guard and emits no payload or process-local identity.
+    fn observe_delivery_memory_locked(inner: &mut EventLogInner) {
+        if !tracing::enabled!(
+            target: "tau_harness::delivery_memory",
+            tracing::Level::TRACE
+        ) {
+            return;
+        }
+        let mut measurement = inner
+            .delivery_memory
+            .take()
+            .unwrap_or_else(|| Box::new(DeliveryMemoryState::default()));
+        let retained_payloads = inner
+            .retained
+            .iter()
+            .filter(|position| position.payload.is_some())
+            .map(|position| position.seq)
+            .collect::<HashSet<_>>();
+        measurement
+            .estimates
+            .retain(|seq, _| retained_payloads.contains(seq));
+        for position in &inner.retained {
+            let Some(payload) = &position.payload else {
+                continue;
+            };
+            measurement
+                .estimates
+                .entry(position.seq)
+                .or_insert_with(|| {
+                    tau_delivery_memory::DecodedMemoryEstimate::from_serializable_encoding(
+                        &payload.frame,
+                    )
+                    .unwrap_or_default()
+                });
+        }
+        let mut total = tau_delivery_memory::DecodedMemoryEstimate::default();
+        let mut shared_allocations = 0_u64;
+        let mut shared_fanout = 0_u64;
+        let mut pending_target_fanout = 0_u64;
+        for position in &inner.retained {
+            let Some(payload) = &position.payload else {
+                continue;
+            };
+            total = total.saturating_add(
+                measurement
+                    .estimates
+                    .get(&position.seq)
+                    .copied()
+                    .unwrap_or_default(),
+            );
+            shared_allocations = shared_allocations.saturating_add(1);
+            shared_fanout = shared_fanout.saturating_add(Arc::strong_count(payload) as u64);
+            pending_target_fanout =
+                pending_target_fanout.saturating_add(position.pending_targets.len() as u64);
+        }
+        measurement.high_encoded_bytes = measurement.high_encoded_bytes.max(total.encoded_bytes);
+        measurement.high_logical_bytes = measurement
+            .high_logical_bytes
+            .max(total.logical_payload_bytes);
+        measurement.high_requested_capacity = measurement
+            .high_requested_capacity
+            .max(total.requested_capacity_estimate);
+        measurement.high_shared_allocations =
+            measurement.high_shared_allocations.max(shared_allocations);
+        measurement.high_shared_fanout = measurement.high_shared_fanout.max(shared_fanout);
+        measurement.high_pending_target_fanout = measurement
+            .high_pending_target_fanout
+            .max(pending_target_fanout);
+        tracing::trace!(
+            target: "tau_harness::delivery_memory",
+            process = "harness",
+            cut = "live_suffix",
+            items = shared_allocations,
+            owners = inner.consumers.len() as u64,
+            encoded_bytes = total.encoded_bytes,
+            decoded_logical_bytes_estimate = total.logical_payload_bytes,
+            decoded_requested_capacity_estimate = total.requested_capacity_estimate,
+            decoded_containers = total.container_count,
+            expansion_milli = total.expansion_milli(),
+            shared_allocations,
+            shared_fanout,
+            pending_target_fanout,
+            overlap_fanout = shared_fanout.saturating_sub(shared_allocations),
+            high_water_encoded_bytes = measurement.high_encoded_bytes,
+            high_water_decoded_logical_bytes_estimate = measurement.high_logical_bytes,
+            high_water_decoded_requested_capacity_estimate = measurement.high_requested_capacity,
+            high_water_shared_allocations = measurement.high_shared_allocations,
+            high_water_shared_fanout = measurement.high_shared_fanout,
+            high_water_pending_target_fanout = measurement.high_pending_target_fanout,
+            kernel_bytes_observable = false,
+            "decoded delivery memory ownership"
+        );
+        inner.delivery_memory = Some(measurement);
     }
 
     /// Reserves the next harness runtime event-log sequence.

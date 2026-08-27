@@ -31,6 +31,7 @@ tau-cli-picker.workspace = true
 tau-cli-term.workspace = true
 tau-client.workspace = true
 tau-config.workspace = true
+tau-delivery-memory.workspace = true
 tau-ext-provider-builtin.workspace = true
 tau-ext-utils.workspace = true
 tau-harness.workspace = true

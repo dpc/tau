@@ -174,6 +174,47 @@ pub(super) struct ColdAttachStager {
 }
 
 impl ColdAttachStager {
+    /// Returns whether reconstruction still owns one process-local delivery.
+    ///
+    /// This linear probe is used only by guarded decoded-memory measurement.
+    pub(super) fn retains_delivery(&self, delivery_id: u64) -> bool {
+        self.transcript
+            .iter()
+            .any(|delivery| delivery.delivery_id == delivery_id)
+            || matches!(
+                &self.tool_reconciliation,
+                ToolReconciliation::Active(state)
+                    if state
+                        .pending_starts
+                        .values()
+                        .chain(state.buffered_live.iter())
+                        .any(|delivery| delivery.delivery_id == delivery_id)
+            )
+    }
+
+    /// Returns every process-local delivery currently retained by
+    /// reconstruction.
+    ///
+    /// The caller invokes this linear diagnostic probe only while
+    /// decoded-memory measurement is enabled.
+    pub(super) fn retained_delivery_ids(&self) -> Vec<u64> {
+        let mut ids = self
+            .transcript
+            .iter()
+            .map(|delivery| delivery.delivery_id)
+            .collect::<Vec<_>>();
+        if let ToolReconciliation::Active(state) = &self.tool_reconciliation {
+            ids.extend(
+                state
+                    .pending_starts
+                    .values()
+                    .chain(state.buffered_live.iter())
+                    .map(|delivery| delivery.delivery_id),
+            );
+        }
+        ids
+    }
+
     /// Creates staging for an explicit attach.
     pub(super) fn staging() -> Self {
         Self {

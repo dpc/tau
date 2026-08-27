@@ -8,6 +8,7 @@ use tau_proto::{Event, ProviderResponseStats};
 
 use super::RendererCmd;
 use super::cold_attach_stager::RendererPresentation;
+use super::delivery_memory::{DeliveryMemoryCut, DeliveryMemoryTracker};
 
 #[cfg(test)]
 #[path = "renderer_scheduler/tests.rs"]
@@ -162,6 +163,8 @@ pub(super) struct RendererCommandScheduler {
     arbiter: Arc<Mutex<()>>,
     /// Shared coalesced wake receiver for both command sources.
     wake: tau_blocking_notify_channel::Receiver,
+    /// Enabled-only decoded-memory owner transitions.
+    delivery_memory: Option<Arc<DeliveryMemoryTracker>>,
 }
 
 impl RendererCommandScheduler {
@@ -172,6 +175,7 @@ impl RendererCommandScheduler {
         remote_admitted: Arc<AtomicU64>,
         arbiter: Arc<Mutex<()>>,
         wake: tau_blocking_notify_channel::Receiver,
+        delivery_memory: Option<Arc<DeliveryMemoryTracker>>,
     ) -> Self {
         Self {
             remote_rx,
@@ -183,6 +187,7 @@ impl RendererCommandScheduler {
             pending_local: None,
             arbiter,
             wake,
+            delivery_memory,
         }
     }
 
@@ -317,9 +322,19 @@ impl RendererCommandScheduler {
 
     /// Returns a retained lookahead command before reading the bounded FIFO.
     fn try_recv_remote(&mut self) -> Result<RendererCmd, mpsc::TryRecvError> {
-        self.pending_remote
+        let result = self
+            .pending_remote
             .take()
-            .map_or_else(|| self.remote_rx.try_recv(), Ok)
+            .map_or_else(|| self.remote_rx.try_recv(), Ok);
+        if let Ok(
+            RendererCmd::Remote { delivery_id, .. }
+            | RendererCmd::RemoteDisconnect { delivery_id, .. },
+        ) = &result
+            && let Some(memory) = &self.delivery_memory
+        {
+            memory.transition(*delivery_id, DeliveryMemoryCut::Scheduler);
+        }
+        result
     }
 
     /// Records and opportunistically folds one already-admitted pure update

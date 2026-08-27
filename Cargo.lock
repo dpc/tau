@@ -5724,6 +5724,7 @@ dependencies = [
  "tau-cli-term-raw",
  "tau-client",
  "tau-config",
+ "tau-delivery-memory",
  "tau-ext-provider-builtin",
  "tau-ext-utils",
  "tau-harness",
@@ -5822,6 +5823,16 @@ dependencies = [
  "tau-actions",
  "tau-proto",
  "tempfile",
+]
+
+[[package]]
+name = "tau-delivery-memory"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "serde",
+ "serde_bytes",
+ "tau-proto",
 ]
 
 [[package]]
@@ -6161,6 +6172,7 @@ dependencies = [
  "tau-client",
  "tau-config",
  "tau-core",
+ "tau-delivery-memory",
  "tau-ext-shell",
  "tau-proto",
  "tau-session-inspect",

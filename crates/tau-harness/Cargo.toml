@@ -49,6 +49,7 @@ tau-actions.workspace = true
 tau-client.workspace = true
 tau-config.workspace = true
 tau-core.workspace = true
+tau-delivery-memory.workspace = true
 tau-ext-shell = { workspace = true, optional = true, features = ["echo-agent"] }
 tau-proto.workspace = true
 tau-session-inspect.workspace = true

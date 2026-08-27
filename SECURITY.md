@@ -96,6 +96,17 @@ this accepted authority and availability risk when changing interception,
 pending-intercept resolution, deferred-publication ownership, or component
 lifecycle.
 
+Disabled-by-default decoded-delivery memory diagnostics report only process
+class, fixed ownership-cut labels, counts, encoded bytes, recursive logical and
+requested-capacity estimates, expansion, shared-allocation fanout, and
+high-water aggregates. They emit no payload, protocol/runtime identity, cursor,
+path, model, account, or error value and create no event, journal, debug-JSON,
+wire, or cross-process authority. Requested capacity is explicitly an
+enabled-only diagnostic projection estimate; allocator usable size, RSS, and
+kernel/socket buffer ownership remain unobserved. Exact aggregate sizes, ratios,
+fanout, and timestamps may still reveal workload metadata or permit heuristic
+cross-process correlation; treat enabled operational trace files as private.
+
 Overall harness shutdown closes configured in-process extension transport first,
 then gives all such runners one shared finite grace to return on EOF. A runner
 still alive after that grace is left to a detached join-reaper, not

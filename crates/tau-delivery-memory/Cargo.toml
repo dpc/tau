@@ -1,0 +1,23 @@
+[package]
+name = "tau-delivery-memory"
+version.workspace = true
+edition.workspace = true
+description = "Process-local content-free decoded delivery memory estimates."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ciborium.workspace = true
+serde.workspace = true
+tau-proto.workspace = true
+
+[dev-dependencies]
+serde_bytes.workspace = true

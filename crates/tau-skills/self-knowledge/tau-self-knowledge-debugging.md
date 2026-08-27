@@ -219,6 +219,12 @@ prompt path. They are diagnostic observations, not protocol, correlation,
 ordering, acceptance, or durability facts. They never contain prompt text,
 payload values, paths, credentials, or durable observation identifiers.
 
+Decoded-delivery ownership measurements use separate default-off
+`tau_cli::delivery_memory` and `tau_harness::delivery_memory` TRACE targets.
+See [`docs/decoded-delivery-memory-measurement.md`](../../../docs/decoded-delivery-memory-measurement.md)
+for the exact `TAU_LOG` invocation, output files, privacy caveats, ownership
+cuts, and estimator limits.
+
 - `tau_cli::prompt_submission` reports the fixed stages
   `raw_submit_clear`, `highterm_history_menu`, `chat_history`,
   `chat_history_routing`, and `frame_construct`. Fields are the wrapping

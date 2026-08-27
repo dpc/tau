@@ -11,6 +11,7 @@ use crate::{list_agents as path_crate_list_agents, theme as path_crate_theme};
 #[cfg(test)]
 mod agent_picker_tests;
 pub(crate) mod cold_attach_stager;
+mod delivery_memory;
 #[cfg(test)]
 mod event_message_tests;
 #[cfg(test)]
@@ -31,6 +32,7 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use cold_attach_stager::{ColdAttachStager, renderer_event_from_delivery};
+use delivery_memory::{DeliveryMemoryCut, DeliveryMemoryTracker};
 use renderer_scheduler::{LocalRendererSender, RemoteRendererSender, RendererCommandScheduler};
 use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
@@ -927,6 +929,7 @@ fn encode_binding_action(action: &CliBindingAction) -> String {
 /// original decoded event box.
 fn enqueue_remote_delivery(
     delivery: cold_attach_stager::RendererDelivery,
+    delivery_memory: Option<&DeliveryMemoryTracker>,
     remote_tx: &RemoteRendererSender,
     renderer_byte_budget: &RendererByteBudget,
     queued_remote_items: &path_std_sync_atomic::AtomicUsize,
@@ -963,7 +966,13 @@ fn enqueue_remote_delivery(
     if remote_tx.send(cmd).is_err() {
         renderer_byte_budget.release(queue_bytes);
         queued_remote_items.fetch_sub(1, Ordering::AcqRel);
+        if let Some(delivery_memory) = delivery_memory {
+            delivery_memory.release(delivery_id);
+        }
         return false;
+    }
+    if let Some(delivery_memory) = delivery_memory {
+        delivery_memory.transition(delivery_id, DeliveryMemoryCut::RendererFifo);
     }
     tracing::trace!(
         target: "tau_cli::frontend_progress",
@@ -1007,6 +1016,105 @@ fn release_remote_queue_frames(
                 "renderer queue stalled"
             );
         }
+    }
+}
+
+/// Moves one folded command into handler ownership and returns its subsidiary
+/// source receipts.
+fn begin_remote_memory_handler(
+    delivery_memory: Option<&DeliveryMemoryTracker>,
+    delivery_id: u64,
+    folded_frames: &[RendererQueueFrame],
+) -> Vec<u64> {
+    let folded_ids = folded_frames
+        .iter()
+        .map(|frame| frame.delivery_id)
+        .collect::<Vec<_>>();
+    if let Some(memory) = delivery_memory {
+        memory.transition(delivery_id, DeliveryMemoryCut::Handler);
+        for folded_id in &folded_ids {
+            memory.transition(*folded_id, DeliveryMemoryCut::Handler);
+        }
+    }
+    folded_ids
+}
+
+/// Releases every source receipt after the folded handler returns.
+fn finish_remote_memory_handler(
+    delivery_memory: Option<&DeliveryMemoryTracker>,
+    delivery_id: u64,
+    folded_ids: Vec<u64>,
+) {
+    if let Some(memory) = delivery_memory {
+        memory.release(delivery_id);
+        for folded_id in folded_ids {
+            memory.release(folded_id);
+        }
+    }
+}
+
+/// Releases cold-stage receipts no longer retained or forwarded by a fold.
+fn release_filtered_cold_memory(
+    delivery_memory: Option<&DeliveryMemoryTracker>,
+    retained_before: Vec<u64>,
+    forwarded: &[cold_attach_stager::RendererDelivery],
+) {
+    let Some(memory) = delivery_memory else {
+        return;
+    };
+    for released in retained_before {
+        if forwarded
+            .iter()
+            .all(|delivery| delivery.delivery_id != released)
+        {
+            memory.release(released);
+        }
+    }
+}
+
+/// Runs cold admission plus every enabled ownership reconciliation decision.
+fn admit_cold_delivery(
+    stager: &mut ColdAttachStager,
+    delivery: cold_attach_stager::RendererDelivery,
+    delivery_memory: Option<&DeliveryMemoryTracker>,
+) -> Vec<cold_attach_stager::RendererDelivery> {
+    let delivery_id = delivery.delivery_id;
+    let retained_before = delivery_memory.map(|_| stager.retained_delivery_ids());
+    let deliveries = stager.admit(delivery);
+    if let Some(retained_before) = retained_before {
+        let retained_after = stager.retained_delivery_ids();
+        let released = retained_before
+            .into_iter()
+            .filter(|id| !retained_after.contains(id))
+            .collect();
+        release_filtered_cold_memory(delivery_memory, released, &deliveries);
+        if deliveries
+            .iter()
+            .all(|ready| ready.delivery_id != delivery_id)
+        {
+            if stager.retains_delivery(delivery_id) {
+                if let Some(memory) = delivery_memory {
+                    memory.transition(delivery_id, DeliveryMemoryCut::ColdStaging);
+                }
+            } else if let Some(memory) = delivery_memory {
+                memory.release(delivery_id);
+            }
+        }
+    }
+    deliveries
+}
+
+/// Moves a disconnect receipt into handler ownership.
+fn begin_disconnect_memory(delivery_memory: Option<&DeliveryMemoryTracker>, delivery_id: u64) {
+    if let Some(memory) = delivery_memory {
+        memory.transition(delivery_id, DeliveryMemoryCut::Handler);
+    }
+}
+
+/// Releases a disconnect receipt after the handler returns.
+fn finish_disconnect_memory(delivery_memory: Option<&DeliveryMemoryTracker>, delivery_id: u64) {
+    if let Some(memory) = delivery_memory {
+        memory.release(delivery_id);
     }
 }
 
@@ -1085,6 +1193,10 @@ pub(crate) fn run_chat(
     let socket_ui_io_meter = ui_io_meter.clone();
     let local_disconnect_started = Arc::new(AtomicBool::new(false));
     let socket_local_disconnect_started = local_disconnect_started.clone();
+    let delivery_memory =
+        tracing::enabled!(target: "tau_cli::delivery_memory", tracing::Level::TRACE)
+            .then(|| Arc::new(DeliveryMemoryTracker::new()));
+    let socket_delivery_memory = delivery_memory.clone();
     let socket_reader = std::thread::spawn(move || {
         let mut cold_attach_stager = if attach {
             ColdAttachStager::staging()
@@ -1129,7 +1241,13 @@ pub(crate) fn run_chat(
             if remote_tx.send(cmd).is_err() {
                 socket_renderer_byte_budget.release(queue_bytes);
                 socket_queued_remote_items.fetch_sub(1, Ordering::AcqRel);
+                if let Some(memory) = &socket_delivery_memory {
+                    memory.release(delivery_id);
+                }
             } else {
+                if let Some(memory) = &socket_delivery_memory {
+                    memory.transition(delivery_id, DeliveryMemoryCut::RendererFifo);
+                }
                 tracing::trace!(
                     target: "tau_cli::frontend_progress",
                     delivery_id,
@@ -1141,19 +1259,36 @@ pub(crate) fn run_chat(
             }
         };
         let drain_staging = |stager: &mut ColdAttachStager| {
-            stager
-                .finish_before_disconnect()
-                .into_iter()
-                .all(|delivery| {
-                    enqueue_remote_delivery(
-                        delivery,
-                        &remote_tx,
-                        &socket_renderer_byte_budget,
-                        &socket_queued_remote_items,
-                        &socket_renderer_arbiter,
-                        &socket_remote_admitted,
-                    )
-                })
+            let retained_before = socket_delivery_memory
+                .as_ref()
+                .map(|_| stager.retained_delivery_ids())
+                .unwrap_or_default();
+            let deliveries = stager.finish_before_disconnect();
+            release_filtered_cold_memory(
+                socket_delivery_memory.as_deref(),
+                retained_before,
+                &deliveries,
+            );
+            let mut deliveries = deliveries.into_iter();
+            while let Some(delivery) = deliveries.next() {
+                if !enqueue_remote_delivery(
+                    delivery,
+                    socket_delivery_memory.as_deref(),
+                    &remote_tx,
+                    &socket_renderer_byte_budget,
+                    &socket_queued_remote_items,
+                    &socket_renderer_arbiter,
+                    &socket_remote_admitted,
+                ) {
+                    if let Some(memory) = &socket_delivery_memory {
+                        for not_enqueued in deliveries {
+                            memory.release(not_enqueued.delivery_id);
+                        }
+                    }
+                    return false;
+                }
+            }
+            true
         };
         let mut reader = socket_reader_input;
         loop {
@@ -1166,6 +1301,13 @@ pub(crate) fn run_chat(
             );
             match reader.read_message_with_size() {
                 Ok(Some(decoded)) => {
+                    if let Some(delivery_memory) = &socket_delivery_memory {
+                        delivery_memory.observe_decode(
+                            delivery_id,
+                            &decoded.message,
+                            decoded.encoded_bytes,
+                        );
+                    }
                     let message = decoded.message;
                     let frame_bytes = decoded.encoded_bytes;
                     let read_elapsed = read_started.elapsed();
@@ -1183,25 +1325,44 @@ pub(crate) fn run_chat(
                             let Some(delivery) =
                                 renderer_event_from_delivery(delivery, queue_bytes, delivery_id)
                             else {
+                                if let Some(memory) = &socket_delivery_memory {
+                                    memory.release(delivery_id);
+                                }
                                 continue;
                             };
-                            cold_attach_stager.admit(delivery)
+                            admit_cold_delivery(
+                                &mut cold_attach_stager,
+                                delivery,
+                                socket_delivery_memory.as_deref(),
+                            )
                         }
                         HarnessOutputMessage::Disconnect(d) => {
                             if socket_local_disconnect_started.load(Ordering::Acquire) {
+                                if let Some(memory) = &socket_delivery_memory {
+                                    memory.release(delivery_id);
+                                }
                                 return;
                             }
                             if !drain_staging(&mut cold_attach_stager) {
+                                if let Some(memory) = &socket_delivery_memory {
+                                    memory.release(delivery_id);
+                                }
                                 return;
                             }
                             notify_disconnect(d.reason, delivery_id, queue_bytes);
                             return;
                         }
-                        _ => continue,
+                        _ => {
+                            if let Some(memory) = &socket_delivery_memory {
+                                memory.release(delivery_id);
+                            }
+                            continue;
+                        }
                     };
                     for delivery in deliveries {
                         if !enqueue_remote_delivery(
                             delivery,
+                            socket_delivery_memory.as_deref(),
                             &remote_tx,
                             &socket_renderer_byte_budget,
                             &socket_queued_remote_items,
@@ -1410,6 +1571,7 @@ pub(crate) fn run_chat(
             remote_admitted,
             renderer_arbiter,
             renderer_wake_rx,
+            delivery_memory.clone(),
         );
         loop {
             let cmd = scheduler.recv_timeout(ui_io_tracker.recv_timeout());
@@ -1426,6 +1588,11 @@ pub(crate) fn run_chat(
                             enqueued_at,
                             folded_frames,
                         } => {
+                            let folded_delivery_ids = begin_remote_memory_handler(
+                                delivery_memory.as_deref(),
+                                delivery_id,
+                                &folded_frames,
+                            );
                             release_remote_queue_frames(
                                 RendererQueueFrame {
                                     delivery_id,
@@ -1473,6 +1640,11 @@ pub(crate) fn run_chat(
                                     );
                                 }
                             }
+                            finish_remote_memory_handler(
+                                delivery_memory.as_deref(),
+                                delivery_id,
+                                folded_delivery_ids,
+                            );
                         }
                         RendererCmd::RemoteDisconnect {
                             reason,
@@ -1480,6 +1652,7 @@ pub(crate) fn run_chat(
                             queue_bytes,
                             enqueued_at,
                         } => {
+                            begin_disconnect_memory(delivery_memory.as_deref(), delivery_id);
                             let queue_items =
                                 queued_remote_items.fetch_sub(1, Ordering::AcqRel) - 1;
                             let remaining_bytes = renderer_byte_budget.release(queue_bytes);
@@ -1492,6 +1665,7 @@ pub(crate) fn run_chat(
                                 "remote disconnect dequeued"
                             );
                             renderer.handle_disconnect(reason);
+                            finish_disconnect_memory(delivery_memory.as_deref(), delivery_id);
                         }
                         RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
                         RendererCmd::ToggleVerboseMode => renderer.toggle_verbose_mode(),

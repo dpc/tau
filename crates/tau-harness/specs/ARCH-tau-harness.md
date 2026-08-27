@@ -24,6 +24,14 @@ tail until the replay-complete boundary. This architecture is governed by
 [GATE-runtime-live-event-log-cursors](../../../specs/GATE-runtime-live-event-log-cursors.md)
 and does not change semantic journals or protocol envelopes.
 
+A default-off process-local diagnostic recursively estimates the canonical live
+suffix once per shared allocation and separately reports strong-owner and
+pending-consumer fanout. It creates no protocol, cursor, journal, or replay
+identity and does not alter pruning or delivery. Requested capacity is a
+diagnostic projection estimate; kernel buffers and allocator/RSS ownership
+remain explicitly unobservable. See
+[`decoded-delivery-memory-measurement`](../../../docs/decoded-delivery-memory-measurement.md).
+
 Fatal startup teardown closes an initial Unix-socket client's cursor after the
 terminal `Disconnect` position. The harness gives the writer a finite grace to
 complete that frame, then shuts down an independently owned socket handle so

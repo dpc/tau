@@ -4,10 +4,25 @@ use tau_proto::{
 };
 
 use super::*;
-use crate::chat::{RendererQueueFrame, cold_attach_stager};
+use crate::chat::{
+    RendererQueueFrame, begin_remote_memory_handler, cold_attach_stager,
+    finish_remote_memory_handler,
+};
 
 /// Creates a scheduler and both production-shaped command senders.
 fn scheduler() -> (
+    Arc<AtomicU64>,
+    RemoteRendererSender,
+    LocalRendererSender,
+    RendererCommandScheduler,
+) {
+    scheduler_with_memory(None)
+}
+
+/// Creates production-shaped command senders with an enabled ownership tracker.
+fn scheduler_with_memory(
+    delivery_memory: Option<Arc<DeliveryMemoryTracker>>,
+) -> (
     Arc<AtomicU64>,
     RemoteRendererSender,
     LocalRendererSender,
@@ -19,8 +34,14 @@ fn scheduler() -> (
     let (remote_tx, remote_rx) = RemoteRendererSender::channel(16, wake_tx.clone());
     let (local_tx, local_rx) =
         LocalRendererSender::channel(admitted.clone(), arbiter.clone(), wake_tx);
-    let receiver =
-        RendererCommandScheduler::new(remote_rx, local_rx, admitted.clone(), arbiter, wake_rx);
+    let receiver = RendererCommandScheduler::new(
+        remote_rx,
+        local_rx,
+        admitted.clone(),
+        arbiter,
+        wake_rx,
+        delivery_memory,
+    );
     (admitted, remote_tx, local_tx, receiver)
 }
 
@@ -77,7 +98,19 @@ fn stats(previous: u64, current: u64, first_semantic: u64) -> ProviderResponseSt
 /// endpoints, immutable first-semantic duration, and every accounting receipt.
 #[test]
 fn folds_adjacent_pure_updates_in_exact_order() {
-    let (admitted, remote_tx, _local_tx, mut receiver) = scheduler();
+    let memory = Arc::new(DeliveryMemoryTracker::new());
+    memory.force_enable_for_test();
+    let encoded = tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte");
+    for id in 1..=3 {
+        memory.observe_decode(
+            id,
+            &tau_proto::HarnessOutputMessage::deliver(Event::TermBell(tau_proto::TermBell {})),
+            encoded,
+        );
+        memory.transition(id, DeliveryMemoryCut::RendererFifo);
+    }
+    let (admitted, remote_tx, _local_tx, mut receiver) =
+        scheduler_with_memory(Some(Arc::clone(&memory)));
     admitted.store(3, Ordering::Release);
     remote_tx
         .send(update(
@@ -121,6 +154,9 @@ fn folds_adjacent_pure_updates_in_exact_order() {
     assert_eq!(text, "abc");
     assert_eq!(update.response_stats, Some(stats(0, 3, 99)));
     assert_eq!(folded_frames.len(), 2);
+    assert_eq!(memory.cut_for_test(1), Some(DeliveryMemoryCut::Scheduler));
+    assert_eq!(memory.cut_for_test(2), Some(DeliveryMemoryCut::Scheduler));
+    assert_eq!(memory.cut_for_test(3), Some(DeliveryMemoryCut::Scheduler));
     assert_eq!(
         folded_frames
             .iter()
@@ -135,6 +171,12 @@ fn folds_adjacent_pure_updates_in_exact_order() {
             .collect::<Vec<_>>(),
         vec![2, 3]
     );
+    let receipts = begin_remote_memory_handler(Some(memory.as_ref()), 1, &folded_frames);
+    assert_eq!(memory.cut_for_test(1), Some(DeliveryMemoryCut::Handler));
+    assert_eq!(memory.cut_for_test(2), Some(DeliveryMemoryCut::Handler));
+    assert_eq!(memory.cut_for_test(3), Some(DeliveryMemoryCut::Handler));
+    finish_remote_memory_handler(Some(memory.as_ref()), 1, receipts);
+    assert_eq!(memory.active_len_for_test(), 0);
 }
 
 /// A captured local watermark is a hard barrier: a later admitted update cannot

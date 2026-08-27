@@ -249,6 +249,14 @@ watermark barrier. It does not wait for a suffix. Every original frame keeps
 independent byte/item release and delivery diagnostics even though the folded
 run performs one response projection.
 
+An independent default-off diagnostic can recursively estimate decoded delivery
+ownership at decode/current, cold staging, renderer FIFO, scheduler
+lookahead/fold, and handler cuts. It reports only bounded content-free
+aggregates, creates no wire or durable identity, and explicitly leaves retained
+presentation and kernel bytes unobservable. The requested-capacity value is a
+diagnostic projection estimate rather than allocator or RSS truth. See
+[`decoded-delivery-memory-measurement`](../../../docs/decoded-delivery-memory-measurement.md).
+
 During initial cold attach, the UI retains the replay marker through socket
 decoding and stages visible replayed prompt/response transcript rows until the
 non-replay `session.replay_complete` boundary. Replay-marked current-state rows
