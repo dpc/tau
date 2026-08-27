@@ -352,8 +352,8 @@ fn standalone_auto_compaction_uses_provider_baseline_for_initial_incident_window
 ///
 /// This reproduces the incident shape: a byte-budget cut preserves a large
 /// suffix and the replacement retains matching typed and raw opaque payloads.
-/// The old from-scratch projection retriggered immediately; the new projection
-/// remains below 334,800 and resumes inference.
+/// Both the compacted-baseline path and the corrected from-scratch projection
+/// remain below 334,800 and resume inference.
 #[test]
 fn standalone_auto_compaction_uses_compacted_baseline_for_opaque_multipass_window() {
     let td = TempDir::new().expect("tempdir");
@@ -446,7 +446,7 @@ fn standalone_auto_compaction_uses_compacted_baseline_for_opaque_multipass_windo
         "client-retained replacement messages must remain charged: {live_projection}"
     );
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    let raw_projection =
+    let from_scratch_projection =
         path_crate_harness::compaction_runtime::active_provider_window_projected_tokens(
             h.session_runtime
                 .agent_store
@@ -455,10 +455,10 @@ fn standalone_auto_compaction_uses_compacted_baseline_for_opaque_multipass_windo
             h.agent_runtime.agent_registry.agents[&cid].identity.head,
             353_400,
         )
-        .expect("legacy from-scratch projection");
+        .expect("from-scratch projection");
     assert!(
-        334_800 <= raw_projection,
-        "fixture must prove the opaque replacement would retrigger under the old projection"
+        from_scratch_projection < 334_800,
+        "from-scratch scheduling must also charge one opaque replay representation: {from_scratch_projection}"
     );
     h.shutdown().expect("shutdown");
     wait_for_session_unlock(&state, "s1");
@@ -708,7 +708,7 @@ fn standalone_auto_compaction_ignores_outbound_agent_message_payloads() {
             .expect("agent");
         agent.execution.context_input_tokens = Some(100);
         agent.execution.context_usage_model = Some("test/model".into());
-        agent.execution.context_usage_head = None;
+        agent.execution.context_usage_head = agent.identity.head;
     }
     h.publish_for_agent(
         &cid,
@@ -722,6 +722,26 @@ fn standalone_auto_compaction_ignores_outbound_agent_message_payloads() {
             kind: tau_proto::AgentMessageKind::Message,
             message: "ignored outbound routing fact ".repeat(10_000),
         }),
+    );
+    let telemetry = h.prompt_context_limit_snapshot(
+        &cid,
+        &"test/model".into(),
+        tau_proto::PromptOperation::Inference,
+    );
+    assert_eq!(
+        telemetry.projected_input_tokens,
+        Some(
+            100 + path_crate_harness::context_limit_telemetry::context_projection_reserve(
+                h.provider_runtime.model_info[&"test/model".into()].context_window,
+            )
+        ),
+        "provider-visible projection must omit the outbound routing fact"
+    );
+    assert!(
+        telemetry
+            .transcript_delta_bytes
+            .is_some_and(|bytes| bytes > 100_000),
+        "exact durable suffix telemetry must retain the outbound routing fact"
     );
     let info = h
         .provider_runtime
@@ -744,6 +764,59 @@ fn standalone_auto_compaction_ignores_outbound_agent_message_payloads() {
         event_log_events(&h)
             .iter()
             .all(|event| !matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Raw Responses replay sidecars must not make eager-terminal or later
+/// activation scheduling charge the same assistant payload twice.
+#[test]
+fn automatic_compaction_charges_one_assistant_replay_representation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let threshold = 250_000;
+    {
+        let info = h
+            .provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("test model");
+        info.context_window = 500_000;
+        info.supports_compaction = false;
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(threshold);
+        info.standalone_compaction_prefix_budget = Some(500_000);
+    }
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("one replay".to_owned()))
+        .expect("dispatch inference");
+    let prompt = read_nth_prompt_created(&h, 0);
+    let payload = "z".repeat(170_000);
+    let mut response = standalone_compaction_success_response(&prompt, &payload);
+    let ContextItem::Message(message) = &mut response.output_items[0] else {
+        unreachable!("response helper returns one message")
+    };
+    message.responses_raw_json = Some(format!(
+        r#"{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{payload}"}}]}}"#
+    ));
+    h.handle_provider_response_finished(response)
+        .expect("accept assistant response");
+
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::AgentStandaloneCompactionStarted(_)
+        )),
+        0,
+        "eager terminal projection must remain below the threshold"
+    );
+    let later_projection = h
+        .automatic_compaction_projected_tokens(&cid, &"test/model".into())
+        .expect("later provider-window projection");
+    assert!(
+        later_projection < threshold,
+        "later scheduling must also charge one replay representation: {later_projection}"
     );
     h.shutdown().expect("shutdown");
 }

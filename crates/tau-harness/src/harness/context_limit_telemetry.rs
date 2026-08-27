@@ -69,12 +69,13 @@ pub(super) fn serialized_transcript_delta_bytes<'a>(
 ///
 /// Provider-visible structure retains the existing one-JSON-byte-per-token
 /// upper bound. Raw structured tool payloads retained only for non-provider
-/// consumers are replaced by their normalized provider rendering. Canonical
-/// images are removed from that JSON representation and accounted once by
-/// encoded byte length plus one token per 32-by-32 image patch. This avoids
-/// durable-only duplication and the accidental 3-4x expansion from
-/// `serde_bytes` JSON integer arrays while keeping provider input visible to
-/// proactive compaction accounting.
+/// consumers are replaced by their normalized provider rendering. Typed/raw
+/// provider replay alternatives retain one conservative representation rather
+/// than both durable copies. Canonical images are removed from that JSON
+/// representation and accounted once by encoded byte length plus one token per
+/// 32-by-32 image patch. This avoids durable-only duplication and the
+/// accidental 3-4x expansion from `serde_bytes` JSON integer arrays while
+/// keeping provider input visible to proactive compaction accounting.
 pub(super) fn projected_transcript_entry_tokens(entry: &AgentEntry) -> Option<u64> {
     let mut provider_projection = entry.clone();
     if let AgentEntry::Compaction {
@@ -91,7 +92,10 @@ pub(super) fn projected_transcript_entry_tokens(entry: &AgentEntry) -> Option<u6
     }
     let image_tokens = strip_and_count_agent_entry_images(&mut provider_projection)?;
     project_tool_result_outputs(&mut provider_projection);
-    serialized_transcript_entry_bytes(&provider_projection)?.checked_add(image_tokens)
+    let replay_envelope_tokens = project_provider_replay_alternatives(&mut provider_projection)?;
+    serialized_transcript_entry_bytes(&provider_projection)?
+        .checked_add(image_tokens)?
+        .checked_add(replay_envelope_tokens)
 }
 
 /// Derives independent exact-byte telemetry and conservative token projection
@@ -140,6 +144,97 @@ fn project_tool_result_outputs(entry: &mut AgentEntry) {
         result.status = tau_proto::ToolResultStatus::Success;
         result.presentation = tau_proto::ToolResultPresentation::ToolPayload;
     });
+}
+
+fn project_provider_replay_alternatives(entry: &mut AgentEntry) -> Option<u64> {
+    let mut replay_envelope_tokens = Some(0_u64);
+    visit_agent_entry_context_items_mut(entry, |item| match item {
+        ContextItem::Message(message) => {
+            replay_envelope_tokens = replay_envelope_tokens.and_then(|total| {
+                total.checked_add(project_message_replay_envelope_tokens(message)?)
+            });
+        }
+        ContextItem::ToolCall(call) => {
+            if call.tool_type == tau_proto::ToolType::Function && call.raw_arguments_json.is_some()
+            {
+                call.arguments = tau_proto::CborValue::Null;
+            }
+        }
+        ContextItem::Reasoning(item)
+        | ContextItem::Compaction(item)
+        | ContextItem::UnknownProviderItem(item) => {
+            if item
+                .raw_json
+                .as_deref()
+                .is_some_and(|raw| serde_json::from_str::<serde_json::Value>(raw).is_ok())
+            {
+                item.value = tau_proto::CborValue::Null;
+            } else {
+                item.raw_json = None;
+            }
+        }
+        ContextItem::ToolResult(_)
+        | ContextItem::ReasoningText(_)
+        | ContextItem::LocalCompactionNarrative(_)
+        | ContextItem::CompactionTrigger => {}
+    });
+    replay_envelope_tokens
+}
+
+fn project_message_replay_envelope_tokens(message: &mut tau_proto::MessageItem) -> Option<u64> {
+    let Some(raw_json) = message.responses_raw_json.take() else {
+        return Some(0);
+    };
+    let Ok(raw_message) = serde_json::from_str::<serde_json::Value>(&raw_json) else {
+        return Some(0);
+    };
+    if raw_message.get("type").and_then(serde_json::Value::as_str) != Some("message")
+        || raw_message.get("role").and_then(serde_json::Value::as_str) != Some("assistant")
+    {
+        return Some(0);
+    }
+    let raw_text_bytes = raw_message
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| {
+            matches!(
+                part.get("type").and_then(serde_json::Value::as_str),
+                Some("output_text") | Some("text")
+            )
+        })
+        .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+        .try_fold(0_u64, |total, text| {
+            total.checked_add(u64::try_from(text.len()).ok()?)
+        })?;
+    u64::try_from(raw_json.len())
+        .ok()?
+        .checked_sub(raw_text_bytes)
+}
+
+fn visit_agent_entry_context_items_mut(
+    entry: &mut AgentEntry,
+    mut visit: impl FnMut(&mut ContextItem),
+) {
+    let items = match entry {
+        AgentEntry::UserInput { items, .. }
+        | AgentEntry::AssistantResponse {
+            output_items: items,
+            ..
+        }
+        | AgentEntry::Compaction {
+            replacement_window: items,
+            ..
+        } => items,
+        AgentEntry::ToolResults { .. }
+        | AgentEntry::AgentMessage { .. }
+        | AgentEntry::MessageFact { .. }
+        | AgentEntry::CompactionTrigger { .. } => return,
+    };
+    for item in items {
+        visit(item);
+    }
 }
 
 fn visit_agent_entry_images_mut(

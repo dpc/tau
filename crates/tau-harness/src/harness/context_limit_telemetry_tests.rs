@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tau_core::AgentEntry;
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextLimitObservation, ContextRole, ImageContent,
-    ImageDetail, ImageMediaType, MessageItem, ToolResultContentPart, ToolResultItem,
-    ToolResultStatus, ToolType,
+    ImageDetail, ImageMediaType, MessageItem, OpaqueProviderItem, ToolCallItem,
+    ToolResultContentPart, ToolResultItem, ToolResultStatus, ToolType,
 };
 
 use super::context_limit_telemetry::{
@@ -41,6 +41,15 @@ fn tool_result_entry(raw_bytes: usize, provider_bytes: usize) -> AgentEntry {
             },
             provider_content: Vec::new(),
         }],
+    }
+}
+
+fn assistant_entry(item: ContextItem) -> AgentEntry {
+    AgentEntry::AssistantResponse {
+        provider_response_id: None,
+        backend: None,
+        output_items: vec![item],
+        usage: None,
     }
 }
 
@@ -218,6 +227,86 @@ fn tool_result_projection_ignores_raw_payload_size() {
     assert!(
         projected_transcript_entry_tokens(&large_raw).expect("projection") < 1_000,
         "the provider-visible rendering, not structured consumer data, owns projection"
+    );
+}
+
+/// Responses replay alternatives must contribute one large payload to provider
+/// projection even though the durable transcript retains typed and raw copies.
+#[test]
+fn provider_replay_alternatives_charge_one_large_payload() {
+    let payload = "z".repeat(170_000);
+    let fixtures = [
+        assistant_entry(ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: payload.clone(),
+            }],
+            phase: None,
+            responses_raw_json: Some(format!(
+                r#"{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{payload}"}}]}}"#
+            )),
+        })),
+        assistant_entry(ContextItem::Compaction(OpaqueProviderItem::with_raw_json(
+            CborValue::Map(vec![
+                (
+                    CborValue::Text("type".to_owned()),
+                    CborValue::Text("compaction".to_owned()),
+                ),
+                (
+                    CborValue::Text("encrypted_content".to_owned()),
+                    CborValue::Text(payload.clone()),
+                ),
+            ]),
+            format!(r#"{{"type":"compaction","encrypted_content":"{payload}"}}"#),
+        ))),
+        assistant_entry(ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-raw-arguments".into(),
+            name: tau_proto::ToolName::new("audit_fixture"),
+            tool_type: ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("payload".to_owned()),
+                CborValue::Text(payload.clone()),
+            )]),
+            raw_arguments_json: Some(format!(r#"{{"payload":"{payload}"}}"#)),
+            responses_envelope: None,
+        })),
+    ];
+
+    for entry in fixtures {
+        let durable = serialized_transcript_entry_bytes(&entry).expect("durable JSON");
+        let projected = projected_transcript_entry_tokens(&entry).expect("projection");
+        assert!(
+            projected >= payload.len() as u64,
+            "one provider-visible representation must remain charged"
+        );
+        assert!(
+            durable >= projected + 150_000,
+            "the duplicate durable sidecar must not enter provider projection: durable={durable}, projected={projected}"
+        );
+    }
+}
+
+/// Assistant projection must bound the hybrid item produced when provider
+/// lowering keeps a raw envelope but rebases it with different typed text.
+#[test]
+fn assistant_replay_projection_charges_raw_envelope_and_rebased_text() {
+    let typed_payload = "t".repeat(170_000);
+    let envelope_payload = "e".repeat(170_000);
+    let entry = assistant_entry(ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text {
+            text: typed_payload.clone(),
+        }],
+        phase: None,
+        responses_raw_json: Some(format!(
+            r#"{{"type":"message","role":"assistant","provider_owned":"{envelope_payload}","content":[{{"type":"output_text","text":"old"}}]}}"#
+        )),
+    }));
+
+    let projected = projected_transcript_entry_tokens(&entry).expect("projection");
+    assert!(
+        projected >= (typed_payload.len() + envelope_payload.len()) as u64,
+        "the bound must include retained raw fields plus rebased typed text: {projected}"
     );
 }
 

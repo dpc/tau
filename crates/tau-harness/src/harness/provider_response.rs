@@ -795,12 +795,24 @@ impl Harness {
                     let first = usage_head
                         .and_then(|baseline| ids.iter().position(|id| *id == baseline))
                         .map_or(0, |index| index.saturating_add(1));
-                    transcript_growth(
-                        ids[first..]
-                            .iter()
-                            .filter_map(|id| tree.node(*id))
-                            .map(|node| &node.entry),
-                    )
+                    let entries = ids[first..]
+                        .iter()
+                        .filter_map(|id| tree.node(*id))
+                        .map(|node| &node.entry)
+                        .collect::<Vec<_>>();
+                    TranscriptGrowth {
+                        serialized_bytes: entries.iter().try_fold(0_u64, |total, entry| {
+                            total.checked_add(
+                                path_crate_harness::context_limit_telemetry::
+                                    serialized_transcript_entry_bytes(entry)?,
+                            )
+                        }),
+                        projected_tokens: transcript_growth(entries.into_iter().filter(|entry| {
+                            !matches!(entry, tau_core::AgentEntry::AgentMessage { .. })
+                                || crate::prompt::agent_message_is_provider_visible(entry)
+                        }))
+                        .projected_tokens,
+                    }
                 },
             )
     }
