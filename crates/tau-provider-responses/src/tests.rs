@@ -384,6 +384,360 @@ fn terminal_output_fallback_materializes_plain_reasoning_and_text() {
     ));
 }
 
+/// The shared attempt guard treats assistant text, reasoning text, and function
+/// arguments as independent channels and rejects each candidate atomically.
+#[test]
+fn repetition_guard_rejects_independent_delta_channels_before_mutation() {
+    let repeated = "x".repeat(1_024);
+
+    let mut assistant = State::default();
+    assistant
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":"accepted"}"#)
+        .expect("initial assistant text");
+    let event = serde_json::json!({
+        "type": "response.output_text.delta",
+        "output_index": 0,
+        "delta": repeated,
+    });
+    assert!(matches!(
+        assistant.apply_event(&event.to_string()),
+        Err(Error::RepetitionDetected(_))
+    ));
+    assert!(matches!(
+        assistant.progress().output_items.as_slice(),
+        [AttemptOutputItem {
+            item: ContextItem::Message(message),
+            ..
+        }] if message.content == vec![ContentPart::Text {
+            text: "accepted".to_owned(),
+        }]
+    ));
+
+    let mut reasoning = State::default();
+    reasoning
+        .apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_guard","summary":[],"content":[]}}"#)
+        .expect("reasoning item");
+    let event = serde_json::json!({
+        "type": "response.reasoning_text.delta",
+        "item_id": "rs_guard",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": repeated,
+    });
+    assert!(matches!(
+        reasoning.apply_event(&event.to_string()),
+        Err(Error::RepetitionDetected(_))
+    ));
+    assert!(
+        reasoning.progress().output_items.is_empty(),
+        "rejected reasoning must not become transient output"
+    );
+
+    let mut arguments = State::default();
+    arguments
+        .apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_guard","name":"run","arguments":""}}"#)
+        .expect("function item");
+    let event = serde_json::json!({
+        "type": "response.function_call_arguments.delta",
+        "output_index": 0,
+        "delta": repeated,
+    });
+    assert!(matches!(
+        arguments.apply_event(&event.to_string()),
+        Err(Error::RepetitionDetected(_))
+    ));
+    let ContextItem::ToolCall(call) = &arguments.items[0].item else {
+        panic!("function call remains");
+    };
+    assert_eq!(call.raw_arguments_json.as_deref(), Some(""));
+}
+
+/// Cumulative item snapshots and authoritative terminal output use replacement
+/// validation rather than bypassing the attempt guard.
+#[test]
+fn repetition_guard_rejects_cumulative_and_terminal_replacements() {
+    let repeated = "x".repeat(1_024);
+
+    let mut cumulative = State::default();
+    cumulative
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":"accepted"}"#)
+        .expect("initial assistant text");
+    let event = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": repeated}],
+        },
+    });
+    assert!(matches!(
+        cumulative.apply_event(&event.to_string()),
+        Err(Error::RepetitionDetected(_))
+    ));
+    assert!(matches!(
+        cumulative.progress().output_items.as_slice(),
+        [AttemptOutputItem {
+            item: ContextItem::Message(message),
+            ..
+        }] if message.content == vec![ContentPart::Text {
+            text: "accepted".to_owned(),
+        }]
+    ));
+
+    for item in [
+        serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_terminal",
+            "summary": [],
+            "content": [{"type": "reasoning_text", "text": repeated}],
+        }),
+        serde_json::json!({
+            "type": "function_call",
+            "call_id": "call_terminal",
+            "name": "run",
+            "arguments": format!("{{}}{}", " ".repeat(1_024)),
+        }),
+    ] {
+        let mut terminal = State::default();
+        let event = serde_json::json!({
+            "type": "response.completed",
+            "response": {"id": "resp_guard", "output": [item]},
+        });
+        assert!(matches!(
+            terminal.apply_event(&event.to_string()),
+            Err(Error::RepetitionDetected(_))
+        ));
+        assert!(terminal.items.is_empty());
+        assert!(!terminal.terminal);
+        assert!(terminal.response_id.is_none());
+    }
+}
+
+/// Final text snapshots must guard whole provider content without rejecting an
+/// ordinary completion or leaving repeated text in the transient slot.
+#[test]
+fn output_text_done_snapshots_are_guarded_and_atomic() {
+    let mut accepted = State::default();
+    accepted
+        .apply_event(
+            r#"{"type":"response.output_text.done","output_index":0,"text":"complete answer"}"#,
+        )
+        .expect("ordinary final snapshot");
+    assert!(matches!(
+        accepted.progress().output_items.as_slice(),
+        [AttemptOutputItem {
+            item: ContextItem::Message(message),
+            ..
+        }] if message.content == vec![ContentPart::Text {
+            text: "complete answer".to_owned(),
+        }]
+    ));
+
+    let repeated = "x".repeat(1_024);
+    let mut rejected = State::default();
+    let event = serde_json::json!({
+        "type": "response.output_text.done",
+        "output_index": 0,
+        "text": repeated,
+    });
+    assert!(matches!(
+        rejected.apply_event(&event.to_string()),
+        Err(Error::RepetitionDetected(_))
+    ));
+    assert!(
+        rejected.items.is_empty(),
+        "rejected final snapshot must not become transient output"
+    );
+}
+
+/// Repeated ordinary prose must remain accepted when it stays below the
+/// conservative thresholds or its suffix changes instead of forming a loop.
+#[test]
+fn repetition_guard_accepts_short_changing_and_below_threshold_text() {
+    let mut short_words = State::default();
+    short_words
+        .apply_event(
+            &serde_json::json!({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "delta": "again ".repeat(7),
+            })
+            .to_string(),
+        )
+        .expect("short repeated words are not a loop");
+
+    let mut changing_prefixes = State::default();
+    for ordinal in 0..160 {
+        changing_prefixes
+            .apply_event(
+                &serde_json::json!({
+                    "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "delta": format!("prefix {ordinal:04} "),
+                })
+                .to_string(),
+            )
+            .expect("changing suffix is not a loop");
+    }
+
+    let line = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\n";
+    let mut below_threshold_lines = State::default();
+    below_threshold_lines
+        .apply_event(
+            &serde_json::json!({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "delta": line.repeat(7),
+            })
+            .to_string(),
+        )
+        .expect("seven repeated long lines are below the line-loop threshold");
+}
+
+/// Complete reasoning and Function-argument snapshots must pass through the
+/// guard before they can replace the accepted slot state.
+#[test]
+fn repetition_guard_rejects_reasoning_and_function_done_snapshots_atomically() {
+    let repeated = "x".repeat(1_024);
+    let mut reasoning = State::default();
+    reasoning
+        .apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_done","summary":[],"content":[]}}"#)
+        .expect("reasoning item");
+    let reasoning_done = serde_json::json!({
+        "type": "response.reasoning_text.done",
+        "item_id": "rs_done",
+        "output_index": 0,
+        "content_index": 0,
+        "text": repeated,
+    });
+    assert!(matches!(
+        reasoning.apply_event(&reasoning_done.to_string()),
+        Err(Error::RepetitionDetected(_))
+    ));
+    assert!(reasoning.items[0].reasoning_parts.is_empty());
+    assert!(reasoning.items[0].reasoning_text.is_none());
+
+    let mut function = State::default();
+    function
+        .apply_event(r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_done","name":"run","arguments":""}}"#)
+        .expect("function item");
+    let function_done = serde_json::json!({
+        "type": "response.function_call_arguments.done",
+        "output_index": 0,
+        "arguments": format!("{{}}{}", " ".repeat(1_024)),
+    });
+    assert!(matches!(
+        function.apply_event(&function_done.to_string()),
+        Err(Error::RepetitionDetected(_))
+    ));
+    let ContextItem::ToolCall(call) = &function.items[0].item else {
+        panic!("function call remains");
+    };
+    assert_eq!(call.raw_arguments_json.as_deref(), Some(""));
+}
+
+/// Empty assistant deltas must not claim an output index and allow later output
+/// to bypass the response assembler's contiguous-prefix requirement.
+#[test]
+fn empty_assistant_delta_does_not_close_a_missing_output_index_gap() {
+    let mut state = State::default();
+    assert!(
+        !state
+            .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":""}"#)
+            .expect("empty delta is accepted but non-semantic")
+    );
+    state
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":1,"delta":"later"}"#)
+        .expect("later output remains pending");
+    assert!(state.progress().output_items.is_empty());
+    assert!(matches!(
+        state.apply_event(r#"{"type":"response.completed","response":{}}"#),
+        Err(Error::UnsupportedOutput)
+    ));
+}
+
+/// An SSE repetition after visible progress must close the finite attempt
+/// without retrying while retaining the progress bit that requests one clear.
+#[test]
+fn sse_repetition_is_nonretryable_and_requests_clear_after_progress() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE server");
+    let address = listener.local_addr().expect("SSE server address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept request");
+        let _ = read_http_request(&mut socket);
+        let repeated = "x".repeat(1_024);
+        let body = format!(
+            "data: {{\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"accepted\"}}\n\n\
+             data: {{\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"{repeated}\"}}\n\n"
+        );
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write response");
+    });
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| {},
+        &mut || false,
+        &test_network(),
+    );
+    server.join().expect("join SSE server");
+    let AttemptOutcome::Terminal(failure) = outcome else {
+        panic!("repetition must close rather than retry");
+    };
+    assert_eq!(failure.stop_reason, ProviderStopReason::RepetitionDetected);
+    assert_eq!(failure.failure_kind, None);
+    assert!(failure.progress.has_timed_semantic_output);
+    assert!(matches!(
+        failure.progress.output_items.as_slice(),
+        [AttemptOutputItem {
+            item: ContextItem::Message(message),
+            ..
+        }] if message.content == vec![ContentPart::Text {
+            text: "accepted".to_owned(),
+        }]
+    ));
+}
+
+/// WebSocket terminal full-content repetition before visible progress must
+/// close without retry or a spurious clear request.
+#[test]
+fn websocket_terminal_repetition_is_nonretryable_without_clear() {
+    let repeated = "x".repeat(1_024);
+    let event = serde_json::json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp_guard",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": repeated}],
+            }],
+        },
+    });
+    let outcome = run_websocket_message(Message::Text(event.to_string().into()), &mut || false);
+    let AttemptOutcome::Terminal(failure) = outcome else {
+        panic!("repetition must close rather than retry");
+    };
+    assert_eq!(failure.stop_reason, ProviderStopReason::RepetitionDetected);
+    assert_eq!(failure.failure_kind, None);
+    assert!(!failure.progress.has_timed_semantic_output);
+    assert!(failure.progress.output_items.is_empty());
+}
+
 /// Terminal replacement retains exact raw provider item syntax for transcript
 /// replay rather than reserializing its key order, numeric spelling, or extras.
 #[test]

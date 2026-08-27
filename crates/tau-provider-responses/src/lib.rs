@@ -23,6 +23,7 @@ use tau_proto::{
 use tau_provider::retry_policy::{
     RetryClass, RetryDecision, classify_error_code, parse_json_error_code,
 };
+use tau_provider::{StreamRepetition, StreamRepetitionGuard, StreamRepetitionKey};
 use tokio::runtime as path_tokio_runtime;
 
 use self::debug_capture::DebugCapture;
@@ -186,6 +187,7 @@ enum Error {
     InvalidRequest,
     UnsupportedTool,
     UnsupportedOutput,
+    RepetitionDetected(StreamRepetition),
     StreamFailure,
 }
 
@@ -195,7 +197,8 @@ impl Error {
             Self::Canceled
             | Self::InvalidRequest
             | Self::UnsupportedTool
-            | Self::UnsupportedOutput => None,
+            | Self::UnsupportedOutput
+            | Self::RepetitionDetected(_) => None,
             Self::Http(status, body) => {
                 if failure_kind(*status, body).is_some() {
                     return None;
@@ -458,6 +461,7 @@ fn terminal(error: Error, progress: AttemptProgress) -> AttemptOutcome {
                 "Responses supports text, plain reasoning, and Function output only".to_owned()
             }
             Error::InvalidRequest => "Responses request was invalid".to_owned(),
+            Error::RepetitionDetected(repetition) => repetition.to_string(),
             Error::Http(status, _) => format!("provider returned HTTP {status}"),
             Error::Provider { status, code } => {
                 let detail = code.as_deref().map(tau_proto::visible_escape_metadata);
@@ -475,12 +479,16 @@ fn terminal(error: Error, progress: AttemptProgress) -> AttemptOutcome {
             _ => "Responses request failed".to_owned(),
         },
         failure_kind: error.failure_kind(),
-        stop_reason: ProviderStopReason::EndTurn,
+        stop_reason: if matches!(error, Error::RepetitionDetected(_)) {
+            ProviderStopReason::RepetitionDetected
+        } else {
+            ProviderStopReason::EndTurn
+        },
         progress,
     })
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Slot {
     /// Provider output index shared by durable and display projections.
     index: u32,
@@ -620,6 +628,34 @@ impl Slot {
             })
             .text
             .push_str(delta);
+        Ok(())
+    }
+
+    /// Validate a reasoning delta without changing the accumulated slot.
+    fn validate_reasoning_delta(
+        &self,
+        index: ReasoningContentIndex,
+        item_id: &ReasoningItemId,
+    ) -> Result<(), Error> {
+        if self.state != SlotState::ReasoningAdded
+            || self
+                .reasoning_item_id
+                .as_ref()
+                .is_some_and(|known| known != item_id)
+        {
+            return Err(Error::UnsupportedOutput);
+        }
+        let newest = self
+            .reasoning_parts
+            .last_key_value()
+            .map(|(index, _)| *index);
+        if let Some(part) = self.reasoning_parts.get(&index) {
+            if newest != Some(index) || part.phase == ReasoningPartPhase::Done {
+                return Err(Error::UnsupportedOutput);
+            }
+        } else if newest.is_some_and(|newest| !(newest < index)) {
+            return Err(Error::UnsupportedOutput);
+        }
         Ok(())
     }
 
@@ -823,6 +859,45 @@ impl Slot {
     }
 }
 
+/// Project the exact guard channel and cumulative text for one semantic slot.
+fn slot_repetition_text(slot: &Slot) -> (StreamRepetitionKey, String) {
+    let output_index = usize::try_from(slot.index).unwrap_or(usize::MAX);
+    match &slot.item {
+        ContextItem::Message(message) => (
+            StreamRepetitionKey::AssistantText { output_index },
+            message
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        ContextItem::ToolCall(call) => (
+            StreamRepetitionKey::FunctionCallArguments { output_index },
+            call.raw_arguments_json.clone().unwrap_or_default(),
+        ),
+        _ if matches!(
+            slot.state,
+            SlotState::ReasoningAdded | SlotState::ReasoningCompleted
+        ) =>
+        {
+            (
+                StreamRepetitionKey::ReasoningText { output_index },
+                slot.reasoning_text
+                    .as_ref()
+                    .map(|reasoning| reasoning.text.clone())
+                    .unwrap_or_default(),
+            )
+        }
+        _ => (
+            StreamRepetitionKey::AssistantText { output_index },
+            String::new(),
+        ),
+    }
+}
+
 #[derive(Debug, Default)]
 struct State {
     /// Provider-indexed slots in ascending provider output order.
@@ -838,6 +913,9 @@ struct State {
     response_id: Option<String>,
     /// Monotonic revision advanced only by qualifying semantic observations.
     semantic_progress_revision: u64,
+    /// Exact bounded repetition state shared by both transport parsers for this
+    /// finite attempt.
+    repetition_guard: StreamRepetitionGuard,
     /// Private bounded capture state, inactive unless diagnostics are enabled.
     debug_capture: DebugCapture,
 }
@@ -981,6 +1059,7 @@ impl State {
         Ok(())
     }
 
+    /// Find or create one non-empty output slot in provider-index order.
     fn slot_mut(&mut self, index: u32) -> &mut Slot {
         if let Some(position) = self.items.iter().position(|slot| slot.index == index) {
             return &mut self.items[position];
@@ -997,26 +1076,173 @@ impl State {
         phase: OutputItemPhase,
         raw_json: Option<&RawValue>,
     ) -> Result<bool, Error> {
+        self.update_slot(index, |slot| slot.apply_item(item, phase, raw_json))
+    }
+
+    /// Reject a candidate before it replaces any semantic slot state.
+    fn validate_repetition(
+        &mut self,
+        previous: Option<&Slot>,
+        candidate: &Slot,
+    ) -> Result<(), Error> {
+        let (key, candidate_text) = slot_repetition_text(candidate);
+        let previous_text = previous
+            .and_then(|slot| {
+                let (previous_key, text) = slot_repetition_text(slot);
+                (previous_key == key).then_some(text)
+            })
+            .unwrap_or_default();
+        let repetition = if candidate_text.starts_with(&previous_text) {
+            self.repetition_guard
+                .push_delta(key, &candidate_text[previous_text.len()..])
+        } else {
+            self.repetition_guard.replace_tail(key, &candidate_text)
+        };
+        repetition.map_or(Ok(()), |repetition| {
+            Err(Error::RepetitionDetected(repetition))
+        })
+    }
+
+    /// Validate and atomically update one existing slot.
+    fn update_existing_slot(
+        &mut self,
+        index: u32,
+        update: impl FnOnce(&mut Slot) -> Result<bool, Error>,
+    ) -> Result<bool, Error> {
+        if !self.items.iter().any(|slot| slot.index == index) {
+            return Err(Error::UnsupportedOutput);
+        }
+        self.update_slot(index, update)
+    }
+
+    /// Validate and atomically update one slot, creating it when absent.
+    fn update_slot(
+        &mut self,
+        index: u32,
+        update: impl FnOnce(&mut Slot) -> Result<bool, Error>,
+    ) -> Result<bool, Error> {
         if !(index < MAX_OUTPUT_ITEMS) {
             return Err(Error::UnsupportedOutput);
         }
+        let previous = self.items.iter().find(|slot| slot.index == index).cloned();
+        let mut candidate = previous.clone().unwrap_or_else(|| Slot::new(index));
+        let qualifying_progress = update(&mut candidate)?;
+        self.validate_repetition(previous.as_ref(), &candidate)?;
         if let Some(slot) = self.items.iter_mut().find(|slot| slot.index == index) {
-            return slot.apply_item(item, phase, raw_json);
+            *slot = candidate;
+        } else {
+            let position = self
+                .items
+                .partition_point(|existing| existing.index < index);
+            self.items.insert(position, candidate);
         }
-        let mut slot = Slot::new(index);
-        let qualifying_progress = slot.apply_item(item, phase, raw_json)?;
-        let position = self
-            .items
-            .partition_point(|existing| existing.index < index);
-        self.items.insert(position, slot);
         Ok(qualifying_progress)
     }
 
-    fn existing_slot_mut(&mut self, index: u32) -> Result<&mut Slot, Error> {
-        self.items
+    /// Reject one delta before appending it to the selected semantic channel.
+    fn guard_delta(&mut self, key: StreamRepetitionKey, delta: &str) -> Result<(), Error> {
+        self.repetition_guard
+            .push_delta(key, delta)
+            .map_or(Ok(()), |repetition| {
+                Err(Error::RepetitionDetected(repetition))
+            })
+    }
+
+    /// Validate, guard, and append a message delta without copying its prefix.
+    fn append_message_delta(&mut self, index: u32, delta: &str) -> Result<bool, Error> {
+        if !(index < MAX_OUTPUT_ITEMS) {
+            return Err(Error::UnsupportedOutput);
+        }
+        if delta.is_empty() {
+            return Ok(false);
+        }
+        if self
+            .items
+            .iter()
+            .find(|slot| slot.index == index)
+            .is_some_and(|slot| !matches!(slot.state, SlotState::Empty | SlotState::Message))
+        {
+            return Err(Error::UnsupportedOutput);
+        }
+        self.guard_delta(
+            StreamRepetitionKey::AssistantText {
+                output_index: usize::try_from(index).unwrap_or(usize::MAX),
+            },
+            delta,
+        )?;
+        let slot = self.slot_mut(index);
+        match &mut slot.item {
+            ContextItem::Message(message) => append_text(message, delta),
+            _ => {
+                slot.item = message_item(delta);
+                slot.state = SlotState::Message;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Validate, guard, and append a Function argument delta without copying
+    /// it.
+    fn append_function_arguments_delta(&mut self, index: u32, delta: &str) -> Result<bool, Error> {
+        let Some(slot) = self.items.iter().find(|slot| slot.index == index) else {
+            return Err(Error::UnsupportedOutput);
+        };
+        if slot.state != SlotState::FunctionCall || !matches!(slot.item, ContextItem::ToolCall(_)) {
+            return Err(Error::UnsupportedOutput);
+        }
+        self.guard_delta(
+            StreamRepetitionKey::FunctionCallArguments {
+                output_index: usize::try_from(index).unwrap_or(usize::MAX),
+            },
+            delta,
+        )?;
+        let slot = self
+            .items
             .iter_mut()
             .find(|slot| slot.index == index)
-            .ok_or(Error::UnsupportedOutput)
+            .ok_or(Error::UnsupportedOutput)?;
+        let ContextItem::ToolCall(call) = &mut slot.item else {
+            return Err(Error::UnsupportedOutput);
+        };
+        call.raw_arguments_json
+            .get_or_insert_with(String::new)
+            .push_str(delta);
+        Ok(!delta.is_empty())
+    }
+
+    /// Validate, guard, and append a reasoning delta without copying its
+    /// prefix.
+    fn append_reasoning_delta(
+        &mut self,
+        index: u32,
+        content_index: ReasoningContentIndex,
+        event: &Value,
+        delta: &str,
+    ) -> Result<bool, Error> {
+        let item_id = {
+            let slot = self
+                .items
+                .iter()
+                .find(|slot| slot.index == index)
+                .ok_or(Error::UnsupportedOutput)?;
+            let item_id = slot.reasoning_event_id(event)?;
+            slot.validate_reasoning_delta(content_index, &item_id)?;
+            item_id
+        };
+        self.guard_delta(
+            StreamRepetitionKey::ReasoningText {
+                output_index: usize::try_from(index).unwrap_or(usize::MAX),
+            },
+            delta,
+        )?;
+        let slot = self
+            .items
+            .iter_mut()
+            .find(|slot| slot.index == index)
+            .ok_or(Error::UnsupportedOutput)?;
+        slot.append_reasoning_delta(content_index, delta)?;
+        slot.reasoning_item_id = Some(item_id);
+        Ok(!delta.is_empty())
     }
 
     fn apply_event(&mut self, data: &str) -> Result<bool, Error> {
@@ -1043,34 +1269,28 @@ impl State {
             "response.output_text.delta" | "response.content_part.delta" => {
                 let index = output_index(&event)?;
                 let delta = event["delta"].as_str().unwrap_or("");
-                if !delta.is_empty() {
-                    let slot = self.slot_mut(index);
+                self.append_message_delta(index, delta)?
+            }
+            "response.output_text.done" => {
+                let index = output_index(&event)?;
+                let text = event["text"].as_str().ok_or(Error::UnsupportedOutput)?;
+                self.update_slot(index, |slot| {
                     if !matches!(slot.state, SlotState::Empty | SlotState::Message) {
                         return Err(Error::UnsupportedOutput);
                     }
-                    match &mut slot.item {
-                        ContextItem::Message(message) => append_text(message, delta),
-                        _ => {
-                            slot.item = message_item(delta);
-                            slot.state = SlotState::Message;
-                        }
-                    }
-                }
-                !delta.is_empty()
+                    let qualifying_progress = !text.is_empty()
+                        && !matches!(&slot.item, ContextItem::Message(message)
+                            if message.content.as_slice()
+                                == [ContentPart::Text { text: text.to_owned() }]);
+                    slot.item = message_item(text);
+                    slot.state = SlotState::Message;
+                    Ok(qualifying_progress)
+                })?
             }
             "response.function_call_arguments.delta" => {
                 let index = output_index(&event)?;
                 let delta = event["delta"].as_str().unwrap_or("");
-                let slot = self.existing_slot_mut(index)?;
-                if slot.state != SlotState::FunctionCall {
-                    return Err(Error::UnsupportedOutput);
-                }
-                if let ContextItem::ToolCall(call) = &mut slot.item {
-                    call.raw_arguments_json
-                        .get_or_insert_with(String::new)
-                        .push_str(delta);
-                }
-                !delta.is_empty()
+                self.append_function_arguments_delta(index, delta)?
             }
             "response.function_call_arguments.done" => {
                 let index = output_index(&event)?;
@@ -1080,49 +1300,44 @@ impl State {
                 let parsed = tau_proto::json_to_cbor(
                     &serde_json::from_str::<Value>(arguments).map_err(|_| Error::Json)?,
                 );
-                let slot = self.existing_slot_mut(index)?;
-                if slot.state != SlotState::FunctionCall {
-                    return Err(Error::UnsupportedOutput);
-                }
-                if let ContextItem::ToolCall(call) = &mut slot.item {
-                    let qualifying_progress = !arguments.is_empty()
-                        && call.raw_arguments_json.as_deref() != Some(arguments);
-                    call.raw_arguments_json = Some(arguments.to_owned());
-                    call.arguments = parsed;
-                    qualifying_progress
-                } else {
-                    false
-                }
+                self.update_existing_slot(index, |slot| {
+                    if slot.state != SlotState::FunctionCall {
+                        return Err(Error::UnsupportedOutput);
+                    }
+                    if let ContextItem::ToolCall(call) = &mut slot.item {
+                        let qualifying_progress = !arguments.is_empty()
+                            && call.raw_arguments_json.as_deref() != Some(arguments);
+                        call.raw_arguments_json = Some(arguments.to_owned());
+                        call.arguments = parsed;
+                        Ok(qualifying_progress)
+                    } else {
+                        Ok(false)
+                    }
+                })?
             }
             "response.reasoning_text.delta" => {
                 let index = output_index(&event)?;
                 let content_index = reasoning_content_index(&event)?;
                 let delta = event["delta"].as_str().ok_or(Error::UnsupportedOutput)?;
-                let slot = self.existing_slot_mut(index)?;
-                if slot.state != SlotState::ReasoningAdded {
-                    return Err(Error::UnsupportedOutput);
-                }
-                let item_id = slot.reasoning_event_id(&event)?;
-                slot.append_reasoning_delta(content_index, delta)?;
-                slot.reasoning_item_id = Some(item_id);
-                !delta.is_empty()
+                self.append_reasoning_delta(index, content_index, &event, delta)?
             }
             "response.reasoning_text.done" => {
                 let index = output_index(&event)?;
                 let content_index = reasoning_content_index(&event)?;
                 let text = event["text"].as_str().ok_or(Error::UnsupportedOutput)?;
-                let slot = self.existing_slot_mut(index)?;
-                if slot.state != SlotState::ReasoningAdded {
-                    return Err(Error::UnsupportedOutput);
-                }
-                let item_id = slot.reasoning_event_id(&event)?;
-                let has_text = slot
-                    .reasoning_parts
-                    .get(&content_index)
-                    .is_some_and(|part| !part.text.is_empty());
-                slot.complete_reasoning_part(content_index, text)?;
-                slot.reasoning_item_id = Some(item_id);
-                !has_text && !text.is_empty()
+                self.update_existing_slot(index, |slot| {
+                    if slot.state != SlotState::ReasoningAdded {
+                        return Err(Error::UnsupportedOutput);
+                    }
+                    let item_id = slot.reasoning_event_id(&event)?;
+                    let has_text = slot
+                        .reasoning_parts
+                        .get(&content_index)
+                        .is_some_and(|part| !part.text.is_empty());
+                    slot.complete_reasoning_part(content_index, text)?;
+                    slot.reasoning_item_id = Some(item_id);
+                    Ok(!has_text && !text.is_empty())
+                })?
             }
             "response.completed" | "response.done" => {
                 let response = event.get("response").unwrap_or(&event);
@@ -1146,23 +1361,26 @@ impl State {
                                 .map_err(|_| Error::Json)
                         })
                         .transpose()?;
-                    let mut terminal = State::default();
-                    for (index, item) in output.iter().enumerate() {
-                        terminal.apply_item_at(
-                            u32::try_from(index).map_err(|_| Error::UnsupportedOutput)?,
+                    let mut terminal_items = Vec::with_capacity(output.len());
+                    for (position, item) in output.iter().enumerate() {
+                        let index =
+                            u32::try_from(position).map_err(|_| Error::UnsupportedOutput)?;
+                        let mut slot = Slot::new(index);
+                        slot.apply_item(
                             item,
                             OutputItemPhase::TerminalFallback,
                             raw_output
                                 .as_ref()
-                                .and_then(|items| items.get(index))
+                                .and_then(|items| items.get(position))
                                 .copied(),
                         )?;
+                        terminal_items.push(slot);
                     }
                     let reasoning_disagrees = self.items.iter().any(|slot| {
                         matches!(
                             slot.state,
                             SlotState::ReasoningAdded | SlotState::ReasoningCompleted
-                        ) && !terminal.items.iter().any(|terminal_slot| {
+                        ) && !terminal_items.iter().any(|terminal_slot| {
                             terminal_slot.index == slot.index
                                 && reasoning_slots_agree(slot, terminal_slot)
                         })
@@ -1170,7 +1388,15 @@ impl State {
                     if reasoning_disagrees {
                         return Err(Error::UnsupportedOutput);
                     }
-                    replacement = Some(terminal.items);
+                    for candidate in &terminal_items {
+                        let previous = self
+                            .items
+                            .iter()
+                            .find(|slot| slot.index == candidate.index)
+                            .cloned();
+                        self.validate_repetition(previous.as_ref(), candidate)?;
+                    }
+                    replacement = Some(terminal_items);
                 }
                 if let Some(items) = replacement {
                     self.items = items;

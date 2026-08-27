@@ -506,6 +506,7 @@ fn error_metadata(error: &Error) -> Value {
         Error::InvalidRequest => serde_json::json!({"kind": "invalid_request"}),
         Error::UnsupportedTool => serde_json::json!({"kind": "unsupported_tool"}),
         Error::UnsupportedOutput => serde_json::json!({"kind": "unsupported_output"}),
+        Error::RepetitionDetected(_) => serde_json::json!({"kind": "repetition_detected"}),
         Error::Json => serde_json::json!({"kind": "json"}),
         Error::StreamFailure => serde_json::json!({"kind": "stream_failure"}),
     }
