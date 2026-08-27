@@ -165,7 +165,7 @@ fn write_startup(
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
                 supports_compaction: false,
                 supports_standalone_compaction: true,
-                standalone_compaction_threshold: Some(500),
+                standalone_compaction_threshold: Some(5_200),
                 standalone_compaction_prefix_budget: Some(u64::MAX),
                 cache_policy: None,
                 est_uncached_input_cost_1m_usd: Default::default(),

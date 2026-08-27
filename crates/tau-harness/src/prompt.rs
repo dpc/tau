@@ -1066,6 +1066,40 @@ pub(crate) fn assemble_prompt_context_from(
     assemble_prompt_context_window(tree, head, None, None)
 }
 
+/// Returns whether one durable agent-message entry contributes model-visible
+/// input when prompt assembly lowers the active provider window.
+pub(crate) fn agent_message_is_provider_visible(entry: &AgentEntry) -> bool {
+    let AgentEntry::AgentMessage {
+        direction,
+        sender_id,
+        kind,
+        watch_provider_status,
+        watch_work_status,
+        watch_long_wait,
+        watch_lifecycle,
+        ..
+    } = entry
+    else {
+        return false;
+    };
+    if *direction != tau_core::AgentMessageDirection::Inbound {
+        return false;
+    }
+    match kind {
+        tau_proto::AgentMessageKind::Message
+        | tau_proto::AgentMessageKind::WatchResponse
+        | tau_proto::AgentMessageKind::WatchPrompt => true,
+        tau_proto::AgentMessageKind::WatchProviderStatus => watch_provider_status
+            .as_ref()
+            .is_some_and(|status| !status.initial),
+        tau_proto::AgentMessageKind::WatchWorkStatus => watch_work_status
+            .as_deref()
+            .is_some_and(|status| watch_work_status_text(sender_id.as_str(), status).is_some()),
+        tau_proto::AgentMessageKind::WatchLongWait => watch_long_wait.is_some(),
+        tau_proto::AgentMessageKind::WatchLifecycle => watch_lifecycle.is_some(),
+    }
+}
+
 /// Assemble a logical active-window prefix ending at `cut`.
 ///
 /// Unlike physical ancestry assembly, this retains the latest replacement and
@@ -1152,6 +1186,14 @@ fn assemble_prompt_context_window(
     let mut serialized_block_count = blocks.len();
 
     for (node_id, entry) in active_window.transcript {
+        if matches!(entry, AgentEntry::AgentMessage { .. })
+            && !agent_message_is_provider_visible(entry)
+        {
+            if let Some(measurements) = measurements.as_deref_mut() {
+                measurements.push((node_id, serialized_bytes));
+            }
+            continue;
+        }
         let blocks_before = blocks.len();
         match entry {
             AgentEntry::Compaction {

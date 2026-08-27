@@ -962,11 +962,11 @@ impl Harness {
             }) if through == selected => transaction_id,
             _ => return false,
         };
-        let projection = serde_json::to_vec(
-            &crate::prompt::assemble_prompt_context_from(tree, selected.as_option()).context,
+        let projection = active_provider_window_projected_tokens(
+            tree,
+            selected.as_option(),
+            info.context_window,
         )
-        .ok()
-        .and_then(|encoded| u64::try_from(encoded.len()).ok())
         .unwrap_or(u64::MAX);
         if projection < threshold {
             return false;
@@ -1428,16 +1428,18 @@ impl Harness {
         let Some(agent_id) = conv.identity.agent_id.clone() else {
             return false;
         };
-        let active_tokens = self
+        let projected_tokens = self
             .session_runtime
             .agent_store
             .agent(&agent_id)
-            .map(|tree| {
-                crate::prompt::assemble_prompt_context_from(tree, conv.identity.head).context
+            .and_then(|tree| {
+                active_provider_window_projected_tokens(
+                    tree,
+                    conv.identity.head,
+                    info.context_window,
+                )
             })
-            .and_then(|context| serde_json::to_vec(&context).ok())
-            .and_then(|encoded| u64::try_from(encoded.len()).ok());
-        let projected_tokens = active_tokens.unwrap_or(u64::MAX);
+            .unwrap_or(u64::MAX);
         if threshold.is_none_or(|threshold| projected_tokens < threshold) {
             return false;
         }
@@ -2170,4 +2172,38 @@ impl Harness {
             .then_some(started)
         })
     }
+}
+/// Projects the complete active provider-visible window from scratch.
+///
+/// Automatic scheduling intentionally uses the canonical transcript-entry
+/// projection rather than durable JSON bytes, then adds the same conservative
+/// control-token reserve as dispatch telemetry.
+pub(super) fn active_provider_window_projected_tokens(
+    tree: &tau_core::AgentTree,
+    head: Option<tau_proto::NodeId>,
+    context_window: u64,
+) -> Option<u64> {
+    let window = tree.active_provider_window(head);
+    let replacement_tokens = window.replacement.map_or(Some(0), |replacement| {
+        projected_transcript_entry_tokens(&tau_core::AgentEntry::Compaction {
+            replacement_window: replacement.to_vec(),
+            transaction_id: None,
+            cut: None,
+            suffix_end: None,
+        })
+    })?;
+    window
+        .transcript
+        .iter()
+        .try_fold(replacement_tokens, |total, (_, entry)| {
+            let entry_tokens = if matches!(entry, tau_core::AgentEntry::AgentMessage { .. })
+                && !crate::prompt::agent_message_is_provider_visible(entry)
+            {
+                0
+            } else {
+                projected_transcript_entry_tokens(entry)?
+            };
+            total.checked_add(entry_tokens)
+        })?
+        .checked_add(context_projection_reserve(context_window))
 }

@@ -2503,6 +2503,26 @@ pub(crate) fn full_ws_request_bytes(
         })
 }
 
+/// Return the exact unchained WebSocket frame size for standalone compaction.
+///
+/// Compact dispatch invalidates any cached socket before sending this shape, so
+/// it has neither a response anchor nor the ordinary prewarm `generate` flag.
+pub(crate) fn compact_ws_request_bytes(
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+) -> Result<u64, LlmError> {
+    let envelope = build_ws_envelope(config, request, None, None);
+    serde_json::to_vec(&envelope)
+        .map_err(LlmError::Json)
+        .and_then(|encoded| {
+            u64::try_from(encoded.len()).map_err(|_| {
+                LlmError::InvalidResponse(
+                    "serialized compact WebSocket request is too large".to_owned(),
+                )
+            })
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Phase capture
 // ---------------------------------------------------------------------------

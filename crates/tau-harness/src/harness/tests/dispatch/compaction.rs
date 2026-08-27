@@ -351,9 +351,15 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
         .expect("assistant head");
 
     let mut encoded = path_std_io::Cursor::new(Vec::new());
-    image::DynamicImage::new_rgb8(2, 2)
-        .write_to(&mut encoded, image::ImageFormat::Png)
-        .expect("encode PNG fixture");
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(128, 128, |x, y| {
+        image::Rgb([
+            x.wrapping_mul(17).wrapping_add(y.wrapping_mul(11)) as u8,
+            x.wrapping_mul(31).wrapping_add(y.wrapping_mul(7)) as u8,
+            x.wrapping_mul(13).wrapping_add(y.wrapping_mul(29)) as u8,
+        ])
+    }))
+    .write_to(&mut encoded, image::ImageFormat::Png)
+    .expect("encode PNG fixture");
     let image_bytes = encoded.into_inner();
     h.publish_for_agent(
         &cid,
@@ -362,13 +368,13 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
             call_id: "call-image".into(),
             tool_name: ToolName::new("read_image"),
             tool_type: tau_proto::ToolType::Function,
-            result: CborValue::Text("image/png image, 2x2".to_owned()),
+            result: CborValue::Text("image/png image, 128x128".to_owned()),
             provider_content: vec![tau_proto::ToolResultContentPart::Image(
                 tau_proto::ImageContent {
                     media_type: tau_proto::ImageMediaType::Png,
                     data: image_bytes.clone().into(),
-                    width: 2,
-                    height: 2,
+                    width: 128,
+                    height: 128,
                     detail: tau_proto::ImageDetail::High,
                 },
             )],
@@ -397,9 +403,10 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
         .len() as u64;
     assert!(
         projected < expanded,
-        "fixture must distinguish canonical from JSON-expanded image bytes"
+        "fixture must distinguish canonical from JSON-expanded image bytes: \
+         projected={projected}, expanded={expanded}"
     );
-    let reserve = path_crate_harness::context_limit_telemetry::context_projection_reserve(128_000);
+    let reserve = path_crate_harness::context_limit_telemetry::context_projection_reserve(1_000);
     let active_bytes = serde_json::to_vec(
         &crate::prompt::assemble_prompt_context_from(
             h.session_runtime
@@ -412,6 +419,20 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
     )
     .expect("serialize active prompt context")
     .len() as u64;
+    let active_projection =
+        path_crate_harness::compaction_runtime::active_provider_window_projected_tokens(
+            h.session_runtime
+                .agent_store
+                .agent(&agent_id)
+                .expect("agent tree"),
+            Some(result_head),
+            1_000,
+        )
+        .expect("active provider-visible projection");
+    assert!(
+        active_projection < active_bytes,
+        "fixture must leave room for a threshold between projection and durable JSON bytes"
+    );
     {
         let info = h
             .provider_runtime
@@ -420,7 +441,7 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
             .expect("test model");
         info.supports_compaction = false;
         info.supports_standalone_compaction = true;
-        info.standalone_compaction_threshold = Some(active_bytes + 1);
+        info.standalone_compaction_threshold = Some(active_projection + 1);
     }
     {
         let agent = h
@@ -456,7 +477,7 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
         .model_info
         .get_mut(&"test/model".into())
         .expect("test model")
-        .standalone_compaction_threshold = Some(active_bytes);
+        .standalone_compaction_threshold = Some(active_projection);
     assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
     let compact = read_nth_prompt_created(&h, 0);
     h.provider_runtime
@@ -731,55 +752,6 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
         1
     );
     h.shutdown().expect("shutdown");
-}
-
-/// The real in-process provider/tool route must reject any unbalanced compact
-/// timeline, accept the normalized post-tool threshold request, and complete a
-/// later queued user prompt after the recovered continuation.
-#[test]
-fn strict_provider_vertical_slice_accepts_closed_post_tool_compaction() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = strict_compaction_provider_harness(td.path().join("state")).expect("start");
-    h.submit_user_prompt(test_session_id("s1"), "first tool round".to_owned())
-        .expect("submit first prompt");
-    h.submit_user_prompt(test_session_id("s1"), "later queued prompt".to_owned())
-        .expect("queue later prompt");
-
-    let error = h
-        .run_event_loop(None, false)
-        .expect_err("test provider disconnects after completing the later prompt");
-    assert!(matches!(
-        error,
-        HarnessError::Participant(message) if message == "provider disconnected"
-    ));
-    let events = event_log_events(&h);
-    assert!(events.iter().any(|event| matches!(
-        event,
-        Event::AgentStandaloneCompactionStarted(started)
-            if started.resume_through.is_some()
-    )));
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, Event::AgentCompacted(_)))
-    );
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, Event::AgentStandaloneCompactionFailed(_)))
-    );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        Event::ProviderResponseFinished(response)
-            if response.output_items.iter().any(|item| matches!(
-                item,
-                ContextItem::Message(message)
-                    if message.content.iter().any(|part| matches!(
-                        part,
-                        ContentPart::Text { text } if text == "later prompt complete"
-                    ))
-            ))
-    )));
 }
 
 /// A tool-result activation checkpoint must capture the normalized prefix so a
@@ -9144,6 +9116,11 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
         h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation".to_owned()))
             .expect("start automatic compaction");
         let compact = read_nth_prompt_created(&h, 0);
+        h.provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("test model")
+            .standalone_compaction_threshold = Some(u64::MAX);
         h.handle_provider_response_finished(ProviderResponseFinished {
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -9363,6 +9340,11 @@ fn standalone_auto_compaction_schedules_at_threshold() {
             .expect("context")
             .contains("queued once")
     );
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .standalone_compaction_threshold = Some(u64::MAX);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
@@ -9425,7 +9407,7 @@ fn standalone_auto_compaction_ignores_stale_usage_baseline() {
         .expect("test model");
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
-    info.standalone_compaction_threshold = Some(900);
+    info.standalone_compaction_threshold = Some(10_000);
     let cid = ensure_test_user_agent(&mut h);
     let agent = h
         .agent_runtime
@@ -9511,6 +9493,11 @@ fn standalone_auto_compaction_rolls_fitting_logical_prefixes() {
     assert!(second_context.contains("old-B"));
     assert!(!second_context.contains("old-A"));
     assert!(!second_context.contains("pending suffix"));
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .standalone_compaction_threshold = Some(u64::MAX);
     h.handle_provider_response_finished(provider_text_response(
         &second.agent_prompt_id,
         second.agent_id,

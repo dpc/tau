@@ -2359,10 +2359,38 @@ fn full_ws_compaction_measurement_matches_exact_fresh_wire_envelope() {
             .is_some_and(|key| !key.is_empty())
     );
     assert_eq!(
-        body["input"].as_array().expect("input").last().unwrap()["type"],
+        body["input"]
+            .as_array()
+            .expect("input")
+            .last()
+            .expect("compaction request preserves trigger")["type"],
         "compaction_trigger"
     );
     assert!(body.get("previous_response_id").is_none());
+}
+
+/// Standalone compact admission must measure the exact unchained WebSocket
+/// frame, which omits the ordinary prewarm `generate` field.
+#[test]
+fn compact_ws_measurement_matches_exact_dispatch_envelope() {
+    let config = chain_test_config();
+    let request = basic_prompt_payload();
+    let measured = compact_ws_request_bytes(&config, &request).expect("measure compact frame");
+    let envelope = build_ws_envelope(&config, &request, None, None);
+    let exact = u64::try_from(
+        serde_json::to_vec(&envelope)
+            .expect("serialize compact frame")
+            .len(),
+    )
+    .expect("compact frame length");
+    assert_eq!(measured, exact);
+    assert!(
+        serde_json::to_value(envelope)
+            .expect("serialize compact frame")
+            .get("generate")
+            .is_none(),
+        "compact dispatch must not add the ordinary prewarm marker"
+    );
 }
 
 /// Ensures the default GPT-5.6 route uses standard Responses lowering and
