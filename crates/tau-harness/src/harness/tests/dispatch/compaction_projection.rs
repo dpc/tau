@@ -21,6 +21,252 @@ fn append_projection_fixture_text(h: &mut Harness, cid: &AgentId, bytes: usize, 
     );
 }
 
+fn set_projection_fixture_agents_message(h: &mut Harness, cid: &AgentId, message: String) {
+    let agent_id = durable_agent_id_for_conversation(h, cid);
+    h.publish_for_agent(
+        cid,
+        Event::AgentInitializationContextSet(tau_proto::AgentInitializationContextSet {
+            session_id: h.session_runtime.current_session_id.clone(),
+            agent_id,
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("init-byte-fit")
+                .expect("test initialization id"),
+            agents_message: Some(message),
+            effective_skills: Vec::new(),
+            agents_files: Vec::new(),
+        }),
+    );
+}
+
+/// Standalone prefix fitting must include the exact initialization block that
+/// prompt materialization prepends before provider dispatch.
+///
+/// Both cases reproduce the incident's planner measurements and 4,304-byte
+/// materialization increase. The corrected planner must retreat to a safe
+/// closed prefix, include initialization exactly once, and dispatch rather
+/// than synthesize a local context-window terminal.
+#[test]
+fn standalone_auto_compaction_fits_fully_materialized_incident_prefixes() {
+    const PREFIX_BUDGET: u64 = 334_800;
+    const INITIALIZATION_INCREASE: u64 = 4_304;
+
+    for incident_planner_bytes in [334_055_u64, 333_918] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        let cid = ensure_test_user_agent(&mut h);
+        append_projection_fixture_text(&mut h, &cid, 100, "safe-prefix");
+
+        let agent_id = durable_agent_id_for_conversation(&h, &cid);
+        let safe_head = h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .head
+            .expect("safe prefix head");
+        let tree = h
+            .session_runtime
+            .agent_store
+            .agent(&agent_id)
+            .expect("agent tree");
+        let safe_context = crate::prompt::assemble_prompt_context_prefix_from(
+            tree,
+            Some(safe_head),
+            tau_proto::AgentHead::Node(safe_head),
+        )
+        .expect("safe context")
+        .context;
+        let empty_candidate = tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                content: vec![ContentPart::Text {
+                    text: "incident-prefix:".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        });
+        let mut candidate_context = safe_context.clone();
+        candidate_context.blocks.push(empty_candidate);
+        let empty_candidate_bytes = u64::try_from(
+            serde_json::to_vec(&candidate_context)
+                .expect("serialize")
+                .len(),
+        )
+        .expect("test length fits u64");
+        let incident_payload_bytes = incident_planner_bytes
+            .checked_sub(empty_candidate_bytes)
+            .expect("incident target exceeds fixed context bytes");
+        append_projection_fixture_text(
+            &mut h,
+            &cid,
+            usize::try_from(incident_payload_bytes).expect("test length fits usize"),
+            "incident-prefix",
+        );
+        let incident_head = h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .head
+            .expect("incident prefix head");
+
+        let tree = h
+            .session_runtime
+            .agent_store
+            .agent(&agent_id)
+            .expect("agent tree");
+        let incident_context = crate::prompt::assemble_prompt_context_prefix_from(
+            tree,
+            Some(incident_head),
+            tau_proto::AgentHead::Node(incident_head),
+        )
+        .expect("incident context")
+        .context;
+        assert_eq!(
+            u64::try_from(
+                serde_json::to_vec(&incident_context)
+                    .expect("serialize")
+                    .len()
+            )
+            .expect("test length fits u64"),
+            incident_planner_bytes,
+            "fixture must reproduce the pre-fix planner measurement"
+        );
+
+        let empty_initialization = tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+            items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                content: vec![ContentPart::Text {
+                    text: String::new(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        });
+        let mut with_empty_initialization = incident_context.clone();
+        with_empty_initialization
+            .blocks
+            .insert(0, empty_initialization);
+        let empty_initialization_increase = u64::try_from(
+            serde_json::to_vec(&with_empty_initialization)
+                .expect("serialize")
+                .len(),
+        )
+        .expect("test length fits u64")
+            - incident_planner_bytes;
+        let agents_message_bytes = INITIALIZATION_INCREASE
+            .checked_sub(empty_initialization_increase)
+            .expect("initialization target exceeds fixed block bytes");
+        set_projection_fixture_agents_message(
+            &mut h,
+            &cid,
+            "a".repeat(usize::try_from(agents_message_bytes).expect("test length fits usize")),
+        );
+
+        let tree = h
+            .session_runtime
+            .agent_store
+            .agent(&agent_id)
+            .expect("agent tree");
+        let mut materialized_incident = incident_context;
+        materialized_incident.blocks.insert(
+            0,
+            crate::prompt::initialization_agents_context_block(tree)
+                .expect("initialization context block"),
+        );
+        assert_eq!(
+            u64::try_from(
+                serde_json::to_vec(&materialized_incident)
+                    .expect("serialize")
+                    .len()
+            )
+            .expect("test length fits u64"),
+            incident_planner_bytes + INITIALIZATION_INCREASE,
+            "fixture must reproduce the adapter's fully materialized measurement"
+        );
+
+        {
+            let info = h
+                .provider_runtime
+                .model_info
+                .get_mut(&"test/model".into())
+                .expect("test model");
+            info.supports_compaction = false;
+            info.supports_standalone_compaction = true;
+            info.standalone_compaction_threshold = Some(1);
+            info.standalone_compaction_prefix_budget = Some(PREFIX_BUDGET);
+        }
+        assert_eq!(
+            h.fitting_automatic_compaction_cut(
+                &agent_id,
+                tau_proto::AgentHead::Node(incident_head),
+                PREFIX_BUDGET,
+            ),
+            Some(tau_proto::AgentHead::Node(safe_head)),
+            "fully materialized over-limit candidate must retreat"
+        );
+
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("continue".to_owned()))
+            .expect("dispatch safe compaction prefix");
+        let compact = read_nth_prompt_created(&h, 0);
+        assert_eq!(
+            compact.operation,
+            tau_proto::PromptOperation::StandaloneCompaction
+        );
+        assert_eq!(
+            compact
+                .context
+                .blocks
+                .iter()
+                .filter(|block| {
+                    **block
+                        == crate::prompt::initialization_agents_context_block(
+                            h.session_runtime
+                                .agent_store
+                                .agent(&agent_id)
+                                .expect("agent tree"),
+                        )
+                        .expect("initialization block")
+                })
+                .count(),
+            1,
+            "prompt materialization must include initialization exactly once"
+        );
+        let mut historical_context = compact.context.clone();
+        let trailing = historical_context
+            .blocks
+            .pop()
+            .expect("standalone compaction trigger block");
+        assert_eq!(
+            trailing,
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            })
+        );
+        let historical_bytes = u64::try_from(
+            serde_json::to_vec(&historical_context)
+                .expect("serialize historical prefix")
+                .len(),
+        )
+        .expect("test length fits u64");
+        let planned_bytes = crate::prompt::active_prompt_prefix_json_measurements(
+            h.session_runtime
+                .agent_store
+                .agent(&agent_id)
+                .expect("agent tree"),
+            Some(incident_head),
+        )
+        .expect("prefix measurements")
+        .into_iter()
+        .find_map(|(node_id, bytes)| (node_id == safe_head).then_some(bytes))
+        .expect("selected safe-prefix measurement");
+        assert_eq!(
+            planned_bytes, historical_bytes,
+            "planner and materialized adapter prefix must have identical request shape"
+        );
+        assert!(
+            historical_bytes <= PREFIX_BUDGET,
+            "the dispatched historical prefix must pass adapter admission"
+        );
+        h.shutdown().expect("shutdown");
+    }
+}
+
 /// A same-model provider usage baseline must prevent the live incident's first
 /// premature automatic compaction.
 ///

@@ -825,23 +825,10 @@ impl Harness {
         let contains_payload_envelope_provenance_projection =
             prompt_context.contains_payload_envelope_provenance_projection;
         let mut context = prompt_context.context;
-        if let Some(agents_message) = tree
-            .and_then(tau_core::AgentTree::initialization_context)
-            .and_then(|initialization| initialization.agents_message.as_ref())
+        if let Some(initialization_block) =
+            tree.and_then(crate::prompt::initialization_agents_context_block)
         {
-            context.blocks.insert(
-                0,
-                tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
-                    items: vec![ContextItem::Message(tau_proto::MessageItem {
-                        role: tau_proto::ContextRole::User,
-                        content: vec![tau_proto::ContentPart::Text {
-                            text: agents_message.clone(),
-                        }],
-                        phase: None,
-                        responses_raw_json: None,
-                    })],
-                }),
-            );
+            context.blocks.insert(0, initialization_block);
         }
         if compaction_transaction.is_some() {
             context.blocks.push(tau_proto::ContextBlock::UserInput(

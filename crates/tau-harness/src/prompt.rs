@@ -1135,6 +1135,26 @@ pub(crate) fn active_prompt_prefix_json_measurements(
     Some(measurements)
 }
 
+/// Builds the synthetic user block that prompt materialization prepends from
+/// the agent's frozen initialization context.
+pub(crate) fn initialization_agents_context_block(
+    tree: &tau_core::AgentTree,
+) -> Option<tau_proto::ContextBlock> {
+    let agents_message = tree.initialization_context()?.agents_message.as_ref()?;
+    Some(tau_proto::ContextBlock::UserInput(
+        tau_proto::UserInputBlock {
+            items: vec![ContextItem::Message(tau_proto::MessageItem {
+                role: tau_proto::ContextRole::User,
+                content: vec![tau_proto::ContentPart::Text {
+                    text: agents_message.clone(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        },
+    ))
+}
+
 fn assemble_prompt_context_window(
     tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,
@@ -1177,13 +1197,24 @@ fn assemble_prompt_context_window(
             },
         ));
     }
+    // Prefix admission measures the exact historical context that prompt
+    // materialization will send. Keep the initialization block out of the
+    // assembled transcript itself so materialization remains its sole owner.
+    let measurement_prefix = measurements
+        .as_ref()
+        .and_then(|_| initialization_agents_context_block(tree));
+    let measured_blocks = measurement_prefix
+        .iter()
+        .cloned()
+        .chain(blocks.iter().cloned())
+        .collect();
     let mut serialized_bytes = serde_json::to_vec(&tau_proto::PromptContext {
-        blocks: blocks.clone(),
+        blocks: measured_blocks,
     })
     .ok()
     .and_then(|encoded| u64::try_from(encoded.len()).ok())
     .unwrap_or(u64::MAX);
-    let mut serialized_block_count = blocks.len();
+    let mut serialized_block_count = blocks.len() + usize::from(measurement_prefix.is_some());
 
     for (node_id, entry) in active_window.transcript {
         if matches!(entry, AgentEntry::AgentMessage { .. })
