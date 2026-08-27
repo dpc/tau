@@ -51,6 +51,33 @@ fn authenticated_discovery_normalizes_models_and_refreshes_cache() {
     assert_eq!(cached.len(), 1);
 }
 
+/// Ensures discovery keeps known root context lengths while dropping entries
+/// with null or absent root lengths, without borrowing provider-specific data.
+#[test]
+fn discovery_filters_models_without_root_context_length() {
+    let server = ScriptedHttpServer::spawn(
+        200,
+        r#"{"data":[
+            {"id":"vendor/valid","context_length":1234},
+            {"id":"vendor/null","context_length":null,"top_provider":{"context_length":9999}},
+            {"id":"vendor/missing","top_provider":{"context_length":8888}},
+            {"id":"vendor/zero","context_length":0}
+        ]}"#,
+    );
+
+    let models =
+        fetch_openrouter_models_from("", &network(), &server.url(), None).expect("discovery");
+
+    assert_eq!(
+        models
+            .iter()
+            .map(|model| (model.id.as_str(), model.context_window))
+            .collect::<Vec<_>>(),
+        vec![("vendor/valid", 1234), ("vendor/zero", 0)]
+    );
+    server.finish();
+}
+
 /// OpenRouter routes may emit documented cache counters, but provider selection
 /// prevents an asserted upstream cache lifecycle from becoming model metadata.
 #[test]

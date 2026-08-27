@@ -300,6 +300,7 @@ async fn read_openrouter_models(
 
 fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel> {
     let id = ModelName::try_new(entry.id).ok()?;
+    let context_window = entry.context_length?;
     let supports_reasoning = entry
         .supported_parameters
         .as_deref()
@@ -309,7 +310,7 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
     Some(ChatCompletionsModel {
         id,
         display_name: entry.name,
-        context_window: entry.context_length.unwrap_or(2_000_000),
+        context_window,
         compat: Some(ChatCompletionsCompat {
             stream_options: true,
             parallel_tool_calls: false,
