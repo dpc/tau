@@ -101,15 +101,6 @@ pub(crate) enum ActivationDispatchState {
         /// Durable transaction reserved by the queued start.
         transaction_id: tau_proto::CompactionTransactionId,
     },
-    /// Terminal failure retained its recovery obligation.
-    Blocked {
-        /// Failed durable transaction id.
-        failed_id: tau_proto::CompactionTransactionId,
-        /// Failed transaction cut.
-        cut: tau_proto::AgentHead,
-        /// Activation still owed inference.
-        resume_through: Option<tau_proto::AgentHead>,
-    },
 }
 
 /// Complete provider-facing ownership of an inference dispatch.
@@ -254,31 +245,6 @@ impl InferenceCheckpointOwner {
         match self {
             Self::Inference => None,
             Self::Standalone { id } => Some(id),
-        }
-    }
-}
-
-impl ActivationDispatchState {
-    /// Returns the durable recovery details when inference is blocked.
-    pub(crate) fn blocked_recovery(
-        &self,
-    ) -> Option<(
-        &tau_proto::CompactionTransactionId,
-        tau_proto::AgentHead,
-        Option<tau_proto::AgentHead>,
-    )> {
-        match self {
-            Self::Blocked {
-                failed_id,
-                cut,
-                resume_through,
-            } => Some((failed_id, *cut, *resume_through)),
-            Self::None
-            | Self::Running { .. }
-            | Self::AwaitingCheckpoint { .. }
-            | Self::DispatchUncertain { .. }
-            | Self::ContextRecoveryPending { .. }
-            | Self::ContextRecoveryClaimPending { .. } => None,
         }
     }
 }

@@ -34,7 +34,6 @@ impl Harness {
             || !matches!(
                 agent.dispatch.activation_dispatch,
                 crate::agent::ActivationDispatchState::None
-                    | crate::agent::ActivationDispatchState::Blocked { .. }
             )
         {
             self.send_ui_error_response(
@@ -169,15 +168,19 @@ impl Harness {
                 .is_some_and(|info| info.supports_standalone_compaction)
         });
         if let Some(model) = standalone_model {
-            let blocked_recovery = conv
-                .dispatch
-                .activation_dispatch
-                .blocked_recovery()
-                .map(|(failed_id, cut, resume)| (failed_id.clone(), cut, resume));
             let current_head = conv
                 .identity
                 .head
                 .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+            let blocked_recovery = self
+                .matching_durable_failed_recovery(&agent_id, &model, current_head)
+                .map(|failed| {
+                    (
+                        failed.transaction_id.clone(),
+                        failed.cut,
+                        failed.resume_through,
+                    )
+                });
             let normalized_blocked_cut =
                 blocked_recovery
                     .as_ref()
@@ -357,7 +360,6 @@ impl Harness {
                     && matches!(
                         target.dispatch.activation_dispatch,
                         crate::agent::ActivationDispatchState::None
-                            | crate::agent::ActivationDispatchState::Blocked { .. }
                     )
             };
         if dispatch_uncertain || already_pending || !valid_state {
@@ -471,12 +473,9 @@ impl Harness {
                 target_generation <= previous.target_generation
             });
         let may_bypass_repeat_guard = repeated_generation
-            && !self_request
-            && self.has_matching_blocked_recovery(
-                target_public_id.as_str(),
-                &target.dispatch.activation_dispatch,
-                target_head,
-            );
+            && self
+                .matching_durable_failed_recovery(target_public_id.as_str(), &model, target_head)
+                .is_some();
         if repeated_generation && !may_bypass_repeat_guard {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
@@ -619,15 +618,23 @@ impl Harness {
             );
             return false;
         }
-        let blocked_recovery = target
-            .dispatch
-            .activation_dispatch
-            .blocked_recovery()
-            .map(|(failed_id, cut, resume)| (failed_id.clone(), cut, resume));
         let current_head = target
             .identity
             .head
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        let blocked_recovery = self
+            .matching_durable_failed_recovery(
+                accepted.request.target_agent_id.as_str(),
+                &accepted.request.model,
+                current_head,
+            )
+            .map(|failed| {
+                (
+                    failed.transaction_id.clone(),
+                    failed.cut,
+                    failed.resume_through,
+                )
+            });
         let normalized_blocked_cut =
             blocked_recovery
                 .as_ref()
@@ -1055,33 +1062,37 @@ impl Harness {
         .then_some(normalized)
     }
 
-    /// Returns whether runtime Blocked state matches the latest durable
-    /// failure's transaction id, cut, and resume watermark, and the current
-    /// head must permit the existing safe cut and owed-branch
-    /// normalization.
-    pub(super) fn has_matching_blocked_recovery(
+    /// Returns the latest durable failed transaction only when its start
+    /// supplies the same provider-qualified model and its saved boundary still
+    /// belongs to the selected branch.
+    pub(super) fn matching_durable_failed_recovery(
         &self,
         agent_id: &str,
-        dispatch: &crate::agent::ActivationDispatchState,
+        model: &tau_proto::ModelId,
+        current_head: tau_proto::AgentHead,
+    ) -> Option<tau_proto::AgentStandaloneCompactionFailed> {
+        let tree = self.session_runtime.agent_store.agent(agent_id)?;
+        let failed = tree.unresolved_standalone_compaction_failure(model, current_head)?;
+        self.normalized_blocked_recovery_cut(
+            agent_id,
+            failed.cut,
+            failed.resume_through,
+            current_head,
+        )
+        .is_some()
+        .then(|| failed.clone())
+    }
+
+    /// Returns whether durable recovery authority prevents another automatic
+    /// transaction for this model and selected branch.
+    pub(super) fn durable_recovery_blocks_automatic(
+        &self,
+        agent_id: &str,
+        model: &tau_proto::ModelId,
         current_head: tau_proto::AgentHead,
     ) -> bool {
-        let Some((failed_id, failed_cut, resume_through)) = dispatch.blocked_recovery() else {
-            return false;
-        };
-        let Some(tree) = self.session_runtime.agent_store.agent(agent_id) else {
-            return false;
-        };
-        let Some(tau_core::StandaloneCompactionRecovery::Blocked { failed, .. }) =
-            tree.standalone_compaction_recovery()
-        else {
-            return false;
-        };
-        failed.transaction_id == *failed_id
-            && failed.cut == failed_cut
-            && failed.resume_through == resume_through
-            && self
-                .normalized_blocked_recovery_cut(agent_id, failed_cut, resume_through, current_head)
-                .is_some()
+        self.matching_durable_failed_recovery(agent_id, model, current_head)
+            .is_some()
     }
 
     /// Inserts one automatic standalone compaction boundary before inference
@@ -1138,14 +1149,12 @@ impl Harness {
     ) -> Option<tau_proto::AutomaticCompactionDecision> {
         let conv = self.agent_runtime.agent_registry.agents.get(cid)?;
         let projected_tokens = projected_tokens?;
-        if conv
+        let agent_id = conv.identity.agent_id.as_deref()?;
+        let selected_head = conv
             .identity
-            .agent_id
-            .as_deref()
-            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
-            .and_then(tau_core::AgentTree::standalone_compaction_recovery)
-            .is_some()
-        {
+            .head
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        if self.durable_recovery_blocks_automatic(agent_id, &model, selected_head) {
             return None;
         }
         let info = self.provider_runtime.model_info.get(&model)?;
@@ -1419,15 +1428,20 @@ impl Harness {
                 })
                 .min()
         });
-        if !matches!(
-            conv.dispatch.activation_dispatch,
-            crate::agent::ActivationDispatchState::None
-        ) {
-            return false;
-        }
         let Some(agent_id) = conv.identity.agent_id.clone() else {
             return false;
         };
+        let selected_head = conv
+            .identity
+            .head
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        if !matches!(
+            conv.dispatch.activation_dispatch,
+            crate::agent::ActivationDispatchState::None
+        ) || self.durable_recovery_blocks_automatic(agent_id.as_str(), &model, selected_head)
+        {
+            return false;
+        }
         let projected_tokens = self
             .session_runtime
             .agent_store
@@ -1575,52 +1589,6 @@ impl Harness {
             .collect::<Vec<_>>();
         for call_id in delivered {
             self.consume_wait_background_completion(&call_id);
-        }
-    }
-
-    /// Release a restored run-local block only when a typed failed terminal has
-    /// already committed an inference activation that still lacks a checkpoint.
-    pub(super) fn release_restored_self_compaction_failure_continuations(&mut self) {
-        let releasable = self
-            .agent_runtime
-            .agent_registry
-            .agents
-            .iter()
-            .filter_map(|(cid, agent)| {
-                let agent_id = agent.identity.agent_id.as_deref()?;
-                let tree = self.session_runtime.agent_store.agent(agent_id)?;
-                let typed_failure = tree.manual_compaction_recoveries().into_iter().any(
-                    |recovery| match recovery {
-                        tau_core::ManualCompactionRecovery::Started {
-                            requested,
-                            outcome: Some(outcome),
-                            ..
-                        } => {
-                            matches!(
-                                outcome.as_ref(),
-                                tau_core::ManualCompactionOutcome::Failed(_)
-                            ) && tree
-                                .self_compaction_delivery_needs_checkpoint(&requested.request_id)
-                        }
-                        tau_core::ManualCompactionRecovery::Failed { requested, .. } => {
-                            tree.self_compaction_delivery_needs_checkpoint(&requested.request_id)
-                        }
-                        _ => false,
-                    },
-                );
-                (typed_failure
-                    && matches!(
-                        agent.dispatch.activation_dispatch,
-                        crate::agent::ActivationDispatchState::Blocked { .. }
-                    ))
-                .then_some(cid.clone())
-            })
-            .collect::<Vec<_>>();
-        for cid in releasable {
-            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                agent.dispatch.activation_dispatch =
-                    path_crate_agent::ActivationDispatchState::None;
-            }
         }
     }
 

@@ -2618,24 +2618,11 @@ impl Harness {
             });
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 agent.dispatch.activation_dispatch =
-                    path_crate_agent::ActivationDispatchState::Blocked {
-                        failed_id: failed.transaction_id.clone(),
-                        cut: failed.cut,
-                        resume_through: failed.resume_through,
-                    };
+                    path_crate_agent::ActivationDispatchState::None;
                 agent.dispatch.in_flight_prompt = None;
                 if failed.reason == tau_proto::StandaloneCompactionFailureReason::Cancelled {
                     agent.dispatch.pending_cancel = None;
                 }
-            }
-            if !suppress_provider_watch && let Some(failed_prompt_id) = failed_prompt_id {
-                self.project_agent_watch_provider_state(
-                    &cid,
-                    failed_prompt_id,
-                    tau_proto::AgentWatchProviderState::Blocked {
-                        category: tau_proto::AgentWatchProviderCategory::Compaction,
-                    },
-                );
             }
             if failed.reason != tau_proto::StandaloneCompactionFailureReason::Cancelled
                 && self.complete_failed_compaction_side_conversation(&cid, source)
@@ -2664,10 +2651,6 @@ impl Harness {
                 });
             if has_terminal_continuation {
                 self.fold_pending_prompts_as_steered(&cid);
-                if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                    agent.dispatch.activation_dispatch =
-                        path_crate_agent::ActivationDispatchState::None;
-                }
                 self.dispatch_prompt_after_publish_idle(&cid);
             }
             self.try_advance_queue();

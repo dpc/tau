@@ -4,6 +4,10 @@
 
 Compaction and recovery span core transcript cuts and boundaries, harness transaction/checkpoint ownership, provider execution, typed message activation, context accounting, cold restore, and CLI/model authority, so no component-local documentation can state the complete closed-prefix and recovery contract.
 
+The user explicitly approved the durable failure, retry, suppression, replay,
+and successor semantics added for ticket `9dvw`, satisfying
+[GATE-persistence-and-extension-interface-change-approval](GATE-persistence-and-extension-interface-change-approval.md).
+
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and
 standalone compaction using the same provider converter. Approximate context
@@ -124,21 +128,33 @@ The model-callable path accepts work only when the exact captured
 provider-qualified model supports standalone compaction and its route exists.
 It has no inline fallback. Provider terminal errors, including context-window
 rejection during standalone compaction, produce one terminal transaction
-failure and are not retried indefinitely.
+failure and are not retried indefinitely. Standalone compaction uses the shared
+transient-failure classifier and jittered Fibonacci scheduler with a named
+five-attempt policy, including the first attempt. Deterministic failures,
+including context-window exhaustion, are terminal immediately. Ordinary
+inference deliberately retains its unbounded transient-retry policy.
 The Codex adapter serializes the first v2 compaction probe for a route/account
 generation. A compaction-specific request rejection removes standalone
 capability for that generation; explicit tools and automatic recovery share the
 downgrade. Credential/account generation changes reject stale observations and
 restore one fresh probe. Negative capability evidence is not persisted.
 An explicit `:compact` or authorized `agent_compact` request may recover a
-terminally blocked standalone transaction. Its successor may preserve the
+terminally failed standalone transaction. Its successor may preserve the
 failed cut or retreat it along the same ancestor path to obtain a closed
 provider prefix, but may never advance or cross branches and may not drop a
 retained resume obligation. Its resume watermark must remain on the original
-owed branch, and explicit recovery refuses a current head reached by navigating
-away from that branch. Ordinary activating input remains queued and does
-not clear or implicitly retry the block; `:cancel` does not abandon this idle
-durable obligation.
+owed branch. Navigating away refuses supersession of that failure but permits a
+fresh independent explicit transaction on the selected branch. The failed
+durable start's provider-qualified model and selected-branch ancestry are the
+authority after warm continuation and cold replay.
+Ordinary activating input remains usable but does not clear or implicitly retry
+the failure. The matching failed model and branch suppress automatic threshold,
+policy, continuation, and reactive recovery so queued ingress cannot create a
+hidden repeat loop. Explicit UI, self, and cross-agent requests remain recovery
+authorities. Model or branch drift permits a fresh independent transaction
+without rewriting the failed history; returning to the failed model and branch
+restores suppression. Only a successful explicit successor clears the matching
+durable failure chain.
 When a failed transaction carries `resume_through`, that watermark must be an
 ancestor of the successor watermark; a sibling branch with superficial
 nonemptiness is invalid. Only a failed standalone transaction may be
@@ -223,9 +239,15 @@ cannot rewrite a committed start. If the captured model route disappears, the
 transaction durably fails before any provider request is delivered. Success installs a
 cut/suffix-bearing boundary so facts
 committed during compaction survive after the replacement window. Terminal
-failure records a safe durable category, blocks the owed activation from
-automatic retry, and leaves the agent addressable for explicit `:compact` or
-authorized `agent_compact` recovery.
+failure records a safe durable category, suppresses automatic retry, and leaves
+the agent addressable for ordinary prompts and explicit `:compact` or authorized
+`agent_compact` recovery. A transaction remains runtime-blocked only while it
+owes a durable continuation or background completion. Self/manual, cross-agent,
+side-agent, and reactive-overflow failure handling removes that block only after
+the owed completion is staged or delivered at its owning durable boundary.
+Terminal failures with no remaining continuation obligation become usable
+immediately; replay reconstructs the same result and never redispatches the
+terminal provider request.
 Inference resumes only after a durable dispatch watermark commits.
 While that checkpoint is interceptable or waiting to persist, an explicit
 `AwaitingCheckpoint` runtime state blocks every ordinary dispatch path.
@@ -407,8 +429,10 @@ pass must consume another closed suffix group, which proves termination without
 an arbitrary pass ceiling. A deterministic preflight failure and its reason are
 recorded in the start itself, so live execution and restart commit the same
 terminal outcome without provider work. A failed provider pass is never
-recursively retried; provider, serialization, and indivisible-item failures
-remain explicit terminal outcomes.
+recursively scheduled as another automatic compaction transaction. Its provider
+request may use the bounded transient retry policy above; exhausted transient
+failures, deterministic provider failures, serialization failures, and
+indivisible-item failures remain explicit terminal outcomes.
 
 `before_inference` policies otherwise retain the deferred runtime behavior above.
 `outer_turn_finished` policies that match the logical terminal status coalesce

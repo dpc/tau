@@ -17,6 +17,12 @@ authority. Scheduler release preserves independent prompt deadlines, delayed
 ownership/counting, and unrelated providers or generations. Configured
 credential, endpoint, or backend-family identity rotation invalidates only the
 old provider profile cooldown.
+Ordinary inference retains unbounded transient retry authority. Standalone
+compaction uses the same classified jittered Fibonacci scheduler but
+terminalizes after five total attempts; deterministic failures terminalize
+immediately. The fifth transient failure still extends matching shared cooldown
+state, so bounding one compaction never discards availability evidence that
+paces other same-profile work.
 
 Parsed usage-window reset hints remain informational and are not scheduler lower
 bounds. The runtime probes through the existing per-prompt jittered Fibonacci

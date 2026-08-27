@@ -927,16 +927,24 @@ retried. Zulip-specific review triggers are recorded in
 
 Standalone compaction and its continuation are harness-owned durable work. Every
 new provider cut must be a closed transcript prefix; a tool-calling assistant
-response and its complete terminal results node are indivisible. A failed
-transaction with a resume watermark remains fail-closed until an explicit
-successor preserves same-branch coverage of that watermark. A successor may
-retreat its cut to retain more exact suffix, but it must not replace the owed
-watermark with an ancestor or sibling selected by later head navigation.
-Ordinary input and `:cancel` do not abandon this ownership; if the selected head
-no longer descends from the owed watermark, explicit recovery must remain
-blocked. Core validation and warm/cold replay regressions enforce these rules.
+response and its complete terminal results node are indivisible. Transient
+standalone provider failures use the shared scheduler for at most five total
+attempts; deterministic failures terminalize immediately. After terminal
+continuation or background completion, ordinary input proceeds, while durable
+failure history suppresses automatic threshold, policy, continuation, and
+reactive recovery for the same provider-qualified model and branch. Model or
+branch drift permits fresh independent work; returning restores suppression
+until a successful matching explicit successor clears the failed chain.
+
+An explicit successor may retreat its cut to retain more exact suffix, but it
+must preserve same-branch coverage of any resume watermark and cannot replace
+that watermark with an ancestor or sibling selected by later head navigation.
+Ordinary input and `:cancel` do not clear durable failure authority. Core
+validation and warm/cold exact-once replay regressions prevent duplicate provider
+dispatch, terminal delivery, and continuation checkpoints.
 Revisit them when adding any explicit abandon/rewind operation or changing
-compaction replay ownership.
+compaction replay ownership, retry limits, failure classification, or automatic
+suppression qualification.
 
 Exact committed publication envelopes create or transfer activation ownership.
 A retained completion envelope or standalone `AwaitingCheckpoint` tuple represents

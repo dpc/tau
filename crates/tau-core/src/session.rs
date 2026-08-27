@@ -440,6 +440,8 @@ pub struct AgentTree {
     compaction_transactions: HashMap<tau_proto::CompactionTransactionId, CompactionTransactionFold>,
     /// Durable insertion order for deterministic recovery projection.
     compaction_transaction_order: Vec<tau_proto::CompactionTransactionId>,
+    /// Failed authorities cleared by a successful explicit successor chain.
+    resolved_compaction_failures: HashSet<tau_proto::CompactionTransactionId>,
     /// Terminal-owned eager decisions keyed by eventual transaction id.
     automatic_compaction_decisions:
         HashMap<tau_proto::CompactionTransactionId, AutomaticCompactionDecisionFold>,
@@ -691,7 +693,8 @@ pub enum ManualCompactionRecovery {
 pub enum ManualCompactionOutcome {
     /// Compaction committed a replacement boundary.
     Succeeded(tau_proto::AgentCompacted),
-    /// Compaction failed and left the target blocked.
+    /// Compaction failed; durable history may suppress matching automatic work
+    /// without blocking ordinary prompt dispatch.
     Failed(tau_proto::AgentStandaloneCompactionFailed),
 }
 
@@ -709,7 +712,10 @@ pub enum StandaloneCompactionRecovery {
     },
     /// A start has no terminal outcome and must be repaired as interrupted.
     Interrupted(tau_proto::AgentStandaloneCompactionStarted),
-    /// A terminal failure retains an explicit recovery obligation.
+    /// The latest transaction failed terminally.
+    ///
+    /// Harness recovery may use this as nonblocking automatic-suppression
+    /// authority; this projection does not itself require dispatch to block.
     Blocked {
         /// Durable terminal failure.
         failed: tau_proto::AgentStandaloneCompactionFailed,
@@ -826,6 +832,38 @@ impl AgentTree {
             }
             (Some(CompactionTransactionOutcome::Succeeded(_)), Some(_)) => None,
         }
+    }
+
+    /// Returns the latest unresolved terminal failure for one exact model and
+    /// selected branch.
+    ///
+    /// Unrelated later transactions do not clear this authority. A successful
+    /// explicit successor clears the failed transaction and its superseded
+    /// failure chain.
+    #[must_use]
+    pub fn unresolved_standalone_compaction_failure(
+        &self,
+        model: &tau_proto::ModelId,
+        current_head: tau_proto::AgentHead,
+    ) -> Option<&tau_proto::AgentStandaloneCompactionFailed> {
+        self.compaction_transaction_order
+            .iter()
+            .rev()
+            .filter(|id| !self.resolved_compaction_failures.contains(*id))
+            .filter_map(|id| {
+                let transaction = self.compaction_transactions.get(id)?;
+                let CompactionTransactionOutcome::Failed(failed) = transaction.outcome.as_ref()?
+                else {
+                    return None;
+                };
+                (transaction.started.model == *model
+                    && self.is_ancestor_head(failed.cut, current_head)
+                    && failed
+                        .resume_through
+                        .is_none_or(|resume| self.is_ancestor_head(resume, current_head)))
+                .then_some(failed)
+            })
+            .next()
     }
 
     /// Returns model-requested compaction state in durable acceptance order.
@@ -1596,6 +1634,7 @@ impl AgentTree {
             background_completed_tool_calls: HashSet::new(),
             compaction_transactions: HashMap::new(),
             compaction_transaction_order: Vec::new(),
+            resolved_compaction_failures: HashSet::new(),
             automatic_compaction_decisions: HashMap::new(),
             automatic_compaction_decision_order: Vec::new(),
             manual_compaction_requests: HashMap::new(),
@@ -2133,11 +2172,40 @@ impl AgentTree {
                 }
             }
             Event::AgentCompacted(compacted) => {
-                if let Some(transaction_id) = &compacted.transaction_id
-                    && let Some(transaction) = self.compaction_transactions.get_mut(transaction_id)
-                {
+                if let Some(transaction_id) = &compacted.transaction_id {
+                    let Some(transaction) = self.compaction_transactions.get_mut(transaction_id)
+                    else {
+                        return;
+                    };
                     transaction.outcome =
                         Some(CompactionTransactionOutcome::Succeeded(compacted.clone()));
+                    let mut superseded = transaction.started.supersedes.clone();
+                    let clear_matching = superseded.as_ref().map(|_| {
+                        (
+                            transaction.started.model.clone(),
+                            transaction
+                                .started
+                                .resume_through
+                                .unwrap_or(transaction.started.cut),
+                        )
+                    });
+                    while let Some(failed_id) = superseded {
+                        if !self.resolved_compaction_failures.insert(failed_id.clone()) {
+                            break;
+                        }
+                        superseded = self
+                            .compaction_transactions
+                            .get(&failed_id)
+                            .and_then(|failed| failed.started.supersedes.clone());
+                    }
+                    if let Some((model, through)) = clear_matching {
+                        while let Some(failed_id) = self
+                            .unresolved_standalone_compaction_failure(&model, through)
+                            .map(|failed| failed.transaction_id.clone())
+                        {
+                            self.resolved_compaction_failures.insert(failed_id);
+                        }
+                    }
                 }
             }
             Event::AgentInferenceDispatchStarted(checkpoint) => {
@@ -3193,13 +3261,21 @@ impl AgentTree {
             let accepted = &request.requested;
             let valid_cut = match accepted.initiating_tool_name {
                 tau_proto::ManualCompactionTool::Compact => {
-                    started.supersedes.is_none()
-                        && started.resume_through == Some(started.cut)
-                        && self.is_ancestor_head(accepted.requested_target_head, started.cut)
-                        && self.has_complete_tool_round_for(
-                            started.cut.as_option(),
-                            &accepted.initiating_tool_call_id,
-                        )
+                    started.resume_through.is_some_and(|resume| {
+                        let valid_boundary = if started.supersedes.is_some() {
+                            self.is_ancestor_head(started.cut, accepted.requested_target_head)
+                        } else {
+                            resume == started.cut
+                                && self
+                                    .is_ancestor_head(accepted.requested_target_head, started.cut)
+                        };
+                        valid_boundary
+                            && self.is_ancestor_head(accepted.requested_target_head, resume)
+                            && self.has_complete_tool_round_for(
+                                resume.as_option(),
+                                &accepted.initiating_tool_call_id,
+                            )
+                    })
                 }
                 tau_proto::ManualCompactionTool::AgentCompact => {
                     if started.supersedes.is_some() {
@@ -3381,6 +3457,15 @@ impl AgentTree {
             ));
         }
         if let Some(id) = &started.supersedes {
+            if !matches!(
+                started.trigger,
+                tau_proto::StandaloneCompactionTrigger::Manual
+                    | tau_proto::StandaloneCompactionTrigger::ManualAgentTool { .. }
+            ) {
+                return Err(AgentEventValidationError::new(
+                    "only an explicit manual compaction may supersede a failed transaction",
+                ));
+            }
             let Some(previous) = self.compaction_transactions.get(id) else {
                 return Err(AgentEventValidationError::new(
                     "standalone compaction supersedes unknown transaction",
@@ -3392,6 +3477,20 @@ impl AgentTree {
             ) {
                 return Err(AgentEventValidationError::new(
                     "standalone compaction may supersede only a failed transaction",
+                ));
+            }
+            let current = self
+                .head
+                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+            if self
+                .unresolved_standalone_compaction_failure(&started.model, current)
+                .as_ref()
+                .map(|failed| &failed.transaction_id)
+                != Some(id)
+                || previous.started.model != started.model
+            {
+                return Err(AgentEventValidationError::new(
+                    "standalone compaction must supersede the latest matching unresolved failure",
                 ));
             }
             let preserves_resume = previous

@@ -2134,7 +2134,6 @@ impl Harness {
         if matches!(reason, tau_proto::SessionStartReason::Resume) {
             self.repair_restored_session_tool_state(&session_id);
             self.consume_restored_self_compaction_deliveries();
-            self.release_restored_self_compaction_failure_continuations();
         }
         self.reconcile_pending_context_recoveries(true);
         self.resume_restored_compaction_checkpoints(RestoredCheckpointAuthority::DiscoveryComplete);
@@ -2827,24 +2826,34 @@ impl Harness {
                     }
                 }
                 Some(tau_core::StandaloneCompactionRecovery::Blocked {
-                    failed,
-                    compact_prompt_id,
+                    failed: _,
+                    compact_prompt_id: _,
                 }) => {
+                    let pending_reactive = self
+                        .session_runtime
+                        .agent_store
+                        .agent(agent_id.as_str())
+                        .and_then(tau_core::AgentTree::inference_dispatch_recovery)
+                        .and_then(|recovery| match recovery {
+                            tau_core::InferenceDispatchRecovery::ContextRecoveryRequired(
+                                checkpoint,
+                            ) => Some(checkpoint),
+                            _ => None,
+                        });
                     if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                        conv.dispatch.activation_dispatch =
-                            path_crate_agent::ActivationDispatchState::Blocked {
-                                failed_id: failed.transaction_id,
-                                cut: failed.cut,
-                                resume_through: failed.resume_through,
-                            };
+                        // The terminal failure itself leaves no work in flight;
+                        // a separately committed legacy reactive plan must
+                        // still be claimed locally. Durable failure history,
+                        // not activation dispatch, suppresses provider work.
+                        conv.dispatch.activation_dispatch = pending_reactive.map_or(
+                            path_crate_agent::ActivationDispatchState::None,
+                            |checkpoint| {
+                                path_crate_agent::ActivationDispatchState::ContextRecoveryPending {
+                                    checkpoint,
+                                }
+                            },
+                        );
                     }
-                    self.project_agent_watch_provider_state(
-                        &cid,
-                        compact_prompt_id,
-                        tau_proto::AgentWatchProviderState::Blocked {
-                            category: tau_proto::AgentWatchProviderCategory::Compaction,
-                        },
-                    );
                 }
                 Some(
                     ref recovery @ tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint {

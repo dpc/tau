@@ -1492,7 +1492,7 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
         h.agent_runtime.agent_registry.agents[&cid]
             .dispatch
             .activation_dispatch,
-        crate::agent::ActivationDispatchState::Blocked { .. }
+        crate::agent::ActivationDispatchState::None
     ));
     h.handle_cancel_prompt(
         crate::harness::harness_connection_id(),
@@ -1506,7 +1506,7 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
         h.agent_runtime.agent_registry.agents[&cid]
             .dispatch
             .activation_dispatch,
-        crate::agent::ActivationDispatchState::Blocked { .. }
+        crate::agent::ActivationDispatchState::None
     ));
     assert!(!event_log_events(&h).into_iter().any(|event| matches!(
         event,
@@ -1521,8 +1521,17 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
             .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
             .count(),
         1,
-        "new input must not implicitly retry or clear the block"
+        "new input must not implicitly retry or clear suppression"
     );
+    let queued = read_nth_prompt_created(&h, 1);
+    h.handle_provider_response_finished(provider_text_response(
+        &queued.agent_prompt_id,
+        queued.agent_id,
+        "queued input remains usable",
+    ))
+    .expect("finish queued input before explicit compaction");
+    h.drain_publish_idle_dispatches();
+    h.try_advance_queue();
     h.handle_compact_request(
         crate::harness::harness_connection_id(),
         test_session_id("s1"),
@@ -1545,7 +1554,7 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
     );
     assert!(starts[1].resume_through.is_some());
 
-    let retry = read_nth_prompt_created(&h, 1);
+    let retry = read_nth_prompt_created(&h, 2);
     assert!(
         retry
             .context
@@ -1558,7 +1567,7 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
         "recovered summary",
     ))
     .expect("accept corrected retry");
-    let inference = read_nth_prompt_created(&h, 2);
+    let inference = read_nth_prompt_created(&h, 3);
     let rendered = serde_json::to_string(&inference.context).expect("context");
     assert_eq!(rendered.matches("call-historical").count(), 2);
     assert_eq!(rendered.matches("queued while blocked").count(), 1);
@@ -1571,7 +1580,7 @@ fn compact_repairs_warm_historical_open_prefix_failure() {
                     if prompt.operation == tau_proto::PromptOperation::Inference
             ))
             .count(),
-        1
+        2
     );
     h.shutdown().expect("shutdown");
 }
@@ -1658,15 +1667,15 @@ fn compact_repairs_cold_historical_open_prefix_failure() {
             .expect("recovered agent")
             .dispatch
             .activation_dispatch,
-        crate::agent::ActivationDispatchState::Blocked { .. }
+        crate::agent::ActivationDispatchState::None
     ));
     resumed.shutdown().expect("shutdown");
 }
 
-/// `:compact` must remain fail-closed when navigation moves a warm blocked
-/// agent before the transaction's owed resume watermark.
+/// Navigation changes failure authority, so `:compact` starts a fresh warm
+/// transaction instead of superseding the failure from the old branch.
 #[test]
-fn compact_refuses_warm_blocked_recovery_off_owed_branch() {
+fn compact_starts_fresh_warm_transaction_after_branch_change() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
@@ -1700,26 +1709,21 @@ fn compact_refuses_warm_blocked_recovery_off_owed_branch() {
             .into_iter()
             .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
             .count(),
-        1
+        2
     );
     assert!(matches!(
         h.agent_runtime.agent_registry.agents[&cid]
             .dispatch
             .activation_dispatch,
-        crate::agent::ActivationDispatchState::Blocked { .. }
+        crate::agent::ActivationDispatchState::Running { .. }
     ));
-    assert!(event_log_events(&h).into_iter().any(|event| matches!(
-        event,
-        Event::HarnessNotice(notice)
-            if notice.message.contains("navigating away from its owed branch")
-    )));
     h.shutdown().expect("shutdown");
 }
 
-/// Cold replay must retain the same off-branch recovery refusal and must not
-/// create provider work after a blocked head move.
+/// Cold replay preserves branch-qualified suppression and permits a fresh
+/// explicit transaction after navigation changes authority.
 #[test]
-fn compact_refuses_cold_blocked_recovery_off_owed_branch() {
+fn compact_starts_fresh_cold_transaction_after_branch_change() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
     let agent_id;
@@ -1769,8 +1773,8 @@ fn compact_refuses_cold_blocked_recovery_off_owed_branch() {
             .into_iter()
             .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
             .count(),
-        0,
-        "cold recovery must emit no successor start"
+        1,
+        "changed branch authority must emit one fresh start"
     );
     let recovered = resumed
         .agent_runtime
@@ -1781,7 +1785,7 @@ fn compact_refuses_cold_blocked_recovery_off_owed_branch() {
         .expect("replayed agent");
     assert!(matches!(
         recovered.dispatch.activation_dispatch,
-        crate::agent::ActivationDispatchState::Blocked { .. }
+        crate::agent::ActivationDispatchState::Running { .. }
     ));
     resumed.shutdown().expect("shutdown");
 }
@@ -2625,6 +2629,7 @@ fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
         arguments: CborValue::Map(Vec::new()),
     };
     h.request_agent_tool_compaction(&cid, &call, ToolName::new("compact"), None);
+    h.drain_publish_idle_dispatches();
     let request_id = event_log_events(&h)
         .into_iter()
         .find_map(|event| match event {
@@ -4575,62 +4580,35 @@ fn manual_cross_compaction_cold_replay_recovers_failed_tool_at_same_generation()
     assert_failed_manual_tool_recovery(true);
 }
 
-/// The blocked-repeat exception requires exact runtime/durable transaction
-/// ownership and safe current-head ancestry for every correlated boundary.
+/// Explicit recovery requires exact durable provider-qualified model and safe
+/// current-head ancestry.
 #[test]
-fn manual_cross_compaction_blocked_repeat_requires_exact_recovery_ownership() {
+fn manual_cross_compaction_recovery_requires_exact_failure_authority() {
     let (_td, mut h, _caller, target, _call, target_id) = setup_manual_cross_compaction_test();
     let (prefix, _, _) = seed_historical_open_prefix_failure(&mut h, &target, "echo/model");
     let current_head = h.agent_runtime.agent_registry.agents[&target]
         .identity
         .head
         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-    let valid = h.agent_runtime.agent_registry.agents[&target]
-        .dispatch
-        .activation_dispatch
-        .clone();
-    assert!(h.has_matching_blocked_recovery(target_id.as_str(), &valid, current_head));
-
-    let path_crate_agent::ActivationDispatchState::Blocked {
-        failed_id,
-        cut,
-        resume_through,
-    } = valid.clone()
-    else {
-        panic!("historical failure must block");
-    };
-    let mismatches = [
-        path_crate_agent::ActivationDispatchState::Blocked {
-            failed_id: tau_proto::CompactionTransactionId::parse("ct-not-owned")
-                .expect("transaction id"),
-            cut,
-            resume_through,
-        },
-        path_crate_agent::ActivationDispatchState::Blocked {
-            failed_id: failed_id.clone(),
-            cut: tau_proto::AgentHead::Root,
-            resume_through,
-        },
-        path_crate_agent::ActivationDispatchState::Blocked {
-            failed_id,
-            cut,
-            resume_through: None,
-        },
-    ];
-    for mismatch in &mismatches {
-        assert!(!h.has_matching_blocked_recovery(target_id.as_str(), mismatch, current_head));
-    }
     assert!(
-        !h.has_matching_blocked_recovery(target_id.as_str(), &valid, prefix),
+        h.matching_durable_failed_recovery(target_id.as_str(), &"echo/model".into(), current_head)
+            .is_some()
+    );
+    assert!(
+        h.matching_durable_failed_recovery(target_id.as_str(), &"other/model".into(), current_head)
+            .is_none()
+    );
+    assert!(
+        h.matching_durable_failed_recovery(target_id.as_str(), &"echo/model".into(), prefix)
+            .is_none(),
         "a sibling or retreated current head must not satisfy the owed resume branch"
     );
     h.shutdown().expect("shutdown");
 }
 
-/// Model self-`compact` cannot use the cross-agent blocked-repeat exception,
-/// even when runtime and durable recovery ownership otherwise match exactly.
+/// Model self-`compact` can explicitly retry a matching failed transaction.
 #[test]
-fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
+fn manual_self_compaction_retries_matching_failed_transaction() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("harness");
     h.provider_runtime
@@ -4641,15 +4619,14 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     seed_historical_open_prefix_failure(&mut h, &cid, "echo/model");
-    let blocked = h.agent_runtime.agent_registry.agents[&cid]
-        .dispatch
-        .activation_dispatch
-        .clone();
     let current_head = h.agent_runtime.agent_registry.agents[&cid]
         .identity
         .head
         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-    assert!(h.has_matching_blocked_recovery(agent_id.as_str(), &blocked, current_head));
+    assert!(
+        h.matching_durable_failed_recovery(agent_id.as_str(), &"echo/model".into(), current_head)
+            .is_some()
+    );
 
     let historical = tau_proto::AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse("cr-self-historical")
@@ -4715,11 +4692,11 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
         arguments: CborValue::Map(Vec::new()),
     };
     h.request_agent_tool_compaction(&cid, &call, ToolName::new("compact"), None);
+    h.drain_publish_idle_dispatches();
+    h.try_advance_queue();
+    h.drain_publish_idle_dispatches();
+    h.try_advance_queue();
 
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolError(error) if error.call_id == call.id && error.message == "not_needed"
-    )));
     assert_eq!(
         h.session_runtime
             .agent_store
@@ -4727,22 +4704,21 @@ fn manual_self_compaction_cannot_bypass_repeat_guard_for_blocked_recovery() {
             .expect("agent tree")
             .manual_compaction_recoveries()
             .len(),
-        1
+        2
     );
-    assert_eq!(durable_compaction_counts(&h, &agent_id), (1, 1, 1, 0));
+    assert_eq!(durable_compaction_counts(&h, &agent_id), (2, 2, 1, 0));
     assert!(
-        !h.tool_routing
+        h.tool_routing
             .tool_runtime
             .tool_turn
             .is_backgrounded(&call.id)
     );
-    assert_eq!(
+    assert!(matches!(
         h.agent_runtime.agent_registry.agents[&cid]
             .dispatch
-            .activation_dispatch
-            .blocked_recovery(),
-        blocked.blocked_recovery()
-    );
+            .activation_dispatch,
+        crate::agent::ActivationDispatchState::Running { .. }
+    ));
     h.shutdown().expect("shutdown");
 }
 
@@ -5123,15 +5099,15 @@ fn manual_cross_compaction_repairs_blocked_open_prefix_target() {
         h.agent_runtime.agent_registry.agents[&target_cid]
             .dispatch
             .activation_dispatch,
-        crate::agent::ActivationDispatchState::Blocked { .. }
+        crate::agent::ActivationDispatchState::None
     ));
     h.shutdown().expect("shutdown");
 }
 
-/// Authorized `agent_compact` must fail once with `stale_branch` when the
-/// blocked target no longer selects the owed resume branch.
+/// Authorized `agent_compact` starts a fresh transaction when navigation
+/// changes the target's failure authority.
 #[test]
-fn manual_cross_compaction_refuses_blocked_target_off_owed_branch() {
+fn manual_cross_compaction_starts_fresh_after_branch_change() {
     let (_td, mut h, caller_cid, target_cid, call, target_id) =
         setup_manual_cross_compaction_test();
     let (prefix, _, _) = seed_historical_open_prefix_failure(&mut h, &target_cid, "echo/model");
@@ -5158,9 +5134,9 @@ fn manual_cross_compaction_refuses_blocked_target_off_owed_branch() {
                     if started.agent_id == target_id
             ))
             .count(),
-        1
+        2
     );
-    assert!(event_log_events(&h).into_iter().any(|event| matches!(
+    assert!(!event_log_events(&h).into_iter().any(|event| matches!(
         event,
         Event::AgentManualCompactionRequestFailed(failed)
             if failed.target_agent_id == target_id
@@ -5171,7 +5147,7 @@ fn manual_cross_compaction_refuses_blocked_target_off_owed_branch() {
         h.agent_runtime.agent_registry.agents[&target_cid]
             .dispatch
             .activation_dispatch,
-        crate::agent::ActivationDispatchState::Blocked { .. }
+        crate::agent::ActivationDispatchState::Running { .. }
     ));
     h.shutdown().expect("shutdown");
 }
@@ -5342,7 +5318,7 @@ fn manual_cross_compaction_rejects_caller_limit() {
 
 /// A repeated request and its mismatched block both preserve the repeat guard.
 #[test]
-fn manual_cross_compaction_rejects_repeat_guard_and_mismatched_block() {
+fn manual_cross_compaction_rejects_repeat_guard() {
     let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
     let historical = tau_proto::AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse("cr-historical").expect("request id"),
@@ -5382,27 +5358,6 @@ fn manual_cross_compaction_rejects_repeat_guard_and_mismatched_block() {
         Some(&target_id),
     );
     assert_manual_cross_compaction_error(&h, &call, "not_needed");
-
-    let mismatched_call =
-        register_manual_cross_compaction_call(&mut h, &caller, "call-mismatched-block");
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .get_mut(&target)
-        .expect("target")
-        .dispatch
-        .activation_dispatch = path_crate_agent::ActivationDispatchState::Blocked {
-        failed_id: tau_proto::CompactionTransactionId::parse("ct-not-owned").expect("transaction"),
-        cut: tau_proto::AgentHead::Root,
-        resume_through: None,
-    };
-    h.request_agent_tool_compaction(
-        &caller,
-        &mismatched_call,
-        ToolName::new("agent_compact"),
-        Some(&target_id),
-    );
-    assert_manual_cross_compaction_error(&h, &mismatched_call, "not_needed");
 }
 
 /// Manual compaction may claim the sole installed input wait, but it must first
@@ -6003,8 +5958,13 @@ fn explicit_parent_compaction_failed_worker_remains_loaded_across_resume() {
             .dispatch
             .pending_prompts
             .iter()
-            .any(|prompt| prompt.text == "fresh after compaction failure"),
-        "the durable blocked recovery may queue the turn, but restored request ownership must be ordinary"
+            .any(|prompt| prompt.text == "fresh after compaction failure")
+            || event_log_events(&resumed).iter().any(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::Inference
+            )),
+        "a fresh turn must either queue or dispatch after the terminal failure"
     );
     assert_eq!(
         resumed
@@ -7277,10 +7237,17 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
             models: vec![unsupported],
         },
     );
-    assert!(matches!(
-        h.agent_runtime.agent_watch.provider_status["main"].state,
-        tau_proto::AgentWatchProviderState::Blocked { .. }
-    ));
+    assert!(
+        h.agent_runtime
+            .agent_watch
+            .provider_status
+            .get("main")
+            .is_none_or(|status| !matches!(
+                status.state,
+                tau_proto::AgentWatchProviderState::Blocked { .. }
+            )),
+        "terminal recovery drift must not leave the agent blocked"
+    );
     h.provider_runtime
         .model_info
         .get_mut(&"test/model".into())
@@ -7362,10 +7329,18 @@ fn reactive_context_overflow_ui_cancel_is_terminal_once() {
         )),
         "terminal cancelled compaction is not replay-dispatched"
     );
-    assert!(matches!(
-        resumed.agent_runtime.agent_watch.provider_status[&agent_id].state,
-        tau_proto::AgentWatchProviderState::Blocked { .. }
-    ));
+    assert!(
+        resumed
+            .agent_runtime
+            .agent_watch
+            .provider_status
+            .get(&agent_id)
+            .is_none_or(|status| !matches!(
+                status.state,
+                tau_proto::AgentWatchProviderState::Blocked { .. }
+            )),
+        "a durable cancelled terminal must replay as usable"
+    );
     resumed.shutdown().expect("shutdown");
 }
 
@@ -8382,8 +8357,8 @@ fn standalone_compaction_rejects_response_after_head_navigation() {
     h.shutdown().expect("shutdown");
 }
 
-/// A terminal standalone failure must become one durable blocked outcome and
-/// must not redispatch compaction merely because queue advancement repeats.
+/// A terminal UI compaction failure suppresses hidden automatic retries but
+/// leaves ordinary prompt dispatch and explicit successor retries available.
 #[test]
 fn standalone_compaction_failure_does_not_retry_automatically() {
     let td = TempDir::new().expect("tempdir");
@@ -8396,6 +8371,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         .expect("test model");
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(1);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agent_runtime.agent_registry.agents[&cid]
         .identity
@@ -8441,55 +8417,22 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
             h.agent_runtime.agent_registry.agents[&cid]
                 .dispatch
                 .activation_dispatch,
-            crate::agent::ActivationDispatchState::Blocked { .. }
+            crate::agent::ActivationDispatchState::None
         ),
         "unexpected activation state: {:?}",
         h.agent_runtime.agent_registry.agents[&cid]
             .dispatch
             .activation_dispatch
     );
-    assert!(matches!(
-        h.agent_runtime.agent_watch.provider_status[agent_id.as_str()].state,
-        tau_proto::AgentWatchProviderState::Blocked {
-            category: tau_proto::AgentWatchProviderCategory::Compaction
-        }
-    ));
-    let watcher_cid = h.create_durable_user_agent(
-        h.session_runtime.current_session_id.clone(),
-        &h.config.selected_role.clone(),
-    );
-    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .get_mut(&watcher_cid)
-        .expect("watcher")
-        .turn
-        .turn_state = AgentTurnState::AgentThinking {
-        agent_prompt_id: test_agent_prompt_id("blocked-watcher-busy"),
-    };
-    h.set_agent_watch(
-        &watcher_id,
-        &agent_id,
-        true,
-        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
-    );
     assert!(
-        session_agent_message_received_events(&h)
-            .iter()
-            .any(|message| {
-                message.recipient_id.as_str() == watcher_id
-                    && message
-                        .watch_provider_status
-                        .as_ref()
-                        .is_some_and(|status| {
-                            status.initial
-                                && matches!(
-                                    status.state,
-                                    tau_proto::AgentWatchProviderState::Blocked { .. }
-                                )
-                        })
-            })
+        !h.agent_runtime
+            .agent_watch
+            .provider_status
+            .get(agent_id.as_str())
+            .is_some_and(|status| matches!(
+                status.state,
+                tau_proto::AgentWatchProviderState::Blocked { .. }
+            ))
     );
     assert_eq!(
         event_log_events(&h)
@@ -8498,6 +8441,17 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
             .count(),
         1
     );
+    {
+        let agent = h
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent");
+        agent.execution.context_input_tokens = Some(1_000);
+        agent.execution.context_usage_model = Some("test/model".into());
+        agent.execution.context_usage_head = agent.identity.head;
+    }
     assert_eq!(
         event_log_events(&h)
             .into_iter()
@@ -8509,6 +8463,39 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         matches!(event, Event::AgentStandaloneCompactionFailed(failed)
             if serde_json::to_string(&failed).expect("serialize failure").contains("secret provider detail"))
     }));
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "prompt after failed UI compaction".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    h.drain_publish_idle_dispatches();
+    h.try_advance_queue();
+    let inference = read_nth_prompt_created(&h, 1);
+    assert_eq!(inference.operation, tau_proto::PromptOperation::Inference);
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+            .count(),
+        1,
+        "same-model/branch threshold scheduling must use durable suppression"
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &inference.agent_prompt_id,
+        inference.agent_id,
+        "ordinary inference remains usable",
+    ))
+    .expect("finish ordinary inference");
     h.handle_compact_request(
         crate::harness::harness_connection_id(),
         test_session_id("s1"),
@@ -8527,6 +8514,36 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         Some(&starts[0].transaction_id)
     );
     assert_ne!(starts[1].transaction_id, starts[0].transaction_id);
+    let successor = read_nth_prompt_created(&h, 2);
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        automatic_compaction_decision: None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: successor.agent_prompt_id,
+        agent_id: crate::parse_agent_id(&agent_id),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: Some("second provider detail".to_owned()),
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_attempt: Default::default(),
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("record successor failure");
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .activation_dispatch,
+        crate::agent::ActivationDispatchState::None
+    ));
 }
 
 /// Every rejected standalone terminal must preserve the pre-existing context
@@ -8897,15 +8914,21 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
             "{label}"
         );
         assert!(matches!(
-            h.agent_runtime.agent_registry.agents[&cid].dispatch.activation_dispatch,
-            ActivationDispatchState::Blocked {
-                ref failed_id,
-                cut: blocked_cut,
-                resume_through: blocked_resume,
-            } if *failed_id == transaction_id
-                && blocked_cut == cut
-                && blocked_resume == resume_through
+            h.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
+                .activation_dispatch,
+            ActivationDispatchState::None
         ));
+        let suppressed = h
+            .matching_durable_failed_recovery(
+                agent_id.as_str(),
+                &"test/model".into(),
+                head.map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+            )
+            .expect("terminal failure remains durable suppression authority");
+        assert_eq!(suppressed.transaction_id, transaction_id);
+        assert_eq!(suppressed.cut, cut);
+        assert_eq!(suppressed.resume_through, resume_through);
         assert!(
             !event_log_events(&h)
                 .iter()
@@ -8988,13 +9011,13 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
     h.shutdown().expect("shutdown");
 }
 
-/// Cold replay must recover the actual durable compact prompt correlation for a
-/// blocked snapshot; it must never synthesize one from the transaction id.
+/// Cold replay restores nonblocking suppression without projecting the failed
+/// UI operation as active provider work.
 #[test]
-fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
+fn failed_ui_compaction_replay_restores_nonblocking_suppression() {
     let td = TempDir::new().expect("tempdir");
     let state = td.path().join("state");
-    let (agent_id, compact_prompt_id);
+    let agent_id;
     {
         let mut h = quiet_provider_harness(&state).expect("start");
         enable_remote_compaction_for_test_model(&mut h);
@@ -9017,7 +9040,6 @@ fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
             Some(&agent_id),
         );
         let compact = read_nth_prompt_created(&h, 0);
-        compact_prompt_id = compact.agent_prompt_id.clone();
         h.handle_provider_response_finished(ProviderResponseFinished {
             automatic_compaction_decision: None,
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
@@ -9049,14 +9071,24 @@ fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
     let mut resumed =
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("resume");
-    assert!(matches!(
-        resumed.agent_runtime.agent_watch.provider_status[&agent_id].state,
-        tau_proto::AgentWatchProviderState::Blocked { .. }
-    ));
-    assert_eq!(
-        resumed.agent_runtime.agent_watch.provider_status[&agent_id].agent_prompt_id,
-        compact_prompt_id
+    assert!(
+        !resumed
+            .agent_runtime
+            .agent_watch
+            .provider_status
+            .contains_key(&agent_id)
     );
+    let recovered = resumed
+        .agent_runtime
+        .agent_registry
+        .agents
+        .values()
+        .find(|agent| agent.identity.agent_id.as_deref() == Some(agent_id.as_str()))
+        .expect("replayed agent");
+    assert!(matches!(
+        recovered.dispatch.activation_dispatch,
+        ActivationDispatchState::None
+    ));
     resumed.shutdown().expect("shutdown");
 }
 

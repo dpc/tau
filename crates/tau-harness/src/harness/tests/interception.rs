@@ -4065,7 +4065,7 @@ fn intercepted_reactive_drift_terminalization_never_dispatches() {
         h.agent_runtime.agent_registry.agents[&cid]
             .dispatch
             .activation_dispatch,
-        crate::agent::ActivationDispatchState::Blocked { .. }
+        crate::agent::ActivationDispatchState::None
     ));
     h.shutdown().expect("shutdown");
 }

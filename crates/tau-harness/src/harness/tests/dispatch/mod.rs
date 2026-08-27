@@ -2229,7 +2229,7 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
         h.agent_runtime.agent_registry.agents[&target_cid]
             .dispatch
             .activation_dispatch,
-        crate::agent::ActivationDispatchState::Blocked { .. }
+        crate::agent::ActivationDispatchState::None
     ));
     assert_eq!(
         h.session_runtime
@@ -2398,7 +2398,7 @@ fn assert_failed_manual_tool_recovery(cold_reopen: bool) {
         h.agent_runtime.agent_registry.agents[&target_cid]
             .dispatch
             .activation_dispatch,
-        crate::agent::ActivationDispatchState::Blocked { .. }
+        crate::agent::ActivationDispatchState::None
     ));
     h.shutdown().expect("shutdown");
 }
@@ -2855,6 +2855,7 @@ mod agent_metadata;
 mod agent_runtime;
 mod cancellation_and_background;
 mod compaction;
+mod compaction_failure_recovery;
 mod compaction_projection;
 mod compaction_replay;
 mod compaction_strict;

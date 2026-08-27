@@ -3738,6 +3738,8 @@ where
                         self.oauth_refresh_rejections
                             .record_unauthorized(job.prompt.model.provider.clone(), identity);
                     }
+                    let retry_disposition = PromptRetryPolicy::for_operation(job.prompt.operation)
+                        .after_failure(job.retry_state.attempts);
                     let policy_delay = job
                         .retry_state
                         .next_delay(decision.class, job.agent_prompt_id.as_str());
@@ -3788,6 +3790,19 @@ where
                                 shared.not_before,
                                 generation,
                             );
+                    }
+                    if let PromptRetryDisposition::Terminal(attempt) = retry_disposition {
+                        let mut finished = simple_finished(
+                            job.agent_prompt_id,
+                            job.prompt.agent_id,
+                            job.prompt.originator,
+                            "provider retry budget exhausted during standalone compaction",
+                        );
+                        finished.provider_attempt = attempt;
+                        handle.send(HarnessInputMessage::emit_transient(
+                            Event::ProviderResponseFinishedReported(finished),
+                        ))?;
+                        continue;
                     }
                     emit_retry_status(
                         &job,
@@ -4332,6 +4347,58 @@ impl PromptRetryState {
         let jitter_range = (base / 5).max(1);
         let jitter = stable_retry_hash(prompt_id, self.attempts) % (jitter_range + 1);
         Duration::from_millis(base.saturating_add(jitter).min(ceiling))
+    }
+}
+
+/// Retry-attempt authority applied before the shared scheduler accepts delayed
+/// provider work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromptRetryPolicy {
+    /// Ordinary inference retains the existing deliberately unbounded policy.
+    UnboundedInference,
+    /// Standalone compaction terminates after five total provider attempts.
+    FiveAttemptStandaloneCompaction,
+}
+
+/// Closed scheduling result after one provider attempt fails transiently.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromptRetryDisposition {
+    /// The shared scheduler retains the logical prompt for another attempt.
+    Retry,
+    /// The logical prompt terminalizes at this finite one-based attempt.
+    Terminal(tau_proto::ProviderAttempt),
+}
+
+/// Finite total-attempt limit for standalone compaction.
+const STANDALONE_COMPACTION_ATTEMPT_LIMIT: tau_proto::ProviderAttempt =
+    match tau_proto::ProviderAttempt::new(5) {
+        Some(attempt) => attempt,
+        None => panic!("standalone compaction attempt limit must be nonzero"),
+    };
+
+impl PromptRetryPolicy {
+    /// Selects retry authority from the immutable prompt operation.
+    fn for_operation(operation: tau_proto::PromptOperation) -> Self {
+        match operation {
+            tau_proto::PromptOperation::Inference => Self::UnboundedInference,
+            tau_proto::PromptOperation::StandaloneCompaction => {
+                Self::FiveAttemptStandaloneCompaction
+            }
+        }
+    }
+
+    /// Returns the complete scheduling disposition after one more failure.
+    fn after_failure(self, previous_failures: u64) -> PromptRetryDisposition {
+        match self {
+            Self::UnboundedInference => PromptRetryDisposition::Retry,
+            Self::FiveAttemptStandaloneCompaction
+                if previous_failures.saturating_add(1)
+                    >= u64::from(STANDALONE_COMPACTION_ATTEMPT_LIMIT.get()) =>
+            {
+                PromptRetryDisposition::Terminal(STANDALONE_COMPACTION_ATTEMPT_LIMIT)
+            }
+            Self::FiveAttemptStandaloneCompaction => PromptRetryDisposition::Retry,
+        }
     }
 }
 

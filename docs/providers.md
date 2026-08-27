@@ -979,11 +979,14 @@ when the server reset boundary passes. After quota state is cleared, an empty
 capability snapshot remains replayable for the running harness so both live and
 late clients show neutral unknown.
 
-Required LLM work has no attempt-count or elapsed-time retry limit during the
-running session. Transport/server failures, throttling, usage windows,
-billing/quota/credits, reloadable auth/configuration, and unknown remote
-failures remain pending until success or cancellation. Only a narrowly proven
-deterministic unchanged-request failure closes immediately.
+Required inference work has no attempt-count or elapsed-time retry limit during
+the running session. Standalone compaction is bounded to five total attempts:
+transient failures use the same scheduler and shared cooldown, then the fifth
+failure terminalizes without a sixth provider attempt. Transport/server
+failures, throttling, usage windows, billing/quota/credits, reloadable
+auth/configuration, and unknown remote inference failures remain pending until
+success or cancellation. A narrowly proven deterministic unchanged-request
+failure closes immediately for either operation.
 
 Retry delays do not occupy one of the bounded provider workers. One in-memory
 scheduler parks logical prompts, applies jittered class-specific Fibonacci

@@ -10,11 +10,14 @@ advertise: false
 
 ## Provider retries
 
-Required ChatGPT/Codex Responses, Chat Completions, and OpenRouter work keeps
-retrying during the running session until success or explicit cancellation,
-unless Tau can positively prove the unchanged request is deterministic and
-invalid. Unknown provider failures retry conservatively; billing, quota,
-credits, usage windows, and reloadable auth/configuration retry slowly.
+Required ChatGPT/Codex Responses, Chat Completions, and OpenRouter inference
+keeps retrying during the running session until success or explicit
+cancellation, unless Tau can positively prove the unchanged request is
+deterministic and invalid. Standalone compaction instead stops after five total
+attempts; transient failures use the same scheduler and shared cooldown, while
+deterministic failures stop immediately. Unknown inference failures retry
+conservatively; billing, quota, credits, usage windows, and reloadable
+auth/configuration retry slowly.
 
 Delayed work is parked in one in-memory scheduler and does not consume a
 provider worker. Tau shows a retry status with the reason, next delay, and

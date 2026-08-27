@@ -871,14 +871,16 @@ impl Harness {
         {
             return false;
         }
-        let Some(tree) = self
+        let Some(agent_id) = self
             .agent_runtime
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.identity.agent_id.as_deref())
-            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
+            .and_then(|agent| agent.identity.agent_id.clone())
         else {
+            return false;
+        };
+        let Some(tree) = self.session_runtime.agent_store.agent(agent_id.as_str()) else {
             return false;
         };
         let Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) =
@@ -889,6 +891,13 @@ impl Harness {
         let Some(model) = checkpoint.model.clone() else {
             return false;
         };
+        let current_head = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.identity.head)
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
         let selected_or_continuation_model_matches = self
             .agent_runtime
             .agent_registry
@@ -914,15 +923,8 @@ impl Harness {
                 .get(&response.agent_prompt_id)
                 != Some(&model)
             || !selected_or_continuation_model_matches
-            || !tree.is_ancestor_head(
-                checkpoint.through,
-                self.agent_runtime
-                    .agent_registry
-                    .agents
-                    .get(cid)
-                    .and_then(|agent| agent.identity.head)
-                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-            )
+            || !tree.is_ancestor_head(checkpoint.through, current_head)
+            || self.durable_recovery_blocks_automatic(agent_id.as_str(), &model, current_head)
             || !self
                 .provider_runtime
                 .model_info
@@ -1057,10 +1059,22 @@ impl Harness {
                                 .map_or(AgentHead::Root, AgentHead::Node),
                         )
                     });
+            let matching_failure_suppresses = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(&cid)
+                .and_then(|agent| {
+                    let agent_id = agent.identity.agent_id.as_deref()?;
+                    let current_head = agent.identity.head.map_or(AgentHead::Root, AgentHead::Node);
+                    Some(self.durable_recovery_blocks_automatic(agent_id, model, current_head))
+                })
+                .unwrap_or(true);
             if selected_or_continuation_model_matches
                 && capability_matches
                 && policy_allows
                 && branch_matches
+                && !matching_failure_suppresses
             {
                 self.start_reactive_compaction_for_checkpoint(&cid, &checkpoint, None);
             } else {

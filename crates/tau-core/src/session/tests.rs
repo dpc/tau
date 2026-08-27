@@ -807,10 +807,49 @@ fn superseding_compaction_allows_only_ancestor_cut_retreat() {
     let mut equal = compaction_start("ct-equal");
     equal.cut = equal_cut;
     equal.resume_through = Some(equal_cut);
-    equal.supersedes = Some(failed.transaction_id);
+    equal.supersedes = Some(failed.transaction_id.clone());
     equal_tree
         .validate_event(&Event::AgentStandaloneCompactionStarted(equal))
         .expect("equal retry remains valid");
+    let mut wrong_model = compaction_start("ct-wrong-model");
+    wrong_model.model = "other/model".into();
+    wrong_model.cut = equal_cut;
+    wrong_model.resume_through = Some(equal_cut);
+    wrong_model.supersedes = Some(failed.transaction_id.clone());
+    assert!(
+        validation_error(
+            &equal_tree,
+            Event::AgentStandaloneCompactionStarted(wrong_model)
+        )
+        .contains("latest matching unresolved failure")
+    );
+    let mut later_failed = compaction_start("ct-later-failed");
+    later_failed.cut = equal_cut;
+    later_failed.resume_through = Some(equal_cut);
+    fail_compaction(&mut equal_tree, &later_failed);
+    let mut obsolete = compaction_start("ct-obsolete-predecessor");
+    obsolete.cut = equal_cut;
+    obsolete.resume_through = Some(equal_cut);
+    obsolete.supersedes = Some(failed.transaction_id);
+    assert!(
+        validation_error(
+            &equal_tree,
+            Event::AgentStandaloneCompactionStarted(obsolete)
+        )
+        .contains("latest matching unresolved failure")
+    );
+    let mut automatic_supersession = compaction_start("ct-automatic-supersession");
+    automatic_supersession.cut = equal_cut;
+    automatic_supersession.resume_through = Some(equal_cut);
+    automatic_supersession.supersedes = Some(later_failed.transaction_id);
+    automatic_supersession.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticThreshold;
+    assert!(
+        validation_error(
+            &equal_tree,
+            Event::AgentStandaloneCompactionStarted(automatic_supersession)
+        )
+        .contains("only an explicit manual compaction")
+    );
 
     let mut advance_tree = AgentTree::from_events(agent_id(), &[]);
     let original = append_user_input(&mut advance_tree, "original");
@@ -853,13 +892,14 @@ fn superseding_compaction_allows_only_ancestor_cut_retreat() {
     sibling_start.cut = branch_point;
     sibling_start.resume_through = Some(sibling);
     sibling_start.supersedes = Some(failed.transaction_id);
-    assert!(
-        validation_error(
+    assert!({
+        let error = validation_error(
             &sibling_tree,
-            Event::AgentStandaloneCompactionStarted(sibling_start)
-        )
-        .contains("preserve or retreat")
-    );
+            Event::AgentStandaloneCompactionStarted(sibling_start),
+        );
+        error.contains("preserve or retreat")
+            || error.contains("latest matching unresolved failure")
+    });
 
     let unknown_tree = AgentTree::from_events(agent_id(), &[]);
     let mut unknown = compaction_start("ct-unknown-successor");
@@ -957,6 +997,12 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
     tree.validate_event(&Event::AgentCompacted(compacted.clone()))
         .expect("corrected successor success");
     tree.apply_event(&Event::AgentCompacted(compacted));
+    let successful_head = AgentHead::Node(tree.head().expect("successful boundary"));
+    assert!(
+        tree.unresolved_standalone_compaction_failure(&successor.model, successful_head)
+            .is_none(),
+        "successful exact successor clears its failed authority chain"
+    );
     let through = AgentHead::Node(tree.head().expect("compaction boundary"));
     let checkpoint = tau_proto::AgentInferenceDispatchStarted {
         agent_id: agent_id(),

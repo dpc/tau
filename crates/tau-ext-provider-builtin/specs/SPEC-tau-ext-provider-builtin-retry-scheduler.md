@@ -9,14 +9,19 @@ succeeds, is canceled, the process/session shuts down, or the unchanged request
 is positively proven deterministic and invalid. Unknown remote failures retry;
 classification selects cadence, shared cooldown, visible explanation, and
 profile reload behavior rather than default termination.
+Standalone compaction is the finite exception: transient failures use the same
+classifier, jittered Fibonacci cadence, and shared provider-profile cooldown,
+but the fifth total attempt terminalizes that transaction without scheduling a
+sixth. Its terminal fifth-attempt evidence still extends the matching shared
+cooldown for other logical prompts. Ordinary inference retains unbounded retry
+authority.
 The local Chat Completions summary compactor is a narrow exception: once any
 semantic output has arrived, any retryable outcome terminalizes the
 standalone transaction rather than risking an ambiguous summary resend. Only
 pre-semantic-output failures enter the scheduler.
 Provider adapters attach a machine-readable terminal failure category to the
 single final `ProviderResponseFinished`. Terminal request rejections bypass the
-logical-work retry scheduler even when its configured retry budget is
-effectively unlimited.
+logical-work retry scheduler and terminalize immediately.
 
 Workers execute one finite attempt. Retryable outcomes return the logical job to
 one process-lifetime delayed scheduler, releasing the bounded execution slot

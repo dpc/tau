@@ -2090,6 +2090,30 @@ fn generated_retry_delay_caps_without_exhausting_attempts() {
     assert_eq!(state.attempts, 10_000);
 }
 
+/// Standalone compaction must stop after its named five-attempt policy while
+/// ordinary inference retains deliberately unbounded retry authority.
+#[test]
+fn standalone_retry_budget_exhausts_without_bounding_inference() {
+    let compaction =
+        PromptRetryPolicy::for_operation(tau_proto::PromptOperation::StandaloneCompaction);
+    assert_eq!(
+        compaction,
+        PromptRetryPolicy::FiveAttemptStandaloneCompaction
+    );
+    assert_eq!(compaction.after_failure(3), PromptRetryDisposition::Retry);
+    assert_eq!(
+        compaction.after_failure(4),
+        PromptRetryDisposition::Terminal(STANDALONE_COMPACTION_ATTEMPT_LIMIT)
+    );
+
+    let inference = PromptRetryPolicy::for_operation(tau_proto::PromptOperation::Inference);
+    assert_eq!(inference, PromptRetryPolicy::UnboundedInference);
+    assert_eq!(
+        inference.after_failure(u64::MAX),
+        PromptRetryDisposition::Retry
+    );
+}
+
 /// Ensures prompts sharing one reset lower bound receive positive stable
 /// prompt-local jitter instead of stampeding at one identical instant.
 #[test]

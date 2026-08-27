@@ -2361,6 +2361,258 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
+/// Standalone compaction uses the shared retry scheduler for four delayed
+/// retries, then emits one terminal fifth-attempt failure without dispatching
+/// a sixth provider attempt.
+#[test]
+fn standalone_compaction_retry_policy_terminalizes_after_five_attempts() {
+    let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
+    let input = BlockingInput::default();
+    let mut compact_prompt = prompt();
+    compact_prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(compact_prompt),
+    )]));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let executor_attempts = Arc::clone(&attempts);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        executor_attempts.fetch_add(1, Ordering::SeqCst);
+        send_worker_message(
+            &execution.output_tx,
+            &execution.output_waker,
+            WorkerMessage::Retry {
+                job: execution.job,
+                decision: RetryDecision::new(RetryClass::Transport),
+                live_detail: None,
+                canonical_unauthorized: false,
+            },
+        )
+        .expect("return retry outcome");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_executors_and_clock(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            RuntimeExecutors {
+                prompt: executor,
+                prewarm: production_prewarm_executor(),
+                retry_clock: runtime_clock,
+            },
+        )
+        .expect("run standalone retry provider");
+    });
+
+    for expected_retry_statuses in 1..=4 {
+        wait_for_runtime_frames(&output, |frames| {
+            frames
+                .iter()
+                .filter(|frame| {
+                    matches!(
+                        input_event(frame),
+                        Some(Event::ProviderResponseUpdatedReported(update))
+                            if update.status.as_ref().is_some_and(|status| status.retry.is_some())
+                    )
+                })
+                .count()
+                >= expected_retry_statuses
+        });
+        clock.advance(Duration::from_secs(60 * 60));
+    }
+    let frames = wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinishedReported(finished))
+                    if finished.stop_reason == ProviderStopReason::Error
+                        && finished.provider_attempt.get() == 5
+            )
+        })
+    });
+    assert_eq!(attempts.load(Ordering::SeqCst), 5);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinishedReported(_))
+            ))
+            .count(),
+        1
+    );
+    input.close();
+    runtime.join().expect("standalone retry runtime joins");
+}
+
+/// The fifth transient compaction failure terminalizes that prompt but still
+/// extends the shared cooldown that keeps a same-profile peer parked.
+#[test]
+fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
+    let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
+    let input = BlockingInput::default();
+    let mut compact_prompt = prompt();
+    compact_prompt.agent_prompt_id = "compact-4290"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("compaction prompt id");
+    compact_prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    let mut peer_prompt = prompt();
+    peer_prompt.agent_prompt_id = "peer-3"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("peer prompt id");
+    input.push(encode_frames(&[
+        live_event(11, Event::AgentPromptCreated(compact_prompt)),
+        live_event(12, Event::AgentPromptCreated(peer_prompt)),
+    ]));
+    let compaction_attempts = Arc::new(AtomicUsize::new(0));
+    let peer_attempts = Arc::new(AtomicUsize::new(0));
+    let (peer_finished_tx, peer_finished_rx) = mpsc::sync_channel(1);
+    let executor_compaction_attempts = Arc::clone(&compaction_attempts);
+    let executor_peer_attempts = Arc::clone(&peer_attempts);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        if execution.job.agent_prompt_id.as_str() == "compact-4290" {
+            executor_compaction_attempts.fetch_add(1, Ordering::SeqCst);
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::Throttle),
+                    live_detail: None,
+                    canonical_unauthorized: false,
+                },
+            )
+            .expect("return compaction retry");
+            return;
+        }
+        let attempt = executor_peer_attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0 {
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::Throttle),
+                    live_detail: None,
+                    canonical_unauthorized: false,
+                },
+            )
+            .expect("park peer retry");
+            return;
+        }
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit_transient(
+                Event::ProviderResponseFinishedReported(simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "peer done",
+                )),
+            ))
+            .expect("finish peer");
+        writer.flush().expect("flush peer");
+        peer_finished_tx.send(()).expect("report peer finish");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime_clock: Arc<dyn RetryClock> = clock.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_executors_and_clock(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            2,
+            RuntimeExecutors {
+                prompt: executor,
+                prewarm: production_prewarm_executor(),
+                retry_clock: runtime_clock,
+            },
+        )
+        .expect("run shared-cooldown provider");
+    });
+
+    wait_for_runtime_frames(&output, |frames| {
+        ["compact-4290", "peer-3"].into_iter().all(|id| {
+            frames.iter().any(|frame| {
+                matches!(
+                    input_event(frame),
+                    Some(Event::ProviderResponseUpdatedReported(update))
+                        if update.agent_prompt_id.as_str() == id
+                            && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+                )
+            })
+        })
+    });
+    for expected_compaction_statuses in 2..=4 {
+        clock.advance(Duration::from_secs(1));
+        wait_for_runtime_frames(&output, |frames| {
+            frames
+                .iter()
+                .filter(|frame| matches!(
+                    input_event(frame),
+                    Some(Event::ProviderResponseUpdatedReported(update))
+                        if update.agent_prompt_id.as_str() == "compact-4290"
+                            && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+                ))
+                .count()
+                >= expected_compaction_statuses
+        });
+    }
+    clock.advance(Duration::from_secs(1));
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinishedReported(finished))
+                    if finished.agent_prompt_id.as_str() == "compact-4290"
+                        && finished.provider_attempt.get() == 5
+            )
+        })
+    });
+    assert_eq!(compaction_attempts.load(Ordering::SeqCst), 5);
+    assert_eq!(peer_attempts.load(Ordering::SeqCst), 1);
+
+    clock.advance(Duration::from_secs(4));
+    assert!(matches!(
+        peer_finished_rx.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(
+        peer_attempts.load(Ordering::SeqCst),
+        1,
+        "the fifth failure must extend the peer beyond the previous cooldown"
+    );
+    clock.advance(Duration::from_secs(1));
+    peer_finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("peer becomes due after the extended cooldown");
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinishedReported(finished))
+                    if finished.agent_prompt_id.as_str() == "peer-3"
+            )
+        })
+    });
+    assert_eq!(peer_attempts.load(Ordering::SeqCst), 2);
+    input.close();
+    runtime.join().expect("shared-cooldown runtime joins");
+}
+
 /// Ensures manual scheduler ownership transfer decrements the delayed count in
 /// the main loop, so EOF can finish after the admitted attempt completes.
 #[test]

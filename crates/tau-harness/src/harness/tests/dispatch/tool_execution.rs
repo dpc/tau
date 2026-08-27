@@ -1768,7 +1768,8 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
 
 /// Standalone terminal classification precedes the ordinary global-round guard,
 /// so a rejected telemetry-bearing compact response records only its permitted
-/// terminal diagnostic and cannot launch the malformed tool call.
+/// terminal diagnostic, cannot launch the malformed tool call, and does not
+/// project already-finished provider work as blocked.
 #[test]
 fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
     let td = TempDir::new().expect("tempdir");
@@ -1970,32 +1971,27 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         ),
         context_before
     );
-    assert!(matches!(
-        h.agent_runtime.agent_watch.provider_status[agent_id.as_str()].state,
-        tau_proto::AgentWatchProviderState::Blocked {
-            category: tau_proto::AgentWatchProviderCategory::Compaction
-        }
-    ));
+    assert!(
+        !h.agent_runtime
+            .agent_watch
+            .provider_status
+            .get(agent_id.as_str())
+            .is_some_and(|status| matches!(
+                status.state,
+                tau_proto::AgentWatchProviderState::Blocked {
+                    category: tau_proto::AgentWatchProviderCategory::Compaction
+                }
+            ))
+    );
     let watcher_receives_after: Vec<_> = session_agent_message_received_events(&h)
         .into_iter()
         .filter(|message| message.recipient_id == watcher_id)
         .collect();
     assert_eq!(
         watcher_receives_after.len(),
-        watcher_receives_before + 1,
+        watcher_receives_before,
         "{watcher_receives_after:#?}"
     );
-    assert!(matches!(
-        watcher_receives_after
-            .last()
-            .and_then(|event| event.watch_provider_status.as_ref()),
-        Some(tau_proto::AgentWatchProviderStatusNotification {
-            state: tau_proto::AgentWatchProviderState::Blocked {
-                category: tau_proto::AgentWatchProviderCategory::Compaction
-            },
-            ..
-        })
-    ));
     assert_eq!(
         event_log_events(&h)
             .into_iter()
