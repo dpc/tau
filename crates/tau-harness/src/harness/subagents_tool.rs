@@ -528,7 +528,7 @@ impl Harness {
     /// any.
     pub(crate) fn record_wait_tool_result(
         &mut self,
-        result: ToolResult,
+        result: &ToolResult,
         terminal: Option<tau_proto::ObservationId>,
     ) {
         let Some(owner) = self.wait_owner_for_call(&result.call_id) else {
@@ -546,7 +546,7 @@ impl Harness {
     /// Record one tool error with its canonical terminal observation, when any.
     pub(crate) fn record_wait_tool_error(
         &mut self,
-        error: ToolError,
+        error: &ToolError,
         terminal: Option<tau_proto::ObservationId>,
     ) {
         let Some(owner) = self.wait_owner_for_call(&error.call_id) else {

@@ -49,6 +49,41 @@ fn background_placeholder(call_id: &str) -> ToolResult {
     }
 }
 
+fn foreground_result(call_id: &str, payload: &str) -> ToolResult {
+    ToolResult {
+        presentation: Default::default(),
+        call_id: call_id.into(),
+        tool_name: slow_tool_name(),
+        tool_type: ToolType::Function,
+        result: CborValue::Text(payload.to_owned()),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: vec![7; 64 * 1024].into(),
+                width: 1,
+                height: 1,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }
+}
+
+fn foreground_error(call_id: &str, payload: &str) -> ToolError {
+    ToolError {
+        call_id: call_id.into(),
+        tool_name: slow_tool_name(),
+        tool_type: ToolType::Function,
+        message: payload.to_owned(),
+        details: Some(CborValue::Text(payload.to_owned())),
+        presentation: Default::default(),
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }
+}
+
 fn background_result(call_id: &str, text: &str) -> ToolBackgroundResult {
     ToolBackgroundResult {
         call_id: call_id.into(),
@@ -118,6 +153,50 @@ fn call_ref(byte: u8, item_index: u32) -> ToolCallRef {
     }
 }
 
+/// Unclaimed foreground terminals remain caller-owned while the tracker records
+/// only its small normal-returned tombstone.
+#[test]
+fn unclaimed_foreground_terminals_remain_borrowed_and_normal_returned() {
+    let owner = conv("main");
+    let payload = "large terminal payload".repeat(4 * 1024);
+    let result = foreground_result("result", &payload);
+    let error = foreground_error("error", &payload);
+    let mut tracker = WaitTracker::default();
+    tracker.record_tool_invoke(
+        result.call_id.clone(),
+        result.tool_name.clone(),
+        owner.clone(),
+    );
+    tracker.record_tool_invoke(
+        error.call_id.clone(),
+        error.tool_name.clone(),
+        owner.clone(),
+    );
+
+    assert!(
+        tracker
+            .record_tool_result(&result, owner.clone(), observation())
+            .is_empty()
+    );
+    assert!(
+        tracker
+            .record_tool_error(&error, owner, observation())
+            .is_empty()
+    );
+
+    assert_eq!(result.result, CborValue::Text(payload.clone()));
+    assert_eq!(result.provider_content.len(), 1);
+    assert_eq!(error.message, payload);
+    assert_eq!(
+        tracker.calls.get(&result.call_id),
+        Some(&WaitCallState::NormalReturned)
+    );
+    assert_eq!(
+        tracker.calls.get(&error.call_id),
+        Some(&WaitCallState::NormalReturned)
+    );
+}
+
 /// A background completion that arrives while compaction holds an exact wait
 /// must remain the rollback winner even if activating input arrives afterward.
 #[test]
@@ -128,7 +207,7 @@ fn compaction_claim_rollback_preserves_first_exact_completion_winner() {
     let mut tracker = WaitTracker::default();
     tracker.record_tool_invoke(target.clone(), slow_tool_name(), owner.clone());
     tracker.record_tool_result(
-        background_placeholder(target.as_str()),
+        &background_placeholder(target.as_str()),
         owner.clone(),
         observation(),
     );
@@ -175,7 +254,7 @@ fn compaction_claim_cancellation_unsuppresses_completed_exact_source() {
     let mut tracker = WaitTracker::default();
     tracker.record_tool_invoke(target.clone(), slow_tool_name(), owner.clone());
     tracker.record_tool_result(
-        background_placeholder(target.as_str()),
+        &background_placeholder(target.as_str()),
         owner.clone(),
         observation(),
     );
@@ -235,7 +314,7 @@ fn compaction_claim_cancellation_unsuppresses_errored_exact_source() {
     let mut tracker = WaitTracker::default();
     tracker.record_tool_invoke(target.clone(), slow_tool_name(), owner.clone());
     tracker.record_tool_result(
-        background_placeholder(target.as_str()),
+        &background_placeholder(target.as_str()),
         owner.clone(),
         observation(),
     );
@@ -271,7 +350,7 @@ fn compaction_claim_cancels_bare_wait_without_source_consumption() {
     let mut tracker = WaitTracker::default();
     tracker.record_tool_invoke(target.clone(), slow_tool_name(), owner.clone());
     tracker.record_tool_result(
-        background_placeholder(target.as_str()),
+        &background_placeholder(target.as_str()),
         owner.clone(),
         observation(),
     );
@@ -558,7 +637,7 @@ fn immediate_completion_settlement_keeps_fixed_durable_endpoints() {
     let mut tracker = WaitTracker::default();
     tracker.record_tool_invoke("source".into(), slow_tool_name(), owner.clone());
     tracker.call_refs.insert("source".into(), call_ref(1, 0));
-    tracker.record_tool_result(background_placeholder("source"), owner.clone(), None);
+    tracker.record_tool_result(&background_placeholder("source"), owner.clone(), None);
     let terminal = tau_proto::ObservationId::from_bytes([42; 16]);
     tracker.record_background_result(
         background_result("source", "done"),
@@ -601,7 +680,7 @@ fn registered_and_unavailable_completion_settlements_are_explicit() {
     let mut tracker = WaitTracker::default();
     tracker.record_tool_invoke("source".into(), slow_tool_name(), owner.clone());
     tracker.call_refs.insert("source".into(), call_ref(1, 0));
-    tracker.record_tool_result(background_placeholder("source"), owner.clone(), None);
+    tracker.record_tool_result(&background_placeholder("source"), owner.clone(), None);
     tracker.call_refs.insert("wait".into(), call_ref(2, 0));
     let wait_observation = tau_proto::ObservationId::from_bytes([44; 16]);
     let start = tracker.handle_wait_invoke(
@@ -641,7 +720,7 @@ fn registered_and_unavailable_completion_settlements_are_explicit() {
 
     let mut unavailable = WaitTracker::default();
     unavailable.record_tool_invoke("source".into(), slow_tool_name(), owner.clone());
-    unavailable.record_tool_result(background_placeholder("source"), owner.clone(), None);
+    unavailable.record_tool_result(&background_placeholder("source"), owner.clone(), None);
     unavailable.call_refs.insert("wait".into(), call_ref(3, 0));
     unavailable.handle_wait_invoke(
         &owner,
@@ -1428,7 +1507,7 @@ fn no_arg_wait_blocks_on_running_background_call_and_resolves() {
     assert!(
         tracker
             .record_tool_result(
-                background_placeholder("bg-run"),
+                &background_placeholder("bg-run"),
                 owner.clone(),
                 observation()
             )
@@ -1465,7 +1544,7 @@ fn no_arg_wait_resolves_when_running_background_call_is_cancelled() {
     assert!(
         tracker
             .record_tool_result(
-                background_placeholder("bg-cancel-any"),
+                &background_placeholder("bg-cancel-any"),
                 owner.clone(),
                 observation()
             )
@@ -1544,7 +1623,7 @@ fn explicit_waiter_wins_over_any_waiter_for_same_completion() {
     assert!(
         tracker
             .record_tool_result(
-                background_placeholder("bg-run"),
+                &background_placeholder("bg-run"),
                 owner.clone(),
                 observation()
             )
@@ -1597,7 +1676,7 @@ fn explicit_waiter_wins_over_any_waiter_for_same_cancelled_completion() {
     assert!(
         tracker
             .record_tool_result(
-                background_placeholder("bg-cancel-race"),
+                &background_placeholder("bg-cancel-race"),
                 owner.clone(),
                 observation()
             )
@@ -1675,7 +1754,7 @@ fn any_wait_cancellation_settlement_keeps_source_terminal() {
     let mut tracker = WaitTracker::default();
     tracker.record_tool_invoke("source".into(), slow_tool_name(), owner.clone());
     tracker.call_refs.insert("source".into(), call_ref(1, 0));
-    tracker.record_tool_result(background_placeholder("source"), owner.clone(), None);
+    tracker.record_tool_result(&background_placeholder("source"), owner.clone(), None);
     tracker.call_refs.insert("wait".into(), call_ref(2, 0));
     assert!(start_wait_any(&mut tracker, &owner, "wait").reply.is_none());
     let terminal = tau_proto::ObservationId::from_bytes([48; 16]);
@@ -1746,7 +1825,7 @@ fn duplicate_no_arg_waits_in_same_conversation_error() {
     assert!(
         tracker
             .record_tool_result(
-                background_placeholder("bg-run"),
+                &background_placeholder("bg-run"),
                 owner.clone(),
                 observation()
             )
@@ -1852,7 +1931,7 @@ fn exact_wait_does_not_attach_to_running_background_call_from_other_conversation
     assert!(
         tracker
             .record_tool_result(
-                background_placeholder("side-bg"),
+                &background_placeholder("side-bg"),
                 side.clone(),
                 observation()
             )
@@ -1944,7 +2023,7 @@ fn exact_wait_after_background_cancel_returns_cancel_error_once() {
     assert!(
         tracker
             .record_tool_result(
-                background_placeholder("bg-cancel"),
+                &background_placeholder("bg-cancel"),
                 owner.clone(),
                 observation()
             )

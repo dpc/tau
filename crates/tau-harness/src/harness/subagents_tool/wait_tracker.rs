@@ -1006,7 +1006,7 @@ impl WaitTracker {
     /// correlation.
     pub(super) fn record_tool_result(
         &mut self,
-        result: ToolResult,
+        result: &ToolResult,
         owner: AgentId,
         terminal: Option<tau_proto::ObservationId>,
     ) -> Vec<WaitReply> {
@@ -1034,8 +1034,8 @@ impl WaitTracker {
                 wait.call_id.clone(),
                 wait.tool_name.clone(),
                 source_tool_name,
-                result.result,
-                result.display,
+                result.result.clone(),
+                result.display.clone(),
             );
             return vec![self.attach_completion_settlement(
                 reply,
@@ -1053,7 +1053,7 @@ impl WaitTracker {
     /// correlation.
     pub(super) fn record_tool_error(
         &mut self,
-        error: ToolError,
+        error: &ToolError,
         owner: AgentId,
         terminal: Option<tau_proto::ObservationId>,
     ) -> Vec<WaitReply> {
@@ -1076,10 +1076,10 @@ impl WaitTracker {
             let reply = wait_error_reply(
                 wait.call_id.clone(),
                 wait.tool_name.clone(),
-                error.message,
-                error.details,
+                error.message.clone(),
+                error.details.clone(),
             )
-            .with_source_display(source_tool_name, error.display);
+            .with_source_display(source_tool_name, error.display.clone());
             return vec![self.attach_completion_settlement(
                 reply,
                 &wait,

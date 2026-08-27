@@ -1829,7 +1829,7 @@ impl Harness {
                 {
                     return;
                 }
-                self.record_wait_tool_result(result.clone(), None);
+                self.record_wait_tool_result(result, None);
                 if newly_backgrounded {
                     self.on_tool_call_foreground_complete(call_id.as_str());
                 }
@@ -1858,7 +1858,7 @@ impl Harness {
             });
             match event {
                 Event::ProviderToolResult(result) => {
-                    self.record_wait_tool_result(result.clone(), None);
+                    self.record_wait_tool_result(result, None);
                     if let Some(cid) = self
                         .tool_routing
                         .tool_runtime
@@ -1892,7 +1892,7 @@ impl Harness {
                     }) {
                         self.record_tool_failure_loop_signature(&cid, error);
                     }
-                    self.record_wait_tool_error(error.clone(), None);
+                    self.record_wait_tool_error(error, None);
                     if runtime_only_cid.is_none() {
                         if disconnect_batch_pending {
                             self.finish_non_durable_disconnect_tool_tracking(call_id);
@@ -1985,11 +1985,11 @@ impl Harness {
         match event {
             Event::ProviderToolResult(result) => {
                 self.reset_loop_guard_for_progress(&cid);
-                self.record_wait_tool_result(result.clone(), Some(append_outcome.observation_id));
+                self.record_wait_tool_result(result, Some(append_outcome.observation_id));
             }
             Event::ProviderToolError(error) => {
                 self.record_tool_failure_loop_signature(&cid, error);
-                self.record_wait_tool_error(error.clone(), Some(append_outcome.observation_id));
+                self.record_wait_tool_error(error, Some(append_outcome.observation_id));
             }
             Event::ToolCancelled(_) => {
                 self.record_wait_tool_cancelled(
@@ -2191,9 +2191,17 @@ impl Harness {
         source: Option<&tau_proto::ConnectionId>,
         result: &ToolResult,
     ) {
-        let mut generic_result = result.clone();
-        generic_result.provider_content.clear();
-        let generic = Event::ToolResult(generic_result);
+        let generic = Event::ToolResult(ToolResult {
+            call_id: result.call_id.clone(),
+            tool_name: result.tool_name.clone(),
+            tool_type: result.tool_type,
+            result: result.result.clone(),
+            presentation: result.presentation,
+            provider_content: Vec::new(),
+            kind: result.kind,
+            display: result.display.clone(),
+            originator: result.originator.clone(),
+        });
         let display = Event::ToolResultDisplay(tau_proto::ToolResultDisplay::from(result));
         match cid {
             Some(cid) => {

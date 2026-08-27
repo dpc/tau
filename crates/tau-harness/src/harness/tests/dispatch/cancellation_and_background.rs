@@ -3758,7 +3758,7 @@ fn background_wait_rejections_do_not_count_as_input_timeouts() {
     );
     h.record_wait_tool_request(&background_id);
     h.record_wait_tool_result(
-        ToolResult {
+        &ToolResult {
             presentation: Default::default(),
             call_id: background_id.clone(),
             tool_name: ToolName::new("slow"),

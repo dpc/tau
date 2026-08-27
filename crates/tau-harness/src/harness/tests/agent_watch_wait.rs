@@ -247,7 +247,7 @@ fn overlapping_waits_accumulate_until_the_last_wait_settles() {
         Some(first_deadline)
     );
 
-    harness.record_wait_tool_result(wait_source_result("overlap-a"), None);
+    harness.record_wait_tool_result(&wait_source_result("overlap-a"), None);
     assert_eq!(
         harness.next_work_wait_threshold_deadline(),
         Some(first_deadline)
@@ -255,7 +255,7 @@ fn overlapping_waits_accumulate_until_the_last_wait_settles() {
     harness.process_runtime_deadlines_at(first_deadline);
     assert!(harness.next_work_wait_threshold_deadline().is_some());
 
-    harness.record_wait_tool_result(wait_source_result("overlap-b"), None);
+    harness.record_wait_tool_result(&wait_source_result("overlap-b"), None);
     assert_eq!(harness.next_work_wait_threshold_deadline(), None);
     harness.shutdown().expect("shutdown");
 }

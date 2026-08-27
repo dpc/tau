@@ -2112,7 +2112,7 @@ fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
         );
         h.record_wait_tool_request(call_id);
         h.record_wait_tool_result(
-            ToolResult {
+            &ToolResult {
                 presentation: Default::default(),
                 call_id: call_id.clone(),
                 tool_name: ToolName::new("slow"),
