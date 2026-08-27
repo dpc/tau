@@ -244,9 +244,12 @@ fn deterministic_post_tool_policy_compacts_and_replays_after_clean_restart()
                         response: "post-tool lifecycle finished".to_owned(),
                     },
                     ScenarioActionV2::StandaloneOpaqueCompaction,
-                    ScenarioActionV2::CompactedOpaqueText {
-                        user_text: FOLLOW_UP.to_owned(),
+                    ScenarioActionV2::CompactedOpaqueCheckpoint {
                         removed_user_text: INITIAL.to_owned(),
+                        response: "checkpointed lifecycle replacement".to_owned(),
+                    },
+                    ScenarioActionV2::Text {
+                        user_text: FOLLOW_UP.to_owned(),
                         response: "continued from lifecycle replacement".to_owned(),
                     },
                 ],
@@ -312,6 +315,11 @@ fn deterministic_post_tool_policy_compacts_and_replays_after_clean_restart()
             if item.raw_json.as_deref()
                 == Some(tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON)
     ));
+    let checkpointed = recv_until_finished(&mut peer_a)?;
+    assert_assistant(
+        &checkpointed.output_items,
+        "checkpointed lifecycle replacement",
+    );
     disconnect_ui(&mut peer_a)?;
     server_a.finish()?;
 
@@ -393,8 +401,8 @@ fn deterministic_post_tool_policy_compacts_and_replays_after_clean_restart()
     };
     assert_eq!(
         count(&|event| matches!(event, Event::AgentPromptStarted(_))),
-        4,
-        "initial, tool continuation, compact, and follow-up prompts are the complete lineage"
+        5,
+        "initial, tool continuation, compact, checkpoint, and follow-up prompts are the complete lineage"
     );
     assert_eq!(
         count(&|event| matches!(
@@ -469,7 +477,7 @@ fn deterministic_post_tool_policy_compacts_and_replays_after_clean_restart()
         decision_index < finish_index && finish_index < start_index,
         "automatic lifecycle order changed"
     );
-    assert_eq!(fixture.trace()?.matches(" matched ").count(), 4);
+    assert_eq!(fixture.trace()?.matches(" matched ").count(), 5);
     let published = fixture.published_trace_events()?;
     let diagnostics = published
         .iter()

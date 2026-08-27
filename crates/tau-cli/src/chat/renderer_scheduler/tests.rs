@@ -289,7 +289,7 @@ fn status_and_compaction_are_hard_barriers() {
     compaction_update.compaction = Some(tau_proto::ProviderResponseCompactionUpdate {
         status: tau_proto::ProviderResponseCompactionStatus::Started,
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
     });
 
     admitted.store(5, Ordering::Release);

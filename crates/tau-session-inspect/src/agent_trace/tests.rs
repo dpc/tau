@@ -192,7 +192,7 @@ fn public_compact_exports_project_persisted_explicit_observations() {
             estimated_api_cost_increment: None,
             estimated_api_cost_rates: None,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,

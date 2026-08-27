@@ -229,16 +229,15 @@ pub fn models_for_provider(
                 tool_result_modalities: Vec::new(),
                 supports_parallel_tool_calls: model.supports_parallel_tool_calls,
                 default_affinity: 0,
-                context_window: model.context_window,
+                context_window: tau_proto::TokenCount::new(model.context_window),
                 efforts: model_efforts(model),
                 verbosities: vec![tau_proto::Verbosity::Medium],
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
                 supports_compaction: false,
                 supports_standalone_compaction: resolved_summary_config(model).is_some(),
-                standalone_compaction_threshold: resolved_summary_config(model)
-                    .map(SummaryCompactionConfig::proactive_threshold),
+                standalone_compaction_threshold: None,
                 standalone_compaction_prefix_budget: resolved_summary_config(model)
-                    .map(SummaryCompactionConfig::max_input_bytes),
+                    .and_then(SummaryCompactionConfig::max_input_bytes),
                 cache_policy: model.cache_contract.map(|contract| {
                     contract
                         .runtime_policy()
@@ -316,17 +315,6 @@ pub fn run_prompt_attempt<W: std::io::Write>(
     let model = tau_provider_responses::AttemptModel {
         id: model.id.clone(),
     };
-    if let Some(summary) = summary_config.filter(|_| compact_prompt.is_some())
-        && tau_provider_responses::serialized_request_bytes(effective_prompt, &config, &model)
-            .is_none_or(|bytes| bytes > summary.max_input_bytes())
-    {
-        return invalid_compaction(
-            agent_prompt_id,
-            prompt,
-            provider,
-            "summary compaction final wire request exceeds the adapter bound",
-        );
-    }
     let mut sampler = ResponsesResponseSampler::new();
     let outcome =
         forward_debug_capture_policy(debug_provider_requests, |debug_provider_requests| {
@@ -430,7 +418,10 @@ fn materialize_summary_prompt(
 ) -> Result<tau_proto::AgentPromptCreated, &'static str> {
     let prefix_bytes =
         tau_provider::local_summary_compaction::historical_prefix_json_bytes(&prompt.context);
-    if prefix_bytes.is_none_or(|bytes| bytes > config.max_input_bytes()) {
+    if config
+        .max_input_bytes()
+        .is_some_and(|budget| prefix_bytes.is_none_or(|bytes| budget < bytes))
+    {
         return Err("summary compaction prefix exceeds the published safe budget");
     }
     let mut compact = prompt.clone();
@@ -555,7 +546,7 @@ fn finished(
         originator: prompt.originator.clone(),
         usage,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: Some(tau_proto::ProviderBackend {
             kind: tau_proto::ProviderBackendKind::Responses,
             base_url: provider.base_url.clone(),

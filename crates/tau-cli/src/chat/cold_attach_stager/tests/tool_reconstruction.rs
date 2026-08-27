@@ -238,7 +238,7 @@ fn tool_call_response(call_id: &str) -> Event {
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,

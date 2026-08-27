@@ -2,22 +2,14 @@
 
 use std::num::{NonZeroU32, NonZeroU64};
 
-/// Conservative one-byte-per-token reserve for instructions and framing.
-pub const REQUEST_OVERHEAD_TOKENS: u64 = 1024;
 /// Default maximum summary generation.
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
-/// Approximate prefix bytes charged per projected context token.
-const PROJECTED_BYTES_PER_TOKEN: u64 = 4;
-/// Smallest useful prefix budget, including fixed request framing.
-const MIN_INPUT_BYTES: u64 = 256;
 
 /// Validated limits for Tau-owned summary compaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Config {
-    /// Target model context window.
-    context_window_tokens: NonZeroU64,
-    /// Prefix budget used to derive proactive scheduling.
-    max_input_bytes: NonZeroU64,
+    /// Independent historical-prefix byte work cap, when configured.
+    max_input_bytes: Option<tau_proto::ByteCount>,
     /// Maximum generated summary tokens.
     max_output_tokens: NonZeroU32,
     /// Maximum accepted narrative or reasoning bytes.
@@ -27,9 +19,9 @@ pub struct Config {
 impl Config {
     /// Validate explicit limits.
     ///
-    /// Returns `None` unless the declared and advertised windows match, the
-    /// input budget is at least 256 bytes, output bytes fit the harness cap,
-    /// and checked input, output, and framing budgets fit the model window.
+    /// Returns `None` unless the declared and advertised windows match, output
+    /// bytes fit the harness cap, and the output-token cap does not exceed the
+    /// token window.
     #[must_use]
     pub fn new(
         declared_context_window_tokens: NonZeroU64,
@@ -38,47 +30,37 @@ impl Config {
         max_output_tokens: NonZeroU32,
         max_output_bytes: NonZeroU64,
     ) -> Option<Self> {
-        let request_tokens = max_input_bytes
-            .get()
-            .checked_add(max_output_tokens.get().into())
-            .and_then(|total| total.checked_add(REQUEST_OVERHEAD_TOKENS));
         (declared_context_window_tokens.get() == advertised_context_window_tokens
-            && max_input_bytes.get() >= MIN_INPUT_BYTES
             && max_output_bytes.get() <= tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64
-            && request_tokens.is_some_and(|total| total <= advertised_context_window_tokens))
-        .then_some(Self {
-            context_window_tokens: declared_context_window_tokens,
-            max_input_bytes,
-            max_output_tokens,
-            max_output_bytes,
-        })
+            && u64::from(max_output_tokens.get()) <= advertised_context_window_tokens)
+            .then_some(Self {
+                max_input_bytes: Some(tau_proto::ByteCount::new(max_input_bytes.get())),
+                max_output_tokens,
+                max_output_bytes,
+            })
     }
 
-    /// Derive conservative limits from one model context window.
-    ///
-    /// Returns `None` below the smallest window that can retain the 256-byte
-    /// input floor together with output and framing reserves.
+    /// Build the generic no-prefix-cap fallback using only same-domain token
+    /// output policy and the independent narrative byte cap.
     #[must_use]
     pub fn default_for(context_window_tokens: u64) -> Option<Self> {
-        let available = context_window_tokens.checked_sub(REQUEST_OVERHEAD_TOKENS + 2)?;
-        let max_output_tokens = u32::try_from(available / 8)
+        let max_output_tokens = u32::try_from(context_window_tokens / 8)
             .unwrap_or(u32::MAX)
             .clamp(1, DEFAULT_MAX_OUTPUT_TOKENS);
-        let max_input_bytes = context_window_tokens
-            .checked_sub(REQUEST_OVERHEAD_TOKENS + u64::from(max_output_tokens))?;
-        Self::new(
-            NonZeroU64::new(context_window_tokens)?,
-            context_window_tokens,
-            NonZeroU64::new(max_input_bytes)?,
-            NonZeroU32::new(max_output_tokens)?,
-            NonZeroU64::new(tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64)?,
-        )
+        NonZeroU64::new(context_window_tokens)?;
+        Some(Self {
+            max_input_bytes: None,
+            max_output_tokens: NonZeroU32::new(max_output_tokens)?,
+            max_output_bytes: NonZeroU64::new(
+                tau_proto::LOCAL_COMPACTION_NARRATIVE_MAX_BYTES as u64,
+            )?,
+        })
     }
 
     /// Return the configured prefix budget used for proactive scheduling.
     #[must_use]
-    pub const fn max_input_bytes(self) -> u64 {
-        self.max_input_bytes.get()
+    pub const fn max_input_bytes(self) -> Option<tau_proto::ByteCount> {
+        self.max_input_bytes
     }
 
     /// Return the output-token request cap.
@@ -91,13 +73,6 @@ impl Config {
     #[must_use]
     pub const fn max_output_bytes(self) -> u64 {
         self.max_output_bytes.get()
-    }
-
-    /// Return the proactive projected-token threshold derived from the prefix
-    /// budget.
-    #[must_use]
-    pub const fn proactive_threshold(self) -> u64 {
-        self.max_input_bytes.get() / PROJECTED_BYTES_PER_TOKEN
     }
 }
 
@@ -152,10 +127,14 @@ pub fn replace_trailing_trigger(
 /// standalone trigger.
 ///
 /// This is the adapter-side counterpart of the harness planner's published
-/// prefix-budget measurement. Provider-specific lowering may expand the
-/// request, so adapters must still check the exact final wire body separately.
+/// prefix-budget measurement. Adapters compare this fully materialized
+/// historical prefix only with the published historical-prefix byte budget.
+/// Provider-specific whole-wire expansion requires an independent byte-domain
+/// limit and must never be compared with token-window metadata.
 #[must_use]
-pub fn historical_prefix_json_bytes(context: &tau_proto::PromptContext) -> Option<u64> {
+pub fn historical_prefix_json_bytes(
+    context: &tau_proto::PromptContext,
+) -> Option<tau_proto::ByteCount> {
     let mut historical = context.clone();
     let tau_proto::ContextBlock::UserInput(block) = historical.blocks.last_mut()? else {
         return None;
@@ -173,6 +152,7 @@ pub fn historical_prefix_json_bytes(context: &tau_proto::PromptContext) -> Optio
     serde_json::to_vec(&historical)
         .ok()
         .and_then(|encoded| u64::try_from(encoded.len()).ok())
+        .map(tau_proto::ByteCount::new)
 }
 
 #[cfg(test)]

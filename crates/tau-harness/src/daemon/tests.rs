@@ -300,7 +300,7 @@ fn daemon_trace_correlation_requires_created_agent_and_binds_once() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,

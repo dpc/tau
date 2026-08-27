@@ -23,7 +23,7 @@ fn debug_response_producer_submits_typed_compressed_capture_job() {
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: Some(tau_proto::ProviderBackend {
             kind: tau_proto::ProviderBackendKind::Responses,
             base_url: "https://example.invalid".to_owned(),
@@ -221,6 +221,7 @@ enum WsFailureMode {
     Upgrade426,
     CloseWithoutResponse,
     ContextWindowExceeded,
+    DirectContextWindowExceeded,
     SemanticThenClose,
 }
 
@@ -234,6 +235,10 @@ fn spawn_ws_disconnect_server() -> WsFailureServer {
 
 fn spawn_ws_context_error_server() -> WsFailureServer {
     spawn_ws_failure_server(WsFailureMode::ContextWindowExceeded)
+}
+
+fn spawn_direct_ws_context_error_server() -> WsFailureServer {
+    spawn_ws_failure_server(WsFailureMode::DirectContextWindowExceeded)
 }
 
 fn spawn_ws_semantic_close_server() -> WsFailureServer {
@@ -257,7 +262,9 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
             let _ = stream.set_read_timeout(Some(path_std_time::Duration::from_secs(2)));
             if matches!(
                 mode,
-                WsFailureMode::ContextWindowExceeded | WsFailureMode::SemanticThenClose
+                WsFailureMode::ContextWindowExceeded
+                    | WsFailureMode::DirectContextWindowExceeded
+                    | WsFailureMode::SemanticThenClose
             ) {
                 let Ok(mut socket) = tungstenite::accept(stream) else {
                     continue;
@@ -266,6 +273,18 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                     .ws_upgrade_requests
                     .fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
                 let _ = socket.read();
+                if matches!(mode, WsFailureMode::DirectContextWindowExceeded) {
+                    let _ = socket.send(tungstenite::Message::Text(
+                        serde_json::json!({
+                            "type": "error",
+                            "code": "context_length_exceeded",
+                            "message": "maximum context reached"
+                        })
+                        .to_string()
+                        .into(),
+                    ));
+                    continue;
+                }
                 if matches!(mode, WsFailureMode::SemanticThenClose) {
                     let _ = socket.send(tungstenite::Message::Text(
                         serde_json::json!({
@@ -346,7 +365,8 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                     let _ = path_std_io::Write::write_all(&mut stream, response.as_bytes());
                 }
                 WsFailureMode::CloseWithoutResponse => {}
-                WsFailureMode::ContextWindowExceeded => unreachable!("handled above"),
+                WsFailureMode::ContextWindowExceeded
+                | WsFailureMode::DirectContextWindowExceeded => unreachable!("handled above"),
                 WsFailureMode::SemanticThenClose => unreachable!("handled above"),
             }
             assert!(
@@ -440,27 +460,17 @@ fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
     );
 }
 
-/// Compact admission must accept an exact WebSocket compact frame at the
-/// configured raw-window boundary.
-///
-/// The provider probe reaches the loopback peer and reports route
-/// unavailability, proving equality admits the exact frame that compact
-/// dispatch will send.
-#[test]
-fn compact_admission_accepts_exact_websocket_compact_frame_at_boundary() {
-    let server = spawn_ws_426_server();
-    let mut config = test_config(server.base_url());
-    let session_id =
-        tau_proto::SessionId::parse("session-compact-admission").expect("known-safe session id");
-    let agent_id = tau_proto::AgentId::parse("agent-compact-admission").expect("agent id");
-    let context = tau_proto::PromptContext {
+/// Builds a standalone prompt whose canonical historical prefix has exactly the
+/// requested JSON byte length.
+fn context_with_historical_prefix_bytes(target: tau_proto::ByteCount) -> tau_proto::PromptContext {
+    let mut context = tau_proto::PromptContext {
         blocks: vec![tau_proto::ContextBlock::UserInput(
             tau_proto::UserInputBlock {
                 items: vec![
                     tau_proto::ContextItem::Message(tau_proto::MessageItem {
                         role: tau_proto::ContextRole::User,
                         content: vec![tau_proto::ContentPart::Text {
-                            text: "compact this".to_owned(),
+                            text: String::new(),
                         }],
                         phase: None,
                         responses_raw_json: None,
@@ -470,67 +480,59 @@ fn compact_admission_accepts_exact_websocket_compact_frame_at_boundary() {
             },
         )],
     };
+    let empty_bytes =
+        tau_provider::local_summary_compaction::historical_prefix_json_bytes(&context)
+            .expect("well-formed standalone prompt has a historical prefix");
+    let padding = target
+        .checked_sub(empty_bytes)
+        .expect("target admits the fixed prompt envelope")
+        .get();
+    let tau_proto::ContextBlock::UserInput(block) = &mut context.blocks[0] else {
+        unreachable!("fixture contains one user block")
+    };
+    let tau_proto::ContextItem::Message(message) = &mut block.items[0] else {
+        unreachable!("fixture starts with one message")
+    };
+    let tau_proto::ContentPart::Text { text } = &mut message.content[0] else {
+        unreachable!("fixture message contains text")
+    };
+    *text = "x".repeat(usize::try_from(padding).expect("fixture padding fits usize"));
+    assert_eq!(
+        tau_provider::local_summary_compaction::historical_prefix_json_bytes(&context),
+        Some(target)
+    );
+    context
+}
+
+/// Large fixed system material may make the actual wire frame numerically
+/// larger than token-window metadata; only the provider owns token rejection.
+#[test]
+fn compact_large_fixed_material_reaches_canonical_context_rejection_once() {
+    let server = spawn_direct_ws_context_error_server();
+    let mut config = test_config(server.base_url());
+    config.raw_context_window = tau_proto::TokenCount::new(1_000);
+    let session_id =
+        tau_proto::SessionId::parse("session-compact-provider-limit").expect("session id");
+    let agent_id = tau_proto::AgentId::parse("agent-compact-provider-limit").expect("agent id");
+    let context = context_with_historical_prefix_bytes(tau_proto::ByteCount::new(500));
     let system_prompt = "s".repeat(8_000);
     let mut request = test_prompt_payload(&session_id, &agent_id, &context);
     request.system_prompt = &system_prompt;
-    let compact_wire_bytes =
-        responses::compact_ws_request_bytes(&config, &request).expect("measure WebSocket envelope");
-    config.raw_context_window = compact_wire_bytes;
+    assert!(
+        responses::compact_ws_request_bytes(&config, &request)
+            .expect("measure actual compact frame")
+            > config.raw_context_window.get()
+    );
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let mut abort = NeverAbort;
-    let outcome = runtime.compact(
-        "ap-compact-admission",
-        &ResolvedConfig { inner: config },
-        &request,
-        &mut abort,
-    );
-    match outcome {
-        CompactOutcome::Terminal(error) => assert_ne!(
-            error.failure_kind(),
-            Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
-            "only the peer's deliberate route rejection may end admitted compaction"
-        ),
-        CompactOutcome::RouteUnavailable { .. } => {}
-        CompactOutcome::Finished { .. } | CompactOutcome::Retry(_) | CompactOutcome::Canceled => {
-            panic!("the deliberate provider rejection must terminate compaction")
-        }
-    }
-    assert_eq!(
-        server
-            .counts()
-            .ws_upgrade_requests
-            .load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "admitted compaction must reach the provider route"
-    );
-}
 
-/// Oversized exact WebSocket compact frames must fail locally as typed
-/// context-window errors before the runtime opens any provider connection.
-#[test]
-fn compact_admission_rejects_oversized_exact_body_without_provider_request() {
-    let server = spawn_ws_426_server();
-    let mut config = test_config(server.base_url());
-    let session_id =
-        tau_proto::SessionId::parse("session-compact-overbound").expect("known-safe session id");
-    let agent_id = tau_proto::AgentId::parse("agent-compact-overbound").expect("agent id");
-    let context = tau_proto::PromptContext::default();
-    let request = test_prompt_payload(&session_id, &agent_id, &context);
-    let compact_wire_bytes =
-        responses::compact_ws_request_bytes(&config, &request).expect("measure WebSocket envelope");
-    config.raw_context_window = compact_wire_bytes
-        .checked_sub(1)
-        .expect("nonempty compact WebSocket frame");
-    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
-    let mut abort = NeverAbort;
-    let outcome = runtime.compact(
-        "ap-compact-overbound",
+    let CompactOutcome::Terminal(error) = runtime.compact(
+        "ap-compact-provider-limit",
         &ResolvedConfig { inner: config },
         &request,
         &mut abort,
-    );
-    let CompactOutcome::Terminal(error) = outcome else {
-        panic!("oversized compact WebSocket frame must fail locally");
+    ) else {
+        panic!("canonical context rejection must terminate compact dispatch")
     };
     assert_eq!(
         error.failure_kind(),
@@ -541,16 +543,14 @@ fn compact_admission_rejects_oversized_exact_body_without_provider_request() {
             .counts()
             .ws_upgrade_requests
             .load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "local compact admission must avoid provider traffic"
+        1
     );
     assert_eq!(
         server
             .counts()
             .http_post_requests
             .load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "local compact admission must avoid every provider transport"
+        0
     );
 }
 
@@ -631,8 +631,7 @@ fn publishes_chatgpt_model_metadata() {
                 model.supports_standalone_compaction
                     && model.standalone_compaction_threshold
                         == Some(GPT_5_6_STANDALONE_COMPACTION_TOKEN_THRESHOLD)
-                    && model.standalone_compaction_prefix_budget
-                        == Some(GPT_5_6_STANDALONE_COMPACTION_PREFIX_BYTE_BUDGET)
+                    && model.standalone_compaction_prefix_budget.is_none()
             })
     );
     assert!(
@@ -658,7 +657,9 @@ fn publishes_chatgpt_model_metadata() {
             .find(|model| model.id.model.as_str() == "gpt-5.6-sol")
             .expect("gpt-5.6-sol model")
             .context_window,
-        GPT_5_6_RAW_CONTEXT_WINDOW * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100
+        tau_proto::TokenCount::new(
+            GPT_5_6_RAW_CONTEXT_WINDOW.get() * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100
+        )
     );
     assert_eq!(
         models
@@ -666,7 +667,9 @@ fn publishes_chatgpt_model_metadata() {
             .find(|model| model.id.model.as_str() == "gpt-5.5")
             .expect("gpt-5.5 model")
             .context_window,
-        DEFAULT_RAW_CONTEXT_WINDOW * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100
+        tau_proto::TokenCount::new(
+            DEFAULT_RAW_CONTEXT_WINDOW.get() * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100
+        )
     );
     assert!(
         models

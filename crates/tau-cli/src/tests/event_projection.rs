@@ -1588,14 +1588,8 @@ fn standalone_compaction_replay_retires_private_progress() {
         standalone_compaction_started("ct-replay", "ap-replay"),
     ));
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
-        original_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
-            tokens: 226_200,
-            provenance: tau_proto::CompactionTokenProvenance::Estimated,
-        }),
-        compacted_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
-            tokens: 4_500,
-            provenance: tau_proto::CompactionTokenProvenance::Estimated,
-        }),
+        original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
+        compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
         agent_id: agent_id("main"),
         transaction_id: Some(
             tau_proto::CompactionTransactionId::parse("ct-replay")
@@ -1610,7 +1604,7 @@ fn standalone_compaction_replay_retires_private_progress() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "compact ~#226.2k → ~#4.5k (2%) ok"));
+    assert!(vt.screen_contains(100, "compact #226.2k in / #4.5k out ok"));
     assert!(!vt.screen_contains(100, "Compacting…"));
     assert!(!vt.screen_contains(100, "synthetic checkpoint"));
     assert!(!vt.screen_contains(100, "◆"));

@@ -39,9 +39,10 @@ inference so its unchanged prefix remains cache-eligible.
 
 ## Local summary compactor boundary
 
-The built-in provider supplies conservative context-derived summary limits for
-every viable model; an explicit `local_summary_compaction` profile fully
-overrides them. The adapter lowers the immutable cut exactly like ordinary
+The built-in provider supplies a generic local-summary fallback with no prefix
+byte cap or proactive threshold and independent token-output/narrative-byte
+limits; an explicit `local_summary_compaction` profile may override those
+native-domain limits. The adapter lowers the immutable cut exactly like ordinary
 inference, retaining the ordinary system prompt, tools, typed history, images,
 raw tool arguments, route/model fields, and cache controls, then appends the
 fixed harness-authored `<tau_internal>` user instruction last. This is deliberate

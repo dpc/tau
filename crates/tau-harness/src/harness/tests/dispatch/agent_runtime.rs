@@ -440,7 +440,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
             query_id: "q-user".to_owned(),
         },
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,

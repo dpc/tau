@@ -4,6 +4,46 @@ use ciborium::value as path_ciborium_value;
 
 use super::*;
 
+/// Semantic size wrappers preserve scalar wire shape and existing arithmetic
+/// overflow behavior without accepting cross-domain operands.
+#[test]
+fn token_and_byte_counts_preserve_scalar_shape_and_overflow_behavior() {
+    assert_eq!(
+        serde_json::to_value(TokenCount::ZERO).expect("serialize zero"),
+        serde_json::json!(0)
+    );
+    assert_eq!(
+        serde_json::from_value::<TokenCount>(serde_json::json!(u64::MAX))
+            .expect("deserialize maximum"),
+        TokenCount::MAX
+    );
+    assert_eq!(
+        TokenCount::new(2).checked_add(TokenCount::new(3)),
+        Some(TokenCount::new(5))
+    );
+    assert_eq!(TokenCount::MAX.checked_add(TokenCount::new(1)), None);
+    assert_eq!(
+        TokenCount::ZERO.saturating_sub(TokenCount::new(1)),
+        TokenCount::ZERO
+    );
+
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&Some(ByteCount::MAX), &mut encoded).expect("serialize maximum");
+    assert_eq!(
+        ciborium::from_reader::<Option<u64>, _>(encoded.as_slice()).expect("decode scalar shape"),
+        Some(u64::MAX)
+    );
+    assert_eq!(
+        ByteCount::new(2).checked_add(ByteCount::new(3)),
+        Some(ByteCount::new(5))
+    );
+    assert_eq!(ByteCount::ZERO.checked_sub(ByteCount::new(1)), None);
+    assert_eq!(
+        ByteCount::MAX.saturating_add(ByteCount::new(1)),
+        ByteCount::MAX
+    );
+}
+
 /// Notice-purpose wire tags must remain explicit and independent of notice
 /// level.
 #[test]
@@ -1355,7 +1395,7 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::AgentCompacted(AgentCompacted {
             original_input_tokens: None,
-            compacted_input_tokens: None,
+            compaction_output_tokens: None,
             compact_prompt_id: None,
             model: None,
             operation: None,
@@ -1383,6 +1423,7 @@ fn representative_events() -> Vec<Event> {
             cut: AgentHead::Root,
             reason: StandaloneCompactionFailureReason::InvalidWindow,
             resume_through: Some(AgentHead::Node(NodeId::new(1))),
+            context_retreat: None,
         }),
         Event::AgentInferenceDispatchStarted(AgentInferenceDispatchStarted {
             agent_id: agent_id("engineer_abcd1234"),
@@ -1546,7 +1587,7 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
 
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -1735,7 +1776,7 @@ fn representative_events() -> Vec<Event> {
                 tool_result_modalities: Vec::new(),
                 supports_parallel_tool_calls: true,
                 default_affinity: 0,
-                context_window: 128_000,
+                context_window: TokenCount::new(128_000),
                 efforts: vec![Effort::Off, Effort::Low, Effort::Medium, Effort::High],
                 verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
                 thinking_summaries: vec![ThinkingSummary::Off],
@@ -4188,7 +4229,7 @@ fn execution_events_use_provider_wire_family() {
                 output_items: Vec::new(),
                 usage: None,
                 compaction_original_input_tokens: None,
-                compaction_compacted_input_tokens: None,
+                compaction_output_tokens: None,
                 backend: None,
                 provider_attempt: Default::default(),
                 provider_response_id: None,
@@ -4249,7 +4290,7 @@ fn provider_execution_reports_use_distinct_transient_wires() {
                 output_items: Vec::new(),
                 usage: None,
                 compaction_original_input_tokens: None,
-                compaction_compacted_input_tokens: None,
+                compaction_output_tokens: None,
                 backend: None,
                 provider_attempt: Default::default(),
                 provider_response_id: None,
@@ -4668,12 +4709,10 @@ fn context_limit_telemetry_json_and_cbor_round_trip() {
     let mut telemetry = ContextLimitTelemetry {
         model: "openai/gpt-test".parse().expect("model"),
         operation: PromptOperation::StandaloneCompaction,
-        projected_input_tokens: Some(127_000),
-        transcript_delta_bytes: Some(8192),
-        advertised_context_window: Some(128_000),
-        provider_input_tokens: Some(127_000),
-        projection_reserve_tokens: 4096,
-        compaction_threshold: Some(115_200),
+        transcript_delta_bytes: Some(ByteCount::new(8192)),
+        advertised_context_window: Some(TokenCount::new(128_000)),
+        provider_input_tokens: Some(TokenCount::new(127_000)),
+        compaction_threshold: Some(TokenCount::new(115_200)),
         compaction_policy: ContextLimitCompactionPolicy::Threshold,
         recovery_eligible: false,
         action: ContextLimitAction::Terminal,
@@ -5904,6 +5943,62 @@ fn provider_model_rejects_zero_standalone_compaction_prefix_budget() {
             .contains("standalone_compaction_prefix_budget must be nonzero")
     );
 }
+
+/// Legacy durable compaction records must decode their mislabeled input field
+/// as provider output accounting, while new records encode only the honest
+/// field name.
+#[test]
+fn agent_compacted_migrates_legacy_output_token_field_name() {
+    let provider_reported = serde_json::json!({
+        "agent_id": "agent",
+        "original_input_tokens": {
+            "tokens": 11,
+            "provenance": "provider_reported"
+        },
+        "compacted_input_tokens": {
+            "tokens": 7,
+            "provenance": "provider_reported"
+        },
+        "replacement_window": []
+    });
+    let compacted: AgentCompacted =
+        serde_json::from_value(provider_reported.clone()).expect("decode legacy JSON record");
+    assert_eq!(compacted.original_input_tokens, Some(TokenCount::new(11)));
+    assert_eq!(compacted.compaction_output_tokens, Some(TokenCount::new(7)));
+
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&provider_reported, &mut cbor).expect("encode legacy CBOR");
+    let from_cbor: AgentCompacted =
+        ciborium::from_reader(cbor.as_slice()).expect("decode legacy CBOR record");
+    assert_eq!(from_cbor, compacted);
+
+    let encoded = serde_json::to_value(compacted).expect("encode migrated compacted record");
+    assert_eq!(encoded["original_input_tokens"], serde_json::json!(11));
+    assert_eq!(encoded["compaction_output_tokens"], serde_json::json!(7));
+    assert!(
+        encoded.get("compacted_input_tokens").is_none(),
+        "new records must not preserve the misleading legacy field name"
+    );
+
+    let estimated = serde_json::json!({
+        "agent_id": "agent",
+        "original_input_tokens": {"tokens": 11, "provenance": "estimated"},
+        "compacted_input_tokens": {"tokens": 7, "provenance": "estimated"},
+        "replacement_window": []
+    });
+    let estimated_json: AgentCompacted =
+        serde_json::from_value(estimated.clone()).expect("decode estimated JSON record");
+    assert_eq!(estimated_json.original_input_tokens, None);
+    assert_eq!(estimated_json.compaction_output_tokens, None);
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&estimated, &mut cbor).expect("encode estimated CBOR");
+    let estimated_cbor: AgentCompacted =
+        ciborium::from_reader(cbor.as_slice()).expect("decode estimated CBOR record");
+    assert_eq!(estimated_cbor, estimated_json);
+    let reencoded = serde_json::to_value(estimated_json).expect("re-encode estimated record");
+    assert!(reencoded.get("original_input_tokens").is_none());
+    assert!(reencoded.get("compaction_output_tokens").is_none());
+}
 /// Terminal provider failure categories have stable snake-case wire values,
 /// while old response frames without the additive field remain decodable.
 #[test]
@@ -5934,7 +6029,7 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -6284,7 +6379,7 @@ fn standalone_compaction_and_context_recovery_wire_contract() {
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,

@@ -1162,12 +1162,12 @@ impl StreamState {
             OutputItemAccumulator::Compaction(Some(_)) => Some(ProviderResponseCompactionUpdate {
                 status: ProviderResponseCompactionStatus::Completed,
                 original_input_tokens: None,
-                compacted_input_tokens: None,
+                compaction_output_tokens: None,
             }),
             OutputItemAccumulator::Compaction(None) => Some(ProviderResponseCompactionUpdate {
                 status: ProviderResponseCompactionStatus::Started,
                 original_input_tokens: None,
-                compacted_input_tokens: None,
+                compaction_output_tokens: None,
             }),
             _ => None,
         })

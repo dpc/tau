@@ -48,13 +48,14 @@ chain, and sends the complete provider-visible window followed by one
 the model/service-tier routing hint; Tau does not claim a Codex installation or
 attestation identity.
 
-The model publishes a conservative standalone prefix budget. Prefix retreat
-keeps the fresh chain: Tau sends the exact ordinary full replay of the selected
-prefix with the same mode, system prompt, tools, controls, and stable
-`prompt_cache_key`, then appends only `compaction_trigger`. It never claims a
-retreated prefix through `previous_response_id`; compatible provider prefix
-caching may still hit. Final request lowering fails closed above the published
-bound.
+The model publishes no inferred historical-prefix byte budget. Tau initially
+sends the exact normalized provider-closed target with the same mode, system
+prompt, tools, controls, and stable `prompt_cache_key`, then appends only
+`compaction_trigger`. It never claims a retreated prefix through
+`previous_response_id`; compatible provider prefix caching may still hit.
+Fixed system/tool material and provider-specific wire expansion are not
+compared with model token-window metadata. Canonical upstream context rejection
+owns token-capacity admission and authorizes strict-predecessor retreat.
 
 Native compact completion preserves provider usage, including cached-read and
 cache-write counters, in the ordinary `ProviderResponseFinished.usage` path.
@@ -139,8 +140,8 @@ Both modes suppress legacy inline `context_management` for GPT-5.6 and advertise
 standalone compaction. V2 success requires `response.completed` and exactly one
 opaque provider compaction item. Tau constructs the replacement from retained
 real user/hook and eligible agent-message input, preserving order and metadata,
-then appends that provider item. Agent messages above 10,000 approximate tokens
-are omitted. A newest-first 64,000-token text budget retains complete groups and
+then appends that provider item. Agent messages above 40,000 UTF-8 bytes are
+omitted. A newest-first 256,000-byte text budget retains complete groups and
 middle-truncates at most one boundary message; images and audio in retained
 messages do not consume this budget. Invalid output installs nothing. Raw
 provider sidecars remain intact through durable replacement and cold replay.

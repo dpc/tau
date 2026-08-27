@@ -2375,7 +2375,7 @@ fn reasoning_only_length_rejects_other_adapters_and_side_conversations() {
             usage: None,
             originator,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: Some(tau_proto::ProviderBackend {
                 kind: backend_kind,
                 base_url: "https://example.invalid/v1".to_owned(),
@@ -2652,7 +2652,7 @@ fn output_length_eligibility_matrix_is_exact() {
             usage: None,
             originator: case.originator,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: case.backend,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -2848,7 +2848,7 @@ fn output_length_successor_terminal_matrix_is_exact() {
             usage: None,
             originator: tau_proto::PromptOriginator::User,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: Some(tau_proto::ProviderBackend {
                 kind: tau_proto::ProviderBackendKind::ChatCompletions,
                 base_url: "https://example.invalid/v1".to_owned(),

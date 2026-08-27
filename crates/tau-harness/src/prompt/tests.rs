@@ -1382,7 +1382,7 @@ fn assemble_conversation_starts_at_latest_standalone_compaction() {
     tree.apply_event(&user_prompt("old history"));
     tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         compact_prompt_id: None,
         model: None,
         operation: None,
@@ -1739,7 +1739,7 @@ fn materialized_message(text: &str) -> ContextItem {
 fn compacted_event(replacement_window: Vec<ContextItem>) -> Event {
     Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         compact_prompt_id: None,
         model: None,
         operation: None,
@@ -1806,7 +1806,7 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
             source: None,
             event: Event::AgentCompacted(tau_proto::AgentCompacted {
                 original_input_tokens: None,
-                compacted_input_tokens: None,
+                compaction_output_tokens: None,
                 compact_prompt_id: None,
                 model: None,
                 operation: None,
@@ -1850,7 +1850,7 @@ fn assemble_conversation_preserves_new_compaction_suffix() {
     let suffix_end = tau_proto::AgentHead::Node(tree.head().expect("suffix end"));
     tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         compact_prompt_id: None,
         model: None,
         operation: None,
@@ -1903,7 +1903,7 @@ fn repeated_compaction_uses_logical_active_window_live_and_replay() {
                     summary: &str| {
         Event::AgentCompacted(tau_proto::AgentCompacted {
             original_input_tokens: None,
-            compacted_input_tokens: None,
+            compaction_output_tokens: None,
             compact_prompt_id: None,
             model: None,
             operation: None,
@@ -2024,7 +2024,7 @@ fn assemble_conversation_includes_tool_error_details() {
             originator: tau_proto::PromptOriginator::User,
             usage: None,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -2125,7 +2125,7 @@ fn assemble_conversation_preserves_agent_phase() {
             originator: tau_proto::PromptOriginator::User,
             usage: None,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -2451,7 +2451,7 @@ fn assemble_conversation_replays_reasoning_items_before_text() {
             originator: tau_proto::PromptOriginator::User,
             usage: None,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -2507,7 +2507,7 @@ fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
             originator: tau_proto::PromptOriginator::User,
             usage: None,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,

@@ -1569,7 +1569,6 @@ impl Harness {
                 .semantic_output
                 .insert(updated.agent_prompt_id.clone());
         }
-        self.enrich_provider_response_updated_compaction(&mut updated);
         if let Some(retry) = updated
             .status
             .as_ref()

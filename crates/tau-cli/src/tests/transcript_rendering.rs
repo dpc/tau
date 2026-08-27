@@ -1078,7 +1078,7 @@ fn standalone_compaction_terminals_clear_hidden_watched_activity() {
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         agent_id: agent_id("engineer"),
         transaction_id: Some(
             tau_proto::CompactionTransactionId::parse("ct-side-success")
@@ -1115,6 +1115,7 @@ fn standalone_compaction_terminals_clear_hidden_watched_activity() {
             cut: tau_proto::AgentHead::Root,
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: None,
+            context_retreat: None,
         },
     ));
     sync(&handle);
@@ -1971,6 +1972,7 @@ fn standalone_compaction_terminal_failures_clear_private_progress() {
             cut: tau_proto::AgentHead::Root,
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: None,
+            context_retreat: None,
         },
     ));
     sync(&handle);
@@ -2043,7 +2045,7 @@ fn render_provider_compaction_update_as_compact_progress() {
         compaction: Some(tau_proto::ProviderResponseCompactionUpdate {
             status: tau_proto::ProviderResponseCompactionStatus::Started,
             original_input_tokens: Some(226_200),
-            compacted_input_tokens: None,
+            compaction_output_tokens: None,
         }),
         status: None,
         response_stats: None,
@@ -2075,7 +2077,7 @@ fn render_provider_compaction_item_when_response_finishes() {
         ))],
     );
     finished.compaction_original_input_tokens = Some(226_200);
-    finished.compaction_compacted_input_tokens = Some(4_500);
+    finished.compaction_output_tokens = Some(4_500);
     renderer.handle(&Event::ProviderResponseFinished(finished));
     sync(&handle);
 
@@ -3392,7 +3394,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         },
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -3677,14 +3679,8 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     assert!(provider_final_frame.contains("💤 @main"));
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
-        original_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
-            tokens: 226_200,
-            provenance: tau_proto::CompactionTokenProvenance::Estimated,
-        }),
-        compacted_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
-            tokens: 4_500,
-            provenance: tau_proto::CompactionTokenProvenance::Estimated,
-        }),
+        original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
+        compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
         agent_id: agent_id("main"),
         transaction_id: Some(
             tau_proto::CompactionTransactionId::parse("ct-private")
@@ -3699,7 +3695,7 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(100, "compact ~#226.2k → ~#4.5k (2%) ok"));
+    assert!(vt.screen_contains(100, "compact #226.2k in / #4.5k out ok"));
     assert!(!vt.screen_contains(100, "compact complete"));
     assert!(!vt.screen_contains(100, "Compacting…"));
     assert!(!vt.screen_contains(100, "private compactor answer"));

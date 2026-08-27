@@ -1502,14 +1502,16 @@ fn quiet_provider_harness_for_with_start_reason_and_storage_mode(
                         tool_result_modalities: Vec::new(),
                         supports_parallel_tool_calls: true,
                         default_affinity: 0,
-                        context_window: 1_000,
+                        context_window: tau_proto::TokenCount::new(1_000),
                         efforts: vec![tau_proto::Effort::Medium],
                         verbosities: vec![tau_proto::Verbosity::Medium],
                         thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
                         supports_compaction: true,
                         supports_standalone_compaction: false,
                         standalone_compaction_threshold: None,
-                        standalone_compaction_prefix_budget: Some(u64::MAX),
+                        standalone_compaction_prefix_budget: Some(tau_proto::ByteCount::new(
+                            u64::MAX,
+                        )),
                         cache_policy: None,
                         est_uncached_input_cost_1m_usd: Default::default(),
                         est_cached_input_cost_1m_usd: Default::default(),
@@ -1770,7 +1772,7 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
             usage: None,
             originator: tau_proto::PromptOriginator::User,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -1824,7 +1826,7 @@ fn rewrite_finished_response_tool_call_items_preserves_provider_replay_sidecars(
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -2025,6 +2027,77 @@ fn read_nth_prompt_created(h: &Harness, index: usize) -> AgentPromptCreated {
             seen += 1;
         }
     }
+}
+
+/// Commit one ordinary response with exact nonzero provider usage.
+fn establish_exact_provider_usage(
+    h: &mut Harness,
+    cid: &AgentId,
+    tokens: u64,
+) -> tau_proto::AgentPromptId {
+    let prompt_index =
+        dispatch::event_log_count(h, |event| matches!(event, Event::AgentPromptCreated(_)));
+    h.dispatch_prompt_for_agent(cid, PendingPrompt::user("exact usage baseline".to_owned()))
+        .expect("dispatch exact usage baseline");
+    let prompt = read_nth_prompt_created(h, prompt_index);
+    let mut response = dispatch::provider_text_response(
+        &prompt.agent_prompt_id,
+        prompt.agent_id,
+        "baseline accepted",
+    );
+    response.usage = Some(tau_proto::ProviderTokenUsage {
+        model: Some(prompt.model),
+        prompt_sent_tokens: tokens,
+        prompt_cached_tokens: 0,
+        prompt_cache_read_ceiling_tokens: None,
+        cache: None,
+        response_received_tokens: 1,
+        stats: Default::default(),
+    });
+    h.handle_provider_response_finished(response)
+        .expect("accept exact usage baseline");
+    prompt.agent_prompt_id
+}
+
+fn publish_exact_automatic_start(
+    h: &mut Harness,
+    cid: &AgentId,
+    cut: tau_proto::AgentHead,
+    model: tau_proto::ModelId,
+    transaction: &str,
+    compact_prompt: &str,
+    provider_prompt_id: tau_proto::AgentPromptId,
+) {
+    let agent = &h.agent_runtime.agent_registry.agents[cid];
+    let provider_input_tokens =
+        tau_proto::TokenCount::new(agent.execution.context_input_tokens.expect("exact usage"));
+    h.publish_for_agent(
+        cid,
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            compact_prompt_id: tau_proto::AgentPromptId::parse(compact_prompt)
+                .expect("compact prompt"),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            agent_id: tau_proto::AgentId::parse(
+                agent.identity.agent_id.as_deref().expect("durable agent"),
+            )
+            .expect("agent id"),
+            transaction_id: tau_proto::CompactionTransactionId::parse(transaction)
+                .expect("transaction"),
+            cut,
+            resume_through: Some(cut),
+            model,
+            originator: agent.identity.originator.clone(),
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence {
+                evidence: tau_proto::ProactiveCompactionEvidence {
+                    provider_prompt_id,
+                    provider_input_tokens,
+                    threshold: tau_proto::TokenCount::new(1),
+                    threshold_source: tau_proto::CompactionThresholdSource::ProviderDefault,
+                },
+            },
+        }),
+    );
 }
 
 fn read_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCreated {

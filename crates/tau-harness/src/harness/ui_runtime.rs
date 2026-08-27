@@ -1189,13 +1189,8 @@ impl Harness {
                 .get(&canceled_prompt_id)
                 .cloned()
                 .and_then(|model| {
-                    let projected = self
-                        .prompt_coordination
-                        .prompt_runtime
-                        .compaction_projected_tokens
-                        .get(&canceled_prompt_id)
-                        .copied()
-                        .flatten();
+                    let reported_input =
+                        self.automatic_compaction_reported_input_tokens(cid, &model);
                     let policies = self
                         .prompt_coordination
                         .prompt_runtime
@@ -1203,7 +1198,13 @@ impl Harness {
                         .get(&canceled_prompt_id)
                         .cloned()
                         .unwrap_or_default();
-                    self.eager_automatic_compaction_decision(cid, model, projected, &policies)
+                    self.eager_automatic_compaction_decision(
+                        cid,
+                        model,
+                        reported_input,
+                        None,
+                        &policies,
+                    )
                 });
             let response = ProviderResponseFinished {
                 automatic_compaction_decision,
@@ -1231,7 +1232,7 @@ impl Harness {
                 estimated_api_cost_rates: None,
                 estimated_api_cost_increment: None,
                 compaction_original_input_tokens: None,
-                compaction_compacted_input_tokens: None,
+                compaction_output_tokens: None,
                 backend: None,
                 provider_attempt: Default::default(),
                 provider_response_id: None,
@@ -1278,13 +1279,7 @@ impl Harness {
             .get(&canceled_prompt_id)
             .cloned()
             .and_then(|model| {
-                let projected = self
-                    .prompt_coordination
-                    .prompt_runtime
-                    .compaction_projected_tokens
-                    .get(&canceled_prompt_id)
-                    .copied()
-                    .flatten();
+                let reported_input = self.automatic_compaction_reported_input_tokens(cid, &model);
                 let policies = self
                     .prompt_coordination
                     .prompt_runtime
@@ -1292,7 +1287,13 @@ impl Harness {
                     .get(&canceled_prompt_id)
                     .cloned()
                     .unwrap_or_default();
-                self.eager_automatic_compaction_decision(cid, model, projected, &policies)
+                self.eager_automatic_compaction_decision(
+                    cid,
+                    model,
+                    reported_input,
+                    None,
+                    &policies,
+                )
             });
         self.publish_prompt_terminated_with_decision(
             session_id,
@@ -1322,10 +1323,6 @@ impl Harness {
         self.prompt_coordination
             .prompt_runtime
             .compaction_policies
-            .remove(&canceled_prompt_id);
-        self.prompt_coordination
-            .prompt_runtime
-            .compaction_projected_tokens
             .remove(&canceled_prompt_id);
         self.prompt_coordination
             .prompt_runtime
@@ -1389,6 +1386,7 @@ impl Harness {
                         cut,
                         reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
                         resume_through,
+                        context_retreat: None,
                     },
                 ),
                 Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
@@ -1613,10 +1611,6 @@ impl Harness {
             self.prompt_coordination
                 .prompt_runtime
                 .compaction_policies
-                .remove(&spid);
-            self.prompt_coordination
-                .prompt_runtime
-                .compaction_projected_tokens
                 .remove(&spid);
             self.publish_event(
                 None,

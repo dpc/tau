@@ -454,7 +454,7 @@ fn terminal_defaults(finished: &tau_proto::ProviderResponseFinished) -> bool {
         && finished.context_limit_telemetry.is_none()
         && finished.recovery_disposition == tau_proto::ContextRecoveryDisposition::None
         && finished.compaction_original_input_tokens.is_none()
-        && finished.compaction_compacted_input_tokens.is_none()
+        && finished.compaction_output_tokens.is_none()
         && finished.backend.is_none()
         && finished.provider_response_id.is_none()
         && finished.ws_pool_delta.is_none()

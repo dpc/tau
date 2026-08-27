@@ -158,6 +158,14 @@ pub enum ScenarioActionV2 {
         /// Complete assistant response.
         response: String,
     },
+    /// Complete the mandatory ordinary checkpoint immediately after proactive
+    /// opaque compaction, before any later user input exists.
+    CompactedOpaqueCheckpoint {
+        /// Earlier user text that the replacement must remove from context.
+        removed_user_text: String,
+        /// Complete assistant response.
+        response: String,
+    },
     /// Complete a standalone compaction request with one terminal provider
     /// error.
     StandaloneCompactionError {

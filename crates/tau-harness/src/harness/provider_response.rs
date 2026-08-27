@@ -7,33 +7,6 @@
 use super::*;
 
 impl Harness {
-    pub(super) fn compaction_original_input_tokens_for_prompt(
-        &self,
-        agent_prompt_id: &AgentPromptId,
-    ) -> Option<u64> {
-        let cid = self.agent_id_for_prompt(agent_prompt_id)?;
-        self.agent_runtime
-            .agent_registry
-            .agents
-            .get(&cid)
-            .and_then(|conv| conv.execution.context_input_tokens)
-    }
-
-    pub(super) fn enrich_provider_response_updated_compaction(
-        &self,
-        updated: &mut tau_proto::ProviderResponseUpdated,
-    ) {
-        if updated.compaction.is_none() {
-            return;
-        }
-        let original_input_tokens =
-            self.compaction_original_input_tokens_for_prompt(&updated.agent_prompt_id);
-        if let Some(compaction) = updated.compaction.as_mut() {
-            compaction.original_input_tokens =
-                original_input_tokens.or(compaction.original_input_tokens);
-        }
-    }
-
     #[cfg(test)]
     pub(super) fn handle_provider_response_finished(
         &mut self,
@@ -247,9 +220,6 @@ impl Harness {
             .output_items
             .iter()
             .any(|item| matches!(item, ContextItem::Compaction(_)));
-        let compaction_original_input_tokens = response_contains_compaction
-            .then(|| self.compaction_original_input_tokens_for_prompt(&response.agent_prompt_id))
-            .flatten();
         let response_owner_is_selected = self
             .agent_runtime
             .agent_registry
@@ -293,31 +263,9 @@ impl Harness {
             .compaction_policies
             .remove(&response.agent_prompt_id)
             .unwrap_or_default();
-        let projected_prompt_tokens = self
-            .prompt_coordination
-            .prompt_runtime
-            .compaction_projected_tokens
-            .remove(&response.agent_prompt_id)
-            .flatten();
-        let projected_prompt_tokens = projected_prompt_tokens.or_else(|| {
-            input_tokens.and_then(|tokens| {
-                terminal_model
-                    .as_ref()
-                    .and_then(|model| self.provider_runtime.model_info.get(model))
-                    .map(|info| {
-                        tokens.saturating_add(context_projection_reserve(info.context_window))
-                    })
-            })
-        });
-        let projected_terminal_tokens = projected_prompt_tokens.and_then(|tokens| {
-            projected_transcript_entry_tokens(&tau_core::AgentEntry::AssistantResponse {
-                provider_response_id: response.provider_response_id.clone(),
-                backend: response.backend.clone(),
-                output_items: response.output_items.clone(),
-                usage: response.usage.clone(),
-            })
-            .map(|growth| tokens.saturating_add(growth))
-        });
+        let reported_input_tokens = input_tokens
+            .filter(|tokens| *tokens > 0)
+            .map(tau_proto::TokenCount::new);
         if (!standalone_compaction || standalone_success)
             && self.try_plan_reactive_context_recovery(&cid, &mut response, source)
         {
@@ -416,11 +364,7 @@ impl Harness {
             requested_tool_calls,
         );
         if response_contains_compaction {
-            self.attach_finished_response_compaction_usage(
-                &mut response,
-                input_tokens,
-                compaction_original_input_tokens,
-            );
+            self.attach_finished_response_compaction_usage(&mut response, input_tokens);
         }
 
         let is_non_tool_ext_query = self.is_non_tool_extension_query(&cid);
@@ -510,7 +454,8 @@ impl Harness {
                     self.eager_automatic_compaction_decision(
                         &cid,
                         model,
-                        projected_terminal_tokens,
+                        reported_input_tokens,
+                        Some(response.agent_prompt_id.clone()),
                         &compaction_policies,
                     )
                 });
@@ -707,7 +652,7 @@ impl Harness {
         Ok(())
     }
 
-    /// Captures immutable, content-free context-limit projection evidence
+    /// Captures immutable, content-free native context-limit evidence
     /// immediately before provider dispatch.
     pub(super) fn prompt_context_limit_snapshot(
         &self,
@@ -720,25 +665,18 @@ impl Harness {
             .model_info
             .get(model)
             .map(|info| info.context_window)
-            .filter(|window| *window > 0);
-        let projection_reserve_tokens = advertised_context_window
-            .map_or(MIN_CONTEXT_PROJECTION_RESERVE, context_projection_reserve);
-        let (baseline, transcript_delta_bytes, transcript_delta_tokens) =
-            self.agent_runtime.agent_registry.agents.get(cid).map_or(
-                (None, Some(0), Some(0)),
-                |agent| {
-                    let baseline = (agent.execution.context_usage_model.as_ref() == Some(model)
-                        && self.context_usage_baseline_applies(agent))
-                    .then_some(agent.execution.context_input_tokens)
-                    .flatten();
-                    let growth = self.transcript_growth_since(
-                        agent.identity.agent_id.as_deref(),
-                        agent.identity.head,
-                        agent.execution.context_usage_head,
-                    );
-                    (baseline, growth.serialized_bytes, growth.projected_tokens)
-                },
-            );
+            .filter(|window| *window > tau_proto::TokenCount::ZERO);
+        let transcript_delta_bytes = self.agent_runtime.agent_registry.agents.get(cid).map_or(
+            Some(tau_proto::ByteCount::ZERO),
+            |agent| {
+                self.transcript_growth_since(
+                    agent.identity.agent_id.as_deref(),
+                    agent.identity.head,
+                    agent.execution.context_usage_head,
+                )
+                .serialized_bytes
+            },
+        );
         let role_compaction = self
             .config
             .available_roles
@@ -747,7 +685,7 @@ impl Harness {
             .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault);
         let (compaction_threshold, compaction_policy) = match role_compaction {
             path_tau_config_settings::RoleCompaction::Threshold(value) => (
-                Some(value),
+                Some(tau_proto::TokenCount::new(value)),
                 tau_proto::ContextLimitCompactionPolicy::Threshold,
             ),
             path_tau_config_settings::RoleCompaction::ProviderDefault => (
@@ -764,14 +702,8 @@ impl Harness {
         PromptContextLimitSnapshot {
             model: model.clone(),
             operation,
-            projected_input_tokens: projected_input_tokens(
-                baseline,
-                transcript_delta_tokens,
-                projection_reserve_tokens,
-            ),
             transcript_delta_bytes,
             advertised_context_window,
-            projection_reserve_tokens,
             compaction_threshold,
             compaction_policy,
         }
@@ -787,8 +719,7 @@ impl Harness {
             .and_then(|id| self.session_runtime.agent_store.agent(id))
             .map_or(
                 TranscriptGrowth {
-                    serialized_bytes: Some(0),
-                    projected_tokens: Some(0),
+                    serialized_bytes: Some(tau_proto::ByteCount::ZERO),
                 },
                 |tree| {
                     let ids = tree.branch_node_ids_from(head);
@@ -801,17 +732,7 @@ impl Harness {
                         .map(|node| &node.entry)
                         .collect::<Vec<_>>();
                     TranscriptGrowth {
-                        serialized_bytes: entries.iter().try_fold(0_u64, |total, entry| {
-                            total.checked_add(
-                                path_crate_harness::context_limit_telemetry::
-                                    serialized_transcript_entry_bytes(entry)?,
-                            )
-                        }),
-                        projected_tokens: transcript_growth(entries.into_iter().filter(|entry| {
-                            !matches!(entry, tau_core::AgentEntry::AgentMessage { .. })
-                                || crate::prompt::agent_message_is_provider_visible(entry)
-                        }))
-                        .projected_tokens,
+                        serialized_bytes: transcript_growth(entries).serialized_bytes,
                     }
                 },
             )
@@ -835,20 +756,15 @@ impl Harness {
         let provider_input_tokens = response
             .usage
             .as_ref()
-            .map(|usage| usage.prompt_sent_tokens);
-        let observation = context_limit_observation(
-            provider_input_tokens,
-            snapshot.projected_input_tokens,
-            snapshot.advertised_context_window,
-        );
+            .map(|usage| tau_proto::TokenCount::new(usage.prompt_sent_tokens));
+        let observation =
+            context_limit_observation(provider_input_tokens, snapshot.advertised_context_window);
         response.context_limit_telemetry = Some(tau_proto::ContextLimitTelemetry {
             model: snapshot.model,
             operation: snapshot.operation,
-            projected_input_tokens: snapshot.projected_input_tokens,
             transcript_delta_bytes: snapshot.transcript_delta_bytes,
             advertised_context_window: snapshot.advertised_context_window,
             provider_input_tokens,
-            projection_reserve_tokens: snapshot.projection_reserve_tokens,
             compaction_threshold: snapshot.compaction_threshold,
             compaction_policy: snapshot.compaction_policy,
             recovery_eligible: false,
@@ -941,10 +857,7 @@ impl Harness {
                 .provider_runtime
                 .model_info
                 .get(&model)
-                .is_some_and(|info| {
-                    info.supports_standalone_compaction
-                        && info.standalone_compaction_prefix_budget.is_some()
-                })
+                .is_some_and(|info| info.supports_standalone_compaction)
         {
             return false;
         }
@@ -1026,14 +939,11 @@ impl Harness {
             if !self.provider_runtime.model_info.contains_key(model) && !absence_is_authoritative {
                 continue;
             }
-            let capability_matches =
-                self.provider_runtime
-                    .model_info
-                    .get(model)
-                    .is_some_and(|info| {
-                        info.supports_standalone_compaction
-                            && info.standalone_compaction_prefix_budget.is_some()
-                    });
+            let capability_matches = self
+                .provider_runtime
+                .model_info
+                .get(model)
+                .is_some_and(|info| info.supports_standalone_compaction);
             let selected_or_continuation_model_matches = self
                 .agent_runtime
                 .agent_registry
@@ -1148,6 +1058,7 @@ impl Harness {
             cut,
             reason,
             resume_through: Some(checkpoint.through),
+            context_retreat: None,
         };
         self.publish_event_for_agent_with_completion(
             cid,
@@ -1188,7 +1099,7 @@ impl Harness {
         let Some(model) = checkpoint.model.clone() else {
             return;
         };
-        let Some(provisional_cut) = checkpoint.activation_cut else {
+        let Some(activation_cut) = checkpoint.activation_cut else {
             return;
         };
         let Some(agent_id) = self
@@ -1206,27 +1117,27 @@ impl Harness {
             .agents
             .get(cid)
             .map_or(0, |agent| agent.dispatch.next_prompt_index);
+        let provisional_cut = self
+            .session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .and_then(|tree| tree.reactive_compaction_target(&checkpoint.agent_prompt_id))
+            .unwrap_or(activation_cut);
         let prefix_budget = self
             .provider_runtime
             .model_info
             .get(&model)
             .and_then(|info| info.standalone_compaction_prefix_budget);
-        let Some(prefix_budget) = prefix_budget else {
-            self.terminalize_replay_blocked_context_recovery(
-                cid,
-                checkpoint,
-                tau_proto::StandaloneCompactionFailureReason::RouteFailed,
-            );
-            return;
-        };
         let fitting_cut = if provisional_cut == tau_proto::AgentHead::Root {
             // Reactive recovery retains the established root-cut transaction:
             // the activating input remains exact suffix and the compact request
             // contains only fixed provider/system surface. Later inference may
             // still reject one oversized indivisible activating item.
             Some(tau_proto::AgentHead::Root)
-        } else {
+        } else if let Some(prefix_budget) = prefix_budget {
             self.fitting_automatic_compaction_cut(&agent_id, provisional_cut, None, prefix_budget)
+        } else {
+            Some(provisional_cut)
         };
         let cut = fitting_cut.unwrap_or(provisional_cut);
         let transaction_id = tau_proto::CompactionTransactionId::parse(format!("ct-{next}"))
@@ -1282,6 +1193,41 @@ impl Harness {
         );
     }
 
+    /// Append the exact retreat successor pre-minted by a committed typed
+    /// context rejection. The retained completion retries the same immutable
+    /// event after append rejection; replay calls this only while the successor
+    /// remains absent from the core projection.
+    pub(super) fn start_context_retreat_from_plan(
+        &mut self,
+        cid: &AgentId,
+        failed: &tau_proto::AgentStandaloneCompactionFailed,
+        plan: tau_proto::ContextRetreatPlan,
+    ) {
+        let event =
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                agent_id: failed.agent_id.clone(),
+                transaction_id: plan.transaction_id,
+                compact_prompt_id: plan.compact_prompt_id,
+                cut: plan.cut,
+                resume_through: plan.resume_through,
+                model: plan.model,
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator: plan.originator,
+                supersedes: Some(failed.transaction_id.clone()),
+                trigger: tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat {
+                    failed_transaction_id: failed.transaction_id.clone(),
+                    roll_through: plan.roll_through,
+                },
+            });
+        self.publish_event_for_agent_with_completion(
+            cid,
+            None,
+            event,
+            Some(AgentPublishCompletion::RollingCompactionStart { retry_event: None }),
+            false,
+        );
+    }
+
     /// Classify a standalone terminal before it changes any context or cache
     /// state, including the complete durable-boundary validation.
     pub(super) fn classify_standalone_compaction_terminal(
@@ -1290,6 +1236,14 @@ impl Harness {
         response: &ProviderResponseFinished,
     ) -> StandaloneCompactionTerminal {
         if response.error.is_some() || response.failure_kind.is_some() {
+            if response.failure_kind == Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+                && response.stop_reason == ProviderStopReason::Error
+                && response.output_items.is_empty()
+            {
+                return StandaloneCompactionTerminal::Rejected(
+                    StandaloneCompactionRejection::ContextWindowExceeded,
+                );
+            }
             return StandaloneCompactionTerminal::Rejected(
                 StandaloneCompactionRejection::ProviderError,
             );
@@ -1392,40 +1346,15 @@ impl Harness {
             agent_id,
             parent,
             Event::AgentCompacted(tau_proto::AgentCompacted {
-                original_input_tokens: response.usage.as_ref().map_or_else(
-                    || {
-                        (agent.execution.context_usage_model.as_ref() == Some(&model)
-                            && self.context_usage_baseline_applies(agent))
-                        .then_some(agent.execution.context_input_tokens)
-                        .flatten()
-                        .map(|tokens| tau_proto::CompactionTokenMeasurement {
-                            tokens,
-                            provenance: tau_proto::CompactionTokenProvenance::Estimated,
-                        })
-                    },
-                    |usage| {
-                        Some(tau_proto::CompactionTokenMeasurement {
-                            tokens: usage.prompt_sent_tokens,
-                            provenance: tau_proto::CompactionTokenProvenance::ProviderReported,
-                        })
-                    },
-                ),
-                compacted_input_tokens: response
+                original_input_tokens: response
+                    .usage
+                    .as_ref()
+                    .map(|usage| tau_proto::TokenCount::new(usage.prompt_sent_tokens)),
+                compaction_output_tokens: response
                     .usage
                     .as_ref()
                     .map(|usage| usage.response_received_tokens)
-                    .map(|tokens| tau_proto::CompactionTokenMeasurement {
-                        tokens,
-                        provenance: tau_proto::CompactionTokenProvenance::ProviderReported,
-                    })
-                    .or_else(|| {
-                        estimate_compacted_input_tokens(replacement_window.items()).map(|tokens| {
-                            tau_proto::CompactionTokenMeasurement {
-                                tokens,
-                                provenance: tau_proto::CompactionTokenProvenance::Estimated,
-                            }
-                        })
-                    }),
+                    .map(tau_proto::TokenCount::new),
                 compact_prompt_id: Some(compact_prompt_id),
                 model: Some(model),
                 operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
@@ -1544,6 +1473,10 @@ impl Harness {
                 "provider failed standalone compaction for agent_prompt_id={}",
                 response.agent_prompt_id
             )),
+            StandaloneCompactionRejection::ContextWindowExceeded => self.emit_info(&format!(
+                "provider context-rejected standalone compaction for agent_prompt_id={}",
+                response.agent_prompt_id
+            )),
             StandaloneCompactionRejection::InvalidStop => self.emit_info(&format!(
                 "provider returned a non-terminal standalone compaction stop for agent_prompt_id={}",
                 response.agent_prompt_id
@@ -1552,6 +1485,23 @@ impl Harness {
                 "provider returned an invalid standalone compaction window for agent_prompt_id={}",
                 response.agent_prompt_id
             )),
+        }
+        if matches!(
+            rejection,
+            StandaloneCompactionRejection::ContextWindowExceeded
+        ) {
+            self.publish_event_for_agent_with_completion(
+                cid,
+                source,
+                Event::ProviderResponseFinished(response.clone()),
+                Some(AgentPublishCompletion::StandaloneContextRejection {
+                    response: Box::new(response.clone()),
+                    source: source.cloned(),
+                    retry_event: None,
+                }),
+                false,
+            );
+            return;
         }
         self.fail_standalone_compaction(cid, response, rejection.durable_reason(), source);
     }
@@ -1583,6 +1533,125 @@ impl Harness {
         let Some((transaction_id, cut, resume_through)) = transaction else {
             return;
         };
+        let automatic_context_recovery = self
+            .session_runtime
+            .agent_store
+            .agent(response.agent_id.as_str())
+            .and_then(|tree| match tree.standalone_compaction_recovery() {
+                Some(tau_core::StandaloneCompactionRecovery::Interrupted(started))
+                | Some(tau_core::StandaloneCompactionRecovery::RejectedAwaitingFailure {
+                    started,
+                    ..
+                }) if started.transaction_id == transaction_id => Some(matches!(
+                    started.trigger,
+                    tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence { .. }
+                        | tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { .. }
+                        | tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. }
+                        | tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat { .. }
+                        | tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow { .. }
+                )),
+                _ => None,
+            })
+            .unwrap_or(false);
+        let automatic_context_irreducible = automatic_context_recovery
+            && self
+                .previous_useful_compaction_cut(
+                    response.agent_id.as_str(),
+                    self.selected_head_for_agent(cid).unwrap_or(cut),
+                    cut,
+                )
+                .is_none();
+        let retreat_plan = if reason
+            == tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
+        {
+            let agent_id = response.agent_id.as_str();
+            let started = self
+                .session_runtime
+                .agent_store
+                .agent(agent_id)
+                .and_then(|tree| match tree.standalone_compaction_recovery() {
+                    Some(tau_core::StandaloneCompactionRecovery::Interrupted(started))
+                    | Some(tau_core::StandaloneCompactionRecovery::RejectedAwaitingFailure {
+                        started,
+                        ..
+                    }) if started.transaction_id == transaction_id => Some(started),
+                    _ => None,
+                });
+            started.and_then(|started| {
+                let automatic = matches!(
+                    started.trigger,
+                    tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence { .. }
+                        | tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { .. }
+                        | tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. }
+                        | tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat { .. }
+                        | tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow { .. }
+                );
+                automatic.then_some(started).and_then(|started| {
+                    let active_head = self.selected_head_for_agent(cid).unwrap_or(started.cut);
+                    let predecessor =
+                        self.previous_useful_compaction_cut(agent_id, active_head, started.cut)?;
+                    let next = self
+                        .agent_runtime
+                        .agent_registry
+                        .agents
+                        .get(cid)?
+                        .dispatch
+                        .next_prompt_index;
+                    let transaction_id =
+                        tau_proto::CompactionTransactionId::parse(format!("ct-{next}")).ok()?;
+                    let compact_prompt_id =
+                        tau_proto::AgentPromptId::parse(format!("ap-{agent_id}-{next}")).ok()?;
+                    Some(tau_proto::ContextRetreatPlan {
+                        transaction_id,
+                        compact_prompt_id,
+                        cut: predecessor,
+                        roll_through: match &started.trigger {
+                            tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence {
+                                ..
+                            }
+                            | tau_proto::StandaloneCompactionTrigger::AutomaticPolicy { .. } => {
+                                started.cut
+                            }
+                            tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat {
+                                roll_through,
+                                ..
+                            } => *roll_through,
+                            tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+                                previous_transaction_id,
+                            } => self
+                                .session_runtime
+                                .agent_store
+                                .agent(agent_id)?
+                                .reactive_compaction_progress(previous_transaction_id)
+                                .and_then(|progress| match progress {
+                                    tau_core::ReactiveCompactionProgress::NeedsContinuation {
+                                        target_cut,
+                                    } => Some(target_cut),
+                                    tau_core::ReactiveCompactionProgress::ReachedTargetCut => None,
+                                })?,
+                            tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                                failed_agent_prompt_id,
+                            } => self
+                                .session_runtime
+                                .agent_store
+                                .agent(agent_id)?
+                                .reactive_compaction_target(failed_agent_prompt_id)?,
+                            _ => return None,
+                        },
+                        model: started.model,
+                        originator: started.originator,
+                        resume_through: started.resume_through,
+                    })
+                })
+            })
+        } else {
+            None
+        };
+        if retreat_plan.is_some()
+            && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid)
+        {
+            agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
+        }
         // Rejection retains neither cache evidence nor context-recovery authority,
         // but it must release the prompt-local snapshots allocated for dispatch.
         self.provider_runtime
@@ -1596,25 +1665,38 @@ impl Harness {
             .prompt_runtime
             .compaction_policies
             .remove(&response.agent_prompt_id);
-        self.prompt_coordination
-            .prompt_runtime
-            .compaction_projected_tokens
-            .remove(&response.agent_prompt_id);
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
         self.emit_info_important(&format!(
             "standalone compaction failed for agent `{cid}` ({reason:?}); retry with :compact, switch model/role, or rewind"
         ));
-        self.publish_for_agent_from(
+        let batch_parent = self
+            .selected_head_for_agent(cid)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        self.publish_event_for_agent_with_completion(
             cid,
             source,
             Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
                 agent_id: response.agent_id.clone(),
                 transaction_id,
                 cut,
-                reason,
+                reason: if reason
+                    == tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
+                    && retreat_plan.is_none()
+                    && automatic_context_irreducible
+                {
+                    tau_proto::StandaloneCompactionFailureReason::ContextIrreducible
+                } else {
+                    reason
+                },
                 resume_through,
+                context_retreat: retreat_plan,
             }),
+            Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
+                batch_parent,
+                retry_event: None,
+            }),
+            false,
         );
     }
 
@@ -1667,10 +1749,6 @@ impl Harness {
         self.prompt_coordination
             .prompt_runtime
             .compaction_policies
-            .remove(agent_prompt_id);
-        self.prompt_coordination
-            .prompt_runtime
-            .compaction_projected_tokens
             .remove(agent_prompt_id);
         self.prompt_coordination
             .prompt_runtime
@@ -1844,6 +1922,7 @@ impl Harness {
                 .cloned();
             self.update_agent_context_usage(
                 cid,
+                Some(agent_prompt_id),
                 usage_model.as_ref(),
                 input_tokens,
                 cached_tokens,
@@ -2248,22 +2327,14 @@ impl Harness {
         &self,
         response: &mut ProviderResponseFinished,
         input_tokens: Option<u64>,
-        compaction_original_input_tokens: Option<u64>,
     ) {
-        response.compaction_original_input_tokens = input_tokens
-            .or(response.compaction_original_input_tokens)
-            .or(compaction_original_input_tokens);
-        response.compaction_compacted_input_tokens = response
+        response.compaction_original_input_tokens =
+            input_tokens.or(response.compaction_original_input_tokens);
+        response.compaction_output_tokens = response
             .usage
             .as_ref()
-            .and_then(|usage| {
-                (0 < usage.response_received_tokens).then_some(usage.response_received_tokens)
-            })
-            .or_else(|| {
-                latest_compaction_replay_window(&response.output_items)
-                    .and_then(estimate_compacted_input_tokens)
-            })
-            .or(response.compaction_compacted_input_tokens);
+            .map(|usage| usage.response_received_tokens)
+            .or(response.compaction_output_tokens);
     }
 
     pub(super) fn reconcile_finished_response_tool_call_stop(
@@ -3286,6 +3357,7 @@ impl Harness {
     pub(super) fn update_agent_context_usage(
         &mut self,
         cid: &AgentId,
+        agent_prompt_id: Option<&tau_proto::AgentPromptId>,
         model: Option<&ModelId>,
         input_tokens: Option<u64>,
         cached_tokens: Option<u64>,
@@ -3298,17 +3370,12 @@ impl Harness {
             _ => None,
         };
         if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-            if input_tokens.is_some() {
-                conv.execution.context_input_tokens = input_tokens;
-                conv.execution.context_usage_head = conv.identity.head;
-                conv.execution.context_usage_model = model.cloned();
-            }
-            if cached_tokens.is_some() {
-                conv.execution.context_cached_tokens = cached_tokens;
-            }
-            if percent_used.is_some() {
-                conv.execution.context_percent_used = percent_used;
-            }
+            conv.execution.context_input_tokens = input_tokens;
+            conv.execution.context_cached_tokens = cached_tokens;
+            conv.execution.context_usage_head = conv.identity.head;
+            conv.execution.context_usage_model = model.cloned();
+            conv.execution.context_usage_prompt_id = agent_prompt_id.cloned();
+            conv.execution.context_percent_used = percent_used;
         }
         self.publish_event(
             source,
@@ -3328,6 +3395,7 @@ impl Harness {
             conv.execution.context_input_tokens = None;
             conv.execution.context_usage_head = None;
             conv.execution.context_usage_model = None;
+            conv.execution.context_usage_prompt_id = None;
             conv.execution.context_cached_tokens = None;
             conv.execution.context_percent_used = None;
             conv.execution.fired_context_size_alerts.clear();
@@ -3382,6 +3450,7 @@ impl Harness {
                         conv.execution.context_input_tokens?,
                         conv.execution.context_cached_tokens.unwrap_or_default(),
                         None,
+                        conv.execution.context_usage_prompt_id.clone()?,
                     ))
                 })
                 .flatten()
@@ -3397,9 +3466,17 @@ impl Harness {
                 || current_model.as_ref() == Some(model)
         });
         self.clear_agent_context_usage(cid);
-        let (model, input_tokens, cached_tokens, usage_head) = restored
-            .map(|(model, input, cached, head)| (Some(model), Some(input), Some(cached), head))
-            .unwrap_or((None, None, None, None));
+        let (model, input_tokens, cached_tokens, usage_head, usage_prompt_id) = restored
+            .map(|(model, input, cached, head, prompt_id)| {
+                (
+                    Some(model),
+                    Some(input),
+                    Some(cached),
+                    head,
+                    Some(prompt_id),
+                )
+            })
+            .unwrap_or((None, None, None, None, None));
         let context_window = model
             .as_ref()
             .and_then(|model| context_window_for_model(&self.provider_runtime.model_info, model));
@@ -3411,6 +3488,7 @@ impl Harness {
             conv.execution.context_cached_tokens = cached_tokens;
             conv.execution.context_usage_head = usage_head;
             conv.execution.context_usage_model = model;
+            conv.execution.context_usage_prompt_id = usage_prompt_id;
             conv.execution.context_percent_used = percent_used;
         }
         self.publish_event(

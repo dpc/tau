@@ -367,7 +367,7 @@ fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: Some(100),
-        compaction_compacted_input_tokens: Some(25),
+        compaction_output_tokens: Some(25),
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: Some("response-1".to_owned()),

@@ -18,6 +18,7 @@ use std::{io as path_std_io, num as path_std_num};
 
 use serde::de as path_serde_de;
 
+mod byte_count;
 mod context;
 mod diff;
 mod discovery_snapshot;
@@ -40,12 +41,14 @@ mod provider_cache_quota;
 mod provider_cache_usage;
 mod provider_quota;
 mod suggestion;
+mod token_count;
 mod token_usage;
 mod tool_name_prefix;
 
 use std::io::{BufReader, Cursor, Read, Write};
 use std::marker::PhantomData;
 
+pub use byte_count::ByteCount;
 pub use ciborium::value::Value as CborValue;
 pub use context::*;
 pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary, FileDiffSummary};
@@ -71,6 +74,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 pub use suggestion::*;
 pub use tau_actions::*;
+pub use token_count::TokenCount;
 pub use token_usage::*;
 pub use tool_name_prefix::{
     InvalidToolNamePrefix, ToolNameCompositionError, ToolNamePrefix, ToolNameTarget,

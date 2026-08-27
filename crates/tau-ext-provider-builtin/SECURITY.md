@@ -185,10 +185,11 @@ retains its existing policy. See
 
 ## Tau-owned summary compaction fallback
 
-Chat Completions, OpenRouter, and public Responses models advertise standalone
-summary compaction by default with conservative context-derived limits and a
-proactive threshold. `local_summary_compaction` remains an optional full
-per-model override. Tau sends the ordinary provider request prefix for the
+Chat Completions, OpenRouter, and public Responses models advertise a generic
+standalone summary fallback with no prefix byte cap or proactive threshold and
+independent token-output/narrative-byte limits. An explicit
+`local_summary_compaction` profile may override those native-domain limits. Tau
+sends the ordinary provider request prefix for the
 immutable cut, including the normal system prompt, tools, history, images, raw
 tool arguments, and cache controls, then appends one harness-authored
 `<tau_internal>` user message. Any tool call fails without execution. Tau accepts

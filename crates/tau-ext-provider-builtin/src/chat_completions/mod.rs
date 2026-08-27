@@ -135,7 +135,7 @@ impl LocalSummaryCompactionConfig {
     }
 }
 
-/// Resolve an optional profile override or derive conservative defaults.
+/// Resolve an explicit profile or the generic no-byte-cap fallback.
 fn resolved_local_summary_compaction(
     override_config: Option<LocalSummaryCompactionConfig>,
     context_window: u64,

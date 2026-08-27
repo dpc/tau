@@ -344,7 +344,7 @@ fn staged_provider_model(id: &str) -> tau_proto::ProviderModelInfo {
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
         default_affinity: 100,
-        context_window: 4_096,
+        context_window: tau_proto::TokenCount::new(4_096),
         efforts: vec![tau_proto::Effort::Medium],
         verbosities: vec![tau_proto::Verbosity::Medium],
         thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
@@ -414,7 +414,7 @@ pub(super) fn seed_restored_compaction_checkpoint(
         Event::AgentStandaloneCompactionStarted(started),
         Event::AgentCompacted(tau_proto::AgentCompacted {
             original_input_tokens: None,
-            compacted_input_tokens: None,
+            compaction_output_tokens: None,
             agent_id: agent_id.clone(),
             transaction_id: Some(transaction_id.clone()),
             cut: Some(tau_proto::AgentHead::Root),
@@ -793,7 +793,7 @@ fn reasoning_only_length_response(
         }),
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: Some(tau_proto::ProviderBackend {
             kind: tau_proto::ProviderBackendKind::ChatCompletions,
             base_url: "https://example.invalid/v1".to_owned(),

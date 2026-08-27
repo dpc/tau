@@ -1431,7 +1431,7 @@ fn role_setting_updates_are_typed_and_reset_aware() {
             "compaction-threshold",
             "85000",
             UiRoleUpdateAction::SetCompactionThreshold {
-                compaction_threshold: Some(85000),
+                compaction_threshold: Some(tau_proto::TokenCount::new(85000)),
             },
         ),
         (

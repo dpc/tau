@@ -990,10 +990,6 @@ impl Harness {
             .remove(agent_prompt_id);
         self.prompt_coordination
             .prompt_runtime
-            .compaction_projected_tokens
-            .remove(agent_prompt_id);
-        self.prompt_coordination
-            .prompt_runtime
             .estimated_cost_rates
             .remove(agent_prompt_id);
         self.clear_prompt_tool_snapshot(agent_prompt_id);
@@ -1101,6 +1097,7 @@ impl Harness {
                         cut,
                         reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
                         resume_through,
+                        context_retreat: None,
                     },
                 ),
             );

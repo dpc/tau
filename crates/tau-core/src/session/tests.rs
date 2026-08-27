@@ -445,7 +445,7 @@ fn provider_response_rejects_input_side_tool_result_items() {
         usage: None,
         originator: PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -583,6 +583,97 @@ fn append_user_input(tree: &mut AgentTree, text: &str) -> AgentHead {
     AgentHead::Node(tree.head().expect("input node"))
 }
 
+fn install_provider_evidence(
+    tree: &mut AgentTree,
+    prompt: &str,
+    response_node: NodeId,
+    input_tokens: Option<tau_proto::TokenCount>,
+) -> tau_proto::AgentPromptId {
+    let prompt_id = tau_proto::AgentPromptId::parse(prompt).expect("valid prompt id");
+    tree.inference_dispatch_order.push(prompt_id.clone());
+    tree.inference_dispatches.insert(
+        prompt_id.clone(),
+        InferenceDispatchFold {
+            checkpoint: tau_proto::AgentInferenceDispatchStarted {
+                agent_id: agent_id(),
+                transaction_id: None,
+                agent_prompt_id: prompt_id.clone(),
+                through: AgentHead::Node(response_node),
+                model: Some("provider/model".into()),
+                operation: Some(tau_proto::PromptOperation::Inference),
+                activation_cut: None,
+                output_length_continuation: None,
+            },
+            fold_semantics: AgentJournalFoldSemantics::InferenceDeferredInputV1,
+            head_move_generation: tree.head_move_generation,
+            finished: true,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            provider_attempt: Some(tau_proto::ProviderAttempt::ONE),
+            provider_stop_reason: Some(tau_proto::ProviderStopReason::EndTurn),
+            provider_input_tokens: input_tokens,
+            rearms_output_length: false,
+            output_length_plan_node: None,
+            output_length_steer_node: None,
+            response_node: Some(response_node),
+        },
+    );
+    prompt_id
+}
+
+#[test]
+fn direct_proactive_evidence_requires_newest_ancestral_observation_and_valid_source() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let evidence_head = append_user_input(&mut tree, "evidence");
+    let AgentHead::Node(evidence_node) = evidence_head else {
+        unreachable!()
+    };
+    let evidence_prompt = install_provider_evidence(
+        &mut tree,
+        "ap-exact-evidence",
+        evidence_node,
+        Some(tau_proto::TokenCount::new(200)),
+    );
+    let mut started = compaction_start("ct-exact-evidence");
+    started.cut = evidence_head;
+    started.resume_through = Some(evidence_head);
+    started.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence {
+        evidence: tau_proto::ProactiveCompactionEvidence {
+            provider_prompt_id: evidence_prompt,
+            provider_input_tokens: tau_proto::TokenCount::new(200),
+            threshold: tau_proto::TokenCount::new(100),
+            threshold_source: tau_proto::CompactionThresholdSource::ProviderDefault,
+        },
+    };
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(started.clone()))
+        .expect("newest ancestral exact observation");
+
+    let newer_head = append_user_input(&mut tree, "newer missing usage");
+    let AgentHead::Node(newer_node) = newer_head else {
+        unreachable!()
+    };
+    install_provider_evidence(&mut tree, "ap-newer-missing", newer_node, None);
+    assert!(
+        validation_error(
+            &tree,
+            Event::AgentStandaloneCompactionStarted(started.clone())
+        )
+        .contains("exact provider evidence")
+    );
+
+    let tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence { evidence } =
+        &mut started.trigger
+    else {
+        unreachable!()
+    };
+    evidence.threshold_source =
+        tau_proto::CompactionThresholdSource::NamedPolicies { names: Vec::new() };
+    assert!(
+        validation_error(&tree, Event::AgentStandaloneCompactionStarted(started))
+            .contains("exact provider evidence")
+    );
+}
+
 /// Same-head ancestry must avoid materializing an arbitrarily long selected
 /// branch, while sibling and unknown heads retain their existing answers.
 #[test]
@@ -623,6 +714,7 @@ fn fail_compaction(tree: &mut AgentTree, started: &tau_proto::AgentStandaloneCom
             cut: started.cut,
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: started.resume_through,
+            context_retreat: None,
         },
     ));
 }
@@ -670,7 +762,7 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             usage: None,
             originator: PromptOriginator::User,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -709,7 +801,7 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
         );
         tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
             original_input_tokens: None,
-            compacted_input_tokens: None,
+            compaction_output_tokens: None,
             agent_id: agent_id(),
             transaction_id: None,
             cut: None,
@@ -762,7 +854,7 @@ fn closed_provider_prefix_retreats_only_from_tool_calling_assistant() {
             usage: None,
             originator: PromptOriginator::User,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -917,7 +1009,7 @@ fn superseding_compaction_allows_only_ancestor_cut_retreat() {
     successful_tree.apply_event(&Event::AgentStandaloneCompactionStarted(successful.clone()));
     successful_tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         agent_id: agent_id(),
         transaction_id: Some(successful.transaction_id.clone()),
         cut: Some(successful.cut),
@@ -944,6 +1036,168 @@ fn superseding_compaction_allows_only_ancestor_cut_retreat() {
         error.contains("only a failed transaction")
             || error.contains("explicitly linked continuation"),
         "{error}"
+    );
+}
+
+/// Automatic context retreat must claim the exact successor pre-minted by the
+/// failed transaction; neither an equal cut nor a rewritten successor is valid.
+#[test]
+fn automatic_context_retreat_claims_exact_strict_predecessor_plan() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let skipped = append_user_input(&mut tree, "skipped");
+    let predecessor = append_user_input(&mut tree, "predecessor");
+    let rejected_cut = append_user_input(&mut tree, "rejected");
+    let mut rejected = compaction_start("ct-context-rejected");
+    rejected.cut = rejected_cut;
+    rejected.resume_through = Some(rejected_cut);
+    rejected.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence {
+        evidence: tau_proto::ProactiveCompactionEvidence {
+            provider_prompt_id: "ap-provider-evidence".parse().expect("valid prompt id"),
+            provider_input_tokens: tau_proto::TokenCount::new(2),
+            threshold: tau_proto::TokenCount::new(1),
+            threshold_source: tau_proto::CompactionThresholdSource::ProviderDefault,
+        },
+    };
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(rejected.clone()));
+    tree.apply_event(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        agent_prompt_id: rejected.compact_prompt_id.clone(),
+        agent_id: agent_id(),
+        session_id: tau_proto::SessionId::parse("session").expect("session"),
+        model: rejected.model.clone(),
+        model_params: Some(tau_proto::ModelParams::default()),
+        outer_turn_id: None,
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        originator: rejected.originator.clone(),
+        ctx_id: None,
+    }));
+    tree.apply_event(&Event::AgentInferenceDispatchStarted(
+        tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id(),
+            transaction_id: Some(rejected.transaction_id.clone()),
+            agent_prompt_id: rejected.compact_prompt_id.clone(),
+            through: rejected.cut,
+            model: Some(rejected.model.clone()),
+            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+            activation_cut: None,
+            output_length_continuation: None,
+        },
+    ));
+    let mut provider_rejection =
+        tool_calling_response(&agent_id(), rejected.compact_prompt_id.as_str(), Vec::new());
+    provider_rejection.stop_reason = tau_proto::ProviderStopReason::Error;
+    provider_rejection.failure_kind = Some(tau_proto::ProviderFailureKind::ContextWindowExceeded);
+    tree.apply_event(&Event::ProviderResponseFinished(provider_rejection));
+    assert_eq!(
+        tree.head().map(AgentHead::Node),
+        Some(rejected_cut),
+        "standalone rejection evidence must not enter the provider transcript"
+    );
+    assert!(matches!(
+        tree.standalone_compaction_recovery(),
+        Some(StandaloneCompactionRecovery::RejectedAwaitingFailure {
+            started: ref projected,
+            ..
+        }) if projected.transaction_id == rejected.transaction_id
+    ));
+    let plan = tau_proto::ContextRetreatPlan {
+        transaction_id: tau_proto::CompactionTransactionId::parse("ct-context-retreat")
+            .expect("valid transaction id"),
+        compact_prompt_id: "ap-context-retreat".parse().expect("valid prompt id"),
+        cut: predecessor,
+        roll_through: rejected_cut,
+        model: rejected.model.clone(),
+        originator: rejected.originator.clone(),
+        resume_through: rejected.resume_through,
+    };
+    let failure = tau_proto::AgentStandaloneCompactionFailed {
+        agent_id: agent_id(),
+        transaction_id: rejected.transaction_id.clone(),
+        cut: rejected.cut,
+        reason: tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded,
+        resume_through: rejected.resume_through,
+        context_retreat: Some(plan.clone()),
+    };
+    let mut skipped_failure = failure.clone();
+    skipped_failure.context_retreat.as_mut().expect("plan").cut = skipped;
+    let skipped_error = validation_error(
+        &tree,
+        Event::AgentStandaloneCompactionFailed(skipped_failure),
+    );
+    assert!(
+        skipped_error.contains("strict predecessor"),
+        "{skipped_error}"
+    );
+    let mut rewritten_target = failure.clone();
+    rewritten_target
+        .context_retreat
+        .as_mut()
+        .expect("plan")
+        .roll_through = predecessor;
+    assert!(
+        validation_error(
+            &tree,
+            Event::AgentStandaloneCompactionFailed(rewritten_target)
+        )
+        .contains("strict predecessor")
+    );
+    tree.validate_event(&Event::AgentStandaloneCompactionFailed(failure.clone()))
+        .expect("canonical provider rejection authorizes the planned failure");
+    tree.apply_event(&Event::AgentStandaloneCompactionFailed(failure));
+    assert!(matches!(
+        tree.standalone_compaction_recovery(),
+        Some(StandaloneCompactionRecovery::AwaitingContextRetreat {
+            failed: ref projected_failure,
+            plan: ref projected_plan,
+        }) if projected_failure.transaction_id == rejected.transaction_id
+            && projected_plan == &plan
+    ));
+    let successor = tau_proto::AgentStandaloneCompactionStarted {
+        compact_prompt_id: plan.compact_prompt_id,
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        agent_id: agent_id(),
+        transaction_id: plan.transaction_id,
+        cut: plan.cut,
+        resume_through: plan.resume_through,
+        model: plan.model,
+        originator: plan.originator,
+        supersedes: Some(rejected.transaction_id.clone()),
+        trigger: tau_proto::StandaloneCompactionTrigger::AutomaticContextRetreat {
+            failed_transaction_id: rejected.transaction_id,
+            roll_through: plan.roll_through,
+        },
+    };
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(successor.clone()))
+        .expect("exact strict-predecessor successor is valid");
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(successor.clone()));
+    let successor_transaction_id = successor.transaction_id.clone();
+    let compacted = tau_proto::AgentCompacted {
+        original_input_tokens: None,
+        compaction_output_tokens: None,
+        agent_id: agent_id(),
+        replacement_window: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "retreated summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+        transaction_id: Some(successor_transaction_id.clone()),
+        cut: Some(successor.cut),
+        suffix_end: Some(rejected_cut),
+        compact_prompt_id: Some(successor.compact_prompt_id),
+        model: Some(successor.model),
+        operation: Some(successor.operation),
+    };
+    tree.validate_event(&Event::AgentCompacted(compacted.clone()))
+        .expect("retreated successor success is valid");
+    tree.apply_event(&Event::AgentCompacted(compacted));
+    assert_eq!(
+        tree.reactive_compaction_progress(&successor_transaction_id),
+        Some(ReactiveCompactionProgress::NeedsContinuation {
+            target_cut: rejected_cut
+        }),
+        "successful retreat must roll forward to the immutable recovery target"
     );
 }
 
@@ -977,7 +1231,7 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
     tree.apply_event(&Event::AgentStandaloneCompactionStarted(successor.clone()));
     let compacted = tau_proto::AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         agent_id: agent_id(),
         transaction_id: Some(successor.transaction_id.clone()),
         cut: Some(successor.cut),
@@ -1050,7 +1304,7 @@ fn corrected_compaction_successor_owns_replay_checkpoint() {
             originator: PromptOriginator::User,
             usage: None,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -1097,7 +1351,7 @@ fn reactive_overflow_recovery_is_claimed_exactly_once() {
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1170,7 +1424,7 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1284,6 +1538,7 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
                 output_length_disposition: tau_proto::OutputLengthDisposition::None,
                 provider_attempt: None,
                 provider_stop_reason: Some(tau_proto::ProviderStopReason::Error),
+                provider_input_tokens: None,
                 rearms_output_length: false,
                 output_length_plan_node: None,
                 output_length_steer_node: None,
@@ -1324,6 +1579,7 @@ fn compaction_fold_rejects_duplicate_start_and_outcome() {
         cut: AgentHead::Root,
         reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
         resume_through: Some(AgentHead::Root),
+        context_retreat: None,
     };
     tree.validate_event(&Event::AgentStandaloneCompactionFailed(failed.clone()))
         .expect("first outcome is valid");
@@ -1393,7 +1649,7 @@ fn compaction_checkpoint_rejects_ownership_mismatches() {
     tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
     let compacted = tau_proto::AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         agent_id: agent_id(),
         replacement_window: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::User,
@@ -1478,7 +1734,7 @@ fn compaction_boundary_validates_explicit_parent() {
     );
     let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         compact_prompt_id: Some(started.compact_prompt_id.clone()),
         model: Some(started.model.clone()),
         operation: Some(started.operation),
@@ -1557,7 +1813,7 @@ fn legacy_compaction_boundary_without_transaction_metadata_replays() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         agent_id: agent_id(),
         transaction_id: None,
         cut: None,
@@ -1594,7 +1850,7 @@ fn provider_compaction_replacement_has_identical_live_and_replay_state() {
     ));
     let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         agent_id: agent_id(),
         transaction_id: None,
         cut: None,
@@ -1649,7 +1905,7 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
         let started = compaction_start(&format!("ct-opaque-{case}"));
         let compacted = tau_proto::AgentCompacted {
             original_input_tokens: None,
-            compacted_input_tokens: None,
+            compaction_output_tokens: None,
             agent_id: agent_id(),
             replacement_window: vec![replacement.clone()],
             transaction_id: Some(started.transaction_id.clone()),
@@ -1747,7 +2003,7 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
             sequence.get(),
             Event::AgentCompacted(tau_proto::AgentCompacted {
                 original_input_tokens: None,
-                compacted_input_tokens: None,
+                compaction_output_tokens: None,
                 agent_id: agent_id(),
                 replacement_window,
                 transaction_id,
@@ -1818,7 +2074,7 @@ fn automatic_compaction_continuation_chain_matches_live_and_cold_replay() {
     records.push(first_start);
     let first_boundary_event = Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         agent_id: agent_id(),
         replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::Assistant,
@@ -1902,7 +2158,7 @@ fn automatic_compaction_continuation_chain_matches_live_and_cold_replay() {
         5,
         Event::AgentCompacted(tau_proto::AgentCompacted {
             original_input_tokens: None,
-            compacted_input_tokens: None,
+            compaction_output_tokens: None,
             agent_id: agent_id(),
             replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
                 role: tau_proto::ContextRole::Assistant,
@@ -2001,7 +2257,7 @@ fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
         records.len() as u64,
         Event::AgentCompacted(tau_proto::AgentCompacted {
             original_input_tokens: None,
-            compacted_input_tokens: None,
+            compaction_output_tokens: None,
             agent_id: agent_id(),
             replacement_window: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
@@ -2066,7 +2322,7 @@ fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
             originator: PromptOriginator::User,
             usage: None,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -2094,7 +2350,7 @@ fn reactive_progress_reaches_prior_suffix_preserving_boundary_live_and_cold() {
         records.len() as u64,
         Event::AgentCompacted(tau_proto::AgentCompacted {
             original_input_tokens: None,
-            compacted_input_tokens: None,
+            compaction_output_tokens: None,
             agent_id: agent_id(),
             replacement_window: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
@@ -2162,7 +2418,7 @@ fn no_resume_compaction_success_allows_later_independent_start() {
         1,
         Event::AgentCompacted(tau_proto::AgentCompacted {
             original_input_tokens: None,
-            compacted_input_tokens: None,
+            compaction_output_tokens: None,
             agent_id: agent_id(),
             replacement_window: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
@@ -2535,7 +2791,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                 usage: None,
                 originator: PromptOriginator::User,
                 compaction_original_input_tokens: None,
-                compaction_compacted_input_tokens: None,
+                compaction_output_tokens: None,
                 backend: None,
                 provider_attempt: Default::default(),
                 provider_response_id: Some("response-id".to_owned()),
@@ -3209,7 +3465,7 @@ fn v1_compaction_retains_exact_suffix_without_splitting_tool_round() {
             AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
                 original_input_tokens: None,
-                compacted_input_tokens: None,
+                compaction_output_tokens: None,
                 agent_id: agent_id.clone(),
                 transaction_id: Some(started.transaction_id),
                 cut: Some(started.cut),
@@ -3805,7 +4061,7 @@ fn tool_calling_response(
         usage: None,
         originator: PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -4523,7 +4779,7 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: Some(tau_proto::ProviderBackend {
             kind: tau_proto::ProviderBackendKind::ChatCompletions,
             base_url: "https://example.invalid/v1".to_owned(),
@@ -4594,7 +4850,7 @@ fn output_length_recovery_fixture() -> OutputLengthRecoveryFixture {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: Some(tau_proto::ProviderBackend {
             kind: tau_proto::ProviderBackendKind::ChatCompletions,
             base_url: "https://example.invalid/v1".to_owned(),
@@ -4793,6 +5049,7 @@ fn output_length_rearm_boundary_rejects_non_action_responses() {
             output_length_disposition: tau_proto::OutputLengthDisposition::None,
             provider_attempt: Some(tau_proto::ProviderAttempt::ONE),
             provider_stop_reason: Some(tau_proto::ProviderStopReason::ToolCalls),
+            provider_input_tokens: None,
             rearms_output_length: true,
             output_length_plan_node: None,
             output_length_steer_node: None,
@@ -4903,7 +5160,7 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_response_id: None,
         ws_pool_delta: None,
@@ -4926,7 +5183,7 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
     let compact_parent = AgentHead::Node(tree.head().expect("rejected response node"));
     let compacted = tau_proto::AgentCompacted {
         original_input_tokens: None,
-        compacted_input_tokens: None,
+        compaction_output_tokens: None,
         agent_id: fixture.agent_id().clone(),
         transaction_id: Some(started.transaction_id.clone()),
         cut: Some(started.cut),
@@ -5011,7 +5268,7 @@ fn output_length_reactive_descendant_resolves_exact_owner() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_response_id: None,
         ws_pool_delta: None,
@@ -5478,7 +5735,7 @@ fn output_length_recovery_repairs_dormant_branch_without_selecting_it() {
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_response_id: None,
         ws_pool_delta: None,
@@ -5620,7 +5877,7 @@ fn output_length_terminal_incomplete_does_not_cross_newer_selected_dispatch() {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_response_id: None,
             ws_pool_delta: None,
@@ -5833,11 +6090,26 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
     let mut terminal =
         tool_calling_response(&agent_id, continuation_prompt_id.as_str(), Vec::new());
     terminal.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+    terminal.usage = Some(tau_proto::ProviderTokenUsage {
+        model: Some(model.clone()),
+        prompt_sent_tokens: 100,
+        prompt_cached_tokens: 0,
+        prompt_cache_read_ceiling_tokens: None,
+        cache: None,
+        response_received_tokens: 0,
+        stats: Default::default(),
+    });
     terminal.automatic_compaction_decision = Some(tau_proto::AutomaticCompactionDecision {
         transaction_id: transaction_id.clone(),
         outer_turn_id: outer_turn_id.clone(),
         model: model.clone(),
-        threshold: 100,
+        threshold: tau_proto::TokenCount::new(100),
+        evidence: Some(tau_proto::ProactiveCompactionEvidence {
+            provider_prompt_id: continuation_prompt_id.clone(),
+            provider_input_tokens: tau_proto::TokenCount::new(100),
+            threshold: tau_proto::TokenCount::new(100),
+            threshold_source: tau_proto::CompactionThresholdSource::ProviderDefault,
+        }),
     });
     let terminal = Event::ProviderResponseFinished(terminal);
     assert!(
@@ -5889,6 +6161,7 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             cut,
             reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
             resume_through: None,
+            context_retreat: None,
         });
     stale_tree
         .validate_event(&stale)
@@ -5901,7 +6174,7 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             transaction_id: transaction_id.clone(),
             compact_prompt_id: tau_proto::AgentPromptId::parse("compact-eager").expect("prompt"),
             cut,
-            resume_through: None,
+            resume_through: Some(cut),
             model,
             operation: tau_proto::PromptOperation::StandaloneCompaction,
             originator: PromptOriginator::User,
@@ -5933,6 +6206,7 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             cut,
             reason: tau_proto::StandaloneCompactionFailureReason::Interrupted,
             resume_through: None,
+            context_retreat: None,
         },
     ));
     let prompt_two = tau_proto::AgentPromptId::parse("prompt-eager-two").expect("prompt");
@@ -5974,7 +6248,8 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             tau_proto::ProviderName::new("test"),
             tau_proto::ModelName::new("model"),
         ),
-        threshold: 100,
+        threshold: tau_proto::TokenCount::new(100),
+        evidence: None,
     });
     assert!(
         tree.validate_event(&Event::ProviderResponseFinished(collision))
@@ -6177,11 +6452,26 @@ fn automatic_policy_tool_trace(rounds: usize) -> AutomaticPolicyToolTrace {
     let continuation_prompt_started = events.len();
     let mut terminal = tool_calling_response(&agent_id, prompt.as_str(), Vec::new());
     terminal.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+    terminal.usage = Some(tau_proto::ProviderTokenUsage {
+        model: Some(model.clone()),
+        prompt_sent_tokens: 100,
+        prompt_cached_tokens: 0,
+        prompt_cache_read_ceiling_tokens: None,
+        cache: None,
+        response_received_tokens: 0,
+        stats: Default::default(),
+    });
     terminal.automatic_compaction_decision = Some(tau_proto::AutomaticCompactionDecision {
         transaction_id: transaction_id.clone(),
         outer_turn_id: outer_turn_id.clone(),
         model: model.clone(),
-        threshold: 100,
+        threshold: tau_proto::TokenCount::new(100),
+        evidence: Some(tau_proto::ProactiveCompactionEvidence {
+            provider_prompt_id: prompt.clone(),
+            provider_input_tokens: tau_proto::TokenCount::new(100),
+            threshold: tau_proto::TokenCount::new(100),
+            threshold_source: tau_proto::CompactionThresholdSource::ProviderDefault,
+        }),
     });
     events.push((
         "terminal_decision",
@@ -6204,7 +6494,7 @@ fn automatic_policy_tool_trace(rounds: usize) -> AutomaticPolicyToolTrace {
             compact_prompt_id: tau_proto::AgentPromptId::parse(format!("model-compact-{rounds}"))
                 .expect("prompt"),
             cut: AgentHead::Node(NodeId::new((rounds * 2) as u64)),
-            resume_through: None,
+            resume_through: Some(AgentHead::Node(NodeId::new((rounds * 2) as u64))),
             model,
             operation: tau_proto::PromptOperation::StandaloneCompaction,
             originator: PromptOriginator::User,

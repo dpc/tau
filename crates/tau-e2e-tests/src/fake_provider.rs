@@ -475,7 +475,7 @@ fn model_snapshot(capabilities: FakeModelCapabilities) -> ProviderModelsDeclared
             },
             supports_parallel_tool_calls: capabilities.parallel_tool_calls,
             default_affinity: 0,
-            context_window: 16_384,
+            context_window: tau_proto::TokenCount::new(16_384),
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Low],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -484,7 +484,7 @@ fn model_snapshot(capabilities: FakeModelCapabilities) -> ProviderModelsDeclared
             standalone_compaction_threshold: None,
             standalone_compaction_prefix_budget: capabilities
                 .standalone_compaction
-                .then_some(u64::MAX),
+                .then_some(tau_proto::ByteCount::MAX),
             cache_policy: None,
             est_uncached_input_cost_1m_usd: Some(
                 tau_proto::EstimatedUsdPerMillion::from_micro_usd(2_000_000),
@@ -1584,6 +1584,7 @@ impl FakeState {
             ScenarioActionV2::Text { response, .. }
             | ScenarioActionV2::CompactedText { response, .. }
             | ScenarioActionV2::CompactedOpaqueText { response, .. }
+            | ScenarioActionV2::CompactedOpaqueCheckpoint { response, .. }
             | ScenarioActionV2::ReactiveCompactedOpaqueText { response, .. }
             | ScenarioActionV2::DummyToolResult { response, .. }
             | ScenarioActionV2::TypedImageToolResult { response, .. }
@@ -2374,6 +2375,10 @@ impl FakeState {
                 user_text: _,
                 removed_user_text,
                 response: _,
+            }
+            | ScenarioActionV2::CompactedOpaqueCheckpoint {
+                removed_user_text,
+                response: _,
             } => {
                 let context = serde_json::to_string(&prompt.context)
                     .map_err(|error| ClientError::handler(error.to_string()))?;
@@ -3096,7 +3101,7 @@ fn finished(
         originator: prompt.originator.clone(),
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -3162,6 +3167,7 @@ impl ScenarioActionV2 {
             Self::OutputLengthContinuation { .. }
             | Self::StandaloneCompaction { narrative: _ }
             | Self::StandaloneOpaqueCompaction
+            | Self::CompactedOpaqueCheckpoint { .. }
             | Self::ReactiveOpaqueCompaction { .. }
             | Self::ReactiveCompactedOpaqueText { .. }
             | Self::StandaloneCompactionError {

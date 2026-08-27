@@ -129,6 +129,7 @@ impl Harness {
                 | AgentPublishCompletion::OutputLengthSteer { .. }
                 | AgentPublishCompletion::OutputLengthDormantRepair { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
+                | AgentPublishCompletion::StandaloneContextRejection { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
                 | AgentPublishCompletion::RollingCompactionStart { .. }
                 | AgentPublishCompletion::StandaloneContinuation { .. } => None,
@@ -489,6 +490,18 @@ impl Harness {
             }
             return;
         }
+        if let AgentPublishCompletion::StandaloneContextRejection {
+            response, source, ..
+        } = completion
+        {
+            self.fail_standalone_compaction(
+                cid,
+                &response,
+                tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded,
+                source.as_ref(),
+            );
+            return;
+        }
         if let AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } = completion {
             return;
         }
@@ -627,6 +640,9 @@ impl Harness {
             AgentPublishCompletion::ReactiveContextRecoveryStart { retry_event, .. } => {
                 *retry_event = Some(Box::new(event.clone()));
             }
+            AgentPublishCompletion::StandaloneContextRejection { retry_event, .. } => {
+                *retry_event = Some(Box::new(event.clone()));
+            }
             AgentPublishCompletion::ReactiveContextRecoveryFailure { retry_event, .. } => {
                 *retry_event = Some(Box::new(event.clone()));
             }
@@ -742,6 +758,7 @@ impl Harness {
                 | AgentPublishCompletion::OutputLengthDormantRepair { .. }
                 | AgentPublishCompletion::ReactiveContextRecovery { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
+                | AgentPublishCompletion::StandaloneContextRejection { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
                 | AgentPublishCompletion::RollingCompactionStart { .. }
         ) {
@@ -750,6 +767,7 @@ impl Harness {
                 AgentPublishCompletion::OutputLengthDormantRepair { .. }
                     | AgentPublishCompletion::ReactiveContextRecovery { .. }
                     | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
+                    | AgentPublishCompletion::StandaloneContextRejection { .. }
                     | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
                     | AgentPublishCompletion::RollingCompactionStart { .. }
             ) {
@@ -759,6 +777,7 @@ impl Harness {
                     | AgentPublishCompletion::ReactiveContextRecoveryStart {
                         retry_event, ..
                     }
+                    | AgentPublishCompletion::StandaloneContextRejection { retry_event, .. }
                     | AgentPublishCompletion::ReactiveContextRecoveryFailure {
                         retry_event, ..
                     }
@@ -775,6 +794,7 @@ impl Harness {
                     | AgentPublishCompletion::ReactiveContextRecoveryStart {
                         retry_event, ..
                     }
+                    | AgentPublishCompletion::StandaloneContextRejection { retry_event, .. }
                     | AgentPublishCompletion::ReactiveContextRecoveryFailure {
                         retry_event, ..
                     }
@@ -875,6 +895,9 @@ impl Harness {
                 unreachable!("returned above")
             }
             AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => {
+                unreachable!("returned above")
+            }
+            AgentPublishCompletion::StandaloneContextRejection { .. } => {
                 unreachable!("returned above")
             }
             AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } => {
@@ -1113,7 +1136,7 @@ impl Harness {
                         estimated_api_cost_rates: None,
                         estimated_api_cost_increment: None,
                         compaction_original_input_tokens: None,
-                        compaction_compacted_input_tokens: None,
+                        compaction_output_tokens: None,
                         backend: None,
                         provider_response_id: None,
                         ws_pool_delta: None,
@@ -2361,6 +2384,7 @@ impl Harness {
                                     cut: started.cut,
                                     reason,
                                     resume_through: started.resume_through,
+                                    context_retreat: None,
                                 },
                             ),
                             Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
@@ -2382,6 +2406,7 @@ impl Harness {
                                     cut: started.cut,
                                     reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
                                     resume_through: started.resume_through,
+                                    context_retreat: None,
                                 },
                             ),
                             Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
@@ -2420,6 +2445,7 @@ impl Harness {
                                 cut: started.cut,
                                 reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
                                 resume_through: started.resume_through,
+                                context_retreat: None,
                             },
                         ),
                     );
@@ -2485,6 +2511,14 @@ impl Harness {
                 == Some(&failed.transaction_id)
         {
             agent.turn.pending_automatic_compaction_start = None;
+        }
+        if let Event::AgentStandaloneCompactionFailed(failed) = event
+            && let Some(plan) = failed.context_retreat.clone()
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
+        {
+            self.start_context_retreat_from_plan(&cid, failed, plan);
+            return;
         }
         if let Event::AgentManualCompactionRequestFailed(failed) = event
             && let Some(pending) = self
@@ -3041,10 +3075,6 @@ impl Harness {
             self.prompt_coordination
                 .prompt_runtime
                 .compaction_policies
-                .remove(&terminated.agent_prompt_id);
-            self.prompt_coordination
-                .prompt_runtime
-                .compaction_projected_tokens
                 .remove(&terminated.agent_prompt_id);
             self.prompt_coordination
                 .prompt_runtime

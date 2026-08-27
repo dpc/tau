@@ -1327,54 +1327,6 @@ fn local_summary_compaction_uses_ordinary_request_debug_capture() {
     assert!(!debug_capture_enabled_for_prompt(&created, false));
 }
 
-/// Ensures conservative one-byte-per-token accounting accepts the exact
-/// declared boundary and rejects one token less before dispatch.
-#[test]
-fn local_summary_compaction_enforces_complete_context_budget_boundary() {
-    let mut created = prompt();
-    created.operation = tau_proto::PromptOperation::StandaloneCompaction;
-    created
-        .context
-        .blocks
-        .push(tau_proto::ContextBlock::UserInput(
-            tau_proto::UserInputBlock {
-                items: vec![ContextItem::CompactionTrigger],
-            },
-        ));
-    let mut config = resolved_provider(&provider());
-    let overhead = LOCAL_SUMMARY_COMPACTION_REQUEST_OVERHEAD_TOKENS;
-    config.local_summary_compaction = LocalSummaryCompactionConfig::new(
-        NonZeroU64::new(4096 + 1 + overhead).expect("positive"),
-        4096 + 1 + overhead,
-        NonZeroU64::new(4096).expect("positive"),
-        NonZeroU32::new(1).expect("positive"),
-        NonZeroU64::new(1).expect("positive"),
-    );
-    assert!(try_build_request(&config, &provider().models[0], &created).is_ok());
-
-    assert!(
-        LocalSummaryCompactionConfig::new(
-            NonZeroU64::new(4096 + overhead).expect("positive"),
-            4096 + overhead,
-            NonZeroU64::new(4096).expect("positive"),
-            NonZeroU32::new(1).expect("positive"),
-            NonZeroU64::new(1).expect("positive"),
-        )
-        .is_none()
-    );
-    assert!(
-        LocalSummaryCompactionConfig::new(
-            NonZeroU64::new(u64::MAX).expect("positive"),
-            u64::MAX,
-            NonZeroU64::new(u64::MAX - 1).expect("positive"),
-            NonZeroU32::new(1).expect("positive"),
-            NonZeroU64::new(1).expect("positive"),
-        )
-        .is_none(),
-        "an overflowing conservative budget must not saturate into an accepted fit"
-    );
-}
-
 /// The configured raw narrative limit cannot exceed the harness's fixed
 /// composite-checkpoint memory and persistence budget.
 #[test]

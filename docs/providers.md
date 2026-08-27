@@ -127,14 +127,14 @@ struct ProviderModelInfo {
     tool_result_modalities: Vec<InputModality>,
     supports_parallel_tool_calls: bool,
     default_affinity: i32,
-    context_window: u64,
+    context_window: TokenCount,
     efforts: Vec<Effort>,
     verbosities: Vec<Verbosity>,
     thinking_summaries: Vec<ThinkingSummary>,
     supports_compaction: bool,
     supports_standalone_compaction: bool,
-    standalone_compaction_threshold: Option<u64>,
-    standalone_compaction_prefix_budget: Option<u64>,
+    standalone_compaction_threshold: Option<TokenCount>,
+    standalone_compaction_prefix_budget: Option<ByteCount>,
     cache_policy: Option<ProviderCachePolicy>,
     est_uncached_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
     est_cached_input_cost_1m_usd: Option<EstimatedUsdPerMillion>,
@@ -145,13 +145,16 @@ struct ProviderModelInfo {
 ```
 
 `context_window` is required for every published model.
-`standalone_compaction_prefix_budget`, when present, is a nonzero `u64` in
-bytes of the canonical JSON-serialized historical `PromptContext`. The native
-trigger is excluded. The adapter reserves its own framing, tokenizer, reasoning,
-and output needs and still fails closed after lowering and serializing the exact
-final wire request.
-Absence disables size-recoverable automatic prefix compaction, not manual
-standalone compaction.
+`standalone_compaction_prefix_budget`, when present, is a nonzero `ByteCount`
+of the canonical JSON-serialized historical `PromptContext`. The native trigger
+is excluded. The harness fits a prefix in this byte domain, and the adapter
+exactly remeasures the fully materialized historical prefix before dispatch.
+Provider-specific whole-wire bytes are not compared with token-window metadata;
+an adapter may enforce a separate whole-wire limit only when its transport
+publishes a genuine byte-domain bound.
+When the budget is absent, the harness dispatches the exact normalized
+provider-closed target without a local byte admission check; canonical typed
+context rejection may then authorize strict-predecessor retreat.
 `input_modalities` declares what the exact provider/model route accepts as
 prompt input, while `tool_result_modalities` declares what it accepts inside
 native tool-result output. A tool that returns images is exposed only when both
@@ -833,10 +836,11 @@ Configure snapshot.
 Keyless setup writes only the explicit portable profile. It does not create an
 empty or dummy API-key record.
 
-Tau enables its summary compaction fallback for every Chat Completions,
-OpenRouter, and public Responses model. It derives conservative request,
-output, and proactive-compaction limits from the model's context window. An
-optional `local_summary_compaction` object fully overrides those defaults:
+Tau enables its summary compaction fallback for Chat Completions, OpenRouter,
+and public Responses models. The generic fallback publishes no prefix byte cap
+or proactive threshold; it derives only a same-domain output-token cap and uses
+an independent narrative byte bound. An explicit `local_summary_compaction`
+object supplies native-domain overrides:
 
 ```json
 {
@@ -869,12 +873,12 @@ harness stores the exact final text once as one synthetic user-role checkpoint,
 without a wrapper or deterministic supplement. Events after the immutable cut
 remain suffix history, and live/cold replay reuse the committed checkpoint
 without another model call. Ordinary opted-in provider debug capture applies.
-Context windows below 1,316 tokens cannot fit even the minimum bounded request
-and therefore do not publish the fallback. For an override, the context window
-must match the model field. Input and output limits must be positive and fit
-conservatively within that window; `max_input_bytes` must be at least 256. Units are
-bytes, tokens, and bytes respectively, with an additional 1,024-token worst-case
-request and chat-template reserve. The limit profile controls scheduling and output bounds; compaction does not rewrite the ordinary input prefix. Empty, unsupported,
+For an override, the context window must match the model field. Explicit byte
+input/output limits and the output-token limit must be positive in their native
+domains. Tau does not infer token fit from byte limits. The profile controls only
+its declared resource/output bounds; without an exact token threshold it does
+not proactively schedule. Compaction does not rewrite the ordinary input prefix.
+Empty, unsupported,
 truncated, or over-limit summaries fail the durable transaction without fallback
 or resend.
 

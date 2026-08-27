@@ -55,9 +55,7 @@ use self::agent_watch::AgentWatchState;
 #[cfg(any(test, feature = "echo-agent"))]
 pub(crate) use self::construction::InProcessTool;
 use self::context_limit_telemetry::{
-    MIN_CONTEXT_PROJECTION_RESERVE, PromptContextLimitSnapshot, TranscriptGrowth,
-    context_limit_observation, context_projection_reserve, projected_input_tokens,
-    projected_transcript_entry_tokens, transcript_growth,
+    PromptContextLimitSnapshot, TranscriptGrowth, context_limit_observation, transcript_growth,
 };
 use self::preview_requests::{PendingRenderedPreview, PendingRenderedPrompt};
 pub(crate) use self::provider_runtime::CurrentProviderQuota;
@@ -212,6 +210,9 @@ enum StandaloneCompactionTerminal {
 enum StandaloneCompactionRejection {
     /// The provider explicitly reported a terminal failure.
     ProviderError,
+    /// The provider canonically rejected an output-free request for context
+    /// size.
+    ContextWindowExceeded,
     /// The provider did not report a completed terminal turn.
     InvalidStop,
     /// The provider did not return an acceptable replacement window.
@@ -224,6 +225,9 @@ impl StandaloneCompactionRejection {
     fn durable_reason(self) -> tau_proto::StandaloneCompactionFailureReason {
         match self {
             Self::ProviderError => tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            Self::ContextWindowExceeded => {
+                tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
+            }
             Self::InvalidStop | Self::InvalidWindow => {
                 tau_proto::StandaloneCompactionFailureReason::InvalidWindow
             }
@@ -574,122 +578,6 @@ pub(crate) fn is_restore_notice_prompt_text(text: &str) -> bool {
     text.starts_with(RESTORE_NOTICE_BODY_PREFIX)
 }
 
-/// Estimate how many prompt/input tokens a compacted replay window will occupy
-/// when replayed on the next turn.
-///
-/// Tau does not carry a tokenizer in the harness, and providers do not always
-/// report usage for compaction items. For UI status we use the same coarse
-/// convention used by many provider dashboards: roughly four UTF-8 bytes per
-/// token, measured over the provider-owned items that prompt assembly will
-/// replay after compaction. This is not a billing counter.
-fn estimate_compacted_input_tokens(replay_window: &[ContextItem]) -> Option<u64> {
-    const APPROX_BYTES_PER_TOKEN: u64 = 4;
-
-    let bytes: u64 = replay_window
-        .iter()
-        .map(approx_context_item_provider_bytes)
-        .sum();
-    (0 < bytes).then_some(bytes.div_ceil(APPROX_BYTES_PER_TOKEN).max(1))
-}
-
-fn approx_context_item_provider_bytes(item: &ContextItem) -> u64 {
-    match item {
-        ContextItem::Message(message) => {
-            let content_bytes: u64 = message
-                .content
-                .iter()
-                .map(|part| match part {
-                    ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
-                        text.len() as u64
-                    }
-                })
-                .sum();
-            content_bytes + 16
-        }
-        ContextItem::ToolCall(call) => {
-            call.call_id.as_str().len() as u64
-                + call.name.as_str().len() as u64
-                + approx_cbor_json_bytes(&call.arguments)
-                + 16
-        }
-        ContextItem::ToolResult(result) => {
-            let status_bytes = match &result.status {
-                tau_proto::ToolResultStatus::Success => 0,
-                tau_proto::ToolResultStatus::Error { message }
-                | tau_proto::ToolResultStatus::Cancelled { reason: message } => {
-                    message.len() as u64
-                }
-            };
-            let image_bytes = result
-                .provider_content
-                .iter()
-                .map(|part| match part {
-                    tau_proto::ToolResultContentPart::Image(image) => {
-                        let patches = u64::from(image.width)
-                            .div_ceil(32)
-                            .saturating_mul(u64::from(image.height).div_ceil(32));
-                        image.data.len() as u64 + patches.saturating_mul(4)
-                    }
-                })
-                .sum::<u64>();
-            result.call_id.as_str().len() as u64
-                + status_bytes
-                + result.output.render().len() as u64
-                + image_bytes
-                + 16
-        }
-        ContextItem::ReasoningText(reasoning) => reasoning.text.len() as u64 + 16,
-        ContextItem::LocalCompactionNarrative(narrative) => narrative.narrative.len() as u64 + 16,
-        ContextItem::Reasoning(item)
-        | ContextItem::Compaction(item)
-        | ContextItem::UnknownProviderItem(item) => item.raw_json.as_ref().map_or_else(
-            || approx_cbor_json_bytes(&item.value),
-            |raw| raw.len() as u64,
-        ),
-        ContextItem::CompactionTrigger => 16,
-    }
-}
-
-fn latest_compaction_replay_window(items: &[ContextItem]) -> Option<&[ContextItem]> {
-    items
-        .iter()
-        .rposition(|item| matches!(item, ContextItem::Compaction(_)))
-        .map(|index| &items[index..])
-}
-
-fn approx_cbor_json_bytes(value: &CborValue) -> u64 {
-    match value {
-        CborValue::Null => 4,
-        CborValue::Bool(value) => {
-            if *value {
-                4
-            } else {
-                5
-            }
-        }
-        CborValue::Integer(value) => {
-            let value: i128 = (*value).into();
-            value.to_string().len() as u64
-        }
-        CborValue::Float(value) => value.to_string().len() as u64,
-        CborValue::Bytes(bytes) => (bytes.len() as u64).div_ceil(3) * 4,
-        CborValue::Text(text) => text.len() as u64,
-        CborValue::Array(values) => {
-            2 + values.iter().map(approx_cbor_json_bytes).sum::<u64>()
-                + values.len().saturating_sub(1) as u64
-        }
-        CborValue::Map(entries) => {
-            2 + entries
-                .iter()
-                .map(|(key, value)| approx_cbor_json_bytes(key) + approx_cbor_json_bytes(value) + 3)
-                .sum::<u64>()
-                + entries.len().saturating_sub(1) as u64
-        }
-        CborValue::Tag(_, value) => approx_cbor_json_bytes(value),
-        _ => 0,
-    }
-}
-
 const LOOP_GUARD_RECENT_LIMIT: usize = 8;
 const LOOP_GUARD_CYCLE_LIMIT: usize = 8;
 const LOOP_GUARD_ASSISTANT_REPEAT_THRESHOLD: usize = 3;
@@ -1017,6 +905,10 @@ fn standalone_compaction_failure_message(
         tau_proto::StandaloneCompactionFailureReason::StaleBranch => "stale_branch",
         tau_proto::StandaloneCompactionFailureReason::Interrupted => "interrupted",
         tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge => "prefix_too_large",
+        tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded => {
+            "context_window_exceeded"
+        }
+        tau_proto::StandaloneCompactionFailureReason::ContextIrreducible => "context_irreducible",
     }
 }
 
@@ -1462,9 +1354,7 @@ mod agent_context_tests;
 #[cfg(test)]
 mod agent_watch_provider_deliveries_tests;
 #[cfg(test)]
-mod compaction_metadata_tests;
 #[cfg(test)]
-mod context_limit_telemetry_tests;
 #[cfg(test)]
 mod semantic_event_router_tests;
 #[cfg(test)]
@@ -1506,6 +1396,8 @@ mod ui_runtime;
 #[cfg(test)]
 use runtime_loop::RuntimeEventWait;
 mod context_limit_telemetry;
+#[cfg(test)]
+mod context_limit_telemetry_tests;
 mod current_session;
 mod dispatch;
 mod extension_data;
@@ -1764,7 +1656,7 @@ where
                 tool_result_modalities: Vec::new(),
                 supports_parallel_tool_calls: true,
                 default_affinity: 0,
-                context_window: 128_000,
+                context_window: tau_proto::TokenCount::new(128_000),
                 efforts: vec![Effort::Off],
                 verbosities: vec![Verbosity::Low],
                 thinking_summaries: vec![ThinkingSummary::Off],
@@ -1843,7 +1735,7 @@ where
                         originator: prompt.originator.clone(),
                         usage: None,
                         compaction_original_input_tokens: None,
-                        compaction_compacted_input_tokens: None,
+                        compaction_output_tokens: None,
                         backend: None,
                         provider_attempt: Default::default(),
                         provider_response_id: None,
@@ -1922,7 +1814,7 @@ where
                         originator: prompt.originator.clone(),
                         usage: None,
                         compaction_original_input_tokens: None,
-                        compaction_compacted_input_tokens: None,
+                        compaction_output_tokens: None,
                         backend: None,
                         provider_attempt: Default::default(),
                         provider_response_id: None,

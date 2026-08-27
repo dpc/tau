@@ -389,7 +389,7 @@ impl Harness {
             estimated_api_cost_rates: None,
             estimated_api_cost_increment: None,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -504,6 +504,7 @@ impl Harness {
                     cut: *cut,
                     reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
                     resume_through: *resume_through,
+                    context_retreat: None,
                 })
             }),
             path_crate_agent::ActivationDispatchState::DispatchUncertain {
@@ -542,7 +543,7 @@ impl Harness {
                     originator,
                     usage: None,
                     compaction_original_input_tokens: None,
-                    compaction_compacted_input_tokens: None,
+                    compaction_output_tokens: None,
                     backend: None,
                     provider_attempt: Default::default(),
                     provider_response_id: None,
@@ -611,6 +612,7 @@ impl Harness {
                     cut: *cut,
                     reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
                     resume_through: *resume_through,
+                    context_retreat: None,
                 })
             }
             path_crate_agent::ActivationDispatchState::DispatchUncertain {
@@ -639,7 +641,7 @@ impl Harness {
                     originator,
                     usage: None,
                     compaction_original_input_tokens: None,
-                    compaction_compacted_input_tokens: None,
+                    compaction_output_tokens: None,
                     backend: None,
                     provider_attempt: Default::default(),
                     provider_response_id: None,
@@ -909,13 +911,6 @@ impl Harness {
             .models
             .insert(agent_prompt_id.clone(), model.clone());
         let context_limit_snapshot = self.prompt_context_limit_snapshot(cid, &model, operation);
-        self.prompt_coordination
-            .prompt_runtime
-            .compaction_projected_tokens
-            .insert(
-                agent_prompt_id.clone(),
-                context_limit_snapshot.projected_input_tokens,
-            );
         self.prompt_coordination
             .prompt_runtime
             .context_limits

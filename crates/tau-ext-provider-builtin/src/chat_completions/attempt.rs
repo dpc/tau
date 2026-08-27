@@ -34,7 +34,7 @@ pub fn models_for_provider(
                 tool_result_modalities: model.tool_result_modalities.clone(),
                 supports_parallel_tool_calls: model.supports_parallel_tool_calls,
                 default_affinity: 0,
-                context_window: model.context_window,
+                context_window: tau_proto::TokenCount::new(model.context_window),
                 efforts: compat.reasoning_effort.as_ref().map_or_else(
                     || vec![tau_proto::Effort::Off],
                     |config| config.efforts.canonical(),
@@ -47,16 +47,12 @@ pub fn models_for_provider(
                     model.context_window,
                 )
                 .is_some(),
-                standalone_compaction_threshold: super::resolved_local_summary_compaction(
-                    model.local_summary_compaction,
-                    model.context_window,
-                )
-                .map(SummaryCompactionConfig::proactive_threshold),
+                standalone_compaction_threshold: None,
                 standalone_compaction_prefix_budget: super::resolved_local_summary_compaction(
                     model.local_summary_compaction,
                     model.context_window,
                 )
-                .map(SummaryCompactionConfig::max_input_bytes),
+                .and_then(SummaryCompactionConfig::max_input_bytes),
                 cache_policy: model.cache_contract.map(|contract| {
                     contract
                         .runtime_policy()
@@ -404,7 +400,7 @@ fn finished(
         originator: prompt.originator.clone(),
         usage,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: Some(tau_proto::ProviderBackend {
             kind: tau_proto::ProviderBackendKind::ChatCompletions,
             base_url: base_url.to_owned(),

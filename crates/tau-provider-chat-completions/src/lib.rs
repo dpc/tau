@@ -19,8 +19,6 @@ use tau_proto::{
     ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ToolCallItem, ToolChoice,
     ToolDefinition, ToolType,
 };
-#[cfg(test)]
-use tau_provider::local_summary_compaction::REQUEST_OVERHEAD_TOKENS as LOCAL_SUMMARY_COMPACTION_REQUEST_OVERHEAD_TOKENS;
 use tau_provider::retry_policy::{
     RetryClass, RetryDecision, classify_error_code, parse_json_reset_hint, parse_retry_after,
 };
@@ -1346,7 +1344,10 @@ fn try_build_request(
     if let Some(config) = summary_config {
         let prefix_bytes =
             tau_provider::local_summary_compaction::historical_prefix_json_bytes(&prompt.context);
-        if prefix_bytes.is_none_or(|bytes| bytes > config.max_input_bytes()) {
+        if config
+            .max_input_bytes()
+            .is_some_and(|budget| prefix_bytes.is_none_or(|bytes| budget < bytes))
+        {
             return Err(LlmError::InvalidCompaction(
                 "summary compaction prefix exceeds the published safe budget".to_owned(),
             ));
@@ -1408,16 +1409,6 @@ fn try_build_request(
         tools,
         tool_choice,
     };
-    if let Some(config) = summary_config {
-        let final_wire_bytes = serde_json::to_vec(&request)
-            .ok()
-            .and_then(|encoded| u64::try_from(encoded.len()).ok());
-        if final_wire_bytes.is_none_or(|bytes| bytes > config.max_input_bytes()) {
-            return Err(LlmError::InvalidCompaction(
-                "summary compaction final wire request exceeds the adapter bound".to_owned(),
-            ));
-        }
-    }
     Ok(request)
 }
 

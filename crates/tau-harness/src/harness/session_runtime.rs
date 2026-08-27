@@ -592,10 +592,6 @@ impl Harness {
                 .prompt_runtime
                 .compaction_policies
                 .remove(spid);
-            self.prompt_coordination
-                .prompt_runtime
-                .compaction_projected_tokens
-                .remove(spid);
             self.emit_info(&format!(
                 "preempting side conv `{cid}` ({spid}) for incoming user prompt",
             ));
@@ -941,10 +937,6 @@ impl Harness {
         self.prompt_coordination
             .prompt_runtime
             .compaction_policies
-            .clear();
-        self.prompt_coordination
-            .prompt_runtime
-            .compaction_projected_tokens
             .clear();
         self.prompt_coordination
             .prompt_runtime
@@ -2788,13 +2780,15 @@ impl Harness {
             }
             self.clear_agent_context_usage(&cid);
             let restored_context_usage = self.restored_agent_context_usage(agent_id.as_str());
-            if let Some((model, input_tokens, cached_tokens, usage_head)) = restored_context_usage
+            if let Some((model, input_tokens, cached_tokens, usage_head, usage_prompt_id)) =
+                restored_context_usage
                 && let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
             {
                 conv.execution.context_input_tokens = Some(input_tokens);
                 conv.execution.context_cached_tokens = Some(cached_tokens);
                 conv.execution.context_usage_head = usage_head;
                 conv.execution.context_usage_model = Some(model.clone());
+                conv.execution.context_usage_prompt_id = Some(usage_prompt_id);
                 conv.execution.context_percent_used =
                     context_window_for_model(&self.provider_runtime.model_info, &model)
                         .map(|window| context_percent_used(input_tokens, window));
@@ -2834,6 +2828,34 @@ impl Harness {
                                 );
                         }
                     }
+                }
+                Some(tau_core::StandaloneCompactionRecovery::AwaitingContextRetreat {
+                    ref failed,
+                    ref plan,
+                }) => {
+                    self.start_context_retreat_from_plan(&cid, failed, plan.clone());
+                }
+                Some(tau_core::StandaloneCompactionRecovery::RejectedAwaitingFailure {
+                    ref started,
+                    ref response,
+                }) => {
+                    if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
+                        agent.dispatch.activation_dispatch =
+                            path_crate_agent::ActivationDispatchState::Running {
+                                id: started.transaction_id.clone(),
+                                cut: started.cut,
+                                resume_through: started.resume_through,
+                                model: started.model.clone(),
+                                branch_generation: agent.identity.branch_generation,
+                                compact_prompt_id: started.compact_prompt_id.clone(),
+                            };
+                    }
+                    self.fail_standalone_compaction(
+                        &cid,
+                        response,
+                        tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded,
+                        None,
+                    );
                 }
                 Some(tau_core::StandaloneCompactionRecovery::Blocked {
                     failed: _,
@@ -3208,6 +3230,7 @@ impl Harness {
                             cut: started.cut,
                             reason,
                             resume_through: started.resume_through,
+                            context_retreat: None,
                         },
                     ),
                 );
@@ -3446,7 +3469,13 @@ impl Harness {
     pub(super) fn restored_agent_context_usage(
         &self,
         agent_id: &str,
-    ) -> Option<(ModelId, u64, u64, Option<tau_proto::NodeId>)> {
+    ) -> Option<(
+        ModelId,
+        u64,
+        u64,
+        Option<tau_proto::NodeId>,
+        tau_proto::AgentPromptId,
+    )> {
         let tree = self.session_runtime.agent_store.agent(agent_id)?;
         self.agent_context_usage_at(agent_id, tree.head())
     }
@@ -3457,21 +3486,27 @@ impl Harness {
         &self,
         agent_id: &str,
         head: Option<tau_proto::NodeId>,
-    ) -> Option<(ModelId, u64, u64, Option<tau_proto::NodeId>)> {
+    ) -> Option<(
+        ModelId,
+        u64,
+        u64,
+        Option<tau_proto::NodeId>,
+        tau_proto::AgentPromptId,
+    )> {
         let tree = self.session_runtime.agent_store.agent(agent_id)?;
         for node_id in tree.branch_node_ids_from(head).into_iter().rev() {
             let node = tree.node(node_id)?;
             match &node.entry {
                 tau_core::AgentEntry::Compaction { .. } => return None,
-                tau_core::AgentEntry::AssistantResponse {
-                    usage: Some(usage), ..
-                } => {
+                tau_core::AgentEntry::AssistantResponse { usage, .. } => {
+                    let usage = usage.as_ref()?;
                     let model = usage.model.as_ref()?;
                     return Some((
                         model.clone(),
                         usage.prompt_sent_tokens,
                         usage.prompt_cached_tokens,
                         node.parent_id,
+                        tree.provider_prompt_for_response_node(node_id)?,
                     ));
                 }
                 _ => {}

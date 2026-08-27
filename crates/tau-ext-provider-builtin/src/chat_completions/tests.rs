@@ -332,8 +332,8 @@ fn parallel_capability_defaults_true_and_is_omitted() {
     assert!(value.get("supports_parallel_tool_calls").is_none());
 }
 
-/// Ensures generic compatible models receive default summary compaction while
-/// a fully declared per-model profile overrides its limits.
+/// Generic compatible models receive a no-byte-cap summary fallback while a
+/// fully declared per-model profile supplies explicit native-domain limits.
 #[test]
 fn local_summary_compaction_defaults_without_model_profile() {
     let disabled: ChatCompletionsModel =
@@ -361,7 +361,7 @@ fn local_summary_compaction_defaults_without_model_profile() {
     assert!(
         published
             .iter()
-            .all(|model| model.standalone_compaction_threshold.is_some())
+            .all(|model| model.standalone_compaction_threshold.is_none())
     );
     assert!(published.iter().all(|model| !model.supports_compaction));
 

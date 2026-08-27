@@ -293,7 +293,7 @@ impl Harness {
             } => {
                 let inference = match compaction_threshold {
                     Some(threshold) => {
-                        path_tau_config_settings::RoleCompaction::Threshold(threshold)
+                        path_tau_config_settings::RoleCompaction::Threshold(threshold.get())
                     }
                     None => path_tau_config_settings::RoleCompaction::ProviderDefault,
                 };

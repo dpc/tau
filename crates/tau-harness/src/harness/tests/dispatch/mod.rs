@@ -1,8 +1,8 @@
 use std::os::unix::net as path_std_os_unix_net;
 use std::sync::{atomic as path_std_sync_atomic, mpsc as path_std_sync_mpsc};
 use std::{
-    collections as path_std_collections, fs as path_std_fs, io as path_std_io,
-    path as path_std_path, sync as path_std_sync, time as path_std_time,
+    collections as path_std_collections, fs as path_std_fs, path as path_std_path,
+    sync as path_std_sync, time as path_std_time,
 };
 
 use tau_config::settings as path_tau_config_settings;
@@ -201,7 +201,7 @@ fn publish_test_tool_declaration(harness: &mut Harness, cid: &AgentId, call_id: 
             usage: None,
             originator: tau_proto::PromptOriginator::User,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -451,7 +451,7 @@ pub(super) fn provider_text_response(
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -480,7 +480,7 @@ fn provider_repetition_response(
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -564,6 +564,25 @@ fn seed_agent_context_usage(state_dir: &Path, model: Option<&str>, input_tokens:
         }),
     );
     let prompt_id = test_agent_prompt_id("ap-main-usage");
+    let through = store
+        .agent("main")
+        .and_then(tau_core::AgentTree::head)
+        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+    if let Some(model) = model {
+        append_seed_agent_event(
+            &mut store,
+            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+                transaction_id: None,
+                agent_prompt_id: prompt_id.clone(),
+                through,
+                model: Some(model.into()),
+                operation: Some(tau_proto::PromptOperation::Inference),
+                activation_cut: Some(through),
+                output_length_continuation: None,
+            }),
+        );
+    }
     let mut response = provider_text_response(
         &prompt_id,
         tau_proto::AgentId::parse("main").expect("agent id"),
@@ -771,7 +790,7 @@ fn seed_background_placeholder_for_agent(
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
                 compaction_original_input_tokens: None,
-                compaction_compacted_input_tokens: None,
+                compaction_output_tokens: None,
                 backend: None,
                 provider_attempt: Default::default(),
                 provider_response_id: None,
@@ -934,7 +953,7 @@ fn event_log_contains_any_source(h: &Harness, matches_event: impl Fn(&Event) -> 
     false
 }
 
-fn event_log_count(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> usize {
+pub(super) fn event_log_count(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> usize {
     let mut count = 0;
     let mut seq = path_crate_event_log::EventLogSeq::new(0);
     while let Some(entry) = h.runtime_io.event_log.get_next_from(seq) {
@@ -1034,7 +1053,7 @@ pub(super) fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (Te
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1163,7 +1182,7 @@ fn provider_tool_response(
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1221,7 +1240,7 @@ fn provider_model_info(
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
         default_affinity: 0,
-        context_window,
+        context_window: tau_proto::TokenCount::new(context_window),
         efforts: vec![tau_proto::Effort::Off, tau_proto::Effort::High],
         verbosities: vec![tau_proto::Verbosity::Low, tau_proto::Verbosity::High],
         thinking_summaries: vec![
@@ -1231,7 +1250,7 @@ fn provider_model_info(
         supports_compaction: false,
         supports_standalone_compaction: false,
         standalone_compaction_threshold: None,
-        standalone_compaction_prefix_budget: Some(u64::MAX),
+        standalone_compaction_prefix_budget: Some(tau_proto::ByteCount::new(u64::MAX)),
         cache_policy: None,
         est_uncached_input_cost_1m_usd: Default::default(),
         est_cached_input_cost_1m_usd: Default::default(),
@@ -1401,60 +1420,6 @@ fn drive_harness_until_extension_tool_report(h: &mut Harness, call_id: &str) -> 
     }
 }
 
-fn standalone_compaction_boundary_with_measurements(
-    usage: Option<tau_proto::ProviderTokenUsage>,
-    baseline_model: Option<tau_proto::ModelId>,
-    baseline_head: Option<tau_proto::NodeId>,
-) -> tau_proto::AgentCompacted {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    enable_remote_compaction_for_test_model(&mut h);
-    let info = h
-        .provider_runtime
-        .model_info
-        .get_mut(&"test/model".into())
-        .expect("test model");
-    info.supports_compaction = false;
-    info.supports_standalone_compaction = true;
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
-        .identity
-        .agent_id
-        .clone()
-        .expect("durable agent");
-    if let Some(model) = baseline_model {
-        let agent = h
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get_mut(&cid)
-            .expect("agent");
-        agent.execution.context_input_tokens = Some(226_200);
-        agent.execution.context_usage_model = Some(model);
-        agent.execution.context_usage_head = baseline_head.or(agent.identity.head);
-    }
-
-    h.handle_compact_request(
-        crate::harness::harness_connection_id(),
-        test_session_id("s1"),
-        Some(&agent_id),
-    );
-    let prompt = read_nth_prompt_created(&h, 0);
-    let mut response = standalone_compaction_success_response(&prompt, "summary");
-    response.usage = usage;
-    h.handle_provider_response_finished(response)
-        .expect("accept compact response");
-    let boundary = event_log_events(&h)
-        .into_iter()
-        .find_map(|event| match event {
-            Event::AgentCompacted(compacted) => Some(compacted),
-            _ => None,
-        })
-        .expect("durable compaction boundary");
-    h.shutdown().expect("shutdown");
-    boundary
-}
-
 pub(super) fn context_overflow_response(
     prompt: &tau_proto::AgentPromptCreated,
 ) -> ProviderResponseFinished {
@@ -1475,7 +1440,7 @@ pub(super) fn context_overflow_response(
         originator: prompt.originator.clone(),
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1531,7 +1496,7 @@ fn standalone_compaction_success_response(
         originator: prompt.originator.clone(),
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1650,14 +1615,14 @@ pub(super) fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 1_000,
+            context_window: tau_proto::TokenCount::new(1_000),
             efforts: vec![tau_proto::Effort::Medium],
             verbosities: vec![tau_proto::Verbosity::Medium],
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
             supports_compaction: true,
             supports_standalone_compaction: false,
             standalone_compaction_threshold: None,
-            standalone_compaction_prefix_budget: Some(u64::MAX),
+            standalone_compaction_prefix_budget: Some(tau_proto::ByteCount::new(u64::MAX)),
             cache_policy: None,
             est_uncached_input_cost_1m_usd: Default::default(),
             est_cached_input_cost_1m_usd: Default::default(),
@@ -1667,104 +1632,6 @@ pub(super) fn enable_remote_compaction_for_test_model(h: &mut Harness) {
         },
     );
 }
-
-/// Rewrites one test agent journal to an exact complete-record crash prefix.
-fn rewrite_agent_records(
-    state: &std::path::Path,
-    agent_id: &tau_proto::AgentId,
-    records: &[tau_core::PersistedAgentEvent],
-) {
-    use std::io::Write as _;
-
-    let path = state
-        .join("agents")
-        .join(agent_id.as_str())
-        .join("events.cbor");
-    let mut journal = path_std_fs::File::create(path).expect("rewrite crash prefix");
-    for record in records {
-        let mut encoded = Vec::new();
-        ciborium::into_writer(record, &mut encoded).expect("encode record");
-        journal
-            .write_all(&(encoded.len() as u64).to_le_bytes())
-            .expect("write record length");
-        journal.write_all(&encoded).expect("write record");
-    }
-    journal.sync_all().expect("sync crash prefix");
-}
-
-/// Counts the decision terminal and its matching finish/start suffix.
-fn automatic_policy_recovery_counts(
-    records: &[tau_core::PersistedAgentEvent],
-    transaction_id: &tau_proto::CompactionTransactionId,
-) -> (usize, usize, usize, usize) {
-    let terminals = records
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::ProviderResponseFinished(_) | Event::AgentPromptTerminated(_)
-            )
-        })
-        .count();
-    let finishes = records
-        .iter()
-        .filter(|record| matches!(&record.event, Event::AgentOuterTurnFinished(_)))
-        .count();
-    let starts = records
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::AgentStandaloneCompactionStarted(started)
-                    if &started.transaction_id == transaction_id
-            )
-        })
-        .count();
-    let failures = records
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::AgentStandaloneCompactionFailed(failed)
-                if &failed.transaction_id == transaction_id =>
-            {
-                Some(failed)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        failures.iter().all(|failed| {
-            matches!(
-                failed.reason,
-                tau_proto::StandaloneCompactionFailureReason::Interrupted
-                    | tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
-            )
-        }),
-        "automatic recovery closed with an unexpected failure: {failures:?}"
-    );
-    (terminals, finishes, starts, failures.len())
-}
-
-/// Projects only lifecycle records whose repetition would violate quiescent
-/// automatic-policy recovery; discovery snapshots are intentionally excluded.
-fn automatic_policy_recovery_events(
-    records: &[tau_core::PersistedAgentEvent],
-) -> Vec<&tau_proto::Event> {
-    records
-        .iter()
-        .filter_map(|record| {
-            matches!(
-                record.event,
-                Event::ProviderResponseFinished(_)
-                    | Event::AgentPromptTerminated(_)
-                    | Event::AgentOuterTurnFinished(_)
-                    | Event::AgentStandaloneCompactionStarted(_)
-                    | Event::AgentStandaloneCompactionFailed(_)
-            )
-            .then_some(&record.event)
-        })
-        .collect()
-}
-
 fn strict_fake_compact_response(
     prompt: &tau_proto::AgentPromptCreated,
 ) -> Result<ProviderResponseFinished, String> {
@@ -1837,7 +1704,7 @@ fn seed_historical_open_prefix_failure(
             usage: None,
             originator: tau_proto::PromptOriginator::User,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -1897,6 +1764,7 @@ fn seed_historical_open_prefix_failure(
             cut: assistant,
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: Some(results),
+            context_retreat: None,
         }),
     );
     (prefix, assistant, results)
@@ -2000,7 +1868,7 @@ fn provider_compact_call(
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -2497,7 +2365,7 @@ fn start_background_tool_and_finish_placeholder_turn(
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -2856,9 +2724,8 @@ mod agent_runtime;
 mod cancellation_and_background;
 mod compaction;
 mod compaction_failure_recovery;
-mod compaction_projection;
+
 mod compaction_reactive_rolling;
-mod compaction_replay;
 mod compaction_strict;
 mod configuration;
 mod extension_routing;
@@ -2871,3 +2738,100 @@ mod session_lifecycle;
 mod status_reporting;
 mod tool_execution;
 mod ui_admission;
+
+/// Rewrites one test agent journal to an exact complete-record crash prefix.
+fn rewrite_agent_records(
+    state: &std::path::Path,
+    agent_id: &tau_proto::AgentId,
+    records: &[tau_core::PersistedAgentEvent],
+) {
+    use std::io::Write as _;
+
+    let path = state
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    let mut journal = path_std_fs::File::create(path).expect("rewrite crash prefix");
+    for record in records {
+        let mut encoded = Vec::new();
+        ciborium::into_writer(record, &mut encoded).expect("encode record");
+        journal
+            .write_all(&(encoded.len() as u64).to_le_bytes())
+            .expect("write record length");
+        journal.write_all(&encoded).expect("write record");
+    }
+    journal.sync_all().expect("sync crash prefix");
+}
+
+/// Counts the decision terminal and its matching finish/start suffix.
+fn automatic_policy_recovery_counts(
+    records: &[tau_core::PersistedAgentEvent],
+    transaction_id: &tau_proto::CompactionTransactionId,
+) -> (usize, usize, usize, usize) {
+    let terminals = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::ProviderResponseFinished(_) | Event::AgentPromptTerminated(_)
+            )
+        })
+        .count();
+    let finishes = records
+        .iter()
+        .filter(|record| matches!(&record.event, Event::AgentOuterTurnFinished(_)))
+        .count();
+    let starts = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if &started.transaction_id == transaction_id
+            )
+        })
+        .count();
+    let failures = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentStandaloneCompactionFailed(failed)
+                if &failed.transaction_id == transaction_id =>
+            {
+                Some(failed)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        failures.iter().all(|failed| {
+            matches!(
+                failed.reason,
+                tau_proto::StandaloneCompactionFailureReason::Interrupted
+                    | tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
+            )
+        }),
+        "automatic recovery closed with an unexpected failure: {failures:?}"
+    );
+    (terminals, finishes, starts, failures.len())
+}
+
+/// Projects only lifecycle records whose repetition would violate quiescent
+/// automatic-policy recovery; discovery snapshots are intentionally excluded.
+fn automatic_policy_recovery_events(
+    records: &[tau_core::PersistedAgentEvent],
+) -> Vec<&tau_proto::Event> {
+    records
+        .iter()
+        .filter_map(|record| {
+            matches!(
+                record.event,
+                Event::ProviderResponseFinished(_)
+                    | Event::AgentPromptTerminated(_)
+                    | Event::AgentOuterTurnFinished(_)
+                    | Event::AgentStandaloneCompactionStarted(_)
+                    | Event::AgentStandaloneCompactionFailed(_)
+            )
+            .then_some(&record.event)
+        })
+        .collect()
+}

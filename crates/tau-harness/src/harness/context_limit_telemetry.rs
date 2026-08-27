@@ -1,12 +1,5 @@
-use std::sync as path_std_sync;
-
 use tau_core::AgentEntry;
-use tau_proto::{
-    ContextItem, ContextLimitObservation, ModelId, PromptOperation, ToolResultContentPart,
-};
-
-/// Minimum control-token reserve used by conservative context projection.
-pub(super) const MIN_CONTEXT_PROJECTION_RESERVE: u64 = 4096;
+use tau_proto::{ContextLimitObservation, ModelId, PromptOperation};
 
 /// Immutable content-free context-limit evidence captured at dispatch.
 pub(super) struct PromptContextLimitSnapshot {
@@ -14,317 +7,61 @@ pub(super) struct PromptContextLimitSnapshot {
     pub(super) model: ModelId,
     /// Provider operation dispatched.
     pub(super) operation: PromptOperation,
-    /// Conservative input-token projection.
-    pub(super) projected_input_tokens: Option<u64>,
-    /// Exact serialized post-baseline transcript growth, when every entry could
-    /// be represented as JSON and the total fit in `u64`.
-    pub(super) transcript_delta_bytes: Option<u64>,
-    /// Advertised model window at dispatch.
-    pub(super) advertised_context_window: Option<u64>,
-    /// Conservative projection reserve.
-    pub(super) projection_reserve_tokens: u64,
-    /// Explicit role/model compaction threshold at dispatch.
-    pub(super) compaction_threshold: Option<u64>,
+    /// Exact serialized post-baseline transcript growth, when representable.
+    pub(super) transcript_delta_bytes: Option<tau_proto::ByteCount>,
+    /// Advertised model token window at dispatch.
+    pub(super) advertised_context_window: Option<tau_proto::TokenCount>,
+    /// Explicit role/model token threshold at dispatch.
+    pub(super) compaction_threshold: Option<tau_proto::TokenCount>,
     /// Sanitized role compaction policy at dispatch.
     pub(super) compaction_policy: tau_proto::ContextLimitCompactionPolicy,
 }
 
-/// Independent exact-byte telemetry and conservative token projection for a
-/// transcript suffix.
+/// Exact byte telemetry for a transcript suffix.
 #[derive(Clone, Copy)]
 pub(super) struct TranscriptGrowth {
-    /// Exact JSON-serialized suffix bytes, independently unavailable on
-    /// failure.
-    pub(super) serialized_bytes: Option<u64>,
-    /// Conservative suffix token projection, independently unavailable on
-    /// failure.
-    pub(super) projected_tokens: Option<u64>,
+    /// Exact JSON-serialized suffix bytes, unavailable on failure.
+    pub(super) serialized_bytes: Option<tau_proto::ByteCount>,
 }
 
-/// Returns the shared conservative control-token reserve.
-pub(super) fn context_projection_reserve(context_window: u64) -> u64 {
-    (context_window / 100).max(MIN_CONTEXT_PROJECTION_RESERVE)
-}
-
-/// Returns the exact JSON byte length used for one transcript-growth entry, or
-/// `None` when the entry is not JSON-representable.
-pub(super) fn serialized_transcript_entry_bytes(entry: &AgentEntry) -> Option<u64> {
+/// Returns the exact JSON byte length used for one transcript-growth entry.
+pub(super) fn serialized_transcript_entry_bytes(
+    entry: &AgentEntry,
+) -> Option<tau_proto::ByteCount> {
     serde_json::to_vec(entry)
         .ok()
         .and_then(|value| u64::try_from(value.len()).ok())
+        .map(tau_proto::ByteCount::new)
 }
 
-/// Sums exact serialized entry lengths, returning `None` if any entry is not
-/// JSON-representable or the exact total overflows.
-#[cfg(test)]
-pub(super) fn serialized_transcript_delta_bytes<'a>(
-    entries: impl IntoIterator<Item = &'a AgentEntry>,
-) -> Option<u64> {
-    entries.into_iter().try_fold(0_u64, |total, entry| {
-        total.checked_add(serialized_transcript_entry_bytes(entry)?)
-    })
-}
-
-/// Returns the conservative token projection for one transcript-growth entry.
-///
-/// Provider-visible structure retains the existing one-JSON-byte-per-token
-/// upper bound. Raw structured tool payloads retained only for non-provider
-/// consumers are replaced by their normalized provider rendering. Typed/raw
-/// provider replay alternatives retain one conservative representation rather
-/// than both durable copies. Canonical images are removed from that JSON
-/// representation and accounted once by encoded byte length plus one token per
-/// 32-by-32 image patch. This avoids durable-only duplication and the
-/// accidental 3-4x expansion from `serde_bytes` JSON integer arrays while
-/// keeping provider input visible to proactive compaction accounting.
-pub(super) fn projected_transcript_entry_tokens(entry: &AgentEntry) -> Option<u64> {
-    let mut provider_projection = entry.clone();
-    if let AgentEntry::Compaction {
-        transaction_id,
-        cut,
-        suffix_end,
-        ..
-    } = &mut provider_projection
-    {
-        // Boundary correlation is durable harness metadata, not provider input.
-        *transaction_id = None;
-        *cut = None;
-        *suffix_end = None;
-    }
-    let image_tokens = strip_and_count_agent_entry_images(&mut provider_projection)?;
-    project_tool_result_outputs(&mut provider_projection);
-    let replay_envelope_tokens = project_provider_replay_alternatives(&mut provider_projection)?;
-    serialized_transcript_entry_bytes(&provider_projection)?
-        .checked_add(image_tokens)?
-        .checked_add(replay_envelope_tokens)
-}
-
-/// Derives independent exact-byte telemetry and conservative token projection
-/// from one transcript suffix.
+/// Derives exact byte telemetry from one transcript suffix.
 pub(super) fn transcript_growth<'a>(
     entries: impl IntoIterator<Item = &'a AgentEntry>,
 ) -> TranscriptGrowth {
-    entries.into_iter().fold(
-        TranscriptGrowth {
-            serialized_bytes: Some(0),
-            projected_tokens: Some(0),
-        },
-        |growth, entry| TranscriptGrowth {
-            serialized_bytes: growth
-                .serialized_bytes
-                .and_then(|total| total.checked_add(serialized_transcript_entry_bytes(entry)?)),
-            projected_tokens: growth
-                .projected_tokens
-                .and_then(|total| total.checked_add(projected_transcript_entry_tokens(entry)?)),
-        },
-    )
-}
-
-fn strip_and_count_agent_entry_images(entry: &mut AgentEntry) -> Option<u64> {
-    let mut total = 0_u64;
-    visit_agent_entry_images_mut(entry, |image| {
-        let width_patches = u64::from(image.width).div_ceil(32);
-        let height_patches = u64::from(image.height).div_ceil(32);
-        let patches = width_patches.checked_mul(height_patches)?;
-        let image_tokens = u64::try_from(image.data.len()).ok()?.checked_add(patches)?;
-        total = total.checked_add(image_tokens)?;
-        image.data = path_std_sync::Arc::from([]);
-        Some(())
-    })?;
-    Some(total)
-}
-
-fn project_tool_result_outputs(entry: &mut AgentEntry) {
-    if let AgentEntry::ToolResults { items } = entry {
-        *items = crate::prompt::project_tool_result_items(items);
-    }
-    visit_agent_entry_tool_results_mut(entry, |result| {
-        result.output.body = result.render_provider_text();
-        result.output.headers.clear();
-        result.output.raw = tau_proto::CborValue::Null;
-        result.status = tau_proto::ToolResultStatus::Success;
-        result.presentation = tau_proto::ToolResultPresentation::ToolPayload;
-    });
-}
-
-fn project_provider_replay_alternatives(entry: &mut AgentEntry) -> Option<u64> {
-    let mut replay_envelope_tokens = Some(0_u64);
-    visit_agent_entry_context_items_mut(entry, |item| match item {
-        ContextItem::Message(message) => {
-            replay_envelope_tokens = replay_envelope_tokens.and_then(|total| {
-                total.checked_add(project_message_replay_envelope_tokens(message)?)
-            });
-        }
-        ContextItem::ToolCall(call) => {
-            if call.tool_type == tau_proto::ToolType::Function && call.raw_arguments_json.is_some()
-            {
-                call.arguments = tau_proto::CborValue::Null;
-            }
-        }
-        ContextItem::Reasoning(item)
-        | ContextItem::Compaction(item)
-        | ContextItem::UnknownProviderItem(item) => {
-            if item
-                .raw_json
-                .as_deref()
-                .is_some_and(|raw| serde_json::from_str::<serde_json::Value>(raw).is_ok())
-            {
-                item.value = tau_proto::CborValue::Null;
-            } else {
-                item.raw_json = None;
-            }
-        }
-        ContextItem::ToolResult(_)
-        | ContextItem::ReasoningText(_)
-        | ContextItem::LocalCompactionNarrative(_)
-        | ContextItem::CompactionTrigger => {}
-    });
-    replay_envelope_tokens
-}
-
-fn project_message_replay_envelope_tokens(message: &mut tau_proto::MessageItem) -> Option<u64> {
-    let Some(raw_json) = message.responses_raw_json.take() else {
-        return Some(0);
-    };
-    let Ok(raw_message) = serde_json::from_str::<serde_json::Value>(&raw_json) else {
-        return Some(0);
-    };
-    if raw_message.get("type").and_then(serde_json::Value::as_str) != Some("message")
-        || raw_message.get("role").and_then(serde_json::Value::as_str) != Some("assistant")
-    {
-        return Some(0);
-    }
-    let raw_text_bytes = raw_message
-        .get("content")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|part| {
-            matches!(
-                part.get("type").and_then(serde_json::Value::as_str),
-                Some("output_text") | Some("text")
-            )
-        })
-        .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
-        .try_fold(0_u64, |total, text| {
-            total.checked_add(u64::try_from(text.len()).ok()?)
-        })?;
-    u64::try_from(raw_json.len())
-        .ok()?
-        .checked_sub(raw_text_bytes)
-}
-
-fn visit_agent_entry_context_items_mut(
-    entry: &mut AgentEntry,
-    mut visit: impl FnMut(&mut ContextItem),
-) {
-    let items = match entry {
-        AgentEntry::UserInput { items, .. }
-        | AgentEntry::AssistantResponse {
-            output_items: items,
-            ..
-        }
-        | AgentEntry::Compaction {
-            replacement_window: items,
-            ..
-        } => items,
-        AgentEntry::ToolResults { .. }
-        | AgentEntry::AgentMessage { .. }
-        | AgentEntry::MessageFact { .. }
-        | AgentEntry::CompactionTrigger { .. } => return,
-    };
-    for item in items {
-        visit(item);
+    TranscriptGrowth {
+        serialized_bytes: entries
+            .into_iter()
+            .try_fold(tau_proto::ByteCount::ZERO, |total, entry| {
+                total.checked_add(serialized_transcript_entry_bytes(entry)?)
+            }),
     }
 }
 
-fn visit_agent_entry_images_mut(
-    entry: &mut AgentEntry,
-    mut visit: impl FnMut(&mut tau_proto::ImageContent) -> Option<()>,
-) -> Option<()> {
-    let mut result = Some(());
-    visit_agent_entry_tool_results_mut(entry, |tool_result| {
-        if result.is_none() {
-            return;
-        }
-        for part in &mut tool_result.provider_content {
-            let ToolResultContentPart::Image(image) = part;
-            if visit(image).is_none() {
-                result = None;
-                return;
-            }
-        }
-    });
-    result
-}
-
-fn visit_agent_entry_tool_results_mut(
-    entry: &mut AgentEntry,
-    mut visit: impl FnMut(&mut tau_proto::ToolResultItem),
-) {
-    let mut visit_items = |items: &mut [ContextItem]| {
-        for item in items {
-            if let ContextItem::ToolResult(result) = item {
-                visit(result);
-            }
-        }
-    };
-    match entry {
-        AgentEntry::UserInput { items, .. }
-        | AgentEntry::AssistantResponse {
-            output_items: items,
-            ..
-        }
-        | AgentEntry::Compaction {
-            replacement_window: items,
-            ..
-        } => visit_items(items),
-        AgentEntry::ToolResults { items } => {
-            for result in items {
-                visit(result);
-            }
-        }
-        AgentEntry::AgentMessage { .. }
-        | AgentEntry::MessageFact { .. }
-        | AgentEntry::CompactionTrigger { .. } => {}
-    }
-}
-
-/// Derives a projection only when the same-model baseline and exact transcript
-/// token delta are both available and checked arithmetic succeeds.
-pub(super) fn projected_input_tokens(
-    baseline: Option<u64>,
-    transcript_delta_tokens: Option<u64>,
-    reserve: u64,
-) -> Option<u64> {
-    baseline
-        .zip(transcript_delta_tokens)
-        .and_then(|(tokens, delta)| tokens.checked_add(delta))
-        .and_then(|tokens| tokens.checked_add(reserve))
-}
-
-/// Classifies sanitized evidence, failing closed for invalid or contradictory
-/// provider/projection values. A conservative transcript projection can
-/// corroborate or contradict provider usage, but cannot establish a categorical
-/// observation without nonzero provider-token evidence.
+/// Classifies a canonical rejection using only provider-reported input and the
+/// advertised token window.
 pub(super) fn context_limit_observation(
-    provider_tokens: Option<u64>,
-    projected_tokens: Option<u64>,
-    advertised_limit: Option<u64>,
+    provider_tokens: Option<tau_proto::TokenCount>,
+    advertised_limit: Option<tau_proto::TokenCount>,
 ) -> ContextLimitObservation {
-    let Some(limit) = advertised_limit.filter(|limit| *limit > 0) else {
+    let Some(limit) = advertised_limit.filter(|limit| *limit > tau_proto::TokenCount::ZERO) else {
         return ContextLimitObservation::InsufficientEvidence;
     };
-    let Some(provider_tokens) = provider_tokens.filter(|tokens| *tokens > 0) else {
+    let Some(provider_tokens) =
+        provider_tokens.filter(|tokens| *tokens > tau_proto::TokenCount::ZERO)
+    else {
         return ContextLimitObservation::InsufficientEvidence;
     };
-    let provider_below_limit = provider_tokens < limit;
-    let projection_below_limit = projected_tokens.map(|tokens| tokens < limit);
-    if projection_below_limit
-        .is_some_and(|projection_below_limit| projection_below_limit != provider_below_limit)
-    {
-        return ContextLimitObservation::InsufficientEvidence;
-    }
-    if provider_below_limit {
+    if provider_tokens < limit {
         ContextLimitObservation::RejectedBelowAdvertisedLimit
     } else {
         ContextLimitObservation::RejectedAtOrAboveAdvertisedLimit

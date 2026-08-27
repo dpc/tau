@@ -13,19 +13,19 @@ replay, and typed no-progress termination, satisfying the same gate.
 
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and
-standalone compaction using the same provider converter. Approximate context
-accounting includes encoded bytes and conservative 32-by-32 image patches;
-provider adapters separately enforce aggregate canonical-image and generated
-data-URL request bounds. A compacted replacement may summarize an old image
-away like any other input fact. This behavior is confirmed by
+standalone compaction using the same provider converter. Provider adapters
+enforce their native exact byte resource bounds independently; Tau does not
+translate image bytes or patches into token usage. A compacted replacement may
+summarize an old image away like any other input fact. This behavior is confirmed by
 [GATE-typed-image-tool-results](GATE-typed-image-tool-results.md).
 
-The default Tau-owned summary fallback for Chat Completions, OpenRouter, and
-public Responses models uses cache-aligned ordinary-prefix compaction.
-Provider-native ChatGPT/Codex compaction remains preferred and unchanged. The
-fallback derives conservative limits and a proactive threshold from the model
-context window; an explicit `local_summary_compaction` profile fully overrides
-those defaults.
+The Tau-owned summary fallback for Chat Completions, OpenRouter, and public
+Responses models uses cache-aligned ordinary-prefix compaction. Its generic
+profile publishes no prefix byte cap or proactive threshold; its output-token
+cap is derived only within the token domain and its narrative byte cap is an
+independent resource bound. An explicit `local_summary_compaction` profile may
+publish native-domain overrides. Provider-native ChatGPT/Codex compaction
+remains preferred and unchanged.
 
 The compaction request lowers the selected immutable cut exactly as ordinary
 inference does: the same system prompt, tool definitions, ordered typed history,
@@ -86,7 +86,7 @@ is overwritten, and observations cannot automatically alter safety thresholds.
 
 ## Reactive context-overflow recovery
 
-An ordinary inference that receives a canonical, no-output context-window rejection may authorize one durable standalone-compaction chain when the captured model still matches, advertises standalone support, and role policy permits compaction. The terminal response and recovery disposition commit before a uniquely correlated compaction start. Each successful pass compacts the largest provider-closed prefix that fits the adapter's published budget. When that cut preserves reducible history before the original activation cut, the next durable pass consumes the replacement plus at least one more closed suffix group, independent of the local token projection. The rejected activating input remains in the suffix under the original resume watermark. The finite preceding transcript therefore bounds the chain: every pass removes a surviving group, or a typed `prefix_too_large` preflight failure terminates it without provider dispatch. Inference resumes only after the chain reaches the end of the logical provider window preceding the rejected activation.
+An ordinary inference that receives a canonical, no-output context-window rejection may authorize one durable standalone-compaction chain when the captured model still matches, advertises standalone support, and role policy permits compaction. The terminal response and recovery disposition commit before a uniquely correlated compaction start. A context-rejected automatic standalone request durably pre-mints one successor at the immediate previous useful provider-closed cut. Rejection exhaustively repeats that strict retreat until one request succeeds or the history is irreducible. A successful pass then advances toward the immutable logical target by consuming the replacement plus at least one more closed suffix group. The rejected activating input remains in the suffix under the original resume watermark. The finite preceding transcript bounds both phases: retreat strictly moves backward, and forward rolling strictly removes surviving groups. Typed preflight or irreducible failures terminate without recursive inference retry. Inference resumes only after the chain reaches the end of the logical provider window preceding the rejected activation.
 
 Compaction dispatch and continuation reuse the existing durable transaction machinery. A committed partial chain remains owed if its captured route or standalone capability disappears; replay commits one predecessor-linked typed `route_failed` terminal without provider dispatch instead of checkpointing inference. Standalone-compaction overflow, a post-chain inference overflow, a second overflow, and ambiguous dispatch are terminal rather than recursive. Partial output, cancellation, unsupported policy, legacy checkpoints, and branch/model mismatch never authorize recovery. Replay resumes an unclaimed planned recovery once, continues a committed successful partial chain from its durable predecessor, treats an interrupted compact dispatch as blocked, and retains the existing dispatch-uncertain rule after inference dispatch.
 
@@ -168,15 +168,11 @@ validated successor determines blocked, successful, and
 continuation-checkpoint recovery.
 Context-window rejection records may include sanitized, harness-owned
 `context_limit_telemetry`. Correlation is the enclosing prompt plus exact
-provider-qualified model and operation. Projection is accepted only from a
-same-model usage baseline; missing, zero, stale/model-changed, or contradictory
-inputs produce absent values or `insufficient_evidence`. The exact serialized
-transcript delta remains separately attributable byte provenance, not projection
-input. Projection independently counts byte-free JSON structure, canonical
-encoded-image bytes, and rounded-up 32-by-32 image patches. It may corroborate
-provider usage but never establishes a categorical observation without nonzero
-provider-token evidence. The record makes hidden overhead and advertised-limit drift observable
-but does not feed back into automatic calibration.
+provider-qualified model and operation. Optional provider-reported token usage
+and exact serialized transcript-delta bytes remain separate native-domain facts.
+Missing, zero, stale/model-changed, or contradictory token inputs produce
+`insufficient_evidence`; bytes never stand in for tokens. The record makes
+advertised-limit drift observable but does not feed back into calibration.
 Calibration is explicit only: operators may change normal persisted model/role
 configuration (including bounded thresholds), and resetting that configuration
 removes the calibration. Tau never learns or mutates provider limits from a
@@ -197,14 +193,11 @@ presence.
 The harness, not providers, owns the durable context-limit diagnostic attached
 to terminal responses. Provider-supplied values are discarded. The schema is
 content-free and bounded to one record per rejected prompt: model id, operation,
-optional token counts/window, optional exact serialized transcript-growth bytes,
-reserve, active threshold, closed policy/eligibility/action, and a closed
-observation enum. Exact growth and projection are derived independently; each
-field is absent only when its own serialization or checked aggregation is
-unavailable. A categorical observation requires a positive advertised limit and
-nonzero provider input usage; the transcript projection only corroborates or
-makes contradictory evidence insufficient. Raw evidence remains present even
-when the bounded observation is insufficient. Raw prompts, errors, response
+optional provider token counts/window, optional exact serialized
+transcript-growth bytes, active threshold, closed policy/eligibility/action, and
+a closed observation enum. Each field is absent only when its own exact
+authority is unavailable. A categorical observation requires a positive
+advertised limit and nonzero provider input usage. Raw prompts, errors, response
 bodies, headers, accounts, and endpoints are excluded.
 Normal session/event retention applies; watcher snapshots do not duplicate this
 record. Evidence never automatically lowers limits or thresholds.
@@ -325,17 +318,13 @@ sidecars. Harness-authored `CompactionTrigger` items, malformed messages, and
 open, duplicate, or otherwise incomplete tool rounds remain invalid. A standalone
 terminal commits a replacement only on `EndTurn` with neither provider error nor
 typed failure; error and typed failure take precedence as provider failures.
-The canonical `agent.compacted` boundary may also carry optional harness-owned
-before and after token measurements. Each count records whether it is exact
-provider-reported usage or an estimate. Before-count precedence is canonical
-provider prompt/input usage, then a prior context-usage baseline only when its
-model and selected-branch ancestry still apply. After-count precedence is
-canonical provider compacted-output usage, including a reported zero, then the
-replacement-window byte estimate. The measurements are content-free display
-metadata: they do not affect replacement authority or replay, and missing fields
-on older boundaries remain valid. Because they live on the at-most-once boundary,
-live publication, late catch-up, and cold replay expose the same values without
-publishing the private standalone provider response.
+The canonical `agent.compacted` boundary may carry provider-reported compact
+request input and output token counts. These content-free display/accounting
+fields never become scheduling authority; absent provider usage remains absent.
+Legacy `compacted_input_tokens` decodes as the provider output count, while new
+records encode `compaction_output_tokens`. Because the fields live on the
+at-most-once boundary, live publication, late catch-up, and cold replay expose
+the same values without publishing the private standalone response.
 Rejected terminals retain the transaction cut/resume and context/cache baselines,
 while their report/accounting behavior is owned by
 [SPEC-provider-execution-reports-and-canonical-facts](SPEC-provider-execution-reports-and-canonical-facts.md).
@@ -352,9 +341,10 @@ sends the full provider-visible input plus a final `compaction_trigger`, accepts
 exactly one provider compaction item followed by `response.completed`, and
 constructs the replacement from approved retained input plus that item last.
 Retention preserves order and metadata for real user/hook messages and
-non-final agent messages no larger than 10,000 approximate tokens. It applies a
-newest-first 64,000-token aggregate text budget, keeps complete groups, and
-middle-truncates at most one boundary message with an explicit token marker.
+non-final agent messages no larger than 40,000 UTF-8 bytes. It applies a
+newest-first contiguous 256,000-byte aggregate text budget, keeps complete
+groups, and middle-truncates at most one boundary message with a byte-labeled
+marker.
 Images and audio inside retained messages remain uncharged by this retention
 budget. All other input items are omitted. Invalid output or failed validation
 installs nothing.
@@ -363,24 +353,17 @@ exceptions, a standalone provider request is stateless and its
 ordered provider output remains the canonical replacement window without
 pruning or reinterpretation. The default Tau-owned local compactor transforms one bounded assistant final text into exactly one synthetic user-role checkpoint message with no wrapper or supplement.
 
-Cold agent rehydration restores context usage only from the latest
-model-qualified durable assistant response on the selected branch and never
-across a later compaction boundary. The producing model travels with the
-runtime usage until provider model discovery can validate it against the
-agent's resolved model. A qualified model that has not been discovered yet is
-unresolved, not mismatched, so staggered provider startup retains it until its
-provider appears; only a confirmed different resolution clears it. Live
-navigation performs the same selected-branch derivation after the durable head
-move, publishes the complete reconciled context-usage and agent-stats
-projections, and restores a prior branch's qualified baseline when that branch
-is reselected. A baseline is applicable only while its producing head is an
-ancestor of the selected head; root-qualified usage applies to every branch.
-Proactive scheduling and context-limit telemetry share that ancestry decision
-and decline a baseline when its branch ownership cannot be established.
-Accepted compaction and explicit agent model changes also clear the usage,
-head, model, cached-token, and percentage baseline. Consequently live
-navigation and cold rehydration make the same projected standalone-compaction
-decision for the selected branch.
+Cold agent rehydration restores the latest ordinary durable assistant
+observation on the selected branch and never crosses a later compaction
+boundary. Missing or zero usage on that newest response blocks fallback to an
+older count. The producing prompt id and model travel with nonzero runtime usage
+until provider model discovery can validate them against the agent's resolved
+model. Live navigation performs the same selected-branch derivation and
+publishes the complete reconciled context facts. Proactive scheduling and
+context-limit telemetry share that ancestry/newest decision and decline evidence
+when branch ownership cannot be established. Accepted compaction and explicit
+model changes clear the observation. Live navigation and cold rehydration
+therefore make the same exact-evidence decision.
 
 Typed image tool results remain canonical replay content until a compaction
 replacement window omits them. Logical canonical image bytes are counted across
@@ -390,16 +373,14 @@ Agent-record writes must also satisfy the loader's 64 MiB encoded-record bound.
 Provider request lowering independently enforces its raw-image and data-URL
 aggregate limits.
 
-Proactive context projection serializes byte-free provider transcript structure
-under the existing one-byte-per-token conservative bound, then adds each image's
-canonical encoded byte length and one token per rounded-up 32-by-32 patch.
-Provider-visible tool-result rendering contributes to this structure, while the
-parallel raw structured payload retained for non-provider consumers does not.
-Exact serialized transcript-growth bytes remain separate telemetry and still
-include that raw payload; they never substitute their JSON representation for
-projected tokens. Threshold-fired standalone compaction persists
-`automatic_threshold`; only explicit UI compaction retains the legacy/default
-`manual` trigger.
+Proactive compaction requires a nonzero provider-reported ordinary-input token
+count at or above the selected exact `TokenCount` threshold. New durable starts
+carry the correlated provider prompt, reported count, threshold, and threshold
+source. Transcript bytes, image dimensions, and local summaries never authorize
+threshold scheduling. Exact serialized transcript-growth bytes remain
+independent telemetry. Threshold-fired standalone compaction persists exact
+evidence; only explicit UI compaction retains the legacy/default `manual`
+trigger.
 
 Named automatic-compaction policies are harness-scheduled standalone policies.
 The built-in named `default` policy runs at `before_inference` at the
@@ -407,44 +388,34 @@ adapter-published context-limit-safe threshold. Other named policies augment it;
 only disabling `default` or legacy replace-all disabling removes that safety
 policy.
 
-Protected automatic scheduling measures the active provider-visible window from
-the strongest applicable same-model token baseline. Applicable provider response
-usage contributes its reported input tokens and only later provider-visible
-transcript growth is estimated. A successful compaction contributes a nonzero
-provider-reported compacted-input measurement; client-retained replacement items
-on the ChatGPT-tagged v2 route and the preserved suffix remain conservatively
-estimated, while provider-owned output is not charged again. Estimated or zero
-compacted measurements retain the from-scratch fallback. Core reconstructs that logical
-window by folding each durable replacement over its selected logical prefix; it
-never substitutes physical
-journal ancestry for `replacement + preserved suffix`. When the window exceeds
-the scheduling guard, Tau linearly selects its latest provider-closed logical
-position within the adapter's nonzero `standalone_compaction_prefix_budget`.
-Complete tool call/result rounds and each replacement are indivisible. The
-durable start records the selected logical node as `cut` and the exact source
-window head as `resume_through`, so success installs `compact(P)` followed by
-the exact logical suffix. A later pass may therefore cut inside a suffix that
-physically precedes its earlier replacement boundary without resurrecting the
-old prefix. No fitting progress-making group produces a bounded typed failure
-without provider work. The sole exception is an active window containing only
-an earlier replacement: another automatic pass cannot consume transcript or
-make progress, so an already-durable activation proceeds to ordinary inference
-and leaves provider context-limit recovery authoritative. An absent budget
-disables these size-recoverable automatic paths but not explicit/manual
-compaction.
+Protected proactive scheduling uses only a nonzero provider-reported input count
+from an accepted ordinary request for the same selected model. The durable start
+records the exact provider prompt, count, threshold, and threshold source. Core
+reconstructs and validates that evidence on replay. Transcript growth,
+replacement output, serialized bytes, image dimensions, and local summaries
+never supply or extend token authority. Missing or zero provider usage therefore
+runs ordinary inference. A proactive success also runs inference; it never
+remeasures locally or independently schedules a second pass.
 
-After each successful durable boundary Tau remeasures at the protected
-continuation seam using the same effective numeric or provider threshold. If
-the active window remains over the guard, that successful transaction owns one
-durable `automatic_continuation` start before any inference checkpoint. Each
-pass must consume another closed suffix group, which proves termination without
-an arbitrary pass ceiling. A deterministic preflight failure and its reason are
-recorded in the start itself, so live execution and restart commit the same
-terminal outcome without provider work. A failed provider pass is never
-recursively scheduled as another automatic compaction transaction. Its provider
-request may use the bounded transient retry policy above; exhausted transient
-failures, deterministic provider failures, serialization failures, and
-indivisible-item failures remain explicit terminal outcomes.
+An adapter's optional `standalone_compaction_prefix_budget` is an exact
+`ByteCount` work/resource limit, not a token guard. When present, Tau selects the
+latest provider-closed logical prefix whose fully materialized historical
+context fits it. Complete tool call/result rounds and each replacement remain
+indivisible. When absent, Tau dispatches the full selected closed prefix and lets
+the provider's canonical token-capacity rejection decide recovery. The durable
+start records `cut` and `resume_through`, so success installs `compact(P)`
+followed by the exact logical suffix. No fitting progress-making group produces
+a bounded typed preflight failure without provider work.
+
+Only a canonical typed, no-output `context_window_exceeded` terminal authorizes
+automatic retreat. Its failure record pre-mints one successor at the immediate
+previous useful provider-closed cut. Each rejection strictly retreats; the first
+success begins target-based forward rolling, where each successful continuation
+consumes another closed suffix group. These monotonic phases prove termination
+without a pass ceiling. Generic provider failures, cancellation, route loss,
+manual compaction, and irreducible history terminalize without automatic retry.
+A deterministic byte-budget preflight failure records its reason in the start,
+so live execution and restart commit the same terminal without provider work.
 
 `before_inference` policies otherwise retain the deferred runtime behavior above.
 `outer_turn_finished` policies that match the logical terminal status coalesce

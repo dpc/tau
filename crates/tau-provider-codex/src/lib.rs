@@ -28,10 +28,10 @@ pub const LOG_TARGET: &str = "provider-codex";
 /// ChatGPT/Codex backend base URL, without the final Responses path.
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
-const DEFAULT_RAW_CONTEXT_WINDOW: u64 = 272_000;
-const GPT_5_6_RAW_CONTEXT_WINDOW: u64 = 372_000;
-const GPT_5_6_STANDALONE_COMPACTION_TOKEN_THRESHOLD: u64 = 334_800;
-const GPT_5_6_STANDALONE_COMPACTION_PREFIX_BYTE_BUDGET: u64 = 334_800;
+const DEFAULT_RAW_CONTEXT_WINDOW: tau_proto::TokenCount = tau_proto::TokenCount::new(272_000);
+const GPT_5_6_RAW_CONTEXT_WINDOW: tau_proto::TokenCount = tau_proto::TokenCount::new(372_000);
+const GPT_5_6_STANDALONE_COMPACTION_TOKEN_THRESHOLD: tau_proto::TokenCount =
+    tau_proto::TokenCount::new(334_800);
 const EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
 const CHATGPT_MODELS: &[&str] = &[
     "gpt-5.6-sol",
@@ -246,7 +246,7 @@ impl ResolvedConfig {
 
     /// Returns the raw provider context window.
     #[must_use]
-    pub fn raw_context_window(&self) -> u64 {
+    pub fn raw_context_window(&self) -> tau_proto::TokenCount {
         self.inner.raw_context_window
     }
 
@@ -944,25 +944,6 @@ impl CodexRuntime {
         request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
     ) -> CompactOutcome {
-        let prefix_budget = GPT_5_6_STANDALONE_COMPACTION_PREFIX_BYTE_BUDGET;
-        let prefix_bytes =
-            tau_provider::local_summary_compaction::historical_prefix_json_bytes(request.context);
-        if prefix_bytes.is_none_or(|bytes| prefix_budget < bytes) {
-            return CompactOutcome::Terminal(CodexError(common::LlmError::ProviderFailure(
-                tau_proto::ProviderFailureKind::ContextWindowExceeded,
-                "standalone compaction prefix exceeds the published safe budget".to_owned(),
-            )));
-        }
-        let compact_wire_bytes = responses::compact_ws_request_bytes(config.wire(), request);
-        if compact_wire_bytes
-            .ok()
-            .is_none_or(|bytes| bytes > config.wire().raw_context_window)
-        {
-            return CompactOutcome::Terminal(CodexError(common::LlmError::ProviderFailure(
-                tau_proto::ProviderFailureKind::ContextWindowExceeded,
-                "standalone compaction final wire request exceeds the adapter bound".to_owned(),
-            )));
-        }
         let identity = config.inference_identity();
         let probe = match self.acquire_compact_probe(identity, abort) {
             CompactAdmissionResult::Probe(probe) => Some(probe),
@@ -1318,8 +1299,7 @@ fn model_info(
         supports_standalone_compaction: is_gpt_5_6(model),
         standalone_compaction_threshold: is_gpt_5_6(model)
             .then_some(GPT_5_6_STANDALONE_COMPACTION_TOKEN_THRESHOLD),
-        standalone_compaction_prefix_budget: is_gpt_5_6(model)
-            .then_some(GPT_5_6_STANDALONE_COMPACTION_PREFIX_BYTE_BUDGET),
+        standalone_compaction_prefix_budget: None,
         cache_policy: Some(private_response_chain_cache_policy()),
         est_uncached_input_cost_1m_usd: Some(prices.uncached_input),
         est_cached_input_cost_1m_usd: None,
@@ -1395,7 +1375,7 @@ fn default_affinity_for_model(model: &str) -> i32 {
     }
 }
 
-fn raw_context_window_for_model(model: &str) -> u64 {
+fn raw_context_window_for_model(model: &str) -> tau_proto::TokenCount {
     if is_gpt_5_6(model) {
         GPT_5_6_RAW_CONTEXT_WINDOW
     } else {
@@ -1403,8 +1383,10 @@ fn raw_context_window_for_model(model: &str) -> u64 {
     }
 }
 
-fn effective_context_window_for_model(model: &str) -> u64 {
-    raw_context_window_for_model(model) * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100
+fn effective_context_window_for_model(model: &str) -> tau_proto::TokenCount {
+    tau_proto::TokenCount::new(
+        raw_context_window_for_model(model).get() * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100,
+    )
 }
 
 fn effective_mode(model: &str, requested: responses::ResponsesMode) -> responses::ResponsesMode {

@@ -145,7 +145,7 @@ fn model_switch_invalidates_chain_anchor() {
         },
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: Some("resp_abc".to_owned()),
@@ -222,7 +222,7 @@ fn missing_response_id_leaves_chain_unset() {
         },
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -986,87 +986,6 @@ fn failed_response_does_not_inject_context_size_alert() {
     )));
     h.shutdown().expect("shutdown");
 }
-
-/// Staggered provider discovery must preserve a qualified baseline while its
-/// model is unresolved, validate it when that provider appears, and use it for
-/// the first resumed activation's compaction projection.
-#[test]
-fn restored_usage_survives_staggered_provider_discovery() {
-    let td = TempDir::new().expect("tempdir");
-    let state = td.path().join("state");
-    let model_b: tau_proto::ModelId = "provider-b/model".into();
-    seed_agent_context_usage(&state, Some("provider-b/model"), 900);
-    let mut h =
-        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
-            .expect("resume");
-    let role = h.config.selected_role.clone();
-    h.config
-        .available_roles
-        .get_mut(&role)
-        .expect("selected role")
-        .model = Some(model_b.clone());
-    h.rehydrate_agents_from_session();
-    let cid = ensure_test_user_agent(&mut h);
-    assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid]
-            .execution
-            .context_input_tokens,
-        Some(900)
-    );
-    assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid]
-            .execution
-            .context_usage_model
-            .as_ref(),
-        Some(&model_b)
-    );
-
-    let base_info = h
-        .provider_runtime
-        .model_info
-        .get(&"test/model".into())
-        .expect("test model info")
-        .clone();
-    let mut model_a_info = base_info.clone();
-    model_a_info.id = "provider-a/model".into();
-    h.set_provider_models(&crate::test_connection_id("provider-a"), vec![model_a_info]);
-    assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid]
-            .execution
-            .context_input_tokens,
-        Some(900),
-        "unresolved model B must survive provider A discovery"
-    );
-
-    let mut model_b_info = base_info;
-    model_b_info.id = model_b.clone();
-    model_b_info.supports_compaction = false;
-    model_b_info.supports_standalone_compaction = true;
-    model_b_info.standalone_compaction_threshold = Some(900);
-    h.set_provider_models(&crate::test_connection_id("provider-b"), vec![model_b_info]);
-    assert_eq!(
-        h.agent_runtime.agent_registry.agents[&cid]
-            .execution
-            .context_input_tokens,
-        Some(900)
-    );
-    assert_eq!(
-        h.model_for_agent_role(&h.agent_runtime.agent_registry.agents[&cid]),
-        Some(model_b.clone())
-    );
-
-    h.dispatch_prompt_for_agent(
-        &cid,
-        PendingPrompt::user("first activation after provider B".to_owned()),
-    )
-    .expect("dispatch first activation");
-    assert_eq!(
-        read_nth_prompt_created(&h, 0).operation,
-        tau_proto::PromptOperation::StandaloneCompaction
-    );
-    h.shutdown().expect("shutdown");
-}
-
 /// Cold replay must not apply usage from an unqualified or different model,
 /// and a live per-agent model change clears already-restored usage.
 #[test]
@@ -1463,6 +1382,8 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
         conv.execution.context_input_tokens = Some(800);
         conv.execution.context_usage_head = conv.identity.head;
         conv.execution.context_usage_model = Some(alternate.clone());
+        conv.execution.context_usage_prompt_id =
+            Some(test_agent_prompt_id("ap-test-provider-usage"));
         conv.execution.context_cached_tokens = Some(400);
         conv.execution.context_percent_used = Some(80);
     }
@@ -1492,6 +1413,8 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
         conv.execution.context_input_tokens = Some(700);
         conv.execution.context_usage_head = conv.identity.head;
         conv.execution.context_usage_model = Some("test/model".into());
+        conv.execution.context_usage_prompt_id =
+            Some(test_agent_prompt_id("ap-test-provider-usage"));
         conv.execution.context_cached_tokens = Some(350);
         conv.execution.context_percent_used = Some(70);
     }
@@ -1719,7 +1642,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         },
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: Some("resp_abc".to_owned()),
@@ -1769,7 +1692,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         },
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: Some("resp_def".to_owned()),
@@ -1850,7 +1773,7 @@ fn params_drift_invalidates_chain_anchor() {
         },
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: Some("resp_abc".to_owned()),
@@ -1930,7 +1853,7 @@ fn stable_params_preserve_chain_anchor() {
         },
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: Some(responses_backend()),
         provider_attempt: Default::default(),
         provider_response_id: Some("resp_xyz".to_owned()),

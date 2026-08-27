@@ -165,7 +165,8 @@ fn parse_service_tier_action(value: &str) -> Result<tau_proto::UiRoleUpdateActio
 
 fn parse_compaction_threshold_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
     Ok(tau_proto::UiRoleUpdateAction::SetCompactionThreshold {
-        compaction_threshold: parse_compaction_threshold_update(value)?,
+        compaction_threshold: parse_compaction_threshold_update(value)?
+            .map(tau_proto::TokenCount::new),
     })
 }
 

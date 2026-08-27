@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use tau_core::NodeId;
-use tau_proto::ModelId;
+use tau_proto::{AgentPromptId, ModelId};
 
 use super::LoopGuardState;
 use crate::dedup::ResultDedupMap;
@@ -22,6 +22,8 @@ pub(crate) struct AgentExecutionState {
     pub(crate) context_usage_head: Option<NodeId>,
     /// Provider-qualified model that produced `context_input_tokens`.
     pub(crate) context_usage_model: Option<ModelId>,
+    /// Ordinary provider prompt that reported `context_input_tokens`.
+    pub(crate) context_usage_prompt_id: Option<AgentPromptId>,
     /// Most recent cached input-token count this agent's provider reported on
     /// a finished response.
     pub(crate) context_cached_tokens: Option<u64>,

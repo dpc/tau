@@ -760,6 +760,8 @@ fn automatic_policy_terminal_matrix_commits_owned_suffix_once() {
                     .expect("agent");
                 agent.execution.context_input_tokens = Some(100);
                 agent.execution.context_usage_model = Some("test/model".into());
+                agent.execution.context_usage_prompt_id =
+                    Some(test_agent_prompt_id("ap-test-provider-usage"));
                 agent.execution.context_usage_head = agent.identity.head;
             }
             h.dispatch_prompt_for_agent(
@@ -823,6 +825,21 @@ fn automatic_policy_terminal_matrix_commits_owned_suffix_once() {
                 1,
                 "post_tool={post_tool} canceled={canceled}"
             );
+            if canceled {
+                let Event::AgentPromptTerminated(terminated) = terminals[0] else {
+                    panic!("canceled matrix terminal");
+                };
+                assert!(
+                    terminated.automatic_compaction_decision.is_none(),
+                    "cancellation without a prior exact provider observation cannot mint authority"
+                );
+                assert!(records.iter().all(|record| !matches!(
+                    record.event,
+                    Event::AgentStandaloneCompactionStarted(_)
+                )));
+                h.shutdown().expect("shutdown");
+                continue;
+            }
             let decision = match terminals[0] {
                 Event::ProviderResponseFinished(response) if !canceled => response
                     .automatic_compaction_decision

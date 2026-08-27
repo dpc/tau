@@ -799,7 +799,7 @@ impl Harness {
             }
             path_tau_config_settings::RoleCompaction::Threshold(compact_threshold) => {
                 Some(tau_proto::PromptCompactionContext {
-                    compact_threshold: Some(compact_threshold),
+                    compact_threshold: Some(tau_proto::TokenCount::new(compact_threshold)),
                 })
             }
             path_tau_config_settings::RoleCompaction::Disabled => None,
@@ -855,7 +855,7 @@ impl Harness {
         agent_id: &str,
         active_head: tau_proto::AgentHead,
         maximum_cut: Option<tau_proto::AgentHead>,
-        budget: u64,
+        budget: tau_proto::ByteCount,
     ) -> Option<tau_proto::AgentHead> {
         let tree = self.session_runtime.agent_store.agent(agent_id)?;
         let window = tree.active_provider_window(active_head.as_option());
@@ -899,6 +899,17 @@ impl Harness {
             .last()
     }
 
+    /// Return the immediate previous useful provider-closed cut.
+    pub(super) fn previous_useful_compaction_cut(
+        &self,
+        agent_id: &str,
+        active_head: tau_proto::AgentHead,
+        rejected_cut: tau_proto::AgentHead,
+    ) -> Option<tau_proto::AgentHead> {
+        let tree = self.session_runtime.agent_store.agent(agent_id)?;
+        tree.previous_provider_closed_cut_in_active_window(active_head, rejected_cut)
+    }
+
     /// Starts another bounded rolling pass after a durable successful boundary.
     ///
     /// Automatic work requires the active window to reach its local scheduling
@@ -923,7 +934,7 @@ impl Harness {
         let Some(tree) = self.session_runtime.agent_store.agent(&agent_id) else {
             return RollingCompactionPass::NotNeeded;
         };
-        let (previous_transaction_id, automatic) = match tree.standalone_compaction_recovery() {
+        let (previous_transaction_id, _automatic) = match tree.standalone_compaction_recovery() {
             Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint {
                 transaction_id,
                 through,
@@ -943,14 +954,11 @@ impl Harness {
             _ => None,
         };
         let reactive_continuation = reactive_target_cut.is_some();
-        if !automatic && !reactive_continuation {
+        if !reactive_continuation {
             return RollingCompactionPass::NotNeeded;
         }
         let info = self.provider_runtime.model_info.get(model);
         let budget = info.and_then(|info| info.standalone_compaction_prefix_budget);
-        if !reactive_continuation && budget.is_none() {
-            return RollingCompactionPass::NotNeeded;
-        }
         let role_name = self.role_name_for_agent_id(cid);
         let role = self.config.available_roles.get(&role_name);
         let status_available = self
@@ -977,7 +985,9 @@ impl Harness {
                     path_tau_config_settings::RoleCompaction::ProviderDefault => {
                         info.and_then(|info| info.standalone_compaction_threshold)
                     }
-                    path_tau_config_settings::RoleCompaction::Threshold(tokens) => Some(tokens),
+                    path_tau_config_settings::RoleCompaction::Threshold(tokens) => {
+                        Some(tau_proto::TokenCount::new(tokens))
+                    }
                     path_tau_config_settings::RoleCompaction::Disabled => None,
                 };
             }
@@ -998,31 +1008,27 @@ impl Harness {
                         info.and_then(|info| info.standalone_compaction_threshold)
                     }
                     path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
-                        Some(tokens)
+                        Some(tau_proto::TokenCount::new(tokens))
                     }
                 })
                 .min()
         });
-        let projection = self
-            .automatic_compaction_projected_tokens(cid, model)
-            .unwrap_or(u64::MAX);
+        let reported_input = self
+            .automatic_compaction_reported_input_tokens(cid, model)
+            .unwrap_or(tau_proto::TokenCount::ZERO);
         if !reactive_continuation {
             let Some(threshold) = threshold else {
                 return RollingCompactionPass::NotNeeded;
             };
-            if projection < threshold {
+            if reported_input < threshold {
                 return RollingCompactionPass::NotNeeded;
             }
         }
         let provisional_cut = reactive_target_cut.unwrap_or(selected);
-        let fitting = budget.and_then(|budget| {
+        let fitting = budget.map_or(Some(provisional_cut), |budget| {
             self.fitting_automatic_compaction_cut(&agent_id, selected, reactive_target_cut, budget)
         });
-        let failure_reason = if budget.is_none() {
-            tau_proto::StandaloneCompactionFailureReason::RouteFailed
-        } else {
-            tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge
-        };
+        let failure_reason = tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge;
         let cut = fitting.unwrap_or(provisional_cut);
         let Some((next, originator)) =
             self.agent_runtime
@@ -1189,11 +1195,15 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         model: ModelId,
-        projected_tokens: Option<u64>,
+        reported_input: Option<tau_proto::TokenCount>,
+        provider_prompt_id: Option<tau_proto::AgentPromptId>,
         policies: &BTreeMap<String, tau_config::settings::CompactionPolicy>,
     ) -> Option<tau_proto::AutomaticCompactionDecision> {
         let conv = self.agent_runtime.agent_registry.agents.get(cid)?;
-        let projected_tokens = projected_tokens?;
+        let reported_input = reported_input?;
+        let historical_evidence = provider_prompt_id.is_none();
+        let provider_prompt_id =
+            provider_prompt_id.or_else(|| conv.execution.context_usage_prompt_id.clone())?;
         let agent_id = conv.identity.agent_id.as_deref()?;
         let selected_head = conv
             .identity
@@ -1203,9 +1213,7 @@ impl Harness {
             return None;
         }
         let info = self.provider_runtime.model_info.get(&model)?;
-        if !info.supports_standalone_compaction
-            || info.standalone_compaction_prefix_budget.is_none()
-        {
+        if !info.supports_standalone_compaction {
             return None;
         }
         let logical_status = Self::finalizing_outer_turn_policy_status(
@@ -1230,25 +1238,43 @@ impl Harness {
                         info.standalone_compaction_threshold
                     }
                     path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
-                        Some(tokens)
+                        Some(tau_proto::TokenCount::new(tokens))
                     }
                 }?;
-                (threshold <= projected_tokens).then_some((name.as_str(), threshold))
+                (threshold <= reported_input).then_some((name.as_str(), threshold))
             })
             .collect::<Vec<_>>();
         let threshold = matches.iter().map(|(_, threshold)| *threshold).min()?;
-        let matched_names = matches
+        let matched_policy_names = matches
             .iter()
             .map(|(name, _)| *name)
-            .collect::<Vec<_>>()
-            .join(",");
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let matched_names = matched_policy_names.join(",");
         tracing::debug!(
             target: "tau_harness",
             agent = %cid,
             policies = %matched_names,
-            threshold,
+            threshold = %threshold,
             "coalesced outer-turn-finished automatic compaction policies"
         );
+        let evidence = tau_proto::ProactiveCompactionEvidence {
+            provider_prompt_id,
+            provider_input_tokens: reported_input,
+            threshold,
+            threshold_source: tau_proto::CompactionThresholdSource::NamedPolicies {
+                names: matched_policy_names,
+            },
+        };
+        if historical_evidence
+            && !self
+                .session_runtime
+                .agent_store
+                .agent(agent_id)
+                .is_some_and(|tree| tree.historical_proactive_evidence_is_valid(&evidence, &model))
+        {
+            return None;
+        }
         let outer_turn_id = conv.turn.outer_turn.owned_id().cloned()?;
         let transaction_id = tau_proto::CompactionTransactionId::parse(format!(
             "ct-{}",
@@ -1263,6 +1289,7 @@ impl Harness {
             outer_turn_id,
             model,
             threshold,
+            evidence: Some(evidence),
         })
     }
 
@@ -1324,6 +1351,7 @@ impl Harness {
                         cut,
                         reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
                         resume_through: None,
+                        context_retreat: None,
                     },
                 ),
             );
@@ -1335,7 +1363,7 @@ impl Harness {
             .get(&decision.model)
             .and_then(|info| info.standalone_compaction_prefix_budget);
         let fitting_cut = match prefix_budget {
-            None => None,
+            None => Some(cut),
             Some(budget) => self.fitting_automatic_compaction_cut(&agent_id, cut, None, budget),
         };
         let cut = fitting_cut.unwrap_or(cut);
@@ -1345,7 +1373,7 @@ impl Harness {
         ))
         .expect("known-safe AgentPromptId must be valid");
         let originator = conv.identity.originator.clone();
-        let resume_through = (selected != cut).then_some(selected);
+        let resume_through = Some(selected);
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
             agent.turn.pending_automatic_compaction_start = Some(decision.transaction_id.clone());
@@ -1414,9 +1442,7 @@ impl Harness {
         if !info.supports_standalone_compaction {
             return false;
         }
-        let Some(prefix_budget) = info.standalone_compaction_prefix_budget else {
-            return false;
-        };
+        let prefix_budget = info.standalone_compaction_prefix_budget;
         let role_name = self.role_name_for_agent_id(cid);
         let role = self.config.available_roles.get(&role_name);
         let status_available =
@@ -1447,7 +1473,7 @@ impl Harness {
                         info.standalone_compaction_threshold
                     }
                     path_tau_config_settings::RoleCompaction::Threshold(threshold) => {
-                        Some(threshold)
+                        Some(tau_proto::TokenCount::new(threshold))
                     }
                     path_tau_config_settings::RoleCompaction::Disabled => None,
                 };
@@ -1468,7 +1494,7 @@ impl Harness {
                         info.standalone_compaction_threshold
                     }
                     path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
-                        Some(tokens)
+                        Some(tau_proto::TokenCount::new(tokens))
                     }
                 })
                 .min()
@@ -1487,12 +1513,51 @@ impl Harness {
         {
             return false;
         }
-        let projected_tokens = self
-            .automatic_compaction_projected_tokens(cid, &model)
-            .unwrap_or(u64::MAX);
-        if threshold.is_none_or(|threshold| projected_tokens < threshold) {
+        let reported_input = self
+            .automatic_compaction_reported_input_tokens(cid, &model)
+            .unwrap_or(tau_proto::TokenCount::ZERO);
+        if threshold.is_none_or(|threshold| reported_input < threshold) {
             return false;
         }
+        let threshold = threshold.expect("eligible threshold is present");
+        let Some(provider_prompt_id) = conv.execution.context_usage_prompt_id.clone() else {
+            return false;
+        };
+        let threshold_source = if role.is_some_and(|role| !role.compactions.is_empty()) {
+            let names = role
+                .into_iter()
+                .flat_map(|role| role.compactions.iter())
+                .filter_map(|(name, policy)| {
+                    if !policy.enable
+                        || policy.when.at != point
+                        || policy
+                            .when
+                            .statuses
+                            .as_ref()
+                            .is_some_and(|statuses| !statuses.contains(&logical_status))
+                    {
+                        return None;
+                    }
+                    let policy_threshold = match policy.threshold {
+                        path_tau_config_settings::CompactionPolicyThreshold::ProviderDefault => {
+                            info.standalone_compaction_threshold
+                        }
+                        path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
+                            Some(tau_proto::TokenCount::new(tokens))
+                        }
+                    }?;
+                    (policy_threshold <= reported_input).then(|| name.clone())
+                })
+                .collect();
+            tau_proto::CompactionThresholdSource::NamedPolicies { names }
+        } else if matches!(
+            role.and_then(|role| role.compaction),
+            Some(path_tau_config_settings::RoleCompaction::Threshold(_))
+        ) {
+            tau_proto::CompactionThresholdSource::RoleThreshold
+        } else {
+            tau_proto::CompactionThresholdSource::ProviderDefault
+        };
         let selected_head = conv
             .identity
             .head
@@ -1523,8 +1588,9 @@ impl Harness {
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
             }
         });
-        let fitting_cut =
-            self.fitting_automatic_compaction_cut(&agent_id, provisional_cut, None, prefix_budget);
+        let fitting_cut = prefix_budget.map_or(Some(provisional_cut), |budget| {
+            self.fitting_automatic_compaction_cut(&agent_id, provisional_cut, None, budget)
+        });
         if fitting_cut.is_none()
             && self
                 .session_runtime
@@ -1542,9 +1608,7 @@ impl Harness {
         }
         let cut = fitting_cut
             .unwrap_or_else(|| self.closed_provider_prefix_for_agent(&agent_id, provisional_cut));
-        let resume_through = (selected_head != cut)
-            .then_some(selected_head)
-            .or(resume_through);
+        let resume_through = resume_through.or(Some(selected_head));
         let originator = conv.identity.originator.clone();
         let transaction_id = tau_proto::CompactionTransactionId::parse(format!(
             "ct-{}",
@@ -1579,7 +1643,14 @@ impl Harness {
                 previous_transaction_id: None,
                 reason: tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
             },
-            |_| tau_proto::StandaloneCompactionTrigger::AutomaticThreshold,
+            |_| tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence {
+                evidence: tau_proto::ProactiveCompactionEvidence {
+                    provider_prompt_id,
+                    provider_input_tokens: reported_input,
+                    threshold,
+                    threshold_source,
+                },
+            },
         );
         self.publish_for_agent(
             cid,
@@ -1599,85 +1670,23 @@ impl Harness {
         true
     }
 
-    /// Project the selected provider input in token units from the strongest
-    /// same-model baseline available.
+    /// Return the applicable nonzero provider-reported ordinary input count.
     ///
-    /// Applicable provider usage owns the first choice. Immediately after a
-    /// successful compaction, a nonzero provider-reported compacted-input
-    /// measurement owns its provider output while client-retained replacement
-    /// items and the preserved suffix remain conservatively estimated. A fully
-    /// estimated active window remains the cold/legacy fallback.
-    pub(super) fn automatic_compaction_projected_tokens(
+    /// Unknown suffix growth is not estimated. Missing, zero, model-mismatched,
+    /// off-branch, and post-compaction observations provide no proactive
+    /// scheduling authority.
+    pub(super) fn automatic_compaction_reported_input_tokens(
         &self,
         cid: &AgentId,
         model: &tau_proto::ModelId,
-    ) -> Option<u64> {
+    ) -> Option<tau_proto::TokenCount> {
         let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
-        let info = self.provider_runtime.model_info.get(model)?;
-        let agent_id = agent.identity.agent_id.as_deref()?;
-        let tree = self.session_runtime.agent_store.agent(agent_id)?;
-        let reserve = context_projection_reserve(info.context_window);
-
-        if agent.execution.context_usage_model.as_ref() == Some(model)
-            && self.context_usage_baseline_applies(agent)
-        {
-            let ids = tree.branch_node_ids_from(agent.identity.head);
-            let first = agent
-                .execution
-                .context_usage_head
-                .and_then(|baseline| ids.iter().position(|id| *id == baseline))
-                .map_or(0, |index| index.saturating_add(1));
-            let growth = transcript_growth(
-                ids[first..]
-                    .iter()
-                    .filter_map(|id| tree.node(*id))
-                    .map(|node| &node.entry)
-                    .filter(|entry| {
-                        !matches!(entry, tau_core::AgentEntry::AgentMessage { .. })
-                            || crate::prompt::agent_message_is_provider_visible(entry)
-                    }),
-            );
-            return projected_input_tokens(
-                agent.execution.context_input_tokens,
-                growth.projected_tokens,
-                reserve,
-            );
-        }
-
-        let window = tree.active_provider_window(agent.identity.head);
-        if let Some(compacted) = tree.active_provider_compaction(agent.identity.head)
-            && compacted.model.as_ref() == Some(model)
-            && let Some(baseline) = compacted
-                .compacted_input_tokens
-                .as_ref()
-                .and_then(scheduling_compacted_input_tokens)
-        {
-            let retained_replacement_tokens = window
-                .replacement
-                .map(|replacement| {
-                    projected_client_retained_replacement_tokens(
-                        replacement,
-                        info.tags.iter().any(|tag| tag.as_str() == "shell:chatgpt"),
-                    )
-                })
-                .unwrap_or(Some(0))?;
-            let suffix_tokens = window.transcript.iter().try_fold(
-                retained_replacement_tokens,
-                |total, (_, entry)| {
-                    let entry_tokens = if matches!(entry, tau_core::AgentEntry::AgentMessage { .. })
-                        && !crate::prompt::agent_message_is_provider_visible(entry)
-                    {
-                        0
-                    } else {
-                        projected_transcript_entry_tokens(entry)?
-                    };
-                    total.checked_add(entry_tokens)
-                },
-            )?;
-            return projected_input_tokens(Some(baseline), Some(suffix_tokens), reserve);
-        }
-
-        active_provider_window_projected_tokens(tree, agent.identity.head, info.context_window)
+        (agent.execution.context_usage_model.as_ref() == Some(model)
+            && self.context_usage_baseline_applies(agent))
+        .then_some(agent.execution.context_input_tokens)
+        .flatten()
+        .filter(|tokens| *tokens > 0)
+        .map(tau_proto::TokenCount::new)
     }
 
     /// Reapply durable self-compaction consumption after generic restored tool
@@ -2257,77 +2266,4 @@ impl Harness {
             .then_some(started)
         })
     }
-}
-
-/// Project only ChatGPT-v2 client-retained items prepended before a provider
-/// compaction item. Other providers' ordered output and message-only local
-/// summaries are wholly covered by provider output usage.
-pub(super) fn projected_client_retained_replacement_tokens(
-    replacement: &[tau_proto::ContextItem],
-    chatgpt_v2: bool,
-) -> Option<u64> {
-    if !chatgpt_v2 {
-        return Some(0);
-    }
-    let Some(compaction_index) = replacement
-        .iter()
-        .position(|item| matches!(item, tau_proto::ContextItem::Compaction(_)))
-    else {
-        return Some(0);
-    };
-    if compaction_index == 0 {
-        return Some(0);
-    }
-    projected_transcript_entry_tokens(&tau_core::AgentEntry::Compaction {
-        replacement_window: replacement[..compaction_index].to_vec(),
-        transaction_id: None,
-        cut: None,
-        suffix_end: None,
-    })
-}
-
-/// Accept only exact nonzero provider compaction output usage as a scheduling
-/// baseline. Estimated UI measurements and provider-reported zero retain the
-/// conservative full-window fallback.
-pub(super) fn scheduling_compacted_input_tokens(
-    measurement: &tau_proto::CompactionTokenMeasurement,
-) -> Option<u64> {
-    (measurement.provenance == tau_proto::CompactionTokenProvenance::ProviderReported
-        && 0 < measurement.tokens)
-        .then_some(measurement.tokens)
-}
-
-/// Projects the complete active provider-visible window from scratch.
-///
-/// Automatic scheduling intentionally uses the canonical transcript-entry
-/// projection rather than durable JSON bytes, then adds the same conservative
-/// control-token reserve as dispatch telemetry.
-pub(super) fn active_provider_window_projected_tokens(
-    tree: &tau_core::AgentTree,
-    head: Option<tau_proto::NodeId>,
-    context_window: u64,
-) -> Option<u64> {
-    let window = tree.active_provider_window(head);
-    let replacement_tokens = window.replacement.map_or(Some(0), |replacement| {
-        projected_transcript_entry_tokens(&tau_core::AgentEntry::Compaction {
-            replacement_window: replacement.to_vec(),
-            transaction_id: None,
-            cut: None,
-            suffix_end: None,
-        })
-    })?;
-    window
-        .transcript
-        .iter()
-        .try_fold(replacement_tokens, |total, (_, entry)| {
-            let entry_tokens = if matches!(entry, tau_core::AgentEntry::AgentMessage { .. })
-                && !crate::prompt::agent_message_is_provider_visible(entry)
-            {
-                0
-            } else {
-                projected_transcript_entry_tokens(entry)?
-            };
-            total.checked_add(entry_tokens)
-        })?
-        .checked_add(context_projection_reserve(context_window))
 }

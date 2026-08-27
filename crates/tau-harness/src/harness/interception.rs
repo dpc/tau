@@ -480,6 +480,16 @@ pub(crate) enum AgentPublishCompletion {
         /// rejection.
         retry_event: Option<Box<Event>>,
     },
+    /// Commit one canonical standalone context rejection before deriving and
+    /// appending its typed failure and retreat plan.
+    StandaloneContextRejection {
+        /// Exact canonical response used to derive the post-commit failure.
+        response: Box<tau_proto::ProviderResponseFinished>,
+        /// Provider connection retained for derived-failure attribution.
+        source: Option<tau_proto::ConnectionId>,
+        /// Exact interceptor-approved response retained after append rejection.
+        retry_event: Option<Box<Event>>,
+    },
     /// Retain one reactive recovery failure until its semantic append commits.
     ReactiveContextRecoveryFailure {
         /// Exact committed transaction-start parent of this failure.
@@ -539,6 +549,7 @@ impl AgentPublishCompletion {
             | Self::OutputLengthDormantRepair { .. }
             | Self::ReactiveContextRecovery { .. }
             | Self::ReactiveContextRecoveryStart { .. }
+            | Self::StandaloneContextRejection { .. }
             | Self::ReactiveContextRecoveryFailure { .. }
             | Self::RollingCompactionStart { .. }
             | Self::StandaloneContinuation { .. } => None,
@@ -563,6 +574,7 @@ impl AgentPublishCompletion {
             | Self::OutputLengthDormantRepair { .. }
             | Self::ReactiveContextRecovery { .. }
             | Self::ReactiveContextRecoveryStart { .. }
+            | Self::StandaloneContextRejection { .. }
             | Self::ReactiveContextRecoveryFailure { .. }
             | Self::RollingCompactionStart { .. }
             | Self::InitialPromptSubmission { .. } => {
@@ -1300,6 +1312,7 @@ impl Harness {
             AgentPublishCompletion::OutputLengthDormantRepair { .. } => false,
             AgentPublishCompletion::ReactiveContextRecovery { .. } => false,
             AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => false,
+            AgentPublishCompletion::StandaloneContextRejection { .. } => false,
             AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } => false,
             AgentPublishCompletion::RollingCompactionStart { .. } => false,
             AgentPublishCompletion::InitialPromptSubmission { .. } => false,

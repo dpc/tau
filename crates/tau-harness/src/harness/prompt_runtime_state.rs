@@ -29,7 +29,6 @@ pub(crate) struct PromptRuntimeState {
     pub(super) compaction_policies:
         HashMap<AgentPromptId, BTreeMap<String, tau_config::settings::CompactionPolicy>>,
     /// Proactive projection paired with each compaction policy snapshot.
-    pub(super) compaction_projected_tokens: HashMap<AgentPromptId, Option<u64>>,
     /// Prompts whose stream exposed semantic output.
     pub(super) semantic_output: HashSet<AgentPromptId>,
     /// Stale owner reports waiting for their durable closer.

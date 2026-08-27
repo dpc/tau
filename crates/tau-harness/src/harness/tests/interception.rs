@@ -21,9 +21,9 @@ mod ui_liveness;
 
 use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;
+use crate::harness::PendingTool;
 use crate::harness::gated_final::GatedFinalDisposition;
 use crate::harness::interception::AgentPublishCompletion;
-use crate::harness::{PendingTool, background_completion_prompt};
 
 /// Construct one authenticated-provenance report for ordinary extension
 /// publication.
@@ -54,7 +54,7 @@ fn provider_models_declaration(model: &str, context_window: u64) -> Event {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window,
+            context_window: tau_proto::TokenCount::new(context_window),
             efforts: vec![tau_proto::Effort::Medium],
             verbosities: vec![tau_proto::Verbosity::Medium],
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
@@ -871,7 +871,10 @@ fn rollover_applies_deferred_provider_models_for_current_generation() {
             .map(tau_proto::ConnectionId::as_str),
         Some("model-provider")
     );
-    assert_eq!(h.provider_runtime.model_info[&model].context_window, 1234);
+    assert_eq!(
+        h.provider_runtime.model_info[&model].context_window,
+        tau_proto::TokenCount::new(1234)
+    );
     assert!(matches!(
         committed_provider_model_events(&h).as_slice(),
         [
@@ -2986,321 +2989,6 @@ fn unload_disposes_parked_prompt_delivery() {
         "delivery-unload-owner",
     );
 }
-
-/// A standalone start parked before commit owns the compact request model even
-/// if model selection changes before its post-commit provider dispatch.
-#[test]
-fn intercepted_compaction_start_pins_materialized_model() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    add_second_test_model(&mut h);
-    let cid = ensure_test_user_agent(&mut h);
-    {
-        let info = h
-            .provider_runtime
-            .model_info
-            .get_mut(&tau_proto::ModelId::from("echo/model"))
-            .expect("model");
-        info.supports_standalone_compaction = true;
-        info.standalone_compaction_threshold = Some(1);
-        info.standalone_compaction_prefix_budget = Some(u64::MAX);
-        info.standalone_compaction_prefix_budget = Some(u64::MAX);
-        let agent = h
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get_mut(&cid)
-            .expect("agent");
-        agent.execution.context_input_tokens = Some(1);
-        agent.execution.context_usage_head = agent.identity.head;
-        agent.execution.context_usage_model = Some("echo/model".into());
-    }
-    let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.publish_for_agent(
-        &cid,
-        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-            inference_activation: false,
-            agent_id,
-            text: "compactable prefix".to_owned(),
-            trusted_internal_spans: Vec::new(),
-            message_class: tau_proto::PromptMessageClass::User,
-            internal_kind: None,
-            originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
-            display_name: None,
-            ctx_id: None,
-        }),
-    );
-    let interceptor = connect_test_tool(&mut h, "compact-model-owner");
-    h.handle_extension_event(
-        "compact-model-owner",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::AGENT_STANDALONE_COMPACTION_STARTED,
-            )],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("register interceptor");
-
-    assert!(h.schedule_standalone_auto_compaction(&cid));
-    let (parked, _) = intercepted_payload(&interceptor);
-    let Event::AgentStandaloneCompactionStarted(started) = parked else {
-        panic!("compaction start intercepted");
-    };
-    assert_eq!(started.model, tau_proto::ModelId::from("echo/model"));
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .get_mut(&cid)
-        .expect("agent")
-        .identity
-        .model_override = Some("other/model".into());
-    h.handle_extension_event(
-        "compact-model-owner",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("release start");
-
-    let prompt = read_nth_prompt_created(&h, 0);
-    assert_eq!(prompt.agent_prompt_id, started.compact_prompt_id);
-    assert_eq!(prompt.model, started.model);
-    assert_eq!(
-        prompt.operation,
-        tau_proto::PromptOperation::StandaloneCompaction
-    );
-    h.shutdown().expect("shutdown");
-}
-
-/// A successful standalone compaction binds its continuation to the final
-/// steer publication, so interception cannot let the checkpoint overtake and
-/// omit that activating input.
-#[test]
-fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
-    let cid = ensure_test_user_agent(&mut h);
-    {
-        let info = h
-            .provider_runtime
-            .model_info
-            .get_mut(&tau_proto::ModelId::from("test/model"))
-            .expect("model");
-        info.supports_standalone_compaction = true;
-        info.standalone_compaction_threshold = Some(1);
-        let agent = h
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get_mut(&cid)
-            .expect("agent");
-        agent.execution.context_input_tokens = Some(1);
-        agent.execution.context_usage_head = agent.identity.head;
-        agent.execution.context_usage_model = Some("test/model".into());
-    }
-    let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.publish_for_agent(
-        &cid,
-        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-            inference_activation: false,
-            agent_id,
-            text: "completion prefix".to_owned(),
-            trusted_internal_spans: Vec::new(),
-            message_class: tau_proto::PromptMessageClass::User,
-            internal_kind: None,
-            originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
-            display_name: None,
-            ctx_id: None,
-        }),
-    );
-    let activation_cut = h.agent_runtime.agent_registry.agents[&cid]
-        .identity
-        .head
-        .map(tau_proto::AgentHead::Node)
-        .expect("completion prefix");
-    assert!(
-        h.schedule_standalone_auto_compaction_for_activation(&cid, true, Some(activation_cut),)
-    );
-    let compact_prompt = read_nth_prompt_created(&h, 0);
-    let transaction_id = event_log_events(&h)
-        .into_iter()
-        .find_map(|event| match event {
-            Event::AgentStandaloneCompactionStarted(started) => Some(started.transaction_id),
-            _ => None,
-        })
-        .expect("standalone transaction");
-
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .get_mut(&cid)
-        .expect("agent")
-        .dispatch
-        .pending_prompts
-        .extend([
-            PendingPrompt::user("first steer after compaction".to_owned()),
-            PendingPrompt::user("final steer after compaction".to_owned()),
-        ]);
-    let interceptor = connect_test_tool(&mut h, "completion-steer-owner");
-    h.handle_extension_event(
-        "completion-steer-owner",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::AGENT_PROMPT_STEERED,
-            )],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("register steer interceptor");
-    h.provider_runtime
-        .model_info
-        .get_mut(&"test/model".into())
-        .expect("test model")
-        .standalone_compaction_threshold = Some(u64::MAX);
-
-    h.handle_provider_response_finished(provider_text_response(
-        &compact_prompt.agent_prompt_id,
-        compact_prompt.agent_id.clone(),
-        "summary",
-    ))
-    .expect("accept compact response");
-    let (parked, _) = intercepted_payload(&interceptor);
-    assert!(matches!(
-        parked,
-        Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
-            ref text, ..
-        })
-            if text == "first steer after compaction"
-    ));
-    assert_eq!(
-        event_log_events(&h)
-            .iter()
-            .filter(|event| matches!(
-                event,
-                Event::AgentInferenceDispatchStarted(started)
-                    if started.transaction_id.as_ref() == Some(&transaction_id)
-            ))
-            .count(),
-        0,
-        "the continuation checkpoint must wait for the exact steer commit"
-    );
-    assert_eq!(prompt_created_count(&h), 1);
-    h.publish_for_agent(
-        &cid,
-        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
-            agent_id: compact_prompt.agent_id.clone(),
-            head: tau_proto::AgentHead::Root,
-        }),
-    );
-
-    h.handle_extension_event(
-        "completion-steer-owner",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("release first steer");
-    assert!(matches!(
-        h.runtime_io.publication.pending_intercept.as_ref().map(|pending| &pending.event),
-        Some(Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
-            text, ..
-        }))
-            if text == "final steer after compaction"
-    ));
-    assert_eq!(prompt_created_count(&h), 1);
-    assert!(!event_log_events(&h).iter().any(|event| matches!(
-        event,
-        Event::AgentInferenceDispatchStarted(started)
-            if started.transaction_id.as_ref() == Some(&transaction_id)
-    )));
-    h.handle_extension_event(
-        "completion-steer-owner",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("release final steer");
-    let checkpoint = event_log_events(&h)
-        .into_iter()
-        .find_map(|event| match event {
-            Event::AgentInferenceDispatchStarted(started)
-                if started.transaction_id.as_ref() == Some(&transaction_id) =>
-            {
-                Some(started)
-            }
-            _ => None,
-        })
-        .expect("continuation checkpoint");
-    let tau_proto::AgentHead::Node(final_steer_node) = checkpoint.through else {
-        panic!("continuation must end at the final steer node");
-    };
-    assert!(matches!(
-        &default_agent_node(&h, final_steer_node).entry,
-        AgentEntry::UserInput { items, .. }
-            if items.iter().any(|item| matches!(
-                item,
-                ContextItem::Message(MessageItem { content, .. })
-                    if content.iter().any(|part| matches!(
-                        part,
-                        ContentPart::Text { text }
-                            | ContentPart::HarnessInternalText { text }
-                            if text == "final steer after compaction"
-                    ))
-            ))
-    ));
-    let continuation = read_nth_prompt_created(&h, 1);
-    for expected in [
-        "first steer after compaction",
-        "final steer after compaction",
-    ] {
-        assert_eq!(
-            continuation
-                .context
-                .flatten_iter()
-                .filter(|item| matches!(
-                    item,
-                    ContextItem::Message(MessageItem {
-                        role: ContextRole::User,
-                        content,
-                        ..
-                    }) if content.iter().any(|part| matches!(
-                        part,
-                        ContentPart::Text { text }
-                            if text == expected
-                                || text == &crate::internal_envelope::frame(expected)
-                    ))
-                ))
-                .count(),
-            1
-        );
-    }
-    let events = event_log_events(&h);
-    let checkpoint_index = events
-        .iter()
-        .position(|event| {
-            matches!(
-                event,
-                Event::AgentInferenceDispatchStarted(started)
-                    if started.transaction_id.as_ref() == Some(&transaction_id)
-            )
-        })
-        .expect("checkpoint index");
-    let navigation_index = events
-        .iter()
-        .position(|event| {
-            matches!(
-                event,
-                Event::AgentHeadMoved(moved) if moved.head == tau_proto::AgentHead::Root
-            )
-        })
-        .expect("navigation index");
-    assert!(checkpoint_index < navigation_index);
-    h.shutdown().expect("shutdown");
-}
-
 /// A first-suffix persistence failure drops the interceptor-approved
 /// continuation and retains exact retry state for later semantic work.
 #[test]
@@ -3942,6 +3630,7 @@ fn rollover_commits_deferred_default_mandatory_compaction_terminal() {
             cut: tau_proto::AgentHead::Root,
             reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
             resume_through: None,
+            context_retreat: None,
         }),
     );
     assert!(h.runtime_io.publication.pending_intercept.is_some());
@@ -5075,7 +4764,7 @@ fn deferred_tool_result_report_keeps_tracking_until_report_commit() {
             usage: None,
             originator: tau_proto::PromptOriginator::User,
             compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            compaction_output_tokens: None,
             backend: None,
             provider_attempt: Default::default(),
             provider_response_id: None,
@@ -6323,181 +6012,6 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
         "c.head points at the just-committed user prompt"
     );
 }
-
-#[test]
-fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch() {
-    // Regression: passive background notices published before a real user prompt
-    // must not let interception wake provider dispatch before the user prompt
-    // itself commits. The passive notice and user prompt are treated as one
-    // publish batch and dispatch only after both intercepted submissions pass.
-    let tmp = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(tmp.path()).expect("harness");
-    let session_id = h.session_runtime.current_session_id.clone();
-    h.prompt_coordination
-        .context_discovery
-        .initialized_sessions
-        .insert(session_id);
-    h.config.selected_model = Some("echo/model".into());
-    let info = h
-        .provider_runtime
-        .model_info
-        .get_mut(&"echo/model".into())
-        .expect("echo model");
-    info.supports_compaction = false;
-    info.supports_standalone_compaction = true;
-    info.standalone_compaction_threshold = Some(900);
-    info.standalone_compaction_prefix_budget = Some(u64::MAX);
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.publish_for_agent(
-        &cid,
-        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-            inference_activation: false,
-            agent_id,
-            text: "stable prefix ".repeat(80),
-            trusted_internal_spans: Vec::new(),
-            message_class: tau_proto::PromptMessageClass::User,
-            internal_kind: None,
-            originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
-            display_name: None,
-            ctx_id: None,
-        }),
-    );
-
-    let _interceptor = connect_test_tool(&mut h, "interceptor-passive-batch");
-    h.handle_extension_event(
-        "interceptor-passive-batch",
-        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
-            )],
-            priority: InterceptionPriority::new(0),
-        })),
-    )
-    .expect("intercept registration");
-
-    {
-        let conv = h
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get_mut(&cid)
-            .expect("conversation");
-        conv.execution.context_input_tokens = Some(900);
-        conv.execution.context_usage_head = conv.identity.head;
-        conv.execution.context_usage_model = Some("echo/model".into());
-        conv.execution.context_cached_tokens = Some(450);
-    }
-    let passive_text = background_completion_prompt(&"passive-intercept-bg".into());
-    h.agent_runtime
-        .agent_registry
-        .agents
-        .get_mut(&cid)
-        .expect("conversation")
-        .dispatch
-        .pending_prompts
-        .push_back(PendingPrompt::passive_background_completion(
-            passive_text.clone(),
-        ));
-    let prompts_before = prompt_created_count(&h);
-
-    h.dispatch_prompt_for_agent(&cid, "real follow-up".to_owned())
-        .expect("dispatch user prompt with passive notice");
-
-    assert_eq!(prompt_created_count(&h), prompts_before);
-    assert!(h.runtime_io.publication.pending_intercept.is_some());
-    assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
-    assert!(
-        !h.runtime_io.publication.idle_dispatches[0]
-            .obligation
-            .is_committed()
-    );
-
-    h.handle_extension_event(
-        "interceptor-passive-batch",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("pass passive notice");
-
-    assert_eq!(
-        prompt_created_count(&h),
-        prompts_before,
-        "provider dispatch must still wait for the real user prompt"
-    );
-    assert!(
-        h.runtime_io
-            .publication
-            .pending_intercept
-            .as_ref()
-            .is_some_and(|pending| matches!(
-                pending.event,
-                Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-                    inference_activation: true,
-                    ..
-                })
-            ))
-    );
-    assert_eq!(h.runtime_io.publication.idle_dispatches.len(), 1);
-    assert!(
-        !h.runtime_io.publication.idle_dispatches[0]
-            .obligation
-            .is_committed()
-    );
-
-    h.handle_extension_event(
-        "interceptor-passive-batch",
-        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(None),
-        })),
-    )
-    .expect("pass user prompt");
-
-    assert!(h.runtime_io.publication.pending_intercept.is_none());
-    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
-    assert_eq!(prompt_created_count(&h), prompts_before + 1);
-    let compact = read_nth_prompt_created(&h, prompts_before as usize);
-    assert_eq!(
-        compact.operation,
-        tau_proto::PromptOperation::StandaloneCompaction
-    );
-    assert!(
-        !event_log_events(&h)
-            .into_iter()
-            .any(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
-    );
-    let active_head = h.agent_runtime.agent_registry.agents[&cid]
-        .identity
-        .head
-        .expect("active prompt head");
-    let active_parent = default_agent_node(&h, active_head)
-        .parent_id
-        .expect("passive fact is active parent");
-    assert!(event_log_events(&h).into_iter().any(|event| matches!(
-        event,
-        Event::AgentStandaloneCompactionStarted(started)
-            if started.cut == tau_proto::AgentHead::Node(active_parent)
-    )));
-    let submitted: Vec<(String, bool)> = event_log_events(&h)
-        .into_iter()
-        .filter_map(|event| match event {
-            Event::AgentPromptSubmitted(submitted)
-                if submitted.text == passive_text || submitted.text == "real follow-up" =>
-            {
-                Some((submitted.text, submitted.inference_activation))
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        submitted,
-        vec![(passive_text, false), ("real follow-up".to_owned(), true)],
-        "passive notice should commit false immediately before the active user prompt"
-    );
-}
-
 /// Navigation queued behind an intercepted activation commits after that
 /// activation, leaving its exact branch-owned obligation dormant until the
 /// original activation node is reselected.
@@ -7494,5 +7008,340 @@ fn invalid_metadata_interceptor_replacements_fall_back_to_original() {
         Event::AgentMetadataSet(set) if set.key.as_str() == "too-large"
     )));
 
+    h.shutdown().expect("shutdown");
+}
+
+/// A standalone start parked before commit owns the compact request model even
+/// if model selection changes before its post-commit provider dispatch.
+#[test]
+fn intercepted_compaction_start_pins_materialized_model() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    add_second_test_model(&mut h);
+    let cid = ensure_test_user_agent(&mut h);
+    let evidence_prompt = establish_exact_provider_usage(&mut h, &cid, 1);
+    {
+        let info = h
+            .provider_runtime
+            .model_info
+            .get_mut(&tau_proto::ModelId::from("echo/model"))
+            .expect("model");
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(1));
+        info.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::new(u64::MAX));
+        info.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::new(u64::MAX));
+        let agent = h
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent");
+        agent.execution.context_input_tokens = Some(1);
+        agent.execution.context_usage_head = agent.identity.head;
+        agent.execution.context_usage_model = Some("echo/model".into());
+    }
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id,
+            text: "compactable prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let interceptor = connect_test_tool(&mut h, "compact-model-owner");
+    h.handle_extension_event(
+        "compact-model-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STANDALONE_COMPACTION_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    let cut = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .head
+        .map(tau_proto::AgentHead::Node)
+        .expect("compactable prefix");
+    publish_exact_automatic_start(
+        &mut h,
+        &cid,
+        cut,
+        "echo/model".into(),
+        "ct-intercept-model",
+        "ap-intercept-model",
+        evidence_prompt,
+    );
+    let (parked, _) = intercepted_payload(&interceptor);
+    let Event::AgentStandaloneCompactionStarted(started) = parked else {
+        panic!("compaction start intercepted");
+    };
+    assert_eq!(started.model, tau_proto::ModelId::from("echo/model"));
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .identity
+        .model_override = Some("other/model".into());
+    h.handle_extension_event(
+        "compact-model-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release start");
+
+    let prompt = read_nth_prompt_created(&h, 1);
+    assert_eq!(prompt.agent_prompt_id, started.compact_prompt_id);
+    assert_eq!(prompt.model, started.model);
+    assert_eq!(
+        prompt.operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A successful standalone compaction binds its continuation to the final
+/// steer publication, so interception cannot let the checkpoint overtake and
+/// omit that activating input.
+#[test]
+fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let evidence_prompt = establish_exact_provider_usage(&mut h, &cid, 1);
+    {
+        let info = h
+            .provider_runtime
+            .model_info
+            .get_mut(&tau_proto::ModelId::from("test/model"))
+            .expect("model");
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(1));
+        let agent = h
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get_mut(&cid)
+            .expect("agent");
+        agent.execution.context_input_tokens = Some(1);
+        agent.execution.context_usage_head = agent.identity.head;
+        agent.execution.context_usage_model = Some("test/model".into());
+    }
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id,
+            text: "completion prefix".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let activation_cut = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .head
+        .map(tau_proto::AgentHead::Node)
+        .expect("completion prefix");
+    publish_exact_automatic_start(
+        &mut h,
+        &cid,
+        activation_cut,
+        "test/model".into(),
+        "ct-intercept-completion",
+        "ap-intercept-completion",
+        evidence_prompt,
+    );
+    let compact_prompt = read_nth_prompt_created(&h, 1);
+    let transaction_id = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started.transaction_id),
+            _ => None,
+        })
+        .expect("standalone transaction");
+
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .pending_prompts
+        .extend([
+            PendingPrompt::user("first steer after compaction".to_owned()),
+            PendingPrompt::user("final steer after compaction".to_owned()),
+        ]);
+    let interceptor = connect_test_tool(&mut h, "completion-steer-owner");
+    h.handle_extension_event(
+        "completion-steer-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_STEERED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register steer interceptor");
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .standalone_compaction_threshold = Some(tau_proto::TokenCount::new(u64::MAX));
+
+    h.handle_provider_response_finished(provider_text_response(
+        &compact_prompt.agent_prompt_id,
+        compact_prompt.agent_id.clone(),
+        "summary",
+    ))
+    .expect("accept compact response");
+    let (parked, _) = intercepted_payload(&interceptor);
+    assert!(matches!(
+        parked,
+        Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            ref text, ..
+        })
+            if text == "first steer after compaction"
+    ));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.transaction_id.as_ref() == Some(&transaction_id)
+            ))
+            .count(),
+        0,
+        "the continuation checkpoint must wait for the exact steer commit"
+    );
+    assert_eq!(prompt_created_count(&h), 2);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: compact_prompt.agent_id.clone(),
+            head: tau_proto::AgentHead::Root,
+        }),
+    );
+
+    h.handle_extension_event(
+        "completion-steer-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release first steer");
+    assert!(matches!(
+        h.runtime_io.publication.pending_intercept.as_ref().map(|pending| &pending.event),
+        Some(Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            text, ..
+        }))
+            if text == "final steer after compaction"
+    ));
+    assert_eq!(prompt_created_count(&h), 2);
+    assert!(!event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started)
+            if started.transaction_id.as_ref() == Some(&transaction_id)
+    )));
+    h.handle_extension_event(
+        "completion-steer-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release final steer");
+    let checkpoint = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(started)
+                if started.transaction_id.as_ref() == Some(&transaction_id) =>
+            {
+                Some(started)
+            }
+            _ => None,
+        })
+        .expect("continuation checkpoint");
+    let tau_proto::AgentHead::Node(final_steer_node) = checkpoint.through else {
+        panic!("continuation must end at the final steer node");
+    };
+    assert!(matches!(
+        &default_agent_node(&h, final_steer_node).entry,
+        AgentEntry::UserInput { items, .. }
+            if items.iter().any(|item| matches!(
+                item,
+                ContextItem::Message(MessageItem { content, .. })
+                    if content.iter().any(|part| matches!(
+                        part,
+                        ContentPart::Text { text }
+                            | ContentPart::HarnessInternalText { text }
+                            if text == "final steer after compaction"
+                    ))
+            ))
+    ));
+    let continuation = read_nth_prompt_created(&h, 2);
+    for expected in [
+        "first steer after compaction",
+        "final steer after compaction",
+    ] {
+        assert_eq!(
+            continuation
+                .context
+                .flatten_iter()
+                .filter(|item| matches!(
+                    item,
+                    ContextItem::Message(MessageItem {
+                        role: ContextRole::User,
+                        content,
+                        ..
+                    }) if content.iter().any(|part| matches!(
+                        part,
+                        ContentPart::Text { text }
+                            if text == expected
+                                || text == &crate::internal_envelope::frame(expected)
+                    ))
+                ))
+                .count(),
+            1
+        );
+    }
+    let events = event_log_events(&h);
+    let checkpoint_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.transaction_id.as_ref() == Some(&transaction_id)
+            )
+        })
+        .expect("checkpoint index");
+    let navigation_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentHeadMoved(moved) if moved.head == tau_proto::AgentHead::Root
+            )
+        })
+        .expect("navigation index");
+    assert!(checkpoint_index < navigation_index);
     h.shutdown().expect("shutdown");
 }

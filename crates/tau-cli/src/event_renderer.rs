@@ -1475,7 +1475,7 @@ fn update_compaction_status(
             CompactionStatus::Success,
             EventRenderer::compaction_success_status(
                 compaction.original_input_tokens,
-                compaction.compacted_input_tokens,
+                compaction.compaction_output_tokens,
             ),
         )),
     }
@@ -3129,25 +3129,6 @@ impl EventRenderer {
         format!("#{}", format_token_count(tokens))
     }
 
-    fn compaction_measurement_chip(measurement: tau_proto::CompactionTokenMeasurement) -> String {
-        let estimate = matches!(
-            measurement.provenance,
-            tau_proto::CompactionTokenProvenance::Estimated
-        )
-        .then_some("~")
-        .unwrap_or_default();
-        format!(
-            "{estimate}{}",
-            Self::compaction_token_chip(measurement.tokens)
-        )
-    }
-
-    fn retained_percentage(original: u64, compacted: u64) -> Option<u128> {
-        (0 < original).then(|| {
-            (u128::from(compacted) * 100 + u128::from(original) / 2) / u128::from(original)
-        })
-    }
-
     fn compaction_progress_status(original_input_tokens: Option<u64>) -> String {
         original_input_tokens
             .map(|tokens| {
@@ -3162,9 +3143,9 @@ impl EventRenderer {
 
     fn compaction_success_status(
         original_input_tokens: Option<u64>,
-        compacted_input_tokens: Option<u64>,
+        compaction_output_tokens: Option<u64>,
     ) -> String {
-        match (original_input_tokens, compacted_input_tokens) {
+        match (original_input_tokens, compaction_output_tokens) {
             (Some(original), Some(compacted)) => format!(
                 "{} ok: {}",
                 Self::compaction_token_chip(original),
@@ -3179,25 +3160,26 @@ impl EventRenderer {
     /// Formats one successful standalone compaction terminal from durable
     /// metrics.
     pub(crate) fn standalone_compaction_success_status(
-        original: Option<tau_proto::CompactionTokenMeasurement>,
-        compacted: Option<tau_proto::CompactionTokenMeasurement>,
+        original: Option<tau_proto::TokenCount>,
+        output: Option<tau_proto::TokenCount>,
     ) -> String {
-        match (original, compacted) {
-            (Some(original), Some(compacted)) => {
-                let ratio = Self::retained_percentage(original.tokens, compacted.tokens)
-                    .map(|percentage| format!(" ({percentage}%)"))
-                    .unwrap_or_default();
+        match (original, output) {
+            (Some(original), Some(output)) => format!(
+                "{} in / {} out ok",
+                Self::compaction_token_chip(original.get()),
+                Self::compaction_token_chip(output.get()),
+            ),
+            (Some(original), None) => {
                 format!(
-                    "{} → {}{ratio} ok",
-                    Self::compaction_measurement_chip(original),
-                    Self::compaction_measurement_chip(compacted),
+                    "{} in / ? out ok",
+                    Self::compaction_token_chip(original.get())
                 )
             }
-            (Some(original), None) => {
-                format!("{} → ? ok", Self::compaction_measurement_chip(original))
-            }
-            (None, Some(compacted)) => {
-                format!("? → {} ok", Self::compaction_measurement_chip(compacted))
+            (None, Some(output)) => {
+                format!(
+                    "? in / {} out ok",
+                    Self::compaction_token_chip(output.get())
+                )
             }
             (None, None) => "ok".to_owned(),
         }
@@ -9132,7 +9114,7 @@ impl EventRenderer {
                 if let Some(prompt_id) = prompt_id {
                     let status = Self::standalone_compaction_success_status(
                         compacted.original_input_tokens,
-                        compacted.compacted_input_tokens,
+                        compacted.compaction_output_tokens,
                     );
                     self.complete_standalone_compaction_prompt(
                         &compacted.agent_id,

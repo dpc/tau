@@ -1253,100 +1253,6 @@ fn background_completion_substantive_tool_admission_records_working_reminder() {
     );
     h.shutdown().expect("shutdown");
 }
-
-/// Cancellation of a post-tool continuation uses that prompt's durable
-/// outer-turn ownership, persists its terminal-owned decision, and starts after
-/// finish.
-#[test]
-fn canceled_no_status_turn_persists_eager_decision_from_prompt_snapshot() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    enable_remote_compaction_for_test_model(&mut h);
-    let info = h
-        .provider_runtime
-        .model_info
-        .get_mut(&"test/model".into())
-        .expect("test model");
-    info.supports_compaction = false;
-    info.supports_standalone_compaction = true;
-    let cid = ensure_test_user_agent(&mut h);
-    h.config
-        .available_roles
-        .get_mut(&h.config.selected_role)
-        .expect("selected role")
-        .compactions
-        .insert(
-            "cancel".to_owned(),
-            tau_config::settings::CompactionPolicy {
-                threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(1),
-                enable: true,
-                when: tau_config::settings::ContextPolicyWhen {
-                    at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
-                    statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
-                },
-            },
-        );
-    {
-        let agent = h
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get_mut(&cid)
-            .expect("agent");
-        agent.execution.context_input_tokens = Some(100);
-        agent.execution.context_usage_model = Some("test/model".into());
-        agent.execution.context_usage_head = agent.identity.head;
-    }
-    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("cancel me".to_owned()))
-        .expect("dispatch");
-    let inference = read_nth_prompt_created(&h, 0);
-    h.handle_provider_response_finished(provider_tool_response(
-        &inference,
-        "cancel-round-tool",
-        "self_info",
-        CborValue::Map(Vec::new()),
-    ))
-    .expect("finish tool round");
-    let continuation = read_nth_prompt_created(&h, 1);
-    h.finalize_canceled_in_flight_prompt(&cid);
-
-    let events = event_log_events(&h);
-    let decision = events
-        .iter()
-        .find_map(|event| match event {
-            Event::AgentPromptTerminated(terminated) => {
-                terminated.automatic_compaction_decision.clone()
-            }
-            _ => None,
-        })
-        .expect("termination decision");
-    assert_ne!(continuation.agent_prompt_id, inference.agent_prompt_id);
-    assert!(
-        h.prompt_coordination
-            .prompt_runtime
-            .pending_publish_completions
-            .is_empty(),
-        "accepted cancellation must not enter the retained publication retry path"
-    );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        Event::AgentPromptTerminated(terminated)
-            if terminated.agent_prompt_id == continuation.agent_prompt_id
-    )));
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(
-                event,
-                Event::AgentStandaloneCompactionStarted(started)
-                    if started.transaction_id == decision.transaction_id
-            ))
-            .count(),
-        1
-    );
-    h.shutdown().expect("shutdown");
-}
-
 /// Self metadata uses the exact prompt-owned model parameters rather than
 /// mutable role selection and exposes the initial unreported status explicitly.
 #[test]
@@ -1797,7 +1703,7 @@ fn unsuccessful_working_terminal_bypasses_reminders() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,

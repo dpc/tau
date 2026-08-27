@@ -3151,7 +3151,7 @@ pub struct ProviderModelInfo {
     pub default_affinity: i32,
     /// Total model context window in tokens. Required so harness/UI state does
     /// not have to fall back to provider-specific config.
-    pub context_window: u64,
+    pub context_window: crate::TokenCount,
     /// Reasoning-effort levels accepted by this model, in UI cycling order.
     /// Empty means the model does not support reasoning-effort selection.
     pub efforts: Vec<Effort>,
@@ -3173,21 +3173,19 @@ pub struct ProviderModelInfo {
     /// Provider-recommended token threshold for harness-scheduled standalone
     /// compaction. `None` means no provider default is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub standalone_compaction_threshold: Option<u64>,
-    /// Conservative maximum provider-visible historical prefix projection that
-    /// one standalone compaction request can safely accept.
+    pub standalone_compaction_threshold: Option<crate::TokenCount>,
+    /// Exact maximum canonical historical-prefix bytes that one standalone
+    /// compaction request may accept as a local resource/work bound.
     ///
-    /// Units are Tau's conservative provider-visible prefix projection. The
-    /// trailing compaction trigger is excluded because the adapter has already
-    /// reserved framing, tokenizer uncertainty, reasoning, and output needs.
-    /// Absence disables size-recoverable automatic prefix compaction without
-    /// disabling explicit/manual standalone compaction.
+    /// The trailing compaction trigger is excluded. Absence means no local byte
+    /// admission check; automatic recovery remains supported and canonical
+    /// typed context rejection may authorize strict-predecessor retreat.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_nonzero_u64"
+        deserialize_with = "deserialize_optional_nonzero_byte_count"
     )]
-    pub standalone_compaction_prefix_budget: Option<u64>,
+    pub standalone_compaction_prefix_budget: Option<crate::ByteCount>,
     /// Optional documented runtime cache contract for this exact route.
     ///
     /// Absence means that no operational cache contract is declared; it does
@@ -3211,12 +3209,14 @@ pub struct ProviderModelInfo {
     pub est_cache_storage_cost_1m_token_hour_usd: Option<crate::EstimatedUsdPerMillionTokenHours>,
 }
 
-fn deserialize_optional_nonzero_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+fn deserialize_optional_nonzero_byte_count<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::ByteCount>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let value = Option::<u64>::deserialize(deserializer)?;
-    if value == Some(0) {
+    let value = Option::<crate::ByteCount>::deserialize(deserializer)?;
+    if value == Some(crate::ByteCount::ZERO) {
         return Err(path_serde_de::Error::custom(
             "standalone_compaction_prefix_budget must be nonzero",
         ));
@@ -3673,7 +3673,7 @@ pub enum UiRoleUpdateAction {
         /// Token threshold at which automatic server-side compaction should
         /// start, or `None` to use the provider/server default behavior.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        compaction_threshold: Option<u64>,
+        compaction_threshold: Option<crate::TokenCount>,
     },
     /// Set or clear the role's explicit tool allow-list.
     SetTools {
@@ -4370,6 +4370,11 @@ pub enum StandaloneCompactionFailureReason {
     /// No indivisible provider-closed historical prefix fits the adapter's
     /// published standalone compaction prefix budget.
     PrefixTooLarge,
+    /// The provider canonically rejected this compact request for context size.
+    ContextWindowExceeded,
+    /// No smaller useful provider-closed prefix remains after context
+    /// rejection.
+    ContextIrreducible,
 }
 
 /// Durable start record for one standalone-compaction transaction.
@@ -4475,16 +4480,29 @@ pub enum StandaloneCompactionTrigger {
     /// field is absent.
     #[default]
     Manual,
-    /// Automatic compaction after the local context projection reached the
-    /// configured role/model threshold.
+    /// Legacy automatic threshold trigger. New records use exact provider
+    /// evidence; this variant grants no replay authority.
     AutomaticThreshold,
-    /// A successful automatic pass still exceeded its effective guard, or a
-    /// provider-rejected reactive chain still has suffix history to consume,
-    /// and owns this next durable rolling pass.
+    /// Exact-evidence proactive threshold root.
+    AutomaticThresholdEvidence {
+        /// Exact provider observation and configured threshold claimed once by
+        /// this proactive root.
+        evidence: ProactiveCompactionEvidence,
+    },
+    /// A provider-rejected recovery chain successfully compacted one prefix and
+    /// still has provider-closed history before its immutable target.
     AutomaticContinuation {
         /// Immediately preceding successful transaction whose checkpoint this
         /// start claims instead.
         previous_transaction_id: CompactionTransactionId,
+    },
+    /// Canonical standalone rejection authorized one strict predecessor retry.
+    AutomaticContextRetreat {
+        /// Failed automatic transaction that pre-minted this successor.
+        failed_transaction_id: CompactionTransactionId,
+        /// Immutable logical target retained across retreat and forward
+        /// rolling.
+        roll_through: AgentHead,
     },
     /// Automatic or rolling reactive planning found a deterministic local
     /// reason not to dispatch provider work. The matching start makes the
@@ -4544,6 +4562,28 @@ pub struct AgentStandaloneCompactionFailed {
     pub reason: StandaloneCompactionFailureReason,
     /// Last activation still owed an inference, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_through: Option<AgentHead>,
+    /// Exact automatic successor plan committed before a strict retreat start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_retreat: Option<ContextRetreatPlan>,
+}
+
+/// Pre-minted strict-predecessor successor for automatic context rejection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ContextRetreatPlan {
+    /// Successor transaction identity.
+    pub transaction_id: CompactionTransactionId,
+    /// Successor provider prompt identity.
+    pub compact_prompt_id: AgentPromptId,
+    /// Immediate previous useful provider-closed cut.
+    pub cut: AgentHead,
+    /// Fixed logical recovery target.
+    pub roll_through: AgentHead,
+    /// Captured provider-qualified model.
+    pub model: ModelId,
+    /// Captured prompt originator.
+    pub originator: PromptOriginator,
+    /// Preserved owed inference watermark.
     pub resume_through: Option<AgentHead>,
 }
 
@@ -4611,34 +4651,64 @@ pub struct AgentCompacted {
     /// Captured provider operation; absent on legacy boundaries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<PromptOperation>,
-    /// Token count before compaction, with its measurement provenance.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub original_input_tokens: Option<CompactionTokenMeasurement>,
-    /// Token count after compaction, with its measurement provenance.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compacted_input_tokens: Option<CompactionTokenMeasurement>,
+    /// Provider-reported compact-request input tokens.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_provider_reported_tokens"
+    )]
+    pub original_input_tokens: Option<crate::TokenCount>,
+    /// Provider output tokens consumed to produce the compacted replacement.
+    ///
+    /// This is display/accounting metadata and never scheduling authority. The
+    /// alias interprets the legacy field according to what providers actually
+    /// reported there.
+    #[serde(
+        default,
+        alias = "compacted_input_tokens",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_provider_reported_tokens"
+    )]
+    pub compaction_output_tokens: Option<crate::TokenCount>,
     /// Provider-validated ordered context that replaces all older model-visible
     /// history.
     pub replacement_window: Vec<ContextItem>,
 }
 
-/// One durable harness-owned compaction token measurement.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CompactionTokenMeasurement {
-    /// Measured or estimated token count.
-    pub tokens: u64,
-    /// Authority from which the count was derived.
-    pub provenance: CompactionTokenProvenance,
-}
-
-/// Provenance of a durable compaction token measurement.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompactionTokenProvenance {
-    /// Exact usage reported for the accepted provider response.
-    ProviderReported,
-    /// Approximation derived from prior context or replacement bytes.
-    Estimated,
+fn deserialize_optional_provider_reported_tokens<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::TokenCount>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum CompatibleTokens {
+        Exact(crate::TokenCount),
+        Legacy {
+            tokens: crate::TokenCount,
+            provenance: LegacyProvenance,
+        },
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum LegacyProvenance {
+        ProviderReported,
+        Estimated,
+    }
+    Ok(
+        Option::<CompatibleTokens>::deserialize(deserializer)?.and_then(|value| match value {
+            CompatibleTokens::Exact(tokens)
+            | CompatibleTokens::Legacy {
+                tokens,
+                provenance: LegacyProvenance::ProviderReported,
+            } => Some(tokens),
+            CompatibleTokens::Legacy {
+                provenance: LegacyProvenance::Estimated,
+                ..
+            } => None,
+        }),
+    )
 }
 
 /// A previously queued user or harness-internal prompt folded into an in-flight
@@ -5189,7 +5259,7 @@ pub struct PromptCompactionContext {
     /// Token threshold at which automatic server-side compaction should run.
     /// `None` means use the provider/server default behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compact_threshold: Option<u64>,
+    pub compact_threshold: Option<crate::TokenCount>,
 }
 
 /// Why a prompt ended without a provider response being accepted.
@@ -5505,13 +5575,14 @@ pub enum ProviderResponseTextDelta {
 pub struct ProviderResponseCompactionUpdate {
     /// Current compaction status.
     pub status: ProviderResponseCompactionStatus,
-    /// Input-token count before compaction, filled by the harness when known.
+    /// Provider-reported input-token count for the compact request, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_input_tokens: Option<u64>,
-    /// Prompt/input-token count of the compacted provider item, when available.
-    /// Live updates may omit this and rely on the final response metadata.
+    /// Provider-reported output tokens consumed by the compact request. This is
+    /// display/accounting metadata only. Live updates may omit it and rely on
+    /// final response metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compacted_input_tokens: Option<u64>,
+    pub compaction_output_tokens: Option<u64>,
 }
 
 /// Status of provider-side compaction in a transient response update.
@@ -5586,29 +5657,21 @@ pub struct ContextLimitTelemetry {
     pub model: ModelId,
     /// Operation rejected by the provider.
     pub operation: PromptOperation,
-    /// Conservative harness estimate immediately before dispatch, when a
-    /// same-model usage baseline was available. Transcript growth counts
-    /// byte-free JSON structure plus canonical image bytes and rounded-up
-    /// 32-by-32 patches. This estimate is not provider-token evidence.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub projected_input_tokens: Option<u64>,
     /// Serialized transcript growth since the usage baseline. This byte count
     /// is intentionally not labeled or interpreted as provider tokens. It is
     /// absent when any suffix entry is not JSON-representable or the exact
     /// total cannot be represented.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transcript_delta_bytes: Option<u64>,
+    pub transcript_delta_bytes: Option<crate::ByteCount>,
     /// Provider-published context window observed for this exact model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub advertised_context_window: Option<u64>,
+    pub advertised_context_window: Option<crate::TokenCount>,
     /// Provider-reported input usage attached to the rejection, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_input_tokens: Option<u64>,
-    /// Conservative reserve included in the harness projection.
-    pub projection_reserve_tokens: u64,
+    pub provider_input_tokens: Option<crate::TokenCount>,
     /// Explicit role/model compaction threshold active at dispatch, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction_threshold: Option<u64>,
+    pub compaction_threshold: Option<crate::TokenCount>,
     /// Explicit compaction policy active for the role at dispatch.
     pub compaction_policy: ContextLimitCompactionPolicy,
     /// Whether all reactive-recovery gates were satisfied.
@@ -5646,15 +5709,14 @@ pub enum ContextLimitCompactionPolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextLimitObservation {
-    /// Nonzero provider input usage was below the advertised window and any
-    /// available conservative projection agreed, indicating hidden overhead or
-    /// provider/model limit drift.
+    /// Nonzero provider input usage was below the positive advertised window,
+    /// indicating hidden overhead or provider/model limit drift.
     RejectedBelowAdvertisedLimit,
-    /// Nonzero provider input usage reached or exceeded the advertised limit
-    /// and any available conservative projection agreed.
+    /// Nonzero provider input usage reached or exceeded the positive advertised
+    /// limit.
     RejectedAtOrAboveAdvertisedLimit,
-    /// Provider usage or model-limit evidence was absent, zero, or
-    /// contradictory. A transcript projection alone always has this category.
+    /// Provider input usage or advertised model-limit evidence was absent or
+    /// zero.
     InsufficientEvidence,
 }
 
@@ -5845,17 +5907,13 @@ pub struct ProviderResponseFinished {
     /// remains present as zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_api_cost_increment: Option<crate::EstimatedApiCost>,
-    /// Input-token count of the conversation before provider-side compaction,
-    /// if this finished response contains a durable compaction item and the
-    /// harness knows the previous context size.
+    /// Provider-reported input-token count for this compact request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_original_input_tokens: Option<u64>,
-    /// Prompt/input-token count of the compacted provider item, if this
-    /// finished response contains a durable compaction item and the harness can
-    /// derive or estimate the replay size. This is UI context-size metadata,
-    /// not a billing counter.
+    /// Provider-reported output-token count for this compact request. This is
+    /// display/accounting metadata, not future scheduling authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction_compacted_input_tokens: Option<u64>,
+    pub compaction_output_tokens: Option<u64>,
     /// Which LLM backend handled this turn. Recorded once per turn
     /// (instead of in a trace line) so offline inspection of the
     /// event log can correlate cache-miss / retry patterns with the
@@ -5898,7 +5956,43 @@ pub struct AutomaticCompactionDecision {
     /// Provider-qualified model resolved while finalizing the terminal.
     pub model: ModelId,
     /// Lowest resolved threshold among all matching named policies.
-    pub threshold: u64,
+    pub threshold: crate::TokenCount,
+    /// Replay-verifiable provider observation that crossed this threshold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<ProactiveCompactionEvidence>,
+}
+
+/// Source of one exact proactive compaction threshold.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CompactionThresholdSource {
+    /// Threshold published by the selected provider model.
+    ProviderDefault,
+    /// Legacy role-wide explicit threshold.
+    RoleThreshold,
+    /// Named automatic-compaction policy.
+    NamedPolicy {
+        /// Configured policy name used to resolve the threshold.
+        name: String,
+    },
+    /// Coalesced exact named policies evaluated at one scheduling point.
+    NamedPolicies {
+        /// Configured policy names in deterministic role order.
+        names: Vec<String>,
+    },
+}
+
+/// Exact ordinary provider-input observation claimed by proactive compaction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProactiveCompactionEvidence {
+    /// Ordinary provider prompt whose accepted usage supplied the count.
+    pub provider_prompt_id: AgentPromptId,
+    /// Nonzero provider-reported ordinary request input.
+    pub provider_input_tokens: crate::TokenCount,
+    /// Exact configured threshold crossed by the observation.
+    pub threshold: crate::TokenCount,
+    /// Configuration seam that supplied the threshold.
+    pub threshold_source: CompactionThresholdSource,
 }
 
 /// Per-turn delta of the provider's Codex WebSocket pool counters. The

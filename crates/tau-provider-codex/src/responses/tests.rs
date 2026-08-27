@@ -466,7 +466,7 @@ fn build_request_includes_prompt_cache_key_when_supported() {
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
-        raw_context_window: 258400,
+        raw_context_window: tau_proto::TokenCount::new(258400),
         account_id: None,
         supports_reasoning_effort: false,
         supports_verbosity: false,
@@ -574,7 +574,7 @@ fn build_request_includes_service_tier_when_configured() {
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
-        raw_context_window: 258400,
+        raw_context_window: tau_proto::TokenCount::new(258400),
         account_id: None,
         supports_reasoning_effort: false,
         supports_verbosity: false,
@@ -670,7 +670,7 @@ fn build_request_omits_prompt_cache_key_without_seed() {
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
-        raw_context_window: 258400,
+        raw_context_window: tau_proto::TokenCount::new(258400),
         account_id: None,
         supports_reasoning_effort: false,
         supports_verbosity: false,
@@ -1519,7 +1519,7 @@ fn build_compact_request_uses_lite_schema() {
         },
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: Some(tau_proto::PromptCompactionContext {
-            compact_threshold: Some(10),
+            compact_threshold: Some(tau_proto::TokenCount::new(10)),
         }),
         originator: &tau_proto::PromptOriginator::User,
         share_user_cache_key: false,
@@ -2250,7 +2250,7 @@ fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
         profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-sol".into(),
-        raw_context_window: 372_000,
+        raw_context_window: tau_proto::TokenCount::new(372_000),
         supports_reasoning_effort: false,
         supports_reasoning_summary: false,
         supports_compaction: true,
@@ -2315,7 +2315,7 @@ fn full_ws_compaction_measurement_matches_exact_fresh_wire_envelope() {
         profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::LiteCompatibility,
         model_id: "gpt-5.6-sol".into(),
-        raw_context_window: 372_000,
+        raw_context_window: tau_proto::TokenCount::new(372_000),
         supports_reasoning_effort: false,
         supports_reasoning_summary: false,
         supports_compaction: true,
@@ -2401,7 +2401,7 @@ fn build_request_uses_standard_responses_contract_for_gpt_5_6() {
         profile_namespace: "chatgpt".to_owned(),
         mode: ResponsesMode::Standard,
         model_id: "gpt-5.6-sol".into(),
-        raw_context_window: 372_000,
+        raw_context_window: tau_proto::TokenCount::new(372_000),
         supports_reasoning_effort: true,
         supports_reasoning_summary: true,
         supports_compaction: false,
@@ -2700,7 +2700,7 @@ fn ws_envelope_suppresses_compaction_without_disabling_responses_lite() {
     };
     let mut request = basic_prompt_payload();
     request.compaction = Some(tau_proto::PromptCompactionContext {
-        compact_threshold: Some(1200),
+        compact_threshold: Some(tau_proto::TokenCount::new(1200)),
     });
 
     let body =
@@ -2731,7 +2731,7 @@ fn build_request_sends_compaction_context_management_and_trigger_item() {
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
         compaction: Some(tau_proto::PromptCompactionContext {
-            compact_threshold: Some(1200),
+            compact_threshold: Some(tau_proto::TokenCount::new(1200)),
         }),
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::parse("test-session")
@@ -2835,7 +2835,7 @@ fn chain_test_config() -> ResponsesConfig {
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
-        raw_context_window: 258400,
+        raw_context_window: tau_proto::TokenCount::new(258400),
         account_id: None,
         supports_reasoning_effort: false,
         supports_verbosity: false,

@@ -19,7 +19,7 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
             .expect("test model");
         info.supports_compaction = false;
         info.supports_standalone_compaction = true;
-        info.standalone_compaction_threshold = Some(1);
+        info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(1));
         let cid = ensure_test_user_agent(&mut h);
         agent_id = durable_agent_id_for_conversation(&h, &cid);
         let (_, _, results) = seed_historical_open_prefix_failure(&mut h, &cid, "test/model");
@@ -56,6 +56,8 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
                 .expect("agent");
             agent.execution.context_input_tokens = Some(1_000);
             agent.execution.context_usage_model = Some("test/model".into());
+            agent.execution.context_usage_prompt_id =
+                Some(test_agent_prompt_id("ap-test-provider-usage"));
             agent.execution.context_usage_head = agent.identity.head;
         }
         assert!(h.schedule_standalone_auto_compaction(&cid));
@@ -75,7 +77,7 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
             .model_info
             .get_mut(&"test/model".into())
             .expect("test model")
-            .standalone_compaction_threshold = Some(1);
+            .standalone_compaction_threshold = Some(tau_proto::TokenCount::new(1));
 
         h.publish_for_agent(
             &cid,
@@ -93,6 +95,8 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
                 .expect("agent");
             agent.execution.context_input_tokens = Some(1_000);
             agent.execution.context_usage_model = Some("test/model".into());
+            agent.execution.context_usage_prompt_id =
+                Some(test_agent_prompt_id("ap-test-provider-usage"));
             agent.execution.context_usage_head = agent.identity.head;
         }
         assert!(!h.schedule_standalone_auto_compaction(&cid));
@@ -111,7 +115,7 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
         .expect("test model");
     info.supports_compaction = false;
     info.supports_standalone_compaction = true;
-    info.standalone_compaction_threshold = Some(1);
+    info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(1));
     let cid = resumed
         .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
         .expect("restored agent");
@@ -128,6 +132,8 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
         );
         agent.execution.context_input_tokens = Some(1_000);
         agent.execution.context_usage_model = Some("test/model".into());
+        agent.execution.context_usage_prompt_id =
+            Some(test_agent_prompt_id("ap-test-provider-usage"));
         agent.execution.context_usage_head = agent.identity.head;
     }
     assert!(!resumed.schedule_standalone_auto_compaction(&cid));
@@ -163,7 +169,7 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
         .model_info
         .get_mut(&"test/model".into())
         .expect("test model")
-        .standalone_compaction_threshold = Some(1);
+        .standalone_compaction_threshold = Some(tau_proto::TokenCount::new(1));
     {
         let agent = resumed
             .agent_runtime
@@ -173,6 +179,8 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
             .expect("agent");
         agent.execution.context_input_tokens = Some(1_000);
         agent.execution.context_usage_model = Some("test/model".into());
+        agent.execution.context_usage_prompt_id =
+            Some(test_agent_prompt_id("ap-test-provider-usage"));
         agent.execution.context_usage_head = agent.identity.head;
     }
     assert!(resumed.schedule_standalone_auto_compaction(&cid));
@@ -382,7 +390,7 @@ fn reactive_replay_terminalizes_plan_suppressed_by_prior_failure_once() {
                     originator: tau_proto::PromptOriginator::User,
                     usage: None,
                     compaction_original_input_tokens: None,
-                    compaction_compacted_input_tokens: None,
+                    compaction_output_tokens: None,
                     backend: None,
                     provider_attempt: Default::default(),
                     provider_response_id: None,
@@ -489,7 +497,7 @@ fn reactive_replay_terminalizes_plan_suppressed_by_prior_failure_once() {
             tau_core::AgentEventParent::InheritHead,
             Event::AgentCompacted(tau_proto::AgentCompacted {
                 original_input_tokens: None,
-                compacted_input_tokens: None,
+                compaction_output_tokens: None,
                 agent_id: agent_id.clone(),
                 transaction_id: Some(successor_id),
                 cut: Some(tau_proto::AgentHead::Root),

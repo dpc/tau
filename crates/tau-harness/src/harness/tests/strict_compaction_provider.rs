@@ -159,14 +159,14 @@ fn write_startup(
                 tool_result_modalities: Vec::new(),
                 supports_parallel_tool_calls: true,
                 default_affinity: 0,
-                context_window: 10_000,
+                context_window: tau_proto::TokenCount::new(10_000),
                 efforts: vec![tau_proto::Effort::Off],
                 verbosities: vec![tau_proto::Verbosity::Low],
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
                 supports_compaction: false,
                 supports_standalone_compaction: true,
-                standalone_compaction_threshold: Some(5_200),
-                standalone_compaction_prefix_budget: Some(u64::MAX),
+                standalone_compaction_threshold: Some(tau_proto::TokenCount::new(100)),
+                standalone_compaction_prefix_budget: Some(tau_proto::ByteCount::new(u64::MAX)),
                 cache_policy: None,
                 est_uncached_input_cost_1m_usd: Default::default(),
                 est_cached_input_cost_1m_usd: Default::default(),
@@ -226,7 +226,7 @@ fn run_provider(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::
                         originator: prompt.originator,
                         usage: reply.usage,
                         compaction_original_input_tokens: None,
-                        compaction_compacted_input_tokens: None,
+                        compaction_output_tokens: None,
                         backend: None,
                         provider_attempt: Default::default(),
                         provider_response_id: None,
@@ -243,18 +243,6 @@ fn run_provider(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::
     }
     Ok(())
 }
-
-/// Creates a harness backed by a real provider route that rejects open tool
-/// timelines at the standalone-compaction boundary.
-pub(super) fn strict_compaction_provider_harness(
-    state_dir: impl Into<PathBuf>,
-) -> Result<Harness, HarnessError> {
-    strict_compaction_provider_harness_with_start_reason(
-        state_dir,
-        tau_proto::SessionStartReason::Initial,
-    )
-}
-
 /// Creates the strict compaction-provider harness for a selected session start.
 pub(super) fn strict_compaction_provider_harness_with_start_reason(
     state_dir: impl Into<PathBuf>,
@@ -280,4 +268,15 @@ pub(super) fn strict_compaction_provider_harness_with_start_reason(
     h.agent_runtime.agent_registry.id_rng = super::super::deterministic_agent_id_rng();
     h.enable_echo_tool_for_tests();
     Ok(h)
+}
+
+/// Creates a harness backed by a real provider route that rejects open tool
+/// timelines at the standalone-compaction boundary.
+pub(super) fn strict_compaction_provider_harness(
+    state_dir: impl Into<PathBuf>,
+) -> Result<Harness, HarnessError> {
+    strict_compaction_provider_harness_with_start_reason(
+        state_dir,
+        tau_proto::SessionStartReason::Initial,
+    )
 }

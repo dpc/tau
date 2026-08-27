@@ -68,7 +68,7 @@ fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
         default_affinity: 0,
-        context_window: 128_000,
+        context_window: tau_proto::TokenCount::new(128_000),
         efforts: vec![Effort::Off],
         verbosities: vec![Verbosity::Medium],
         thinking_summaries: vec![ThinkingSummary::Off],

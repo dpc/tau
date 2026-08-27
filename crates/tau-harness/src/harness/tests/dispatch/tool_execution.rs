@@ -440,7 +440,7 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
         originator: tau_proto::PromptOriginator::User,
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -589,7 +589,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         originator: tau_proto::PromptOriginator::User,
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -738,7 +738,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         originator: tau_proto::PromptOriginator::User,
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -977,7 +977,7 @@ fn watch_notification_folded_by_tool_terminal_starts_continuation() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1198,7 +1198,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1290,7 +1290,7 @@ fn tools_drift_invalidates_chain_anchor() {
         },
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: Some("resp_tools".to_owned()),
@@ -1400,7 +1400,7 @@ fn peer_auto_start_endpoint_dispatches_tools_and_remains_loaded() {
         usage: None,
         originator,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1647,7 +1647,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
                 compaction_original_input_tokens: None,
-                compaction_compacted_input_tokens: None,
+                compaction_output_tokens: None,
                 backend: None,
                 provider_attempt: Default::default(),
                 provider_response_id: None,
@@ -1692,7 +1692,7 @@ fn second_tool_bearing_response_is_rejected_before_persistence_and_dispatch() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1783,7 +1783,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
             .expect("test model");
         info.supports_compaction = false;
         info.supports_standalone_compaction = true;
-        info.standalone_compaction_threshold = Some(900);
+        info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(900));
     }
     let _ = connect_ready_configured_extension(
         &mut h,
@@ -1873,7 +1873,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
                 compaction_original_input_tokens: None,
-                compaction_compacted_input_tokens: None,
+                compaction_output_tokens: None,
                 backend: None,
                 provider_attempt: Default::default(),
                 provider_response_id: None,
@@ -1937,7 +1937,7 @@ fn standalone_tool_response_with_telemetry_is_rejected_before_persistence() {
         }),
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -2356,7 +2356,7 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -2479,7 +2479,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -2602,7 +2602,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -2709,7 +2709,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
             query_id: "q-A".to_owned(),
         },
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -2743,7 +2743,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
             query_id: "q-B".to_owned(),
         },
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -2816,7 +2816,14 @@ fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
         },
     );
     h.bump_tools_started_for(&cid);
-    h.update_agent_context_usage(&cid, Some(&"test/model".into()), Some(250), Some(50), None);
+    h.update_agent_context_usage(
+        &cid,
+        None,
+        Some(&"test/model".into()),
+        Some(250),
+        Some(50),
+        None,
+    );
     h.tool_routing
         .tool_runtime
         .tool_agents
@@ -3101,7 +3108,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         originator: tau_proto::PromptOriginator::User,
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -3176,7 +3183,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         },
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -3256,7 +3263,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         },
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -3419,7 +3426,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         originator: tau_proto::PromptOriginator::User,
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -3488,7 +3495,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         },
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -3622,7 +3629,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         originator: tau_proto::PromptOriginator::User,
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -3696,7 +3703,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         },
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -3807,7 +3814,7 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -3920,205 +3927,6 @@ fn message_tool_unknown_recipient_errors_without_agent_message() {
 
     h.shutdown().expect("shutdown");
 }
-
-/// Post-tool lifecycle recovery repairs exactly the currently owed automatic
-/// suffix in stages: terminal/finish cuts first add the protected start, the
-/// next reopen records the now-interrupted in-flight transaction, and only the
-/// following reopen is quiescent. A start cut owes that interruption on its
-/// first reopen; a continuation-start cut owes no compaction repair.
-#[test]
-fn post_tool_automatic_policy_crash_cuts_repair_owed_suffix_once() {
-    for cut_name in [
-        "continuation_started",
-        "terminal_decision",
-        "outer_finished",
-        "standalone_started",
-    ] {
-        let td = TempDir::new().expect("tempdir");
-        let state = td.path().join("state");
-        let (agent_id, transaction_id, records, cut);
-        {
-            let mut h = quiet_provider_harness(&state).expect("start");
-            enable_remote_compaction_for_test_model(&mut h);
-            let info = h
-                .provider_runtime
-                .model_info
-                .get_mut(&"test/model".into())
-                .expect("test model");
-            info.supports_compaction = false;
-            info.supports_standalone_compaction = true;
-            let cid = ensure_test_user_agent(&mut h);
-            h.config
-                .available_roles
-                .get_mut(&h.config.selected_role)
-                .expect("selected role")
-                .compactions
-                .insert(
-                    "crash-cut".to_owned(),
-                    tau_config::settings::CompactionPolicy {
-                        threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(100),
-                        enable: true,
-                        when: tau_config::settings::ContextPolicyWhen {
-                            at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
-                            statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
-                        },
-                    },
-                );
-            h.dispatch_prompt_for_agent(
-                &cid,
-                PendingPrompt::user(format!("post-tool crash cut {cut_name}")),
-            )
-            .expect("dispatch inference");
-            let initial = read_nth_prompt_created(&h, 0);
-            h.handle_provider_response_finished(provider_tool_response(
-                &initial,
-                &format!("crash-cut-call-{cut_name}"),
-                "self_info",
-                CborValue::Map(Vec::new()),
-            ))
-            .expect("finish tool round");
-            let continuation = read_nth_prompt_created(&h, 1);
-            h.config
-                .available_roles
-                .get_mut(&h.config.selected_role)
-                .expect("selected role")
-                .compactions
-                .clear();
-            let mut response = provider_text_response(
-                &continuation.agent_prompt_id,
-                continuation.agent_id.clone(),
-                "done",
-            );
-            response.usage = Some(tau_proto::ProviderTokenUsage {
-                prompt_sent_tokens: 250,
-                response_received_tokens: 1,
-                ..Default::default()
-            });
-            h.handle_provider_response_finished(response)
-                .expect("finish continuation");
-            agent_id = continuation.agent_id.clone();
-            records = h
-                .session_runtime
-                .agent_store
-                .agent_events(agent_id.as_str())
-                .expect("records");
-            let terminal_index = records
-                .iter()
-                .position(|record| {
-                    matches!(
-                        &record.event,
-                        Event::ProviderResponseFinished(response)
-                            if response.agent_prompt_id == continuation.agent_prompt_id
-                                && response.automatic_compaction_decision.is_some()
-                    )
-                })
-                .expect("decision terminal");
-            transaction_id = match &records[terminal_index].event {
-                Event::ProviderResponseFinished(response) => response
-                    .automatic_compaction_decision
-                    .as_ref()
-                    .expect("decision")
-                    .transaction_id
-                    .clone(),
-                _ => unreachable!("located response"),
-            };
-            let continuation_index = records
-                .iter()
-                .position(|record| {
-                    matches!(
-                        &record.event,
-                        Event::AgentPromptStarted(started)
-                            if started.agent_prompt_id == continuation.agent_prompt_id
-                    )
-                })
-                .expect("continuation start");
-            let finish_index = records
-                .iter()
-                .position(|record| {
-                    matches!(
-                        &record.event,
-                        Event::AgentOuterTurnFinished(finished)
-                            if finished.automatic_compaction_decision.as_ref()
-                                == Some(&transaction_id)
-                    )
-                })
-                .expect("finish");
-            let start_index = records
-                .iter()
-                .position(|record| {
-                    matches!(
-                        &record.event,
-                        Event::AgentStandaloneCompactionStarted(started)
-                            if started.transaction_id == transaction_id
-                    )
-                })
-                .expect("start");
-            cut = match cut_name {
-                "continuation_started" => continuation_index + 1,
-                "terminal_decision" => terminal_index + 1,
-                "outer_finished" => finish_index + 1,
-                "standalone_started" => start_index + 1,
-                _ => unreachable!(),
-            };
-            h.shutdown().expect("shutdown seed");
-        }
-        wait_for_session_unlock(&state, "s1");
-        rewrite_agent_records(&state, &agent_id, &records[..cut]);
-
-        let mut previous_reopen_records: Option<Vec<tau_core::PersistedAgentEvent>> = None;
-        for reopen in 1..=3 {
-            let expected = match (cut_name, reopen) {
-                ("continuation_started", _) => (1, 0, 0, 0),
-                ("terminal_decision" | "outer_finished", _) => (2, 1, 1, 1),
-                ("standalone_started", _) => (2, 1, 1, 1),
-                _ => unreachable!(),
-            };
-            let mut restored = quiet_provider_harness_with_start_reason(
-                &state,
-                tau_proto::SessionStartReason::Resume,
-            )
-            .unwrap_or_else(|error| panic!("cut={cut_name} reopen={reopen}: {error}"));
-            let restored_records = restored
-                .session_runtime
-                .agent_store
-                .agent_events(agent_id.as_str())
-                .expect("restored records");
-            let counts = automatic_policy_recovery_counts(&restored_records, &transaction_id);
-            assert_eq!(
-                counts, expected,
-                "cut={cut_name} reopen={reopen} repaired a non-owed fact"
-            );
-            assert!(
-                restored
-                    .prompt_coordination
-                    .prompt_runtime
-                    .pending_publish_completions
-                    .is_empty(),
-                "cut={cut_name} reopen={reopen} retained a completion"
-            );
-            let quiescent = match cut_name {
-                "continuation_started" | "standalone_started" => 2 <= reopen,
-                "terminal_decision" | "outer_finished" => 3 <= reopen,
-                _ => unreachable!(),
-            };
-            if quiescent {
-                let previous = previous_reopen_records
-                    .as_ref()
-                    .expect("quiescent reopen has predecessor");
-                assert_eq!(
-                    automatic_policy_recovery_events(&restored_records),
-                    automatic_policy_recovery_events(previous),
-                    "cut={cut_name} final reopen appended an unowed lifecycle record"
-                );
-            }
-            previous_reopen_records = Some(restored_records);
-            restored.shutdown().expect("shutdown reopen");
-            drop(restored);
-            wait_for_session_unlock(&state, "s1");
-        }
-    }
-}
-
 /// While a parent's `agent_start` tool call is in flight, the harness
 /// must still dispatch the spawned side conversation's prompt
 /// immediately — the parent's `ToolsRunning` turn state is logically
@@ -4208,7 +4016,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         originator: tau_proto::PromptOriginator::User,
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -4314,7 +4122,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         },
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -4599,7 +4407,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
         originator: tau_proto::PromptOriginator::User,
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -4753,7 +4561,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
         originator: tau_proto::PromptOriginator::User,
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -4933,7 +4741,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
         },
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: Some(responses_backend()),
         provider_attempt: Default::default(),
         provider_response_id: Some("resp_parent".to_owned()),
@@ -5067,7 +4875,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         originator: tau_proto::PromptOriginator::User,
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -5314,7 +5122,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         originator: tau_proto::PromptOriginator::User,
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -5388,7 +5196,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         },
 
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -6001,7 +5809,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -6140,7 +5948,7 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -6249,7 +6057,7 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -6630,7 +6438,7 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -6783,7 +6591,7 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -6890,7 +6698,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -7070,4 +6878,203 @@ fn completed_call_clears_all_runtime_observation_correlation_before_id_reuse() {
             .pending_wait_settlements
             .contains_key(&call_id)
     );
+}
+
+/// Post-tool lifecycle recovery repairs exactly the currently owed automatic
+/// suffix in stages: terminal/finish cuts first add the protected start, the
+/// next reopen records the now-interrupted in-flight transaction, and only the
+/// following reopen is quiescent. A start cut owes that interruption on its
+/// first reopen; a continuation-start cut owes no compaction repair.
+#[test]
+fn post_tool_automatic_policy_crash_cuts_repair_owed_suffix_once() {
+    for cut_name in [
+        "continuation_started",
+        "terminal_decision",
+        "outer_finished",
+        "standalone_started",
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join("state");
+        let (agent_id, transaction_id, records, cut);
+        {
+            let mut h = quiet_provider_harness(&state).expect("start");
+            enable_remote_compaction_for_test_model(&mut h);
+            let info = h
+                .provider_runtime
+                .model_info
+                .get_mut(&"test/model".into())
+                .expect("test model");
+            info.supports_compaction = false;
+            info.supports_standalone_compaction = true;
+            let cid = ensure_test_user_agent(&mut h);
+            h.config
+                .available_roles
+                .get_mut(&h.config.selected_role)
+                .expect("selected role")
+                .compactions
+                .insert(
+                    "crash-cut".to_owned(),
+                    tau_config::settings::CompactionPolicy {
+                        threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(100),
+                        enable: true,
+                        when: tau_config::settings::ContextPolicyWhen {
+                            at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
+                            statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
+                        },
+                    },
+                );
+            h.dispatch_prompt_for_agent(
+                &cid,
+                PendingPrompt::user(format!("post-tool crash cut {cut_name}")),
+            )
+            .expect("dispatch inference");
+            let initial = read_nth_prompt_created(&h, 0);
+            h.handle_provider_response_finished(provider_tool_response(
+                &initial,
+                &format!("crash-cut-call-{cut_name}"),
+                "self_info",
+                CborValue::Map(Vec::new()),
+            ))
+            .expect("finish tool round");
+            let continuation = read_nth_prompt_created(&h, 1);
+            h.config
+                .available_roles
+                .get_mut(&h.config.selected_role)
+                .expect("selected role")
+                .compactions
+                .clear();
+            let mut response = provider_text_response(
+                &continuation.agent_prompt_id,
+                continuation.agent_id.clone(),
+                "done",
+            );
+            response.usage = Some(tau_proto::ProviderTokenUsage {
+                prompt_sent_tokens: 250,
+                response_received_tokens: 1,
+                ..Default::default()
+            });
+            h.handle_provider_response_finished(response)
+                .expect("finish continuation");
+            agent_id = continuation.agent_id.clone();
+            records = h
+                .session_runtime
+                .agent_store
+                .agent_events(agent_id.as_str())
+                .expect("records");
+            let terminal_index = records
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event,
+                        Event::ProviderResponseFinished(response)
+                            if response.agent_prompt_id == continuation.agent_prompt_id
+                                && response.automatic_compaction_decision.is_some()
+                    )
+                })
+                .expect("decision terminal");
+            transaction_id = match &records[terminal_index].event {
+                Event::ProviderResponseFinished(response) => response
+                    .automatic_compaction_decision
+                    .as_ref()
+                    .expect("decision")
+                    .transaction_id
+                    .clone(),
+                _ => unreachable!("located response"),
+            };
+            let continuation_index = records
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event,
+                        Event::AgentPromptStarted(started)
+                            if started.agent_prompt_id == continuation.agent_prompt_id
+                    )
+                })
+                .expect("continuation start");
+            let finish_index = records
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event,
+                        Event::AgentOuterTurnFinished(finished)
+                            if finished.automatic_compaction_decision.as_ref()
+                                == Some(&transaction_id)
+                    )
+                })
+                .expect("finish");
+            let start_index = records
+                .iter()
+                .position(|record| {
+                    matches!(
+                        &record.event,
+                        Event::AgentStandaloneCompactionStarted(started)
+                            if started.transaction_id == transaction_id
+                    )
+                })
+                .expect("start");
+            cut = match cut_name {
+                "continuation_started" => continuation_index + 1,
+                "terminal_decision" => terminal_index + 1,
+                "outer_finished" => finish_index + 1,
+                "standalone_started" => start_index + 1,
+                _ => unreachable!(),
+            };
+            h.shutdown().expect("shutdown seed");
+        }
+        wait_for_session_unlock(&state, "s1");
+        rewrite_agent_records(&state, &agent_id, &records[..cut]);
+
+        let mut previous_reopen_records: Option<Vec<tau_core::PersistedAgentEvent>> = None;
+        for reopen in 1..=3 {
+            let expected = match (cut_name, reopen) {
+                ("continuation_started", _) => (1, 0, 0, 0),
+                ("terminal_decision" | "outer_finished", 1) => (2, 1, 1, 0),
+                ("terminal_decision" | "outer_finished", _) => (2, 1, 1, 1),
+                ("standalone_started", _) => (2, 1, 1, 1),
+                _ => unreachable!(),
+            };
+            let mut restored = quiet_provider_harness_with_start_reason(
+                &state,
+                tau_proto::SessionStartReason::Resume,
+            )
+            .unwrap_or_else(|error| panic!("cut={cut_name} reopen={reopen}: {error}"));
+            let restored_records = restored
+                .session_runtime
+                .agent_store
+                .agent_events(agent_id.as_str())
+                .expect("restored records");
+            let counts = automatic_policy_recovery_counts(&restored_records, &transaction_id);
+            assert_eq!(
+                counts, expected,
+                "cut={cut_name} reopen={reopen} repaired a non-owed fact"
+            );
+            assert!(
+                restored
+                    .prompt_coordination
+                    .prompt_runtime
+                    .pending_publish_completions
+                    .is_empty(),
+                "cut={cut_name} reopen={reopen} retained a completion"
+            );
+            let quiescent = match cut_name {
+                "continuation_started" | "standalone_started" => 2 <= reopen,
+                "terminal_decision" | "outer_finished" => 3 <= reopen,
+                _ => unreachable!(),
+            };
+            if quiescent {
+                let previous = previous_reopen_records
+                    .as_ref()
+                    .expect("quiescent reopen has predecessor");
+                assert_eq!(
+                    automatic_policy_recovery_events(&restored_records),
+                    automatic_policy_recovery_events(previous),
+                    "cut={cut_name} final reopen appended an unowed lifecycle record"
+                );
+            }
+            previous_reopen_records = Some(restored_records);
+            restored.shutdown().expect("shutdown reopen");
+            drop(restored);
+            wait_for_session_unlock(&state, "s1");
+        }
+    }
 }

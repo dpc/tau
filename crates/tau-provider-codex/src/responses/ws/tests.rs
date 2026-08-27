@@ -245,7 +245,7 @@ fn test_responses_config() -> ResponsesConfig {
         base_url: "https://chatgpt.com/backend-api".to_owned(),
         api_key: "test-token".to_owned(),
         model_id: "gpt-test".to_owned(),
-        raw_context_window: 128_000,
+        raw_context_window: tau_proto::TokenCount::new(128_000),
         account_id: None,
         supports_reasoning_effort: true,
         supports_reasoning_summary: true,

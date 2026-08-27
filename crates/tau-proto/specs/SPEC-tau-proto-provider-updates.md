@@ -63,12 +63,8 @@ body. `action=reactive_compaction_planned` is valid only with the matching
 `recovery_disposition`; absent fields preserve legacy decoding.
 
 Raw provider input usage remains separate from the optional exact JSON byte
-length of transcript growth. The conservative token projection uses byte-free
-JSON structure plus explicit canonical-image byte and patch accounting; neither
-projection nor exact serialized bytes are provider-token evidence. Categorical
-below/at-or-above observations require a positive advertised limit and nonzero
-provider usage, while projection-only or contradictory cases are
-`insufficient_evidence`. If exact transcript serialization or checked
-projection aggregation is unavailable, the corresponding field is absent.
-These diagnostics never calibrate limits or
+length of transcript growth. Tau does not derive token counts from transcript
+bytes or image dimensions. Categorical below/at-or-above observations require a
+positive advertised limit and nonzero provider usage; otherwise the observation
+is `insufficient_evidence`. These diagnostics never calibrate limits or
 thresholds automatically.

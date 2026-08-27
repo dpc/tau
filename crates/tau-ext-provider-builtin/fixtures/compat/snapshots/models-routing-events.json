@@ -326,7 +326,6 @@
         "text",
         "image"
       ],
-      "standalone_compaction_prefix_budget": 334800,
       "standalone_compaction_threshold": 334800,
       "supported_tool_types": [
         "function",
@@ -395,7 +394,6 @@
         "text",
         "image"
       ],
-      "standalone_compaction_prefix_budget": 334800,
       "standalone_compaction_threshold": 334800,
       "supported_tool_types": [
         "function",
@@ -464,7 +462,6 @@
         "text",
         "image"
       ],
-      "standalone_compaction_prefix_budget": 334800,
       "standalone_compaction_threshold": 334800,
       "supported_tool_types": [
         "function",
@@ -775,9 +772,7 @@
       ],
       "verbosities": [
         "medium"
-      ],
-      "standalone_compaction_prefix_budget": 27777,
-      "standalone_compaction_threshold": 6944
+      ]
     },
     {
       "context_window": 131072,
@@ -805,9 +800,7 @@
       ],
       "verbosities": [
         "medium"
-      ],
-      "standalone_compaction_prefix_budget": 125952,
-      "standalone_compaction_threshold": 31488
+      ]
     }
   ],
   "routes": [

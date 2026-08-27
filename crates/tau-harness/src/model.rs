@@ -493,7 +493,9 @@ pub(crate) fn context_window_for_model(
     provider_models: &HashMap<ModelId, ProviderModelInfo>,
     model: &ModelId,
 ) -> Option<u64> {
-    provider_models.get(model).map(|info| info.context_window)
+    provider_models
+        .get(model)
+        .map(|info| info.context_window.get())
 }
 
 /// Convert used input tokens into a clamped percentage of the context window.

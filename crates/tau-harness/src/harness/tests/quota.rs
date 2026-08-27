@@ -11,7 +11,7 @@ fn quota_model() -> tau_proto::ProviderModelInfo {
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
         default_affinity: 0,
-        context_window: 100_000,
+        context_window: tau_proto::TokenCount::new(100_000),
         efforts: vec![tau_proto::Effort::Off],
         verbosities: vec![tau_proto::Verbosity::Low],
         thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
@@ -823,7 +823,7 @@ fn model_change_preserves_provider_sequence_space() {
         },
     );
     let mut changed = quota_model();
-    changed.context_window = 200_000;
+    changed.context_window = tau_proto::TokenCount::new(200_000);
     harness.apply_provider_models_snapshot(&crate::test_connection_id("owner"), vec![changed]);
     assert_eq!(
         harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]

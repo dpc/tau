@@ -1,4 +1,17 @@
+use std::num::{NonZeroU32, NonZeroU64};
+
 use super::*;
+
+fn summary_config() -> SummaryCompactionConfig {
+    SummaryCompactionConfig::new(
+        NonZeroU64::new(128_000).expect("positive"),
+        128_000,
+        NonZeroU64::new(16_384).expect("positive"),
+        NonZeroU32::new(4_096).expect("positive"),
+        NonZeroU64::new(8_192).expect("positive"),
+    )
+    .expect("valid explicit summary profile")
+}
 
 /// Public Responses accepts legacy retention and its one opt-in typed
 /// input-text boundary while rejecting the Chat Completions boundary.
@@ -171,7 +184,7 @@ fn profile_publishes_default_responses_efforts() {
     );
     assert!(!models[0].supports_compaction);
     assert!(models[0].supports_standalone_compaction);
-    assert_eq!(models[0].standalone_compaction_threshold, Some(30_720));
+    assert_eq!(models[0].standalone_compaction_threshold, None);
 }
 
 /// Public Responses emits both visible reasoning text and an opaque replay
@@ -198,7 +211,7 @@ fn summary_validation_accepts_responses_dual_reasoning_representation() {
             responses_raw_json: None,
         }),
     ];
-    let config = SummaryCompactionConfig::default_for(128_000).expect("ordinary context");
+    let config = summary_config();
     assert!(matches!(
         validate_responses_narrative_output(items, config),
         Ok(tau_proto::ContextItem::LocalCompactionNarrative(_))
@@ -242,7 +255,7 @@ fn summary_prompt_appends_instruction_to_ordinary_prefix() {
     prompt.tools_ref = Some(tau_proto::PromptToolsRef {
         base_agent_prompt_id: "old-tools".parse().expect("prompt id"),
     });
-    let config = SummaryCompactionConfig::default_for(128_000).expect("ordinary context");
+    let config = summary_config();
     let compact = materialize_summary_prompt(&prompt, config).expect("summary prompt");
     assert_eq!(compact.system_prompt, prompt.system_prompt);
     assert_eq!(compact.context.blocks.len(), 1);
@@ -276,7 +289,7 @@ fn summary_retry_policy_terminalizes_only_after_semantic_output() {
     assert!(!summary_retry_is_terminal(true, &progress(false)));
     assert!(summary_retry_is_terminal(true, &progress(true)));
     assert!(!summary_retry_is_terminal(false, &progress(true)));
-    let config = SummaryCompactionConfig::default_for(128_000).expect("ordinary context");
+    let config = summary_config();
     assert_eq!(attempt_output_tokens(99, Some(config), true), 4096);
 }
 

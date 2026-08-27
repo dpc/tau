@@ -514,7 +514,7 @@ impl EventRenderer {
                         &self.resources.theme,
                         Self::compaction_success_status(
                             finished.compaction_original_input_tokens,
-                            finished.compaction_compacted_input_tokens,
+                            finished.compaction_output_tokens,
                         ),
                         CompactionStatus::Success,
                     ),

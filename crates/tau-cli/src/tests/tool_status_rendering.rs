@@ -932,7 +932,7 @@ fn model_status_shows_main_tools_then_context_then_quota() {
         },
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1514,7 +1514,7 @@ fn watched_agent_response_finished_keeps_status_row() {
         },
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -1721,7 +1721,7 @@ fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
         },
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -2458,14 +2458,8 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     assert_eq!(progress.matches("Compacting…").count(), 1, "{progress}");
 
     renderer.handle(&Event::AgentCompacted(AgentCompacted {
-        original_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
-            tokens: 226_200,
-            provenance: tau_proto::CompactionTokenProvenance::ProviderReported,
-        }),
-        compacted_input_tokens: Some(tau_proto::CompactionTokenMeasurement {
-            tokens: 4_500,
-            provenance: tau_proto::CompactionTokenProvenance::ProviderReported,
-        }),
+        original_input_tokens: Some(tau_proto::TokenCount::new(226_200)),
+        compaction_output_tokens: Some(tau_proto::TokenCount::new(4_500)),
         agent_id: agent_id("main"),
         transaction_id: Some(
             tau_proto::CompactionTransactionId::parse("ct-self")
@@ -2481,7 +2475,7 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
     sync(&handle);
     let compacted = vt.screen_text(100).join("\n");
     assert!(
-        compacted.contains("#226.2k → #4.5k (2%) 0s ok"),
+        compacted.contains("#226.2k in / #4.5k out 0s ok"),
         "{compacted}"
     );
     assert!(!compacted.contains("complete"), "{compacted}");
@@ -2565,7 +2559,7 @@ fn watched_agent_provider_prompt_terminal_keeps_status_row() {
         },
         usage: None,
         compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction_output_tokens: None,
         backend: None,
         provider_attempt: Default::default(),
         provider_response_id: None,
@@ -3478,57 +3472,41 @@ fn late_self_compaction_tool_start_adopts_retained_lifecycle_status() {
     assert_eq!(text.matches("Compacting…").count(), 1, "{text}");
 }
 
-/// Compaction terminals must keep `ok` last, distinguish estimates, round the
-/// retained ratio, and degrade without inventing a percentage or missing count.
+/// Compaction terminals must keep input and provider output accounting distinct
+/// and degrade without presenting output usage as retained input.
 #[test]
-fn compaction_success_status_formats_provenance_and_partial_measurements() {
-    use tau_proto::{CompactionTokenMeasurement as Measurement, CompactionTokenProvenance};
-
-    let exact = |tokens| Measurement {
-        tokens,
-        provenance: CompactionTokenProvenance::ProviderReported,
-    };
-    let estimated = |tokens| Measurement {
-        tokens,
-        provenance: CompactionTokenProvenance::Estimated,
-    };
+fn compaction_success_status_formats_exact_and_partial_measurements() {
+    let exact = |tokens| tau_proto::TokenCount::new(tokens);
 
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(
             Some(exact(226_200)),
-            Some(estimated(4_500)),
-        ),
-        "#226.2k → ~#4.5k (2%) ok"
-    );
-    assert_eq!(
-        EventRenderer::standalone_compaction_success_status(
-            Some(estimated(226_200)),
             Some(exact(4_500)),
         ),
-        "~#226.2k → #4.5k (2%) ok"
+        "#226.2k in / #4.5k out ok"
     );
     assert_eq!(
-        EventRenderer::standalone_compaction_success_status(Some(estimated(12_000)), None),
-        "~#12k → ? ok"
+        EventRenderer::standalone_compaction_success_status(Some(exact(12_000)), None),
+        "#12k in / ? out ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(None, Some(exact(4_500))),
-        "? → #4.5k ok"
+        "? in / #4.5k out ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(Some(exact(0)), Some(exact(1))),
-        "#0 → #1 ok"
+        "#0 in / #1 out ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(Some(exact(3)), Some(exact(2))),
-        "#3 → #2 (67%) ok"
+        "#3 in / #2 out ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(
             Some(exact(u64::MAX)),
             Some(exact(u64::MAX)),
         ),
-        "#18446744073709.5m → #18446744073709.5m (100%) ok"
+        "#18446744073709.5m in / #18446744073709.5m out ok"
     );
     assert_eq!(
         EventRenderer::standalone_compaction_success_status(None, None),
@@ -5919,6 +5897,7 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
             cut: tau_proto::AgentHead::Root,
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: None,
+            context_retreat: None,
         },
     ));
 

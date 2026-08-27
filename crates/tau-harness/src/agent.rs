@@ -764,6 +764,7 @@ impl Agent {
                 context_input_tokens: None,
                 context_usage_head: None,
                 context_usage_model: None,
+                context_usage_prompt_id: None,
                 context_cached_tokens: None,
                 context_percent_used: None,
                 fired_context_size_alerts: HashSet::new(),

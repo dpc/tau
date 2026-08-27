@@ -1129,7 +1129,7 @@ pub(crate) fn assemble_prompt_context_prefix_from(
 pub(crate) fn active_prompt_prefix_json_measurements(
     tree: &tau_core::AgentTree,
     active_head: Option<tau_core::NodeId>,
-) -> Option<Vec<(tau_core::NodeId, u64)>> {
+) -> Option<Vec<(tau_core::NodeId, tau_proto::ByteCount)>> {
     let mut measurements = Vec::new();
     let _ = assemble_prompt_context_window(tree, active_head, None, Some(&mut measurements));
     Some(measurements)
@@ -1159,7 +1159,7 @@ fn assemble_prompt_context_window(
     tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,
     prefix_through: Option<tau_proto::AgentHead>,
-    mut measurements: Option<&mut Vec<(tau_core::NodeId, u64)>>,
+    mut measurements: Option<&mut Vec<(tau_core::NodeId, tau_proto::ByteCount)>>,
 ) -> AssembledPromptContext {
     let mut blocks: Vec<tau_proto::ContextBlock> = Vec::new();
     let mut contains_payload_envelope_provenance_projection = false;
@@ -1213,7 +1213,8 @@ fn assemble_prompt_context_window(
     })
     .ok()
     .and_then(|encoded| u64::try_from(encoded.len()).ok())
-    .unwrap_or(u64::MAX);
+    .map(tau_proto::ByteCount::new)
+    .unwrap_or(tau_proto::ByteCount::MAX);
     let mut serialized_block_count = blocks.len() + usize::from(measurement_prefix.is_some());
 
     for (node_id, entry) in active_window.transcript {
@@ -1519,11 +1520,16 @@ fn assemble_prompt_context_window(
             let block_bytes = serde_json::to_vec(block)
                 .ok()
                 .and_then(|encoded| u64::try_from(encoded.len()).ok())
-                .unwrap_or(u64::MAX);
+                .map(tau_proto::ByteCount::new)
+                .unwrap_or(tau_proto::ByteCount::MAX);
             serialized_bytes = serialized_bytes
                 .checked_add(block_bytes)
-                .and_then(|bytes| bytes.checked_add(u64::from(serialized_block_count != 0)))
-                .unwrap_or(u64::MAX);
+                .and_then(|bytes| {
+                    bytes.checked_add(tau_proto::ByteCount::new(u64::from(
+                        serialized_block_count != 0,
+                    )))
+                })
+                .unwrap_or(tau_proto::ByteCount::MAX);
             serialized_block_count = serialized_block_count.saturating_add(1);
         }
         if let Some(measurements) = measurements.as_deref_mut() {

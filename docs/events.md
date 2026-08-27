@@ -307,9 +307,10 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   exactly once. New boundaries require the transaction id, cut, suffix end,
   compact prompt id, provider-qualified model, and standalone operation as one
   all-present group matching the durable start. Legacy records have all six
-  absent and remain hard boundaries. Optional before/after token measurements
-  identify exact provider-reported usage or an estimate; absent fields preserve
-  older journal semantics. Connection ids are intentionally not
+  absent and remain hard boundaries. Optional compact-request input/output token
+  counts are provider-reported display/accounting only; absent fields preserve
+  older journal semantics, and legacy estimate provenance grants no authority.
+  Connection ids are intentionally not
   durable. Either form invalidates any previous-response chain.
 - **`agent.display_name_set`** — Durable fact that changes an agent's
   human-friendly display name. Carries `agent_id` and the new non-empty display
@@ -407,19 +408,16 @@ their selected models.
   rejection may carry a machine-readable `failure_kind`; notably,
   `context_window_exceeded` is independent of bounded display `error` prose.
   Such a rejection may also carry harness-authored `context_limit_telemetry`:
-  provider-qualified model, operation, projected/provider input tokens,
-  optional exact serialized transcript-growth bytes, advertised window, reserve,
-  and a closed observation category. Exact serialized byte growth is independent
-  telemetry and is not provider token usage or projection input. Projection
-  counts byte-free JSON structure plus canonical encoded-image bytes and
-  rounded-up 32-by-32 image patches. Either value may be absent independently
-  when its own serialization or checked aggregation is unavailable. The
-  projection contains no prompt/error/body text. It is diagnostic evidence only
-  and never changes model metadata or thresholds automatically. The active
-  explicit threshold and closed policy,
+  provider-qualified model and operation, optional provider-reported input
+  tokens, optional exact serialized transcript-growth bytes, the advertised
+  token window, and a closed observation category. Exact serialized byte growth
+  is independent telemetry and is never interpreted as provider token usage.
+  Either measurement may be absent independently. The telemetry contains no
+  prompt/error/body text and never changes model metadata or thresholds
+  automatically. The active explicit threshold and closed policy,
   eligibility flag, and harness action distinguish terminal handling from one
   planned reactive compaction.
-  A transcript projection without nonzero `provider_input_tokens` is classified
+  A rejection without nonzero `provider_input_tokens` is classified
   as `insufficient_evidence`; it cannot by itself claim rejection below or above
   the advertised provider limit.
   Usage is absent when every provider counter is unavailable; an explicitly
@@ -972,14 +970,34 @@ the closed reason `unexpected_unload` or `restored_delegation_route_lost`.
 
 ### Reactive context recovery fields
 
-`agent.inference_dispatch_started` optionally records the provider-qualified `model`, `operation`, and immutable pre-activation `activation_cut`; legacy records omit these and cannot authorize automatic recovery. `provider.response_finished.recovery_disposition` is harness-authored, defaults to `none`, and is `reactive_compaction_planned` only for a canonical no-output ordinary-inference context rejection. `agent.standalone_compaction_started.trigger` defaults to `manual`; `automatic_threshold` identifies deferred proactive role/model threshold work, `automatic_policy` uniquely claims a terminal-owned eager decision, and `reactive_context_overflow` carries the failed inference prompt id and uniquely claims that planned recovery. `automatic_continuation` links one successful proactive or reactive rolling pass to its immediate durable predecessor. `automatic_preflight_failure` commits a typed no-provider-dispatch terminal under one of three authorities: an initial threshold with neither correlation id, an eager decision id, or an immediate rolling predecessor id. All three may use `prefix_too_large`; only a predecessor-linked reactive chain may use `route_failed`.
+`agent.inference_dispatch_started` optionally records the provider-qualified
+`model`, `operation`, and immutable pre-activation `activation_cut`; legacy
+records omit these and cannot authorize automatic recovery.
+`provider.response_finished.recovery_disposition` is harness-authored, defaults
+to `none`, and is `reactive_compaction_planned` only for a canonical no-output
+ordinary-inference context rejection.
+`agent.standalone_compaction_started.trigger` defaults to `manual`.
+`automatic_threshold_evidence` carries the uniquely claimed newest ancestral
+provider prompt, its nonzero reported input count, the exact crossed threshold,
+and threshold source. Legacy `automatic_threshold` decodes but supplies no new
+authority. `automatic_policy` uniquely claims a terminal-owned eager decision,
+whose evidence carries the same exact fields. `reactive_context_overflow`
+carries the failed inference prompt id and claims that planned recovery.
+A typed standalone context rejection may commit a `context_retreat` successor
+plan; its `automatic_context_retreat` start must claim that exact plan and strict
+previous provider-closed cut. `automatic_continuation` links only a successful
+rejection-authorized forward-rolling pass to its immediate durable predecessor.
+`automatic_preflight_failure` commits a typed no-provider-dispatch byte-budget or
+route terminal under its correlated authority.
 
 `provider.response_finished.automatic_compaction_decision` and the corresponding
 field on a harness-authored canceled `agent.prompt_terminated` are optional
-harness authority. They carry one coalesced eager action identity, outer-turn
-identity, resolved model, and effective threshold. A response's assistant node,
-or a cancellation terminal's parent, is the cut. The matching outer-turn finish
-repeats the action identity before a protected standalone start may claim it.
+harness authority. New decisions carry one coalesced eager action identity,
+outer-turn identity, resolved model, effective threshold, and exact provider
+evidence. Evidence-less legacy decisions remain decodable but cannot start
+provider work. A response's assistant node, or a cancellation terminal's parent,
+is the cut. The matching outer-turn finish repeats the action identity before a
+protected standalone start may claim it.
 
 `provider.response_finished.output_length_disposition` is also harness-authored
 and defaults to `none`. An eligible reasoning-only `length` terminal may carry

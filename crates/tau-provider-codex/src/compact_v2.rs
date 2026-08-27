@@ -2,8 +2,8 @@
 
 use tau_proto::{ContentPart, ContextItem, ContextRole, MessageItem, PromptContext};
 
-const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
-const MAX_RETAINED_AGENT_MESSAGE_TOKENS: usize = 10_000;
+const RETAINED_MESSAGE_BYTE_BUDGET: usize = 256_000;
+const MAX_RETAINED_AGENT_MESSAGE_BYTES: usize = 40_000;
 
 /// Builds the approved ChatGPT-v2 replacement from exact retained input and
 /// the single canonical provider compaction item.
@@ -15,19 +15,21 @@ pub(super) fn build_v2_compacted_window(
         .flatten_iter()
         .filter_map(|item| retained_message(&item))
         .collect::<Vec<_>>();
-    let mut remaining = RETAINED_MESSAGE_TOKEN_BUDGET;
+    let mut remaining = RETAINED_MESSAGE_BYTE_BUDGET;
     let mut retained = Vec::new();
     for item in candidates.into_iter().rev() {
         if remaining == 0 {
-            continue;
+            break;
         }
-        let tokens = message_tokens(&item).max(1);
-        if tokens <= remaining {
-            remaining = remaining.saturating_sub(tokens);
+        let bytes = message_bytes(&item);
+        if bytes <= remaining {
+            remaining = remaining.saturating_sub(bytes);
             retained.push(ContextItem::Message(item));
         } else if let Some(item) = truncate_message(item, remaining) {
             retained.push(ContextItem::Message(item));
-            remaining = 0;
+            break;
+        } else {
+            break;
         }
     }
     retained.reverse();
@@ -55,18 +57,18 @@ fn retained_message(item: &ContextItem) -> Option<MessageItem> {
                 || (text.starts_with("<tau_internal>") && text.contains("\n\n<tau_peer_message "))
         })
     });
-    if is_agent_message && MAX_RETAINED_AGENT_MESSAGE_TOKENS < message_tokens(message) {
+    if is_agent_message && MAX_RETAINED_AGENT_MESSAGE_BYTES < message_bytes(message) {
         return None;
     }
     Some(message.clone())
 }
 
-fn message_tokens(message: &MessageItem) -> usize {
+fn message_bytes(message: &MessageItem) -> usize {
     message
         .content
         .iter()
         .filter_map(content_text)
-        .map(|text| text.len().div_ceil(4))
+        .map(str::len)
         .sum()
 }
 
@@ -76,8 +78,8 @@ fn content_text(part: &ContentPart) -> Option<&str> {
     }
 }
 
-fn truncate_message(mut message: MessageItem, max_tokens: usize) -> Option<MessageItem> {
-    let mut remaining = max_tokens;
+fn truncate_message(mut message: MessageItem, max_bytes: usize) -> Option<MessageItem> {
+    let mut remaining = max_bytes;
     let mut content = Vec::new();
     for mut part in message.content {
         let text = match &mut part {
@@ -86,9 +88,9 @@ fn truncate_message(mut message: MessageItem, max_tokens: usize) -> Option<Messa
         if remaining == 0 {
             continue;
         }
-        let tokens = text.len().div_ceil(4);
-        if tokens <= remaining {
-            remaining = remaining.saturating_sub(tokens);
+        let bytes = text.len();
+        if bytes <= remaining {
+            remaining = remaining.saturating_sub(bytes);
         } else {
             *text = truncate_middle(text, remaining);
             remaining = 0;
@@ -104,12 +106,11 @@ fn truncate_message(mut message: MessageItem, max_tokens: usize) -> Option<Messa
     Some(message)
 }
 
-fn truncate_middle(text: &str, max_tokens: usize) -> String {
-    let max_bytes = max_tokens.saturating_mul(4);
+fn truncate_middle(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_owned();
     }
-    let marker_reserve = "…18446744073709551615 tokens truncated…".len();
+    let marker_reserve = "…18446744073709551615 bytes truncated…".len();
     if max_bytes <= marker_reserve {
         return String::new();
     }
@@ -118,9 +119,9 @@ fn truncate_middle(text: &str, max_tokens: usize) -> String {
     let right_target = content_budget.saturating_sub(left_target);
     let left = floor_char_boundary(text, left_target);
     let right_start = ceil_char_boundary(text, text.len().saturating_sub(right_target));
-    let removed_tokens = text[left..right_start].len().div_ceil(4);
+    let removed_bytes = text[left..right_start].len();
     format!(
-        "{}…{removed_tokens} tokens truncated…{}",
+        "{}…{removed_bytes} bytes truncated…{}",
         &text[..left],
         &text[right_start..]
     )

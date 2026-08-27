@@ -239,9 +239,9 @@ pub struct ResponsesConfig {
     pub api_key: String,
     /// Upstream model id without the Tau provider namespace.
     pub model_id: String,
-    /// Raw context window for the selected upstream model, before applying the
-    /// provider's effective-window safety margin.
-    pub raw_context_window: u64,
+    /// Raw token context window for the selected upstream model, before
+    /// applying the provider's effective-window safety margin.
+    pub raw_context_window: tau_proto::TokenCount,
     /// `chatgpt-account-id` header extracted from JWT.
     pub account_id: Option<String>,
     /// Whether the provider's API accepts a `reasoning.effort` field.
@@ -2134,7 +2134,7 @@ struct ContextManagementRequest {
     #[serde(rename = "type")]
     ty: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    compact_threshold: Option<u64>,
+    compact_threshold: Option<tau_proto::TokenCount>,
 }
 
 /// Connection-local response id plus proof of the exact context it represents.
@@ -2405,8 +2405,10 @@ fn build_request(
     }
 }
 
-fn provider_default_compaction_threshold(raw_context_window: u64) -> u64 {
-    (raw_context_window * 9 / 10).max(1000)
+fn provider_default_compaction_threshold(
+    raw_context_window: tau_proto::TokenCount,
+) -> tau_proto::TokenCount {
+    tau_proto::TokenCount::new((raw_context_window.get() * 9 / 10).max(1000))
 }
 
 fn build_input_items(
@@ -2507,6 +2509,7 @@ pub(crate) fn full_ws_request_bytes(
 ///
 /// Compact dispatch invalidates any cached socket before sending this shape, so
 /// it has neither a response anchor nor the ordinary prewarm `generate` flag.
+#[cfg(test)]
 pub(crate) fn compact_ws_request_bytes(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,

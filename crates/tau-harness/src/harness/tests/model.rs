@@ -52,7 +52,7 @@ fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
         default_affinity: 0,
-        context_window,
+        context_window: tau_proto::TokenCount::new(context_window),
         efforts: vec![Effort::High],
         verbosities: vec![Verbosity::Low, Verbosity::High],
         thinking_summaries: vec![ThinkingSummary::Off, ThinkingSummary::Auto],
@@ -309,7 +309,7 @@ fn provider_models_snapshot_updates_available_models() {
             .model_info
             .get(&model_id)
             .map(|info| info.context_window),
-        Some(128_000),
+        Some(tau_proto::TokenCount::new(128_000)),
     );
     assert_eq!(
         h.provider_runtime
@@ -394,7 +394,7 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
             .model_info
             .get(model_id)
             .map(|info| info.context_window),
-        Some(2_000),
+        Some(tau_proto::TokenCount::new(2_000)),
     );
     assert_eq!(
         h.provider_runtime
@@ -419,11 +419,11 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
         .collect::<Vec<_>>();
     assert!(canonical_snapshots.iter().any(|update| {
         update.publisher_extension_id.as_str() == "provider-a"
-            && update.models[0].context_window == 1_000
+            && update.models[0].context_window == tau_proto::TokenCount::new(1_000)
     }));
     assert!(canonical_snapshots.iter().any(|update| {
         update.publisher_extension_id.as_str() == "provider-z"
-            && update.models[0].context_window == 2_000
+            && update.models[0].context_window == tau_proto::TokenCount::new(2_000)
     }));
 
     h.handle_extension_event(
@@ -438,7 +438,7 @@ fn duplicate_provider_model_ids_warn_without_changing_winner() {
             .model_info
             .get(model_id)
             .map(|info| info.context_window),
-        Some(1_000),
+        Some(tau_proto::TokenCount::new(1_000)),
     );
     assert_eq!(
         h.provider_runtime
@@ -1568,7 +1568,7 @@ fn provider_model_metadata_drives_selection_state() {
                 tool_result_modalities: Vec::new(),
                 supports_parallel_tool_calls: true,
                 default_affinity: 0,
-                context_window: 654_321,
+                context_window: tau_proto::TokenCount::new(654_321),
                 efforts: vec![Effort::Off],
                 verbosities: vec![Verbosity::High],
                 thinking_summaries: vec![ThinkingSummary::Off],
@@ -1625,7 +1625,7 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 128_000,
+            context_window: tau_proto::TokenCount::new(128_000),
             efforts: vec![Effort::Off, Effort::High],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -1649,7 +1649,7 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 8_192,
+            context_window: tau_proto::TokenCount::new(8_192),
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -1763,7 +1763,7 @@ fn role_without_effort_picks_middle_provider_effort() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 128_000,
+            context_window: tau_proto::TokenCount::new(128_000),
             efforts: vec![
                 Effort::Off,
                 Effort::Minimal,
@@ -1793,7 +1793,7 @@ fn role_without_effort_picks_middle_provider_effort() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 8_192,
+            context_window: tau_proto::TokenCount::new(8_192),
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -1963,7 +1963,7 @@ fn role_missing_fields_use_model_defaults() {
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
         default_affinity: 0,
-        context_window: 8_192,
+        context_window: tau_proto::TokenCount::new(8_192),
         efforts: vec![Effort::Off, Effort::Low, Effort::High],
         verbosities: vec![Verbosity::Medium],
         thinking_summaries: vec![ThinkingSummary::Off],
@@ -1999,7 +1999,7 @@ fn role_without_verbosity_picks_low_when_supported() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 128_000,
+            context_window: tau_proto::TokenCount::new(128_000),
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2023,7 +2023,7 @@ fn role_without_verbosity_picks_low_when_supported() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 8_192,
+            context_window: tau_proto::TokenCount::new(8_192),
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2480,7 +2480,7 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 128_000,
+            context_window: tau_proto::TokenCount::new(128_000),
             efforts: vec![L::Medium, L::High, L::XHigh],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2504,7 +2504,7 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 8_192,
+            context_window: tau_proto::TokenCount::new(8_192),
             efforts: vec![L::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2577,7 +2577,7 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 128_000,
+            context_window: tau_proto::TokenCount::new(128_000),
             efforts: vec![Effort::Off],
             verbosities: vec![V::Low, V::Medium, V::High],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2601,7 +2601,7 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 128_000,
+            context_window: tau_proto::TokenCount::new(128_000),
             efforts: vec![Effort::Off],
             verbosities: vec![V::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
@@ -2653,7 +2653,7 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 128_000,
+            context_window: tau_proto::TokenCount::new(128_000),
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![T::Off, T::Auto, T::Concise, T::Detailed],
@@ -2677,7 +2677,7 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
             default_affinity: 0,
-            context_window: 8_192,
+            context_window: tau_proto::TokenCount::new(8_192),
             efforts: vec![Effort::Off],
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![T::Off],
@@ -2730,7 +2730,7 @@ fn selected_params_use_runtime_role_fields() {
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
         default_affinity: 0,
-        context_window: 128_000,
+        context_window: tau_proto::TokenCount::new(128_000),
         efforts: vec![Effort::Off, Effort::Low, Effort::High],
         verbosities: vec![Verbosity::Low, Verbosity::High],
         thinking_summaries: vec![
