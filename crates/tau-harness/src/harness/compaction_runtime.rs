@@ -969,12 +969,9 @@ impl Harness {
             }) if through == selected => transaction_id,
             _ => return false,
         };
-        let projection = active_provider_window_projected_tokens(
-            tree,
-            selected.as_option(),
-            info.context_window,
-        )
-        .unwrap_or(u64::MAX);
+        let projection = self
+            .automatic_compaction_projected_tokens(cid, model)
+            .unwrap_or(u64::MAX);
         if projection < threshold {
             return false;
         }
@@ -1443,16 +1440,7 @@ impl Harness {
             return false;
         }
         let projected_tokens = self
-            .session_runtime
-            .agent_store
-            .agent(&agent_id)
-            .and_then(|tree| {
-                active_provider_window_projected_tokens(
-                    tree,
-                    conv.identity.head,
-                    info.context_window,
-                )
-            })
+            .automatic_compaction_projected_tokens(cid, &model)
             .unwrap_or(u64::MAX);
         if threshold.is_none_or(|threshold| projected_tokens < threshold) {
             return false;
@@ -1561,6 +1549,87 @@ impl Harness {
             }),
         );
         true
+    }
+
+    /// Project the selected provider input in token units from the strongest
+    /// same-model baseline available.
+    ///
+    /// Applicable provider usage owns the first choice. Immediately after a
+    /// successful compaction, a nonzero provider-reported compacted-input
+    /// measurement owns its provider output while client-retained replacement
+    /// items and the preserved suffix remain conservatively estimated. A fully
+    /// estimated active window remains the cold/legacy fallback.
+    pub(super) fn automatic_compaction_projected_tokens(
+        &self,
+        cid: &AgentId,
+        model: &tau_proto::ModelId,
+    ) -> Option<u64> {
+        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
+        let info = self.provider_runtime.model_info.get(model)?;
+        let agent_id = agent.identity.agent_id.as_deref()?;
+        let tree = self.session_runtime.agent_store.agent(agent_id)?;
+        let reserve = context_projection_reserve(info.context_window);
+
+        if agent.execution.context_usage_model.as_ref() == Some(model)
+            && self.context_usage_baseline_applies(agent)
+        {
+            let ids = tree.branch_node_ids_from(agent.identity.head);
+            let first = agent
+                .execution
+                .context_usage_head
+                .and_then(|baseline| ids.iter().position(|id| *id == baseline))
+                .map_or(0, |index| index.saturating_add(1));
+            let growth = transcript_growth(
+                ids[first..]
+                    .iter()
+                    .filter_map(|id| tree.node(*id))
+                    .map(|node| &node.entry)
+                    .filter(|entry| {
+                        !matches!(entry, tau_core::AgentEntry::AgentMessage { .. })
+                            || crate::prompt::agent_message_is_provider_visible(entry)
+                    }),
+            );
+            return projected_input_tokens(
+                agent.execution.context_input_tokens,
+                growth.projected_tokens,
+                reserve,
+            );
+        }
+
+        let window = tree.active_provider_window(agent.identity.head);
+        if let Some(compacted) = tree.active_provider_compaction(agent.identity.head)
+            && compacted.model.as_ref() == Some(model)
+            && let Some(baseline) = compacted
+                .compacted_input_tokens
+                .as_ref()
+                .and_then(scheduling_compacted_input_tokens)
+        {
+            let retained_replacement_tokens = window
+                .replacement
+                .map(|replacement| {
+                    projected_client_retained_replacement_tokens(
+                        replacement,
+                        info.tags.iter().any(|tag| tag.as_str() == "shell:chatgpt"),
+                    )
+                })
+                .unwrap_or(Some(0))?;
+            let suffix_tokens = window.transcript.iter().try_fold(
+                retained_replacement_tokens,
+                |total, (_, entry)| {
+                    let entry_tokens = if matches!(entry, tau_core::AgentEntry::AgentMessage { .. })
+                        && !crate::prompt::agent_message_is_provider_visible(entry)
+                    {
+                        0
+                    } else {
+                        projected_transcript_entry_tokens(entry)?
+                    };
+                    total.checked_add(entry_tokens)
+                },
+            )?;
+            return projected_input_tokens(Some(baseline), Some(suffix_tokens), reserve);
+        }
+
+        active_provider_window_projected_tokens(tree, agent.identity.head, info.context_window)
     }
 
     /// Reapply durable self-compaction consumption after generic restored tool
@@ -2141,6 +2210,45 @@ impl Harness {
         })
     }
 }
+
+/// Project only ChatGPT-v2 client-retained items prepended before a provider
+/// compaction item. Other providers' ordered output and message-only local
+/// summaries are wholly covered by provider output usage.
+pub(super) fn projected_client_retained_replacement_tokens(
+    replacement: &[tau_proto::ContextItem],
+    chatgpt_v2: bool,
+) -> Option<u64> {
+    if !chatgpt_v2 {
+        return Some(0);
+    }
+    let Some(compaction_index) = replacement
+        .iter()
+        .position(|item| matches!(item, tau_proto::ContextItem::Compaction(_)))
+    else {
+        return Some(0);
+    };
+    if compaction_index == 0 {
+        return Some(0);
+    }
+    projected_transcript_entry_tokens(&tau_core::AgentEntry::Compaction {
+        replacement_window: replacement[..compaction_index].to_vec(),
+        transaction_id: None,
+        cut: None,
+        suffix_end: None,
+    })
+}
+
+/// Accept only exact nonzero provider compaction output usage as a scheduling
+/// baseline. Estimated UI measurements and provider-reported zero retain the
+/// conservative full-window fallback.
+pub(super) fn scheduling_compacted_input_tokens(
+    measurement: &tau_proto::CompactionTokenMeasurement,
+) -> Option<u64> {
+    (measurement.provenance == tau_proto::CompactionTokenProvenance::ProviderReported
+        && 0 < measurement.tokens)
+        .then_some(measurement.tokens)
+}
+
 /// Projects the complete active provider-visible window from scratch.
 ///
 /// Automatic scheduling intentionally uses the canonical transcript-entry

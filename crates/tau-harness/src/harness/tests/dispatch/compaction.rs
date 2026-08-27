@@ -477,7 +477,7 @@ fn standalone_auto_compaction_projects_and_preserves_typed_image_suffix() {
         .model_info
         .get_mut(&"test/model".into())
         .expect("test model")
-        .standalone_compaction_threshold = Some(active_projection);
+        .standalone_compaction_threshold = snapshot.projected_input_tokens;
     assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
     let compact = read_nth_prompt_created(&h, 0);
     h.provider_runtime
@@ -9425,8 +9425,8 @@ fn standalone_auto_compaction_schedules_at_threshold() {
     h.shutdown().expect("shutdown");
 }
 
-/// A large provider-usage value from an older window cannot trigger protected
-/// compaction when the current active window measured from scratch is small.
+/// A large provider-usage value from another model cannot trigger protected
+/// compaction when the selected model's active window is small.
 #[test]
 fn standalone_auto_compaction_ignores_stale_usage_baseline() {
     let td = TempDir::new().expect("tempdir");
@@ -9448,7 +9448,7 @@ fn standalone_auto_compaction_ignores_stale_usage_baseline() {
         .get_mut(&cid)
         .expect("agent");
     agent.execution.context_input_tokens = Some(100_000);
-    agent.execution.context_usage_model = Some("test/model".into());
+    agent.execution.context_usage_model = Some("stale/model".into());
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("small current turn".to_owned()))
         .expect("dispatch current turn");

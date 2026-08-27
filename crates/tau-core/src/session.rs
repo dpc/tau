@@ -1043,6 +1043,28 @@ impl AgentTree {
         window
     }
 
+    /// Return the successful compaction that owns the active replacement
+    /// boundary, when that boundary retains qualified token measurements.
+    #[must_use]
+    pub fn active_provider_compaction(
+        &self,
+        head: Option<NodeId>,
+    ) -> Option<&tau_proto::AgentCompacted> {
+        let boundary = self.active_provider_window(head).replacement_boundary?;
+        let AgentEntry::Compaction {
+            transaction_id: Some(transaction_id),
+            ..
+        } = &self.node(boundary)?.entry
+        else {
+            return None;
+        };
+        let transaction = self.compaction_transactions.get(transaction_id)?;
+        match transaction.outcome.as_ref()? {
+            CompactionTransactionOutcome::Succeeded(compacted) => Some(compacted),
+            CompactionTransactionOutcome::Failed(_) => None,
+        }
+    }
+
     /// Return whether `cut` names one occurrence in the logical active window
     /// ending at `through`.
     #[must_use]

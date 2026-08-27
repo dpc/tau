@@ -403,8 +403,15 @@ only disabling `default` or legacy replace-all disabling removes that safety
 policy.
 
 Protected automatic scheduling measures the active provider-visible window from
-scratch. Core reconstructs that logical window by folding each durable
-replacement over its selected logical prefix; it never substitutes physical
+the strongest applicable same-model token baseline. Applicable provider response
+usage contributes its reported input tokens and only later provider-visible
+transcript growth is estimated. A successful compaction contributes a nonzero
+provider-reported compacted-input measurement; client-retained replacement items
+on the ChatGPT-tagged v2 route and the preserved suffix remain conservatively
+estimated, while provider-owned output is not charged again. Estimated or zero
+compacted measurements retain the from-scratch fallback. Core reconstructs that logical
+window by folding each durable replacement over its selected logical prefix; it
+never substitutes physical
 journal ancestry for `replacement + preserved suffix`. When the window exceeds
 the scheduling guard, Tau linearly selects its latest provider-closed logical
 position within the adapter's nonzero `standalone_compaction_prefix_budget`.
