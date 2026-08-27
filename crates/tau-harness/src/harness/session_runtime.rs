@@ -455,7 +455,17 @@ impl Harness {
             );
             prompt.activation_observation = Some(activation);
         }
-        self.dispatch_prompt_for_agent(&cid, prompt)?;
+        let trace_prompt_acceptance = matches!(
+            prompt.submission_source,
+            tau_proto::PromptSubmissionSource::HumanUi
+        ) && !prompt.is_internal()
+            && prompt.initial_prompt_correlation.is_none()
+            && prompt.activation_observation.is_some();
+        if trace_prompt_acceptance {
+            self.dispatch_prompt_for_agent_with_acceptance_trace(&cid, prompt)?;
+        } else {
+            self.dispatch_prompt_for_agent(&cid, prompt)?;
+        }
         Ok(PromptSubmission::Dispatched)
     }
 

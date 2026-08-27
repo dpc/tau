@@ -127,6 +127,28 @@ pub struct EventBus {
     last_route_work: RouteWork,
 }
 
+/// Count of recipients that reached a delivery outcome for one broadcast.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DeliveryOutcomeCount {
+    /// Recipients that completed delivery handling, including failures and
+    /// retirement.
+    count: usize,
+}
+
+impl DeliveryOutcomeCount {
+    /// Returns the numeric count for diagnostic emission or local aggregation.
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.count
+    }
+
+    /// Adds one completed delivery outcome without overflowing the diagnostic
+    /// count.
+    fn increment(&mut self) {
+        self.count = self.count.saturating_add(1);
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RouteWork {
@@ -256,6 +278,45 @@ impl RouteCollector for NoReportRouteCollector {
     }
 
     fn retired(&mut self, _connection_id: ConnectionId) {}
+
+    #[cfg(test)]
+    fn probed_admitted_target(&mut self) {
+        self.work.admitted_membership_probes += 1;
+    }
+}
+
+/// Counts delivery outcomes without retaining route-report identities or
+/// errors.
+#[derive(Default)]
+struct DeliveryCountRouteCollector {
+    /// Number of eligible recipients that completed or failed delivery
+    /// handling.
+    delivery_count: DeliveryOutcomeCount,
+    #[cfg(test)]
+    /// Routing work retained for the test-only work oracle.
+    work: RouteWork,
+}
+
+impl RouteCollector for DeliveryCountRouteCollector {
+    fn skipped(&mut self, _connection_id: &ConnectionId) {}
+
+    fn blocked(&mut self, _connection_id: &ConnectionId) {}
+
+    fn delivered(&mut self, _connection_id: ConnectionId) {
+        self.delivery_count.increment();
+    }
+
+    fn failed(&mut self, _connection_id: ConnectionId, _error: crate::ConnectionSendError) {
+        self.delivery_count.increment();
+    }
+
+    fn failed_shared(&mut self, _connection_id: ConnectionId, _error: &crate::ConnectionSendError) {
+        self.delivery_count.increment();
+    }
+
+    fn retired(&mut self, _connection_id: ConnectionId) {
+        self.delivery_count.increment();
+    }
 
     #[cfg(test)]
     fn probed_admitted_target(&mut self) {
@@ -484,6 +545,27 @@ impl EventBus {
         }
         #[cfg(not(test))]
         let _ = collector;
+    }
+
+    /// Broadcasts one message and returns its delivery-outcome count without
+    /// retaining per-connection routing diagnostics.
+    pub fn publish_from_excluding_kinds_with_delivery_count(
+        &mut self,
+        source_id: Option<&ConnectionId>,
+        message: HarnessOutputMessage,
+        excluded_kinds: &[ClientKind],
+    ) -> DeliveryOutcomeCount {
+        let collector = self.publish_with_collector(
+            source_id,
+            message,
+            excluded_kinds,
+            DeliveryCountRouteCollector::default(),
+        );
+        #[cfg(test)]
+        {
+            self.last_route_work = collector.work;
+        }
+        collector.delivery_count
     }
 
     /// Lazily constructs and broadcasts one event projection when at least one

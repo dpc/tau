@@ -5,6 +5,7 @@
 
 use tau_proto::ToolResultStatus;
 
+use super::prompt_acceptance_timing::{PromptAcceptanceTerminal, PromptAcceptanceTiming};
 use super::*;
 
 impl Harness {
@@ -723,6 +724,38 @@ impl Harness {
         completion: Option<AgentPublishCompletion>,
         notify_watchers: bool,
     ) {
+        self.publish_event_for_agent_inner(cid, source, event, completion, notify_watchers, None);
+    }
+
+    /// Publish one eligible UI prompt while retaining its aggregate timing.
+    pub(super) fn publish_event_for_agent_with_prompt_acceptance(
+        &mut self,
+        cid: &AgentId,
+        source: Option<&tau_proto::ConnectionId>,
+        event: Event,
+        completion: Option<AgentPublishCompletion>,
+        prompt_acceptance: PromptAcceptanceTiming,
+        notify_watchers: bool,
+    ) {
+        self.publish_event_for_agent_inner(
+            cid,
+            source,
+            event,
+            completion,
+            notify_watchers,
+            Some(prompt_acceptance),
+        );
+    }
+
+    fn publish_event_for_agent_inner(
+        &mut self,
+        cid: &AgentId,
+        source: Option<&tau_proto::ConnectionId>,
+        event: Event,
+        completion: Option<AgentPublishCompletion>,
+        notify_watchers: bool,
+        prompt_acceptance: Option<PromptAcceptanceTiming>,
+    ) {
         if let Event::ProviderResponseFinished(finished) = &event
             && (matches!(
                 finished.stop_reason,
@@ -834,7 +867,18 @@ impl Harness {
                 .map(PostCommitContinuation::AgentPublish),
             notify_watchers,
         });
-        self.enqueue_publish(source.as_ref(), event, persist, must_pass, sync);
+        if let Some(prompt_acceptance) = prompt_acceptance {
+            self.enqueue_publish_with_prompt_acceptance(
+                source.as_ref(),
+                event,
+                persist,
+                must_pass,
+                sync,
+                prompt_acceptance,
+            );
+        } else {
+            self.enqueue_publish(source.as_ref(), event, persist, must_pass, sync);
+        }
     }
 
     /// Updates runtime prompt-route bookkeeping from the compact durable owner.
@@ -1599,6 +1643,7 @@ impl Harness {
         event: Event,
         persist: bool,
         mut sync_head_for: Option<ConversationHeadSync>,
+        mut prompt_acceptance: Option<PromptAcceptanceTiming>,
     ) {
         let mut event = event;
         self.arbitrate_output_length_terminal_cancellation(&mut event, &mut sync_head_for);
@@ -1756,10 +1801,16 @@ impl Harness {
             recorded_at,
         );
         commit_timing.semantic_persist = semantic_persist_started.elapsed();
+        if let Some(timing) = prompt_acceptance.as_mut() {
+            timing.set_semantic_admission_fold(commit_timing.semantic_persist);
+        }
         let append_outcome = match append_result {
             Ok(append_outcome) => append_outcome,
             Err(error) => {
                 commit_timing.result = CommitEventTimingResult::SemanticPersistError;
+                if let Some(timing) = prompt_acceptance.take() {
+                    timing.finish(PromptAcceptanceTerminal::SemanticAdmissionRejected);
+                }
                 self.rollback_rejected_activation_successor(&event);
                 self.clear_rejected_eager_compaction_start(&event);
                 self.rollback_failed_wait_compaction_terminal(&event);
@@ -1828,6 +1879,9 @@ impl Harness {
             self.observe_debug_log_result(result);
         }
         commit_timing.debug_log = debug_log_started.elapsed();
+        if let Some(timing) = prompt_acceptance.as_mut() {
+            timing.set_debug_record_admission(commit_timing.debug_log);
+        }
         if let Event::SessionAgentLoaded(loaded) = &event
             && loaded.session_id == self.session_runtime.current_session_id
         {
@@ -1973,6 +2027,7 @@ impl Harness {
                 (cid, completion, through)
             });
         let bus_enqueue_started = Instant::now();
+        let mut eligible_delivery_count = tau_core::DeliveryOutcomeCount::default();
         let prompt_provider_route = matches!(event, Event::AgentPromptCreated(_))
             .then(|| {
                 sync_head_for
@@ -2109,9 +2164,17 @@ impl Harness {
                 recorded_at,
                 event_without_provider_image_bytes(&event),
             );
-            self.runtime_io
-                .bus
-                .publish_from_excluding_kinds_without_report(source, observer_frame, &[]);
+            if prompt_acceptance.is_some() {
+                let delivery_count = self
+                    .runtime_io
+                    .bus
+                    .publish_from_excluding_kinds_with_delivery_count(source, observer_frame, &[]);
+                eligible_delivery_count = delivery_count;
+            } else {
+                self.runtime_io
+                    .bus
+                    .publish_from_excluding_kinds_without_report(source, observer_frame, &[]);
+            }
         }
         if let Event::AgentPromptCreated(prompt) = &event {
             self.prompt_coordination
@@ -2120,6 +2183,10 @@ impl Harness {
                 .remove(&prompt.agent_prompt_id);
         }
         commit_timing.bus_enqueue = bus_enqueue_started.elapsed();
+        if let Some(mut timing) = prompt_acceptance.take() {
+            timing.set_bus_admission(commit_timing.bus_enqueue, eligible_delivery_count);
+            timing.finish(PromptAcceptanceTerminal::Accepted);
+        }
         let post_commit_started = Instant::now();
         if let Event::ShellCommandProgress(progress) = &event {
             self.release_pending_ephemeral_shell_canonical_marker(&progress.command_id);

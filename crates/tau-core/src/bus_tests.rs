@@ -254,6 +254,28 @@ fn no_report_broadcast_matches_detailed_routing_model() {
     assert_eq!(report.failed_deliveries.len(), 3);
 }
 
+/// Count-only broadcasts must preserve detailed delivery decisions without
+/// retaining recipient identities or errors for prompt-path diagnostics.
+#[test]
+fn delivery_count_broadcast_matches_detailed_delivery_outcomes_without_report_work() {
+    let (mut detailed_bus, detailed_trace) = model_bus();
+    let (mut counted_bus, counted_trace) = model_bus();
+    let excluded = [ClientKind::Provider];
+
+    let report = detailed_bus.publish_from_excluding_kinds(None, notice(), &excluded);
+    let delivery_count =
+        counted_bus.publish_from_excluding_kinds_with_delivery_count(None, notice(), &excluded);
+
+    assert_eq!(detailed_trace.normalized(), counted_trace.normalized());
+    assert_eq!(
+        delivery_count.get(),
+        report.delivered_to.len() + report.failed_deliveries.len(),
+        "count-only routing includes successful, failed, and retired eligible recipients"
+    );
+    assert_eq!(counted_bus.last_route_work().report_id_clones, 0);
+    assert_eq!(counted_bus.last_route_work().report_entries, 0);
+}
+
 /// Detailed broadcasts retain their exact per-vector ordering while using the
 /// shared collector traversal instead of a separate routing loop.
 #[test]

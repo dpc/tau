@@ -214,7 +214,7 @@ under the existing diagnostics policy when those details are required.
 
 ## Interactive prompt latency traces
 
-Trace-level logs expose content-free observations for the local interactive
+Operational logs expose content-free observations for the local interactive
 prompt path. They are diagnostic observations, not protocol, correlation,
 ordering, acceptance, or durability facts. They never contain prompt text,
 payload values, paths, credentials, or durable observation identifiers.
@@ -246,20 +246,35 @@ payload values, paths, credentials, or durable observation identifiers.
   protocol interval. Its `traffic_class` is exactly `ui_prompt_submitted` or
   `ui_create_agent`; unrelated frames and prompt drafts do not emit these
   prompt-ingress records.
-- `tau_harness::prompt_acceptance` reports only direct authenticated `HumanUi`
-  prompt acceptance, not UI agent creation. An activation append has the fixed
-  `stage=activation_append`, `event_class=agent.activation_queued`, `agent_id`,
-  `result_class` (`success` or `failure`), `activation_append_us`, and the fixed
-  message `content-free prompt acceptance precursor`. A durable dispatch's
-  session-retention touch has the fixed `stage=session_meta_touch`, `agent_id`,
-  `result_class` (`success` or `failure`), `session_meta_touch_us`, and that same
-  fixed message. Immediate and either queued UI branch emit one activation record;
-  a durable UI dispatch emits its one session-touch record. Internal, harness,
-  extension, agent-create, passive, replay, message-wake, and other session
-  metadata traffic emits neither record. These fields contain no prompt/model
-  content, prompt, observation, request, or protocol-correlation identifiers,
-  or authority. `agent_id` is the stable durable target identity and can support
-  agent-level correlation; only timings are process-local diagnostics.
+- `tau_harness::prompt_acceptance` has TRACE-only precursors and one INFO
+  aggregate. It accepts only an authenticated, non-internal `HumanUi` prompt
+  that enters immediate dispatch after its activation observation; UI agent
+  creation, queued prompts, internal/harness/extension/passive/replay/message-wake
+  traffic, and unrelated session metadata do not own the aggregate. The existing
+  activation append and durable session-retention touch retain their fixed
+  TRACE schemas (`activation_append_us` and `session_meta_touch_us` respectively).
+  The aggregate emits exactly once with terminal `result_class`
+  `publication_accepted`, `semantic_admission_rejected`, or
+  `stale_or_torn_down`.
+- The INFO aggregate's fixed, content- and identity-free schema is
+  `ui_dispatch_to_publication_acceptance_us`, `setup_us`,
+  `interception_wait_us`, `semantic_admission_fold_us`,
+  `debug_record_admission_us`,
+  `bus_admission_us`, `residual_us`, `precursor_stats_count`, and
+  `eligible_connection_count`, plus `result_class`. Setup runs from immediate
+  dispatch to generic-publication entry; interception wait accumulates parked
+  interceptor replies; semantic admission/fold and bus admission name their
+  completed publication phases; debug-record admission is synchronous processing and queue
+  admission rather than detached filesystem writing; `precursor_stats_count`
+  counts only the session-metadata precursor inside this aggregate window;
+  residual is unclassified elapsed time; and eligible connections counts
+  bus delivery outcomes without retaining recipient identities or errors.
+  Prompt text, model data, target identity, request/observation IDs, and protocol
+  correlation never appear in this aggregate.
+- Both precursor and aggregate records use only process-local monotonic timing.
+  They are operational observations, not protocol, persistence, event-log,
+  replay, watcher, or publication authority, and they neither change nor
+  suppress existing watcher delivery.
 
 All counters use bounded state and wrapping fixed-size process-local sequences;
 none enters wire, journals, replay, or semantic persistence. Durations use

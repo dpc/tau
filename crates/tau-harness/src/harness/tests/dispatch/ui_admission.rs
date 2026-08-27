@@ -1592,11 +1592,11 @@ fn ui_prompt_interaction_append_failure_does_not_resume_or_admit() {
     h.shutdown().expect("shutdown");
 }
 
-/// UI activation appends emit one fixed, content-free trace whether they
-/// dispatch immediately or wait in the queue, while internal queue traffic
-/// remains outside the prompt-acceptance diagnostic.
+/// UI activation appends trace for immediate and queued prompts, while the
+/// aggregate trace emits only for an immediate UI dispatch and excludes
+/// internal queue traffic.
 #[test]
-fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
+fn ui_prompt_acceptance_traces_distinguish_immediate_and_queued_ui_prompts() {
     let temp = TempDir::new().expect("tempdir");
     let mut harness = echo_harness(temp.path().join("state")).expect("harness");
     let cid = ensure_test_user_agent(&mut harness);
@@ -1631,8 +1631,8 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
         assert_eq!(activation_count(), 1, "immediate UI append traces once");
         assert_eq!(
             capture.events.lock().expect("trace capture lock").len(),
-            2,
-            "immediate UI dispatch also traces its durable session touch once"
+            3,
+            "immediate UI dispatch traces durable session touch and aggregate acceptance once"
         );
 
         submit_authenticated_ui_prompt(
@@ -1735,8 +1735,8 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
     let captured_traces = capture.events.lock().expect("trace capture lock");
     assert_eq!(
         captured_traces.len(),
-        6,
-        "the immediate and drained queued UI dispatches plus all activation results are the entire trace"
+        7,
+        "the immediate aggregate trace joins the activation and session-touch traces"
     );
     let activation_traces = captured_traces
         .iter()
@@ -1849,6 +1849,53 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
         }),
         "session metadata traces retain their distinct fixed fields: {session_meta_traces:?}"
     );
+    let terminal_traces = captured_traces
+        .iter()
+        .filter(|trace| {
+            trace
+                .fields
+                .contains_key("ui_dispatch_to_publication_acceptance_us")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal_traces.len(),
+        1,
+        "only the immediately dispatched visible UI prompt emits the aggregate terminal trace"
+    );
+    assert!(
+        terminal_traces.iter().all(|trace| {
+            trace.target == "tau_harness::prompt_acceptance"
+                && trace.fields.keys().map(String::as_str).eq([
+                    "bus_admission_us",
+                    "debug_record_admission_us",
+                    "eligible_connection_count",
+                    "interception_wait_us",
+                    "precursor_stats_count",
+                    "residual_us",
+                    "result_class",
+                    "semantic_admission_fold_us",
+                    "setup_us",
+                    "ui_dispatch_to_publication_acceptance_us",
+                ])
+                && trace
+                    .fields
+                    .get("result_class")
+                    .is_some_and(|value| value == "publication_accepted")
+                && trace
+                    .fields
+                    .get("precursor_stats_count")
+                    .is_some_and(|value| value == "1")
+                && trace.fields.values().all(|value| {
+                    !value.contains(&expected_trace_agent_id)
+                        && !value.contains("IMMEDIATE-UI-CANARY")
+                })
+                && trace.fields.iter().all(|(name, value)| {
+                    (name == "result_class" && value == "publication_accepted")
+                        || (name != "result_class" && value.parse::<u128>().is_ok())
+                })
+        }),
+        "terminal trace uses only its fixed, content- and identity-free field allowlist: {terminal_traces:?}"
+    );
     assert!(
         captured_traces.iter().all(|trace| {
             !trace.fields.values().any(|value| {
@@ -1862,6 +1909,337 @@ fn ui_activation_append_traces_cover_immediate_and_queued_prompts_only() {
         "trace output must not retain prompt content"
     );
     harness.shutdown().expect("shutdown");
+}
+
+/// Aggregate prompt-acceptance timing follows the bounded publication owner
+/// through a parked interceptor and resolves at the semantic admission cut.
+#[test]
+fn ui_prompt_acceptance_trace_resolves_intercepted_and_rejected_terminals() {
+    let terminal_class = |intercept_action: &dyn Fn(Event) -> InterceptAction,
+                          reject_on_reply: bool| {
+        let temp = TempDir::new().expect("tempdir");
+        let mut harness = echo_harness(temp.path().join("state")).expect("harness");
+        let cid = ensure_test_user_agent(&mut harness);
+        let agent_id = durable_agent_id_for_conversation(&harness, &cid);
+        let interceptor = connect_test_tool(&mut harness, "acceptance-interceptor");
+        harness
+            .handle_extension_event(
+                "acceptance-interceptor",
+                TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                    selectors: vec![EventSelector::Exact(
+                        tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+                    )],
+                    priority: InterceptionPriority::new(0),
+                })),
+            )
+            .expect("register interceptor");
+        let capture = TraceCapture::default();
+        let subscriber = tracing_subscriber::registry().with(TraceCaptureLayer {
+            capture: capture.clone(),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            submit_authenticated_ui_prompt(
+                &mut harness,
+                agent_id,
+                "INTERCEPTED-UI-CANARY",
+                tau_proto::PromptMessageClass::User,
+            )
+            .expect("park prompt publication");
+            let (intercepted, _) = super::super::intercepted_payload(&interceptor);
+            if reject_on_reply {
+                reject_next_semantic_admission(&harness);
+            }
+            harness
+                .handle_extension_event(
+                    "acceptance-interceptor",
+                    TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                        action: intercept_action(intercepted),
+                    })),
+                )
+                .expect("resolve interceptor");
+        });
+
+        let terminal_classes = capture
+            .events
+            .lock()
+            .expect("trace capture lock")
+            .iter()
+            .filter_map(|trace| {
+                trace
+                    .fields
+                    .contains_key("ui_dispatch_to_publication_acceptance_us")
+                    .then(|| trace.fields.get("result_class").cloned())
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminal_classes.len(),
+            1,
+            "the bounded parked owner resolves once"
+        );
+        harness.shutdown().expect("shutdown");
+        terminal_classes
+            .into_iter()
+            .next()
+            .expect("one terminal class")
+    };
+
+    assert_eq!(
+        terminal_class(&|_| InterceptAction::Pass(None), false),
+        "publication_accepted",
+        "a parked pass reaches the same publication acceptance cut as inline publication"
+    );
+    assert_eq!(
+        terminal_class(&|_| InterceptAction::Drop, false),
+        "publication_accepted",
+        "prompt publication is must-pass, so an attempted drop publishes the original"
+    );
+    assert_eq!(
+        terminal_class(&|event| InterceptAction::Pass(Some(Box::new(event))), false),
+        "publication_accepted",
+        "a parked replacement retains the aggregate trace"
+    );
+    assert_eq!(
+        terminal_class(&|_| InterceptAction::Pass(None), true),
+        "semantic_admission_rejected",
+        "a parked prompt resolves at rejected semantic admission"
+    );
+}
+
+/// Prompt-acceptance timing must not suppress the existing watcher
+/// notification: interception queues it until the parked UI prompt's semantic
+/// admission rejects.
+#[test]
+fn parked_ui_prompt_preserves_pre_admission_watcher_notification() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut harness = echo_harness(temp.path().join("state")).expect("harness");
+    harness.config.selected_model = Some("test/model".into());
+    let watched_cid = ensure_test_user_agent(&mut harness);
+    let watcher_cid = harness.create_durable_user_agent(
+        harness.session_runtime.current_session_id.clone(),
+        &harness.config.selected_role.clone(),
+    );
+    let watched_id = durable_agent_id_for_conversation(&harness, &watched_cid);
+    let watcher_id = durable_agent_id_for_conversation(&harness, &watcher_cid);
+    finish_test_agent_context_wait(&mut harness, &watcher_id);
+    harness
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&watcher_cid)
+        .expect("watcher conversation")
+        .turn
+        .turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: test_agent_prompt_id("parked-rejection-watcher-busy"),
+    };
+    harness.set_agent_watch(
+        watcher_id.as_str(),
+        watched_id.as_str(),
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let interceptor = connect_test_tool(&mut harness, "parked-watcher-interceptor");
+    harness
+        .handle_extension_event(
+            "parked-watcher-interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register interceptor");
+    let capture = TraceCapture::default();
+    let subscriber = tracing_subscriber::registry().with(TraceCaptureLayer {
+        capture: capture.clone(),
+    });
+
+    tracing::subscriber::with_default(subscriber, || {
+        submit_authenticated_ui_prompt(
+            &mut harness,
+            watched_id.clone(),
+            "PARKED-REJECTED-WATCHER-CANARY",
+            tau_proto::PromptMessageClass::User,
+        )
+        .expect("park prompt publication");
+        assert!(
+            !session_agent_message_received_events(&harness)
+                .into_iter()
+                .any(|message| message.kind == tau_proto::AgentMessageKind::WatchPrompt),
+            "the existing generic publication queue holds the watcher notification"
+        );
+
+        let (_intercepted, _) = super::super::intercepted_payload(&interceptor);
+        reject_next_semantic_admission(&harness);
+        harness
+            .handle_extension_event(
+                "parked-watcher-interceptor",
+                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                    action: InterceptAction::Pass(None),
+                })),
+            )
+            .expect("reject parked prompt admission");
+    });
+
+    assert_eq!(
+        session_agent_message_received_events(&harness)
+            .into_iter()
+            .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchPrompt)
+            .count(),
+        1,
+        "the rejected publication must not suppress or duplicate the existing watcher notification"
+    );
+    let terminal_classes = capture
+        .events
+        .lock()
+        .expect("trace capture lock")
+        .iter()
+        .filter_map(|trace| {
+            trace
+                .fields
+                .contains_key("ui_dispatch_to_publication_acceptance_us")
+                .then(|| trace.fields.get("result_class").cloned())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_classes, ["semantic_admission_rejected"]);
+    harness.shutdown().expect("shutdown");
+}
+
+/// A parked publication owns the aggregate trace until teardown releases it.
+#[test]
+fn ui_prompt_acceptance_trace_marks_parked_teardown_stale() {
+    let capture = TraceCapture::default();
+    let subscriber = tracing_subscriber::registry().with(TraceCaptureLayer {
+        capture: capture.clone(),
+    });
+
+    tracing::subscriber::with_default(subscriber, || {
+        let temp = TempDir::new().expect("tempdir");
+        let mut harness = echo_harness(temp.path().join("state")).expect("harness");
+        let cid = ensure_test_user_agent(&mut harness);
+        let agent_id = durable_agent_id_for_conversation(&harness, &cid);
+        let _interceptor = connect_test_tool(&mut harness, "teardown-interceptor");
+        harness
+            .handle_extension_event(
+                "teardown-interceptor",
+                TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                    selectors: vec![EventSelector::Exact(
+                        tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+                    )],
+                    priority: InterceptionPriority::new(0),
+                })),
+            )
+            .expect("register interceptor");
+
+        submit_authenticated_ui_prompt(
+            &mut harness,
+            agent_id,
+            "STALE-UI-CANARY",
+            tau_proto::PromptMessageClass::User,
+        )
+        .expect("park prompt publication");
+        assert!(harness.runtime_io.publication.pending_intercept.is_some());
+        harness.shutdown().expect("shutdown parked prompt");
+    });
+
+    let terminal_classes = capture
+        .events
+        .lock()
+        .expect("trace capture lock")
+        .iter()
+        .filter_map(|trace| {
+            trace
+                .fields
+                .contains_key("ui_dispatch_to_publication_acceptance_us")
+                .then(|| trace.fields.get("result_class").cloned())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_classes, ["stale_or_torn_down"]);
+}
+
+/// The aggregate trace measures bus admission with no subscriber and one
+/// matching subscriber, independent of the existing watcher notification path.
+#[test]
+fn ui_prompt_acceptance_trace_counts_eligible_live_bus_connections() {
+    let eligible_connection_count = |subscribe: bool| {
+        let capture = TraceCapture::default();
+        let subscriber = tracing_subscriber::registry().with(TraceCaptureLayer {
+            capture: capture.clone(),
+        });
+        let temp = TempDir::new().expect("tempdir");
+        let mut harness = echo_harness(temp.path().join("state")).expect("harness");
+        let cid = ensure_test_user_agent(&mut harness);
+        let agent_id = durable_agent_id_for_conversation(&harness, &cid);
+        let observer = connect_test_client(
+            &mut harness,
+            "prompt-acceptance-observer",
+            tau_proto::ClientKind::Ui,
+        );
+        if subscribe {
+            harness
+                .runtime_io
+                .bus
+                .set_subscriptions(
+                    &crate::test_connection_id("prompt-acceptance-observer"),
+                    Vec::new(),
+                    vec![EventSelector::Exact(
+                        tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+                    )],
+                )
+                .expect("subscribe observer");
+        }
+
+        tracing::subscriber::with_default(subscriber, || {
+            submit_authenticated_ui_prompt(
+                &mut harness,
+                agent_id,
+                "BUS-ADMISSION-UI-CANARY",
+                tau_proto::PromptMessageClass::User,
+            )
+            .expect("submit prompt");
+        });
+
+        if subscribe {
+            assert!(
+                observer.lock().expect("observer").iter().any(|routed| {
+                    matches!(
+                        peel_inner_event(&routed.frame),
+                        Some(Event::AgentPromptSubmitted(_))
+                    )
+                }),
+                "the matching observer receives the admitted prompt"
+            );
+        } else {
+            assert!(
+                observer.lock().expect("observer").is_empty(),
+                "an unsubscribed observer is not eligible for bus admission"
+            );
+        }
+        let counts = capture
+            .events
+            .lock()
+            .expect("trace capture lock")
+            .iter()
+            .filter_map(|trace| {
+                trace
+                    .fields
+                    .contains_key("ui_dispatch_to_publication_acceptance_us")
+                    .then(|| trace.fields.get("eligible_connection_count"))
+                    .flatten()
+                    .and_then(|count| count.parse::<usize>().ok())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(counts.len(), 1, "one prompt has one terminal trace");
+        harness.shutdown().expect("shutdown");
+        counts[0]
+    };
+
+    assert_eq!(eligible_connection_count(false), 0);
+    assert_eq!(eligible_connection_count(true), 1);
 }
 
 /// Only authenticated UI submissions may enter prompt-acceptance traces, even
@@ -2834,8 +3212,8 @@ fn ui_session_metadata_touch_worker_failure_does_not_retract_admission() {
     let captured_traces = capture.events.lock().expect("trace capture lock");
     assert_eq!(
         captured_traces.len(),
-        2,
-        "activation and touch admission both succeed before asynchronous I/O"
+        3,
+        "activation, aggregate acceptance, and touch admission all finish before asynchronous I/O"
     );
     assert!(captured_traces.iter().any(|trace| {
         trace.fields.contains_key("activation_append_us")

@@ -24,7 +24,9 @@ use tau_proto::{AgentId, Event, SessionId};
 use crate::agent as path_crate_agent;
 use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::error::HarnessError;
-use crate::harness::{AgentPublishCompletion, Harness, InferenceDispatchSelectionError};
+use crate::harness::{
+    AgentPublishCompletion, Harness, InferenceDispatchSelectionError, prompt_acceptance_timing,
+};
 
 const NO_PROVIDER_MODELS_MESSAGE: &str = "No provider models are available. Run `tau provider list` to inspect provider status, then configure or enable a provider before submitting another prompt.";
 
@@ -66,7 +68,16 @@ impl Harness {
         agent_id: &AgentId,
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
-        let mut prompt = prompt.into();
+        self.publish_pending_prompt_for_agent_inner(agent_id, prompt.into(), None)
+    }
+
+    fn publish_pending_prompt_for_agent_inner(
+        &mut self,
+        agent_id: &AgentId,
+        prompt: PendingPrompt,
+        prompt_acceptance: Option<prompt_acceptance_timing::PromptAcceptanceTiming>,
+    ) -> Result<(), HarnessError> {
+        let mut prompt = prompt;
         self.ensure_prompt_activation_observed(agent_id, &mut prompt);
         self.promote_lifecycle_notification_turn(agent_id);
         if !prompt.is_internal() {
@@ -103,24 +114,36 @@ impl Harness {
             .clone()
             .map(|correlation| AgentPublishCompletion::InitialPromptSubmission { correlation });
         let defers_notification = completion.is_some();
-        self.publish_event_for_agent_with_completion(
-            agent_id,
-            None,
-            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-                inference_activation,
-                agent_id: target_agent_id,
-                text: prompt.text,
-                trusted_internal_spans: prompt.trusted_internal_spans,
-                message_class: prompt.message_class,
-                internal_kind,
-                originator,
-                submission_source: prompt.submission_source,
-                display_name: self.agent_display_name_for_cid(agent_id),
-                ctx_id: prompt.ctx_id,
-            }),
-            completion,
-            defers_notification && notify_watchers,
-        );
+        let event = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation,
+            agent_id: target_agent_id,
+            text: prompt.text,
+            trusted_internal_spans: prompt.trusted_internal_spans,
+            message_class: prompt.message_class,
+            internal_kind,
+            originator,
+            submission_source: prompt.submission_source,
+            display_name: self.agent_display_name_for_cid(agent_id),
+            ctx_id: prompt.ctx_id,
+        });
+        if let Some(prompt_acceptance) = prompt_acceptance {
+            self.publish_event_for_agent_with_prompt_acceptance(
+                agent_id,
+                None,
+                event,
+                completion,
+                prompt_acceptance,
+                defers_notification && notify_watchers,
+            );
+        } else {
+            self.publish_event_for_agent_with_completion(
+                agent_id,
+                None,
+                event,
+                completion,
+                defers_notification && notify_watchers,
+            );
+        }
         if !defers_notification
             && let Some(text) = notification_text
             && let Some(public_agent_id) = self.ensure_agent_id_for_agent(agent_id)
@@ -143,7 +166,24 @@ impl Harness {
         agent_id: &AgentId,
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
-        let mut prompt = prompt.into();
+        self.dispatch_prompt_for_agent_inner(agent_id, prompt.into(), false)
+    }
+
+    /// Dispatch an immediately admitted visible Human UI prompt with timing.
+    pub(super) fn dispatch_prompt_for_agent_with_acceptance_trace(
+        &mut self,
+        agent_id: &AgentId,
+        prompt: PendingPrompt,
+    ) -> Result<(), HarnessError> {
+        self.dispatch_prompt_for_agent_inner(agent_id, prompt, true)
+    }
+
+    fn dispatch_prompt_for_agent_inner(
+        &mut self,
+        agent_id: &AgentId,
+        mut prompt: PendingPrompt,
+        trace_prompt_acceptance: bool,
+    ) -> Result<(), HarnessError> {
         if self
             .agent_runtime
             .agent_registry
@@ -165,6 +205,8 @@ impl Harness {
             self.fail_initial_prompt_preflight(correlation);
             return Ok(());
         }
+        let mut prompt_acceptance =
+            trace_prompt_acceptance.then(prompt_acceptance_timing::PromptAcceptanceTiming::new);
         self.record_durable_agent_session_activity(
             agent_id,
             matches!(
@@ -172,6 +214,9 @@ impl Harness {
                 tau_proto::PromptSubmissionSource::HumanUi
             ) && prompt.initial_prompt_correlation.is_none(),
         );
+        if let Some(timing) = prompt_acceptance.as_mut() {
+            timing.note_precursor_stats();
+        }
         // A fresh ordinary activation explicitly abandons a response-uncertain
         // inference restored from a previous harness runtime. The historical
         // outer start remains unterminated as the crash boundary; this runtime
@@ -252,13 +297,17 @@ impl Harness {
                 for restore_prompt in restore_prompts {
                     self.publish_pending_prompt_for_agent(agent_id, restore_prompt)?;
                 }
-                self.publish_pending_prompt_for_agent(agent_id, prompt)?;
+                self.publish_pending_prompt_for_agent_inner(
+                    agent_id,
+                    prompt,
+                    prompt_acceptance.take(),
+                )?;
                 self.dispatch_activation_after_publish_idle(agent_id);
                 return Ok(());
             }
         }
 
-        self.publish_pending_prompt_for_agent(agent_id, prompt)?;
+        self.publish_pending_prompt_for_agent_inner(agent_id, prompt, prompt_acceptance.take())?;
         // If the publish parked in interception (or queued behind one
         // that is), defer the agent dispatch until this user-prompt
         // event actually commits. If it committed inline, the helper

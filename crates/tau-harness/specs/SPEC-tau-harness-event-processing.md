@@ -48,6 +48,14 @@ terminal result class, and durations. Cycles over 500 milliseconds emit the
 same fields at warning level. This operational tracing never enters
 `events.jsonl`, changes commit ordering, or affects persistence/publication.
 
+`tau_harness::prompt_acceptance` additionally follows one authenticated,
+immediately dispatched Human UI prompt through interception and publication
+admission. It owns exactly one content-free, process-local terminal observation;
+queued, replayed, internal, and non-UI work does not create that owner. Its
+terminal does not alter protocol, persistence, replay, watcher behavior,
+extension interfaces, or publication authority. See the [operator-facing fixed
+schema and phase meanings](../../../crates/tau-skills/self-knowledge/tau-self-knowledge-debugging.md#interactive-prompt-latency-traces).
+
 Eligible debug JSONL observations serialize one complete line and attempt
 immediate admission to the process-wide bounded writer queue. File locking,
 opening, EOF lookup, append, flush, and rollback run only on the detached writer

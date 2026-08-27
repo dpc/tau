@@ -33,7 +33,7 @@ pub use agent_store::{
     AgentPersistenceMode, AgentStore, AgentStoreError, agent_is_locked, list_agent_metas,
     read_agent_creation_record,
 };
-pub use bus::EventBus;
+pub use bus::{DeliveryOutcomeCount, EventBus};
 pub use connection::{
     AllowAll, Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError,
     ConnectionSink, DeliveryFailure, PendingConnectionMetadata, RouteError, RouteReport,

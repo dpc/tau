@@ -1488,6 +1488,7 @@ mod extension_lifecycle;
 mod harness_config_state;
 mod peer_messaging;
 mod peer_reports;
+mod prompt_acceptance_timing;
 mod prompt_coordination_state;
 mod prompt_materialization;
 mod prompt_runtime_state;

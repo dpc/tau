@@ -29,6 +29,7 @@ use tau_proto::{
 };
 
 use crate::harness::InferenceDispatchSelectionError;
+use crate::harness::prompt_acceptance_timing::PromptAcceptanceTiming;
 use crate::{agent as path_crate_agent, extension as path_crate_extension};
 
 /// Materialization-phase owner of one full prompt until the compact fact
@@ -246,12 +247,29 @@ pub(crate) struct PeerPublicationContext {
     pub(crate) extension: Option<AuthenticatedExtensionPublication>,
 }
 
+/// Inputs that survive setup until the generic publish dispatcher takes
+/// ownership.
+struct EnqueuePublishOptions {
+    /// Whether ordinary eligible semantic persistence was requested.
+    persist: bool,
+    /// Whether an interceptor drop must preserve the original event.
+    must_pass: bool,
+    /// Conversation cursor synchronized after an ordinary transcript fold.
+    sync_head_for: Option<ConversationHeadSync>,
+    /// Immutable session/generation captured for a peer publication.
+    admission: Option<ExtensionFrameAdmission>,
+    /// Process-local aggregate timing for one eligible UI prompt.
+    prompt_acceptance: Option<PromptAcceptanceTiming>,
+}
+
 /// Source envelope retained through generic interception and commit.
 struct PublicationSource {
     /// Original connection for persistence and bus delivery metadata.
     connection_id: Option<tau_proto::ConnectionId>,
     /// Immutable authenticated identity captured at admission.
     peer_context: PeerPublicationContext,
+    /// Process-local aggregate timing for one eligible UI prompt.
+    prompt_acceptance: Option<PromptAcceptanceTiming>,
 }
 
 /// A publish that arrived while another publish was in interception limbo.
@@ -1324,6 +1342,7 @@ impl Harness {
                 continuation: Some(PostCommitContinuation::AgentPublish(Box::new(completion))),
                 notify_watchers,
             }),
+            None,
         );
         self.drain_deferred_publishes();
     }
@@ -1920,7 +1939,40 @@ impl Harness {
         must_pass: bool,
         sync_head_for: Option<ConversationHeadSync>,
     ) {
-        self.enqueue_publish_inner(source, event, persist, must_pass, sync_head_for, None);
+        self.enqueue_publish_inner(
+            source,
+            event,
+            EnqueuePublishOptions {
+                persist,
+                must_pass,
+                sync_head_for,
+                admission: None,
+                prompt_acceptance: None,
+            },
+        );
+    }
+
+    /// Enqueue one eligible UI prompt with its bounded acceptance timing owner.
+    pub(super) fn enqueue_publish_with_prompt_acceptance(
+        &mut self,
+        source: Option<&tau_proto::ConnectionId>,
+        event: Event,
+        persist: bool,
+        must_pass: bool,
+        sync_head_for: Option<ConversationHeadSync>,
+        prompt_acceptance: PromptAcceptanceTiming,
+    ) {
+        self.enqueue_publish_inner(
+            source,
+            event,
+            EnqueuePublishOptions {
+                persist,
+                must_pass,
+                sync_head_for,
+                admission: None,
+                prompt_acceptance: Some(prompt_acceptance),
+            },
+        );
     }
 
     /// Enqueue a peer publication with its immutable frame-admission session.
@@ -1936,10 +1988,13 @@ impl Harness {
         self.enqueue_publish_inner(
             source,
             event,
-            persist,
-            must_pass,
-            sync_head_for,
-            Some(admission),
+            EnqueuePublishOptions {
+                persist,
+                must_pass,
+                sync_head_for,
+                admission: Some(admission),
+                prompt_acceptance: None,
+            },
         );
     }
 
@@ -1947,11 +2002,15 @@ impl Harness {
         &mut self,
         source: Option<&tau_proto::ConnectionId>,
         event: Event,
-        persist: bool,
-        must_pass: bool,
-        sync_head_for: Option<ConversationHeadSync>,
-        admission: Option<ExtensionFrameAdmission>,
+        options: EnqueuePublishOptions,
     ) {
+        let EnqueuePublishOptions {
+            persist,
+            must_pass,
+            sync_head_for,
+            admission,
+            prompt_acceptance,
+        } = options;
         let shell_report_targets_ephemeral = match &event {
             Event::ShellCommandProgressReported(progress) => Some(&progress.command_id),
             Event::ShellCommandFinishedReported(finished) => Some(&finished.command_id),
@@ -2005,11 +2064,18 @@ impl Harness {
                 activation_reservation,
             }),
         };
-        let source = PublicationSource {
+        let mut source = PublicationSource {
             connection_id: source.cloned(),
             peer_context,
+            prompt_acceptance,
         };
+        if let Some(timing) = source.prompt_acceptance.as_mut() {
+            timing.finish_setup();
+        }
         if self.runtime_io.publication.pending_intercept.is_some() {
+            if let Some(timing) = source.prompt_acceptance.as_mut() {
+                timing.begin_interception_wait();
+            }
             self.runtime_io
                 .publication
                 .deferred
@@ -2049,7 +2115,7 @@ impl Harness {
     /// further interceptor matches, the event commits.
     fn dispatch_publish_step(
         &mut self,
-        source: PublicationSource,
+        mut source: PublicationSource,
         event: Event,
         persist: bool,
         must_pass: bool,
@@ -2069,6 +2135,7 @@ impl Harness {
                     event,
                     persist,
                     sync_head_for,
+                    source.prompt_acceptance.take(),
                 );
                 return;
             };
@@ -2106,6 +2173,9 @@ impl Harness {
                 .as_ref()
                 .is_ok_and(|report| report.delivered_to.iter().any(|id| id == &conn_id));
             if delivered {
+                if let Some(timing) = source.prompt_acceptance.as_mut() {
+                    timing.begin_interception_wait();
+                }
                 self.runtime_io.publication.pending_intercept = Some(PendingIntercept {
                     conn_id: conn_id.clone(),
                     event,
@@ -2225,11 +2295,14 @@ impl Harness {
             conn_id: _,
             event: original_event,
             persist,
-            source,
+            mut source,
             must_pass,
             sync_head_for,
             cursor,
         } = pending;
+        if let Some(timing) = source.prompt_acceptance.as_mut() {
+            timing.end_interception_wait();
+        }
 
         let event_name = original_event.name();
         let shell_progress_command_id = match &original_event {
@@ -2363,12 +2436,15 @@ impl Harness {
                 break;
             };
             let DeferredPublish {
-                source,
+                mut source,
                 event,
                 persist,
                 must_pass,
                 sync_head_for,
             } = deferred;
+            if let Some(timing) = source.prompt_acceptance.as_mut() {
+                timing.end_interception_wait();
+            }
             self.dispatch_publish_step(source, event, persist, must_pass, sync_head_for, None);
         }
     }
