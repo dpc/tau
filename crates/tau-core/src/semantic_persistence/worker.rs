@@ -18,8 +18,8 @@ use serde::de::DeserializeOwned;
 
 use super::identity::{PersistenceGeneration, StreamIdentity};
 use super::owner::{
-    PersistenceAdmissionError, PersistenceFailureKind, RetentionCharge, Shared, StagedFrame,
-    invalidate_worker, report_failure,
+    FrameAdmissionToken, PersistenceAdmissionError, PersistenceFailureKind, RetentionCharge,
+    Shared, StagedFrame, invalidate_worker, report_failure,
 };
 use super::preparation::{PreparationResult, SessionPreparationMode, WorkerCommand};
 
@@ -76,7 +76,7 @@ pub(crate) struct FrameJob {
     /// Exact complete frame watermark set only after the full payload.
     written_end: Option<u64>,
     /// Owner-local admission order for derived-work prerequisites.
-    admission_watermark: u64,
+    admission_watermark: FrameAdmissionToken,
 }
 
 impl FrameJob {
@@ -87,7 +87,7 @@ impl FrameJob {
         charge: RetentionCharge,
         reserved_bytes: usize,
         internal_bytes: usize,
-        admission_watermark: u64,
+        admission_watermark: FrameAdmissionToken,
     ) -> Self {
         Self {
             identity,
@@ -250,7 +250,7 @@ struct TouchDebt {
     /// Earliest retry; later hints do not reset failed backoff.
     retry_at: Instant,
     /// Highest authoritative frame that must be written first.
-    prerequisite: u64,
+    prerequisite: Option<FrameAdmissionToken>,
     /// None until exact FIFO disposition; false terminally drops this lossy
     /// hint.
     prerequisite_written: Option<bool>,
@@ -437,7 +437,7 @@ pub(crate) fn worker_main(shared: Arc<Shared>) {
 fn record_frame_disposition(
     shared: &Shared,
     touches: &mut VecDeque<TouchDebt>,
-    token: u64,
+    token: FrameAdmissionToken,
     written: bool,
 ) {
     let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -448,14 +448,14 @@ fn record_frame_disposition(
             prerequisite_written,
             ..
         } = command
-            && *prerequisite == token
+            && *prerequisite == Some(token)
         {
             *prerequisite_written = Some(written);
         }
     }
     drop(state);
     for debt in touches {
-        if debt.prerequisite == token {
+        if debt.prerequisite == Some(token) {
             debt.prerequisite_written = Some(written);
         }
     }

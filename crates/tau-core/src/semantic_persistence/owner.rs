@@ -25,6 +25,21 @@ use super::worker::{
 
 static NEXT_OWNER_EPOCH: AtomicU64 = AtomicU64::new(1);
 
+/// Positive owner-local FIFO identity assigned to one admitted frame.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct FrameAdmissionToken(u64);
+
+impl FrameAdmissionToken {
+    /// First identity allocated by a newly created persistence owner.
+    const FIRST: Self = Self(1);
+
+    /// Advances the allocation cursor while preserving the existing exhaustion
+    /// policy.
+    fn checked_successor(self) -> Self {
+        Self(self.0.checked_add(1).expect("global frame token exhausted"))
+    }
+}
+
 /// Admission failure returned before canonical acceptance changes any live
 /// fact.
 #[derive(Debug)]
@@ -293,10 +308,8 @@ impl StagingReservation {
             (lifecycle, _) => return Err(lifecycle_admission_error(lifecycle)),
         }
         let admission_watermark = state.next_frame_token;
-        state.next_frame_token = state
-            .next_frame_token
-            .checked_add(1)
-            .expect("global frame token exhausted");
+        state.next_frame_token = admission_watermark.checked_successor();
+        state.last_admitted_frame = Some(admission_watermark);
         let job = FrameJob::from_reservation(
             Arc::clone(&self.identity),
             frame,
@@ -379,11 +392,13 @@ pub(crate) struct AdmissionState {
     pub(crate) rejected_admissions_remaining: usize,
     /// Next generation allocated within this owner.
     pub(crate) next_generation: u64,
-    /// Next global authoritative FIFO acceptance token.
-    pub(crate) next_frame_token: u64,
+    /// Next owner-local authoritative FIFO acceptance token.
+    pub(crate) next_frame_token: FrameAdmissionToken,
+    /// Most recently allocated authoritative FIFO acceptance token.
+    pub(crate) last_admitted_frame: Option<FrameAdmissionToken>,
     /// Most recent FIFO disposition, sufficient because touch captures latest
     /// admission.
-    pub(crate) last_frame_disposition: Option<(u64, bool)>,
+    pub(crate) last_frame_disposition: Option<(FrameAdmissionToken, bool)>,
     /// Exact state of every registered stream.
     pub(crate) streams: HashMap<StreamIdentity, RegisteredStream>,
     /// Preallocated authoritative FIFO.
@@ -452,7 +467,7 @@ impl SemanticPersistenceOwner {
                             + mem::size_of::<RegisteredStream>()
                             + mem::size_of::<WorkerCommand>()
                             + super::worker::touch_debt_charge()
-                            + mem::size_of::<(u64, bool)>(),
+                            + mem::size_of::<(FrameAdmissionToken, bool)>(),
                     )
                     .and_then(|registry| bytes.checked_add(registry))
             })
@@ -485,7 +500,8 @@ impl SemanticPersistenceOwner {
                 worker_exited: false,
                 rejected_admissions_remaining: 0,
                 next_generation: 1,
-                next_frame_token: 1,
+                next_frame_token: FrameAdmissionToken::FIRST,
+                last_admitted_frame: None,
                 last_frame_disposition: None,
                 streams: HashMap::with_capacity(capacity.max_streams),
                 frames: VecDeque::with_capacity(capacity.max_frames),
@@ -1074,15 +1090,13 @@ impl PersistenceLease {
             &self.identity.stream,
             self.identity.generation,
         )?;
-        let prerequisite = state.next_frame_token.saturating_sub(1);
-        let prerequisite_written = if prerequisite == 0 {
-            Some(true)
-        } else {
+        let prerequisite = state.last_admitted_frame;
+        let prerequisite_written = prerequisite.map_or(Some(true), |prerequisite| {
             state
                 .last_frame_disposition
                 .filter(|(token, _)| *token == prerequisite)
                 .map(|(_, written)| written)
-        };
+        });
         if let Some(WorkerCommand::TouchSession {
             last_touched: retained,
             prerequisite: retained_prerequisite,

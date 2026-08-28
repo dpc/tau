@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
 
 use super::identity::{LeaseIdentity, PersistenceLease};
-use super::owner::PersistenceAdmissionError;
+use super::owner::{FrameAdmissionToken, PersistenceAdmissionError};
 
 /// Canonical session launch authority used during preparation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,7 +86,7 @@ pub(crate) enum WorkerCommand {
         /// Monotonic maximum wall-clock hint.
         last_touched: u64,
         /// Highest authoritative frame admitted before this hint.
-        prerequisite: u64,
+        prerequisite: Option<FrameAdmissionToken>,
         /// Known disposition when the frame completed before touch admission.
         prerequisite_written: Option<bool>,
     },
