@@ -14,9 +14,14 @@
 //!   replays the capped log/history suffix plus fixed tail without rubber
 
 mod block_layout_state;
+mod presentation_mutation_generation;
 mod presentation_observation_state;
 mod prompt_editor_state;
+mod redraw_sync_generation;
 mod renderer_delivery_id;
+#[cfg(test)]
+mod terminal_generation_tests;
+mod terminal_history_generation;
 mod terminal_runtime_state;
 
 use std::cell::RefCell;
@@ -89,6 +94,7 @@ pub use presentation_observation_state::{
     OpaquePresentationFact, PresentationInvalidation, PresentationObservationKey,
 };
 use prompt_editor_state::PromptEditorState;
+use redraw_sync_generation::RedrawSyncGeneration;
 pub use renderer_delivery_id::RendererDeliveryId;
 pub use tau_term_screen::{
     Align, BlockId, Cell, Color, PriorityLine, PriorityLineAlignment, PriorityLinePriority,
@@ -99,6 +105,7 @@ use tau_term_screen::{
     Screen, display_width, emit_styled_cells, layout_block, layout_lines, next_grapheme_boundary,
     previous_grapheme_boundary, truncate_to_width,
 };
+use terminal_history_generation::TerminalHistoryGeneration;
 use terminal_runtime_state::TerminalRuntimeState;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -333,7 +340,7 @@ impl SharedState {
     }
 
     fn mark_history_dirty_from(&mut self, entry: usize) {
-        self.layout.history_generation = self.layout.history_generation.wrapping_add(1);
+        self.layout.history_generation.advance();
         self.layout.history_dirty_from = Some(
             self.layout
                 .history_dirty_from
@@ -1515,7 +1522,7 @@ impl TermHandle {
         if st.terminal.output_failure.is_some() {
             return;
         }
-        st.terminal.sync_requested += 1;
+        st.terminal.sync_requested.advance();
         let target = st.terminal.sync_requested;
         drop(st);
 
@@ -3480,9 +3487,9 @@ struct HistoryLayoutCache {
     /// Terminal width used to lay out cached entries.
     width: usize,
     /// Shared-state history generation represented by this cache.
-    generation: u64,
+    generation: TerminalHistoryGeneration,
     /// Generation represented before the most recent refresh.
-    previous_generation: u64,
+    previous_generation: TerminalHistoryGeneration,
     /// Rendered line where an append-only refresh began.
     appended_from_line: Option<usize>,
     /// Start line for each cached history entry plus one final end offset.
@@ -3497,8 +3504,8 @@ impl Default for HistoryLayoutCache {
     fn default() -> Self {
         Self {
             width: 0,
-            generation: 0,
-            previous_generation: 0,
+            generation: TerminalHistoryGeneration::default(),
+            previous_generation: TerminalHistoryGeneration::default(),
             appended_from_line: None,
             entry_line_offsets: vec![0],
             lines: Vec::new(),
@@ -3613,7 +3620,7 @@ struct LayoutAll {
     /// area upward.
     log_end: usize,
     /// Persistent-history generation used to build this layout.
-    history_generation: u64,
+    history_generation: TerminalHistoryGeneration,
     /// Terminal width used to build persistent-history lines.
     history_width: usize,
     /// Number of leading log rows owned by persistent history.
@@ -3670,7 +3677,7 @@ struct TerminalModel {
     /// Temporary blank rows retaining the viewport after visible shrinkage.
     rubber_height: usize,
     /// Persistent-history generation represented by `known_lines`.
-    history_generation: u64,
+    history_generation: TerminalHistoryGeneration,
     /// Width used for the represented persistent-history layout.
     history_width: usize,
     /// Leading persistent-history rows in `known_lines`.
@@ -4161,7 +4168,7 @@ struct RedrawPass {
     height: usize,
     size_changed: bool,
     force_full: bool,
-    sync_gen: u64,
+    sync_gen: RedrawSyncGeneration,
     pending_raw: Vec<String>,
     redraw_history_size: usize,
     frame: RenderFrame,
@@ -4479,8 +4486,8 @@ fn trace_flushed_presentation_observations(_state: &Arc<Mutex<SharedState>>, pas
             target: "tau_cli_term_raw::frontend_progress",
             delivery_id = fact.delivery_id.get(),
             fact = fact.fact,
-            mutation_generation = fact.generation,
-            frame_generation = observations.generation,
+            mutation_generation = fact.generation.get(),
+            frame_generation = observations.generation.get(),
             mutation_to_flush_us = flushed_at.duration_since(fact.observed_at).as_micros(),
             "selected presentation mutation frame written and flushed"
         );
@@ -4488,7 +4495,7 @@ fn trace_flushed_presentation_observations(_state: &Arc<Mutex<SharedState>>, pas
     if observations.omitted != 0 {
         tracing::trace!(
             target: "tau_cli_term_raw::frontend_progress",
-            frame_generation = observations.generation,
+            frame_generation = observations.generation.get(),
             omitted = observations.omitted,
             "selected presentation flush observations omitted"
         );
@@ -4527,7 +4534,7 @@ fn trace_failed_presentation_observations(
         target: "tau_cli_term_raw::frontend_progress",
         stage,
         stage_us = stage_elapsed.as_micros(),
-        frame_generation = observations.generation,
+        frame_generation = observations.generation.get(),
         indeterminate_facts = observations.facts.len(),
         omitted = observations.omitted,
         error_kind = ?error.kind(),
@@ -4826,7 +4833,7 @@ fn reset_model_after_rendered_full_frame(
 
 fn complete_redraw_sync(
     state: &Arc<Mutex<SharedState>>,
-    sync_gen: u64,
+    sync_gen: RedrawSyncGeneration,
     sync_condvar: &std::sync::Condvar,
 ) {
     // Advance sync_completed to the generation we captured before rendering.

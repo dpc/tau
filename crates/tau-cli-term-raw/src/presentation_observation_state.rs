@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use super::RendererDeliveryId;
+use crate::presentation_mutation_generation::PresentationMutationGeneration;
 
 /// Maximum number of exact selected-presentation facts retained for one redraw.
 pub(super) const MAX_PENDING_PRESENTATION_OBSERVATIONS: usize = 64;
@@ -74,7 +75,7 @@ pub(super) struct PresentationObservation {
     /// Caller-owned invalidation key in `0..64`.
     kind: u8,
     /// Monotonic selected-presentation generation assigned at registration.
-    pub(super) generation: u64,
+    pub(super) generation: PresentationMutationGeneration,
     /// Monotonic time at which the selected handler completed its mutation.
     pub(super) observed_at: Instant,
 }
@@ -86,13 +87,13 @@ pub(super) struct CapturedPresentationObservations {
     /// Number of exact observations omitted by the fixed pending bound.
     pub(super) omitted: u64,
     /// Latest selected-presentation generation visible to the prepared frame.
-    pub(super) generation: u64,
+    pub(super) generation: PresentationMutationGeneration,
 }
 
 /// Coherent bounded opaque correlation state protected by `SharedState`.
 pub(super) struct PresentationObservationState {
     /// Latest selected-presentation mutation generation.
-    generation: u64,
+    generation: PresentationMutationGeneration,
     /// Exact observations awaiting capture by a redraw pass.
     pending: VecDeque<PresentationObservation>,
     /// Count-only overflow retained independently for each opaque key.
@@ -101,14 +102,15 @@ pub(super) struct PresentationObservationState {
     omitted_total: u64,
     /// Successful pass receipts retained only for focused unit-test assertions.
     #[cfg(test)]
-    pub(super) successful_test_passes: Vec<Vec<(RendererDeliveryId, u64)>>,
+    pub(super) successful_test_passes:
+        Vec<Vec<(RendererDeliveryId, PresentationMutationGeneration)>>,
 }
 
 impl PresentationObservationState {
     /// Creates empty process-local observation state without heap allocation.
     pub(super) fn new() -> Self {
         Self {
-            generation: 0,
+            generation: PresentationMutationGeneration::default(),
             pending: VecDeque::new(),
             omitted_by_kind: Vec::new(),
             omitted_total: 0,
@@ -140,7 +142,7 @@ impl PresentationObservationState {
             }
             !invalidated
         });
-        self.generation = self.generation.wrapping_add(1);
+        self.generation.advance();
         if self.pending.len() == MAX_PENDING_PRESENTATION_OBSERVATIONS {
             if let Some((_, omitted)) = self
                 .omitted_by_kind

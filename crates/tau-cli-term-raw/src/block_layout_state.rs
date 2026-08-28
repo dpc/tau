@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::terminal_history_generation::TerminalHistoryGeneration;
 use crate::{BlockId, StyledBlock};
 
 /// Rendered output blocks and their placement around the prompt.
@@ -17,7 +18,7 @@ pub(super) struct BlockLayoutState {
     /// Reference count of block ids present in `history`.
     pub(super) history_refs: HashMap<BlockId, usize>,
     /// Bumped whenever persistent history content, order, or layout changes.
-    pub(super) history_generation: u64,
+    pub(super) history_generation: TerminalHistoryGeneration,
     /// Earliest history entry changed since the redraw cache last refreshed.
     ///
     /// Ordinary output appends mark only the new suffix. Destructive or
@@ -43,7 +44,7 @@ impl BlockLayoutState {
             next_id: 0,
             history: Vec::new(),
             history_refs: HashMap::new(),
-            history_generation: 0,
+            history_generation: TerminalHistoryGeneration::default(),
             history_dirty_from: None,
             above_active: Vec::new(),
             above_sticky: Vec::new(),

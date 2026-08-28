@@ -1,6 +1,7 @@
 //! Owns terminal dimensions, redraw coordination, and lifecycle flags.
 
 use crate::OutputFailure;
+use crate::redraw_sync_generation::RedrawSyncGeneration;
 
 /// Terminal dimensions, redraw coordination, and lifecycle flags.
 pub(super) struct TerminalRuntimeState {
@@ -30,9 +31,9 @@ pub(super) struct TerminalRuntimeState {
     /// Callers bump this generation; the redraw thread copies it into
     /// `sync_completed` atomically with going idle, immediately before blocking
     /// on receive.
-    pub(super) sync_requested: u64,
+    pub(super) sync_requested: RedrawSyncGeneration,
     /// Latest completed redraw synchronization generation.
-    pub(super) sync_completed: u64,
+    pub(super) sync_completed: RedrawSyncGeneration,
     /// Non-model terminal side effects waiting for the redraw thread's next
     /// pass. Producers use narrow typed APIs on `TermHandle`, so callers cannot
     /// inject arbitrary cursor movement or clear-screen escapes behind the
@@ -63,8 +64,8 @@ impl TerminalRuntimeState {
             output_failure: None,
             external_paused: false,
             invalidate_screen: false,
-            sync_requested: 0,
-            sync_completed: 0,
+            sync_requested: RedrawSyncGeneration::default(),
+            sync_completed: RedrawSyncGeneration::default(),
             pending_raw: Vec::new(),
             redraw_suppression: 0,
             redraw_dirty_while_suppressed: false,

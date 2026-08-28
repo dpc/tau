@@ -1,6 +1,7 @@
 use std::{cell as path_std_cell, io as path_std_io, sync as path_std_sync, time as path_std_time};
 
 use super::*;
+use crate::terminal_history_generation::TerminalHistoryGeneration;
 
 /// Builds a delivery identity for raw-terminal seam tests.
 fn renderer_delivery_id(value: u64) -> RendererDeliveryId {
@@ -62,7 +63,7 @@ fn run_full_render(
         all_lines,
         line_sources,
         log_end: history_lines,
-        history_generation: 0,
+        history_generation: TerminalHistoryGeneration::default(),
         history_width: cols as usize,
         history_height: history_lines,
         cursor_row,
@@ -397,7 +398,7 @@ fn full_render_limits_replayed_history_rows() {
             .collect(),
         all_lines,
         log_end: 6,
-        history_generation: 0,
+        history_generation: TerminalHistoryGeneration::default(),
         history_width: 30,
         history_height: 6,
         cursor_row: 6,
@@ -517,7 +518,7 @@ fn full_render_caps_visible_state_when_fixed_area_exceeds_height() {
             .collect(),
         all_lines,
         log_end: 2,
-        history_generation: 0,
+        history_generation: TerminalHistoryGeneration::default(),
         history_width: 30,
         history_height: 2,
         cursor_row: 3,
@@ -546,7 +547,7 @@ fn full_render_cursor_uses_physical_viewport_start() {
             .collect(),
         all_lines,
         log_end: 2,
-        history_generation: 0,
+        history_generation: TerminalHistoryGeneration::default(),
         history_width: 30,
         history_height: 2,
         cursor_row: 3,
@@ -576,7 +577,7 @@ fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
             .collect(),
         all_lines,
         log_end: 10,
-        history_generation: 0,
+        history_generation: TerminalHistoryGeneration::default(),
         history_width: 30,
         history_height: 10,
         cursor_row: 10,
@@ -585,7 +586,7 @@ fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
     let mut model = TerminalModel {
         viewport_start: 6,
         rubber_height: 0,
-        history_generation: 0,
+        history_generation: TerminalHistoryGeneration::default(),
         history_width: 30,
         history_height: 10,
         active_height: 0,
@@ -3783,7 +3784,7 @@ fn differential_write_error_propagates_from_render_helper() {
             .collect(),
         all_lines,
         log_end: 1,
-        history_generation: 0,
+        history_generation: TerminalHistoryGeneration::default(),
         history_width: 40,
         history_height: 1,
         cursor_row: 1,
@@ -3833,7 +3834,7 @@ fn scrolling_write_error_propagates_from_render_helper() {
             .collect(),
         all_lines,
         log_end: 6,
-        history_generation: 0,
+        history_generation: TerminalHistoryGeneration::default(),
         history_width: 40,
         history_height: 6,
         cursor_row: 6,
@@ -4013,7 +4014,7 @@ fn full_redraw_queues_without_flushing_mid_frame() {
         all_lines,
         line_sources,
         log_end: 2,
-        history_generation: 0,
+        history_generation: TerminalHistoryGeneration::default(),
         history_width: 40,
         history_height: 2,
         cursor_row: 2,
