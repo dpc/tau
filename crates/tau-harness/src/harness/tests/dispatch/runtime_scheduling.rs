@@ -1388,7 +1388,6 @@ fn activating_wait_settlement_dispatches_once_and_preserves_next_input() {
     assert!(continuation.context.flatten().iter().any(|item| {
         text_part(item).is_some_and(|text| text.contains("first visible activation"))
     }));
-
     assert_eq!(
         h.submit_prompt_to_agent(
             h.session_runtime.current_session_id.clone(),
@@ -1422,6 +1421,344 @@ fn activating_wait_settlement_dispatches_once_and_preserves_next_input() {
             .is_empty()
     );
     h.shutdown().expect("shutdown");
+}
+
+/// A peer-created extension side conversation keeps its harness extension
+/// originator while visible user input settles an activating wait. The settled
+/// terminal and steered activation must still release exactly one continuation.
+#[test]
+fn peer_entrypoint_activating_wait_settlement_dispatches_once() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
+    let received = h.handle_external_agent_message_request_without_auth_for_test(
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "peer-activating-wait".to_owned(),
+            message_id: tau_proto::AgentMessageId::parse("peer-activating-wait-message")
+                .expect("message id"),
+            capability: "test-only".to_owned(),
+            sender_session_id: test_session_id("sender-session"),
+            sender_id: crate::parse_agent_id("sender-agent"),
+            recipient_session_id: h.session_runtime.current_session_id.clone(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "wait for visible input".to_owned(),
+        },
+    );
+    assert_eq!(received.failure, None);
+    assert!(received.started);
+    let agent_id = received.recipient_id.expect("peer endpoint");
+    let cid = h.agent_runtime.agent_registry.agent_routes[agent_id.as_str()].clone();
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .peer_entrypoint_endpoint
+    );
+    let initial_prompt = h
+        .prompt_coordination
+        .prompt_runtime
+        .agents
+        .iter()
+        .find_map(|(prompt_id, prompt_cid)| {
+            (prompt_cid == &cid).then(|| read_prompt_created(&h, prompt_id))
+        })
+        .expect("side prompt");
+    assert!(matches!(
+        initial_prompt.originator,
+        tau_proto::PromptOriginator::Extension { .. }
+    ));
+    let mut wait_response =
+        provider_input_wait_response(&initial_prompt, "side-activating-wait", 60);
+    wait_response.originator = initial_prompt.originator.clone();
+    wait_response.output_items.insert(
+        0,
+        ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Full,
+            text: "wait for visible input".to_owned(),
+        }),
+    );
+    h.handle_provider_response_finished(wait_response)
+        .expect("open activating wait");
+    assert!(h.input_wait_pending_for(&cid));
+
+    let checkpoints_before = event_log_count(&h, |event| {
+        matches!(event, Event::AgentInferenceDispatchStarted(_))
+    });
+    let interactions_before = event_log_count(&h, |event| {
+        matches!(
+            event,
+            Event::AgentUserInteractionRecorded(interaction) if interaction.agent_id == agent_id
+        )
+    });
+    h.record_accepted_visible_user_interaction(agent_id.as_str())
+        .expect("record first visible interaction");
+    assert_eq!(
+        h.submit_prompt_to_agent(
+            h.session_runtime.current_session_id.clone(),
+            agent_id.as_str(),
+            PendingPrompt::human_ui_watch_notified("first visible activation".to_owned()),
+        )
+        .expect("submit first activation"),
+        PromptSubmission::Queued
+    );
+    assert_eq!(tool_result_count(&h, "side-activating-wait"), 1);
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::AgentUserInteractionRecorded(interaction) if interaction.agent_id == agent_id
+        )),
+        interactions_before + 1
+    );
+    assert_eq!(
+        event_log_count(&h, |event| {
+            matches!(event, Event::AgentInferenceDispatchStarted(_))
+        }),
+        checkpoints_before + 1,
+        "settlement releases exactly one side-conversation continuation"
+    );
+    let continuation_id = h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .in_flight_prompt
+        .clone()
+        .expect("continuation prompt");
+    let continuation = read_prompt_created(&h, &continuation_id);
+    assert_eq!(continuation.originator, initial_prompt.originator);
+    assert!(continuation.context.flatten().iter().any(|item| {
+        text_part(item).is_some_and(|text| text.contains("first visible activation"))
+    }));
+    let settlement_order = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("peer journal")
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::AgentToolTerminalClassified(_) => Some("classified"),
+            Event::ProviderToolResult(result)
+                if result.call_id.as_str() == "side-activating-wait" =>
+            {
+                Some("terminal")
+            }
+            Event::AgentToolWaitSettled(_) => Some("settled"),
+            Event::AgentPromptSteered(steered)
+                if steered.agent_id == agent_id
+                    && steered.text == "first visible activation"
+                    && steered.submission_source == tau_proto::PromptSubmissionSource::HumanUi =>
+            {
+                Some("steered")
+            }
+            Event::AgentInferenceDispatchStarted(started)
+                if started.agent_prompt_id == continuation_id =>
+            {
+                Some("checkpoint")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        settlement_order,
+        ["classified", "terminal", "settled", "steered", "checkpoint"]
+    );
+
+    h.record_accepted_visible_user_interaction(agent_id.as_str())
+        .expect("record second visible interaction");
+    assert_eq!(
+        h.submit_prompt_to_agent(
+            h.session_runtime.current_session_id.clone(),
+            agent_id.as_str(),
+            PendingPrompt::human_ui_watch_notified("second visible activation".to_owned()),
+        )
+        .expect("submit second activation"),
+        PromptSubmission::Queued
+    );
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::AgentUserInteractionRecorded(interaction) if interaction.agent_id == agent_id
+        )),
+        interactions_before + 2
+    );
+    let mut continuation_response = provider_text_response(
+        &continuation.agent_prompt_id,
+        agent_id.clone(),
+        "continuation complete",
+    );
+    continuation_response.originator = continuation.originator.clone();
+    h.handle_provider_response_finished(continuation_response)
+        .expect("finish continuation");
+    let next_prompt_id = h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .in_flight_prompt
+        .clone()
+        .expect("second activation prompt");
+    let next_prompt = read_prompt_created(&h, &next_prompt_id);
+    assert!(next_prompt.context.flatten().iter().any(|item| {
+        text_part(item).is_some_and(|text| text.contains("second visible activation"))
+    }));
+    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
+    h.shutdown().expect("shutdown");
+}
+
+/// A crash after the wait terminal and visible-input steer commit, but before
+/// the inference checkpoint commits, leaves the durable steer as the recovery
+/// owner. Resume dispatches it once without repairing the already-complete
+/// wait.
+#[test]
+fn peer_entrypoint_activating_wait_restart_recovers_committed_steer_once() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let agent_id = {
+        let mut h = quiet_provider_harness(&state).expect("start");
+        configure_inter_session_receivers(&mut h, &[("engineer", true)]);
+        let received = h.handle_external_agent_message_request_without_auth_for_test(
+            tau_proto::ExternalAgentMessageRequest {
+                request_id: "peer-activating-wait-restart".to_owned(),
+                message_id: tau_proto::AgentMessageId::parse(
+                    "peer-activating-wait-restart-message",
+                )
+                .expect("message id"),
+                capability: "test-only".to_owned(),
+                sender_session_id: test_session_id("sender-session"),
+                sender_id: crate::parse_agent_id("sender-agent"),
+                recipient_session_id: h.session_runtime.current_session_id.clone(),
+                recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+                kind: tau_proto::AgentMessageKind::Message,
+                message: "wait for visible input".to_owned(),
+            },
+        );
+        assert_eq!(received.failure, None);
+        assert!(received.started);
+        let agent_id = received.recipient_id.expect("peer endpoint");
+        let cid = h.agent_runtime.agent_registry.agent_routes[agent_id.as_str()].clone();
+        let initial_prompt = h
+            .prompt_coordination
+            .prompt_runtime
+            .agents
+            .iter()
+            .find_map(|(prompt_id, prompt_cid)| {
+                (prompt_cid == &cid).then(|| read_prompt_created(&h, prompt_id))
+            })
+            .expect("side prompt");
+        let mut wait_response =
+            provider_input_wait_response(&initial_prompt, "restart-side-activating-wait", 60);
+        wait_response.originator = initial_prompt.originator.clone();
+        wait_response.output_items.insert(
+            0,
+            ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                kind: tau_proto::ReasoningTextKind::Full,
+                text: "wait for visible input".to_owned(),
+            }),
+        );
+        h.handle_provider_response_finished(wait_response)
+            .expect("open activating wait");
+
+        let _checkpoint_interceptor = connect_test_tool(&mut h, "wait-checkpoint-interceptor");
+        h.handle_extension_event(
+            "wait-checkpoint-interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register checkpoint interceptor");
+        let checkpoints_before = event_log_count(&h, |event| {
+            matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started) if started.agent_id == agent_id
+            )
+        });
+        h.record_accepted_visible_user_interaction(agent_id.as_str())
+            .expect("record first visible interaction");
+        assert_eq!(
+            h.submit_prompt_to_agent(
+                h.session_runtime.current_session_id.clone(),
+                agent_id.as_str(),
+                PendingPrompt::human_ui_watch_notified("first visible activation".to_owned()),
+            )
+            .expect("submit first activation"),
+            PromptSubmission::Queued
+        );
+        assert_eq!(tool_result_count(&h, "restart-side-activating-wait"), 1);
+        assert!(event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::AgentPromptSteered(steered)
+                if steered.agent_id == agent_id
+                    && steered.text == "first visible activation"
+                    && steered.submission_source
+                        == tau_proto::PromptSubmissionSource::HumanUi
+        )));
+        assert_eq!(
+            event_log_count(&h, |event| matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started) if started.agent_id == agent_id
+            )),
+            checkpoints_before
+        );
+        assert!(h.runtime_io.publication.pending_intercept.is_some());
+        assert!(
+            h.session_runtime.persistence_owner.as_ref().is_some_and(
+                |owner| owner.wait_for_latest_durability_for_test(Duration::from_secs(5))
+            )
+        );
+        drop(h);
+        agent_id
+    };
+
+    {
+        let mut h =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume after checkpoint cut");
+        let cid = h.agent_runtime.agent_registry.agent_routes[agent_id.as_str()].clone();
+        assert_eq!(
+            event_log_count(&h, |event| matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started) if started.agent_id == agent_id
+            )),
+            1,
+            "resume dispatches the uncovered durable steer once"
+        );
+        assert!(!event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::ProviderToolError(error)
+                if error.call_id.as_str() == "restart-side-activating-wait"
+        )));
+        let continuation_id = h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .in_flight_prompt
+            .clone()
+            .expect("recovered continuation");
+        let continuation = read_prompt_created(&h, &continuation_id);
+        assert!(matches!(
+            continuation.originator,
+            tau_proto::PromptOriginator::Extension { .. }
+        ));
+        assert!(continuation.context.flatten().iter().any(|item| {
+            text_part(item).is_some_and(|text| text.contains("first visible activation"))
+        }));
+        let mut continuation_response =
+            provider_text_response(&continuation_id, agent_id.clone(), "continuation complete");
+        continuation_response.originator = continuation.originator.clone();
+        h.handle_provider_response_finished(continuation_response)
+            .expect("finish recovered continuation");
+        h.shutdown().expect("shutdown recovered harness");
+    }
+
+    let mut h =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("second resume");
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started)
+            if started.agent_id == agent_id
+    )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderToolError(error)
+            if error.call_id.as_str() == "restart-side-activating-wait"
+    )));
+    h.shutdown().expect("shutdown second resume");
 }
 
 /// Committed endpoint unload crosses the production lifecycle boundary and
