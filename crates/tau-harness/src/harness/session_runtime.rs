@@ -3240,8 +3240,12 @@ impl Harness {
                     } => *reason,
                     _ => tau_proto::StandaloneCompactionFailureReason::Interrupted,
                 };
-                self.publish_for_agent(
+                let batch_parent = self
+                    .selected_head_for_agent(&cid)
+                    .unwrap_or(tau_proto::AgentHead::Root);
+                self.publish_owed_compaction_fact(
                     &cid,
+                    batch_parent,
                     Event::AgentStandaloneCompactionFailed(
                         tau_proto::AgentStandaloneCompactionFailed {
                             agent_id: started.agent_id,

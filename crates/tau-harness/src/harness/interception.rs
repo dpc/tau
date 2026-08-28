@@ -490,11 +490,12 @@ pub(crate) enum AgentPublishCompletion {
         /// Exact interceptor-approved response retained after append rejection.
         retry_event: Option<Box<Event>>,
     },
-    /// Retain one reactive recovery failure until its semantic append commits.
-    ReactiveContextRecoveryFailure {
-        /// Exact committed transaction-start parent of this failure.
+    /// Retain one documented owed compaction fact until its semantic append
+    /// commits.
+    OwedCompactionFact {
+        /// Exact semantic parent captured when the owed fact was derived.
         batch_parent: tau_proto::AgentHead,
-        /// Exact interceptor-approved failure retained after rejection.
+        /// Exact interceptor-approved fact retained after rejection.
         retry_event: Option<Box<Event>>,
     },
     /// Retain a successful pass's exact rolling successor until its durable
@@ -550,7 +551,7 @@ impl AgentPublishCompletion {
             | Self::ReactiveContextRecovery { .. }
             | Self::ReactiveContextRecoveryStart { .. }
             | Self::StandaloneContextRejection { .. }
-            | Self::ReactiveContextRecoveryFailure { .. }
+            | Self::OwedCompactionFact { .. }
             | Self::RollingCompactionStart { .. }
             | Self::StandaloneContinuation { .. } => None,
         };
@@ -575,7 +576,7 @@ impl AgentPublishCompletion {
             | Self::ReactiveContextRecovery { .. }
             | Self::ReactiveContextRecoveryStart { .. }
             | Self::StandaloneContextRejection { .. }
-            | Self::ReactiveContextRecoveryFailure { .. }
+            | Self::OwedCompactionFact { .. }
             | Self::RollingCompactionStart { .. }
             | Self::InitialPromptSubmission { .. } => {
                 unreachable!("non-standalone completions do not own compaction transactions")
@@ -1317,7 +1318,7 @@ impl Harness {
             AgentPublishCompletion::ReactiveContextRecovery { .. } => false,
             AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => false,
             AgentPublishCompletion::StandaloneContextRejection { .. } => false,
-            AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } => false,
+            AgentPublishCompletion::OwedCompactionFact { .. } => false,
             AgentPublishCompletion::RollingCompactionStart { .. } => false,
             AgentPublishCompletion::InitialPromptSubmission { .. } => false,
         };
@@ -1332,7 +1333,7 @@ impl Harness {
             | AgentPublishCompletion::ReactiveContextRecoveryStart { checkpoint, .. } => {
                 Some(tau_core::AgentEventParent::from_head(checkpoint.through))
             }
-            AgentPublishCompletion::ReactiveContextRecoveryFailure { batch_parent, .. } => {
+            AgentPublishCompletion::OwedCompactionFact { batch_parent, .. } => {
                 Some(tau_core::AgentEventParent::from_head(*batch_parent))
             }
             _ => None,
@@ -2310,7 +2311,11 @@ impl Harness {
 
     /// Apply an [`InterceptAction`] to a pending intercept and drive
     /// the next chain step (or commit, or drop).
-    fn advance_pending_intercept(&mut self, pending: PendingIntercept, action: InterceptAction) {
+    pub(super) fn advance_pending_intercept(
+        &mut self,
+        pending: PendingIntercept,
+        action: InterceptAction,
+    ) {
         let PendingIntercept {
             conn_id: _,
             event: original_event,
@@ -2450,7 +2455,7 @@ impl Harness {
 
     /// Drain `deferred_publishes` until either it's empty or one of
     /// them parks a new intercept.
-    fn drain_deferred_publishes(&mut self) {
+    pub(super) fn drain_deferred_publishes(&mut self) {
         while self.runtime_io.publication.pending_intercept.is_none() {
             let Some(deferred) = self.runtime_io.publication.deferred.pop_front() else {
                 break;

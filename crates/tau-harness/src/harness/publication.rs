@@ -844,6 +844,9 @@ impl Harness {
                 AgentPublishCompletion::ReactiveContextRecoveryStart { checkpoint, .. } => {
                     Some(tau_core::AgentEventParent::from_head(checkpoint.through))
                 }
+                AgentPublishCompletion::OwedCompactionFact { batch_parent, .. } => {
+                    Some(tau_core::AgentEventParent::from_head(*batch_parent))
+                }
                 _ => None,
             })
             .or_else(|| {

@@ -1707,7 +1707,7 @@ impl Harness {
                 resume_through,
                 context_retreat: retreat_plan,
             }),
-            Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
+            Some(AgentPublishCompletion::OwedCompactionFact {
                 batch_parent,
                 retry_event: None,
             }),

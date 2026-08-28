@@ -8,6 +8,26 @@ use super::compaction_runtime::RollingCompactionPass;
 use super::*;
 
 impl Harness {
+    /// Publishes one documented owed compaction fact with its exact semantic
+    /// parent retained across append rejection.
+    pub(super) fn publish_owed_compaction_fact(
+        &mut self,
+        cid: &AgentId,
+        batch_parent: tau_proto::AgentHead,
+        event: Event,
+    ) {
+        self.publish_event_for_agent_with_completion(
+            cid,
+            None,
+            event,
+            Some(AgentPublishCompletion::OwedCompactionFact {
+                batch_parent,
+                retry_event: None,
+            }),
+            false,
+        );
+    }
+
     /// Lets a cancellation accepted before terminal write-complete own the one
     /// canonical continuation terminal, regardless of the response queued
     /// first.
@@ -130,7 +150,7 @@ impl Harness {
                 | AgentPublishCompletion::OutputLengthDormantRepair { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
                 | AgentPublishCompletion::StandaloneContextRejection { .. }
-                | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
+                | AgentPublishCompletion::OwedCompactionFact { .. }
                 | AgentPublishCompletion::RollingCompactionStart { .. }
                 | AgentPublishCompletion::StandaloneContinuation { .. } => None,
             }
@@ -475,7 +495,7 @@ impl Harness {
                     cid,
                     None,
                     Event::AgentStandaloneCompactionFailed(*failure),
-                    Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
+                    Some(AgentPublishCompletion::OwedCompactionFact {
                         batch_parent: through,
                         retry_event: None,
                     }),
@@ -496,7 +516,7 @@ impl Harness {
             );
             return;
         }
-        if let AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } = completion {
+        if let AgentPublishCompletion::OwedCompactionFact { .. } = completion {
             return;
         }
         if let AgentPublishCompletion::RollingCompactionStart { .. } = completion {
@@ -637,7 +657,7 @@ impl Harness {
             AgentPublishCompletion::StandaloneContextRejection { retry_event, .. } => {
                 *retry_event = Some(Box::new(event.clone()));
             }
-            AgentPublishCompletion::ReactiveContextRecoveryFailure { retry_event, .. } => {
+            AgentPublishCompletion::OwedCompactionFact { retry_event, .. } => {
                 *retry_event = Some(Box::new(event.clone()));
             }
             AgentPublishCompletion::RollingCompactionStart { retry_event } => {
@@ -753,7 +773,7 @@ impl Harness {
                 | AgentPublishCompletion::ReactiveContextRecovery { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
                 | AgentPublishCompletion::StandaloneContextRejection { .. }
-                | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
+                | AgentPublishCompletion::OwedCompactionFact { .. }
                 | AgentPublishCompletion::RollingCompactionStart { .. }
         ) {
             if matches!(
@@ -762,7 +782,7 @@ impl Harness {
                     | AgentPublishCompletion::ReactiveContextRecovery { .. }
                     | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
                     | AgentPublishCompletion::StandaloneContextRejection { .. }
-                    | AgentPublishCompletion::ReactiveContextRecoveryFailure { .. }
+                    | AgentPublishCompletion::OwedCompactionFact { .. }
                     | AgentPublishCompletion::RollingCompactionStart { .. }
             ) {
                 let retry_event = match &completion {
@@ -772,9 +792,7 @@ impl Harness {
                         retry_event, ..
                     }
                     | AgentPublishCompletion::StandaloneContextRejection { retry_event, .. }
-                    | AgentPublishCompletion::ReactiveContextRecoveryFailure {
-                        retry_event, ..
-                    }
+                    | AgentPublishCompletion::OwedCompactionFact { retry_event, .. }
                     | AgentPublishCompletion::RollingCompactionStart { retry_event } => retry_event,
                     _ => unreachable!("matched direct retry"),
                 };
@@ -789,9 +807,7 @@ impl Harness {
                         retry_event, ..
                     }
                     | AgentPublishCompletion::StandaloneContextRejection { retry_event, .. }
-                    | AgentPublishCompletion::ReactiveContextRecoveryFailure {
-                        retry_event, ..
-                    }
+                    | AgentPublishCompletion::OwedCompactionFact { retry_event, .. }
                     | AgentPublishCompletion::RollingCompactionStart { retry_event } => {
                         *retry_event = None;
                     }
@@ -894,7 +910,7 @@ impl Harness {
             AgentPublishCompletion::StandaloneContextRejection { .. } => {
                 unreachable!("returned above")
             }
-            AgentPublishCompletion::ReactiveContextRecoveryFailure { .. } => {
+            AgentPublishCompletion::OwedCompactionFact { .. } => {
                 unreachable!("returned above")
             }
             AgentPublishCompletion::RollingCompactionStart { .. } => {
@@ -2441,7 +2457,7 @@ impl Harness {
                                     context_retreat: None,
                                 },
                             ),
-                            Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
+                            Some(AgentPublishCompletion::OwedCompactionFact {
                                 batch_parent,
                                 retry_event: None,
                             }),
@@ -2463,7 +2479,7 @@ impl Harness {
                                     context_retreat: None,
                                 },
                             ),
-                            Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
+                            Some(AgentPublishCompletion::OwedCompactionFact {
                                 batch_parent: append_outcome
                                     .and_then(|outcome| outcome.folded_node_id)
                                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
@@ -2490,8 +2506,12 @@ impl Harness {
                         })
                 });
                 if reactive_off_branch {
-                    self.publish_for_agent(
+                    let batch_parent = append_outcome
+                        .and_then(|outcome| outcome.folded_node_id)
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                    self.publish_owed_compaction_fact(
                         &cid,
+                        batch_parent,
                         Event::AgentStandaloneCompactionFailed(
                             tau_proto::AgentStandaloneCompactionFailed {
                                 agent_id: started.agent_id.clone(),
@@ -2815,8 +2835,12 @@ impl Harness {
                     })
                     .map(|accepted| accepted.request.clone())
             {
-                self.publish_for_agent(
+                let batch_parent = append_outcome
+                    .and_then(|outcome| outcome.folded_node_id)
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                self.publish_owed_compaction_fact(
                     &cid,
+                    batch_parent,
                     Event::AgentManualCompactionRequestSatisfied(
                         tau_proto::AgentManualCompactionRequestSatisfied {
                             request_id: request.request_id,

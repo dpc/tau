@@ -1386,7 +1386,7 @@ impl Harness {
                         context_retreat: None,
                     },
                 ),
-                Some(AgentPublishCompletion::ReactiveContextRecoveryFailure {
+                Some(AgentPublishCompletion::OwedCompactionFact {
                     batch_parent: self
                         .selected_head_for_agent(cid)
                         .unwrap_or(tau_proto::AgentHead::Root),

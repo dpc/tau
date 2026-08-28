@@ -1470,7 +1470,7 @@ fn seed_reactive_compaction_prefix(h: &mut Harness, cid: &AgentId) {
 
 /// Build one successful standalone-compaction response with a single
 /// replacement summary.
-fn standalone_compaction_success_response(
+pub(super) fn standalone_compaction_success_response(
     prompt: &tau_proto::AgentPromptCreated,
     summary: &str,
 ) -> ProviderResponseFinished {

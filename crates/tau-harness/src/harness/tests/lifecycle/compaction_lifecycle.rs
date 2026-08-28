@@ -2,8 +2,306 @@
 
 use super::super::dispatch::{
     context_overflow_response, enable_remote_compaction_for_test_model, provider_text_response,
+    standalone_compaction_success_response,
 };
 use super::*;
+
+/// Automatic success must satisfy an already queued UI intent exactly once
+/// after either an attempted interceptor Drop or a rejected semantic append.
+#[test]
+fn ui_compaction_satisfaction_is_owed_across_publication_failures() {
+    for reject_append in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td
+            .path()
+            .join(if reject_append { "reject" } else { "drop" });
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        h.provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("test model")
+            .supports_standalone_compaction = true;
+        let cid = ensure_test_user_agent(&mut h);
+        let agent_id = durable_agent_id_for_conversation(&h, &cid);
+        let cut = h
+            .selected_head_for_agent(&cid)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        let transaction_id =
+            tau_proto::CompactionTransactionId::parse("ct-s5-ui-auto").expect("transaction id");
+        h.publish_for_agent(
+            &cid,
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                agent_id: agent_id.clone(),
+                transaction_id: transaction_id.clone(),
+                compact_prompt_id: test_agent_prompt_id("ap-s5-ui-auto"),
+                cut,
+                resume_through: None,
+                model: "test/model".into(),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator: tau_proto::PromptOriginator::User,
+                supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::AutomaticThreshold,
+            }),
+        );
+        let prompt = event_log_events(&h)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction =>
+                {
+                    Some(prompt)
+                }
+                _ => None,
+            })
+            .expect("standalone prompt");
+        h.handle_compact_request(
+            crate::harness::harness_connection_id(),
+            test_session_id("s1"),
+            Some(agent_id.as_str()),
+        );
+        let request_id = event_log_events(&h)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::AgentManualCompactionRequested(request) => Some(request.request_id),
+                _ => None,
+            })
+            .expect("queued UI request");
+        let interceptor = if reject_append {
+            "s5-ui-reject"
+        } else {
+            "s5-ui-drop"
+        };
+        connect_test_tool(&mut h, interceptor);
+        h.handle_extension_event(
+            interceptor,
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_MANUAL_COMPACTION_REQUEST_SATISFIED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register satisfaction interceptor");
+        h.handle_provider_response_finished(standalone_compaction_success_response(
+            &prompt,
+            "replacement",
+        ))
+        .expect("complete automatic compaction");
+        let satisfaction_parent = h
+            .selected_head_for_agent(&cid)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        assert!(matches!(
+            h.runtime_io
+                .publication
+                .pending_intercept
+                .as_ref()
+                .map(|pending| &pending.event),
+            Some(Event::AgentManualCompactionRequestSatisfied(satisfied))
+                if satisfied.request_id == request_id
+                    && satisfied.transaction_id == transaction_id
+        ));
+        if reject_append {
+            reject_next_semantic_admission(&h);
+        }
+        h.handle_extension_event(
+            interceptor,
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: if reject_append {
+                    InterceptAction::Pass(None)
+                } else {
+                    InterceptAction::Drop
+                },
+            })),
+        )
+        .expect("resolve satisfaction publication");
+        if reject_append {
+            assert!(
+                h.prompt_coordination
+                    .prompt_runtime
+                    .pending_publish_completions
+                    .contains_key(&cid)
+            );
+            h.retry_pending_agent_publish_completion(&cid);
+        }
+        let satisfied = |h: &Harness| {
+            h.session_runtime
+                .agent_store
+                .agent_events(agent_id.as_str())
+                .expect("agent events")
+                .into_iter()
+                .filter(|record| {
+                    matches!(
+                        &record.event,
+                        Event::AgentManualCompactionRequestSatisfied(satisfied)
+                            if satisfied.request_id == request_id
+                                && satisfied.transaction_id == transaction_id
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let live = satisfied(&h);
+        assert_eq!(live.len(), 1, "reject_append={reject_append}");
+        assert_eq!(
+            live[0].parent,
+            tau_core::AgentEventParent::from_head(satisfaction_parent)
+        );
+        drop(h);
+        wait_for_session_unlock(&state, "s1");
+        let resumed =
+            echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        let replayed = satisfied(&resumed);
+        assert_eq!(replayed.len(), 1, "reject_append={reject_append}");
+        assert_eq!(
+            replayed[0].parent,
+            tau_core::AgentEventParent::from_head(satisfaction_parent)
+        );
+    }
+}
+
+/// Cold replay's Interrupted repair remains owed across attempted Drop and
+/// semantic append rejection, preserving its exact parent exactly once.
+#[test]
+fn interrupted_compaction_replay_repair_is_owed_across_publication_failures() {
+    for reject_append in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td
+            .path()
+            .join(if reject_append { "reject" } else { "drop" });
+        let mut h = echo_harness(&state).expect("start");
+        let cid = ensure_test_user_agent(&mut h);
+        let agent_id = durable_agent_id_for_conversation(&h, &cid);
+        let parent = h
+            .selected_head_for_agent(&cid)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        let transaction_id =
+            tau_proto::CompactionTransactionId::parse("ct-s5-replay").expect("transaction id");
+        h.append_direct_agent_semantic_event(
+            agent_id.as_str(),
+            tau_core::AgentEventParent::from_head(parent),
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                agent_id: agent_id.clone(),
+                transaction_id: transaction_id.clone(),
+                compact_prompt_id: test_agent_prompt_id("ap-s5-replay"),
+                cut: parent,
+                resume_through: None,
+                model: "echo/model".into(),
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator: tau_proto::PromptOriginator::User,
+                supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+            }),
+        )
+        .expect("seed interrupted transaction");
+
+        let interceptor = if reject_append {
+            "s5-replay-reject"
+        } else {
+            "s5-replay-drop"
+        };
+        connect_test_tool(&mut h, interceptor);
+        h.handle_extension_event(
+            interceptor,
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_STANDALONE_COMPACTION_FAILED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register replay-repair interceptor");
+
+        h.agent_runtime.agent_registry.agents.clear();
+        h.agent_runtime.agent_registry.agent_routes.clear();
+        h.agent_runtime.agent_registry.session_loaded.clear();
+        h.rehydrate_agents_from_session();
+        let restored_cid = h
+            .runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+            .expect("restored agent");
+        assert!(matches!(
+            h.runtime_io
+                .publication
+                .pending_intercept
+                .as_ref()
+                .map(|pending| &pending.event),
+            Some(Event::AgentStandaloneCompactionFailed(failed))
+                if failed.transaction_id == transaction_id
+                    && failed.reason
+                        == tau_proto::StandaloneCompactionFailureReason::Interrupted
+        ));
+        if reject_append {
+            reject_next_semantic_admission(&h);
+        }
+        h.handle_extension_event(
+            interceptor,
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: if reject_append {
+                    InterceptAction::Pass(None)
+                } else {
+                    InterceptAction::Drop
+                },
+            })),
+        )
+        .expect("resolve replay repair");
+        if reject_append {
+            assert!(
+                h.prompt_coordination
+                    .prompt_runtime
+                    .pending_publish_completions
+                    .contains_key(&restored_cid)
+            );
+            h.retry_pending_agent_publish_completion(&restored_cid);
+        }
+        let repaired = h
+            .session_runtime
+            .agent_store
+            .agent_events(agent_id.as_str())
+            .expect("agent events")
+            .into_iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::AgentStandaloneCompactionFailed(failed)
+                        if failed.transaction_id == transaction_id
+                            && failed.reason
+                                == tau_proto::StandaloneCompactionFailureReason::Interrupted
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(repaired.len(), 1, "reject_append={reject_append}");
+        assert_eq!(
+            repaired[0].parent,
+            tau_core::AgentEventParent::from_head(parent)
+        );
+        drop(h);
+        wait_for_session_unlock(&state, "s1");
+        let resumed =
+            echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+                .expect("cold replay");
+        let replayed = resumed
+            .session_runtime
+            .agent_store
+            .agent_events(agent_id.as_str())
+            .expect("replayed events")
+            .into_iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::AgentStandaloneCompactionFailed(failed)
+                        if failed.transaction_id == transaction_id
+                            && failed.reason
+                                == tau_proto::StandaloneCompactionFailureReason::Interrupted
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replayed.len(), 1, "reject_append={reject_append}");
+        assert_eq!(
+            replayed[0].parent,
+            tau_core::AgentEventParent::from_head(parent)
+        );
+    }
+}
 
 /// The normal eligible path must issue exactly one successor with the source
 /// identity and account for both provider responses independently.

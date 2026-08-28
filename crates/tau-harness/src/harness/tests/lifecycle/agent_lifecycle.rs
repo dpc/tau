@@ -1335,9 +1335,10 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
     h.handle_extension_event(
         "reactive-branch-interceptor",
         TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
-            )],
+            selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_STANDALONE_COMPACTION_FAILED),
+            ],
             priority: InterceptionPriority::new(0),
         })),
     )
@@ -1379,9 +1380,63 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
         })),
     )
     .expect("commit off-selected rejection");
+    assert!(matches!(
+        h.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
+        Some(Event::AgentStandaloneCompactionFailed(failed))
+            if failed.reason == tau_proto::StandaloneCompactionFailureReason::StaleBranch
+    ));
+    reject_next_semantic_admission(&h);
+    let pending = h
+        .runtime_io
+        .publication
+        .pending_intercept
+        .take()
+        .expect("parked off-branch failure");
+    h.advance_pending_intercept(pending, InterceptAction::Pass(None));
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+    );
+    let (navigation_ui_id, _navigation_ui) = connect_socket_ui(&mut h);
+    h.handle_ui_navigate_tree(
+        &navigation_ui_id,
+        tau_proto::UiNavigateTree {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(source.agent_id.clone()),
+            target: tau_proto::UiTreeNavigationTarget::Root,
+        },
+    )
+    .expect("navigate back to owed root");
+    h.drain_deferred_publishes();
+    h.drain_publish_idle_dispatches();
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid].identity.head,
         Some(sibling)
+    );
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty()
+    );
+    h.handle_ui_navigate_tree(
+        &navigation_ui_id,
+        tau_proto::UiNavigateTree {
+            session_id: test_session_id("s1"),
+            target_agent_id: Some(source.agent_id.clone()),
+            target: tau_proto::UiTreeNavigationTarget::Root,
+        },
+    )
+    .expect("reselect owed root after retry");
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid].identity.head,
+        None
     );
     assert_eq!(
         event_log_events(&h)
@@ -1399,12 +1454,28 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
         records
             .iter()
             .filter(|record| matches!(
+                record.event,
+                Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                    head: tau_proto::AgentHead::Root,
+                    ..
+                })
+            ))
+            .count(),
+        2
+    );
+    let failures = records
+        .iter()
+        .filter(|record| {
+            matches!(
                 &record.event,
                 Event::AgentStandaloneCompactionFailed(failed)
                     if failed.reason
                         == tau_proto::StandaloneCompactionFailureReason::StaleBranch
-            ))
-            .count(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failures.len(),
         1,
         "off-branch records: {:?}",
         event_log_events(&h)
@@ -1415,7 +1486,38 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
             })
             .collect::<Vec<_>>()
     );
-    h.shutdown().expect("shutdown");
+    assert_eq!(failures[0].parent, tau_core::AgentEventParent::Root);
+    drop(h);
+    wait_for_session_unlock(td.path(), "s1");
+    let resumed =
+        quiet_provider_harness_with_start_reason(td.path(), tau_proto::SessionStartReason::Resume)
+            .expect("cold replay");
+    let resumed_cid = resumed
+        .runtime_agent_id_for_target_agent(Some(source.agent_id.as_str()))
+        .expect("resumed agent");
+    assert_eq!(
+        resumed.agent_runtime.agent_registry.agents[&resumed_cid]
+            .identity
+            .head,
+        None
+    );
+    let replayed = resumed
+        .session_runtime
+        .agent_store
+        .agent_events(source.agent_id.as_str())
+        .expect("replayed records")
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentStandaloneCompactionFailed(failed)
+                    if failed.reason
+                        == tau_proto::StandaloneCompactionFailureReason::StaleBranch
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].parent, tau_core::AgentEventParent::Root);
 }
 
 /// Cancellation while an off-branch reactive Start or its staged failure is
