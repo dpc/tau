@@ -154,7 +154,9 @@ use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvail
 use crate::harness::prompt_runtime_state::PromptRuntimeState;
 use crate::harness::provider_runtime_state::ProviderRuntimeState;
 use crate::harness::provider_startup::ProviderStartupSnapshot;
-use crate::harness::provider_terminal_plan::{ProviderTerminalPlan, ReactiveContextRecoveryPlan};
+use crate::harness::provider_terminal_plan::{
+    FinalStatusGatedPlan, ProviderTerminalPlan, ReactiveContextRecoveryPlan,
+};
 use crate::harness::publication_state::PublicationState;
 use crate::harness::reactive_context_recovery_reducer::CommittedReactiveContextRecovery;
 use crate::harness::subagents_tool::SubagentToolState;

@@ -414,24 +414,20 @@ impl Harness {
                     | ProviderStopReason::Error
                     | ProviderStopReason::RepetitionDetected
             );
-        let final_status_gate = (!requested_tool_calls)
-            .then(|| self.apply_final_status_response_gate(&cid, &response))
-            .flatten();
+        let final_status_plan =
+            self.classify_final_status_provider_terminal(&cid, &response, requested_tool_calls);
+        let final_status_challenged = matches!(
+            final_status_plan,
+            ProviderTerminalPlan::FinalStatusGated(FinalStatusGatedPlan::Challenge { .. })
+        );
         if !requested_tool_calls
-            && !matches!(
-                final_status_gate,
-                Some(path_crate_agent::FinalStatusDecision::Challenge(_))
-            )
+            && !final_status_challenged
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
         {
             agent.turn.terminal_notice_eligible = successful;
             agent.turn.terminal_notice_outer_turn_id = agent.turn.outer_turn.owned_id().cloned();
             agent.turn.terminal_context_size_alerts = context_size_alerts.clone();
         }
-        let final_status_challenged = matches!(
-            final_status_gate,
-            Some(path_crate_agent::FinalStatusDecision::Challenge(_))
-        );
         if final_status_challenged
             && let tau_proto::OutputLengthDisposition::ContinuationTerminal {
                 outer_turn_finish_owed,
@@ -473,22 +469,22 @@ impl Harness {
                     )
                 });
         }
-        let final_status_gated = final_status_gate.is_some();
-        let completion = match final_status_gate {
-            Some(path_crate_agent::FinalStatusDecision::Challenge(challenge)) => {
-                Some(AgentPublishCompletion::GatedFinal {
-                    batch_parent: self
-                        .agent_runtime
-                        .agent_registry
-                        .agents
-                        .get(&cid)
-                        .and_then(|agent| agent.identity.head)
-                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                    disposition: GatedFinalDisposition::Challenge { challenge },
-                    retry_event: None,
-                })
-            }
-            Some(path_crate_agent::FinalStatusDecision::Accept) => {
+        let final_status_gated = !matches!(final_status_plan, ProviderTerminalPlan::Other);
+        let completion = match final_status_plan {
+            ProviderTerminalPlan::FinalStatusGated(FinalStatusGatedPlan::Challenge {
+                challenge,
+            }) => Some(AgentPublishCompletion::GatedFinal {
+                batch_parent: self
+                    .agent_runtime
+                    .agent_registry
+                    .agents
+                    .get(&cid)
+                    .and_then(|agent| agent.identity.head)
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                disposition: GatedFinalDisposition::Challenge { challenge },
+                retry_event: None,
+            }),
+            ProviderTerminalPlan::FinalStatusGated(FinalStatusGatedPlan::Accept) => {
                 Some(AgentPublishCompletion::GatedFinal {
                     batch_parent: self
                         .agent_runtime
@@ -511,7 +507,10 @@ impl Harness {
                     retry_event: None,
                 })
             }
-            None => None,
+            ProviderTerminalPlan::ReactiveContextRecovery(_) => {
+                unreachable!("reactive recovery returns before final-status classification")
+            }
+            ProviderTerminalPlan::Other => None,
         };
         let eager_terminal_owned = response.automatic_compaction_decision.is_some();
         let commit_gated_terminal = eager_terminal_owned || continues_for_pending_message_wake;
@@ -906,6 +905,9 @@ impl Harness {
     ) -> bool {
         let plan = match plan {
             ProviderTerminalPlan::ReactiveContextRecovery(plan) => plan,
+            ProviderTerminalPlan::FinalStatusGated(_) => {
+                unreachable!("final-status classification runs after shared terminal accounting")
+            }
             ProviderTerminalPlan::Other => return false,
         };
         let ReactiveContextRecoveryPlan { checkpoint, source } = *plan;
@@ -3256,11 +3258,15 @@ impl Harness {
 
     /// Apply the common successful-terminal gate before ordinary or delegated
     /// completion can project the candidate response.
-    pub(super) fn apply_final_status_response_gate(
+    pub(super) fn classify_final_status_provider_terminal(
         &mut self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
-    ) -> Option<crate::agent::FinalStatusDecision> {
+        requested_tool_calls: bool,
+    ) -> ProviderTerminalPlan {
+        if requested_tool_calls {
+            return ProviderTerminalPlan::Other;
+        }
         let successful = response.error.is_none()
             && response.failure_kind.is_none()
             && !matches!(
@@ -3282,16 +3288,27 @@ impl Harness {
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             agent.turn.terminal_status_was_available = status_was_available;
         }
-        self.agent_runtime
+        match self
+            .agent_runtime
             .agent_registry
             .agents
-            .get(cid)?
-            .turn
-            .work_status
-            .decide_final(FinalStatusInput {
-                successful,
-                status_was_available,
-            })
+            .get(cid)
+            .and_then(|agent| {
+                agent.turn.work_status.decide_final(FinalStatusInput {
+                    successful,
+                    status_was_available,
+                })
+            }) {
+            Some(path_crate_agent::FinalStatusDecision::Challenge(challenge)) => {
+                ProviderTerminalPlan::FinalStatusGated(FinalStatusGatedPlan::Challenge {
+                    challenge,
+                })
+            }
+            Some(path_crate_agent::FinalStatusDecision::Accept) => {
+                ProviderTerminalPlan::FinalStatusGated(FinalStatusGatedPlan::Accept)
+            }
+            None => ProviderTerminalPlan::Other,
+        }
     }
 
     /// Perform ordinary or delegated completion only after an accepted gated

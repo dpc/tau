@@ -21,9 +21,9 @@ mod ui_liveness;
 
 use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;
-use crate::harness::PendingTool;
 use crate::harness::gated_final::GatedFinalDisposition;
 use crate::harness::interception::AgentPublishCompletion;
+use crate::harness::{PendingTool, assistant_text_from_output_items};
 
 /// Construct one authenticated-provenance report for ordinary extension
 /// publication.
@@ -466,6 +466,31 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
             .pending_publish_completions
             .contains_key(&cid)
     );
+    let retained = h
+        .prompt_coordination
+        .prompt_runtime
+        .pending_publish_completions
+        .get(&cid)
+        .expect("retained final-status completion");
+    assert!(matches!(
+        retained,
+        AgentPublishCompletion::GatedFinal {
+            batch_parent,
+            disposition:
+                GatedFinalDisposition::Challenge {
+                    challenge: path_crate_agent::FinalStatusChallenge::Working { title },
+                },
+            retry_event: Some(retry),
+        } if *batch_parent == owning_head
+            && title == "append retry"
+            && matches!(
+                retry.as_ref(),
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == prompt_id
+                        && assistant_text_from_output_items(&response.output_items).as_deref()
+                            == Some("candidate")
+            )
+    ));
     assert!(
         h.agent_runtime.agent_registry.agents[&cid]
             .dispatch
