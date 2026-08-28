@@ -2428,7 +2428,9 @@ impl Harness {
                 if let Some(staged) = self
                     .prompt_coordination
                     .compaction_runtime
-                    .remove_pending_model_acceptance(&requested.request_id)
+                    .remove_pending_model_acceptance(&ManualCompactionRequestKey::for_request(
+                        requested,
+                    ))
                 {
                     let source = staged.request.required_tool_source();
                     let call_id = source.initiating_tool_call_id.clone();
@@ -2437,7 +2439,7 @@ impl Harness {
                         .compaction_runtime
                         .accepted_manual_tools
                         .insert(
-                            requested.request_id.clone(),
+                            ManualCompactionRequestKey::for_request(requested),
                             AcceptedManualCompactionTool {
                                 request: requested.clone(),
                                 visible_tool_name: staged.visible_tool_name,
@@ -2475,7 +2477,10 @@ impl Harness {
                         );
                     }
                     if !self_request {
-                        self.start_accepted_manual_compaction(&cid, &requested.request_id);
+                        self.start_accepted_manual_compaction(
+                            &cid,
+                            &ManualCompactionRequestKey::for_request(requested),
+                        );
                     }
                 }
                 return;
@@ -2483,18 +2488,18 @@ impl Harness {
             if let Some(accepted) = self
                 .prompt_coordination
                 .compaction_runtime
-                .remove_pending_ui_acceptance(&requested.request_id)
+                .remove_pending_ui_acceptance(&ManualCompactionRequestKey::for_request(requested))
             {
                 self.prompt_coordination
                     .compaction_runtime
                     .accepted_manual_tools
-                    .insert(requested.request_id.clone(), accepted);
+                    .insert(ManualCompactionRequestKey::for_request(requested), accepted);
             }
             let requesters = self
                 .prompt_coordination
                 .compaction_runtime
                 .pending_ui_acknowledgements
-                .remove(&requested.request_id)
+                .remove(&ManualCompactionRequestKey::for_request(requested))
                 .unwrap_or_default();
             for (index, requester) in requesters.iter().enumerate() {
                 self.send_ui_response(
@@ -2589,7 +2594,10 @@ impl Harness {
                     .prompt_coordination
                     .compaction_runtime
                     .accepted_manual_tools
-                    .remove(request_id);
+                    .remove(&ManualCompactionRequestKey::new(
+                        started.agent_id.clone(),
+                        request_id.clone(),
+                    ));
                 self.prompt_coordination
                     .compaction_runtime
                     .record_model_tool_start(
@@ -2613,7 +2621,10 @@ impl Harness {
                 self.prompt_coordination
                     .compaction_runtime
                     .accepted_manual_tools
-                    .remove(request_id);
+                    .remove(&ManualCompactionRequestKey::new(
+                        started.agent_id.clone(),
+                        request_id.clone(),
+                    ));
                 self.prompt_coordination.compaction_runtime.record_ui_start(
                     started.agent_id.clone(),
                     started.transaction_id.clone(),
@@ -2809,7 +2820,10 @@ impl Harness {
                 .prompt_coordination
                 .compaction_runtime
                 .accepted_manual_tools
-                .remove(&failed.request_id)
+                .remove(&ManualCompactionRequestKey::new(
+                    failed.target_agent_id.clone(),
+                    failed.request_id.clone(),
+                ))
         {
             if let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(failed.target_agent_id.as_str()))
@@ -2886,7 +2900,10 @@ impl Harness {
             self.prompt_coordination
                 .compaction_runtime
                 .accepted_manual_tools
-                .remove(&satisfied.request_id);
+                .remove(&ManualCompactionRequestKey::new(
+                    satisfied.target_agent_id.clone(),
+                    satisfied.request_id.clone(),
+                ));
         }
         if let Event::AgentStandaloneCompactionFailed(failed) = event {
             self.prompt_coordination

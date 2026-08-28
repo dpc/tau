@@ -20,12 +20,12 @@ impl Harness {
     /// Claim a queued UI request at a provider-closed boundary before ordinary
     /// inference can advance.
     pub(super) fn try_start_queued_ui_compaction(&mut self, cid: &AgentId) -> bool {
-        let request_id = self
+        let request_key = self
             .prompt_coordination
             .compaction_runtime
             .accepted_manual_tools
             .iter()
-            .find_map(|(request_id, accepted)| {
+            .find_map(|(request_key, accepted)| {
                 (accepted.request.is_ui_request()
                     && self
                         .runtime_agent_id_for_target_agent(Some(
@@ -33,9 +33,10 @@ impl Harness {
                         ))
                         .as_ref()
                         == Some(cid))
-                .then(|| request_id.clone())
+                .then(|| request_key.clone())
             });
-        request_id.is_some_and(|request_id| self.start_accepted_manual_compaction(cid, &request_id))
+        request_key
+            .is_some_and(|request_key| self.start_accepted_manual_compaction(cid, &request_key))
     }
 
     pub(super) fn handle_compact_request(
@@ -84,27 +85,27 @@ impl Harness {
         };
         let turn_state = agent.turn.turn_state.clone();
         let activation_dispatch = agent.dispatch.activation_dispatch.clone();
-        if let Some(request_id) = self
+        if let Some(request_key) = self
             .prompt_coordination
             .compaction_runtime
             .accepted_manual_tools
             .iter()
-            .find_map(|(request_id, accepted)| {
+            .find_map(|(request_key, accepted)| {
                 (accepted.request.target_agent_id == agent_id && accepted.request.is_ui_request())
-                    .then(|| request_id.clone())
+                    .then(|| request_key.clone())
             })
         {
             if self
                 .prompt_coordination
                 .compaction_runtime
                 .pending_manual_acceptances
-                .get(&request_id)
+                .get(&request_key)
                 .is_some_and(|pending| matches!(pending, PendingManualCompactionAcceptance::Ui(_)))
             {
                 self.prompt_coordination
                     .compaction_runtime
                     .pending_ui_acknowledgements
-                    .entry(request_id)
+                    .entry(request_key)
                     .or_default()
                     .push(client_id.clone());
             } else {
@@ -121,26 +122,26 @@ impl Harness {
             self.send_ui_response(client_id, "compaction already queued");
             return;
         }
-        if let Some(request_id) = self
+        if let Some(request_key) = self
             .prompt_coordination
             .compaction_runtime
             .pending_manual_acceptances
             .iter()
-            .find_map(|(id, pending)| {
-                (pending.request().target_agent_id == agent_id).then(|| id.clone())
+            .find_map(|(key, pending)| {
+                (pending.request().target_agent_id == agent_id).then(|| key.clone())
             })
         {
             if matches!(
                 self.prompt_coordination
                     .compaction_runtime
                     .pending_manual_acceptances
-                    .get(&request_id),
+                    .get(&request_key),
                 Some(PendingManualCompactionAcceptance::Ui(_))
             ) {
                 self.prompt_coordination
                     .compaction_runtime
                     .pending_ui_acknowledgements
-                    .entry(request_id)
+                    .entry(request_key)
                     .or_default()
                     .push(client_id.clone());
             } else {
@@ -245,7 +246,7 @@ impl Harness {
         };
         let turn_state = agent.turn.turn_state.clone();
         let activation_dispatch = agent.dispatch.activation_dispatch.clone();
-        let request_id = self
+        let request_key = self
             .prompt_coordination
             .compaction_runtime
             .accepted_manual_tools
@@ -256,7 +257,7 @@ impl Harness {
             })
             .expect("committed UI request is installed");
         if matches!(turn_state, AgentTurnState::Idle) {
-            self.start_accepted_manual_compaction(cid, &request_id);
+            self.start_accepted_manual_compaction(cid, &request_key);
             return;
         }
         if !matches!(
@@ -390,7 +391,7 @@ impl Harness {
             .compaction_runtime
             .pending_manual_acceptances
             .insert(
-                request_id.clone(),
+                ManualCompactionRequestKey::for_request(&request),
                 PendingManualCompactionAcceptance::Ui(AcceptedManualCompactionTool {
                     request: request.clone(),
                     visible_tool_name: ToolName::new("compact"),
@@ -399,7 +400,10 @@ impl Harness {
         self.prompt_coordination
             .compaction_runtime
             .pending_ui_acknowledgements
-            .insert(request_id.clone(), vec![requester_client_id]);
+            .insert(
+                ManualCompactionRequestKey::for_request(&request),
+                vec![requester_client_id],
+            );
         self.publish_for_agent(cid, Event::AgentManualCompactionRequested(request));
     }
 
@@ -413,12 +417,12 @@ impl Harness {
         }
         self.prompt_coordination
             .compaction_runtime
-            .remove_pending_ui_acceptance(&requested.request_id);
+            .remove_pending_ui_acceptance(&ManualCompactionRequestKey::for_request(requested));
         if let Some(requesters) = self
             .prompt_coordination
             .compaction_runtime
             .pending_ui_acknowledgements
-            .remove(&requested.request_id)
+            .remove(&ManualCompactionRequestKey::for_request(requested))
         {
             for requester in requesters {
                 self.send_ui_error_response(&requester, "compaction could not be queued durably");
@@ -845,7 +849,7 @@ impl Harness {
             .compaction_runtime
             .pending_manual_acceptances
             .insert(
-                request_id.clone(),
+                ManualCompactionRequestKey::for_request(&request),
                 PendingManualCompactionAcceptance::ModelTool(StagedManualCompactionTool {
                     request: request.clone(),
                     visible_tool_name,
@@ -861,8 +865,9 @@ impl Harness {
     pub(super) fn start_accepted_manual_compaction(
         &mut self,
         target_cid: &AgentId,
-        request_id: &tau_proto::CompactionRequestId,
+        request_key: &ManualCompactionRequestKey,
     ) -> bool {
+        let request_id = request_key.request_id();
         if self
             .prompt_coordination
             .compaction_runtime
@@ -875,7 +880,7 @@ impl Harness {
             .prompt_coordination
             .compaction_runtime
             .accepted_manual_tools
-            .get(request_id)
+            .get(request_key)
             .cloned()
         else {
             return false;
@@ -2128,14 +2133,17 @@ impl Harness {
                         .compaction_runtime
                         .accepted_manual_tools
                         .insert(
-                            request.request_id.clone(),
+                            ManualCompactionRequestKey::for_request(&request),
                             AcceptedManualCompactionTool {
                                 request: request.clone(),
                                 visible_tool_name: tool_name,
                             },
                         );
                     if request.is_ui_request() {
-                        waiting.push((target_cid, request.request_id));
+                        waiting.push((
+                            target_cid,
+                            ManualCompactionRequestKey::for_request(&request),
+                        ));
                         continue;
                     }
                     if let Some(caller_cid) = self.runtime_agent_id_for_target_agent(Some(
@@ -2173,7 +2181,10 @@ impl Harness {
                             ]),
                         );
                     }
-                    waiting.push((target_cid, request.request_id));
+                    waiting.push((
+                        target_cid,
+                        ManualCompactionRequestKey::for_request(&request),
+                    ));
                     continue;
                 }
                 tau_core::ManualCompactionRecovery::Started {
@@ -2488,20 +2499,20 @@ impl Harness {
                 None => {}
             }
         }
-        for (target_cid, request_id) in waiting {
+        for (target_cid, request_key) in waiting {
             let self_request = self
                 .prompt_coordination
                 .compaction_runtime
                 .accepted_manual_tools
-                .get(&request_id)
+                .get(&request_key)
                 .is_some_and(|accepted| {
                     accepted
                         .request
                         .tool_source()
                         .is_some_and(|source| source.resume_inference)
                 });
-            if !self_request || self.manual_request_has_complete_tool_round(&request_id) {
-                self.start_accepted_manual_compaction(&target_cid, &request_id);
+            if !self_request || self.manual_request_has_complete_tool_round(&request_key) {
+                self.start_accepted_manual_compaction(&target_cid, &request_key);
             }
         }
     }
@@ -2630,13 +2641,13 @@ impl Harness {
 
     pub(super) fn manual_request_has_complete_tool_round(
         &self,
-        request_id: &tau_proto::CompactionRequestId,
+        request_key: &ManualCompactionRequestKey,
     ) -> bool {
         let Some(accepted) = self
             .prompt_coordination
             .compaction_runtime
             .accepted_manual_tools
-            .get(request_id)
+            .get(request_key)
         else {
             return false;
         };

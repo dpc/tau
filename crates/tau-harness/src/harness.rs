@@ -104,7 +104,9 @@ use crate::format::{format_tool_progress, render_entry_preview};
 use crate::frozen_agent_discovery::FrozenAgentDiscovery;
 use crate::harness::agent_context::AgentContextStore;
 use crate::harness::agent_watch_provider_deliveries::AgentWatchProviderDeliveries;
-use crate::harness::compaction_runtime_state::CompactionRuntimeState;
+use crate::harness::compaction_runtime_state::{
+    CompactionRuntimeState, ManualCompactionRequestKey,
+};
 use crate::harness::context_discovery_state::ContextDiscoveryState;
 use crate::harness::current_session::CurrentSessionState;
 use crate::harness::extension_data::{

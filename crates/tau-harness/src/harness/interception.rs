@@ -29,6 +29,7 @@ use tau_proto::{
 };
 
 use super::gated_final::GatedFinalDisposition;
+use crate::harness::compaction_runtime_state::ManualCompactionRequestKey;
 use crate::harness::prompt_acceptance_timing::PromptAcceptanceTiming;
 use crate::harness::{InferenceDispatchSelectionError, SessionGeneration};
 use crate::{agent as path_crate_agent, extension as path_crate_extension};
@@ -1248,15 +1249,15 @@ impl Harness {
 
     /// Cancel exact pre-commit model-compaction acceptances whose caller or
     /// target is being torn down, without disturbing other target work.
-    pub(crate) fn cancel_staged_model_acceptance_publications(
+    pub(super) fn cancel_staged_model_acceptance_publications(
         &mut self,
-        request_ids: &[tau_proto::CompactionRequestId],
+        request_keys: &[ManualCompactionRequestKey],
     ) {
         let matches_request = |event: &Event| {
             matches!(
                 event,
                 Event::AgentManualCompactionRequested(request)
-                    if request_ids.contains(&request.request_id)
+                    if request_keys.contains(&ManualCompactionRequestKey::for_request(request))
             )
         };
         let removed_pending = self

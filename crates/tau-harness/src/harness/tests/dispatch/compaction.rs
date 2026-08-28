@@ -4556,7 +4556,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
         ToolName::new("agent_compact"),
         Some(&target_id),
     );
-    let request_id = h
+    let request_key = h
         .prompt_coordination
         .compaction_runtime
         .pending_manual_acceptances
@@ -4564,6 +4564,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
         .next()
         .cloned()
         .expect("staged model acceptance");
+    let request_id = request_key.request_id().clone();
     assert!(
         h.prompt_coordination
             .compaction_runtime
@@ -4587,7 +4588,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
         h.prompt_coordination
             .compaction_runtime
             .pending_manual_acceptances
-            .contains_key(&request_id)
+            .contains_key(&request_key)
             && h.prompt_coordination
                 .prompt_runtime
                 .pending_publish_completions
@@ -4607,7 +4608,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
             && h.prompt_coordination
                 .compaction_runtime
                 .accepted_manual_tools
-                .contains_key(&request_id)
+                .contains_key(&request_key)
             && h.prompt_coordination
                 .compaction_runtime
                 .active_manual_starts_is_empty()
@@ -4637,7 +4638,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
         h.prompt_coordination
             .compaction_runtime
             .accepted_manual_tools
-            .contains_key(&request_id)
+            .contains_key(&request_key)
             && h.prompt_coordination
                 .compaction_runtime
                 .active_manual_starts_is_empty()
@@ -4698,7 +4699,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
                 .prompt_coordination
                 .compaction_runtime
                 .accepted_manual_tools
-                .contains_key(&request_id)
+                .contains_key(&request_key)
             && h.prompt_coordination
                 .compaction_runtime
                 .has_model_tool_start(
@@ -4920,7 +4921,7 @@ fn staged_model_compaction_acceptance_is_cleared_by_teardown() {
                 .len(),
             1
         );
-        let request_id = h
+        let request_key = h
             .prompt_coordination
             .compaction_runtime
             .pending_manual_acceptances
@@ -4928,6 +4929,7 @@ fn staged_model_compaction_acceptance_is_cleared_by_teardown() {
             .next()
             .cloned()
             .expect("staged request id");
+        let request_id = request_key.request_id().clone();
         if teardown == "caller_unload" {
             reject_next_semantic_admission(&h);
             h.handle_extension_event(

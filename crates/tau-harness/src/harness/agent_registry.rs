@@ -1702,7 +1702,7 @@ impl Harness {
             self.peer_messaging
                 .uncommitted_peer_auto_starts
                 .remove(&unloading_agent_id_proto);
-            let staged_request_ids = self
+            let staged_request_keys = self
                 .prompt_coordination
                 .compaction_runtime
                 .pending_manual_acceptances
@@ -1716,14 +1716,14 @@ impl Harness {
                             }) || staged.request.target_agent_id.as_str() == unloading_agent_id
                     )
                 })
-                .map(|(request_id, _)| request_id.clone())
+                .map(|(request_key, _)| request_key.clone())
                 .collect::<Vec<_>>();
-            self.cancel_staged_model_acceptance_publications(&staged_request_ids);
-            for request_id in staged_request_ids {
+            self.cancel_staged_model_acceptance_publications(&staged_request_keys);
+            for request_key in staged_request_keys {
                 let Some(staged) = self
                     .prompt_coordination
                     .compaction_runtime
-                    .remove_pending_model_acceptance(&request_id)
+                    .remove_pending_model_acceptance(&request_key)
                 else {
                     continue;
                 };

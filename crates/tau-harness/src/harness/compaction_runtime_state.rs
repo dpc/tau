@@ -37,6 +37,38 @@ impl CompactionTransaction {
     }
 }
 
+/// Agent-scoped identity of one manual-compaction request.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) struct ManualCompactionRequestKey {
+    /// Agent journal that owns the request-local identifier.
+    target_agent_id: tau_proto::AgentId,
+    /// Correlation identifier unique within the owning agent journal.
+    request_id: tau_proto::CompactionRequestId,
+}
+
+impl ManualCompactionRequestKey {
+    /// Construct an agent-scoped request identity.
+    pub(super) fn new(
+        target_agent_id: tau_proto::AgentId,
+        request_id: tau_proto::CompactionRequestId,
+    ) -> Self {
+        Self {
+            target_agent_id,
+            request_id,
+        }
+    }
+
+    /// Construct the identity carried by a proposed durable request.
+    pub(super) fn for_request(request: &tau_proto::AgentManualCompactionRequested) -> Self {
+        Self::new(request.target_agent_id.clone(), request.request_id.clone())
+    }
+
+    /// Return the request-local correlation identifier.
+    pub(super) fn request_id(&self) -> &tau_proto::CompactionRequestId {
+        &self.request_id
+    }
+}
+
 /// Runtime reason that a committed compaction start must not dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SuppressedStart {
@@ -76,15 +108,15 @@ pub(crate) struct CompactionRuntimeState {
         HashMap<CompactionTransaction, ManualCompactionStartOwner>,
     /// Accepted manual requests waiting for a safe start boundary.
     pub(super) accepted_manual_tools:
-        HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
+        HashMap<ManualCompactionRequestKey, AcceptedManualCompactionTool>,
     /// Exclusive request origin staged until its acceptance fact commits.
     pub(super) pending_manual_acceptances:
-        HashMap<tau_proto::CompactionRequestId, PendingManualCompactionAcceptance>,
+        HashMap<ManualCompactionRequestKey, PendingManualCompactionAcceptance>,
     /// UI compactions waiting for a claimed wait cancellation to commit.
     pub(super) pending_ui_after_wait: HashMap<AgentId, PendingUiCompactionAfterWait>,
     /// Requesting UIs awaiting the durable acceptance commit.
     pub(super) pending_ui_acknowledgements:
-        HashMap<tau_proto::CompactionRequestId, Vec<tau_proto::ConnectionId>>,
+        HashMap<ManualCompactionRequestKey, Vec<tau_proto::ConnectionId>>,
     /// Exact UI start publications retained after an append rejection.
     pub(super) rejected_ui_starts: HashMap<AgentId, Event>,
     /// Standalone inference checkpoints currently queued through publication.
@@ -97,14 +129,14 @@ impl CompactionRuntimeState {
     /// colliding UI acceptance.
     pub(super) fn remove_pending_model_acceptance(
         &mut self,
-        request_id: &tau_proto::CompactionRequestId,
+        key: &ManualCompactionRequestKey,
     ) -> Option<StagedManualCompactionTool> {
-        match self.pending_manual_acceptances.get(request_id) {
+        match self.pending_manual_acceptances.get(key) {
             Some(PendingManualCompactionAcceptance::ModelTool(_)) => {}
             Some(PendingManualCompactionAcceptance::Ui(_)) | None => return None,
         }
         let Some(PendingManualCompactionAcceptance::ModelTool(staged)) =
-            self.pending_manual_acceptances.remove(request_id)
+            self.pending_manual_acceptances.remove(key)
         else {
             unreachable!("checked pending acceptance origin")
         };
@@ -115,14 +147,14 @@ impl CompactionRuntimeState {
     /// model-tool acceptance.
     pub(super) fn remove_pending_ui_acceptance(
         &mut self,
-        request_id: &tau_proto::CompactionRequestId,
+        key: &ManualCompactionRequestKey,
     ) -> Option<AcceptedManualCompactionTool> {
-        match self.pending_manual_acceptances.get(request_id) {
+        match self.pending_manual_acceptances.get(key) {
             Some(PendingManualCompactionAcceptance::Ui(_)) => {}
             Some(PendingManualCompactionAcceptance::ModelTool(_)) | None => return None,
         }
         let Some(PendingManualCompactionAcceptance::Ui(accepted)) =
-            self.pending_manual_acceptances.remove(request_id)
+            self.pending_manual_acceptances.remove(key)
         else {
             unreachable!("checked pending acceptance origin")
         };

@@ -1895,7 +1895,18 @@ fn setup_manual_cross_compaction_test() -> (
         .expect("echo model")
         .supports_standalone_compaction = true;
     let caller_cid = ensure_test_user_agent(&mut h);
-    let target_cid: AgentId = crate::parse_agent_id("unrelated-target");
+    let (target_cid, target_id) = install_manual_compaction_target(&mut h, "unrelated-target");
+    let call = register_manual_cross_compaction_call(&mut h, &caller_cid, "call-cross-compact");
+    (td, h, caller_cid, target_cid, call, target_id)
+}
+
+/// Install one loaded idle target with the same initial local correlation
+/// counters as other targets created by this helper.
+fn install_manual_compaction_target(
+    h: &mut Harness,
+    target_agent_id: &str,
+) -> (AgentId, tau_proto::AgentId) {
+    let target_cid: AgentId = crate::parse_agent_id(target_agent_id);
     let mut target = Agent::new(
         target_cid.clone(),
         2,
@@ -1904,7 +1915,7 @@ fn setup_manual_cross_compaction_test() -> (
         None,
         None,
     );
-    target.identity.agent_id = Some("unrelated-target".to_owned());
+    target.identity.agent_id = Some(target_agent_id.to_owned());
     target.identity.role = Some(h.config.selected_role.clone());
     h.agent_runtime
         .agent_registry
@@ -1913,13 +1924,13 @@ fn setup_manual_cross_compaction_test() -> (
     h.agent_runtime
         .agent_registry
         .agent_routes
-        .insert("unrelated-target".to_owned(), target_cid.clone());
+        .insert(target_agent_id.to_owned(), target_cid.clone());
     h.publish_for_agent(
         &target_cid,
         Event::AgentStarted(tau_proto::AgentStarted {
             creator: Some(tau_proto::AgentCreator::default()),
 
-            agent_id: tau_proto::AgentId::parse("unrelated-target").expect("target id"),
+            agent_id: tau_proto::AgentId::parse(target_agent_id).expect("target id"),
             parent_agent: None,
             role: h.config.selected_role.clone(),
             display_name: None,
@@ -1927,10 +1938,11 @@ fn setup_manual_cross_compaction_test() -> (
             ephemeral: false,
         }),
     );
-    h.ensure_loaded_agent_for_agent(&target_cid, "unrelated-target");
-    let call = register_manual_cross_compaction_call(&mut h, &caller_cid, "call-cross-compact");
-    let target_id = tau_proto::AgentId::parse("unrelated-target").expect("target id");
-    (td, h, caller_cid, target_cid, call, target_id)
+    h.ensure_loaded_agent_for_agent(&target_cid, target_agent_id);
+    (
+        target_cid,
+        tau_proto::AgentId::parse(target_agent_id).expect("target id"),
+    )
 }
 
 fn register_manual_cross_compaction_call(
@@ -2728,6 +2740,7 @@ mod agent_metadata;
 mod agent_runtime;
 mod cancellation_and_background;
 mod compaction;
+mod compaction_agent_scope;
 mod compaction_failure_recovery;
 mod compaction_reactive_rolling;
 mod compaction_runtime_state;

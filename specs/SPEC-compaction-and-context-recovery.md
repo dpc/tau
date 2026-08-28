@@ -66,13 +66,16 @@ of an id do not grant compaction authority; conversely, the binding
 stopped, and cross-session targets share a non-enumerating error.
 
 Accepted model requests are harness-owned durable facts correlated to the
-originating prompt and tool call. Each carries a unique bounded request ID and
-immutable caller, target, model, tool-call, accepted-head, and prompt
-correlation. Provider and extension input cannot select a cut, model, or caller,
-and exactly one durable start or pre-start failure may claim an accepted
-request. Projection exposes waiting, started (including transaction outcome),
-and failed state so every crash window can be repaired without resending
-ambiguous provider work or duplicating a background completion.
+originating prompt and tool call. Each carries a bounded request ID unique
+within its target agent journal and immutable caller, target, model, tool-call,
+accepted-head, and prompt correlation. The durable correlation identity is
+therefore `(target_agent_id, request_id)`; harness-global projections must not
+use the target-local request ID alone. Provider and extension input cannot
+select a cut, model, or caller, and exactly one durable start or pre-start
+failure may claim an accepted request. Projection exposes waiting, started
+(including transaction outcome), and failed state so every crash window can be
+repaired without resending ambiguous provider work or duplicating a background
+completion.
 Every newly selected compact cut is a provider-valid closed prefix. A tool-calling assistant
 response and the one terminal results node that closes its complete function,
 custom, or mixed parallel round are indivisible at this boundary. A provisional

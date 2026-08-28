@@ -144,7 +144,10 @@ impl fmt::Display for CompactionTransactionId {
     }
 }
 
-/// Durable correlation identifier for one model-requested compaction.
+/// Target-agent-local durable correlation identifier for one manual compaction.
+///
+/// The complete durable identity is the owning target [`AgentId`] paired with
+/// this identifier.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct CompactionRequestId(
@@ -4556,9 +4559,10 @@ impl MaterializedPromptGeneration {
 /// Harness-owned durable acceptance fact for a manual compaction.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentManualCompactionRequested {
-    /// Stable identifier for this accepted request.
+    /// Stable identifier within the target agent journal.
     pub request_id: CompactionRequestId,
-    /// Public id of the agent whose transcript will be compacted.
+    /// Public id that completes the durable request identity and names the
+    /// agent whose transcript will be compacted.
     pub target_agent_id: AgentId,
     /// Human or model-tool authority and its variant-specific correlation.
     #[serde(flatten)]
