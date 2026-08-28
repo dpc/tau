@@ -52,6 +52,7 @@ use tungstenite::{
     http as path_tungstenite_http, protocol as path_tungstenite_protocol,
 };
 
+use super::compact_stream::CompactStreamShape;
 use super::{
     CachedResponseAnchor, DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT, ProviderRawEventStream,
     ResponsesConfig, apply_parsed_json_event, apply_raw_json_event, build_ws_envelope,
@@ -61,6 +62,15 @@ use super::{
 use crate::common::{LlmError, PromptPayload, StreamState};
 use crate::responses::ws_runtime;
 use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
+
+/// Parser language selected for one Responses envelope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResponseMode {
+    /// Ordinary inference compatibility parsing.
+    Ordinary,
+    /// Native standalone-compaction original-event validation.
+    Compact,
+}
 
 /// Beta-feature header value the OpenAI WebSocket endpoint expects.
 /// Dated by the server; will need a bump when OpenAI rolls a new
@@ -165,6 +175,8 @@ struct EnvelopeExecution<'a> {
     evidence_mode: crate::attempt_failure::ProviderEvidenceMode,
     /// Idle and absolute response deadlines.
     timeouts: EnvelopeTimeouts,
+    /// Response event language for this envelope.
+    response_mode: ResponseMode,
 }
 
 /// Applies the WebSocket-only rate-limit side channel before delegating
@@ -559,6 +571,66 @@ impl WsConn {
         on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<WsTurnResult, LlmError> {
+        self.run_response(
+            config,
+            agent_prompt_id,
+            request,
+            correlation,
+            recording_stream,
+            ResponseMode::Ordinary,
+            abort,
+            on_dispatched,
+            on_update,
+        )
+    }
+
+    /// Sends one native standalone-compaction envelope through the compact-only
+    /// original-event parser.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "transport lifecycle callbacks remain separate typed boundaries"
+    )]
+    pub(super) fn run_compact(
+        &mut self,
+        config: &ResponsesConfig,
+        agent_prompt_id: &str,
+        request: &PromptPayload<'_>,
+        correlation: Option<crate::attempt_failure::DispatchCorrelation>,
+        recording_stream: Option<&mut ProviderRawEventStream>,
+        abort: &mut impl TurnAbort,
+        on_dispatched: &mut impl FnMut(Instant),
+        on_update: &mut impl FnMut(&StreamState),
+    ) -> Result<WsTurnResult, LlmError> {
+        self.run_response(
+            config,
+            agent_prompt_id,
+            request,
+            correlation,
+            recording_stream,
+            ResponseMode::Compact,
+            abort,
+            on_dispatched,
+            on_update,
+        )
+    }
+
+    /// Runs one envelope with an explicitly selected response parser.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "transport lifecycle callbacks remain separate typed boundaries"
+    )]
+    pub(super) fn run_response(
+        &mut self,
+        config: &ResponsesConfig,
+        agent_prompt_id: &str,
+        request: &PromptPayload<'_>,
+        correlation: Option<crate::attempt_failure::DispatchCorrelation>,
+        recording_stream: Option<&mut ProviderRawEventStream>,
+        response_mode: ResponseMode,
+        abort: &mut impl TurnAbort,
+        on_dispatched: &mut impl FnMut(Instant),
+        on_update: &mut impl FnMut(&StreamState),
+    ) -> Result<WsTurnResult, LlmError> {
         let mut envelope =
             build_ws_envelope(config, request, self.cached_response_anchor.as_ref(), None);
         let eligible_previous_input_tokens = envelope
@@ -600,6 +672,7 @@ impl WsConn {
                     idle: TURN_EVENT_TIMEOUT,
                     absolute: None,
                 },
+                response_mode,
             },
             abort,
             on_dispatched,
@@ -670,6 +743,7 @@ impl WsConn {
                     idle: response_timeout,
                     absolute: Some(response_timeout),
                 },
+                response_mode: ResponseMode::Ordinary,
             },
             abort,
             &mut |_| {},
@@ -713,6 +787,8 @@ impl WsConn {
             })?;
 
         let mut state = StreamState::new();
+        let mut compact_shape =
+            (execution.response_mode == ResponseMode::Compact).then(CompactStreamShape::default);
         state.provider_evidence_mode = execution.evidence_mode;
         state.carry_transport_response_bytes(std::mem::take(&mut self.carried_response_bytes));
         let turn_started_at = Instant::now();
@@ -820,6 +896,9 @@ impl WsConn {
                     }
                     let event: serde_json::Value = serde_json::from_str(text.as_ref())
                         .map_err(|_| malformed_text_error(text.len()))?;
+                    if let Some(shape) = compact_shape.as_mut() {
+                        shape.validate(&event)?;
+                    }
                     let terminal = apply_ws_json_event(
                         &mut state,
                         &event,
@@ -1091,6 +1170,7 @@ pub(super) fn run_vcr_replay_turn(
     config: &ResponsesConfig,
     agent_prompt_id: &str,
     request: &PromptPayload<'_>,
+    response_mode: ResponseMode,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<Option<StreamState>, LlmError> {
     // VCR has no live socket proof. Try the only two historical live shapes:
@@ -1114,7 +1194,7 @@ pub(super) fn run_vcr_replay_turn(
     else {
         return Ok(None);
     };
-    run_replay(&cassette.stream, on_update).map(Some)
+    run_replay(&cassette.stream, response_mode, on_update).map(Some)
 }
 
 fn build_replay_request_body(
@@ -1129,11 +1209,20 @@ fn build_replay_request_body(
 }
 pub(super) fn run_replay(
     stream: &ProviderRawEventStream,
+    response_mode: ResponseMode,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<StreamState, LlmError> {
     let mut state = StreamState::new();
+    let mut compact_shape =
+        (response_mode == ResponseMode::Compact).then(CompactStreamShape::default);
     for (index, event) in stream.raw_events.iter().enumerate() {
-        if apply_ws_replay_raw_json_event(&mut state, &event.raw, on_update)? {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&event.raw).map_err(|_| malformed_text_error(event.raw.len()))?;
+        if let Some(shape) = compact_shape.as_mut() {
+            shape.validate(&parsed)?;
+        }
+        let terminal = apply_ws_replay_raw_json_event(&mut state, &event.raw, on_update)?;
+        if terminal {
             if index + 1 != stream.raw_events.len() {
                 return Err(super::replay_unconsumed_frames_error(
                     tau_proto::ProviderBackendTransport::Websocket,

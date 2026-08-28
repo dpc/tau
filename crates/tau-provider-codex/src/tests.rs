@@ -433,6 +433,7 @@ fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
         "ap-ws-context",
         &config,
         &request,
+        ResponseMode::Ordinary,
         &mut correlation,
         &mut abort,
         &mut |_| {},

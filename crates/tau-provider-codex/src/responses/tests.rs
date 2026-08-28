@@ -1172,9 +1172,16 @@ fn websocket_vcr_replays_recorded_causal_mismatch_full_request() {
         )
         .expect("store full-request cassette");
 
-    let state = ws::run_vcr_replay_turn(&vcr, &config, agent_prompt_id, &request, &mut |_| {})
-        .expect("replay full request")
-        .expect("matching cassette");
+    let state = ws::run_vcr_replay_turn(
+        &vcr,
+        &config,
+        agent_prompt_id,
+        &request,
+        ws::ResponseMode::Ordinary,
+        &mut |_| {},
+    )
+    .expect("replay full request")
+    .expect("matching cassette");
     assert_eq!(state.response_id.as_deref(), Some("resp_replayed_full"));
 }
 
@@ -1227,9 +1234,16 @@ fn websocket_vcr_replays_recorded_compatible_chained_request() {
         )
         .expect("store chained-request cassette");
 
-    let state = ws::run_vcr_replay_turn(&vcr, &config, agent_prompt_id, &request, &mut |_| {})
-        .expect("replay chained request")
-        .expect("matching cassette");
+    let state = ws::run_vcr_replay_turn(
+        &vcr,
+        &config,
+        agent_prompt_id,
+        &request,
+        ws::ResponseMode::Ordinary,
+        &mut |_| {},
+    )
+    .expect("replay chained request")
+    .expect("matching cassette");
     assert_eq!(state.response_id.as_deref(), Some("resp_replayed_chain"));
 }
 
@@ -2656,7 +2670,7 @@ fn provider_websocket_replay_rejects_stream_without_terminal_event() {
     )
     .expect("record test event");
 
-    let error = match ws::run_replay(&stream, &mut |_| {}) {
+    let error = match ws::run_replay(&stream, ws::ResponseMode::Ordinary, &mut |_| {}) {
         Ok(_) => panic!("truncated replay must not succeed"),
         Err(error) => error,
     };
@@ -4430,6 +4444,22 @@ fn apply_event_completed_does_not_harvest_response_output() {
     assert_eq!(state.response_id.as_deref(), Some("resp_final"));
     assert_eq!(state.text, "");
     assert!(state.into_output_items().is_empty());
+}
+
+/// Ordinary inference retains legacy `response.done` compatibility even though
+/// the compact-only parser requires the documented `response.completed`.
+#[test]
+fn apply_event_accepts_response_done_for_ordinary_inference() {
+    let mut state = path_crate_common::StreamState::new();
+    let done = apply_event(
+        &mut state,
+        &serde_json::json!({"type": "response.done", "response": {"id": "legacy"}}),
+        &mut |_| {},
+    )
+    .expect("ordinary response.done compatibility");
+
+    assert!(done);
+    assert_eq!(state.response_id.as_deref(), Some("legacy"));
 }
 
 #[test]

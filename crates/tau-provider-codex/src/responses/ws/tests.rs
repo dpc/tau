@@ -158,6 +158,88 @@ fn warm_anchor_emits_ceiling_except_for_compaction() {
     }
 }
 
+/// The live compact parser reports private state for repair accounting while
+/// returning the completed item only after the full shape validates.
+#[test]
+fn compact_turn_validates_shape_while_reporting_private_progress() {
+    let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+    inbound_tx
+        .send_blocking(InboundEvent::Event {
+            text: r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","encrypted_content":"opaque"}}"#.into(),
+        })
+        .expect("queue compact item");
+    inbound_tx
+        .send_blocking(InboundEvent::Event {
+            text: r#"{"type":"response.completed","response":{"usage":{"input_tokens":4,"output_tokens":2}}}"#.into(),
+        })
+        .expect("queue compact terminal");
+    let fixture = PromptFixture::new();
+    let mut observed_semantic_output = false;
+    let result = conn
+        .run_compact(
+            &test_responses_config(),
+            "ap-compact-shape",
+            &fixture.payload(),
+            None,
+            None,
+            &mut NeverAbort,
+            &mut |_| {},
+            &mut |state| {
+                observed_semantic_output |= !state.output_items_snapshot().is_empty();
+            },
+        )
+        .expect("valid compact response");
+
+    assert!(
+        observed_semantic_output,
+        "the pool needs private semantic progress to prohibit replay"
+    );
+    assert!(matches!(
+        result.state.output_items_snapshot().as_slice(),
+        [tau_proto::ContextItem::Compaction(_)]
+    ));
+    assert_eq!(
+        result
+            .state
+            .usage()
+            .map(|usage| usage.response_received_tokens),
+        Some(2)
+    );
+}
+
+/// The live compact transport rejects the inference-only legacy terminal even
+/// after receiving an otherwise valid compaction item.
+#[test]
+fn compact_turn_rejects_response_done_terminal() {
+    let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+    inbound_tx
+        .send_blocking(InboundEvent::Event {
+            text: r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction"}}"#.into(),
+        })
+        .expect("queue compact item");
+    inbound_tx
+        .send_blocking(InboundEvent::Event {
+            text: r#"{"type":"response.done"}"#.into(),
+        })
+        .expect("queue wrong terminal");
+    let fixture = PromptFixture::new();
+    let error = match conn.run_compact(
+        &test_responses_config(),
+        "ap-compact-wrong-terminal",
+        &fixture.payload(),
+        None,
+        None,
+        &mut NeverAbort,
+        &mut |_| {},
+        &mut |_| {},
+    ) {
+        Ok(_) => panic!("response.done must be compact-invalid"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, LlmError::InvalidResponse(_)));
+}
+
 type TestAbortWakerSlot = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>;
 
 struct CapturingAbort {
@@ -1286,6 +1368,7 @@ fn localhost_ws_silent_turn_returns_typed_idle_timeout() {
                 idle: Duration::from_millis(20),
                 absolute: None,
             },
+            response_mode: ResponseMode::Ordinary,
         },
         &mut abort,
         &mut |_| {},
@@ -1388,6 +1471,7 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
                 idle: Duration::from_millis(50),
                 absolute: None,
             },
+            response_mode: ResponseMode::Ordinary,
         },
         &mut abort,
         &mut |_| {},
@@ -1432,6 +1516,7 @@ fn prewarm_absolute_timeout_preempts_queued_nonterminal_frames() {
                 idle: Duration::from_secs(1),
                 absolute: Some(Duration::ZERO),
             },
+            response_mode: ResponseMode::Ordinary,
         },
         &mut abort,
         &mut |_| {},

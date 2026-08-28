@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 mod compact_failure_capture;
+mod compact_stream;
 
 use std::borrow::Cow;
 use std::time::{Duration, Instant, SystemTime};

@@ -174,7 +174,7 @@ fn curated_provider_vcr_replay_only_lane() {
         );
         assert_sanitized_request_projection(&cassette.request);
         audit_structural_stream(&cassette.stream);
-        let state = ws::run_replay(&cassette.stream, &mut |_| {})
+        let state = ws::run_replay(&cassette.stream, ws::ResponseMode::Ordinary, &mut |_| {})
             .expect("production parser must accept curated wire evidence");
         assert!(
             state.provider_terminal_event.is_some(),

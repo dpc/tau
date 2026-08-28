@@ -30,7 +30,7 @@ use std::{cell as path_std_cell, collections as path_std_collections, time as pa
 use lru::LruCache;
 
 use super::ResponsesConfig;
-use super::ws::WsConn;
+use super::ws::{ResponseMode, WsConn};
 #[cfg(test)]
 use crate::NeverAbort;
 use crate::common::{LlmError, PromptPayload};
@@ -600,6 +600,33 @@ struct SharedTurnContext<'a, 'request> {
     agent_prompt_id: &'a str,
     request: &'a crate::common::PromptPayload<'request>,
     record_config: Option<&'a tau_vcr::VcrConfig>,
+    /// Response event language selected by the caller.
+    response_mode: ResponseMode,
+}
+
+/// Private repair evidence accumulated from response-state callbacks.
+#[derive(Default)]
+struct TurnObservation {
+    /// Highest cumulative response-byte count observed in this dispatch.
+    response_bytes: u64,
+    /// Whether any model-semantic output made transparent replay unsafe.
+    semantic_progress: bool,
+}
+
+impl TurnObservation {
+    /// Starts a repair dispatch with bytes spent by its discarded predecessor.
+    fn with_carried_response_bytes(response_bytes: u64) -> Self {
+        Self {
+            response_bytes,
+            semantic_progress: false,
+        }
+    }
+
+    /// Incorporates one parser state without exposing it outside the pool.
+    fn observe(&mut self, state: &crate::common::StreamState) {
+        self.response_bytes = self.response_bytes.max(state.response_bytes_received());
+        self.semantic_progress |= state.has_semantic_progress();
+    }
 }
 
 /// WS dispatch failed in a way the caller can classify.
@@ -651,6 +678,7 @@ fn prepare_vcr_turn(
     config: &ResponsesConfig,
     agent_prompt_id: &str,
     request: &crate::common::PromptPayload<'_>,
+    response_mode: ResponseMode,
     on_update: &mut impl FnMut(&crate::common::StreamState),
 ) -> Result<VcrTurnSetup, WsTurnError> {
     let vcr_config = super::load_vcr_config().map_err(WsTurnError::Other)?;
@@ -660,9 +688,15 @@ fn prepare_vcr_turn(
         });
     };
 
-    if let Some(state) =
-        super::ws::run_vcr_replay_turn(&vcr_config, config, agent_prompt_id, request, on_update)
-            .map_err(WsTurnError::Other)?
+    if let Some(state) = super::ws::run_vcr_replay_turn(
+        &vcr_config,
+        config,
+        agent_prompt_id,
+        request,
+        response_mode,
+        on_update,
+    )
+    .map_err(WsTurnError::Other)?
     {
         return Ok(VcrTurnSetup::Replayed(Box::new(state)));
     }
@@ -699,9 +733,15 @@ pub fn run_turn_through_pool(
 ) -> Result<crate::common::StreamState, WsTurnError> {
     let vcr_config = super::load_vcr_config().map_err(WsTurnError::Other)?;
     let vcr_record_config = if let Some(vcr_config) = vcr_config.as_ref() {
-        if let Some(state) =
-            super::ws::run_vcr_replay_turn(vcr_config, config, agent_prompt_id, request, on_update)
-                .map_err(WsTurnError::Other)?
+        if let Some(state) = super::ws::run_vcr_replay_turn(
+            vcr_config,
+            config,
+            agent_prompt_id,
+            request,
+            ResponseMode::Ordinary,
+            on_update,
+        )
+        .map_err(WsTurnError::Other)?
         {
             return Ok(state);
         }
@@ -830,10 +870,67 @@ pub fn run_turn_through_shared_pool(
     abort: &mut impl TurnAbort,
     on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
 ) -> Result<crate::common::StreamState, WsTurnError> {
+    run_response_through_shared_pool(
+        pool,
+        config,
+        agent_prompt_id,
+        request,
+        correlation,
+        ResponseMode::Ordinary,
+        abort,
+        on_update,
+    )
+}
+
+/// Thread-safe native-compaction entry point using original-event validation.
+pub fn run_compact_through_shared_pool(
+    pool: &SharedWsPool,
+    config: &ResponsesConfig,
+    agent_prompt_id: &str,
+    request: &crate::common::PromptPayload<'_>,
+    correlation: Option<&mut crate::attempt_failure::AttemptCaptureCorrelation>,
+    abort: &mut impl TurnAbort,
+    on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
+) -> Result<crate::common::StreamState, WsTurnError> {
+    run_response_through_shared_pool(
+        pool,
+        config,
+        agent_prompt_id,
+        request,
+        correlation,
+        ResponseMode::Compact,
+        abort,
+        on_update,
+    )
+}
+
+/// Runs one pooled response with an explicitly selected event language.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "transport lifecycle callbacks remain separate typed boundaries"
+)]
+fn run_response_through_shared_pool(
+    pool: &SharedWsPool,
+    config: &ResponsesConfig,
+    agent_prompt_id: &str,
+    request: &crate::common::PromptPayload<'_>,
+    correlation: Option<&mut crate::attempt_failure::AttemptCaptureCorrelation>,
+    response_mode: ResponseMode,
+    abort: &mut impl TurnAbort,
+    on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
+) -> Result<crate::common::StreamState, WsTurnError> {
     let mut correlation = correlation;
-    let record_config = match prepare_vcr_turn(config, agent_prompt_id, request, &mut |state| {
-        on_update(crate::StreamUpdate::Response(state))
-    })? {
+    let record_config = match prepare_vcr_turn(
+        config,
+        agent_prompt_id,
+        request,
+        response_mode,
+        &mut |state| {
+            if response_mode == ResponseMode::Ordinary {
+                on_update(crate::StreamUpdate::Response(state));
+            }
+        },
+    )? {
         VcrTurnSetup::Replayed(state) => return Ok(*state),
         VcrTurnSetup::Live { record_config } => record_config,
     };
@@ -849,6 +946,7 @@ pub fn run_turn_through_shared_pool(
             agent_prompt_id,
             request,
             record_config: record_config.as_ref(),
+            response_mode,
         };
         match turn_context.run_cached(conn, session_id, &mut correlation, abort, on_update)? {
             CachedSharedTurn::Completed(state) => return Ok(*state),
@@ -863,6 +961,7 @@ pub fn run_turn_through_shared_pool(
                     agent_prompt_id,
                     request,
                     record_config: record_config.as_ref(),
+                    response_mode,
                 }
                 .run_fresh(
                     response_bytes,
@@ -883,6 +982,7 @@ pub fn run_turn_through_shared_pool(
         agent_prompt_id,
         request,
         record_config: record_config.as_ref(),
+        response_mode,
     }
     .run_fresh(0, false, true, &mut correlation, abort, on_update)
 }
@@ -902,24 +1002,25 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         }
 
         let mut stream = recording_stream(self.record_config);
-        let mut response_bytes = 0;
-        let mut semantic_progress = false;
+        let mut observation = TurnObservation::default();
         let updates = path_std_cell::RefCell::new(on_update);
         let dispatch = correlation
             .as_deref_mut()
             .map(path_crate_attempt_failure::AttemptCaptureCorrelation::next_dispatch);
-        match conn.run_turn(
+        match conn.run_response(
             self.config,
             self.agent_prompt_id,
             self.request,
             dispatch,
             stream.as_mut(),
+            self.response_mode,
             abort,
             &mut |at| updates.borrow_mut()(crate::StreamUpdate::Dispatched(at)),
             &mut |state| {
-                response_bytes = response_bytes.max(state.response_bytes_received());
-                semantic_progress |= state.has_semantic_progress();
-                updates.borrow_mut()(crate::StreamUpdate::Response(state));
+                observation.observe(state);
+                if self.response_mode == ResponseMode::Ordinary {
+                    updates.borrow_mut()(crate::StreamUpdate::Response(state));
+                }
             },
         ) {
             Ok(turn) => self
@@ -934,7 +1035,10 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
                 self.pool.abandon(&self.key)?;
                 Err(WsTurnError::Other(other))
             }
-            Err(err) if recovery_decision(&err, semantic_progress) == RecoveryDecision::Repair => {
+            Err(err)
+                if recovery_decision(&err, observation.semantic_progress)
+                    == RecoveryDecision::Repair =>
+            {
                 let silent_reconnects = self.pool.bump_silent_reconnects()?;
                 tracing::info!(
                     target: crate::LOG_TARGET,
@@ -944,7 +1048,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
                 );
                 drop(conn);
                 Ok(CachedSharedTurn::RetryFresh {
-                    response_bytes,
+                    response_bytes: observation.response_bytes,
                     stale_chain: is_stale_chain_error(&err),
                 })
             }
@@ -987,15 +1091,15 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             .map(path_crate_attempt_failure::AttemptCaptureCorrelation::next_dispatch);
         conn.carry_response_bytes(carried_response_bytes);
         let mut stream = recording_stream(self.record_config);
-        let mut response_bytes = carried_response_bytes;
-        let mut semantic_progress = false;
+        let mut observation = TurnObservation::with_carried_response_bytes(carried_response_bytes);
         let updates = path_std_cell::RefCell::new(on_update);
-        match conn.run_turn(
+        match conn.run_response(
             self.config,
             self.agent_prompt_id,
             self.request,
             dispatch,
             stream.as_mut(),
+            self.response_mode,
             abort,
             &mut |at| {
                 if emit_dispatched {
@@ -1003,9 +1107,10 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
                 }
             },
             &mut |state| {
-                response_bytes = response_bytes.max(state.response_bytes_received());
-                semantic_progress |= state.has_semantic_progress();
-                updates.borrow_mut()(crate::StreamUpdate::Response(state));
+                observation.observe(state);
+                if self.response_mode == ResponseMode::Ordinary {
+                    updates.borrow_mut()(crate::StreamUpdate::Response(state));
+                }
             },
         ) {
             Ok(mut turn) => {
@@ -1015,12 +1120,13 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             Err(err)
                 if self.record_config.is_none()
                     && repair_budget_available(emit_dispatched)
-                    && recovery_decision(&err, semantic_progress) == RecoveryDecision::Repair =>
+                    && recovery_decision(&err, observation.semantic_progress)
+                        == RecoveryDecision::Repair =>
             {
                 drop(conn);
                 self.pool.bump_silent_reconnects()?;
                 self.run_fresh(
-                    response_bytes,
+                    observation.response_bytes,
                     stale_chain || is_stale_chain_error(&err),
                     false,
                     correlation,

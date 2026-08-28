@@ -9,7 +9,7 @@ use tungstenite::protocol::frame::coding as path_tungstenite_protocol_frame_codi
 use tungstenite::{Message, handshake as path_tungstenite_handshake};
 
 use super::*;
-use crate::common::PromptPayload;
+use crate::common::{PromptPayload, StreamState};
 use crate::responses::ResponsesMode;
 use crate::{NeverAbort, TurnAbort, TurnAbortWaker};
 
@@ -2010,6 +2010,109 @@ fn semantic_progress_exhausts_internal_recovery_budget() {
     assert_eq!(recovery_decision(&error, false), RecoveryDecision::Repair);
 }
 
+/// Compact parser callbacks remain private but must still preserve the response
+/// bytes and semantic-progress facts that prohibit post-item replay and carry
+/// pre-item bytes into an allowed repair.
+#[test]
+fn compact_private_observation_preserves_repair_evidence() {
+    let mut state = StreamState::new();
+    state.record_transport_response_bytes(37);
+    crate::responses::apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "compaction", "id": "cmp_private"},
+        }),
+        &mut |_| {},
+    )
+    .expect("compact item");
+    let mut observation = TurnObservation::default();
+    observation.observe(&state);
+
+    assert_eq!(observation.response_bytes, 37);
+    assert!(observation.semantic_progress);
+    let recoverable = LlmError::HttpStatus(0, "stream error: ws closed".to_owned());
+    assert_eq!(
+        recovery_decision(&recoverable, observation.semantic_progress),
+        RecoveryDecision::Surface,
+        "completed compact output must prohibit transparent repair"
+    );
+
+    let mut pre_semantic = TurnObservation::default();
+    let mut byte_only = StreamState::new();
+    byte_only.record_transport_response_bytes(19);
+    pre_semantic.observe(&byte_only);
+    assert_eq!(pre_semantic.response_bytes, 19);
+    assert!(!pre_semantic.semantic_progress);
+    assert_eq!(
+        recovery_decision(&recoverable, pre_semantic.semantic_progress),
+        RecoveryDecision::Repair,
+        "byte-only compact progress remains eligible for one repair"
+    );
+    let repaired = TurnObservation::with_carried_response_bytes(pre_semantic.response_bytes);
+    assert_eq!(
+        repaired.response_bytes, 19,
+        "the repair starts with its predecessor's cumulative compact bytes"
+    );
+}
+
+/// Shared compact dispatch keeps parser-state callbacks inside the pool while
+/// returning the validated item and usage to the standalone caller.
+#[test]
+fn compact_shared_pool_does_not_forward_semantic_updates() {
+    let (addr, server) = spawn_fake_codex_server();
+    server.lock_state().scripted_events = Some(vec![
+        serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "compaction", "id": "cmp_private"},
+        }),
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            },
+        }),
+    ]);
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
+    let session_id = tau_proto::SessionId::parse("session-compact-private").expect("session id");
+    let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context(&[]),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let mut forwarded_responses = 0;
+    let state = run_compact_through_shared_pool(
+        &pool,
+        &config,
+        "ap-compact-private",
+        &request,
+        None,
+        &mut NeverAbort,
+        &mut |update| {
+            forwarded_responses += usize::from(matches!(update, crate::StreamUpdate::Response(_)));
+        },
+    )
+    .expect("valid compact response");
+
+    assert_eq!(forwarded_responses, 0);
+    assert!(matches!(
+        state.output_items_snapshot().as_slice(),
+        [ContextItem::Compaction(_)]
+    ));
+}
+
 // -----------------------------------------------------------------
 // Fake Codex server: minimal blocking tungstenite acceptor.
 // -----------------------------------------------------------------
@@ -2049,6 +2152,8 @@ struct ServerState {
     fault: Option<MidStreamCloseFault>,
     /// Optional provider error envelope emitted instead of the normal success.
     scripted_error: Option<serde_json::Value>,
+    /// Optional exact successful response event sequence.
+    scripted_events: Option<Vec<serde_json::Value>>,
 }
 
 /// Explicit request-arrival and response-release synchronization for tests.
@@ -2229,7 +2334,7 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
             Message::Text(text) => {
                 let parsed: serde_json::Value =
                     serde_json::from_str(text.as_str()).unwrap_or(serde_json::Value::Null);
-                let (fault_now, response_gate, silent_response, scripted_error) = {
+                let (fault_now, response_gate, silent_response, scripted_error, scripted_events) = {
                     let mut s = state.lock().expect("server state lock");
                     assert!(s.requests.len() < 128, "fake Codex request bound");
                     s.requests.push(parsed.clone());
@@ -2244,6 +2349,7 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
                         s.response_gate.clone(),
                         s.silent_response,
                         s.scripted_error.clone(),
+                        s.scripted_events.clone(),
                     )
                 };
                 turn_counter += 1;
@@ -2275,6 +2381,16 @@ fn handle_one_connection(stream: TcpStream, state: Arc<Mutex<ServerState>>) {
                 if let Some(error) = scripted_error {
                     ws.send(Message::Text(error.to_string().into()))
                         .expect("write scripted provider error");
+                    finish_server_turn(&state);
+                    continue;
+                }
+                if let Some(events) = scripted_events {
+                    for event in events {
+                        if ws.send(Message::Text(event.to_string().into())).is_err() {
+                            finish_server_turn(&state);
+                            return;
+                        }
+                    }
                     finish_server_turn(&state);
                     continue;
                 }

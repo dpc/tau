@@ -15,6 +15,7 @@ use std::time::Duration;
 use std::{cell as path_std_cell, sync as path_std_sync};
 
 use responses::pool as path_responses_pool;
+use responses::ws::ResponseMode;
 mod compact_v2;
 use compact_v2::build_v2_compacted_window;
 use tau_proto::{
@@ -724,26 +725,43 @@ impl CodexRuntime {
     /// Prompt cancellation and shutdown wake each wait; canceled turns return
     /// [`common::LlmError::Canceled`]. Fresh upgrades are independently bounded
     /// to 30 seconds.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "transport parser mode joins existing lifecycle callbacks"
+    )]
     fn stream(
         &self,
         agent_prompt_id: &str,
         config: &responses::ResponsesConfig,
         request: &Prompt<'_>,
+        response_mode: ResponseMode,
         correlation: &mut attempt_failure::AttemptCaptureCorrelation,
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(StreamUpdate<'_>),
     ) -> Result<StreamDispatchResult, common::LlmError> {
         let ws_pool_before = self.ws_pool.stats();
         let session_id = request.session_id.as_str();
-        let state = match responses::pool::run_turn_through_shared_pool(
-            &self.ws_pool,
-            config,
-            agent_prompt_id,
-            request,
-            Some(correlation),
-            abort,
-            on_update,
-        ) {
+        let dispatch = match response_mode {
+            ResponseMode::Ordinary => responses::pool::run_turn_through_shared_pool(
+                &self.ws_pool,
+                config,
+                agent_prompt_id,
+                request,
+                Some(correlation),
+                abort,
+                on_update,
+            ),
+            ResponseMode::Compact => responses::pool::run_compact_through_shared_pool(
+                &self.ws_pool,
+                config,
+                agent_prompt_id,
+                request,
+                Some(correlation),
+                abort,
+                on_update,
+            ),
+        };
+        let state = match dispatch {
             Ok(state) => state,
             Err(error) if is_ws_capability_or_limit_error(&error) => {
                 let error = error.into_llm_error();
@@ -820,6 +838,7 @@ impl CodexRuntime {
             agent_prompt_id,
             config.wire(),
             request,
+            ResponseMode::Ordinary,
             &mut correlation,
             abort,
             &mut |update| {
@@ -981,6 +1000,7 @@ impl CodexRuntime {
             agent_prompt_id,
             config.wire(),
             request,
+            ResponseMode::Compact,
             &mut correlation,
             abort,
             &mut |_| {},
