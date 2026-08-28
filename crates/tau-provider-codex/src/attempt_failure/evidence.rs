@@ -3,6 +3,7 @@ use serde_json::Value;
 use super::RedactedProviderDetail;
 use super::redacted_detail::sanitize_live_detail;
 use super::shape::project_shape;
+use crate::canonical_identifier::CanonicalIdentifierFamily;
 
 /// Work permitted while projecting one provider failure at the parser boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,15 +215,9 @@ impl AttemptFailureEvidence {
             .get("response")
             .and_then(|response| response.get("error"))
             .or_else(|| event.get("error"));
+        let identifier_family = CanonicalIdentifierFamily::from_provider_event(event);
         let canonical_code = bounded_identifier_candidate(
-            error
-                .and_then(|error| {
-                    error
-                        .get("code")
-                        .and_then(Value::as_str)
-                        .or_else(|| error.get("type").and_then(Value::as_str))
-                })
-                .or_else(|| event.get("code").and_then(Value::as_str)),
+            identifier_family.classified(),
             &mut identifiers_truncated,
         );
         let message = error

@@ -6787,10 +6787,13 @@ where
     R: TurnAbort,
 {
     // Standalone compaction deliberately has no inline fallback.
-    match execution
-        .runtime
-        .compact(agent_prompt_id, config, request, retry_ctx)
-    {
+    match execution.runtime.compact_numbered(
+        agent_prompt_id,
+        execution.logical_attempt,
+        config,
+        request,
+        retry_ctx,
+    ) {
         CompactOutcome::Finished {
             output_items,
             usage,
@@ -6802,6 +6805,7 @@ where
                     backend_descriptor(config, ProviderBackendTransport::Websocket, false),
                     output_items,
                     usage,
+                    execution.logical_attempt.provider_attempt(),
                 )),
             ))?;
             writer.flush()?;
@@ -6816,15 +6820,19 @@ where
             finish_canceled(agent_prompt_id, prompt, writer)?;
             Ok(None)
         }
-        CompactOutcome::Terminal(error) => {
+        CompactOutcome::Terminal {
+            error,
+            backend_reached,
+        } => {
             let backend = backend_descriptor(config, ProviderBackendTransport::Websocket, false);
             finish_error(
                 agent_prompt_id,
                 prompt,
-                &backend,
+                backend_reached.then_some(&backend),
                 error,
                 None,
                 execution.debug_provider_requests,
+                execution.logical_attempt.provider_attempt(),
                 writer,
             )?;
             Ok(None)
@@ -6833,6 +6841,7 @@ where
             error,
             newly_downgraded,
             profile_identity,
+            backend_reached,
         } => {
             if newly_downgraded {
                 (execution.compact_route_unavailable)(profile_identity);
@@ -6841,10 +6850,11 @@ where
             finish_error(
                 agent_prompt_id,
                 prompt,
-                &backend,
+                backend_reached.then_some(&backend),
                 error,
                 None,
                 execution.debug_provider_requests,
+                execution.logical_attempt.provider_attempt(),
                 writer,
             )?;
             Ok(None)
@@ -6858,6 +6868,7 @@ fn compact_finished_response(
     backend: tau_proto::ProviderBackend,
     output_items: Vec<tau_proto::ContextItem>,
     usage: Option<tau_proto::ProviderTokenUsage>,
+    provider_attempt: tau_proto::ProviderAttempt,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
         automatic_compaction_decision: None,
@@ -6877,7 +6888,7 @@ fn compact_finished_response(
         compaction_original_input_tokens: None,
         compaction_output_tokens: None,
         backend: Some(backend),
-        provider_attempt: Default::default(),
+        provider_attempt,
         provider_response_id: None,
         ws_pool_delta: None,
     }
@@ -6980,6 +6991,7 @@ where
                 dispatch.debug_capture,
                 ws_pool_delta,
                 execution.debug_provider_requests,
+                execution.logical_attempt.provider_attempt(),
                 writer,
             )?
         }
@@ -6994,7 +7006,11 @@ where
             }
             finish_canceled(agent_prompt_id, prompt, writer)?
         }
-        CodexAttemptOutcome::Terminal { error, progress } if error.repetition().is_some() => {
+        CodexAttemptOutcome::Terminal {
+            error,
+            progress,
+            backend_reached,
+        } if error.repetition().is_some() => {
             if progress == CodexSemanticProgress::Parsed {
                 emit_chat_completions_partial_clear(
                     agent_prompt_id,
@@ -7015,10 +7031,11 @@ where
             finish_error(
                 agent_prompt_id,
                 prompt,
-                &backend,
+                backend_reached.then_some(&backend),
                 error,
                 ws_pool_delta,
                 execution.debug_provider_requests,
+                execution.logical_attempt.provider_attempt(),
                 writer,
             )?
         }
@@ -7042,7 +7059,11 @@ where
                 canonical_unauthorized,
             }));
         }
-        CodexAttemptOutcome::Terminal { error, progress } => {
+        CodexAttemptOutcome::Terminal {
+            error,
+            progress,
+            backend_reached,
+        } => {
             if progress == CodexSemanticProgress::Parsed {
                 emit_chat_completions_partial_clear(
                     agent_prompt_id,
@@ -7055,10 +7076,11 @@ where
             finish_error(
                 agent_prompt_id,
                 prompt,
-                &backend,
+                backend_reached.then_some(&backend),
                 error,
                 ws_pool_delta,
                 execution.debug_provider_requests,
+                execution.logical_attempt.provider_attempt(),
                 writer,
             )?
         }
@@ -7305,6 +7327,7 @@ fn finish_stream<W: Write>(
     debug_capture: tau_provider_codex::CodexDebugCapture,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
     debug_provider_requests: bool,
+    provider_attempt: tau_proto::ProviderAttempt,
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let token_counts = state.token_counts();
@@ -7343,7 +7366,7 @@ fn finish_stream<W: Write>(
         backend: Some(backend.clone()),
         provider_response_id,
         ws_pool_delta,
-        provider_attempt: Default::default(),
+        provider_attempt,
     };
     maybe_debug_submit_provider_response(
         session_id,
@@ -7402,13 +7425,15 @@ fn cache_miss_diagnostic(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_error<W: Write>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
-    backend: &ProviderBackend,
+    backend: Option<&ProviderBackend>,
     error: CodexError,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
     debug_provider_requests: bool,
+    provider_attempt: tau_proto::ProviderAttempt,
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let finished = ProviderResponseFinished {
@@ -7433,8 +7458,8 @@ fn finish_error<W: Write>(
         usage: None,
         compaction_original_input_tokens: None,
         compaction_output_tokens: None,
-        backend: Some(backend.clone()),
-        provider_attempt: Default::default(),
+        backend: backend.cloned(),
+        provider_attempt,
         provider_response_id: None,
         ws_pool_delta,
     };

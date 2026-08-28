@@ -11,13 +11,14 @@
 use std::collections as path_std_collections;
 use std::collections::{HashMap, hash_map as path_std_collections_hash_map};
 use std::num::NonZeroU32;
+use std::sync as path_std_sync;
 use std::time::Duration;
-use std::{cell as path_std_cell, sync as path_std_sync};
 
+mod compact_v2;
+use attempt_context::{AttemptOperation, ProviderAttemptContext, RetryFailureInput};
+use compact_v2::build_v2_compacted_window;
 use responses::pool as path_responses_pool;
 use responses::ws::ResponseMode;
-mod compact_v2;
-use compact_v2::build_v2_compacted_window;
 use tau_proto::{
     Effort, ModelId, ModelName, ModelTag, ProviderBackendTransport, ProviderModelInfo,
     ProviderName, ThinkingSummary, Verbosity,
@@ -44,7 +45,9 @@ const CHATGPT_MODELS: &[&str] = &[
     "gpt-5.3-codex",
 ];
 
+mod attempt_context;
 mod attempt_failure;
+mod canonical_identifier;
 pub(crate) mod common;
 pub mod oauth;
 pub(crate) mod quota;
@@ -440,6 +443,8 @@ pub enum AttemptOutcome {
         error: CodexError,
         /// Whether tentative semantic output must be cleared.
         progress: SemanticProgress,
+        /// Whether a request crossed the provider egress boundary.
+        backend_reached: bool,
     },
 }
 
@@ -472,7 +477,12 @@ pub enum CompactOutcome {
     /// Trusted local cancellation ended the joined operation.
     Canceled,
     /// A proven terminal failure ended the operation.
-    Terminal(CodexError),
+    Terminal {
+        /// Sanitized typed backend error.
+        error: CodexError,
+        /// Whether a request crossed the provider egress boundary.
+        backend_reached: bool,
+    },
     /// The selected profile proved that its generic compact route is absent.
     RouteUnavailable {
         /// Sanitized terminal error for the current transaction.
@@ -481,6 +491,8 @@ pub enum CompactOutcome {
         newly_downgraded: bool,
         /// Exact resolved profile generation that proved unavailable.
         profile_identity: InferenceProfileIdentity,
+        /// Whether a request crossed the provider egress boundary.
+        backend_reached: bool,
     },
 }
 
@@ -831,33 +843,20 @@ impl CodexRuntime {
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(StreamUpdate<'_>),
     ) -> AttemptOutcome {
-        let mut correlation = attempt_failure::AttemptCaptureCorrelation::new(logical_attempt);
-        let response_bytes = path_std_cell::Cell::new(0_u64);
-        let mut progress = SemanticProgress::None;
+        let mut attempt = ProviderAttemptContext::new(AttemptOperation::Inference, logical_attempt);
         let result = self.stream(
             agent_prompt_id,
             config.wire(),
             request,
             ResponseMode::Ordinary,
-            &mut correlation,
+            attempt.correlation(),
             abort,
-            &mut |update| {
-                if let StreamUpdate::Response(state) = update
-                    && state.has_semantic_progress()
-                {
-                    progress = SemanticProgress::Parsed;
-                }
-                if let StreamUpdate::Response(state) = update {
-                    response_bytes.set(response_bytes.get().max(state.response_bytes_received()));
-                }
-                on_update(update);
-            },
+            on_update,
         );
-        if let Ok(result) = &result
-            && result.state.has_semantic_progress()
-        {
-            progress = SemanticProgress::Parsed;
+        if let Ok(result) = &result {
+            attempt.observe_stream(&result.state);
         }
+        let progress = attempt.progress();
         if abort.is_aborted() {
             return AttemptOutcome::Canceled { progress };
         }
@@ -873,13 +872,10 @@ impl CodexRuntime {
                             config.wire().account_id.as_deref(),
                         )
                     });
-                    attempt_failure::submit_capture(attempt_failure::CaptureInput {
+                    attempt.finalize_retry_failure(RetryFailureInput {
                         agent_prompt_id,
                         request,
                         decision: &decision,
-                        progress,
-                        correlation: correlation.snapshot(),
-                        response_bytes_received: response_bytes.get(),
                         evidence: error.evidence(),
                         access_token: config.wire().api_key.as_str(),
                         account_id: config.wire().account_id.as_deref(),
@@ -894,6 +890,7 @@ impl CodexRuntime {
                 None => AttemptOutcome::Terminal {
                     error: CodexError(error),
                     progress,
+                    backend_reached: attempt.backend_reached(),
                 },
             },
         }
@@ -963,15 +960,36 @@ impl CodexRuntime {
         request: &Prompt<'_>,
         abort: &mut impl TurnAbort,
     ) -> CompactOutcome {
+        self.compact_numbered(
+            agent_prompt_id,
+            LogicalAttempt::new(1),
+            config,
+            request,
+            abort,
+        )
+    }
+
+    /// Run one numbered native standalone-compaction attempt.
+    pub fn compact_numbered(
+        &self,
+        agent_prompt_id: &str,
+        logical_attempt: LogicalAttempt,
+        config: &ResolvedConfig,
+        request: &Prompt<'_>,
+        abort: &mut impl TurnAbort,
+    ) -> CompactOutcome {
         let identity = config.inference_identity();
         let probe = match self.acquire_compact_probe(identity, abort) {
             CompactAdmissionResult::Probe(probe) => Some(probe),
             CompactAdmissionResult::Admitted => None,
             CompactAdmissionResult::Canceled => return CompactOutcome::Canceled,
             CompactAdmissionResult::InternalFailure => {
-                return CompactOutcome::Terminal(CodexError(common::LlmError::InvalidResponse(
-                    "compaction admission state unavailable".to_owned(),
-                )));
+                return CompactOutcome::Terminal {
+                    error: CodexError(common::LlmError::InvalidResponse(
+                        "compaction admission state unavailable".to_owned(),
+                    )),
+                    backend_reached: false,
+                };
             }
             CompactAdmissionResult::Unavailable => {
                 return CompactOutcome::RouteUnavailable {
@@ -981,6 +999,7 @@ impl CodexRuntime {
                     )),
                     newly_downgraded: false,
                     profile_identity: identity,
+                    backend_reached: false,
                 };
             }
         };
@@ -988,20 +1007,22 @@ impl CodexRuntime {
             return if abort.is_aborted() {
                 CompactOutcome::Canceled
             } else {
-                CompactOutcome::Terminal(CodexError(error.into_llm_error()))
+                CompactOutcome::Terminal {
+                    error: CodexError(error.into_llm_error()),
+                    backend_reached: false,
+                }
             };
         }
         if abort.is_aborted() {
             return CompactOutcome::Canceled;
         }
-        let mut correlation =
-            attempt_failure::AttemptCaptureCorrelation::new(LogicalAttempt::new(1));
+        let mut attempt = ProviderAttemptContext::new(AttemptOperation::Compact, logical_attempt);
         let compact_result = self.stream(
             agent_prompt_id,
             config.wire(),
             request,
             ResponseMode::Compact,
-            &mut correlation,
+            attempt.correlation(),
             abort,
             &mut |_| {},
         );
@@ -1026,14 +1047,28 @@ impl CodexRuntime {
                         error: CodexError(error),
                         newly_downgraded,
                         profile_identity: identity,
+                        backend_reached: attempt.backend_reached(),
                     };
                 }
                 if let Some(probe) = probe {
                     probe.complete(CompactRouteState::Available);
                 }
                 return match error.retry_decision() {
-                    Some(decision) => CompactOutcome::Retry(decision),
-                    None => CompactOutcome::Terminal(CodexError(error)),
+                    Some(decision) => {
+                        attempt.finalize_retry_failure(RetryFailureInput {
+                            agent_prompt_id,
+                            request,
+                            decision: &decision,
+                            evidence: error.evidence(),
+                            access_token: config.wire().api_key.as_str(),
+                            account_id: config.wire().account_id.as_deref(),
+                        });
+                        CompactOutcome::Retry(decision)
+                    }
+                    None => CompactOutcome::Terminal {
+                        error: CodexError(error),
+                        backend_reached: attempt.backend_reached(),
+                    },
                 };
             }
         };
@@ -1043,10 +1078,13 @@ impl CodexRuntime {
                 Some(tau_proto::ContextItem::Compaction(_))
             )
         {
-            return CompactOutcome::Terminal(CodexError(common::LlmError::InvalidResponse(
-                "compaction response did not contain exactly one canonical compaction item"
-                    .to_owned(),
-            )));
+            return CompactOutcome::Terminal {
+                error: CodexError(common::LlmError::InvalidResponse(
+                    "compaction response did not contain exactly one canonical compaction item"
+                        .to_owned(),
+                )),
+                backend_reached: attempt.backend_reached(),
+            };
         }
         let output = build_v2_compacted_window(request.context, provider_output);
         if abort.is_aborted() {

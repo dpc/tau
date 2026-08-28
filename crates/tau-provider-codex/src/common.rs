@@ -16,6 +16,7 @@ use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 use uuid::Uuid;
 
 use crate::attempt_failure as path_crate_attempt_failure;
+use crate::canonical_identifier::CanonicalIdentifierFamily;
 
 /// The parts of a prompt needed by an LLM backend client.
 pub struct PromptPayload<'a> {
@@ -309,11 +310,20 @@ fn classify_http_status(
     body: &str,
     transport_hint: Option<Duration>,
 ) -> Option<RetryDecision> {
+    // Keep adapter classification independent from UI prose.
+    let provider_code = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            CanonicalIdentifierFamily::from_value(&value)
+                .classified()
+                .map(ToOwned::to_owned)
+        });
+    if provider_code.as_deref() == Some("context_length_exceeded") {
+        return None;
+    }
     if code == 401 {
         return Some(RetryDecision::new(RetryClass::Auth).with_retry_after(transport_hint));
     }
-    // Keep adapter classification independent from UI prose.
-    let provider_code = canonical_error_identifiers(body).into_iter().next();
     if http_failure_kind(code, body).is_some() {
         return None;
     }
@@ -397,21 +407,8 @@ fn canonical_error_identifiers(body: &str) -> Vec<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return Vec::new();
     };
-    let canonical_objects = [
-        Some(&value),
-        value.get("error"),
-        value
-            .get("response")
-            .and_then(|response| response.get("error")),
-    ];
-    canonical_objects
-        .into_iter()
-        .flatten()
-        .flat_map(|object| {
-            ["code", "type"]
-                .into_iter()
-                .filter_map(|field| object[field].as_str())
-        })
+    CanonicalIdentifierFamily::from_value(&value)
+        .iter()
         .map(ToOwned::to_owned)
         .collect()
 }

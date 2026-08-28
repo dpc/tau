@@ -21,6 +21,7 @@ use tau_proto::{
 use tau_provider::debug_capture_writer as path_tau_provider_debug_capture_writer;
 use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync};
 
+use crate::canonical_identifier::CanonicalIdentifierFamily;
 use crate::common::{
     LlmError, OutputItemAccumulator, PromptPayload, StreamState, cbor_to_json, effort_wire,
     json_to_cbor, output_item_retained_payload_bytes,
@@ -1876,7 +1877,7 @@ fn response_failed_error(
                 .or_else(|| error["type"].as_str())
         })
         .unwrap_or("unknown error");
-    let code = error.and_then(|error| error["code"].as_str().or_else(|| error["type"].as_str()));
+    let code = CanonicalIdentifierFamily::from_provider_event(event).classified();
     let detail = bounded_remote_text(detail, 512);
     let code = code.map(|code| bounded_remote_text(code, 64));
     let body = code.as_deref().map_or_else(
@@ -1924,10 +1925,7 @@ fn stream_error_event(
     // `(type=...)` suffix is a stable substring contract matched by
     // `LlmError::retry_decision` and
     // `pool::is_recoverable_ws_error`.
-    let error_code = event["error"]["code"]
-        .as_str()
-        .or_else(|| event["code"].as_str())
-        .or_else(|| event["error"]["type"].as_str());
+    let error_code = CanonicalIdentifierFamily::from_provider_event(event).classified();
     let detail = bounded_remote_text(detail, 512);
     let error_code = error_code.map(|code| bounded_remote_text(code, 64));
     let body = match error_code.as_deref() {

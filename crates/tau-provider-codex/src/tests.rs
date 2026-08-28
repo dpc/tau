@@ -527,14 +527,19 @@ fn compact_large_fixed_material_reaches_canonical_context_rejection_once() {
     let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
     let mut abort = NeverAbort;
 
-    let CompactOutcome::Terminal(error) = runtime.compact(
+    let CompactOutcome::Terminal {
+        error,
+        backend_reached,
+    } = runtime.compact(
         "ap-compact-provider-limit",
         &ResolvedConfig { inner: config },
         &request,
         &mut abort,
-    ) else {
+    )
+    else {
         panic!("canonical context rejection must terminate compact dispatch")
     };
+    assert!(backend_reached);
     assert_eq!(
         error.failure_kind(),
         Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
@@ -821,9 +826,15 @@ fn websocket_capability_error_does_not_fallback_to_http_sse() {
     let request = test_prompt_payload(&session_id, &agent_id, &context);
     let mut abort = NeverAbort;
     let outcome = runtime.run_attempt("ap-ws-426", &config, &request, &mut abort, &mut |_| {});
-    let AttemptOutcome::Terminal { error, progress } = outcome else {
+    let AttemptOutcome::Terminal {
+        error,
+        progress,
+        backend_reached,
+    } = outcome
+    else {
         panic!("WS 426 must be terminal");
     };
+    assert!(!backend_reached);
     assert_eq!(progress, SemanticProgress::None);
     assert_eq!(
         error.failure_kind(),

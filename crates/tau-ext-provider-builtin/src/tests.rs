@@ -2334,7 +2334,9 @@ fn compact_finished_response_preserves_native_cache_usage() {
         },
         Vec::new(),
         Some(usage.clone()),
+        tau_proto::ProviderAttempt::new(4).expect("nonzero attempt"),
     );
+    assert_eq!(finished.provider_attempt.get(), 4);
     assert_eq!(finished.usage, Some(usage));
     let cache = finished
         .usage
@@ -3126,10 +3128,11 @@ fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
         finish_error(
             &tau_proto::AgentPromptId::parse("ap-test").expect("test prompt id"),
             &prompt,
-            &backend,
+            Some(&backend),
             tau_provider_codex::CodexError::from_repetition(repetition),
             None,
             false,
+            tau_proto::ProviderAttempt::ONE,
             &mut writer,
         )
         .expect("finish repetition error");

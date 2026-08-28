@@ -9,6 +9,7 @@ use tungstenite::protocol::frame::coding as path_tungstenite_protocol_frame_codi
 use tungstenite::{Message, handshake as path_tungstenite_handshake};
 
 use super::*;
+use crate::attempt_failure::AttemptCaptureCorrelation;
 use crate::common::{PromptPayload, StreamState};
 use crate::responses::ResponsesMode;
 use crate::{NeverAbort, TurnAbort, TurnAbortWaker};
@@ -2057,6 +2058,45 @@ fn compact_private_observation_preserves_repair_evidence() {
     );
 }
 
+/// Live and VCR replay callbacks share the same private attempt-observation
+/// seam, while neither publishes compact parser state as response updates.
+#[test]
+fn compact_attempt_observation_has_live_replay_parity() {
+    let mut state = StreamState::new();
+    state.record_transport_response_bytes(41);
+    crate::responses::apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "compaction", "id": "cmp_parity"}
+        }),
+        &mut |_| {},
+    )
+    .expect("compact item");
+    for attempt_number in [4, 5] {
+        let mut correlation =
+            AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(attempt_number));
+        let _dispatch = correlation.next_dispatch();
+        let mut correlation = Some(&mut correlation);
+        let mut forwarded = 0;
+        observe_attempt_state(
+            &mut correlation,
+            ResponseMode::Compact,
+            &mut |_| forwarded += 1,
+            &state,
+        );
+        let snapshot = correlation.expect("correlation").snapshot();
+        assert_eq!(snapshot.logical_attempt(), attempt_number);
+        assert_eq!(snapshot.response_bytes_received(), 41);
+        assert_eq!(
+            snapshot.semantic_progress(),
+            crate::SemanticProgress::Parsed
+        );
+        assert_eq!(forwarded, 0);
+    }
+}
+
 /// Shared compact dispatch keeps parser-state callbacks inside the pool while
 /// returning the validated item and usage to the standalone caller.
 #[test]
@@ -2093,12 +2133,13 @@ fn compact_shared_pool_does_not_forward_semantic_updates() {
         debug_provider_requests: false,
     };
     let mut forwarded_responses = 0;
+    let mut correlation = AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(7));
     let state = run_compact_through_shared_pool(
         &pool,
         &config,
         "ap-compact-private",
         &request,
-        None,
+        Some(&mut correlation),
         &mut NeverAbort,
         &mut |update| {
             forwarded_responses += usize::from(matches!(update, crate::StreamUpdate::Response(_)));
@@ -2107,6 +2148,14 @@ fn compact_shared_pool_does_not_forward_semantic_updates() {
     .expect("valid compact response");
 
     assert_eq!(forwarded_responses, 0);
+    let snapshot = correlation.snapshot();
+    assert_eq!(snapshot.logical_attempt(), 7);
+    assert_eq!(snapshot.wire_dispatches(), 1);
+    assert!(0 < snapshot.response_bytes_received());
+    assert_eq!(
+        snapshot.semantic_progress(),
+        crate::SemanticProgress::Parsed
+    );
     assert!(matches!(
         state.output_items_snapshot().as_slice(),
         [ContextItem::Compaction(_)]

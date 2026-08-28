@@ -3,6 +3,7 @@ use tau_provider::retry_policy::{RetryClass, RetryDecision};
 
 use super::*;
 use crate::SemanticProgress;
+use crate::attempt_context::AttemptOperation;
 
 fn capture_record(
     evidence: &AttemptFailureEvidence,
@@ -38,6 +39,7 @@ fn capture_record(
     let mut submitted = None;
     submit_capture_with(
         CaptureInput {
+            operation: AttemptOperation::Inference,
             agent_prompt_id: "prompt-failure",
             request: &request,
             decision: &decision,
@@ -197,10 +199,10 @@ fn sensitive_shape_key_collision_is_deterministic() {
     assert!(provider.shape_truncated);
 }
 
-/// Regression: the schema must correlate one logical attempt's transparent
-/// repair with its exact second request dispatch without retaining prose.
+/// A later standalone compact retry capture must retain its operation, exact
+/// logical/wire identity, cumulative bytes, and sticky semantic progress.
 #[test]
-fn capture_uses_exact_attempt_dispatch_and_observed_provider_projection() {
+fn compact_capture_uses_exact_attempt_dispatch_and_observed_provider_projection() {
     let session_id = tau_proto::SessionId::parse("session-failure").expect("session");
     let agent_id = tau_proto::AgentId::parse("agent-failure").expect("agent");
     let context = tau_proto::PromptContext::default();
@@ -237,6 +239,7 @@ fn capture_uses_exact_attempt_dispatch_and_observed_provider_projection() {
     let mut submitted = None;
     submit_capture_with(
         CaptureInput {
+            operation: AttemptOperation::Compact,
             agent_prompt_id: "prompt-failure",
             request: &request,
             decision: &decision,
@@ -260,6 +263,7 @@ fn capture_uses_exact_attempt_dispatch_and_observed_provider_projection() {
         json!({
             "schema_version": 1,
             "capture_kind": "provider_attempt_failure",
+            "operation": "compact",
             "session_id": "session-failure",
             "agent_prompt_id": "prompt-failure",
             "logical_attempt": 4,

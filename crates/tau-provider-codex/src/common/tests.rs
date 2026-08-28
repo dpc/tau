@@ -493,6 +493,44 @@ fn canonical_http_context_rejection_is_terminal_without_terminalizing_throttle()
     assert_eq!(throttle.failure_kind(), None);
 }
 
+/// Canonical context exhaustion outranks even an exact 401 status, while the
+/// status alone remains credential-recovery authority.
+#[test]
+fn canonical_http_context_rejection_outranks_unauthorized_status() {
+    let error = LlmError::HttpStatus(
+        401,
+        r#"{
+            "code":"new_outer_code",
+            "response":{"error":{"type":"context_length_exceeded"}}
+        }"#
+        .to_owned(),
+    );
+    assert_eq!(error.retry_decision(), None);
+    assert!(error.is_canonical_unauthorized());
+    assert_eq!(
+        error.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+}
+
+/// The HTTP classifier must inspect the complete canonical identifier family:
+/// an unfamiliar outer code cannot hide a later known throttling code.
+#[test]
+fn http_classifier_uses_later_known_canonical_identifier() {
+    let error = LlmError::HttpStatus(
+        499,
+        r#"{
+            "code":"new_outer_code",
+            "response":{"error":{"type":"rate_limit_exceeded"}}
+        }"#
+        .to_owned(),
+    );
+    assert_eq!(
+        error.retry_decision().map(|decision| decision.class),
+        Some(RetryClass::Throttle)
+    );
+}
+
 /// Transient override considers both canonical identifiers but never trusts an
 /// echoed identifier outside the provider error envelope.
 #[test]

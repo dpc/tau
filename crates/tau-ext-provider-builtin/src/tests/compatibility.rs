@@ -251,6 +251,7 @@ fn responses_event_snapshot() -> Vec<Event> {
                 silent_reconnects: 0,
             }),
             false,
+            tau_proto::ProviderAttempt::ONE,
             &mut writer,
         )
         .expect("finish compatibility response");

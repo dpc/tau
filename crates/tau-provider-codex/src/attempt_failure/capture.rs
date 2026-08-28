@@ -55,6 +55,8 @@ fn lengths(value: Option<&str>) -> Value {
 
 /// Inputs required to assemble one schema-v1 attempt-failure record.
 pub(crate) struct CaptureInput<'a> {
+    /// Operation performed by this finite attempt.
+    pub(crate) operation: crate::attempt_context::AttemptOperation,
     /// Agent prompt correlated with the failed finite attempt.
     pub(crate) agent_prompt_id: &'a str,
     /// Prompt-owned session and capture eligibility.
@@ -84,7 +86,7 @@ pub(crate) fn submit_capture(input: CaptureInput<'_>) {
 }
 
 /// Assemble and submit a capture through an injected writer for focused tests.
-pub(super) fn submit_capture_with(
+pub(crate) fn submit_capture_with(
     input: CaptureInput<'_>,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) {
@@ -201,6 +203,7 @@ pub(super) fn submit_capture_with(
     let record = json!({
         "schema_version": 1,
         "capture_kind": "provider_attempt_failure",
+        "operation": input.operation.label(),
         "session_id": input.request.session_id,
         "agent_prompt_id": agent_prompt_id,
         "logical_attempt": input.correlation.logical_attempt(),

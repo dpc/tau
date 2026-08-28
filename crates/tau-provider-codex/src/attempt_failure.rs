@@ -10,7 +10,9 @@ mod redacted_detail;
 mod shape;
 
 #[cfg(test)]
-use capture::{BoundedRecord, serialize_bounded_record, submit_capture_with, validated_identifier};
+pub(crate) use capture::submit_capture_with;
+#[cfg(test)]
+use capture::{BoundedRecord, serialize_bounded_record, validated_identifier};
 pub(crate) use capture::{CaptureInput, submit_capture};
 pub use correlation::LogicalAttempt;
 pub(crate) use correlation::{

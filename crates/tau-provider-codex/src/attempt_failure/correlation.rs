@@ -17,6 +17,13 @@ impl LogicalAttempt {
     pub fn get(self) -> u64 {
         self.0
     }
+
+    /// Convert to the bounded provider-response attempt ordinal.
+    #[must_use]
+    pub fn provider_attempt(self) -> tau_proto::ProviderAttempt {
+        let value = u32::try_from(self.0).unwrap_or(u32::MAX);
+        tau_proto::ProviderAttempt::new(value).expect("logical attempt is nonzero")
+    }
 }
 
 /// Exact correlation for one upstream dispatch within a logical attempt.
@@ -52,6 +59,10 @@ pub(crate) struct AttemptCaptureCorrelation {
     last_wire_dispatch_index: u64,
     /// Whether the pool attempted transparent fresh-socket repair.
     repair_used: bool,
+    /// Highest cumulative response-byte count observed across wire dispatches.
+    response_bytes_received: u64,
+    /// Sticky parser-accepted semantic progress across wire dispatches.
+    semantic_progress: crate::SemanticProgress,
 }
 
 impl AttemptCaptureCorrelation {
@@ -62,6 +73,8 @@ impl AttemptCaptureCorrelation {
             logical_attempt,
             last_wire_dispatch_index: 0,
             repair_used: false,
+            response_bytes_received: 0,
+            semantic_progress: crate::SemanticProgress::None,
         }
     }
 
@@ -81,6 +94,17 @@ impl AttemptCaptureCorrelation {
         self.repair_used = true;
     }
 
+    /// Retain private transport/parser observations without publishing compact
+    /// response deltas to extensions.
+    pub(crate) fn observe_stream(&mut self, state: &crate::StreamState) {
+        self.response_bytes_received = self
+            .response_bytes_received
+            .max(state.response_bytes_received());
+        if state.has_semantic_progress() {
+            self.semantic_progress = crate::SemanticProgress::Parsed;
+        }
+    }
+
     /// Snapshot attempt facts for one final failure capture.
     #[must_use]
     pub(crate) fn snapshot(&self) -> AttemptCaptureSnapshot {
@@ -88,6 +112,8 @@ impl AttemptCaptureCorrelation {
             logical_attempt: self.logical_attempt,
             wire_dispatches: self.last_wire_dispatch_index,
             repair_used: self.repair_used,
+            response_bytes_received: self.response_bytes_received,
+            semantic_progress: self.semantic_progress,
         }
     }
 }
@@ -101,6 +127,10 @@ pub(crate) struct AttemptCaptureSnapshot {
     wire_dispatches: u64,
     /// Whether the pool attempted transparent fresh-socket repair.
     repair_used: bool,
+    /// Highest cumulative response-byte count observed across dispatches.
+    response_bytes_received: u64,
+    /// Sticky parser-accepted semantic progress across dispatches.
+    semantic_progress: crate::SemanticProgress,
 }
 
 impl AttemptCaptureSnapshot {
@@ -120,5 +150,17 @@ impl AttemptCaptureSnapshot {
     #[must_use]
     pub(crate) fn repair_used(self) -> bool {
         self.repair_used
+    }
+
+    /// Return cumulative response bytes observed across wire dispatches.
+    #[must_use]
+    pub(crate) fn response_bytes_received(self) -> u64 {
+        self.response_bytes_received
+    }
+
+    /// Return sticky semantic progress observed across wire dispatches.
+    #[must_use]
+    pub(crate) fn semantic_progress(self) -> crate::SemanticProgress {
+        self.semantic_progress
     }
 }

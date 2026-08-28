@@ -613,6 +613,22 @@ struct TurnObservation {
     semantic_progress: bool,
 }
 
+/// Retain private attempt evidence for every transport source, then publish
+/// response state only for ordinary inference.
+fn observe_attempt_state(
+    correlation: &mut Option<&mut crate::attempt_failure::AttemptCaptureCorrelation>,
+    response_mode: ResponseMode,
+    on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
+    state: &crate::common::StreamState,
+) {
+    if let Some(correlation) = correlation.as_deref_mut() {
+        correlation.observe_stream(state);
+    }
+    if response_mode == ResponseMode::Ordinary {
+        on_update(crate::StreamUpdate::Response(state));
+    }
+}
+
 impl TurnObservation {
     /// Starts a repair dispatch with bytes spent by its discarded predecessor.
     fn with_carried_response_bytes(response_bytes: u64) -> Self {
@@ -926,9 +942,7 @@ fn run_response_through_shared_pool(
         request,
         response_mode,
         &mut |state| {
-            if response_mode == ResponseMode::Ordinary {
-                on_update(crate::StreamUpdate::Response(state));
-            }
+            observe_attempt_state(&mut correlation, response_mode, on_update, state);
         },
     )? {
         VcrTurnSetup::Replayed(state) => return Ok(*state),
@@ -1018,9 +1032,12 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             &mut |at| updates.borrow_mut()(crate::StreamUpdate::Dispatched(at)),
             &mut |state| {
                 observation.observe(state);
-                if self.response_mode == ResponseMode::Ordinary {
-                    updates.borrow_mut()(crate::StreamUpdate::Response(state));
-                }
+                observe_attempt_state(
+                    correlation,
+                    self.response_mode,
+                    &mut *updates.borrow_mut(),
+                    state,
+                );
             },
         ) {
             Ok(turn) => self
@@ -1108,9 +1125,12 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             },
             &mut |state| {
                 observation.observe(state);
-                if self.response_mode == ResponseMode::Ordinary {
-                    updates.borrow_mut()(crate::StreamUpdate::Response(state));
-                }
+                observe_attempt_state(
+                    correlation,
+                    self.response_mode,
+                    &mut *updates.borrow_mut(),
+                    state,
+                );
             },
         ) {
             Ok(mut turn) => {
