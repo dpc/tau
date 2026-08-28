@@ -1224,6 +1224,54 @@ impl StreamState {
         items
     }
 
+    /// Borrows the sole completed compaction item after validating the exact
+    /// compact-response output shape.
+    pub(crate) fn single_compaction_item(&self) -> Option<&OpaqueProviderItem> {
+        if self
+            .thinking
+            .as_ref()
+            .is_some_and(|thinking| !thinking.is_empty())
+        {
+            return None;
+        }
+        let mut compaction = None;
+        for item in &self.output_items {
+            match item {
+                OutputItemAccumulator::Compaction(Some(item)) if compaction.is_none() => {
+                    compaction = Some(item);
+                }
+                item if !item.materializes_context_item() => {}
+                _ => return None,
+            }
+        }
+        compaction
+    }
+
+    /// Temporarily presents the sole validated compaction output as its
+    /// canonical context item without cloning the opaque provider sidecar.
+    pub(crate) fn with_single_compaction_context_item<R>(
+        &mut self,
+        inspect: impl FnOnce(&ContextItem) -> R,
+    ) -> Option<R> {
+        self.single_compaction_item()?;
+        let index = self
+            .output_items
+            .iter()
+            .position(|item| matches!(item, OutputItemAccumulator::Compaction(Some(_))))?;
+        let OutputItemAccumulator::Compaction(Some(item)) =
+            std::mem::replace(&mut self.output_items[index], OutputItemAccumulator::Empty)
+        else {
+            unreachable!("validated compaction slot changed before extraction");
+        };
+        let context_item = ContextItem::Compaction(item);
+        let result = inspect(&context_item);
+        let ContextItem::Compaction(item) = context_item else {
+            unreachable!("temporary compaction context item changed variant");
+        };
+        self.output_items[index] = OutputItemAccumulator::Compaction(Some(item));
+        Some(result)
+    }
+
     /// Returns the final assistant output items in provider item order.
     ///
     /// Tool-call accumulators with an empty `name` are dropped as stream
@@ -1243,26 +1291,7 @@ impl StreamState {
     /// [`Self::into_output_items`]. Any other projected item or non-empty
     /// reasoning summary rejects the compact output before materialization.
     pub(crate) fn into_single_compaction_item(self) -> Option<OpaqueProviderItem> {
-        if self
-            .thinking
-            .as_ref()
-            .is_some_and(|thinking| !thinking.is_empty())
-        {
-            return None;
-        }
-        let completed_compactions = self
-            .output_items
-            .iter()
-            .filter(|item| matches!(item, OutputItemAccumulator::Compaction(Some(_))))
-            .count();
-        if completed_compactions != 1
-            || self.output_items.iter().any(|item| {
-                !matches!(item, OutputItemAccumulator::Compaction(Some(_)))
-                    && item.materializes_context_item()
-            })
-        {
-            return None;
-        }
+        self.single_compaction_item()?;
         self.output_items.into_iter().find_map(|item| match item {
             OutputItemAccumulator::Compaction(Some(item)) => Some(item),
             _ => None,

@@ -716,14 +716,29 @@ impl WsConn {
             state.prompt_cache_read_ceiling_tokens =
                 eligible_previous_input_tokens.map(Self::cache_read_ceiling);
         }
+        let response_input_tokens = state.input_tokens;
         self.cached_response_anchor = state.response_id.clone().and_then(|response_id| {
-            let mut represented_prefix = request.context.flatten();
-            represented_prefix.extend(state.output_items_snapshot());
-            CachedResponseAnchor::new_with_input_tokens(
-                response_id,
-                &represented_prefix,
-                state.input_tokens,
-            )
+            if response_mode == ResponseMode::Compact {
+                let represented_prefix = request.context.flatten();
+                state
+                    .with_single_compaction_context_item(|compaction| {
+                        CachedResponseAnchor::new_with_input_tokens_and_suffix(
+                            response_id,
+                            &represented_prefix,
+                            compaction,
+                            response_input_tokens,
+                        )
+                    })
+                    .flatten()
+            } else {
+                let mut represented_prefix = request.context.flatten();
+                represented_prefix.extend(state.output_items_snapshot());
+                CachedResponseAnchor::new_with_input_tokens(
+                    response_id,
+                    &represented_prefix,
+                    response_input_tokens,
+                )
+            }
         });
         Ok(WsTurnResult {
             state,

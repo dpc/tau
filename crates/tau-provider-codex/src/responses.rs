@@ -30,6 +30,41 @@ use crate::common::{
 };
 use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
 
+#[cfg(test)]
+/// Test callback that observes one item at canonical anchor serialization.
+type FingerprintItemObserver = Box<dyn FnMut(&ContextItem)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only observer for the exact canonical items serialized into anchors.
+    static FINGERPRINT_ITEM_OBSERVER:
+        std::cell::RefCell<Option<FingerprintItemObserver>> = const {
+            std::cell::RefCell::new(None)
+        };
+}
+
+#[cfg(test)]
+/// Runs one production anchor path while observing the exact items presented to
+/// canonical fingerprint serialization.
+fn with_fingerprint_item_observer<R>(
+    observer: impl FnMut(&ContextItem) + 'static,
+    run: impl FnOnce() -> R,
+) -> R {
+    struct ObserverGuard(Option<FingerprintItemObserver>);
+
+    impl Drop for ObserverGuard {
+        fn drop(&mut self) {
+            FINGERPRINT_ITEM_OBSERVER.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous = FINGERPRINT_ITEM_OBSERVER.with(|slot| slot.replace(Some(Box::new(observer))));
+    let _guard = ObserverGuard(previous);
+    run()
+}
+
 pub mod pool;
 pub mod ws;
 pub mod ws_runtime;
@@ -2199,6 +2234,40 @@ impl CachedResponseAnchor {
         Some(anchor)
     }
 
+    /// Captures an anchor from borrowed canonical items without materializing
+    /// another represented-prefix vector.
+    fn new_with_input_tokens_from_items<'a>(
+        response_id: String,
+        item_count: usize,
+        represented_prefix: impl IntoIterator<Item = &'a ContextItem>,
+        prompt_input_tokens: Option<u64>,
+    ) -> Option<Self> {
+        Some(Self {
+            response_id,
+            represented_prefix_fingerprint: Self::fingerprint_items(
+                item_count,
+                represented_prefix,
+            )?,
+            prompt_input_tokens,
+        })
+    }
+
+    /// Captures an anchor from an owned canonical prefix and one borrowed
+    /// suffix item.
+    fn new_with_input_tokens_and_suffix(
+        response_id: String,
+        represented_prefix: &[ContextItem],
+        suffix: &ContextItem,
+        prompt_input_tokens: Option<u64>,
+    ) -> Option<Self> {
+        Self::new_with_input_tokens_from_items(
+            response_id,
+            represented_prefix.len().checked_add(1)?,
+            represented_prefix.iter().chain(std::iter::once(suffix)),
+            prompt_input_tokens,
+        )
+    }
+
     /// Reconstructs the latest transcript-derived anchor for VCR matching.
     fn latest_from_context(context: &tau_proto::PromptContext) -> Option<Self> {
         let context_items = context.flatten();
@@ -2230,10 +2299,24 @@ impl CachedResponseAnchor {
 
     /// Digests item count followed by each CBOR item's byte length and bytes.
     fn fingerprint(items: &[ContextItem]) -> Option<blake3::Hash> {
+        Self::fingerprint_items(items.len(), items)
+    }
+
+    /// Digests a known number of borrowed items without collecting them.
+    fn fingerprint_items<'a>(
+        item_count: usize,
+        items: impl IntoIterator<Item = &'a ContextItem>,
+    ) -> Option<blake3::Hash> {
         let mut hasher = blake3::Hasher::new();
         hasher.update(Self::FINGERPRINT_DOMAIN);
-        hasher.update(&u64::try_from(items.len()).ok()?.to_le_bytes());
+        hasher.update(&u64::try_from(item_count).ok()?.to_le_bytes());
         for item in items {
+            #[cfg(test)]
+            FINGERPRINT_ITEM_OBSERVER.with(|observer| {
+                if let Some(observer) = observer.borrow_mut().as_mut() {
+                    observer(item);
+                }
+            });
             let encoded = tau_proto::encode_message_to_vec(item).ok()?;
             hasher.update(&u64::try_from(encoded.len()).ok()?.to_le_bytes());
             hasher.update(&encoded);

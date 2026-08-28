@@ -13,6 +13,7 @@ mod test_server;
 
 use std::cell::RefCell;
 use std::io::Read;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
@@ -171,40 +172,113 @@ fn compact_turn_validates_shape_while_reporting_private_progress() {
         .expect("queue compact item");
     inbound_tx
         .send_blocking(InboundEvent::Event {
-            text: r#"{"type":"response.completed","response":{"usage":{"input_tokens":4,"output_tokens":2}}}"#.into(),
+            text: r#"{"type":"response.completed","response":{"id":"resp_compact","usage":{"input_tokens":4,"output_tokens":2}}}"#.into(),
         })
         .expect("queue compact terminal");
     let fixture = PromptFixture::new();
     let mut observed_semantic_output = false;
-    let result = conn
-        .run_compact(
-            &test_responses_config(),
-            "ap-compact-shape",
-            &fixture.payload(),
-            None,
-            None,
-            &mut NeverAbort,
-            &mut |_| {},
-            &mut |state| {
-                observed_semantic_output |= !state.output_items_snapshot().is_empty();
-            },
-        )
-        .expect("valid compact response");
+    let mut observed_sidecar_pointer = None;
+    let fingerprint_sidecar_pointer = Rc::new(RefCell::new(None));
+    let observed_fingerprint_pointer = Rc::clone(&fingerprint_sidecar_pointer);
+    let result = super::super::with_fingerprint_item_observer(
+        move |item| {
+            if let tau_proto::ContextItem::Compaction(item) = item {
+                *observed_fingerprint_pointer.borrow_mut() =
+                    item.raw_json.as_ref().map(|raw_json| raw_json.as_ptr());
+            }
+        },
+        || {
+            conn.run_compact(
+                &test_responses_config(),
+                "ap-compact-shape",
+                &fixture.payload(),
+                None,
+                None,
+                &mut NeverAbort,
+                &mut |_| {},
+                &mut |state| {
+                    if let Some(item) = state.single_compaction_item() {
+                        observed_semantic_output = true;
+                        observed_sidecar_pointer =
+                            item.raw_json.as_ref().map(|raw_json| raw_json.as_ptr());
+                    }
+                },
+            )
+        },
+    )
+    .expect("valid compact response");
 
     assert!(
         observed_semantic_output,
         "the pool needs private semantic progress to prohibit replay"
     );
-    assert!(matches!(
-        result.state.output_items_snapshot().as_slice(),
-        [tau_proto::ContextItem::Compaction(_)]
-    ));
+    assert_eq!(
+        conn.cached_response_anchor
+            .as_ref()
+            .map(|anchor| anchor.response_id.as_str()),
+        Some("resp_compact"),
+        "a valid compact response must still publish its live-socket anchor"
+    );
     assert_eq!(
         result
             .state
             .usage()
             .map(|usage| usage.response_received_tokens),
-        Some(2)
+        Some(2),
+    );
+    let item = result
+        .state
+        .into_single_compaction_item()
+        .expect("validated compact item");
+    assert_eq!(
+        *fingerprint_sidecar_pointer.borrow(),
+        observed_sidecar_pointer,
+        "production fingerprint serialization must borrow the original sidecar allocation"
+    );
+    assert_eq!(
+        item.raw_json.as_ref().map(|raw_json| raw_json.as_ptr()),
+        observed_sidecar_pointer,
+        "anchor fingerprinting must return the original opaque sidecar allocation"
+    );
+}
+
+/// A malformed live compact response with an id must fail before
+/// response-anchor publication, preserving the parser's primary shape
+/// rejection.
+#[test]
+fn compact_anchor_rejects_malformed_output_shape() {
+    let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+    for text in [
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","encrypted_content":"opaque"}}"#,
+        r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"unexpected"}]}}"#,
+        r#"{"type":"response.completed","response":{"id":"resp_malformed","usage":{"input_tokens":4,"output_tokens":2}}}"#,
+    ] {
+        inbound_tx
+            .send_blocking(InboundEvent::Event { text: text.into() })
+            .expect("queue compact event");
+    }
+    let fixture = PromptFixture::new();
+    let error = match conn.run_compact(
+        &test_responses_config(),
+        "ap-compact-malformed-anchor",
+        &fixture.payload(),
+        None,
+        None,
+        &mut NeverAbort,
+        &mut |_| {},
+        &mut |_| {},
+    ) {
+        Ok(_) => panic!("compact parser accepted extra semantic output"),
+        Err(error) => error,
+    };
+
+    assert!(
+        conn.cached_response_anchor.is_none(),
+        "malformed compact output must not publish a response anchor"
+    );
+    assert!(
+        matches!(error, LlmError::InvalidResponse(_)),
+        "the malformed terminal must retain its invalid-response classification"
     );
 }
 
