@@ -1915,8 +1915,8 @@ fn compact_stream_requires_one_final_stop_terminal() {
     }
 }
 
-/// Narrative and reasoning consume separate compact byte budgets, and neither
-/// channel may exceed the selected bound.
+/// Narrative and reasoning consume separate compact byte budgets, and either
+/// oversized channel rejects before the event mutates semantic output.
 #[test]
 fn compact_stream_bounds_narrative_and_reasoning_separately() {
     for delta in [
@@ -1927,18 +1927,18 @@ fn compact_stream_bounds_narrative_and_reasoning_separately() {
             CacheUsageCompat::None,
             Some(tau_proto::ByteCount::new(4)),
         );
-        apply_event(
+        let error = apply_event(
             &mut state,
             &serde_json::json!({
                 "choices": [{"index": 0, "delta": delta, "finish_reason": "stop"}]
             }),
             &mut |_| {},
         )
-        .expect("shape is valid before complete-output bounds");
-        assert!(matches!(
-            state.validate_compaction(),
-            Err(LlmError::InvalidCompaction(_))
-        ));
+        .expect_err("oversized semantic channel must reject incrementally");
+        assert!(matches!(error, LlmError::InvalidCompaction(_)));
+        assert!(state.text.is_empty());
+        assert!(state.thinking.is_empty());
+        assert!(state.output_items.is_empty());
     }
 }
 
@@ -1951,6 +1951,121 @@ fn local_summary_compaction_uses_ordinary_request_debug_capture() {
     created.operation = tau_proto::PromptOperation::StandaloneCompaction;
     assert!(debug_capture_enabled_for_prompt(&created, true));
     assert!(!debug_capture_enabled_for_prompt(&created, false));
+}
+
+/// Standalone compaction must accept the exact narrative byte limit, then
+/// reject one additional byte before mutating either narrative projection.
+#[test]
+fn compact_narrative_limit_precedes_semantic_accumulation() {
+    let limit = 15;
+    let mut state = StreamState::new_for_attempt(
+        CacheUsageCompat::None,
+        Some(tau_proto::ByteCount::new(limit as u64)),
+    );
+
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": "exact-narrative"}}]
+        }),
+        &mut |_| {},
+    )
+    .expect("exact narrative limit must remain accepted");
+    let error = apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": "y"}}]
+        }),
+        &mut |_| {},
+    )
+    .expect_err("limit plus one must be rejected");
+
+    assert!(matches!(error, LlmError::InvalidCompaction(_)));
+    assert_eq!(state.text.len(), limit);
+    assert_eq!(
+        state
+            .output_items
+            .iter()
+            .filter_map(|item| match item {
+                OutputItemAccumulator::Message(text) => Some(text.len()),
+                _ => None,
+            })
+            .sum::<usize>(),
+        limit
+    );
+}
+
+/// Standalone compaction must account reasoning independently from narrative,
+/// accepting its exact limit and rejecting the next byte before accumulation.
+#[test]
+fn compact_reasoning_limit_precedes_semantic_accumulation() {
+    let limit = 15;
+    let mut state = StreamState::new_for_attempt(
+        CacheUsageCompat::None,
+        Some(tau_proto::ByteCount::new(limit as u64)),
+    );
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": "narrative"}}]
+        }),
+        &mut |_| {},
+    )
+    .expect("narrative uses an independent budget");
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{"index": 0, "delta": {"reasoning_content": "exact-reasoning"}}]
+        }),
+        &mut |_| {},
+    )
+    .expect("exact reasoning limit must remain accepted");
+    let error = apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{"index": 0, "delta": {"reasoning_content": "s"}}]
+        }),
+        &mut |_| {},
+    )
+    .expect_err("reasoning limit plus one must be rejected");
+
+    assert!(matches!(error, LlmError::InvalidCompaction(_)));
+    assert_eq!(state.text, "narrative");
+    assert_eq!(state.thinking.len(), limit);
+    assert_eq!(
+        state
+            .output_items
+            .iter()
+            .filter_map(|item| match item {
+                OutputItemAccumulator::Reasoning(text) => Some(text.len()),
+                _ => None,
+            })
+            .sum::<usize>(),
+        limit
+    );
+}
+
+/// Ordinary inference has no compact semantic budget and must retain its
+/// existing response-level bound rather than inheriting the summary limit.
+#[test]
+fn ordinary_inference_does_not_apply_compact_semantic_limits() {
+    let oversized = 16;
+    let mut state = StreamState::new();
+
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{"index": 0, "delta": {
+                "content": "ordinary-message",
+                "reasoning_content": "ordinary-thought"
+            }}]
+        }),
+        &mut |_| {},
+    )
+    .expect("ordinary reasoning remains governed by the response limit");
+
+    assert_eq!(state.text.len(), oversized);
+    assert_eq!(state.thinking.len(), oversized);
 }
 
 /// The configured raw narrative limit cannot exceed the harness's fixed

@@ -25,6 +25,21 @@ impl CompactStreamValidator {
         }
     }
 
+    /// Reject a narrative or reasoning delta that would cross the selected
+    /// per-channel limit before the ordinary parser appends it.
+    pub(super) fn check_append(
+        &self,
+        current_bytes: usize,
+        delta_bytes: usize,
+    ) -> Result<(), LlmError> {
+        let next_bytes = current_bytes.saturating_add(delta_bytes);
+        let next_bytes = tau_proto::ByteCount::new(next_bytes.try_into().unwrap_or(u64::MAX));
+        if self.max_output_bytes < next_bytes {
+            return Err(output_limit_error());
+        }
+        Ok(())
+    }
+
     /// Validate one original streamed provider event before compatibility
     /// parsing.
     pub(super) fn observe(&mut self, event: &Value) -> Result<(), LlmError> {
@@ -183,9 +198,7 @@ impl CompactStreamValidator {
                 bytes.try_into().unwrap_or(u64::MAX),
             ));
             if self.max_output_bytes < *total {
-                return Err(invalid(
-                    "summary compactor narrative or reasoning exceeds its byte limit",
-                ));
+                return Err(output_limit_error());
             }
         }
         if narrative_count != 1 || state.text.trim().is_empty() {
@@ -251,4 +264,9 @@ fn error_choices_are_content_free(choices: Option<&Value>) -> bool {
 /// Construct a deterministic compact-shape rejection.
 fn invalid(message: &str) -> LlmError {
     LlmError::InvalidCompaction(message.to_owned())
+}
+
+/// Construct the shared incremental and final per-channel limit rejection.
+fn output_limit_error() -> LlmError {
+    invalid("summary compactor narrative or reasoning exceeds its byte limit")
 }

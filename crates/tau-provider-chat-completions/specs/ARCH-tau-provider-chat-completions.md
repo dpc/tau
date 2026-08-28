@@ -47,7 +47,9 @@ stream events before the ordinary compatibility projection can discard unknown
 fields or collapse terminal shape. It requires one final `stop`, one bounded
 nonempty narrative, and independently bounded optional reasoning; tool calls,
 opaque or extra semantic fields, multiple choices, and post-terminal output
-reject the attempt. Ordinary inference keeps its broader parser behavior.
+reject the attempt. The compact-only state enforces each semantic channel's
+selected byte limit before appending a delta and rechecks the completed
+projection before release. Ordinary inference keeps its broader parser behavior.
 
 ## Cache telemetry route capabilities
 

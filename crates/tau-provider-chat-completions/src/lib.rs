@@ -886,6 +886,9 @@ impl StreamState {
         if delta.is_empty() {
             return Ok(());
         }
+        if let Some(validator) = &self.compact_validator {
+            validator.check_append(self.text.len(), delta.len())?;
+        }
         self.semantic_progress = SemanticProgress::Parsed;
         let output_index = match self.output_items.last() {
             Some(OutputItemAccumulator::Message(_)) => self.output_items.len() - 1,
@@ -910,6 +913,9 @@ impl StreamState {
     fn append_reasoning_delta(&mut self, delta: &str) -> Result<(), LlmError> {
         if delta.is_empty() {
             return Ok(());
+        }
+        if let Some(validator) = &self.compact_validator {
+            validator.check_append(self.thinking.len(), delta.len())?;
         }
         self.semantic_progress = SemanticProgress::Parsed;
         let output_index = match self.output_items.last() {

@@ -49,9 +49,11 @@ fixed harness-authored `<tau_internal>` user instruction last. This is deliberat
 cache alignment, not an isolated authority or privacy boundary.
 
 Any returned tool call rejects the attempt and executes nothing. The extension
-accepts exactly one nonempty bounded assistant final text, discards bounded
-reasoning, and rejects every other semantic item. The harness stores the exact
-text once as one synthetic user-role checkpoint without a wrapper or supplement.
+accepts exactly one nonempty bounded assistant final text, discards independently
+bounded reasoning, and rejects every other semantic item. The adapter rejects a
+delta before appending it when that semantic channel would cross its selected
+limit, then rechecks the completed projection. The harness stores the exact text
+once as one synthetic user-role checkpoint without a wrapper or supplement.
 Ordinary opted-in provider debug capture applies and remains non-semantic,
 sensitive observability data. Revisit prefix identity, output validation,
 non-execution, bounds, capture, retries, suffix preservation, and replay identity
