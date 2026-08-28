@@ -398,7 +398,7 @@ struct PollRequest {
     /// Configuration generation captured for stale-response checks.
     config_generation: ConfigGeneration,
     /// Coordination generation observed before this request.
-    coordination_generation: u64,
+    coordination_generation: TelegramCoordinationGeneration,
     /// Held advisory lock clone that keeps the stream locked until return.
     update_stream_lock: Arc<UpdateStreamLock>,
 }
@@ -412,10 +412,25 @@ impl ConfigGeneration {
     }
 }
 
+/// Process-local generation for poller coordination-relevant state changes.
+///
+/// This runtime-only authority wakes pending retry waits when configuration,
+/// registration, shutdown, or acknowledged-poll progress changes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TelegramCoordinationGeneration(u64);
+
+impl TelegramCoordinationGeneration {
+    /// Advances this generation with its existing wrapping overflow behavior.
+    #[must_use]
+    fn wrapping_next(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
+}
+
 #[derive(Default)]
 struct State {
     /// Monotonic counter for poller coordination-relevant state changes.
-    coordination_generation: u64,
+    coordination_generation: TelegramCoordinationGeneration,
     /// Whether the extension is shutting down and local poller waits should
     /// end.
     shutdown_requested: bool,
@@ -790,7 +805,7 @@ impl SharedState {
 impl State {
     /// Record a change to config, registration, or shutdown that affects waits.
     fn mark_coordination_changed(&mut self) {
-        self.coordination_generation = self.coordination_generation.wrapping_add(1);
+        self.coordination_generation = self.coordination_generation.wrapping_next();
     }
 
     /// Return whether registered or registering agents still need ownership of
@@ -2260,7 +2275,7 @@ fn wait_for_coordination_change_or_shutdown(
     state_cell: &SharedState,
     shutdown: &AtomicBool,
     delay: Duration,
-    observed_generation: u64,
+    observed_generation: TelegramCoordinationGeneration,
 ) {
     if delay.is_zero() || shutdown.load(Ordering::Relaxed) {
         return;
