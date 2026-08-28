@@ -877,6 +877,23 @@ fn output_length_reactive_compaction_terminalizes_exact_descendant() {
             _ => None,
         })
         .collect::<Vec<_>>();
+    let reactive_trace = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id == successor.agent_prompt_id =>
+            {
+                Some("rejection")
+            }
+            Event::AgentStandaloneCompactionStarted(_) => Some("start"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reactive_trace,
+        ["rejection", "start"],
+        "the canonical rejection must commit exactly once before recovery starts, including after cold replay"
+    );
     let rejected = responses
         .iter()
         .copied()

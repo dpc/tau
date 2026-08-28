@@ -1270,6 +1270,25 @@ fn output_length_reactive_rejection_cancelled_before_commit_never_dispatches() {
             _ => None,
         })
         .collect::<Vec<_>>();
+    let cancellation_trace = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id == successor.agent_prompt_id =>
+            {
+                Some("cancelled terminal")
+            }
+            Event::AgentStandaloneCompactionStarted(_) => Some("start"),
+            Event::AgentStandaloneCompactionFailed(_) => Some("failure"),
+            Event::AgentOuterTurnFinished(_) => Some("outer-turn finish"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cancellation_trace,
+        ["cancelled terminal", "outer-turn finish"],
+        "cancellation must replace the parked recovery reducer before commit"
+    );
     assert_eq!(cancelled.len(), 1);
     assert!(cancelled[0].output_items.is_empty());
     assert_eq!(
@@ -1479,6 +1498,28 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
             )
         })
         .collect::<Vec<_>>();
+    let stale_trace = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id == successor.agent_prompt_id =>
+            {
+                Some("rejection")
+            }
+            Event::AgentStandaloneCompactionStarted(_) => Some("start"),
+            Event::AgentStandaloneCompactionFailed(failed)
+                if failed.reason == tau_proto::StandaloneCompactionFailureReason::StaleBranch =>
+            {
+                Some("stale failure")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stale_trace,
+        ["rejection", "start", "stale failure"],
+        "the committed rejection must reduce through its durable claim to one stale failure"
+    );
     assert_eq!(
         failures.len(),
         1,
@@ -1506,11 +1547,34 @@ fn output_length_reactive_rejection_parked_across_branch_move_fails_closed() {
             .head,
         None
     );
-    let replayed = resumed
+    let replayed_records = resumed
         .session_runtime
         .agent_store
         .agent_events(source.agent_id.as_str())
-        .expect("replayed records")
+        .expect("replayed records");
+    let replayed_trace = replayed_records
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id == successor.agent_prompt_id =>
+            {
+                Some("rejection")
+            }
+            Event::AgentStandaloneCompactionStarted(_) => Some("start"),
+            Event::AgentStandaloneCompactionFailed(failed)
+                if failed.reason == tau_proto::StandaloneCompactionFailureReason::StaleBranch =>
+            {
+                Some("stale failure")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replayed_trace,
+        ["rejection", "start", "stale failure"],
+        "cold replay must preserve the exact committed reducer trace without rerunning it"
+    );
+    let replayed = replayed_records
         .into_iter()
         .filter(|record| {
             matches!(

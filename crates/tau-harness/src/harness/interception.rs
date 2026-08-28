@@ -464,10 +464,8 @@ pub(crate) enum AgentPublishCompletion {
     /// Start reactive compaction only after its exact rejection response
     /// commits.
     ReactiveContextRecovery {
-        /// Durable failed inference owner that the transaction must claim.
-        checkpoint: tau_proto::AgentInferenceDispatchStarted,
-        /// Provider connection retained only for live attribution.
-        source: Option<tau_proto::ConnectionId>,
+        /// Typed post-commit transition for the committed rejection.
+        reducer: super::reactive_context_recovery_reducer::CommittedReactiveContextRecovery,
         /// Exact interceptor-approved rejection retained after append
         /// rejection.
         retry_event: Option<Box<Event>>,
@@ -1411,8 +1409,10 @@ impl Harness {
             AgentPublishCompletion::OutputLengthSteer { batch_parent, .. } => {
                 Some(tau_core::AgentEventParent::from_head(*batch_parent))
             }
-            AgentPublishCompletion::ReactiveContextRecovery { checkpoint, .. }
-            | AgentPublishCompletion::ReactiveContextRecoveryStart { checkpoint, .. } => {
+            AgentPublishCompletion::ReactiveContextRecovery { reducer, .. } => Some(
+                tau_core::AgentEventParent::from_head(reducer.checkpoint.through),
+            ),
+            AgentPublishCompletion::ReactiveContextRecoveryStart { checkpoint, .. } => {
                 Some(tau_core::AgentEventParent::from_head(checkpoint.through))
             }
             AgentPublishCompletion::OwedCompactionFact { batch_parent, .. } => {

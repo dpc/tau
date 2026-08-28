@@ -201,8 +201,8 @@ impl Harness {
                 | AgentPublishCompletion::OutputLengthPreDeliveryFailure { batch_parent, .. } => {
                     Some(*batch_parent)
                 }
-                AgentPublishCompletion::ReactiveContextRecovery { checkpoint, .. } => {
-                    Some(checkpoint.through)
+                AgentPublishCompletion::ReactiveContextRecovery { reducer, .. } => {
+                    Some(reducer.checkpoint.through)
                 }
                 AgentPublishCompletion::InitialPromptSubmission { .. }
                 | AgentPublishCompletion::OutputLengthSteer { .. }
@@ -583,43 +583,8 @@ impl Harness {
             }
             return;
         }
-        if let AgentPublishCompletion::ReactiveContextRecovery {
-            checkpoint, source, ..
-        } = completion
-        {
-            let selected = self
-                .selected_head_for_agent(cid)
-                .unwrap_or(tau_proto::AgentHead::Root);
-            let branch_matches = self
-                .agent_runtime
-                .agent_registry
-                .agents
-                .get(cid)
-                .and_then(|agent| agent.identity.agent_id.as_deref())
-                .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
-                .is_some_and(|tree| tree.is_ancestor_head(checkpoint.through, selected));
-            let cancelled = self
-                .agent_runtime
-                .agent_registry
-                .agents
-                .get(cid)
-                .is_some_and(|agent| agent.dispatch.pending_cancel.is_some());
-            if !branch_matches || cancelled {
-                self.terminalize_replay_blocked_context_recovery(
-                    cid,
-                    &checkpoint,
-                    if cancelled {
-                        tau_proto::StandaloneCompactionFailureReason::Cancelled
-                    } else {
-                        tau_proto::StandaloneCompactionFailureReason::StaleBranch
-                    },
-                );
-                if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-                    agent.dispatch.pending_cancel = None;
-                }
-                return;
-            }
-            self.start_reactive_compaction_for_checkpoint(cid, &checkpoint, source.as_ref());
+        if let AgentPublishCompletion::ReactiveContextRecovery { reducer, .. } = completion {
+            self.reduce_committed_reactive_context_recovery(cid, reducer);
             return;
         }
         if let AgentPublishCompletion::ReactiveContextRecoveryStart {
@@ -741,6 +706,52 @@ impl Harness {
                 activation_cut: Some(activation_cut),
                 output_length_continuation: None,
             }),
+        );
+    }
+
+    /// Reduce one committed reactive context rejection against current branch
+    /// and cancellation authority.
+    pub(super) fn reduce_committed_reactive_context_recovery(
+        &mut self,
+        cid: &AgentId,
+        reducer: CommittedReactiveContextRecovery,
+    ) {
+        let selected = self
+            .selected_head_for_agent(cid)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        let branch_matches = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.identity.agent_id.as_deref())
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
+            .is_some_and(|tree| tree.is_ancestor_head(reducer.checkpoint.through, selected));
+        let cancelled = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .is_some_and(|agent| agent.dispatch.pending_cancel.is_some());
+        if !branch_matches || cancelled {
+            self.terminalize_replay_blocked_context_recovery(
+                cid,
+                &reducer.checkpoint,
+                if cancelled {
+                    tau_proto::StandaloneCompactionFailureReason::Cancelled
+                } else {
+                    tau_proto::StandaloneCompactionFailureReason::StaleBranch
+                },
+            );
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+                agent.dispatch.pending_cancel = None;
+            }
+            return;
+        }
+        self.start_reactive_compaction_for_checkpoint(
+            cid,
+            &reducer.checkpoint,
+            reducer.source.as_ref(),
         );
     }
 

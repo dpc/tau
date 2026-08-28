@@ -266,9 +266,12 @@ impl Harness {
         let reported_input_tokens = input_tokens
             .filter(|tokens| *tokens > 0)
             .map(tau_proto::TokenCount::new);
-        if (!standalone_compaction || standalone_success)
-            && self.try_plan_reactive_context_recovery(&cid, &mut response, source)
-        {
+        let terminal_plan = if !standalone_compaction || standalone_success {
+            self.classify_reactive_context_recovery(&cid, &response, source)
+        } else {
+            ProviderTerminalPlan::Other
+        };
+        if self.execute_provider_terminal_plan(&cid, &mut response, terminal_plan) {
             return Ok(());
         }
         self.prompt_coordination
@@ -788,14 +791,14 @@ impl Harness {
         });
     }
 
-    /// Durably claims an eligible no-output context rejection and starts the
-    /// bounded standalone-compaction chain that may recover it.
-    pub(super) fn try_plan_reactive_context_recovery(
-        &mut self,
+    /// Classify one terminal exhaustively at the reactive-recovery family
+    /// boundary without applying terminal effects.
+    pub(super) fn classify_reactive_context_recovery(
+        &self,
         cid: &AgentId,
-        response: &mut ProviderResponseFinished,
+        response: &ProviderResponseFinished,
         source: Option<&tau_proto::ConnectionId>,
-    ) -> bool {
+    ) -> ProviderTerminalPlan {
         if response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
             || response.stop_reason != ProviderStopReason::Error
             || !response.output_items.is_empty()
@@ -812,7 +815,7 @@ impl Harness {
                 .map(|operation| operation.0)
                 != Some(tau_proto::PromptOperation::Inference)
         {
-            return false;
+            return ProviderTerminalPlan::Other;
         }
         let Some(agent_id) = self
             .agent_runtime
@@ -821,18 +824,18 @@ impl Harness {
             .get(cid)
             .and_then(|agent| agent.identity.agent_id.clone())
         else {
-            return false;
+            return ProviderTerminalPlan::Other;
         };
         let Some(tree) = self.session_runtime.agent_store.agent(agent_id.as_str()) else {
-            return false;
+            return ProviderTerminalPlan::Other;
         };
         let Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) =
             tree.inference_dispatch_recovery()
         else {
-            return false;
+            return ProviderTerminalPlan::Other;
         };
         let Some(model) = checkpoint.model.clone() else {
-            return false;
+            return ProviderTerminalPlan::Other;
         };
         let current_head = self
             .agent_runtime
@@ -854,7 +857,7 @@ impl Harness {
                         .owns_prompt_model(&response.agent_prompt_id, &model)
             });
         if checkpoint.activation_cut.is_none() {
-            return false;
+            return ProviderTerminalPlan::Other;
         }
         if checkpoint.transaction_id.is_some()
             || checkpoint.operation != Some(tau_proto::PromptOperation::Inference)
@@ -874,7 +877,7 @@ impl Harness {
                 .get(&model)
                 .is_some_and(|info| info.supports_standalone_compaction)
         {
-            return false;
+            return ProviderTerminalPlan::Other;
         }
         let role_name = self.role_name_for_agent_id(cid);
         if self
@@ -884,9 +887,28 @@ impl Harness {
             .and_then(|role| role.inference_compaction.or(role.compaction))
             == Some(path_tau_config_settings::RoleCompaction::Disabled)
         {
-            return false;
+            return ProviderTerminalPlan::Other;
         }
 
+        ProviderTerminalPlan::ReactiveContextRecovery(Box::new(ReactiveContextRecoveryPlan {
+            checkpoint,
+            source: source.cloned(),
+        }))
+    }
+
+    /// Execute the narrow eager bundle and enqueue the exact canonical
+    /// candidate for one classified provider-terminal plan.
+    pub(super) fn execute_provider_terminal_plan(
+        &mut self,
+        cid: &AgentId,
+        response: &mut ProviderResponseFinished,
+        plan: ProviderTerminalPlan,
+    ) -> bool {
+        let plan = match plan {
+            ProviderTerminalPlan::ReactiveContextRecovery(plan) => plan,
+            ProviderTerminalPlan::Other => return false,
+        };
+        let ReactiveContextRecoveryPlan { checkpoint, source } = *plan;
         response.recovery_disposition =
             tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
         if let Some(telemetry) = response.context_limit_telemetry.as_mut() {
@@ -906,7 +928,7 @@ impl Harness {
             .as_ref()
             .map(|usage| usage.response_received_tokens);
         self.attach_finished_response_usage(response, input_tokens, cached_tokens, output_tokens);
-        self.add_finished_response_estimated_cost(cid, response, source);
+        self.add_finished_response_estimated_cost(cid, response, source.as_ref());
         self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid)
             && agent.dispatch.in_flight_prompt.as_ref() == Some(&response.agent_prompt_id)
@@ -915,11 +937,13 @@ impl Harness {
         }
         self.publish_event_for_agent_with_completion(
             cid,
-            source,
+            source.as_ref(),
             Event::ProviderResponseFinished(response.clone()),
             Some(AgentPublishCompletion::ReactiveContextRecovery {
-                checkpoint,
-                source: source.cloned(),
+                reducer: CommittedReactiveContextRecovery {
+                    checkpoint,
+                    source: source.clone(),
+                },
                 retry_event: None,
             }),
             false,
