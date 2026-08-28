@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::io::Write as _;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::{Arc, atomic as path_std_sync_atomic};
@@ -9,6 +10,7 @@ use std::{
 mod scripted_tcp_server;
 
 use scripted_tcp_server::ScriptedTcpServer;
+use tau_provider::debug_capture_writer::ProviderDebugCaptureClass;
 
 use super::*;
 
@@ -254,7 +256,7 @@ fn stream_state_reports_tool_argument_response_bytes() {
 fn chat_stream_body_rejects_incomplete_data_at_eof() {
     let bytes = b"data: {\"choices\"";
     let mut state = StreamState::new();
-    let mut raw_events = Vec::new();
+    let mut raw_events = DebugEventCapture::new(true);
     let mut observed = Vec::new();
 
     let error = read_chat_stream_body(
@@ -267,7 +269,7 @@ fn chat_stream_body_rejects_incomplete_data_at_eof() {
     .expect_err("incomplete SSE data must reject the stream");
 
     assert_eq!(observed, vec![bytes.len() as u64]);
-    assert!(raw_events.is_empty());
+    assert!(raw_events.events().is_empty());
     assert!(matches!(error, LlmError::Json(_)));
 }
 
@@ -292,7 +294,7 @@ impl std::io::Read for DoneThenPanicReader {
 #[test]
 fn chat_stream_body_stops_after_done_without_waiting_for_eof() {
     let mut state = StreamState::new();
-    let mut raw_events = Vec::new();
+    let mut raw_events = DebugEventCapture::new(true);
     let mut updates = 0;
 
     read_chat_stream_body(
@@ -309,7 +311,7 @@ fn chat_stream_body_stops_after_done_without_waiting_for_eof() {
         state.response_bytes_received(),
         b"data: [DONE]\n\n".len() as u64
     );
-    assert!(raw_events.is_empty());
+    assert!(raw_events.events().is_empty());
 }
 
 /// Ensures active Chat Completions stream cancellation closes the attempt
@@ -317,7 +319,7 @@ fn chat_stream_body_stops_after_done_without_waiting_for_eof() {
 #[test]
 fn chat_stream_body_observes_prompt_cancellation() {
     let mut state = StreamState::new();
-    let mut raw_events = Vec::new();
+    let mut raw_events = DebugEventCapture::new(true);
     let error = read_chat_stream_body(
         path_std_io::Cursor::new(b"data: never read\n\n"),
         &mut state,
@@ -675,7 +677,7 @@ fn timed_semantic_output_predicate_matches_chat_contract() {
 fn chat_stream_body_rejects_oversized_partial_line() {
     let bytes = vec![b'x'; MAX_SSE_LINE_BYTES + 1];
     let mut state = StreamState::new();
-    let mut raw_events = Vec::new();
+    let mut raw_events = DebugEventCapture::new(true);
     let error = read_chat_stream_body(
         path_std_io::Cursor::new(bytes),
         &mut state,
@@ -702,7 +704,7 @@ fn chat_stream_chunk_accepts_many_complete_sub_limit_lines() {
 
     let mut pending = Vec::new();
     let mut state = StreamState::new();
-    let mut raw_events = Vec::new();
+    let mut raw_events = DebugEventCapture::new(true);
     let outcome = process_stream_chunk(
         bytes.as_bytes(),
         &mut pending,
@@ -715,7 +717,7 @@ fn chat_stream_chunk_accepts_many_complete_sub_limit_lines() {
     assert!(!outcome.done);
     assert!(outcome.provider_event);
     assert!(pending.is_empty());
-    assert_eq!(raw_events.len(), line_count);
+    assert_eq!(raw_events.events().len(), line_count);
 }
 
 /// Ensures debug event retention is bounded even when an upstream emits many
@@ -728,7 +730,7 @@ fn chat_stream_body_bounds_debug_event_retention() {
     }
     bytes.extend_from_slice(b"data: [DONE]\n");
     let mut state = StreamState::new();
-    let mut raw_events = Vec::new();
+    let mut raw_events = DebugEventCapture::new(true);
     read_chat_stream_body(
         path_std_io::Cursor::new(bytes),
         &mut state,
@@ -737,7 +739,31 @@ fn chat_stream_body_bounds_debug_event_retention() {
         &mut || false,
     )
     .expect("bounded event stream");
-    assert_eq!(raw_events.len(), MAX_DEBUG_EVENTS);
+    assert_eq!(raw_events.events().len(), MAX_DEBUG_EVENTS);
+}
+
+/// Ensures disabled debug capture retains no raw provider JSON while the same
+/// bounded events still update ordinary semantic stream state.
+#[test]
+fn chat_stream_body_materializes_no_disabled_debug_events() {
+    let bytes = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"kept\"},\"finish_reason\":\"stop\"}]}\n",
+        "data: [DONE]\n",
+    );
+    let mut state = StreamState::new();
+    let mut raw_events = DebugEventCapture::new(false);
+
+    read_chat_stream_body(
+        path_std_io::Cursor::new(bytes),
+        &mut state,
+        &mut raw_events,
+        &mut |_| {},
+        &mut || false,
+    )
+    .expect("valid stream must parse with capture disabled");
+
+    assert!(raw_events.events().is_empty());
+    assert_eq!(state.output_items(), vec![assistant_text_item("kept")]);
 }
 
 /// Ensures malformed SSE data rejects the attempt after accepted output, so EOF
@@ -804,7 +830,7 @@ fn stream_idle_progress_requires_data_event() {
     ] {
         let mut pending = Vec::new();
         let mut state = StreamState::new();
-        let mut raw_events = Vec::new();
+        let mut raw_events = DebugEventCapture::new(true);
         let outcome = process_stream_chunk(
             bytes,
             &mut pending,
@@ -1107,6 +1133,30 @@ fn debug_capture_producers_submit_typed_http_sse_jobs() {
     );
     assert_eq!(submitted[2].1["http_status"], 429);
     assert_eq!(submitted[2].1["body"], "bounded error");
+}
+
+/// Ensures disabled capture returns before constructing metadata or invoking
+/// the submission sink.
+#[test]
+fn disabled_debug_capture_does_not_materialize_or_submit_metadata() {
+    let prompt = prompt();
+    let metadata_materialized = Cell::new(false);
+    let submitted = Cell::new(false);
+
+    submit_debug_json_with(
+        &prompt,
+        ProviderDebugCaptureClass::HttpSseResponse,
+        false,
+        || {
+            metadata_materialized.set(true);
+            serde_json::json!({"raw_events": [{"large": "provider data"}]})
+        },
+        |_| submitted.set(true),
+    )
+    .expect("disabled capture must be an inert success");
+
+    assert!(!metadata_materialized.get());
+    assert!(!submitted.get());
 }
 
 /// Chat Completions must reject Custom tools visibly rather than silently

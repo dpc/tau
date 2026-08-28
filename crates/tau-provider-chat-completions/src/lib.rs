@@ -73,6 +73,47 @@ const MAX_HTTP_ERROR_BODY_BYTES: u64 = 64 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_REQUEST_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 const MAX_REQUEST_IMAGE_DATA_URL_BYTES: usize = 32 * 1024 * 1024;
+
+/// Raw provider-event retention for one optional debug response capture.
+enum DebugEventCapture {
+    /// Debug capture is disabled, so provider events are never cloned or
+    /// retained.
+    Disabled,
+    /// Debug capture is enabled and retains at most the established event
+    /// limit.
+    Enabled(Vec<serde_json::Value>),
+}
+
+impl DebugEventCapture {
+    /// Start raw-event retention only when debug capture is enabled.
+    fn new(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled(Vec::new())
+        } else {
+            Self::Disabled
+        }
+    }
+
+    /// Retain one parsed event when capture is enabled and below its event
+    /// limit.
+    fn record(&mut self, event: &serde_json::Value) {
+        let Self::Enabled(events) = self else {
+            return;
+        };
+        if events.len() < MAX_DEBUG_EVENTS {
+            events.push(event.clone());
+        }
+    }
+
+    /// Borrow retained raw events, or an empty slice when capture is disabled.
+    fn events(&self) -> &[serde_json::Value] {
+        match self {
+            Self::Disabled => &[],
+            Self::Enabled(events) => events,
+        }
+    }
+}
+
 #[cfg(test)]
 std::thread_local! {
     static OUTPUT_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1018,7 +1059,7 @@ impl ToolCallAccumulator {
 fn read_chat_stream_body(
     mut reader: impl Read,
     state: &mut StreamState,
-    raw_events: &mut Vec<serde_json::Value>,
+    raw_events: &mut DebugEventCapture,
     on_update: &mut impl FnMut(&StreamState),
     is_canceled: &mut impl FnMut() -> bool,
 ) -> Result<(), LlmError> {
@@ -1085,7 +1126,7 @@ fn process_stream_chunk(
     bytes: &[u8],
     pending: &mut Vec<u8>,
     state: &mut StreamState,
-    raw_events: &mut Vec<serde_json::Value>,
+    raw_events: &mut DebugEventCapture,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<SseChunkOutcome, LlmError> {
     state.record_transport_response_bytes(bytes.len());
@@ -1130,7 +1171,7 @@ fn sse_line_data(line: &[u8]) -> Option<&[u8]> {
 fn apply_pending_sse_line(
     pending: &mut Vec<u8>,
     state: &mut StreamState,
-    raw_events: &mut Vec<serde_json::Value>,
+    raw_events: &mut DebugEventCapture,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<(), LlmError> {
     if pending.is_empty() {
@@ -1144,7 +1185,7 @@ fn apply_pending_sse_line(
 fn apply_chat_stream_lines(
     lines: &[u8],
     state: &mut StreamState,
-    raw_events: &mut Vec<serde_json::Value>,
+    raw_events: &mut DebugEventCapture,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<SseChunkOutcome, LlmError> {
     let mut provider_event = false;
@@ -1162,9 +1203,7 @@ fn apply_chat_stream_lines(
         let data = String::from_utf8_lossy(data);
         let event: serde_json::Value =
             serde_json::from_str(data.as_ref()).map_err(LlmError::Json)?;
-        if raw_events.len() < MAX_DEBUG_EVENTS {
-            raw_events.push(event.clone());
-        }
+        raw_events.record(&event);
         apply_event(state, &event, on_update)?;
     }
     Ok(SseChunkOutcome {
@@ -1218,6 +1257,7 @@ fn chat_completions_stream(
             provider,
             body: &body_str,
             prompt,
+            capture_raw_events: debug_provider_requests,
         },
         on_update,
         &mut on_wire_dispatch,
@@ -1244,7 +1284,7 @@ fn chat_completions_stream(
         model,
         debug_provider_requests,
         &state,
-        &raw_events,
+        raw_events.events(),
         provider_attempt,
         1,
     );
@@ -1267,6 +1307,8 @@ struct AsyncAttemptContext<'a> {
     body: &'a str,
     /// Logical prompt used for diagnostics.
     prompt: &'a tau_proto::AgentPromptCreated,
+    /// Whether this attempt should retain raw events for private debug capture.
+    capture_raw_events: bool,
 }
 
 async fn chat_completions_stream_async(
@@ -1275,7 +1317,7 @@ async fn chat_completions_stream_async(
     on_dispatched: &mut impl FnMut(Instant),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
-) -> Result<(StreamState, Vec<serde_json::Value>), LlmError> {
+) -> Result<(StreamState, DebugEventCapture), LlmError> {
     let client = network
         .client_for(context.url)
         .map_err(LlmError::Outbound)?;
@@ -1368,7 +1410,7 @@ async fn chat_completions_stream_async(
         });
     let mut state =
         StreamState::new_for_attempt(context.provider.compat.cache_usage, compact_output_bytes);
-    let mut raw_events = Vec::new();
+    let mut raw_events = DebugEventCapture::new(context.capture_raw_events);
     let mut pending = Vec::new();
     let mut last_event_at = Instant::now();
     loop {
@@ -1665,18 +1707,19 @@ fn submit_debug_json_with(
     prompt: &tau_proto::AgentPromptCreated,
     class: tau_provider::debug_capture_writer::ProviderDebugCaptureClass,
     debug_provider_requests: bool,
-    metadata: &serde_json::Value,
+    metadata: impl FnOnce() -> serde_json::Value,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) -> serde_json::Result<()> {
     if !debug_provider_requests {
         return Ok(());
     }
+    let metadata = metadata();
     submit(
         path_tau_provider_debug_capture_writer::ProviderDebugCapture::new(
             prompt.session_id.clone(),
             prompt.agent_prompt_id.clone(),
             class,
-            serde_json::to_vec_pretty(metadata)?,
+            serde_json::to_vec_pretty(&metadata)?,
         ),
     );
     Ok(())
@@ -1760,13 +1803,19 @@ fn maybe_debug_submit_provider_request_with(
     wire_dispatch_index: u64,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) {
-    let metadata =
-        provider_request_debug_metadata(prompt, model, body, provider_attempt, wire_dispatch_index);
     if let Err(error) = submit_debug_json_with(
         prompt,
         path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest,
         debug_provider_requests,
-        &metadata,
+        || {
+            provider_request_debug_metadata(
+                prompt,
+                model,
+                body,
+                provider_attempt,
+                wire_dispatch_index,
+            )
+        },
         submit,
     ) {
         tracing::warn!(
@@ -1810,19 +1859,20 @@ fn maybe_debug_submit_provider_response_with(
     wire_dispatch_index: u64,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) {
-    let metadata = provider_response_debug_metadata(
-        prompt,
-        model,
-        state,
-        raw_events,
-        provider_attempt,
-        wire_dispatch_index,
-    );
     if let Err(error) = submit_debug_json_with(
         prompt,
         path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse,
         debug_provider_requests,
-        &metadata,
+        || {
+            provider_response_debug_metadata(
+                prompt,
+                model,
+                state,
+                raw_events,
+                provider_attempt,
+                wire_dispatch_index,
+            )
+        },
         submit,
     ) {
         tracing::warn!(
@@ -1930,19 +1980,20 @@ fn maybe_debug_submit_provider_http_error_with(
     wire_dispatch_index: u64,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) {
-    let metadata = provider_http_error_debug_metadata(
-        prompt,
-        model,
-        status,
-        body,
-        provider_attempt,
-        wire_dispatch_index,
-    );
     if let Err(error) = submit_debug_json_with(
         prompt,
         path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse,
         debug_provider_requests,
-        &metadata,
+        || {
+            provider_http_error_debug_metadata(
+                prompt,
+                model,
+                status,
+                body,
+                provider_attempt,
+                wire_dispatch_index,
+            )
+        },
         submit,
     ) {
         tracing::warn!(
