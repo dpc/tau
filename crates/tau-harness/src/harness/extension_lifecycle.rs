@@ -275,7 +275,10 @@ impl Harness {
                 if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                     agent.dispatch.activation_dispatch =
                         path_crate_agent::ActivationDispatchState::DispatchUncertain {
-                            owner: path_crate_agent::InferenceCheckpointOwner::Inference,
+                            owner: checkpoint.transaction_id.clone().map_or(
+                                path_crate_agent::InferenceCheckpointOwner::Inference,
+                                |id| path_crate_agent::InferenceCheckpointOwner::Standalone { id },
+                            ),
                             agent_prompt_id: prompt_id.clone(),
                             through: checkpoint.through,
                             model: checkpoint.model,
@@ -284,7 +287,8 @@ impl Harness {
                         };
                     agent.dispatch.in_flight_prompt = None;
                 }
-                if deferred_activation
+                if checkpoint.transaction_id.is_none()
+                    && deferred_activation
                     && let Some((agent_id, originator)) = self
                         .agent_runtime
                         .agent_registry

@@ -2099,6 +2099,25 @@ fn automatic_compaction_continuation_chain_matches_live_and_cold_replay() {
     records.push(first_boundary_record);
     let first_boundary = AgentHead::Node(live.head().expect("first boundary"));
 
+    let mut equal_boundary = compaction_start("ct-auto-equal-boundary");
+    equal_boundary.compact_prompt_id = "ap-auto-equal-boundary".parse().expect("prompt id");
+    equal_boundary.cut = first_boundary;
+    equal_boundary.resume_through = Some(first_boundary);
+    equal_boundary.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+        previous_transaction_id: first.transaction_id.clone(),
+    };
+    let equal_boundary_record = record(4, Event::AgentStandaloneCompactionStarted(equal_boundary));
+    assert!(
+        live.apply_persisted_record(&equal_boundary_record).is_err(),
+        "live append must reject an automatic continuation with no strict progress"
+    );
+    let mut replay_records = records.clone();
+    replay_records.push(equal_boundary_record);
+    assert!(
+        AgentTree::try_from_events(agent_id(), &replay_records).is_err(),
+        "cold replay must reject the same equal-boundary automatic continuation"
+    );
+
     let mut unlinked = live.clone();
     let mut invalid_manual = compaction_start("ct-unlinked-manual");
     invalid_manual.compact_prompt_id = "ap-unlinked-manual".parse().expect("prompt id");

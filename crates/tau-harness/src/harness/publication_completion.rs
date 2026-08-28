@@ -2583,7 +2583,7 @@ impl Harness {
                 self.prompt_coordination
                     .compaction_runtime
                     .pending_manual_tools
-                    .entry(started.transaction_id.clone())
+                    .entry((started.agent_id.clone(), started.transaction_id.clone()))
                     .or_insert_with(|| PendingManualCompactionTool {
                         request_id: request_id.clone(),
                         caller_agent_id: caller_agent_id.clone(),
@@ -2606,8 +2606,8 @@ impl Harness {
                     .compaction_runtime
                     .active_ui_transactions
                     .insert(
-                        started.transaction_id.clone(),
-                        (request_id.clone(), started.agent_id.clone()),
+                        (started.agent_id.clone(), started.transaction_id.clone()),
+                        request_id.clone(),
                     );
             }
             let suppression_key = (started.agent_id.clone(), started.transaction_id.clone());
@@ -2883,12 +2883,12 @@ impl Harness {
             self.prompt_coordination
                 .compaction_runtime
                 .active_ui_transactions
-                .remove(&failed.transaction_id);
+                .remove(&(failed.agent_id.clone(), failed.transaction_id.clone()));
             if let Some(pending) = self
                 .prompt_coordination
                 .compaction_runtime
                 .pending_manual_tools
-                .remove(&failed.transaction_id)
+                .remove(&(failed.agent_id.clone(), failed.transaction_id.clone()))
             {
                 let self_request = pending.caller_agent_id == pending.target_agent_id;
                 if self_request {
@@ -3021,7 +3021,7 @@ impl Harness {
                 self.prompt_coordination
                     .compaction_runtime
                     .active_ui_transactions
-                    .remove(transaction_id);
+                    .remove(&(compacted.agent_id.clone(), transaction_id.clone()));
             }
             self.clear_agent_context_usage(&cid);
             if let Some(transaction_id) = compacted.transaction_id.as_ref()
@@ -3062,7 +3062,7 @@ impl Harness {
                 .prompt_coordination
                 .compaction_runtime
                 .pending_manual_tools
-                .remove(transaction_id)
+                .remove(&(compacted.agent_id.clone(), transaction_id.clone()))
         {
             let self_request = pending.caller_agent_id == pending.target_agent_id;
             let call_id = pending.call_id.clone();

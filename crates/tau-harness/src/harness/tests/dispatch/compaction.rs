@@ -4704,8 +4704,10 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
             && h.prompt_coordination
                 .compaction_runtime
                 .pending_manual_tools
-                .contains_key(match &starts[0].event {
-                    Event::AgentStandaloneCompactionStarted(started) => &started.transaction_id,
+                .contains_key(&match &starts[0].event {
+                    Event::AgentStandaloneCompactionStarted(started) => {
+                        (started.agent_id.clone(), started.transaction_id.clone())
+                    }
                     _ => unreachable!("filtered start"),
                 })
             && !h
@@ -5268,8 +5270,11 @@ fn manual_cross_compaction_rejects_caller_limit() {
             .compaction_runtime
             .pending_manual_tools
             .insert(
-                tau_proto::CompactionTransactionId::parse(format!("ct-cap-{index}"))
-                    .expect("transaction id"),
+                (
+                    tau_proto::AgentId::parse(format!("target-{index}")).expect("target id"),
+                    tau_proto::CompactionTransactionId::parse(format!("ct-cap-{index}"))
+                        .expect("transaction id"),
+                ),
                 crate::harness::PendingManualCompactionTool {
                     request_id: tau_proto::CompactionRequestId::parse(format!("cr-cap-{index}"))
                         .expect("request id"),
@@ -8908,7 +8913,169 @@ fn failed_ui_compaction_replay_restores_nonblocking_suppression() {
         recovered.dispatch.activation_dispatch,
         ActivationDispatchState::None
     ));
+    assert!(
+        resumed
+            .prompt_coordination
+            .compaction_runtime
+            .active_ui_transactions
+            .is_empty(),
+        "a terminal UI transaction must not reappear as active after replay"
+    );
     resumed.shutdown().expect("shutdown");
+}
+
+/// Runtime compaction ownership includes the target agent because transaction
+/// ids are only unique within one agent journal.
+#[test]
+fn restored_ui_transactions_with_equal_local_ids_remain_agent_scoped() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let first_cid = ensure_test_user_agent(&mut h);
+    let second_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let first_id = durable_agent_id_for_conversation(&h, &first_cid);
+    let second_id = durable_agent_id_for_conversation(&h, &second_cid);
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-agent-local").expect("transaction id");
+    let recovery = |cid: AgentId, agent_id: tau_proto::AgentId, ordinal: &str| {
+        let request_id =
+            tau_proto::CompactionRequestId::parse(format!("cr-{ordinal}")).expect("request id");
+        let request = tau_proto::AgentManualCompactionRequested {
+            request_id: request_id.clone(),
+            target_agent_id: agent_id.clone(),
+            source: tau_proto::ManualCompactionSource::UiCompact {
+                ui_compact: tau_proto::UiManualCompactionSource {
+                    eligible_automatic_transaction_id: None,
+                    target_role: h.config.selected_role.clone(),
+                },
+            },
+            requested_target_head: tau_proto::AgentHead::Root,
+            target_generation: tau_proto::MaterializedPromptGeneration::initial(),
+            model: "test/model".into(),
+        };
+        (
+            cid,
+            tau_core::ManualCompactionRecovery::Started {
+                requested: request,
+                started: Box::new(tau_proto::AgentStandaloneCompactionStarted {
+                    agent_id,
+                    transaction_id: transaction_id.clone(),
+                    compact_prompt_id: test_agent_prompt_id(format!("ap-{ordinal}")),
+                    cut: tau_proto::AgentHead::Root,
+                    resume_through: None,
+                    model: "test/model".into(),
+                    operation: tau_proto::PromptOperation::StandaloneCompaction,
+                    originator: tau_proto::PromptOriginator::User,
+                    supersedes: None,
+                    trigger: tau_proto::StandaloneCompactionTrigger::ManualUi { request_id },
+                }),
+                outcome: None,
+            },
+        )
+    };
+
+    h.restore_manual_compaction_tools(vec![
+        recovery(first_cid, first_id.clone(), "first"),
+        recovery(second_cid, second_id.clone(), "second"),
+    ]);
+
+    assert_eq!(
+        h.prompt_coordination
+            .compaction_runtime
+            .active_ui_transactions
+            .len(),
+        2
+    );
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .active_ui_transactions
+            .contains_key(&(first_id, transaction_id.clone()))
+    );
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .active_ui_transactions
+            .contains_key(&(second_id, transaction_id))
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A terminal for one agent-local transaction must neither remove nor complete
+/// another agent's model-tool transaction with the same local id.
+#[test]
+fn model_tool_terminal_with_equal_local_id_keeps_other_agent_owner() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let first_cid = ensure_test_user_agent(&mut h);
+    let second_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let first_id = durable_agent_id_for_conversation(&h, &first_cid);
+    let second_id = durable_agent_id_for_conversation(&h, &second_cid);
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-agent-local-tool").expect("transaction id");
+    let second_call = ToolCallId::from("call-second-agent-local");
+    for (agent_id, ordinal, call_id) in [
+        (
+            first_id.clone(),
+            "first",
+            ToolCallId::from("call-first-agent-local"),
+        ),
+        (second_id.clone(), "second", second_call.clone()),
+    ] {
+        h.prompt_coordination
+            .compaction_runtime
+            .pending_manual_tools
+            .insert(
+                (agent_id.clone(), transaction_id.clone()),
+                crate::harness::PendingManualCompactionTool {
+                    request_id: tau_proto::CompactionRequestId::parse(format!("cr-{ordinal}"))
+                        .expect("request id"),
+                    caller_agent_id: agent_id.clone(),
+                    call_id,
+                    tool_name: ToolName::new("compact"),
+                    target_agent_id: agent_id,
+                },
+            );
+    }
+
+    h.react_to_committed_event(
+        None,
+        &Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            agent_id: first_id.clone(),
+            transaction_id: transaction_id.clone(),
+            cut: tau_proto::AgentHead::Root,
+            reason: tau_proto::StandaloneCompactionFailureReason::Interrupted,
+            resume_through: None,
+            context_retreat: None,
+        }),
+        true,
+        None,
+    );
+
+    assert!(
+        !h.prompt_coordination
+            .compaction_runtime
+            .pending_manual_tools
+            .contains_key(&(first_id, transaction_id.clone()))
+    );
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .pending_manual_tools
+            .contains_key(&(second_id, transaction_id))
+    );
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(
+            event,
+            Event::ToolBackgroundError(error) if error.call_id == second_call
+        )
+    }));
+    h.shutdown().expect("shutdown");
 }
 /// A large provider-usage value from another model cannot trigger protected
 /// compaction when the selected model's active window is small.

@@ -1464,7 +1464,7 @@ impl Harness {
             .pending_manual_tools
             .iter()
             .find(|(_, pending)| pending.call_id == target.call_id)
-            .map(|(id, pending)| (id.clone(), pending.clone()))
+            .map(|((_, id), pending)| (id.clone(), pending.clone()))
             && let Some(target_cid) =
                 self.runtime_agent_id_for_target_agent(Some(pending.target_agent_id.as_str()))
         {

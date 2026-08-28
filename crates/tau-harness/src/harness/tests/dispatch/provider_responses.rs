@@ -1,5 +1,6 @@
 //! Tests for provider responses behavior.
 
+use super::super::lifecycle::seed_restored_compaction_checkpoint;
 use super::*;
 
 /// Ensures provider-owned response stats survive harness validation and are
@@ -514,6 +515,83 @@ fn provider_loss_retries_typed_and_raw_deferred_input_after_append_failures() {
         );
         h.shutdown().expect("shutdown");
     }
+}
+
+/// Provider loss must preserve a transaction-owned checkpoint even when an
+/// activating input is deferred; only ordinary inference may close as stale.
+#[test]
+fn provider_loss_keeps_standalone_checkpoint_uncertain_with_deferred_input() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let (agent_id, transaction_id, prompt_id, through) =
+        seed_restored_compaction_checkpoint(&mut h, &cid, &"test/model".into(), "ct-provider-loss");
+    let checkpoint =
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            output_length_continuation: None,
+            agent_id: agent_id.clone(),
+            transaction_id: Some(transaction_id.clone()),
+            agent_prompt_id: prompt_id.clone(),
+            through,
+            model: Some("test/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        });
+    h.publish_for_agent(&cid, checkpoint);
+    let provider = h
+        .extension_connection_id("provider")
+        .expect("provider")
+        .to_owned();
+    h.provider_runtime
+        .pending_prompts
+        .insert(prompt_id.clone(), crate::test_connection_id(&provider));
+    h.prompt_coordination
+        .prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .pending_message_wakes
+        .push_back(crate::agent::PendingMessageWake {
+            source: path_crate_agent::PendingMessageWakeSource::MessageFact {
+                durable_event_seq: tau_core::PersistedAgentEventSeq::new(0),
+            },
+            node_id: None,
+            activation_observation: None,
+            source_observation: None,
+        });
+
+    h.handle_disconnect(&crate::test_connection_id(&provider));
+
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .activation_dispatch,
+        crate::agent::ActivationDispatchState::DispatchUncertain {
+            owner: crate::agent::InferenceCheckpointOwner::Standalone { ref id },
+            ref agent_prompt_id,
+            ..
+        } if id == &transaction_id && agent_prompt_id == &prompt_id
+    ));
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(
+            event,
+            Event::AgentPromptTerminated(terminated)
+                if terminated.agent_prompt_id == prompt_id
+        )
+    }));
+    assert!(matches!(
+        h.session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .and_then(tau_core::AgentTree::standalone_compaction_recovery),
+        Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(_))
+    ));
+    h.shutdown().expect("shutdown");
 }
 
 /// Harness-owned estimates start at zero for a newly loaded runtime agent and

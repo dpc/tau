@@ -3864,6 +3864,9 @@ impl AgentTree {
                 .head
                 .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
             let current_window = self.active_provider_window(current.as_option());
+            let previous_boundary = current_window
+                .replacement_boundary
+                .map(tau_proto::AgentHead::Node);
             let previous_boundary_matches = current_window
                 .replacement_boundary
                 .and_then(|node_id| self.node(node_id))
@@ -3902,6 +3905,10 @@ impl AgentTree {
                 || !previous_is_rolling
                 || previous.started.model != started.model
                 || started.resume_through != Some(current)
+                || (matches!(
+                    started.trigger,
+                    tau_proto::StandaloneCompactionTrigger::AutomaticContinuation { .. }
+                ) && Some(started.cut) == previous_boundary)
                 || reactive_progress == Some(ReactiveCompactionProgress::ReachedTargetCut)
                 || reactive_target_cut
                     .is_some_and(|target_cut| !self.is_ancestor_head(started.cut, target_cut))

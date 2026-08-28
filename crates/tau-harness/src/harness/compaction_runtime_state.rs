@@ -22,8 +22,10 @@ pub(crate) struct CompactionRuntimeState {
     /// Reactive claims that must terminalize immediately after start commit.
     pub(super) cancelled_claims: HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
     /// Model tool calls awaiting one durable compaction terminal.
-    pub(super) pending_manual_tools:
-        HashMap<tau_proto::CompactionTransactionId, PendingManualCompactionTool>,
+    pub(super) pending_manual_tools: HashMap<
+        (tau_proto::AgentId, tau_proto::CompactionTransactionId),
+        PendingManualCompactionTool,
+    >,
     /// Accepted manual requests waiting for a safe start boundary.
     pub(super) accepted_manual_tools:
         HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
@@ -40,8 +42,8 @@ pub(crate) struct CompactionRuntimeState {
         HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
     /// Committed UI starts retained through their one transaction terminal.
     pub(super) active_ui_transactions: HashMap<
-        tau_proto::CompactionTransactionId,
-        (tau_proto::CompactionRequestId, tau_proto::AgentId),
+        (tau_proto::AgentId, tau_proto::CompactionTransactionId),
+        tau_proto::CompactionRequestId,
     >,
     /// Exact UI start publications retained after an append rejection.
     pub(super) rejected_ui_starts: HashMap<AgentId, Event>,

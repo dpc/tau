@@ -116,8 +116,8 @@ impl Harness {
             .prompt_coordination
             .compaction_runtime
             .active_ui_transactions
-            .values()
-            .any(|(_, target)| target == &agent_id)
+            .keys()
+            .any(|(target, _)| target == &agent_id)
         {
             self.send_ui_response(client_id, "compaction already queued");
             return;
@@ -2179,16 +2179,18 @@ impl Harness {
                     outcome,
                 } => {
                     if requested.is_ui_request() {
-                        self.prompt_coordination
-                            .compaction_runtime
-                            .active_ui_transactions
-                            .insert(
-                                started.transaction_id.clone(),
-                                (
+                        if outcome.is_none() {
+                            self.prompt_coordination
+                                .compaction_runtime
+                                .active_ui_transactions
+                                .insert(
+                                    (
+                                        requested.target_agent_id.clone(),
+                                        started.transaction_id.clone(),
+                                    ),
                                     requested.request_id.clone(),
-                                    requested.target_agent_id.clone(),
-                                ),
-                            );
+                                );
+                        }
                         continue;
                     }
                     let pending = PendingManualCompactionTool {
@@ -2204,7 +2206,13 @@ impl Harness {
                     self.prompt_coordination
                         .compaction_runtime
                         .pending_manual_tools
-                        .insert(started.transaction_id.clone(), pending);
+                        .insert(
+                            (
+                                requested.target_agent_id.clone(),
+                                started.transaction_id.clone(),
+                            ),
+                            pending,
+                        );
                     (requested, Some((started, outcome)))
                 }
                 tau_core::ManualCompactionRecovery::Failed { requested, failed } => {
@@ -2296,7 +2304,10 @@ impl Harness {
                 self.prompt_coordination
                     .compaction_runtime
                     .pending_manual_tools
-                    .remove(&started.transaction_id);
+                    .remove(&(
+                        request.target_agent_id.clone(),
+                        started.transaction_id.clone(),
+                    ));
                 if request.required_tool_source().resume_inference
                     && !self.self_compaction_terminal_delivered(&request)
                 {
@@ -2395,7 +2406,10 @@ impl Harness {
                     self.prompt_coordination
                         .compaction_runtime
                         .pending_manual_tools
-                        .remove(&started.transaction_id);
+                        .remove(&(
+                            request.target_agent_id.clone(),
+                            started.transaction_id.clone(),
+                        ));
                     if request.required_tool_source().resume_inference {
                         self.consume_wait_background_completion(
                             &request.required_tool_source().initiating_tool_call_id,
@@ -2451,7 +2465,10 @@ impl Harness {
                     self.prompt_coordination
                         .compaction_runtime
                         .pending_manual_tools
-                        .remove(&started.transaction_id);
+                        .remove(&(
+                            request.target_agent_id.clone(),
+                            started.transaction_id.clone(),
+                        ));
                     if request.required_tool_source().resume_inference {
                         self.consume_wait_background_completion(&call_id);
                         if let Some(agent) = self
