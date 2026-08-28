@@ -1295,43 +1295,48 @@ impl Harness {
         } else {
             tau_proto::AgentWorkStatusPhase::Working
         };
-        let threshold = role.and_then(|role| {
-            if role.compactions.is_empty() {
-                return match role
-                    .compaction
-                    .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault)
-                {
-                    path_tau_config_settings::RoleCompaction::ProviderDefault => {
-                        info.and_then(|info| info.standalone_compaction_threshold)
-                    }
-                    path_tau_config_settings::RoleCompaction::Threshold(tokens) => {
-                        Some(tau_proto::TokenCount::new(tokens))
-                    }
-                    path_tau_config_settings::RoleCompaction::Disabled => None,
-                };
-            }
-            role.compactions
-                .values()
-                .filter(|policy| {
-                    policy.enable
-                        && policy.when.at
-                            == path_tau_config_settings::ContextPolicyPoint::BeforeInference
-                        && policy
-                            .when
-                            .statuses
-                            .as_ref()
-                            .is_none_or(|statuses| statuses.contains(&logical_status))
-                })
-                .filter_map(|policy| match policy.threshold {
-                    path_tau_config_settings::CompactionPolicyThreshold::ProviderDefault => {
-                        info.and_then(|info| info.standalone_compaction_threshold)
-                    }
-                    path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
-                        Some(tau_proto::TokenCount::new(tokens))
-                    }
-                })
-                .min()
-        });
+        let threshold = role
+            .and_then(|role| {
+                if role.compactions.is_empty() {
+                    return match role
+                        .compaction
+                        .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault)
+                    {
+                        path_tau_config_settings::RoleCompaction::ProviderDefault => {
+                            info.and_then(|info| info.standalone_compaction_threshold)
+                        }
+                        path_tau_config_settings::RoleCompaction::Threshold(tokens) => {
+                            Some(tau_proto::TokenCount::new(tokens))
+                        }
+                        path_tau_config_settings::RoleCompaction::Disabled => None,
+                    };
+                }
+                role.compactions
+                    .values()
+                    .filter(|policy| {
+                        policy.enable
+                            && policy.when.at
+                                == path_tau_config_settings::ContextPolicyPoint::BeforeInference
+                            && policy
+                                .when
+                                .statuses
+                                .as_ref()
+                                .is_none_or(|statuses| statuses.contains(&logical_status))
+                    })
+                    .filter_map(|policy| {
+                        match policy.threshold {
+                            path_tau_config_settings::CompactionPolicyThreshold::ProviderDefault => {
+                                info.and_then(|info| info.standalone_compaction_threshold)
+                            }
+                            path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
+                                Some(tau_proto::TokenCount::new(tokens))
+                            }
+                        }
+                        .filter(|threshold| *threshold > tau_proto::TokenCount::ZERO)
+                    })
+                    .min()
+            })
+            .filter(|threshold| *threshold > tau_proto::TokenCount::ZERO);
         let reported_input = self
             .automatic_compaction_reported_input_tokens(cid, model)
             .unwrap_or(tau_proto::TokenCount::ZERO);
@@ -1587,7 +1592,8 @@ impl Harness {
                     path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
                         Some(tau_proto::TokenCount::new(tokens))
                     }
-                }?;
+                }
+                .filter(|threshold| *threshold > tau_proto::TokenCount::ZERO)?;
                 (threshold <= reported_input).then_some((name.as_str(), threshold))
             })
             .collect::<Vec<_>>();
@@ -1808,45 +1814,50 @@ impl Harness {
         } else {
             tau_proto::AgentWorkStatusPhase::Working
         };
-        let threshold = role.and_then(|role| {
-            if role.compactions.is_empty() {
-                if point != path_tau_config_settings::ContextPolicyPoint::BeforeInference {
-                    return None;
+        let threshold = role
+            .and_then(|role| {
+                if role.compactions.is_empty() {
+                    if point != path_tau_config_settings::ContextPolicyPoint::BeforeInference {
+                        return None;
+                    }
+                    return match role
+                        .compaction
+                        .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault)
+                    {
+                        path_tau_config_settings::RoleCompaction::ProviderDefault => {
+                            info.standalone_compaction_threshold
+                        }
+                        path_tau_config_settings::RoleCompaction::Threshold(threshold) => {
+                            Some(tau_proto::TokenCount::new(threshold))
+                        }
+                        path_tau_config_settings::RoleCompaction::Disabled => None,
+                    };
                 }
-                return match role
-                    .compaction
-                    .unwrap_or(path_tau_config_settings::RoleCompaction::ProviderDefault)
-                {
-                    path_tau_config_settings::RoleCompaction::ProviderDefault => {
-                        info.standalone_compaction_threshold
-                    }
-                    path_tau_config_settings::RoleCompaction::Threshold(threshold) => {
-                        Some(tau_proto::TokenCount::new(threshold))
-                    }
-                    path_tau_config_settings::RoleCompaction::Disabled => None,
-                };
-            }
-            role.compactions
-                .values()
-                .filter(|policy| {
-                    policy.enable
-                        && policy.when.at == point
-                        && policy
-                            .when
-                            .statuses
-                            .as_ref()
-                            .is_none_or(|statuses| statuses.contains(&logical_status))
-                })
-                .filter_map(|policy| match policy.threshold {
-                    path_tau_config_settings::CompactionPolicyThreshold::ProviderDefault => {
-                        info.standalone_compaction_threshold
-                    }
-                    path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
-                        Some(tau_proto::TokenCount::new(tokens))
-                    }
-                })
-                .min()
-        });
+                role.compactions
+                    .values()
+                    .filter(|policy| {
+                        policy.enable
+                            && policy.when.at == point
+                            && policy
+                                .when
+                                .statuses
+                                .as_ref()
+                                .is_none_or(|statuses| statuses.contains(&logical_status))
+                    })
+                    .filter_map(|policy| {
+                        match policy.threshold {
+                            path_tau_config_settings::CompactionPolicyThreshold::ProviderDefault => {
+                                info.standalone_compaction_threshold
+                            }
+                            path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
+                                Some(tau_proto::TokenCount::new(tokens))
+                            }
+                        }
+                        .filter(|threshold| *threshold > tau_proto::TokenCount::ZERO)
+                    })
+                    .min()
+            })
+            .filter(|threshold| *threshold > tau_proto::TokenCount::ZERO);
         let Some(agent_id) = conv.identity.agent_id.clone() else {
             return false;
         };
@@ -1893,7 +1904,8 @@ impl Harness {
                         path_tau_config_settings::CompactionPolicyThreshold::Tokens(tokens) => {
                             Some(tau_proto::TokenCount::new(tokens))
                         }
-                    }?;
+                    }
+                    .filter(|threshold| *threshold > tau_proto::TokenCount::ZERO)?;
                     (policy_threshold <= reported_input).then(|| name.clone())
                 })
                 .collect();

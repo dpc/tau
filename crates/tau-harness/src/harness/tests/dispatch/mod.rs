@@ -2745,6 +2745,7 @@ mod compaction_failure_recovery;
 mod compaction_reactive_rolling;
 mod compaction_runtime_state;
 mod compaction_strict;
+mod compaction_threshold;
 mod configuration;
 mod extension_routing;
 mod loop_guard;
