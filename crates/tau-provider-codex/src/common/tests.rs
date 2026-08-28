@@ -239,6 +239,51 @@ fn timed_semantic_output_has_narrow_metric_categories() {
     assert!(opaque.has_timed_semantic_output());
 }
 
+/// Compact output extraction must reject an additional materialized item
+/// before cloning retained payloads, while preserving empty stream artifacts.
+#[test]
+fn compact_output_extraction_validates_projected_shape_before_consuming() {
+    let mut malformed = StreamState::new();
+    malformed
+        .output_items
+        .push(OutputItemAccumulator::Message(MessageAccumulator {
+            text: "x".repeat(1024 * 1024),
+            ..MessageAccumulator::default()
+        }));
+    malformed
+        .output_items
+        .push(OutputItemAccumulator::Compaction(Some(
+            tau_proto::OpaqueProviderItem::new(tau_proto::CborValue::Null),
+        )));
+    assert!(malformed.into_single_compaction_item().is_none());
+
+    let mut valid = StreamState::new();
+    valid.output_items.push(OutputItemAccumulator::Empty);
+    valid
+        .output_items
+        .push(OutputItemAccumulator::Compaction(None));
+    let raw_json = "x".repeat(1024 * 1024);
+    let raw_json_ptr = raw_json.as_ptr();
+    valid
+        .output_items
+        .push(OutputItemAccumulator::Compaction(Some(
+            tau_proto::OpaqueProviderItem::with_raw_json(tau_proto::CborValue::Null, raw_json),
+        )));
+
+    let extracted = valid
+        .into_single_compaction_item()
+        .expect("one completed compaction item should extract");
+    assert_eq!(
+        extracted
+            .raw_json
+            .as_ref()
+            .expect("raw replay sidecar should remain present")
+            .as_ptr(),
+        raw_json_ptr,
+        "consuming extraction must move rather than clone retained payloads"
+    );
+}
+
 #[test]
 fn usage_limit_429_retries_after_reset_seconds() {
     let error = LlmError::HttpStatus(

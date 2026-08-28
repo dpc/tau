@@ -1026,13 +1026,13 @@ impl CodexRuntime {
             abort,
             &mut |_| {},
         );
-        let (provider_output, usage) = match compact_result {
+        let (state, usage) = match compact_result {
             Ok(dispatch) => {
                 if let Some(probe) = probe {
                     probe.complete(CompactRouteState::Available);
                 }
                 let usage = dispatch.state.usage();
-                (dispatch.state.into_output_items(), usage)
+                (dispatch.state, usage)
             }
             Err(common::LlmError::Canceled) => return CompactOutcome::Canceled,
             Err(error) => {
@@ -1072,12 +1072,7 @@ impl CodexRuntime {
                 };
             }
         };
-        if provider_output.len() != 1
-            || !matches!(
-                provider_output.first(),
-                Some(tau_proto::ContextItem::Compaction(_))
-            )
-        {
+        let Some(compaction_item) = state.into_single_compaction_item() else {
             return CompactOutcome::Terminal {
                 error: CodexError(common::LlmError::InvalidResponse(
                     "compaction response did not contain exactly one canonical compaction item"
@@ -1085,8 +1080,11 @@ impl CodexRuntime {
                 )),
                 backend_reached: attempt.backend_reached(),
             };
-        }
-        let output = build_v2_compacted_window(request.context, provider_output);
+        };
+        let output = build_v2_compacted_window(
+            request.context,
+            vec![tau_proto::ContextItem::Compaction(compaction_item)],
+        );
         if abort.is_aborted() {
             CompactOutcome::Canceled
         } else {

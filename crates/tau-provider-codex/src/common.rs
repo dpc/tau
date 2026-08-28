@@ -663,6 +663,20 @@ impl OutputItemAccumulator {
             }
         }
     }
+
+    fn materializes_context_item(&self) -> bool {
+        match self {
+            OutputItemAccumulator::Empty | OutputItemAccumulator::Compaction(None) => false,
+            OutputItemAccumulator::Message(message) => !message.text.is_empty(),
+            OutputItemAccumulator::ToolCall(call) => {
+                call.name.len() <= tau_proto::ToolName::MAX_LEN
+                    && tau_proto::ToolName::try_new(call.name.clone()).is_some()
+            }
+            OutputItemAccumulator::Reasoning(_)
+            | OutputItemAccumulator::Compaction(Some(_))
+            | OutputItemAccumulator::UnknownProviderItem(_) => true,
+        }
+    }
 }
 
 impl Default for StreamState {
@@ -1220,6 +1234,39 @@ impl StreamState {
     /// harness even though the model never committed a valid call.
     pub fn into_output_items(self) -> Vec<ContextItem> {
         self.output_items_snapshot()
+    }
+
+    /// Extracts exactly one completed compaction item without cloning retained
+    /// provider output.
+    ///
+    /// Empty streaming artifacts retain the same projection semantics as
+    /// [`Self::into_output_items`]. Any other projected item or non-empty
+    /// reasoning summary rejects the compact output before materialization.
+    pub(crate) fn into_single_compaction_item(self) -> Option<OpaqueProviderItem> {
+        if self
+            .thinking
+            .as_ref()
+            .is_some_and(|thinking| !thinking.is_empty())
+        {
+            return None;
+        }
+        let completed_compactions = self
+            .output_items
+            .iter()
+            .filter(|item| matches!(item, OutputItemAccumulator::Compaction(Some(_))))
+            .count();
+        if completed_compactions != 1
+            || self.output_items.iter().any(|item| {
+                !matches!(item, OutputItemAccumulator::Compaction(Some(_)))
+                    && item.materializes_context_item()
+            })
+        {
+            return None;
+        }
+        self.output_items.into_iter().find_map(|item| match item {
+            OutputItemAccumulator::Compaction(Some(item)) => Some(item),
+            _ => None,
+        })
     }
 
     /// Returns response-local usage when the provider supplied any usage field,
