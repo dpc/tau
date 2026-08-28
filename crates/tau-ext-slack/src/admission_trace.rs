@@ -1,12 +1,14 @@
 //! Closed, payload-free classes used by private Slack admission latency traces.
 
+use crate::{SlackConnectionGeneration, SlackTraceSequence};
+
 /// Payload-free fields shared by one occurrence's latency markers.
 #[derive(Clone, Copy)]
 pub(super) struct LatencyTrace {
     /// Socket generation local to this extension process.
-    pub(super) connection_generation: u64,
+    pub(super) connection_generation: SlackConnectionGeneration,
     /// Occurrence ordinal local to this extension process.
-    pub(super) trace_seq: u64,
+    pub(super) trace_seq: SlackTraceSequence,
     /// Stable low-cardinality decoded event class.
     pub(super) event_class: EventClass,
 }

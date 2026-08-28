@@ -25,15 +25,15 @@ use super::*;
 pub(super) struct FrozenSendAuthority {
     /// Monotonic reservation preventing stale workers from owning a reused
     /// call.
-    pub(super) token: u64,
+    pub(super) token: SlackSendReservation,
     /// Harness session generation that admitted the call.
-    pub(super) session_generation: u64,
+    pub(super) session_generation: SlackSessionGeneration,
     /// Extension connection/lifecycle epoch that admitted the call.
-    pub(super) ingress_epoch: u64,
+    pub(super) ingress_epoch: SlackIngressEpoch,
     /// Configuration/credential generation that admitted the call.
-    pub(super) config_generation: u64,
+    pub(super) config_generation: SlackConfigGeneration,
     /// Agent lifecycle generation that admitted the call.
-    pub(super) agent_generation: u64,
+    pub(super) agent_generation: SlackAgentGeneration,
     /// Exact extension instance that owns the scoped tool.
     pub(super) instance_name: Option<tau_proto::ExtensionName>,
     /// Exact bot identity paired with the installation team.
@@ -299,7 +299,7 @@ pub(super) struct SendLedgerEntry {
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub(super) struct SendQueueReservation {
     call_id: tau_proto::ToolCallId,
-    token: u64,
+    token: SlackSendReservation,
 }
 
 /// Closed replay decision for one incoming ToolCallId.
@@ -731,7 +731,7 @@ impl Extension {
                 }
             };
             state.configuration.config_frozen = true;
-            state.sends.next_send_reservation = state.sends.next_send_reservation.wrapping_add(1);
+            state.sends.next_send_reservation = state.sends.next_send_reservation.wrapping_next();
             let authority = FrozenSendAuthority {
                 token: state.sends.next_send_reservation,
                 session_generation: state.sends.session_generation,

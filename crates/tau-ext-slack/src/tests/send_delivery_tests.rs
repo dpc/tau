@@ -12,7 +12,12 @@ struct StepScheduler {
 }
 
 impl SendScheduler for StepScheduler {
-    fn wait(&self, wake: &SendWake, generation: u64, delay: Duration) -> bool {
+    fn wait(
+        &self,
+        wake: &SendWake,
+        generation: crate::generations::SlackSendWakeGeneration,
+        delay: Duration,
+    ) -> bool {
         self.entered.send(delay).expect("announce scheduled wait");
         self.release
             .lock()

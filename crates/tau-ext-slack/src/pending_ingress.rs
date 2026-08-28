@@ -1,6 +1,7 @@
 //! Canonical-confirmation state for Slack ingress reports.
 
 use super::*;
+use crate::{SlackAgentGeneration, SlackConfigGeneration, SlackIngressEpoch};
 
 /// Extension-data map key carrying one Slack report occurrence identity.
 const SLACK_REPORT_ID_KEY: &str = "slack_report_id";
@@ -87,11 +88,11 @@ pub(super) struct PendingIngress {
     /// Expected base or referenced message identity.
     pub(super) message_id: MessageFactId,
     /// Ingress lifecycle epoch captured at submission.
-    pub(super) ingress_epoch: u64,
+    pub(super) ingress_epoch: SlackIngressEpoch,
     /// Configuration generation captured at submission.
-    pub(super) config_generation: u64,
+    pub(super) config_generation: SlackConfigGeneration,
     /// Agent-routing generation captured at submission.
-    pub(super) agent_generation: u64,
+    pub(super) agent_generation: SlackAgentGeneration,
     /// Deferred delivered/edit message source authority.
     pub(super) message_authority: Option<PendingMessageAuthority>,
     /// Exact report replayed if Slack redelivers before canonical confirmation.

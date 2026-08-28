@@ -3,18 +3,20 @@
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
+use crate::generations::SlackSendWakeGeneration;
+
 /// Event-driven cancellation generation shared by delivery workers.
 #[derive(Default)]
 pub(crate) struct SendWake {
     /// Monotonic lifecycle generation.
-    generation: Mutex<u64>,
+    generation: Mutex<SlackSendWakeGeneration>,
     /// Wakes retry waits after lifecycle changes.
     changed: Condvar,
 }
 
 impl SendWake {
     /// Capture the current cancellation generation.
-    pub(crate) fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> SlackSendWakeGeneration {
         *self
             .generation
             .lock()
@@ -27,7 +29,7 @@ impl SendWake {
             .generation
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        *generation = generation.wrapping_add(1);
+        *generation = generation.wrapping_next();
         self.changed.notify_all();
     }
 
@@ -39,7 +41,7 @@ impl SendWake {
     /// Wait until the delay expires or the captured generation is cancelled.
     ///
     /// Returns `true` when cancellation won.
-    pub(crate) fn wait(&self, observed: u64, delay: Duration) -> bool {
+    pub(crate) fn wait(&self, observed: SlackSendWakeGeneration, delay: Duration) -> bool {
         let generation = self
             .generation
             .lock()
@@ -58,14 +60,14 @@ impl SendWake {
 /// Injectable event-driven retry scheduler.
 pub(crate) trait SendScheduler: Send + Sync + 'static {
     /// Wait for the delay or return `true` when lifecycle cancellation wins.
-    fn wait(&self, wake: &SendWake, generation: u64, delay: Duration) -> bool;
+    fn wait(&self, wake: &SendWake, generation: SlackSendWakeGeneration, delay: Duration) -> bool;
 }
 
 /// Production scheduler backed by a condition variable.
 pub(crate) struct SystemSendScheduler;
 
 impl SendScheduler for SystemSendScheduler {
-    fn wait(&self, wake: &SendWake, generation: u64, delay: Duration) -> bool {
+    fn wait(&self, wake: &SendWake, generation: SlackSendWakeGeneration, delay: Duration) -> bool {
         wake.wait(generation, delay)
     }
 }
@@ -76,7 +78,12 @@ pub(crate) struct ImmediateSendScheduler;
 
 #[cfg(test)]
 impl SendScheduler for ImmediateSendScheduler {
-    fn wait(&self, _wake: &SendWake, _generation: u64, _delay: Duration) -> bool {
+    fn wait(
+        &self,
+        _wake: &SendWake,
+        _generation: SlackSendWakeGeneration,
+        _delay: Duration,
+    ) -> bool {
         false
     }
 }

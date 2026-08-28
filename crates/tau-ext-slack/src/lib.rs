@@ -42,6 +42,7 @@ use ureq::tls as path_ureq_tls;
 
 mod admission;
 mod admission_trace;
+mod generations;
 mod pending_ingress;
 mod posted_message_cache;
 mod reactions;
@@ -50,6 +51,11 @@ mod transport_mentions;
 
 use admission::{AdmissionQueue, OutstandingPermit, QueueDepthBucket, ReserveError};
 use admission_trace::{AdmissionOutcome, EventClass, LatencyTrace};
+use generations::{
+    SlackAgentGeneration, SlackConfigGeneration, SlackConnectionGeneration, SlackIngressEpoch,
+    SlackReactionEpoch, SlackReactionReservation, SlackSendReservation, SlackSessionGeneration,
+    SlackTraceSequence,
+};
 use pending_ingress::{
     OccurrenceDisposition, PendingIngress, PendingIngressKind, PendingMessageAuthority,
     SlackReportId,
@@ -185,11 +191,11 @@ struct AdmissionContext {
     /// Local websocket receive instant for frame-to-submit attribution.
     received_at: Instant,
     /// Lifecycle authority captured before ACK.
-    ingress_epoch: u64,
+    ingress_epoch: SlackIngressEpoch,
     /// Configuration generation captured before ACK.
-    config_generation: u64,
+    config_generation: SlackConfigGeneration,
     /// Agent-registration generation captured before ACK for local effects.
-    agent_generation: u64,
+    agent_generation: SlackAgentGeneration,
     /// Exact authenticated installation team captured before ACK.
     installation_team_id: String,
     /// Time spent waiting after successful ACK handoff.
@@ -1061,15 +1067,15 @@ struct AdmissionWork {
     /// Instant immediately after successful ACK when FIFO work became runnable.
     enqueued_at: Instant,
     /// Process-local occurrence ordinal used only for TRACE correlation.
-    trace_seq: u64,
+    trace_seq: SlackTraceSequence,
     /// Socket connection generation on which this occurrence arrived.
-    connection_generation: u64,
+    connection_generation: SlackConnectionGeneration,
     /// Admission lifecycle epoch captured before ACK.
-    ingress_epoch: u64,
+    ingress_epoch: SlackIngressEpoch,
     /// Immutable configuration generation captured before ACK.
-    config_generation: u64,
+    config_generation: SlackConfigGeneration,
     /// Agent-registration generation captured before ACK.
-    agent_generation: u64,
+    agent_generation: SlackAgentGeneration,
     /// Exact authenticated installation team captured before ACK.
     installation_team_id: String,
     /// Queue depth bucket observed while reserving the slot.
@@ -1080,9 +1086,9 @@ struct AdmissionWork {
 #[derive(Clone, Copy)]
 struct SocketFrameTiming {
     /// Socket generation local to this extension process.
-    connection_generation: u64,
+    connection_generation: SlackConnectionGeneration,
     /// Frame ordinal local to this extension process.
-    trace_seq: u64,
+    trace_seq: SlackTraceSequence,
     /// Instant at which `ws.next()` returned the frame.
     received_at: Instant,
 }
@@ -1162,7 +1168,7 @@ struct ConfigurationState {
     /// Monotonic latch preventing configuration changes after remote effects.
     config_frozen: bool,
     /// Version used to reject a stale successful worker preflight race.
-    config_generation: u64,
+    config_generation: SlackConfigGeneration,
 }
 
 /// Registered-agent identities and extension-local conversation selections.
@@ -1175,7 +1181,7 @@ struct AgentRoutingState {
     /// Selected agent independently owned by each static route or dynamic DM.
     selected_agent_by_route: HashMap<SelectionRouteKey, AgentId>,
     /// Generation invalidating late bridge-local effects after agent changes.
-    agent_generation: u64,
+    agent_generation: SlackAgentGeneration,
 }
 
 /// Process/session send reservations, pacing, and replay authority.
@@ -1184,14 +1190,14 @@ struct SendLifecycleState {
     /// Bounded, non-evicting process/session ledger preventing replay reposts.
     send_ledger: HashMap<tau_proto::ToolCallId, SendLedgerEntry>,
     /// Monotonic send reservation token source.
-    next_send_reservation: u64,
+    next_send_reservation: SlackSendReservation,
     /// Per-agent send lifecycle generations preventing unrelated churn from
     /// cancelling other agents.
-    send_agent_generations: HashMap<AgentId, u64>,
+    send_agent_generations: HashMap<AgentId, SlackAgentGeneration>,
     /// Shared slots reserved by delivery/retry workers.
     active_send_workers: usize,
     /// Harness session generation captured by accepted sends.
-    session_generation: u64,
+    session_generation: SlackSessionGeneration,
     /// Live per-channel pacing barrier consulted immediately before attempts.
     channel_attempt_deadlines: HashMap<String, Instant>,
     /// Logical-call FIFO per native channel. The front call retains its turn
@@ -1214,7 +1220,7 @@ struct IngressAuthorityState {
     /// Bounded exact D-conversation to U/W-user dynamic links.
     linked_dms: HashMap<String, LinkedConversation>,
     /// Lifecycle epoch invalidating accepted work after authority teardown.
-    ingress_epoch: u64,
+    ingress_epoch: SlackIngressEpoch,
     /// Bounded process-local Slack occurrence ids already admitted.
     received_occurrences: ReceivedOccurrenceCache,
     /// At most 64 post-ACK reports awaiting canonical confirmation.
@@ -1267,7 +1273,7 @@ struct State {
 impl State {
     /// Irreversibly revoke installation-scoped authority for this process.
     fn latch_installation_mismatch(&mut self) {
-        self.ingress.ingress_epoch = self.ingress.ingress_epoch.wrapping_add(1);
+        self.ingress.ingress_epoch = self.ingress.ingress_epoch.wrapping_next();
         self.socket.installation_mismatch = true;
         self.ingress.reactions.clear();
         self.clear_reply_routes();
@@ -1422,17 +1428,17 @@ impl State {
     }
 
     /// Return one agent's current send lifecycle generation.
-    fn send_agent_generation(&self, agent_id: &AgentId) -> u64 {
+    fn send_agent_generation(&self, agent_id: &AgentId) -> SlackAgentGeneration {
         self.sends
             .send_agent_generations
             .get(agent_id)
             .copied()
-            .unwrap_or(0)
+            .unwrap_or_default()
     }
 
     /// Advance only the affected agent's send lifecycle generation.
     fn bump_send_agent_generation(&mut self, agent_id: &AgentId) {
-        let generation = self.send_agent_generation(agent_id).wrapping_add(1);
+        let generation = self.send_agent_generation(agent_id).wrapping_next();
         self.sends
             .send_agent_generations
             .insert(agent_id.clone(), generation);
@@ -1729,8 +1735,8 @@ impl Extension {
         state.ingress.linked_dms.clear();
         state.configuration.config = Some(cfg);
         state.configuration.config_generation =
-            state.configuration.config_generation.wrapping_add(1);
-        state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_add(1);
+            state.configuration.config_generation.wrapping_next();
+        state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_next();
         state.clear_send_ledger();
         state.agents.registered_agents.clear();
         state.sends.send_agent_generations.clear();
@@ -1759,8 +1765,8 @@ impl Extension {
             return;
         }
         state.configuration.config_generation =
-            state.configuration.config_generation.wrapping_add(1);
-        state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_add(1);
+            state.configuration.config_generation.wrapping_next();
+        state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_next();
         state.configuration.config = None;
         state.agents.registered_agents.clear();
         state.sends.send_agent_generations.clear();
@@ -1811,7 +1817,7 @@ impl Extension {
             .unwrap_or_else(|error| error.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.agents.registered_agents.remove(agent_id);
-        state.agents.agent_generation = state.agents.agent_generation.wrapping_add(1);
+        state.agents.agent_generation = state.agents.agent_generation.wrapping_next();
         state.bump_send_agent_generation(agent_id);
         state.agents.agent_labels.remove(agent_id);
         state
@@ -2037,7 +2043,7 @@ impl Extension {
                 .registered_agents
                 .insert(invoke.agent_id.clone())
             {
-                state.agents.agent_generation = state.agents.agent_generation.wrapping_add(1);
+                state.agents.agent_generation = state.agents.agent_generation.wrapping_next();
                 state.bump_send_agent_generation(&invoke.agent_id);
             }
             state
@@ -2053,7 +2059,7 @@ impl Extension {
                 .unwrap_or_else(|error| error.into_inner());
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.agents.registered_agents.remove(&invoke.agent_id) {
-                state.agents.agent_generation = state.agents.agent_generation.wrapping_add(1);
+                state.agents.agent_generation = state.agents.agent_generation.wrapping_next();
                 state.bump_send_agent_generation(&invoke.agent_id);
             }
             state
@@ -2261,8 +2267,8 @@ impl Extension {
             tracing::trace!(
                 target: LOG_TARGET,
                 schema = LATENCY_SCHEMA,
-                connection_generation = trace.connection_generation,
-                trace_seq = trace.trace_seq,
+                connection_generation = trace.connection_generation.get(),
+                trace_seq = trace.trace_seq.get(),
                 event_class = trace.event_class.as_str(),
                 policy_class = if cfg.allowed_user_ids.contains(user_id) { "allowlisted" } else { "lax_permitted" },
                 cache_state = "disabled",
@@ -2297,8 +2303,8 @@ impl Extension {
             tracing::trace!(
                 target: LOG_TARGET,
                 schema = LATENCY_SCHEMA,
-                connection_generation = trace.connection_generation,
-                trace_seq = trace.trace_seq,
+                connection_generation = trace.connection_generation.get(),
+                trace_seq = trace.trace_seq.get(),
                 event_class = trace.event_class.as_str(),
                 source = "api",
                 duration_us = elapsed_us(started_at),
@@ -3552,8 +3558,8 @@ impl Extension {
             tracing::trace!(
                 target: LOG_TARGET,
                 schema = LATENCY_SCHEMA,
-                connection_generation = trace.connection_generation,
-                trace_seq = trace.trace_seq,
+                connection_generation = trace.connection_generation.get(),
+                trace_seq = trace.trace_seq.get(),
                 event_class = trace.event_class.as_str(),
                 post_class = "local_reply",
                 "slack.api.post_message_started"
@@ -3567,8 +3573,8 @@ impl Extension {
             tracing::trace!(
                 target: LOG_TARGET,
                 schema = LATENCY_SCHEMA,
-                connection_generation = trace.connection_generation,
-                trace_seq = trace.trace_seq,
+                connection_generation = trace.connection_generation.get(),
+                trace_seq = trace.trace_seq.get(),
                 event_class = trace.event_class.as_str(),
                 post_class = "local_reply",
                 duration_us = elapsed_us(started_at),
@@ -3903,8 +3909,8 @@ impl Extension {
             tracing::trace!(
                 target: LOG_TARGET,
                 schema = LATENCY_SCHEMA,
-                connection_generation = trace.connection_generation,
-                trace_seq = trace.trace_seq,
+                connection_generation = trace.connection_generation.get(),
+                trace_seq = trace.trace_seq.get(),
                 event_class = trace.event_class.as_str(),
                 frame_to_submit_us = elapsed_us(admission.trace_received_at()),
                 identity_us = admission.identity_us.get(),
@@ -4232,9 +4238,9 @@ fn socket_worker_loop(
     });
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
     let mut startup = startup;
-    let mut connection_generation = 0_u64;
+    let mut connection_generation = SlackConnectionGeneration::default();
     while !shutdown.is_requested() {
-        connection_generation = connection_generation.wrapping_add(1);
+        connection_generation = connection_generation.wrapping_next();
         let outcome = runtime.block_on(socket_worker_once(
             &ext,
             &cfg,
@@ -4290,8 +4296,8 @@ fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<Admissio
         tracing::trace!(
             target: LOG_TARGET,
             schema = LATENCY_SCHEMA,
-            connection_generation = trace.connection_generation,
-            trace_seq = trace.trace_seq,
+            connection_generation = trace.connection_generation.get(),
+            trace_seq = trace.trace_seq.get(),
             event_class = trace.event_class.as_str(),
             queue_wait_us = elapsed_us(work.enqueued_at),
             queue_depth_bucket = work.queue_depth_bucket.as_str(),
@@ -4337,8 +4343,8 @@ fn admission_worker_loop(ext: Arc<Extension>, queue: Arc<AdmissionQueue<Admissio
         tracing::trace!(
             target: LOG_TARGET,
             schema = LATENCY_SCHEMA,
-            connection_generation = trace.connection_generation,
-            trace_seq = trace.trace_seq,
+            connection_generation = trace.connection_generation.get(),
+            trace_seq = trace.trace_seq.get(),
             event_class = trace.event_class.as_str(),
             duration_us = elapsed_us(started_at),
             outcome = outcome.as_str(),
@@ -4392,7 +4398,7 @@ async fn socket_worker_once(
     cfg: &RuntimeConfig,
     startup: Option<WorkerStartup>,
     admission: &Arc<AdmissionQueue<AdmissionWork>>,
-    connection_generation: u64,
+    connection_generation: SlackConnectionGeneration,
 ) -> Result<WorkerOutcome, String> {
     socket_worker_once_with_heartbeat(
         ext,
@@ -4414,7 +4420,7 @@ async fn socket_worker_once_with_heartbeat(
     cfg: &RuntimeConfig,
     startup: Option<WorkerStartup>,
     admission: &Arc<AdmissionQueue<AdmissionWork>>,
-    connection_generation: u64,
+    connection_generation: SlackConnectionGeneration,
     heartbeat: SocketHeartbeat,
 ) -> Result<WorkerOutcome, String> {
     // ast-grep-ignore: debug-assert-expression-must-not-mutate
@@ -4513,7 +4519,7 @@ async fn socket_worker_once_with_heartbeat(
                 .reset(path_tokio_time::Instant::now() + heartbeat.pong_timeout);
         }
         let received_at = Instant::now();
-        let trace_seq = ext.trace_seq.fetch_add(1, Ordering::Relaxed);
+        let trace_seq = SlackTraceSequence::new(ext.trace_seq.fetch_add(1, Ordering::Relaxed));
         let timing = SocketFrameTiming {
             connection_generation,
             trace_seq,
@@ -4522,8 +4528,8 @@ async fn socket_worker_once_with_heartbeat(
         tracing::trace!(
             target: LOG_TARGET,
             schema = LATENCY_SCHEMA,
-            connection_generation,
-            trace_seq,
+            connection_generation = connection_generation.get(),
+            trace_seq = trace_seq.get(),
             event_class = EventClass::Unsupported.as_str(),
             frame_class = socket_frame_class(&frame),
             since_hello_us = elapsed_us(hello_at.unwrap_or(connected_at)),
@@ -4634,8 +4640,8 @@ async fn handle_socket_text_frame(
         tracing::trace!(
             target: LOG_TARGET,
             schema = LATENCY_SCHEMA,
-            connection_generation,
-            trace_seq,
+            connection_generation = connection_generation.get(),
+            trace_seq = trace_seq.get(),
             event_class = EventClass::Malformed.as_str(),
             envelope_class = "oversized",
             duration_us = 0_u64,
@@ -4663,8 +4669,8 @@ async fn handle_socket_text_frame(
     tracing::trace!(
         target: LOG_TARGET,
         schema = LATENCY_SCHEMA,
-        connection_generation,
-        trace_seq,
+        connection_generation = connection_generation.get(),
+        trace_seq = trace_seq.get(),
         event_class = event_class.as_str(),
         envelope_class = action.envelope_class.as_str(),
         duration_us = elapsed_us(decode_started),
@@ -4705,8 +4711,8 @@ async fn handle_socket_text_frame(
                 tracing::trace!(
                     target: LOG_TARGET,
                     schema = LATENCY_SCHEMA,
-                    connection_generation,
-                    trace_seq,
+                    connection_generation = connection_generation.get(),
+                    trace_seq = trace_seq.get(),
                     event_class = event_class.as_str(),
                     outcome = "reserved",
                     queue_depth_bucket = admission.depth_bucket().as_str(),
@@ -4722,8 +4728,8 @@ async fn handle_socket_text_frame(
                 tracing::trace!(
                     target: LOG_TARGET,
                     schema = LATENCY_SCHEMA,
-                    connection_generation,
-                    trace_seq,
+                    connection_generation = connection_generation.get(),
+                    trace_seq = trace_seq.get(),
                     event_class = event_class.as_str(),
                     outcome,
                     queue_depth_bucket = admission.depth_bucket().as_str(),
@@ -4740,8 +4746,8 @@ async fn handle_socket_text_frame(
         tracing::trace!(
             target: LOG_TARGET,
             schema = LATENCY_SCHEMA,
-            connection_generation,
-            trace_seq,
+            connection_generation = connection_generation.get(),
+            trace_seq = trace_seq.get(),
             event_class = event_class.as_str(),
             has_supported_event = supported_event,
             elapsed_us = elapsed_us(received_at),
@@ -4757,8 +4763,8 @@ async fn handle_socket_text_frame(
         tracing::trace!(
             target: LOG_TARGET,
             schema = LATENCY_SCHEMA,
-            connection_generation,
-            trace_seq,
+            connection_generation = connection_generation.get(),
+            trace_seq = trace_seq.get(),
             event_class = event_class.as_str(),
             has_supported_event = supported_event,
             duration_us = elapsed_us(ack_started),
@@ -5226,7 +5232,7 @@ fn retire_send_state(
         .unwrap_or_else(|error| error.into_inner());
     {
         let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
-        state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_add(1);
+        state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_next();
         state.ingress.pending_ingress.clear();
         state.clear_send_ledger();
     }
@@ -5247,9 +5253,9 @@ fn retire_after_output_failure(
         .unwrap_or_else(|error| error.into_inner());
     {
         let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
-        state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_add(1);
-        state.agents.agent_generation = state.agents.agent_generation.wrapping_add(1);
-        state.sends.session_generation = state.sends.session_generation.wrapping_add(1);
+        state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_next();
+        state.agents.agent_generation = state.agents.agent_generation.wrapping_next();
+        state.sends.session_generation = state.sends.session_generation.wrapping_next();
         state.socket.session_active = false;
         state.agents.registered_agents.clear();
         state.sends.send_agent_generations.clear();
@@ -5514,8 +5520,8 @@ impl Extension {
             Event::SessionStarted(_) => {
                 {
                     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-                    state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_add(1);
-                    state.sends.session_generation = state.sends.session_generation.wrapping_add(1);
+                    state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_next();
+                    state.sends.session_generation = state.sends.session_generation.wrapping_next();
                     state.socket.session_active = true;
                 }
                 self.send_wake.notify_lifecycle_change();
@@ -5531,9 +5537,9 @@ impl Extension {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_add(1);
-                state.agents.agent_generation = state.agents.agent_generation.wrapping_add(1);
-                state.sends.session_generation = state.sends.session_generation.wrapping_add(1);
+                state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_next();
+                state.agents.agent_generation = state.agents.agent_generation.wrapping_next();
+                state.sends.session_generation = state.sends.session_generation.wrapping_next();
                 state.socket.session_active = false;
                 state.agents.registered_agents.clear();
                 state.sends.send_agent_generations.clear();

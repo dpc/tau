@@ -155,7 +155,7 @@ pub(super) struct ReactionReservation {
     /// Agent whose call owns the reservation.
     pub(super) agent_id: AgentId,
     /// Monotonic token unique within this extension process.
-    pub(super) token: u64,
+    pub(super) token: SlackReactionReservation,
     /// Target reference pinned until the call finishes.
     pub(super) message_ref: MessageFactId,
     /// Whether this is an unowned add counted against ownership capacity.
@@ -174,11 +174,11 @@ struct PreparedReaction {
     /// Target reference presented by the caller.
     message_ref: MessageFactId,
     /// Configuration generation at preparation.
-    generation: u64,
+    generation: SlackConfigGeneration,
     /// Reaction lifecycle epoch at preparation.
-    epoch: u64,
+    epoch: SlackReactionEpoch,
     /// Exact in-flight reservation token.
-    reservation: u64,
+    reservation: SlackReactionReservation,
     /// Whether the caller already owned this tuple before the attempt.
     owned_before: bool,
 }
@@ -259,9 +259,9 @@ pub(super) struct ReactionState {
     /// Reaction tuples reserved through Slack I/O and terminal confirmation.
     pub(super) in_flight: HashMap<ReactionKey, ReactionReservation>,
     /// Monotonic token preventing late calls from clearing newer reservations.
-    pub(super) next_reservation: u64,
+    pub(super) next_reservation: SlackReactionReservation,
     /// Lifecycle epoch preventing late calls from mutating restored state.
-    pub(super) epoch: u64,
+    pub(super) epoch: SlackReactionEpoch,
     /// Same-process terminal reaction attempts.
     pub(super) attempts: HashMap<tau_proto::ToolCallId, ReactionAttempt>,
     /// Oldest-first attempt insertion order.
@@ -347,7 +347,7 @@ impl ReactionState {
 
     /// Clear all reaction target, ownership, in-flight, and replay state.
     pub(super) fn clear(&mut self) {
-        self.epoch = self.epoch.wrapping_add(1);
+        self.epoch = self.epoch.wrapping_next();
         self.targets.clear();
         self.target_order.clear();
         self.owners.clear();
@@ -678,7 +678,7 @@ impl Extension {
                 }
             }
             state.ingress.reactions.next_reservation =
-                state.ingress.reactions.next_reservation.wrapping_add(1);
+                state.ingress.reactions.next_reservation.wrapping_next();
             let reservation = state.ingress.reactions.next_reservation;
             state.ingress.reactions.in_flight.insert(
                 key.clone(),

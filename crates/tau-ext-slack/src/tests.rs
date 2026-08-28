@@ -735,8 +735,8 @@ fn admission_context(ext: &Extension) -> AdmissionContext {
     let state = ext.state.lock().expect("state");
     AdmissionContext {
         trace: LatencyTrace {
-            connection_generation: 1,
-            trace_seq: 1,
+            connection_generation: SlackConnectionGeneration::new(1),
+            trace_seq: SlackTraceSequence::new(1),
             event_class: EventClass::Delete,
         },
         received_at: Instant::now(),
@@ -1359,7 +1359,7 @@ fn message_report_lifecycle_preserves_target_identity() {
             reaction_key,
             ReactionReservation {
                 agent_id: agent_id("agent-a"),
-                token: 7,
+                token: SlackReactionReservation::new(7),
                 message_ref: delivered.message_id.clone(),
                 unowned_add: false,
             },
@@ -2015,7 +2015,7 @@ fn delete_submission_gate_revalidates_after_session_retirement() {
         .expect("deletion reached submission boundary");
     {
         let mut state = ext.state.lock().expect("state");
-        state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_add(1);
+        state.ingress.ingress_epoch = state.ingress.ingress_epoch.wrapping_next();
         state.socket.session_active = false;
     }
     release_tx.send(()).expect("release deletion");
@@ -2123,7 +2123,7 @@ async fn socket_worker_result_for_frames(
             socket_url,
         }),
         &AdmissionQueue::new(),
-        1,
+        SlackConnectionGeneration::new(1),
     )
     .await;
     server.await.expect("loopback websocket server");
@@ -2278,7 +2278,7 @@ async fn socket_worker_once_shutdown_interrupts_idle_websocket_receive() {
                 socket_url,
             }),
             &AdmissionQueue::new(),
-            1,
+            SlackConnectionGeneration::new(1),
         )
         .await
     });
@@ -2330,7 +2330,7 @@ async fn socket_worker_once_reconnects_after_missing_heartbeat_pong() {
                 socket_url,
             }),
             &AdmissionQueue::new(),
-            1,
+            SlackConnectionGeneration::new(1),
             SocketHeartbeat {
                 ping_interval: Duration::from_millis(10),
                 pong_timeout: Duration::from_millis(40),
@@ -2403,7 +2403,7 @@ async fn socket_worker_once_keeps_responsive_idle_connection() {
                 socket_url,
             }),
             &AdmissionQueue::new(),
-            1,
+            SlackConnectionGeneration::new(1),
             SocketHeartbeat {
                 ping_interval: Duration::from_millis(5),
                 pong_timeout: Duration::from_millis(50),
@@ -2475,7 +2475,7 @@ async fn socket_worker_once_times_out_from_off_phase_pong_despite_other_traffic(
                 socket_url,
             }),
             &AdmissionQueue::new(),
-            1,
+            SlackConnectionGeneration::new(1),
             SocketHeartbeat {
                 ping_interval: Duration::from_secs(10),
                 pong_timeout: Duration::from_secs(40),
@@ -2671,7 +2671,7 @@ async fn slow_identity_does_not_block_reader_ack_pong_or_shutdown() {
                 socket_url,
             }),
             &worker_queue,
-            1,
+            SlackConnectionGeneration::new(1),
         )
         .await
     });
@@ -2757,7 +2757,7 @@ async fn saturated_admission_does_not_ack_supported_envelope() {
             socket_url,
         }),
         &queue,
-        1,
+        SlackConnectionGeneration::new(1),
     )
     .await;
     assert!(result.is_err(), "saturation must degrade the connection");
@@ -3182,7 +3182,7 @@ fn reaction_target_and_attempt_bounds_preserve_live_entries() {
         },
         ReactionReservation {
             agent_id: agent_id("agent-a"),
-            token: 1,
+            token: SlackReactionReservation::new(1),
             message_ref: MessageFactId::new("slack-message:test-c123-0.0"),
             unowned_add: false,
         },
@@ -6796,8 +6796,8 @@ fn latency_markers_are_payload_free() {
     let sentinel_text = "payload-sentinel-secret";
     tracing::subscriber::with_default(subscriber, || {
         let timing = LatencyTrace {
-            connection_generation: 7,
-            trace_seq: 11,
+            connection_generation: SlackConnectionGeneration::new(7),
+            trace_seq: SlackTraceSequence::new(11),
             event_class: EventClass::Create,
         };
         let (ingress_epoch, config_generation, agent_generation) = {
