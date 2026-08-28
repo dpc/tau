@@ -5,16 +5,16 @@
 
 use super::*;
 
-/// Agent-scoped identity of one durable standalone-compaction start.
+/// Agent-scoped identity of one standalone-compaction transaction.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(super) struct ManualCompactionTransaction {
+pub(super) struct CompactionTransaction {
     /// Agent journal that owns the transaction-local identifier.
     agent_id: tau_proto::AgentId,
     /// Correlation identifier unique within the owning agent journal.
     transaction_id: tau_proto::CompactionTransactionId,
 }
 
-impl ManualCompactionTransaction {
+impl CompactionTransaction {
     /// Construct an agent-scoped transaction identity.
     pub(super) fn new(
         agent_id: tau_proto::AgentId,
@@ -37,6 +37,17 @@ impl ManualCompactionTransaction {
     }
 }
 
+/// Runtime reason that a committed compaction start must not dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SuppressedStart {
+    /// Local prefix validation selected a bounded failure terminal.
+    PreflightFailure(tau_proto::StandaloneCompactionFailureReason),
+    /// Control-plane cancellation won before the start committed.
+    Cancelled,
+    /// A correlated terminal publication was already queued with the start.
+    TerminalAlreadyQueued,
+}
+
 /// Runtime delivery owner for one durably started manual compaction.
 #[derive(Clone)]
 pub(super) enum ManualCompactionStartOwner {
@@ -56,22 +67,13 @@ pub(super) enum ManualCompactionStartOwner {
 /// Runtime-only ownership for manual, reactive, and UI compaction work.
 #[derive(Default)]
 pub(crate) struct CompactionRuntimeState {
-    /// Starts whose post-commit reaction must not dispatch remote work.
-    pub(super) suppressed_dispatches:
-        HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
-    /// Automatic starts that must commit a bounded local failure instead of
-    /// dispatching an oversized indivisible prefix to a provider.
-    pub(super) preflight_failures: HashMap<
-        (tau_proto::AgentId, tau_proto::CompactionTransactionId),
-        tau_proto::StandaloneCompactionFailureReason,
-    >,
+    /// Exclusive runtime reasons that committed starts must not dispatch.
+    suppressed_starts: HashMap<CompactionTransaction, SuppressedStart>,
     /// Failures that clean runtime state without provider-watch projection.
     pub(super) silent_failure_prompts: HashSet<AgentPromptId>,
-    /// Reactive claims that must terminalize immediately after start commit.
-    pub(super) cancelled_claims: HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
     /// Exclusive delivery owner for each durably started manual transaction.
     pub(super) active_manual_transactions:
-        HashMap<ManualCompactionTransaction, ManualCompactionStartOwner>,
+        HashMap<CompactionTransaction, ManualCompactionStartOwner>,
     /// Accepted manual requests waiting for a safe start boundary.
     pub(super) accepted_manual_tools:
         HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
@@ -94,6 +96,75 @@ pub(crate) struct CompactionRuntimeState {
 }
 
 impl CompactionRuntimeState {
+    /// Record a local preflight failure as the highest-priority
+    /// suppressed-start reaction.
+    pub(super) fn suppress_start_for_preflight(
+        &mut self,
+        agent_id: tau_proto::AgentId,
+        transaction_id: tau_proto::CompactionTransactionId,
+        reason: tau_proto::StandaloneCompactionFailureReason,
+    ) {
+        self.suppressed_starts.insert(
+            CompactionTransaction::new(agent_id, transaction_id),
+            SuppressedStart::PreflightFailure(reason),
+        );
+    }
+
+    /// Record cancellation unless a preflight failure already owns the
+    /// reaction.
+    pub(super) fn suppress_start_for_cancellation(
+        &mut self,
+        agent_id: tau_proto::AgentId,
+        transaction_id: tau_proto::CompactionTransactionId,
+    ) {
+        let reaction = self
+            .suppressed_starts
+            .entry(CompactionTransaction::new(agent_id, transaction_id))
+            .or_insert(SuppressedStart::Cancelled);
+        if matches!(reaction, SuppressedStart::PreflightFailure(_)) {
+            return;
+        }
+        *reaction = SuppressedStart::Cancelled;
+    }
+
+    /// Record that a terminal is already paired with the start without
+    /// replacing a stronger preflight or cancellation reaction.
+    pub(super) fn suppress_start_for_queued_terminal(
+        &mut self,
+        agent_id: tau_proto::AgentId,
+        transaction_id: tau_proto::CompactionTransactionId,
+    ) {
+        self.suppressed_starts
+            .entry(CompactionTransaction::new(agent_id, transaction_id))
+            .or_insert(SuppressedStart::TerminalAlreadyQueued);
+    }
+
+    /// Consume the exclusive suppressed-start reaction for one committed start.
+    pub(super) fn take_suppressed_start(
+        &mut self,
+        agent_id: tau_proto::AgentId,
+        transaction_id: tau_proto::CompactionTransactionId,
+    ) -> Option<SuppressedStart> {
+        self.suppressed_starts
+            .remove(&CompactionTransaction::new(agent_id, transaction_id))
+    }
+
+    /// Remove a stale suppressed-start reaction after a committed terminal.
+    pub(super) fn remove_suppressed_start(
+        &mut self,
+        agent_id: tau_proto::AgentId,
+        transaction_id: tau_proto::CompactionTransactionId,
+    ) {
+        self.suppressed_starts
+            .remove(&CompactionTransaction::new(agent_id, transaction_id));
+    }
+
+    /// Return whether no committed-start reaction remains suppressed.
+    #[cfg(test)]
+    pub(super) fn suppressed_starts_is_empty(&self) -> bool {
+        self.suppressed_starts.is_empty()
+    }
+
     /// Record UI delivery ownership for one durably started transaction.
     pub(super) fn record_ui_start(
         &mut self,
@@ -102,7 +173,7 @@ impl CompactionRuntimeState {
         request_id: tau_proto::CompactionRequestId,
     ) {
         self.active_manual_transactions
-            .entry(ManualCompactionTransaction::new(agent_id, transaction_id))
+            .entry(CompactionTransaction::new(agent_id, transaction_id))
             .or_insert(ManualCompactionStartOwner::Ui { request_id });
     }
 
@@ -114,7 +185,7 @@ impl CompactionRuntimeState {
         pending: PendingManualCompactionTool,
     ) {
         self.active_manual_transactions
-            .entry(ManualCompactionTransaction::new(agent_id, transaction_id))
+            .entry(CompactionTransaction::new(agent_id, transaction_id))
             .or_insert(ManualCompactionStartOwner::ModelTool(pending));
     }
 
@@ -145,7 +216,7 @@ impl CompactionRuntimeState {
         agent_id: tau_proto::AgentId,
         transaction_id: tau_proto::CompactionTransactionId,
     ) -> Option<PendingManualCompactionTool> {
-        let key = ManualCompactionTransaction::new(agent_id, transaction_id);
+        let key = CompactionTransaction::new(agent_id, transaction_id);
         if !matches!(
             self.active_manual_transactions.get(&key),
             Some(ManualCompactionStartOwner::ModelTool(_))
@@ -165,7 +236,7 @@ impl CompactionRuntimeState {
         agent_id: tau_proto::AgentId,
         transaction_id: tau_proto::CompactionTransactionId,
     ) {
-        let key = ManualCompactionTransaction::new(agent_id, transaction_id);
+        let key = CompactionTransaction::new(agent_id, transaction_id);
         if matches!(
             self.active_manual_transactions.get(&key),
             Some(ManualCompactionStartOwner::Ui { .. })
@@ -219,7 +290,7 @@ impl CompactionRuntimeState {
     ) -> bool {
         matches!(
             self.active_manual_transactions
-                .get(&ManualCompactionTransaction::new(agent_id, transaction_id)),
+                .get(&CompactionTransaction::new(agent_id, transaction_id)),
             Some(ManualCompactionStartOwner::Ui { .. })
         )
     }
@@ -233,7 +304,7 @@ impl CompactionRuntimeState {
     ) -> Option<&tau_proto::CompactionRequestId> {
         match self
             .active_manual_transactions
-            .get(&ManualCompactionTransaction::new(agent_id, transaction_id))
+            .get(&CompactionTransaction::new(agent_id, transaction_id))
         {
             Some(ManualCompactionStartOwner::Ui { request_id }) => Some(request_id),
             Some(ManualCompactionStartOwner::ModelTool(_)) | None => None,
@@ -249,7 +320,7 @@ impl CompactionRuntimeState {
     ) -> bool {
         matches!(
             self.active_manual_transactions
-                .get(&ManualCompactionTransaction::new(agent_id, transaction_id)),
+                .get(&CompactionTransaction::new(agent_id, transaction_id)),
             Some(ManualCompactionStartOwner::ModelTool(_))
         )
     }

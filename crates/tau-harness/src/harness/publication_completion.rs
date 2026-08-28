@@ -5,6 +5,7 @@
 //! `GATE-persistence-and-extension-interface-change-approval`.
 
 use super::compaction_runtime::RollingCompactionPass;
+use super::compaction_runtime_state::SuppressedStart;
 use super::*;
 
 impl Harness {
@@ -2610,7 +2611,6 @@ impl Harness {
                     request_id.clone(),
                 );
             }
-            let suppression_key = (started.agent_id.clone(), started.transaction_id.clone());
             let durable_preflight_reason = match &started.trigger {
                 tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
                     reason,
@@ -2621,26 +2621,21 @@ impl Harness {
                 } => Some(*reason),
                 _ => None,
             };
-            let runtime_suppressed = self
+            let suppressed_start = self
                 .prompt_coordination
                 .compaction_runtime
-                .suppressed_dispatches
-                .remove(&suppression_key);
-            let suppressed = durable_preflight_reason.is_some() || runtime_suppressed;
-            let cancelled = suppressed
-                && self
-                    .prompt_coordination
-                    .compaction_runtime
-                    .cancelled_claims
-                    .remove(&suppression_key);
+                .take_suppressed_start(started.agent_id.clone(), started.transaction_id.clone());
+            let suppressed = durable_preflight_reason.is_some() || suppressed_start.is_some();
             let cid = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()));
             if let Some(cid) = cid {
                 if suppressed {
-                    let runtime_reason = self
-                        .prompt_coordination
-                        .compaction_runtime
-                        .preflight_failures
-                        .remove(&(started.agent_id.clone(), started.transaction_id.clone()));
+                    let runtime_reason = match suppressed_start {
+                        Some(SuppressedStart::PreflightFailure(reason)) => Some(reason),
+                        Some(
+                            SuppressedStart::Cancelled | SuppressedStart::TerminalAlreadyQueued,
+                        )
+                        | None => None,
+                    };
                     if let Some(reason) = durable_preflight_reason.or(runtime_reason) {
                         let batch_parent = self
                             .selected_head_for_agent(&cid)
@@ -2666,7 +2661,7 @@ impl Harness {
                         );
                         return;
                     }
-                    if cancelled {
+                    if matches!(suppressed_start, Some(SuppressedStart::Cancelled)) {
                         self.publish_event_for_agent_with_completion(
                             &cid,
                             None,
@@ -2931,15 +2926,9 @@ impl Harness {
                     );
                 }
             }
-            let key = (failed.agent_id.clone(), failed.transaction_id.clone());
             self.prompt_coordination
                 .compaction_runtime
-                .suppressed_dispatches
-                .remove(&key);
-            self.prompt_coordination
-                .compaction_runtime
-                .cancelled_claims
-                .remove(&key);
+                .remove_suppressed_start(failed.agent_id.clone(), failed.transaction_id.clone());
         }
         if let Event::AgentStandaloneCompactionFailed(failed) = event
             && let Some(cid) =

@@ -1352,15 +1352,13 @@ impl Harness {
             agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
         }
         if fitting.is_none() {
-            let key = (crate::parse_agent_id(&agent_id), transaction_id.clone());
             self.prompt_coordination
                 .compaction_runtime
-                .suppressed_dispatches
-                .insert(key.clone());
-            self.prompt_coordination
-                .compaction_runtime
-                .preflight_failures
-                .insert(key, failure_reason);
+                .suppress_start_for_preflight(
+                    crate::parse_agent_id(&agent_id),
+                    transaction_id.clone(),
+                    failure_reason,
+                );
         }
         let trigger = fitting.map_or_else(
             || tau_proto::StandaloneCompactionTrigger::AutomaticPreflightFailure {
@@ -1709,19 +1707,11 @@ impl Harness {
             agent.turn.pending_automatic_compaction_start = Some(decision.transaction_id.clone());
         }
         if fitting_cut.is_none() {
-            let key = (
-                crate::parse_agent_id(&agent_id),
-                decision.transaction_id.clone(),
-            );
             self.prompt_coordination
                 .compaction_runtime
-                .suppressed_dispatches
-                .insert(key.clone());
-            self.prompt_coordination
-                .compaction_runtime
-                .preflight_failures
-                .insert(
-                    key,
+                .suppress_start_for_preflight(
+                    crate::parse_agent_id(&agent_id),
+                    decision.transaction_id.clone(),
                     tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
                 );
         }
@@ -1951,16 +1941,11 @@ impl Harness {
         ))
         .expect("known-safe AgentPromptId must be valid");
         if fitting_cut.is_none() {
-            let key = (crate::parse_agent_id(&agent_id), transaction_id.clone());
             self.prompt_coordination
                 .compaction_runtime
-                .suppressed_dispatches
-                .insert(key.clone());
-            self.prompt_coordination
-                .compaction_runtime
-                .preflight_failures
-                .insert(
-                    key,
+                .suppress_start_for_preflight(
+                    crate::parse_agent_id(&agent_id),
+                    transaction_id.clone(),
                     tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
                 );
         }

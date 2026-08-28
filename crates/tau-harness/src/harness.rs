@@ -1378,6 +1378,8 @@ mod agent_watch;
 mod agent_watch_provider_deliveries;
 mod compaction_runtime;
 mod compaction_runtime_state;
+#[cfg(test)]
+mod compaction_runtime_state_tests;
 mod compaction_supplement;
 mod connection_startup;
 mod construction;

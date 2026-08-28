@@ -3736,8 +3736,7 @@ fn intercepted_reactive_drift_terminalization_never_dispatches() {
     assert!(
         h.prompt_coordination
             .compaction_runtime
-            .suppressed_dispatches
-            .is_empty()
+            .suppressed_starts_is_empty()
     );
     assert_eq!(
         event_log_events(&h)

@@ -1065,8 +1065,10 @@ impl Harness {
         }
         self.prompt_coordination
             .compaction_runtime
-            .suppressed_dispatches
-            .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()));
+            .suppress_start_for_queued_terminal(
+                crate::parse_agent_id(&agent_id),
+                transaction_id.clone(),
+            );
         let failure = tau_proto::AgentStandaloneCompactionFailed {
             agent_id: crate::parse_agent_id(&agent_id),
             transaction_id: transaction_id.clone(),

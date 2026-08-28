@@ -831,17 +831,10 @@ impl Harness {
                 } => Some((agent.identity.agent_id.clone()?, transaction_id.clone())),
                 _ => None,
             });
-        if let Some((agent_id, transaction_id)) = pending
-            && self
-                .prompt_coordination
-                .compaction_runtime
-                .cancelled_claims
-                .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()))
-        {
+        if let Some((agent_id, transaction_id)) = pending {
             self.prompt_coordination
                 .compaction_runtime
-                .suppressed_dispatches
-                .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()));
+                .suppress_start_for_cancellation(crate::parse_agent_id(&agent_id), transaction_id);
         }
     }
 
