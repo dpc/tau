@@ -6,8 +6,16 @@ use std::sync::Mutex;
 use tau_proto::AgentId;
 
 /// Opaque process-local identity for one agent registration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct RegistrationLease(u64);
+
+impl RegistrationLease {
+    /// Advances this lease with the allocator's checked exhaustion behavior.
+    #[must_use]
+    fn checked_next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+}
 
 /// Whether a current lease can publish inbound messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,7 +30,7 @@ enum LeaseState {
 #[derive(Default)]
 struct AuthorityState {
     /// Last process-local lease ordinal allocated.
-    next_lease: u64,
+    next_lease: RegistrationLease,
     /// Current lease and publication state per agent.
     current: HashMap<AgentId, (RegistrationLease, LeaseState)>,
 }
@@ -40,9 +48,9 @@ impl RegistrationAuthority {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.next_lease = state
             .next_lease
-            .checked_add(1)
+            .checked_next()
             .expect("XMPP registration lease ordinal exhausted");
-        let lease = RegistrationLease(state.next_lease);
+        let lease = state.next_lease;
         state.current.insert(agent_id, (lease, LeaseState::Pending));
         lease
     }
@@ -114,3 +122,6 @@ impl RegistrationAuthority {
         Some(publish())
     }
 }
+
+#[cfg(test)]
+mod registration_authority_tests;
