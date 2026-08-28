@@ -690,7 +690,7 @@ fn extension_with_config(
             bot_user_id: 99,
             poll_request_timeout: Duration::from_secs(100),
         });
-        state.registration_generation = 1;
+        state.registration_generation = ZulipRegistrationGeneration::new(1);
     }
     (ext, rx, client)
 }
@@ -717,8 +717,13 @@ fn offline_catch_up_baselines_filters_and_advances_on_canonical_echo() {
     ext.state.lock().checkpoint =
         Some(CheckpointRuntime::open(directory.path(), &config.id_key).expect("checkpoint"));
     let queue = ext.state.lock().queue.clone().expect("queue");
-    ext.catch_up_messages(&config, &queue, 1, 1)
-        .expect("baseline");
+    ext.catch_up_messages(
+        &config,
+        &queue,
+        ZulipConfigGeneration::new(1),
+        ZulipRegistrationGeneration::new(1),
+    )
+    .expect("baseline");
     assert!(rx.try_recv().is_err(), "baseline must not replay history");
     assert_eq!(
         ext.state
@@ -748,8 +753,13 @@ fn offline_catch_up_baselines_filters_and_advances_on_canonical_echo() {
         .as_mut()
         .expect("checkpoint")
         .set_more_history(true);
-    ext.catch_up_messages(&config, &queue, 1, 1)
-        .expect("catch-up");
+    ext.catch_up_messages(
+        &config,
+        &queue,
+        ZulipConfigGeneration::new(1),
+        ZulipRegistrationGeneration::new(1),
+    )
+    .expect("catch-up");
     let HarnessInputMessage::Emit(report) = rx.recv().expect("admitted report") else {
         panic!("expected report");
     };
@@ -851,7 +861,7 @@ fn failed_report_submission_blocks_baseline_checkpoint() {
             bot_user_id: 99,
             poll_request_timeout: Duration::from_secs(1),
         });
-        state.registration_generation = 1;
+        state.registration_generation = ZulipRegistrationGeneration::new(1);
         state.checkpoint =
             Some(CheckpointRuntime::open(directory.path(), &config.id_key).expect("checkpoint"));
     }
@@ -863,8 +873,8 @@ fn failed_report_submission_blocks_baseline_checkpoint() {
                 "flags": ["mentioned"]
             }
         }),
-        1,
-        1,
+        ZulipConfigGeneration::new(1),
+        ZulipRegistrationGeneration::new(1),
         99,
     );
     let mut state = ext.state.lock();
@@ -904,8 +914,13 @@ fn catch_up_pagination_is_bounded_and_resumable() {
     ext.state.lock().checkpoint = Some(checkpoint);
     let queue = ext.state.lock().queue.clone().expect("queue");
 
-    ext.catch_up_messages(&config, &queue, 1, 1)
-        .expect("bounded page");
+    ext.catch_up_messages(
+        &config,
+        &queue,
+        ZulipConfigGeneration::new(1),
+        ZulipRegistrationGeneration::new(1),
+    )
+    .expect("bounded page");
     assert_eq!(
         client
             .history_requests
@@ -940,7 +955,12 @@ fn catch_up_rejects_malformed_terminal_page() {
     ext.state.lock().checkpoint = Some(checkpoint);
     let queue = ext.state.lock().queue.clone().expect("queue");
     assert!(matches!(
-        ext.catch_up_messages(&config, &queue, 1, 1),
+        ext.catch_up_messages(
+            &config,
+            &queue,
+            ZulipConfigGeneration::new(1),
+            ZulipRegistrationGeneration::new(1),
+        ),
         Err(ApiError::MalformedResponse)
     ));
     assert_eq!(
@@ -985,8 +1005,13 @@ fn first_baseline_merges_startup_live_history_overlap() {
     ext.state.lock().checkpoint =
         Some(CheckpointRuntime::open(directory.path(), &config.id_key).expect("checkpoint"));
     let queue = ext.state.lock().queue.clone().expect("queue");
-    ext.catch_up_messages(&config, &queue, 1, 1)
-        .expect("baseline merge");
+    ext.catch_up_messages(
+        &config,
+        &queue,
+        ZulipConfigGeneration::new(1),
+        ZulipRegistrationGeneration::new(1),
+    )
+    .expect("baseline merge");
 
     let HarnessInputMessage::Emit(report) = rx.recv().expect("startup live report") else {
         panic!("expected report");
@@ -1018,7 +1043,10 @@ fn checkpoint_wait_uses_echo_predicate_without_polling() {
     let worker = Arc::clone(&ext);
     let thread = std::thread::spawn(move || {
         started_tx.send(()).expect("started");
-        worker.wait_for_checkpoint_progress(1, 1);
+        worker.wait_for_checkpoint_progress(
+            ZulipConfigGeneration::new(1),
+            ZulipRegistrationGeneration::new(1),
+        );
         done_tx.send(()).expect("done");
     });
     started_rx.recv().expect("waiter started");
@@ -1265,7 +1293,7 @@ fn send_only_sends_without_registering_and_ignores_all_ingress() {
     assert!(matches!(
         ext.handle_register(
             tool(REGISTER_TOOL_NAME, vec![("enabled", CborValue::Bool(true))]),
-            Some(0)
+            Some(ZulipRegistrationGeneration::new(0))
         ),
         Event::ToolError(_)
     ));
@@ -2528,7 +2556,7 @@ fn stale_generation_drops_ingress() {
         event_from(rx.recv().expect("current-generation report")),
         Event::MessageDeliveredReported(_)
     ));
-    ext.state.lock().registration_generation = 2;
+    ext.state.lock().registration_generation = ZulipRegistrationGeneration::new(2);
     ext.process_event(
         serde_json::json!({"id":16,"type":"message","message":{"id":505,"type":"private","sender_id":42,"content":"stale","flags":[],"display_recipient":[{"id":42},{"id":99}]}}),
         generation,
@@ -2826,7 +2854,7 @@ fn mandatory_report_failure_preserves_cursor_and_message_ownership() {
             ],
             20,
             generation,
-            1,
+            ZulipRegistrationGeneration::new(1),
             99,
         ),
         20,
@@ -2868,7 +2896,7 @@ fn mixed_batch_advances_only_the_exact_published_prefix() {
             bot_user_id: 99,
             poll_request_timeout: Duration::from_secs(100),
         });
-        state.registration_generation = 1;
+        state.registration_generation = ZulipRegistrationGeneration::new(1);
     }
     let generation = ext.state.lock().config_generation;
     let registration = ext.state.lock().registration_generation;
@@ -3199,7 +3227,7 @@ fn output_failure_cleanup_clears_routing_authority() {
     assert!(state.recent_ids.is_empty());
     assert!(state.recent_set.is_empty());
     assert!(state.checkpoint.is_none());
-    assert_eq!(state.registration_generation, generation + 1);
+    assert_eq!(state.registration_generation, generation.wrapping_next());
 }
 
 /// Authority retirement waits for the dedicated publication gate rather than
@@ -3224,7 +3252,10 @@ fn reconfigure_waits_for_in_flight_publication_authority() {
         completed_rx.recv().expect("reconfigure completed");
         reconfigure.join().expect("reconfigure");
     });
-    assert_eq!(ext.state.lock().config_generation, generation + 1);
+    assert_eq!(
+        ext.state.lock().config_generation,
+        generation.wrapping_next()
+    );
 }
 
 /// Read exactly one complete HTTP request from a loopback client connection.
@@ -3865,7 +3896,7 @@ fn register_tool_returns_content_free_rejection_diagnostic() {
 
     let result = ext.handle_register(
         tool(REGISTER_TOOL_NAME, vec![("enabled", CborValue::Bool(true))]),
-        Some(1),
+        Some(ZulipRegistrationGeneration::new(1)),
     );
 
     let Event::ToolError(error) = result else {

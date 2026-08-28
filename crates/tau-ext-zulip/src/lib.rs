@@ -8,6 +8,7 @@
 mod api;
 mod checkpoint;
 mod config;
+mod generations;
 mod output;
 mod publication_authority;
 
@@ -24,6 +25,7 @@ use checkpoint::CheckpointRuntime;
 #[cfg(test)]
 use config::BridgeMode;
 use config::{DirectRoute, ExtConfig, ProactiveRoute, ReceiveMode, RuntimeConfig, StreamRoute};
+use generations::{ZulipConfigGeneration, ZulipRegistrationGeneration};
 #[cfg(test)]
 pub(crate) use output::MUTATION_PUBLICATION_HOOK;
 use output::Output;
@@ -173,9 +175,9 @@ struct State {
     /// Stable configured publisher name.
     publisher_name: Option<tau_proto::ExtensionName>,
     /// Monotonic configuration generation.
-    config_generation: u64,
+    config_generation: ZulipConfigGeneration,
     /// Monotonic registration generation.
-    registration_generation: u64,
+    registration_generation: ZulipRegistrationGeneration,
     /// Agents currently accepting Zulip messages.
     registered_agents: HashSet<AgentId>,
     /// Agent presentation labels.
@@ -235,7 +237,7 @@ impl State {
         self.owner_order.clear();
         self.recent_ids.clear();
         self.recent_set.clear();
-        self.registration_generation = self.registration_generation.wrapping_add(1);
+        self.registration_generation = self.registration_generation.wrapping_next();
         self.checkpoint = None;
     }
 
@@ -317,7 +319,7 @@ impl Extension {
     fn apply_config(&self, cfg: RuntimeConfig, publisher: tau_proto::ExtensionName) {
         let _authority = self.publication_authority.retire();
         let mut state = self.state.lock();
-        state.config_generation = state.config_generation.wrapping_add(1);
+        state.config_generation = state.config_generation.wrapping_next();
         state.clear_authority();
         state.config = Some(cfg);
         state.publisher_name = Some(publisher);
@@ -328,7 +330,7 @@ impl Extension {
     fn clear_config(&self) {
         let _authority = self.publication_authority.retire();
         let mut state = self.state.lock();
-        state.config_generation = state.config_generation.wrapping_add(1);
+        state.config_generation = state.config_generation.wrapping_next();
         state.clear_authority();
         state.config = None;
         self.state.changed.notify_all();
@@ -375,7 +377,7 @@ impl Extension {
             .map(|_enabled| {
                 let _authority = self.publication_authority.retire();
                 let mut state = self.state.lock();
-                state.registration_generation = state.registration_generation.wrapping_add(1);
+                state.registration_generation = state.registration_generation.wrapping_next();
                 state.unregister_agent(&invoke.agent_id);
                 let epoch = state.registration_generation;
                 self.state.changed.notify_all();
@@ -467,7 +469,11 @@ impl Extension {
         Ok((resolved, queue))
     }
 
-    fn handle_register(&self, invoke: ToolStarted, registration_epoch: Option<u64>) -> Event {
+    fn handle_register(
+        &self,
+        invoke: ToolStarted,
+        registration_epoch: Option<ZulipRegistrationGeneration>,
+    ) -> Event {
         if let Err(error) = validate_fields(&invoke.arguments, &["enabled"]) {
             return tool_error(invoke, error);
         }
@@ -574,7 +580,7 @@ impl Extension {
             .or_insert_with(|| invoke.agent_id.to_string());
         if !self.ensure_worker(&mut state) {
             state.registered_agents.remove(&invoke.agent_id);
-            state.registration_generation = state.registration_generation.wrapping_add(1);
+            state.registration_generation = state.registration_generation.wrapping_next();
             return tool_error(invoke, "zulip event worker could not start".to_owned());
         }
         self.state.changed.notify_all();
@@ -938,8 +944,8 @@ impl Extension {
     fn process_event(
         &self,
         event: serde_json::Value,
-        generation: u64,
-        registration_generation: u64,
+        generation: ZulipConfigGeneration,
+        registration_generation: ZulipRegistrationGeneration,
         bot_user_id: u64,
     ) {
         let _authority = self.publication_authority.publish();
@@ -950,8 +956,8 @@ impl Extension {
     fn process_event_guarded(
         &self,
         event: serde_json::Value,
-        generation: u64,
-        registration_generation: u64,
+        generation: ZulipConfigGeneration,
+        registration_generation: ZulipRegistrationGeneration,
         bot_user_id: u64,
     ) {
         if self
@@ -1006,8 +1012,8 @@ impl Extension {
     fn process_message(
         &self,
         event: &serde_json::Value,
-        generation: u64,
-        registration_generation: u64,
+        generation: ZulipConfigGeneration,
+        registration_generation: ZulipRegistrationGeneration,
         bot_user_id: u64,
     ) {
         let message = event.get("message").unwrap_or(event);
@@ -1124,8 +1130,8 @@ impl Extension {
     fn observe_created_message(
         &self,
         event: serde_json::Value,
-        generation: u64,
-        registration_generation: u64,
+        generation: ZulipConfigGeneration,
+        registration_generation: ZulipRegistrationGeneration,
         bot_user_id: u64,
     ) {
         let _authority = self.publication_authority.publish();
@@ -1182,8 +1188,8 @@ impl Extension {
         &self,
         event_id: i64,
         event: &serde_json::Value,
-        generation: u64,
-        registration_generation: u64,
+        generation: ZulipConfigGeneration,
+        registration_generation: ZulipRegistrationGeneration,
         mutation: Mutation,
     ) {
         let native_id = event
@@ -1376,8 +1382,8 @@ impl Extension {
         &self,
         cfg: &RuntimeConfig,
         queue: &EventQueue,
-        generation: u64,
-        registration_generation: u64,
+        generation: ZulipConfigGeneration,
+        registration_generation: ZulipRegistrationGeneration,
     ) -> Result<(), ApiError> {
         const PAGE_SIZE: usize = 100;
         let state_is_current = || {
@@ -1529,7 +1535,11 @@ impl Extension {
         Ok(())
     }
 
-    fn wait_for_checkpoint_progress(&self, generation: u64, registration_generation: u64) {
+    fn wait_for_checkpoint_progress(
+        &self,
+        generation: ZulipConfigGeneration,
+        registration_generation: ZulipRegistrationGeneration,
+    ) {
         let state = self.state.lock();
         if state
             .checkpoint
@@ -1705,8 +1715,8 @@ fn process_event_batch(
     ext: &Extension,
     events: Vec<serde_json::Value>,
     mut last_id: i64,
-    generation: u64,
-    registration_generation: u64,
+    generation: ZulipConfigGeneration,
+    registration_generation: ZulipRegistrationGeneration,
     bot_user_id: u64,
 ) -> i64 {
     for event in events {
@@ -1731,8 +1741,8 @@ fn process_event_batch(
 
 fn wait_for_lifecycle_change(
     ext: &Extension,
-    generation: u64,
-    registration_generation: u64,
+    generation: ZulipConfigGeneration,
+    registration_generation: ZulipRegistrationGeneration,
     delay: Duration,
 ) {
     let state = ext.state.lock();
@@ -1750,8 +1760,8 @@ fn wait_for_lifecycle_change(
 fn handle_queue_expiry(
     ext: &Extension,
     cfg: &RuntimeConfig,
-    generation: u64,
-    registration_generation: u64,
+    generation: ZulipConfigGeneration,
+    registration_generation: ZulipRegistrationGeneration,
 ) {
     {
         let mut state = ext.state.lock();
@@ -2201,7 +2211,7 @@ fn handle_live_event(runtime: &ZulipRuntime, event: Event) {
             let _authority = runtime.ext.publication_authority.retire();
             let mut state = runtime.ext.state.lock();
             state.unregister_agent(&value.agent_id);
-            state.registration_generation = state.registration_generation.wrapping_add(1);
+            state.registration_generation = state.registration_generation.wrapping_next();
             runtime.ext.state.changed.notify_all();
         }
         Event::SessionShutdown(_) => {
