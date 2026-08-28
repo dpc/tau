@@ -143,7 +143,9 @@ use crate::harness::extensions::{
     DeferredExtensionMessage, ExtensionActivationStage, ExtensionFrameAdmission,
     ExtensionRuntimeState, StagedExtensionPublish, StagedSessionBound,
 };
-use crate::harness::gated_final::{CommittedGatedFinal, GatedFinalDisposition};
+use crate::harness::gated_final::{
+    CommittedGatedFinal, CommittedGatedFinalReducer, GatedFinalDisposition,
+};
 use crate::harness::interception::{
     AgentPublishCompletion, ConversationHeadSync, DeferredPublish, DormantOutputLengthCompletion,
     InterceptorRegistry, PendingIntercept, PostCommitContinuation, PromptDispatchAuthority,
@@ -155,7 +157,9 @@ use crate::harness::prompt_runtime_state::PromptRuntimeState;
 use crate::harness::provider_runtime_state::ProviderRuntimeState;
 use crate::harness::provider_startup::ProviderStartupSnapshot;
 use crate::harness::provider_terminal_plan::{
-    FinalStatusGatedPlan, ProviderTerminalPlan, ReactiveContextRecoveryPlan,
+    AutomaticCompactionOrPendingMessageWakeClassification,
+    AutomaticCompactionOrPendingMessageWakePlan, FinalStatusGatedPlan, ProviderTerminalPlan,
+    ReactiveContextRecoveryPlan,
 };
 use crate::harness::publication_state::PublicationState;
 use crate::harness::reactive_context_recovery_reducer::CommittedReactiveContextRecovery;

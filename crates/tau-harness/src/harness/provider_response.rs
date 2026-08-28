@@ -502,6 +502,7 @@ impl Harness {
                             is_non_tool_ext_query,
                             source: source.cloned(),
                             tool_effect: CommittedOutputLengthToolEffect::None,
+                            reducer: CommittedGatedFinalReducer::Shared,
                         }),
                     },
                     retry_event: None,
@@ -510,12 +511,32 @@ impl Harness {
             ProviderTerminalPlan::ReactiveContextRecovery(_) => {
                 unreachable!("reactive recovery returns before final-status classification")
             }
+            ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_) => {
+                unreachable!("commit-gated classification runs after final-status classification")
+            }
             ProviderTerminalPlan::Other => None,
         };
-        let eager_terminal_owned = response.automatic_compaction_decision.is_some();
-        let commit_gated_terminal = eager_terminal_owned || continues_for_pending_message_wake;
-        let completion = if commit_gated_terminal && completion.is_none() {
-            Some(AgentPublishCompletion::GatedFinal {
+        let commit_gated_plan =
+            Self::classify_automatic_compaction_or_pending_message_wake_terminal(
+                AutomaticCompactionOrPendingMessageWakeClassification {
+                    final_status_owned: completion.is_some(),
+                    automatic_compaction_owned: response.automatic_compaction_decision.is_some(),
+                    continues_for_pending_message_wake,
+                    tool_effect: if requested_tool_calls {
+                        CommittedOutputLengthToolEffect::Dispatch(normalized_tool_calls.clone())
+                    } else {
+                        CommittedOutputLengthToolEffect::None
+                    },
+                },
+            );
+        let commit_gated_terminal = matches!(
+            commit_gated_plan,
+            ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
+        );
+        let completion = match commit_gated_plan {
+            ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(
+                AutomaticCompactionOrPendingMessageWakePlan { tool_effect },
+            ) => Some(AgentPublishCompletion::GatedFinal {
                 batch_parent: self
                     .agent_runtime
                     .agent_registry
@@ -531,17 +552,18 @@ impl Harness {
                         context_size_alerts: context_size_alerts.clone(),
                         is_non_tool_ext_query,
                         source: source.cloned(),
-                        tool_effect: if requested_tool_calls {
-                            CommittedOutputLengthToolEffect::Dispatch(normalized_tool_calls.clone())
-                        } else {
-                            CommittedOutputLengthToolEffect::None
-                        },
+                        tool_effect,
+                        reducer:
+                            CommittedGatedFinalReducer::AutomaticCompactionOrPendingMessageWake,
                     }),
                 },
                 retry_event: None,
-            })
-        } else {
-            completion
+            }),
+            ProviderTerminalPlan::Other => completion,
+            ProviderTerminalPlan::ReactiveContextRecovery(_)
+            | ProviderTerminalPlan::FinalStatusGated(_) => {
+                unreachable!("earlier provider-terminal family reached commit-gated classification")
+            }
         };
         let completion = if matches!(
             response.output_length_disposition,
@@ -588,6 +610,7 @@ impl Harness {
                         } else {
                             CommittedOutputLengthToolEffect::None
                         },
+                        reducer: CommittedGatedFinalReducer::Shared,
                     }),
                 },
                 retry_event: None,
@@ -907,6 +930,9 @@ impl Harness {
             ProviderTerminalPlan::ReactiveContextRecovery(plan) => plan,
             ProviderTerminalPlan::FinalStatusGated(_) => {
                 unreachable!("final-status classification runs after shared terminal accounting")
+            }
+            ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_) => {
+                unreachable!("commit-gated classification runs after shared terminal accounting")
             }
             ProviderTerminalPlan::Other => return false,
         };
@@ -3311,9 +3337,55 @@ impl Harness {
         }
     }
 
+    /// Classify the commit-gated automatic-compaction or pending-message-wake
+    /// family after final-status ownership and eager decision effects settle.
+    fn classify_automatic_compaction_or_pending_message_wake_terminal(
+        AutomaticCompactionOrPendingMessageWakeClassification {
+            final_status_owned,
+            automatic_compaction_owned,
+            continues_for_pending_message_wake,
+            tool_effect,
+        }: AutomaticCompactionOrPendingMessageWakeClassification,
+    ) -> ProviderTerminalPlan {
+        if final_status_owned
+            || (!automatic_compaction_owned && !continues_for_pending_message_wake)
+        {
+            return ProviderTerminalPlan::Other;
+        }
+        ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(
+            AutomaticCompactionOrPendingMessageWakePlan { tool_effect },
+        )
+    }
+
     /// Perform ordinary or delegated completion only after an accepted gated
     /// final crossed its semantic append boundary.
     pub(super) fn complete_committed_gated_final(
+        &mut self,
+        cid: &AgentId,
+        terminal: CommittedGatedFinal,
+    ) {
+        match terminal.reducer {
+            CommittedGatedFinalReducer::Shared => {
+                self.complete_committed_gated_final_state(cid, terminal);
+            }
+            CommittedGatedFinalReducer::AutomaticCompactionOrPendingMessageWake => {
+                self.complete_committed_automatic_compaction_or_pending_message_wake(cid, terminal);
+            }
+        }
+    }
+
+    /// Reduce one committed automatic-compaction-owned or pending-message-wake
+    /// terminal through the unchanged shared terminal projection.
+    fn complete_committed_automatic_compaction_or_pending_message_wake(
+        &mut self,
+        cid: &AgentId,
+        terminal: CommittedGatedFinal,
+    ) {
+        self.complete_committed_gated_final_state(cid, terminal);
+    }
+
+    /// Apply the existing shared committed-terminal projection.
+    fn complete_committed_gated_final_state(
         &mut self,
         cid: &AgentId,
         terminal: CommittedGatedFinal,
@@ -3326,6 +3398,7 @@ impl Harness {
             is_non_tool_ext_query,
             source,
             tool_effect,
+            reducer: _,
         } = terminal;
         let committed_user_cancellation = response.error.as_deref() == Some("cancelled")
             && self

@@ -6,8 +6,9 @@ use super::super::dispatch::{
 };
 use super::*;
 use crate::harness::{
-    AgentPublishCompletion, CommittedGatedFinal, CommittedOutputLengthToolEffect,
-    ConversationHeadSync, GatedFinalDisposition, PostCommitContinuation,
+    AgentPublishCompletion, CommittedGatedFinal, CommittedGatedFinalReducer,
+    CommittedOutputLengthToolEffect, ConversationHeadSync, GatedFinalDisposition,
+    PostCommitContinuation,
 };
 
 /// Ensures targetless user shell output is routed to the default user agent
@@ -2789,6 +2790,7 @@ fn earlier_gated_terminal_cannot_claim_later_prompt_cancellation() {
                     is_non_tool_ext_query: false,
                     source: None,
                     tool_effect: CommittedOutputLengthToolEffect::None,
+                    reducer: CommittedGatedFinalReducer::Shared,
                 }),
             },
             retry_event: None,

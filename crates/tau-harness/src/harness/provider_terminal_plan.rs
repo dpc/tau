@@ -9,6 +9,9 @@ pub(crate) enum ProviderTerminalPlan {
     ReactiveContextRecovery(Box<ReactiveContextRecoveryPlan>),
     /// The terminal is governed by the agent's final-status contract.
     FinalStatusGated(FinalStatusGatedPlan),
+    /// The terminal is commit-gated by an automatic compaction decision or a
+    /// pending side-conversation message wake.
+    AutomaticCompactionOrPendingMessageWake(AutomaticCompactionOrPendingMessageWakePlan),
     /// The terminal belongs to another provider-terminal family.
     Other,
 }
@@ -30,4 +33,25 @@ pub(crate) enum FinalStatusGatedPlan {
     },
     /// Apply ordinary committed terminal projection after the response commits.
     Accept,
+}
+
+/// Exact deferred tool effect for an automatic-compaction-owned or pending
+/// message-wake terminal.
+pub(crate) struct AutomaticCompactionOrPendingMessageWakePlan {
+    /// Tool effect withheld until the response commits.
+    pub(super) tool_effect: super::CommittedOutputLengthToolEffect,
+}
+
+/// Complete semantic input for classifying an automatic-compaction-owned or
+/// pending-message-wake terminal.
+pub(crate) struct AutomaticCompactionOrPendingMessageWakeClassification {
+    /// Whether final-status ownership already claimed this terminal.
+    pub(super) final_status_owned: bool,
+    /// Whether the eager automatic-compaction policy owns this terminal.
+    pub(super) automatic_compaction_owned: bool,
+    /// Whether a pending side-conversation message must wake after this
+    /// terminal.
+    pub(super) continues_for_pending_message_wake: bool,
+    /// Exact deferred tool effect, including its normalized call payload.
+    pub(super) tool_effect: super::CommittedOutputLengthToolEffect,
 }
