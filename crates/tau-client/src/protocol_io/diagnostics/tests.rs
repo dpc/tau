@@ -304,12 +304,12 @@ fn protocol_io_meter_attributes_final_response_semantics_and_metadata() {
             CborValue::Text("extra".to_owned()),
         )])),
     };
-    let reasoning = tau_proto::OpaqueProviderItem::with_raw_json(
-        CborValue::Text("reasoning-value".to_owned()),
-        r#"{"type":"reasoning"}"#,
-    );
-    let compaction = tau_proto::OpaqueProviderItem::new(CborValue::Text("compact".to_owned()));
-    let unknown = tau_proto::OpaqueProviderItem::new(CborValue::Text("unknown".to_owned()));
+    let reasoning = tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"reasoning"}"#)
+        .expect("valid reasoning item");
+    let compaction = tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"compaction"}"#)
+        .expect("valid compaction item");
+    let unknown = tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"future"}"#)
+        .expect("valid unknown item");
     let message = tau_proto::MessageItem {
         role: tau_proto::ContextRole::Assistant,
         content: vec![tau_proto::ContentPart::Text {

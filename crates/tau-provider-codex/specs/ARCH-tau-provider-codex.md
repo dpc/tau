@@ -145,6 +145,11 @@ omitted. A newest-first 256,000-byte text budget retains complete groups and
 middle-truncates at most one boundary message; images and audio in retained
 messages do not consume this budget. Invalid output installs nothing. Raw
 provider sidecars remain intact through durable replacement and cold replay.
+Completed opaque reasoning, compaction, and unknown output retains its exact
+raw item JSON together with the equivalent structured value. Stream decoding
+rejects a completed opaque item when the raw item slice is unavailable, and
+request lowering replays the already validated raw JSON directly rather than
+falling back to structured serialization.
 Older models retain inline context management and ignore the profile's Lite
 compatibility flag.
 Hosted Responses tools are not part of either contract; Tau's tools remain

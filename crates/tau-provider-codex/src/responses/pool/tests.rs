@@ -1582,13 +1582,12 @@ fn fresh_open_with_previous_response_preserves_compacted_items() {
     let session_id = tau_proto::SessionId::parse("session-compacted")
         .expect("known-safe SessionId must be valid");
     let messages = vec![
-        tau_proto::ContextItem::Compaction(tau_proto::OpaqueProviderItem::new(
-            crate::common::json_to_cbor(&serde_json::json!({
-                "type": "message",
-                "role": "user",
-                "content": "compacted-sentinel",
-            })),
-        )),
+        tau_proto::ContextItem::Compaction(
+            tau_proto::OpaqueProviderItem::from_raw_json(
+                r#"{"type":"compaction","content":"compacted-sentinel"}"#,
+            )
+            .expect("valid compaction item"),
+        ),
         user_msg("after compaction"),
     ];
     let request = PromptPayload {

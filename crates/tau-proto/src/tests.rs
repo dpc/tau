@@ -913,28 +913,159 @@ fn tool_call_item_replay_sidecars_are_optional_and_round_trip() {
     assert_eq!(round_trip.responses_envelope, call.responses_envelope);
 }
 
-/// Ensures opaque provider items keep their optional raw JSON replay sidecar
-/// across the current serialized representation.
+/// Ensures opaque provider items require equivalent raw and structured forms.
 #[test]
-fn opaque_provider_item_raw_json_is_optional_and_round_trips() {
+fn opaque_provider_item_raw_json_is_required_validated_and_round_trips() {
     let raw_json = r#"{"type":"compaction","z":1.2300,"a":1e+03}"#;
-    let value = CborValue::Map(vec![
-        (
-            CborValue::Text("type".to_owned()),
-            CborValue::Text("compaction".to_owned()),
-        ),
-        (CborValue::Text("z".to_owned()), CborValue::Float(1.23)),
-    ]);
-    let item = OpaqueProviderItem::with_raw_json(value.clone(), raw_json);
+    let item = OpaqueProviderItem::from_raw_json(raw_json).expect("valid opaque item");
 
     let round_trip: OpaqueProviderItem =
         serde_json::from_value(serde_json::to_value(&item).expect("serialize opaque item"))
             .expect("deserialize opaque item");
-    assert_eq!(round_trip.value, value);
-    assert_eq!(round_trip.raw_json.as_deref(), Some(raw_json));
+    assert_eq!(round_trip.value(), item.value());
+    assert_eq!(round_trip.raw_json(), raw_json);
 
     let serialized = serde_json::to_value(&item).expect("serialize opaque item");
     assert_eq!(serialized["tau_opaque_provider_item_version"], 0);
+}
+
+/// Opaque construction rejects malformed and contradictory raw JSON before an
+/// invalid pair can enter runtime state.
+#[test]
+fn opaque_provider_item_construction_rejects_invalid_raw_json() {
+    assert_eq!(
+        OpaqueProviderItem::from_raw_json("{"),
+        Err(OpaqueProviderItemError::MalformedRawJson)
+    );
+    assert_eq!(
+        OpaqueProviderItem::try_new(CborValue::Null, r#"{"type":"reasoning"}"#),
+        Err(OpaqueProviderItemError::SemanticMismatch)
+    );
+}
+
+/// Semantic equality ignores JSON object member order at every nesting level
+/// while retaining array order and scalar equality.
+#[test]
+fn opaque_provider_item_semantic_equality_ignores_nested_map_order() {
+    let value = CborValue::Map(vec![
+        (
+            CborValue::Text("nested".to_owned()),
+            CborValue::Array(vec![CborValue::Map(vec![
+                (
+                    CborValue::Text("second".to_owned()),
+                    CborValue::Integer(2.into()),
+                ),
+                (
+                    CborValue::Text("first".to_owned()),
+                    CborValue::Integer(1.into()),
+                ),
+            ])]),
+        ),
+        (
+            CborValue::Text("type".to_owned()),
+            CborValue::Text("future".to_owned()),
+        ),
+    ]);
+
+    assert!(
+        OpaqueProviderItem::try_new(
+            value,
+            r#"{"type":"future","nested":[{"first":1,"second":2}]}"#
+        )
+        .is_ok()
+    );
+
+    for invalid in [
+        CborValue::Map(vec![
+            (
+                CborValue::Text("type".to_owned()),
+                CborValue::Text("future".to_owned()),
+            ),
+            (
+                CborValue::Text("type".to_owned()),
+                CborValue::Text("future".to_owned()),
+            ),
+        ]),
+        CborValue::Map(vec![(
+            CborValue::Integer(1.into()),
+            CborValue::Text("future".to_owned()),
+        )]),
+    ] {
+        assert_eq!(
+            OpaqueProviderItem::try_new(invalid, r#"{"type":"future"}"#),
+            Err(OpaqueProviderItemError::SemanticMismatch)
+        );
+    }
+}
+
+/// Durable decoding rejects old raw-less opaque records and outer/provider kind
+/// disagreement instead of upgrading or accepting contradictory history.
+#[test]
+fn opaque_provider_item_decode_requires_raw_json_and_matching_outer_kind() {
+    let missing_raw = serde_json::json!({
+        "type": "reasoning",
+        "payload": {
+            "tau_opaque_provider_item_version": 0,
+            "value": {"type": "reasoning"}
+        }
+    });
+    assert!(serde_json::from_value::<ContextItem>(missing_raw).is_err());
+
+    let mismatched_kind = ContextItem::Reasoning(
+        OpaqueProviderItem::from_raw_json(r#"{"type":"compaction"}"#)
+            .expect("valid canonical compaction payload"),
+    );
+    assert!(serde_json::to_value(mismatched_kind).is_err());
+
+    let serialized_mismatch = serde_json::json!({
+        "type": "reasoning",
+        "payload": {
+            "tau_opaque_provider_item_version": 0,
+            "value": {"type": "compaction"},
+            "raw_json": r#"{"type":"compaction"}"#
+        }
+    });
+    assert!(serde_json::from_value::<ContextItem>(serialized_mismatch).is_err());
+
+    for (label, value, raw_json) in [
+        ("malformed raw", serde_json::Value::Null, "{"),
+        (
+            "contradictory representations",
+            serde_json::Value::Null,
+            r#"{"type":"reasoning"}"#,
+        ),
+    ] {
+        let encoded = serde_json::json!({
+            "type": "reasoning",
+            "payload": {
+                "tau_opaque_provider_item_version": 0,
+                "value": value,
+                "raw_json": raw_json
+            }
+        });
+        assert!(
+            serde_json::from_value::<ContextItem>(encoded).is_err(),
+            "decoded {label}"
+        );
+    }
+
+    for raw_json in ["null", r#"{"type":1}"#] {
+        let item =
+            OpaqueProviderItem::from_raw_json(raw_json).expect("semantically valid raw JSON");
+        assert!(
+            serde_json::to_value(ContextItem::UnknownProviderItem(item.clone())).is_err(),
+            "unknown item accepted non-string type from {raw_json}"
+        );
+        let payload = serde_json::to_value(item).expect("serialize opaque payload");
+        let encoded = serde_json::json!({
+            "type": "unknown_provider_item",
+            "payload": payload
+        });
+        assert!(
+            serde_json::from_value::<ContextItem>(encoded).is_err(),
+            "unknown item decoded non-string type from {raw_json}"
+        );
+    }
 }
 
 fn action_schema_fixture() -> ActionSchema {

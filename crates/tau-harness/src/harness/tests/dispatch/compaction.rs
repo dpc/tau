@@ -6175,9 +6175,10 @@ fn inline_compaction_response_resets_context_size_alerts_without_injection() {
         .expect("dispatch");
     let prompt = read_nth_prompt_created(&h, 0);
     let mut response = provider_text_response(&prompt.agent_prompt_id, prompt.agent_id, "ignored");
-    response.output_items = vec![ContextItem::Compaction(tau_proto::OpaqueProviderItem::new(
-        CborValue::Map(vec![]),
-    ))];
+    response.output_items = vec![ContextItem::Compaction(
+        tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"compaction"}"#)
+            .expect("valid compaction item"),
+    )];
     response.usage = Some(tau_proto::ProviderTokenUsage {
         model: None,
         prompt_sent_tokens: 101,
@@ -6264,7 +6265,6 @@ fn inline_compaction_discards_other_queued_context_size_alerts() {
         event,
         Event::AgentPromptSubmitted(submitted) if submitted.text == "stale second alert"
     )));
-
     let first_alert = read_nth_prompt_created(&h, 1);
     let mut compacting_response = provider_text_response(
         &first_alert.agent_prompt_id,
@@ -6272,7 +6272,8 @@ fn inline_compaction_discards_other_queued_context_size_alerts() {
         "ignored",
     );
     compacting_response.output_items = vec![ContextItem::Compaction(
-        tau_proto::OpaqueProviderItem::new(CborValue::Map(vec![])),
+        tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"compaction"}"#)
+            .expect("valid compaction item"),
     )];
     h.handle_provider_response_finished(compacting_response)
         .expect("finish alert with compaction");
@@ -8858,10 +8859,12 @@ fn standalone_compaction_accepts_canonical_opaque_provider_item() {
         Some(&agent_id),
     );
     let compact = read_nth_prompt_created(&h, 0);
-    let replacement = ContextItem::Compaction(tau_proto::OpaqueProviderItem::with_raw_json(
-        CborValue::Map(vec![]),
-        r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#.to_owned(),
-    ));
+    let replacement = ContextItem::Compaction(
+        tau_proto::OpaqueProviderItem::from_raw_json(
+            r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#,
+        )
+        .expect("valid compaction item"),
+    );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,

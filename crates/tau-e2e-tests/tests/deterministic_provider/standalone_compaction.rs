@@ -99,8 +99,8 @@ fn deterministic_context_overflow_reactively_compacts_and_continues()
     assert!(matches!(
         compacted.replacement_window.as_slice(),
         [ContextItem::Compaction(item)]
-            if item.raw_json.as_deref()
-                == Some(tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON)
+            if item.raw_json()
+                == tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON
     ));
 
     let continuation_prompt = recv_until_inference_prompt(&mut peer)?;
@@ -188,8 +188,8 @@ fn deterministic_opaque_standalone_compaction_replays_after_clean_restart()
     assert!(matches!(
         compacted.replacement_window.as_slice(),
         [ContextItem::Compaction(item)]
-            if item.raw_json.as_deref()
-                == Some(tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON)
+            if item.raw_json()
+                == tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON
     ));
     disconnect_ui(&mut peer_a)?;
     server_a.finish()?;
@@ -312,8 +312,8 @@ fn deterministic_post_tool_policy_compacts_and_replays_after_clean_restart()
     assert!(matches!(
         compacted.replacement_window.as_slice(),
         [ContextItem::Compaction(item)]
-            if item.raw_json.as_deref()
-                == Some(tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON)
+            if item.raw_json()
+                == tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON
     ));
     let checkpointed = recv_until_finished(&mut peer_a)?;
     assert_assistant(
@@ -1053,8 +1053,8 @@ fn assert_durable_opaque_compaction(
     if !matches!(
         compacted.replacement_window.as_slice(),
         [ContextItem::Compaction(item)]
-            if item.raw_json.as_deref()
-                == Some(tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON)
+            if item.raw_json()
+                == tau_e2e_tests::CANONICAL_OPAQUE_COMPACTION_JSON
     ) {
         return Err("durable opaque replacement bytes changed".into());
     }

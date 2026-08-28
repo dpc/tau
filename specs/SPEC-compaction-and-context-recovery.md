@@ -340,7 +340,13 @@ compacting request actually consumed. Replay does not reinterpret or rewrite
 those materialized items when a later release changes source-based presentation.
 Provider-authored opaque `Compaction` items are valid members of a nonempty,
 structurally closed standalone replacement window and retain their raw replay
-sidecars. Harness-authored `CompactionTrigger` items, malformed messages, and
+JSON. Every completed or durable opaque provider item carries required raw JSON
+that parses to the same semantic value as its structured value and whose
+provider `type` matches the outer reasoning, compaction, or unknown-item family.
+Missing, malformed, kind-mismatched, and semantically contradictory input fails
+validation; Tau neither synthesizes a legacy representation nor uses one
+representation as fallback for the other. Harness-authored `CompactionTrigger`
+items, malformed messages, and
 open, duplicate, or otherwise incomplete tool rounds remain invalid. A standalone
 terminal commits a replacement only on `EndTurn` with neither provider error nor
 typed failure; error and typed failure take precedence as provider failures.

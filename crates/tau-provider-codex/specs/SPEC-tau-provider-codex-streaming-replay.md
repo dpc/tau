@@ -59,10 +59,13 @@ object key order, whitespace, and numeric spelling match the provider's original
 argument string. Serializing parsed CBOR arguments is only a fallback for older
 persisted records that do not have the raw sidecar.
 
-The same replay rule applies to opaque Responses provider items. Reasoning, compaction,
-and unknown output items should be stored with `OpaqueProviderItem.raw_json` when the
-upstream event JSON is available, and full transcript replay should prefer that sidecar
-over the parsed CBOR `OpaqueProviderItem.value`.
+Completed reasoning, compaction, and unknown Responses output items must retain
+their exact upstream item JSON in `OpaqueProviderItem.raw_json`. The raw JSON
+must parse to the same semantic value as `OpaqueProviderItem.value` and match
+the enclosing opaque item family. Missing, malformed, contradictory, or
+kind-mismatched input rejects structurally before durable output is formed.
+Full transcript replay emits the validated raw JSON directly; it never falls
+back to serializing the structured value or upgrades raw-less records.
 
 Responses assistant `message` items also carry a replay sidecar. Tau keeps the typed
 message text and `phase` as semantic truth, but the raw Responses item preserves

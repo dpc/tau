@@ -1846,10 +1846,12 @@ fn legacy_compaction_boundary_without_transaction_metadata_replays() {
 /// persisted boundary validation without a parsed or serialized replacement.
 #[test]
 fn provider_compaction_replacement_has_identical_live_and_replay_state() {
-    let replacement = ContextItem::Compaction(tau_proto::OpaqueProviderItem::with_raw_json(
-        tau_proto::CborValue::Map(vec![]),
-        r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#.to_owned(),
-    ));
+    let replacement = ContextItem::Compaction(
+        tau_proto::OpaqueProviderItem::from_raw_json(
+            r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#,
+        )
+        .expect("valid opaque compaction"),
+    );
     let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
         original_input_tokens: None,
         compaction_output_tokens: None,
@@ -1900,10 +1902,10 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
         let raw_json = format!(
             r#"{{"type":"compaction","id":"cmp-{case}","encrypted_content":"opaque-{case}"}}"#
         );
-        let replacement = ContextItem::Compaction(tau_proto::OpaqueProviderItem::with_raw_json(
-            tau_proto::CborValue::Map(vec![]),
-            raw_json.clone(),
-        ));
+        let replacement = ContextItem::Compaction(
+            tau_proto::OpaqueProviderItem::from_raw_json(raw_json.clone())
+                .expect("valid opaque compaction"),
+        );
         let started = compaction_start(&format!("ct-opaque-{case}"));
         let compacted = tau_proto::AgentCompacted {
             original_input_tokens: None,
@@ -1956,7 +1958,7 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
                 ..
             }) if matches!(
                 replacement_window.as_slice(),
-                [ContextItem::Compaction(item)] if item.raw_json.as_deref() == Some(raw_json.as_str())
+                [ContextItem::Compaction(item)] if item.raw_json() == raw_json
             )
         ));
     }
@@ -1981,10 +1983,10 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
         (
             "unknown transaction",
             vec![ContextItem::Compaction(
-                tau_proto::OpaqueProviderItem::with_raw_json(
-                    tau_proto::CborValue::Map(vec![]),
+                tau_proto::OpaqueProviderItem::from_raw_json(
                     r#"{"type":"compaction","id":"cmp-invalid","encrypted_content":"opaque"}"#,
-                ),
+                )
+                .expect("valid opaque compaction"),
             )],
             Some(
                 tau_proto::CompactionTransactionId::parse("ct-other")

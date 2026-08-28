@@ -4,9 +4,11 @@
 //! `SPEC-tau-proto-provider-data`.
 
 mod arc_bytes;
+use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::sync::Arc;
 
+use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::events::{ProviderBackend, ToolFormat, ToolType};
@@ -47,36 +49,170 @@ pub enum ContentPart {
     },
 }
 
+/// The outer transcript family of one opaque provider-owned item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpaqueProviderItemKind {
+    /// A provider reasoning item.
+    Reasoning,
+    /// A provider compaction item.
+    Compaction,
+    /// A provider item whose family Tau does not understand.
+    Unknown,
+}
+
+/// Why an opaque provider item failed canonical validation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpaqueProviderItemError {
+    /// The required raw JSON is malformed.
+    MalformedRawJson,
+    /// The raw JSON and structured value represent different semantic values.
+    SemanticMismatch,
+    /// The provider item's `type` does not match its outer transcript family.
+    KindMismatch {
+        /// Outer transcript family required by the caller.
+        expected: OpaqueProviderItemKind,
+        /// Provider `type` found in the raw JSON, when it was a string.
+        actual_type: Option<String>,
+    },
+}
+
+impl fmt::Display for OpaqueProviderItemError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MalformedRawJson => formatter.write_str("opaque provider raw JSON is malformed"),
+            Self::SemanticMismatch => {
+                formatter.write_str("opaque provider raw JSON contradicts its structured value")
+            }
+            Self::KindMismatch {
+                expected,
+                actual_type,
+            } => write!(
+                formatter,
+                "opaque provider item type {actual_type:?} does not match outer kind {expected:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OpaqueProviderItemError {}
+
 /// Opaque provider-owned payload preserved without semantic authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OpaqueProviderItem {
     /// Parsed provider item for semantic inspection and replay.
-    pub value: CborValue,
+    value: CborValue,
     /// Raw provider item JSON used for cache-identity-preserving replay.
     ///
     /// This sidecar is provider-visible syntax only. Consumers that need to
     /// inspect, validate, or make semantic decisions must use [`Self::value`].
-    pub raw_json: Option<String>,
+    raw_json: String,
 }
 
 impl OpaqueProviderItem {
-    /// Builds an opaque provider item from a parsed CBOR value.
-    #[must_use]
-    pub fn new(value: CborValue) -> Self {
-        Self {
-            value,
-            raw_json: None,
+    /// Validates matching structured and raw representations.
+    pub fn try_new(
+        value: CborValue,
+        raw_json: impl Into<String>,
+    ) -> Result<Self, OpaqueProviderItemError> {
+        let raw_json = raw_json.into();
+        let parsed: serde_json::Value = serde_json::from_str(&raw_json)
+            .map_err(|_| OpaqueProviderItemError::MalformedRawJson)?;
+        if !json_cbor_semantically_equal(&crate::json_to_cbor(&parsed), &value) {
+            return Err(OpaqueProviderItemError::SemanticMismatch);
         }
+        Ok(Self { value, raw_json })
     }
 
-    /// Builds an opaque provider item with a raw JSON replay sidecar.
+    /// Parses raw provider JSON into its canonical structured representation.
+    pub fn from_raw_json(raw_json: impl Into<String>) -> Result<Self, OpaqueProviderItemError> {
+        let raw_json = raw_json.into();
+        let parsed: serde_json::Value = serde_json::from_str(&raw_json)
+            .map_err(|_| OpaqueProviderItemError::MalformedRawJson)?;
+        Ok(Self {
+            value: crate::json_to_cbor(&parsed),
+            raw_json,
+        })
+    }
+
+    /// Returns the parsed provider item used for semantic inspection.
     #[must_use]
-    pub fn with_raw_json(value: CborValue, raw_json: impl Into<String>) -> Self {
-        Self {
-            value,
-            raw_json: Some(raw_json.into()),
+    pub fn value(&self) -> &CborValue {
+        &self.value
+    }
+
+    /// Returns the exact raw provider JSON used for replay.
+    #[must_use]
+    pub fn raw_json(&self) -> &str {
+        &self.raw_json
+    }
+
+    /// Validates that the provider `type` matches an outer transcript family.
+    pub fn validate_kind(
+        &self,
+        expected: OpaqueProviderItemKind,
+    ) -> Result<(), OpaqueProviderItemError> {
+        let parsed: serde_json::Value = serde_json::from_str(&self.raw_json)
+            .map_err(|_| OpaqueProviderItemError::MalformedRawJson)?;
+        let actual_type = parsed
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let matches = match expected {
+            OpaqueProviderItemKind::Reasoning => actual_type.as_deref() == Some("reasoning"),
+            OpaqueProviderItemKind::Compaction => actual_type.as_deref() == Some("compaction"),
+            OpaqueProviderItemKind::Unknown => actual_type
+                .as_deref()
+                .is_some_and(|item_type| !matches!(item_type, "reasoning" | "compaction")),
+        };
+        if matches {
+            Ok(())
+        } else {
+            Err(OpaqueProviderItemError::KindMismatch {
+                expected,
+                actual_type,
+            })
         }
     }
+}
+
+fn json_cbor_semantically_equal(left: &CborValue, right: &CborValue) -> bool {
+    match (left, right) {
+        (CborValue::Array(left), CborValue::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| json_cbor_semantically_equal(left, right))
+        }
+        (CborValue::Map(left), CborValue::Map(right)) => {
+            let Some(left) = json_object_entries(left) else {
+                return false;
+            };
+            let Some(right) = json_object_entries(right) else {
+                return false;
+            };
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| json_cbor_semantically_equal(left, right))
+                })
+        }
+        _ => left == right,
+    }
+}
+
+fn json_object_entries(entries: &[(CborValue, CborValue)]) -> Option<BTreeMap<&str, &CborValue>> {
+    let mut object = BTreeMap::new();
+    for (key, value) in entries {
+        let CborValue::Text(key) = key else {
+            return None;
+        };
+        if object.insert(key.as_str(), value).is_some() {
+            return None;
+        }
+    }
+    Some(object)
 }
 
 impl Serialize for OpaqueProviderItem {
@@ -88,15 +224,14 @@ impl Serialize for OpaqueProviderItem {
         struct Repr<'a> {
             tau_opaque_provider_item_version: u8,
             value: &'a CborValue,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            raw_json: Option<&'a str>,
+            raw_json: &'a str,
         }
 
         Repr {
             // Keep at zero per `GATE-no-backward-compatibility`.
             tau_opaque_provider_item_version: 0,
             value: &self.value,
-            raw_json: self.raw_json.as_deref(),
+            raw_json: &self.raw_json,
         }
         .serialize(serializer)
     }
@@ -112,8 +247,7 @@ impl<'de> Deserialize<'de> for OpaqueProviderItem {
         struct Current {
             tau_opaque_provider_item_version: u8,
             value: CborValue,
-            #[serde(default)]
-            raw_json: Option<String>,
+            raw_json: String,
         }
 
         match Current::deserialize(deserializer)? {
@@ -121,7 +255,7 @@ impl<'de> Deserialize<'de> for OpaqueProviderItem {
                 tau_opaque_provider_item_version: 0,
                 value,
                 raw_json,
-            } => Ok(Self { value, raw_json }),
+            } => Self::try_new(value, raw_json).map_err(de::Error::custom),
             Current {
                 tau_opaque_provider_item_version,
                 ..
@@ -567,8 +701,7 @@ pub struct LocalCompactionNarrativeItem {
 pub const LOCAL_COMPACTION_NARRATIVE_MAX_BYTES: usize = 256 * 1024;
 
 /// One item in Tau's prompt/response timeline.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ContextItem {
     /// Message authored by a system, developer, user, or assistant role.
     Message(MessageItem),
@@ -588,6 +721,98 @@ pub enum ContextItem {
     Compaction(OpaqueProviderItem),
     /// Provider item that Tau does not yet understand.
     UnknownProviderItem(OpaqueProviderItem),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+enum ContextItemRef<'a> {
+    Message(&'a MessageItem),
+    ToolCall(&'a ToolCallItem),
+    ToolResult(&'a ToolResultItem),
+    ReasoningText(&'a ReasoningTextItem),
+    LocalCompactionNarrative(&'a LocalCompactionNarrativeItem),
+    Reasoning(&'a OpaqueProviderItem),
+    CompactionTrigger,
+    Compaction(&'a OpaqueProviderItem),
+    UnknownProviderItem(&'a OpaqueProviderItem),
+}
+
+impl Serialize for ContextItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let repr = match self {
+            Self::Message(item) => ContextItemRef::Message(item),
+            Self::ToolCall(item) => ContextItemRef::ToolCall(item),
+            Self::ToolResult(item) => ContextItemRef::ToolResult(item),
+            Self::ReasoningText(item) => ContextItemRef::ReasoningText(item),
+            Self::LocalCompactionNarrative(item) => ContextItemRef::LocalCompactionNarrative(item),
+            Self::Reasoning(item) => {
+                item.validate_kind(OpaqueProviderItemKind::Reasoning)
+                    .map_err(S::Error::custom)?;
+                ContextItemRef::Reasoning(item)
+            }
+            Self::CompactionTrigger => ContextItemRef::CompactionTrigger,
+            Self::Compaction(item) => {
+                item.validate_kind(OpaqueProviderItemKind::Compaction)
+                    .map_err(S::Error::custom)?;
+                ContextItemRef::Compaction(item)
+            }
+            Self::UnknownProviderItem(item) => {
+                item.validate_kind(OpaqueProviderItemKind::Unknown)
+                    .map_err(S::Error::custom)?;
+                ContextItemRef::UnknownProviderItem(item)
+            }
+        };
+        repr.serialize(serializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+enum ContextItemRepr {
+    Message(MessageItem),
+    ToolCall(ToolCallItem),
+    ToolResult(ToolResultItem),
+    ReasoningText(ReasoningTextItem),
+    LocalCompactionNarrative(LocalCompactionNarrativeItem),
+    Reasoning(OpaqueProviderItem),
+    CompactionTrigger,
+    Compaction(OpaqueProviderItem),
+    UnknownProviderItem(OpaqueProviderItem),
+}
+
+impl<'de> Deserialize<'de> for ContextItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let item = match ContextItemRepr::deserialize(deserializer)? {
+            ContextItemRepr::Message(item) => Self::Message(item),
+            ContextItemRepr::ToolCall(item) => Self::ToolCall(item),
+            ContextItemRepr::ToolResult(item) => Self::ToolResult(item),
+            ContextItemRepr::ReasoningText(item) => Self::ReasoningText(item),
+            ContextItemRepr::LocalCompactionNarrative(item) => Self::LocalCompactionNarrative(item),
+            ContextItemRepr::Reasoning(item) => {
+                item.validate_kind(OpaqueProviderItemKind::Reasoning)
+                    .map_err(de::Error::custom)?;
+                Self::Reasoning(item)
+            }
+            ContextItemRepr::CompactionTrigger => Self::CompactionTrigger,
+            ContextItemRepr::Compaction(item) => {
+                item.validate_kind(OpaqueProviderItemKind::Compaction)
+                    .map_err(de::Error::custom)?;
+                Self::Compaction(item)
+            }
+            ContextItemRepr::UnknownProviderItem(item) => {
+                item.validate_kind(OpaqueProviderItemKind::Unknown)
+                    .map_err(de::Error::custom)?;
+                Self::UnknownProviderItem(item)
+            }
+        };
+        Ok(item)
+    }
 }
 
 /// Validates a standalone compaction replacement window before it can erase

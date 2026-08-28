@@ -125,9 +125,10 @@ fn narrative_output_requires_one_assistant_message_and_rejects_other_items() {
     );
     for unsupported in [
         tau_proto::ContextItem::CompactionTrigger,
-        tau_proto::ContextItem::Reasoning(tau_proto::OpaqueProviderItem::new(
-            tau_proto::CborValue::Null,
-        )),
+        tau_proto::ContextItem::Reasoning(
+            tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"reasoning"}"#)
+                .expect("valid reasoning item"),
+        ),
     ] {
         assert!(
             validate_narrative_output(

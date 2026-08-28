@@ -8,7 +8,6 @@ mod codex_response_wake_generation;
 mod compact_failure_capture;
 mod compact_stream;
 
-use std::borrow::Cow;
 use std::time::{Duration, Instant, SystemTime};
 use std::{sync as path_std_sync, thread as path_std_thread, time as path_std_time};
 
@@ -1003,20 +1002,18 @@ fn provider_backend_transport_label(
     }
 }
 
-/// Applies one decoded `response.*` event when raw JSON is unavailable.
+/// Applies one decoded `response.*` event in tests.
 ///
-/// This compatibility path preserves semantic stream handling but cannot keep
-/// raw provider item JSON for replay sidecars. Live WebSocket and VCR replay
-/// should call the raw JSON event helper with the original event text so
-/// opaque provider items and assistant message items can preserve provider
-/// envelope/content metadata.
+/// The helper re-encodes the test value before using the production raw-event
+/// path. Production callers must retain the provider bytes directly.
 #[cfg(test)]
 pub fn apply_event(
     state: &mut StreamState,
     event: &serde_json::Value,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
-    apply_parsed_json_event(state, event, None, on_update)
+    let raw = serde_json::to_string(event).map_err(LlmError::Json)?;
+    apply_parsed_json_event(state, event, raw_output_item_json(&raw), on_update)
 }
 
 /// Applies one raw upstream Responses event while preserving replay sidecars.
@@ -1108,6 +1105,13 @@ pub(super) fn projected_retained_state_bytes(
     let Some(output_index) = output_index else {
         return Ok(state.admitted_retained_state_bytes());
     };
+    if let Some(item) = event.get("item") {
+        validate_completed_opaque_raw_json(
+            item,
+            event_type == "response.output_item.done",
+            raw_item_json,
+        )?;
+    }
     if let Some(projected) = projected_text_or_tool_bytes(state, event, event_type, output_index) {
         return Ok(projected);
     }
@@ -1326,7 +1330,9 @@ fn opaque_item_retained_bytes(item: &serde_json::Value, raw_item_json: Option<&s
     let semantic_len = serde_json::to_vec(&json_to_cbor(item)).map_or(u64::MAX, |value| {
         u64::try_from(value.len()).unwrap_or(u64::MAX)
     });
-    let raw_len = raw_item_json.map_or_else(|| item.to_string().len(), str::len);
+    let raw_len = raw_item_json
+        .expect("completed opaque item raw JSON validated before projection")
+        .len();
     semantic_len.saturating_add(raw_len as u64)
 }
 
@@ -1652,6 +1658,7 @@ fn apply_output_item_event(
     let Some(item) = event.get("item") else {
         return Ok(());
     };
+    validate_completed_opaque_raw_json(item, kind.is_done(), raw_item_json)?;
     let mut changed = apply_output_item_tool(state, item, output_index, kind)?;
     changed |= apply_output_item_message(state, item, raw_item_json, output_index, kind)?;
     changed |= apply_output_item_reasoning(state, item, raw_item_json, output_index, kind);
@@ -1659,6 +1666,24 @@ fn apply_output_item_event(
     changed |= apply_output_item_unknown(state, item, raw_item_json, output_index, kind);
     if changed {
         on_update(state);
+    }
+    Ok(())
+}
+
+fn validate_completed_opaque_raw_json(
+    item: &serde_json::Value,
+    completed: bool,
+    raw_item_json: Option<&str>,
+) -> Result<(), LlmError> {
+    let item_type = item["type"].as_str();
+    let retains_opaque = completed
+        && (matches!(item_type, Some("compaction"))
+            || matches!(item_type, Some("reasoning")) && item["encrypted_content"].is_string()
+            || item_type.is_some_and(|item_type| !is_known_output_item_type(item_type)));
+    if retains_opaque && raw_item_json.is_none() {
+        return Err(LlmError::InvalidResponse(
+            "completed opaque provider item omitted raw JSON".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -1791,8 +1816,8 @@ fn apply_output_item_reasoning(
         && item["type"].as_str() == Some("reasoning")
         && item["encrypted_content"].is_string()
     {
-        let item_json = raw_or_canonical_item_json(raw_item_json, item);
-        state.set_reasoning_item_at(output_index, item, item_json.into_owned());
+        let item_json = raw_item_json.expect("completed opaque item raw JSON checked above");
+        state.set_reasoning_item_at(output_index, item, item_json.to_owned());
         return true;
     }
     false
@@ -1811,8 +1836,8 @@ fn apply_output_item_compaction(
     match kind {
         OutputItemEventKind::Added => state.start_compaction_item_at(output_index),
         OutputItemEventKind::Done => {
-            let item_json = raw_or_canonical_item_json(raw_item_json, item);
-            state.set_compaction_item_at(output_index, item, item_json.into_owned())
+            let item_json = raw_item_json.expect("completed opaque item raw JSON checked above");
+            state.set_compaction_item_at(output_index, item, item_json.to_owned())
         }
     }
     true
@@ -1834,20 +1859,11 @@ fn apply_output_item_unknown(
     match kind {
         OutputItemEventKind::Added => state.reserve_output_item_at(output_index),
         OutputItemEventKind::Done => {
-            let item_json = raw_or_canonical_item_json(raw_item_json, item);
-            state.set_unknown_provider_item_at(output_index, item, item_json.into_owned());
+            let item_json = raw_item_json.expect("completed opaque item raw JSON checked above");
+            state.set_unknown_provider_item_at(output_index, item, item_json.to_owned());
         }
     }
     true
-}
-
-fn raw_or_canonical_item_json<'a>(
-    raw_item_json: Option<&'a str>,
-    item: &serde_json::Value,
-) -> Cow<'a, str> {
-    raw_item_json
-        .map(Cow::Borrowed)
-        .unwrap_or_else(|| Cow::Owned(item.to_string()))
 }
 
 fn is_known_output_item_type(item_type: &str) -> bool {
@@ -2776,15 +2792,12 @@ fn convert_opaque_provider_item(
     item: &tau_proto::OpaqueProviderItem,
     out: &mut Vec<ResponsesInputItem>,
 ) {
-    if let Some(raw_item) = item
-        .raw_json
-        .as_deref()
-        .and_then(ResponsesInputItem::raw_json)
-    {
-        out.push(raw_item);
-        return;
-    }
-    out.push(ResponsesInputItem::json(cbor_to_json(&item.value)));
+    // Canonical construction already parsed this exact JSON. The assertion
+    // documents that `RawValue` rejection here would be an internal contract
+    // violation rather than a provider-input error or a fallback condition.
+    let raw_item = ResponsesInputItem::raw_json(item.raw_json())
+        .expect("validated opaque provider raw JSON must lower");
+    out.push(raw_item);
 }
 
 fn convert_user_message(msg: &MessageItem, out: &mut Vec<ResponsesInputItem>) {

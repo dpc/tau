@@ -8,8 +8,10 @@ The backend replays the complete typed Responses transcript on every request.
 It supports assistant text, plain `reasoning_text` reasoning, and Function
 tools. Plain reasoning produces full displayable reasoning under the existing
 thinking-visibility policy and a separate opaque durable item; replay skips the
-display companion and prefers the opaque item's Responses sidecar. Encrypted,
-summary-only, malformed, or mixed reasoning remains unsupported. The backend
+display companion and emits the opaque item's required validated raw JSON
+directly. Completed reasoning without exact raw JSON rejects before durable
+output is formed; replay has no structured fallback or raw-less migration.
+Encrypted, summary-only, malformed, or mixed reasoning remains unsupported. The backend
 also preserves Responses assistant and function-call replay sidecars and never
 sends `previous_response_id` or provider-side compaction controls. The
 extension owns profile storage, model publication, retry scheduling,

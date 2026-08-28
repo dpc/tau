@@ -908,10 +908,10 @@ fn full_prompt_debug_projection_is_fixed_shape_and_content_free() {
                             text: "unique-reasoning-secret".to_owned(),
                         }),
                         tau_proto::ContextItem::UnknownProviderItem(
-                            tau_proto::OpaqueProviderItem::with_raw_json(
-                                CborValue::Text("unique-opaque-secret".to_owned()),
-                                "unique-raw-json-secret".to_owned(),
-                            ),
+                            tau_proto::OpaqueProviderItem::from_raw_json(
+                                r#"{"type":"unique-raw-json-secret"}"#,
+                            )
+                            .expect("valid unknown provider item"),
                         ),
                     ],
                 }),

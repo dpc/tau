@@ -1360,8 +1360,8 @@ pub(crate) fn output_item_retained_payload_bytes(item: &OutputItemAccumulator) -
         OutputItemAccumulator::Reasoning(item)
         | OutputItemAccumulator::Compaction(Some(item))
         | OutputItemAccumulator::UnknownProviderItem(item) => {
-            let bytes = add_serialized(0, Some(&item.value));
-            add_optional_string(bytes, item.raw_json.as_ref())
+            let bytes = add_serialized(0, Some(item.value()));
+            add_len(bytes, item.raw_json().len())
         }
     }
 }
@@ -1392,7 +1392,12 @@ pub fn assistant_text_item_with_phase_and_raw(
 }
 
 fn opaque_item_from_value(item: &serde_json::Value, raw_json: String) -> OpaqueProviderItem {
-    OpaqueProviderItem::with_raw_json(json_to_cbor(item), raw_json)
+    // `raw_json` was sliced from the same successfully parsed provider event as
+    // `item`; disagreement here is an internal extraction bug, not provider
+    // input validation. Keep the assertion explicit so that invariant remains
+    // auditable at this construction boundary.
+    OpaqueProviderItem::try_new(json_to_cbor(item), raw_json)
+        .expect("parsed provider item must match its retained raw JSON")
 }
 
 /// Maps `Effort` to the wire string the OpenAI Responses /

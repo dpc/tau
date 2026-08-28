@@ -47,9 +47,9 @@ fn malformed_local_envelopes_fail() {
 /// Provider-native replacement windows must bypass local checkpoint conversion.
 #[test]
 fn provider_native_window_is_unchanged() {
-    let native = vec![ContextItem::Compaction(tau_proto::OpaqueProviderItem {
-        value: tau_proto::CborValue::Null,
-        raw_json: None,
-    })];
+    let native = vec![ContextItem::Compaction(
+        tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"compaction"}"#)
+            .expect("valid compaction item"),
+    )];
     assert!(matches!(compose(&native), Ok(None)));
 }

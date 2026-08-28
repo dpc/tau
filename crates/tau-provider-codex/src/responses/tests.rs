@@ -1050,11 +1050,10 @@ fn response_anchor_fingerprint_distinguishes_cbor_map_key_types() {
 #[test]
 fn build_request_compaction_response_anchor_falls_back_to_full_replay() {
     let config = chain_test_config();
-    let compaction =
-        ContextItem::Compaction(OpaqueProviderItem::new(json_to_cbor(&serde_json::json!({
-            "type": "compaction",
-            "summary": "older context",
-        }))));
+    let compaction = ContextItem::Compaction(
+        OpaqueProviderItem::from_raw_json(r#"{"type":"compaction","summary":"older context"}"#)
+            .expect("valid compaction item"),
+    );
     let request = PromptPayload {
         system_prompt: "sys",
         context: Box::leak(Box::new(tau_proto::PromptContext {
@@ -1793,7 +1792,7 @@ fn parse_compact_response_preserves_canonical_compaction_item() {
     let ContextItem::Compaction(item) = &output[0] else {
         panic!("expected provider compaction item");
     };
-    assert_eq!(item.raw_json.as_deref(), Some(raw));
+    assert_eq!(item.raw_json(), raw);
 }
 
 /// Empty and structurally incomplete compact windows must fail closed rather
@@ -1822,7 +1821,7 @@ fn parse_compact_response_preserves_raw_item_spelling() {
     let ContextItem::UnknownProviderItem(item) = &output[0] else {
         panic!("expected unknown provider item");
     };
-    assert_eq!(item.raw_json.as_deref(), Some(raw));
+    assert_eq!(item.raw_json(), raw);
 }
 
 fn compact_test_failure_capture(
@@ -2828,9 +2827,10 @@ fn build_request_trims_full_replay_before_latest_compaction_item() {
     });
     let items = [
         user_text("obsolete"),
-        ContextItem::Compaction(OpaqueProviderItem::new(crate::common::json_to_cbor(
-            &compaction_item,
-        ))),
+        ContextItem::Compaction(
+            OpaqueProviderItem::from_raw_json(compaction_item.to_string())
+                .expect("valid compaction item"),
+        ),
         user_text("new"),
     ];
     let request = PromptPayload {
@@ -3073,16 +3073,33 @@ fn restored_internal_tool_error(call_id: &str, body: &str) -> ContextItem {
 }
 
 fn reasoning_item(item: &str) -> ContextItem {
-    let value: serde_json::Value = serde_json::from_str(item).expect("reasoning item json");
-    ContextItem::Reasoning(OpaqueProviderItem::new(crate::common::json_to_cbor(&value)))
+    ContextItem::Reasoning(
+        OpaqueProviderItem::from_raw_json(item).expect("valid reasoning item json"),
+    )
 }
 
 fn raw_reasoning_item(item: &str) -> ContextItem {
-    let value: serde_json::Value = serde_json::from_str(item).expect("reasoning item json");
-    ContextItem::Reasoning(OpaqueProviderItem::with_raw_json(
-        crate::common::json_to_cbor(&value),
-        item,
-    ))
+    ContextItem::Reasoning(
+        OpaqueProviderItem::from_raw_json(item).expect("valid reasoning item json"),
+    )
+}
+
+/// Completed opaque output cannot enter retained state without its exact raw
+/// provider item JSON.
+#[test]
+fn completed_opaque_item_without_raw_json_is_rejected_before_mutation() {
+    let event = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {"type": "compaction", "encrypted_content": "opaque"}
+    });
+    let mut state = StreamState::new();
+
+    assert!(matches!(
+        apply_parsed_json_event(&mut state, &event, None, &mut |_| {}),
+        Err(LlmError::InvalidResponse(_))
+    ));
+    assert!(state.output_items.is_empty());
 }
 
 fn request_for_items(items: &[ContextItem]) -> PromptPayload<'static> {
@@ -3919,7 +3936,7 @@ fn apply_event_captures_reasoning_only_on_output_item_done() {
     let tau_proto::ContextItem::Reasoning(item) = &items[0] else {
         panic!("expected reasoning item");
     };
-    let parsed = crate::common::cbor_to_json(&item.value);
+    let parsed = crate::common::cbor_to_json(item.value());
     assert_eq!(parsed["id"], "rs_done");
     assert_eq!(parsed["encrypted_content"], "SEALED");
 }
@@ -3941,7 +3958,7 @@ fn apply_raw_json_event_preserves_reasoning_item_raw_json_for_replay() {
     let tau_proto::ContextItem::Reasoning(item) = &items[0] else {
         panic!("expected reasoning item");
     };
-    assert_eq!(item.raw_json.as_deref(), Some(raw_reasoning));
+    assert_eq!(item.raw_json(), raw_reasoning);
     let request = request_for_items(&items);
     let body = serde_json::to_string(&build_request(
         &encrypted_reasoning_test_config(),
@@ -4050,7 +4067,7 @@ fn apply_event_captures_compaction_output_item_in_order() {
     let tau_proto::ContextItem::Compaction(item) = &items[1] else {
         panic!("expected compaction item");
     };
-    let parsed = crate::common::cbor_to_json(&item.value);
+    let parsed = crate::common::cbor_to_json(item.value());
     assert_eq!(parsed["type"], "compaction");
     assert_eq!(parsed["summary"], "old history");
 }
@@ -4073,7 +4090,7 @@ fn apply_raw_json_event_preserves_compaction_item_raw_json_for_replay() {
     let tau_proto::ContextItem::Compaction(item) = &items[0] else {
         panic!("expected compaction item");
     };
-    assert_eq!(item.raw_json.as_deref(), Some(raw_compaction));
+    assert_eq!(item.raw_json(), raw_compaction);
     let request = request_for_items(&items);
     let body =
         serde_json::to_string(&build_request(&chain_test_config(), &request, None)).expect("body");
@@ -4105,7 +4122,7 @@ fn apply_raw_json_event_captures_unknown_output_item_in_provider_order() {
     let tau_proto::ContextItem::UnknownProviderItem(item) = &items[0] else {
         panic!("expected unknown provider item first");
     };
-    assert_eq!(item.raw_json.as_deref(), Some(raw_unknown));
+    assert_eq!(item.raw_json(), raw_unknown);
     assert!(matches!(items[1], tau_proto::ContextItem::Message(_)));
 
     let request = request_for_items(&items);

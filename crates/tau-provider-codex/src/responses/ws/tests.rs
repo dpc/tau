@@ -183,8 +183,7 @@ fn compact_turn_validates_shape_while_reporting_private_progress() {
     let result = super::super::with_fingerprint_item_observer(
         move |item| {
             if let tau_proto::ContextItem::Compaction(item) = item {
-                *observed_fingerprint_pointer.borrow_mut() =
-                    item.raw_json.as_ref().map(|raw_json| raw_json.as_ptr());
+                *observed_fingerprint_pointer.borrow_mut() = Some(item.raw_json().as_ptr());
             }
         },
         || {
@@ -199,8 +198,7 @@ fn compact_turn_validates_shape_while_reporting_private_progress() {
                 &mut |state| {
                     if let Some(item) = state.single_compaction_item() {
                         observed_semantic_output = true;
-                        observed_sidecar_pointer =
-                            item.raw_json.as_ref().map(|raw_json| raw_json.as_ptr());
+                        observed_sidecar_pointer = Some(item.raw_json().as_ptr());
                     }
                 },
             )
@@ -236,7 +234,7 @@ fn compact_turn_validates_shape_while_reporting_private_progress() {
         "production fingerprint serialization must borrow the original sidecar allocation"
     );
     assert_eq!(
-        item.raw_json.as_ref().map(|raw_json| raw_json.as_ptr()),
+        Some(item.raw_json().as_ptr()),
         observed_sidecar_pointer,
         "anchor fingerprinting must return the original opaque sidecar allocation"
     );
@@ -2080,6 +2078,27 @@ fn retained_state_budget_accepts_equality_and_rejects_before_mutation() {
     );
     assert_eq!(excess.logical_retained_bytes(), 0);
     assert_eq!(updates, 0);
+}
+
+/// Missing raw JSON on completed opaque output is a shape error before retained
+/// state accounting, even when the same event would exceed a zero byte limit.
+#[test]
+fn missing_opaque_raw_json_precedes_websocket_resource_limit() {
+    let event = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {"type": "compaction", "encrypted_content": "opaque"}
+    });
+    let mut state = StreamState::new();
+    let mut updates = 0;
+
+    assert!(matches!(
+        apply_ws_json_event_with_limit(&mut state, &event, None, 0, &mut |_| updates += 1),
+        Err(LlmError::InvalidResponse(_))
+    ));
+    assert_eq!(updates, 0);
+    assert!(state.output_items.is_empty());
+    assert_eq!(state.admitted_retained_state_bytes(), 0);
 }
 
 /// The production 64 MiB retained-state comparison accepts exact equality and

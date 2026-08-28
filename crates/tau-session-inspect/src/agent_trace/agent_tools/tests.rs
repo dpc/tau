@@ -93,9 +93,10 @@ fn semantic_items_share_global_journal_timing_and_order() {
             kind: tau_proto::ReasoningTextKind::Summary,
             text: "because".into(),
         }),
-        ContextItem::Reasoning(tau_proto::OpaqueProviderItem::new(CborValue::Text(
-            "opaque".into(),
-        ))),
+        ContextItem::Reasoning(
+            tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"reasoning"}"#)
+                .expect("valid reasoning item"),
+        ),
     ];
     let sent = fact(
         "agent-a",

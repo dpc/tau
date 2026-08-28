@@ -2709,8 +2709,8 @@ impl FakeState {
                 if !matches!(
                     opaque_items.as_slice(),
                     [compaction]
-                        if compaction.raw_json.as_deref()
-                            == Some(CANONICAL_OPAQUE_COMPACTION_JSON)
+                        if compaction.raw_json()
+                            == CANONICAL_OPAQUE_COMPACTION_JSON
                 ) || context.contains(removed_user_text)
                     || retained_source_items
                 {
@@ -2751,8 +2751,8 @@ impl FakeState {
                 if !matches!(
                     opaque_items.as_slice(),
                     [compaction]
-                        if compaction.raw_json.as_deref()
-                            == Some(CANONICAL_OPAQUE_COMPACTION_JSON)
+                        if compaction.raw_json()
+                            == CANONICAL_OPAQUE_COMPACTION_JSON
                 ) || context_has_text(prompt, ContextRole::User, removed_user_text)
                     || context_has_text(prompt, ContextRole::Assistant, removed_assistant_text)
                     || !context_has_text(prompt, ContextRole::User, overflow_user_text)
@@ -3220,10 +3220,8 @@ fn emit_opaque_compaction_response(
     handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
         prompt,
         vec![ContextItem::Compaction(
-            tau_proto::OpaqueProviderItem::with_raw_json(
-                CborValue::Map(Vec::new()),
-                CANONICAL_OPAQUE_COMPACTION_JSON,
-            ),
+            tau_proto::OpaqueProviderItem::from_raw_json(CANONICAL_OPAQUE_COMPACTION_JSON)
+                .expect("valid canonical compaction item"),
         )],
         ProviderStopReason::EndTurn,
     )))

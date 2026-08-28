@@ -4,10 +4,12 @@ use super::*;
 /// triggers and private local envelopes must never become durable replacements.
 #[test]
 fn compaction_window_accepts_provider_item_and_rejects_harness_trigger() {
-    let provider_item = ContextItem::Compaction(OpaqueProviderItem::with_raw_json(
-        CborValue::Map(vec![]),
-        r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#.to_owned(),
-    ));
+    let provider_item = ContextItem::Compaction(
+        OpaqueProviderItem::from_raw_json(
+            r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}"#,
+        )
+        .expect("valid opaque compaction"),
+    );
 
     assert!(ValidatedCompactionWindow::new(vec![provider_item]).is_ok());
     assert!(validate_compaction_window(&[ContextItem::CompactionTrigger]).is_err());

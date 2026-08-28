@@ -114,6 +114,12 @@ pacing contract is
 [SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
 
 `tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
+`OpaqueProviderItem` owns one canonical pair of structured provider value and
+required raw JSON. Construction and deserialization validate semantic equality,
+and the enclosing `ContextItem` codec validates that the raw provider `type`
+matches its reasoning, compaction, or unknown-item variant. Invalid and old
+raw-less records fail closed; the protocol provides no synthesis or migration
+path.
 `AgentId` wire decoding, serialization, durable parsing, equality, and display
 use only the canonical unsigiled identifier. User-input parsers may call the
 separate reference parser, which removes exactly one optional leading `@`

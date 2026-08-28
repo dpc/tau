@@ -1146,7 +1146,8 @@ fn model_ids(models: &[ProviderModelInfo]) -> Vec<String> {
 #[test]
 fn compaction_output_finishes_as_normal_end_turn() {
     let output_items = [tau_proto::ContextItem::Compaction(
-        tau_proto::OpaqueProviderItem::new(tau_proto::CborValue::Map(Vec::new())),
+        tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"compaction"}"#)
+            .expect("valid compaction item"),
     )];
 
     assert_eq!(
@@ -1160,9 +1161,10 @@ fn compaction_output_finishes_as_normal_end_turn() {
 #[test]
 fn compaction_with_tool_calls_still_requests_tools() {
     let output_items = [
-        tau_proto::ContextItem::Compaction(tau_proto::OpaqueProviderItem::new(
-            tau_proto::CborValue::Map(Vec::new()),
-        )),
+        tau_proto::ContextItem::Compaction(
+            tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"compaction"}"#)
+                .expect("valid compaction item"),
+        ),
         tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
             call_id: "call-compact-tool".into(),
             name: tau_proto::ToolName::new("echo"),

@@ -18,9 +18,10 @@ fn context(items: Vec<ContextItem>) -> PromptContext {
 }
 
 fn compact_item() -> ContextItem {
-    ContextItem::Compaction(OpaqueProviderItem::new(tau_proto::CborValue::Map(
-        Vec::new(),
-    )))
+    ContextItem::Compaction(
+        OpaqueProviderItem::from_raw_json(r#"{"type":"compaction"}"#)
+            .expect("valid compaction item"),
+    )
 }
 
 fn watch_prompt(body_bytes: usize) -> ContextItem {

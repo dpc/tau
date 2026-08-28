@@ -163,7 +163,10 @@ fn visible_provider_final_requests_one_settled_redraw() {
         }),
         assistant_message_item("first settled item"),
         assistant_message_item("settled answer"),
-        ContextItem::Compaction(OpaqueProviderItem::new(CborValue::Map(vec![]))),
+        ContextItem::Compaction(
+            OpaqueProviderItem::from_raw_json(r#"{"type":"compaction"}"#)
+                .expect("valid compaction item"),
+        ),
         ContextItem::ToolCall(ToolCallItem {
             call_id: "atomic-placeholder".into(),
             name: tau_proto::ToolName::new("read"),
@@ -2072,9 +2075,10 @@ fn render_provider_compaction_item_when_response_finishes() {
     // item, which means server-side compaction has actually completed.
     let mut finished = finished_response(
         "sp-compact",
-        vec![ContextItem::Compaction(OpaqueProviderItem::new(
-            CborValue::Map(vec![]),
-        ))],
+        vec![ContextItem::Compaction(
+            OpaqueProviderItem::from_raw_json(r#"{"type":"compaction"}"#)
+                .expect("valid compaction item"),
+        )],
     );
     finished.compaction_original_input_tokens = Some(226_200);
     finished.compaction_output_tokens = Some(4_500);

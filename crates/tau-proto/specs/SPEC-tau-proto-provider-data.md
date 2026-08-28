@@ -70,11 +70,15 @@ semantics.
 It exists for semantic inspection and compatibility with protocol consumers that
 need structured data.
 
-`OpaqueProviderItem.raw_json` is an optional provider-visible replay sidecar for
-the exact JSON item emitted by a backend. Responses request reconstruction should
-prefer this sidecar so key order and numeric spelling remain stable for upstream
-cache identity, and fall back to serializing `value` only for older records or
-items that were not captured from provider JSON.
+`OpaqueProviderItem.raw_json` is the required exact provider-visible JSON item
+emitted by a backend. It parses to the same semantic value as
+`OpaqueProviderItem.value`, and its provider `type` matches the enclosing
+reasoning, compaction, or unknown-item family. Construction and decoding reject
+missing, malformed, semantically contradictory, and kind-mismatched input.
+Responses request reconstruction replays the validated raw JSON directly so key
+order and numeric spelling remain stable for upstream cache identity. Tau does
+not synthesize it from `value`, fall back between representations, or migrate
+older raw-less records.
 
 The public Responses backend represents validated plain `reasoning_text` output
 as both `ReasoningTextKind::Full` display content and an opaque `Reasoning` item.

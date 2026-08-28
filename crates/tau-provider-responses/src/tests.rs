@@ -322,18 +322,11 @@ fn plain_reasoning_streams_displays_and_materializes_for_replay() {
         panic!("durable reasoning item");
     };
     assert_eq!(
-        reasoning.raw_json.as_deref(),
-        Some(
-            r#"{"type":"reasoning","id":"rs_1","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"think "},{"type":"reasoning_text","text":"carefully"}],"provider_number":1.2300,"provider_future":true}"#
-        )
+        reasoning.raw_json(),
+        r#"{"type":"reasoning","id":"rs_1","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"think "},{"type":"reasoning_text","text":"carefully"}],"provider_number":1.2300,"provider_future":true}"#
     );
-    let raw_reasoning: serde_json::Value = serde_json::from_str(
-        reasoning
-            .raw_json
-            .as_deref()
-            .expect("reasoning replay sidecar"),
-    )
-    .expect("reasoning replay JSON");
+    let raw_reasoning: serde_json::Value =
+        serde_json::from_str(reasoning.raw_json()).expect("reasoning replay JSON");
     assert_eq!(
         raw_reasoning,
         serde_json::json!({
@@ -868,16 +861,12 @@ fn plain_reasoning_replay_prefers_sidecar_and_skips_display_item() {
     });
     assert!(lower_item(&display).expect("display lowering").is_none());
 
-    let replay = ContextItem::Reasoning(tau_proto::OpaqueProviderItem {
-        value: tau_proto::json_to_cbor(&serde_json::json!({
-            "type": "reasoning",
-            "content": [{"type": "reasoning_text", "text": "stale"}],
-        })),
-        raw_json: Some(
+    let replay = ContextItem::Reasoning(
+        tau_proto::OpaqueProviderItem::from_raw_json(
             r#"{"type":"reasoning","id":"rs_raw","summary":[],"content":[{"type":"reasoning_text","text":"replay me"}],"provider_number":1.2300,"provider_future":17}"#
-                .to_owned(),
-        ),
-    });
+        )
+        .expect("valid reasoning item"),
+    );
     let lowered = lower_item(&replay)
         .expect("reasoning lowering")
         .expect("reasoning input");
@@ -1348,29 +1337,19 @@ fn terminal_output_rejects_streamed_reasoning_disagreement() {
     }
 }
 
-/// Replay validation must reject malformed raw sidecars and malformed legacy
-/// CBOR fallbacks instead of forwarding arbitrary opaque provider items.
+/// Replay validation rejects provider-invalid reasoning even after canonical
+/// opaque-item validation has accepted its raw and structured equivalence.
 #[test]
 fn invalid_reasoning_replay_authorities_are_rejected() {
     let invalid = [
-        tau_proto::OpaqueProviderItem {
-            value: tau_proto::CborValue::Null,
-            raw_json: Some("{".to_owned()),
-        },
-        tau_proto::OpaqueProviderItem {
-            value: tau_proto::CborValue::Null,
-            raw_json: Some(
+        tau_proto::OpaqueProviderItem::from_raw_json(
                 r#"{"type":"reasoning","encrypted_content":"SEALED","content":[{"type":"reasoning_text","text":"thought"}]}"#
-                    .to_owned(),
-            ),
-        },
-        tau_proto::OpaqueProviderItem {
-            value: tau_proto::json_to_cbor(&serde_json::json!({
-                "type": "reasoning",
-                "summary": [{"type": "summary_text", "text": "summary"}],
-            })),
-            raw_json: None,
-        },
+        )
+        .expect("canonical but provider-invalid reasoning"),
+        tau_proto::OpaqueProviderItem::from_raw_json(
+            r#"{"type":"reasoning","summary":[{"type":"summary_text","text":"summary"}]}"#,
+        )
+        .expect("canonical but provider-invalid reasoning"),
     ];
     for item in invalid {
         assert!(matches!(
@@ -1378,6 +1357,25 @@ fn invalid_reasoning_replay_authorities_are_rejected() {
             Err(Error::UnsupportedOutput)
         ));
     }
+}
+
+/// Completed public Responses reasoning requires the original raw item rather
+/// than synthesizing replay JSON from the structured event.
+#[test]
+fn completed_reasoning_without_raw_json_is_rejected_before_mutation() {
+    let item = serde_json::json!({
+        "type": "reasoning",
+        "id": "rs_missing_raw",
+        "summary": [],
+        "content": []
+    });
+    let mut slot = Slot::new(0);
+
+    assert!(matches!(
+        slot.apply_item(&item, OutputItemPhase::TerminalFallback, None),
+        Err(Error::UnsupportedOutput)
+    ));
+    assert_eq!(slot.state, SlotState::Empty);
 }
 
 fn reasoning_delta_state() -> State {

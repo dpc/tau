@@ -196,12 +196,12 @@ fn summary_validation_accepts_responses_dual_reasoning_representation() {
             kind: tau_proto::ReasoningTextKind::Full,
             text: "bounded thought".to_owned(),
         }),
-        tau_proto::ContextItem::Reasoning(tau_proto::OpaqueProviderItem {
-            value: tau_proto::json_to_cbor(
-                &serde_json::json!({"type": "reasoning", "id": "reasoning-1"}),
-            ),
-            raw_json: Some(r#"{"type":"reasoning","id":"reasoning-1"}"#.to_owned()),
-        }),
+        tau_proto::ContextItem::Reasoning(
+            tau_proto::OpaqueProviderItem::from_raw_json(
+                r#"{"type":"reasoning","id":"reasoning-1"}"#,
+            )
+            .expect("valid reasoning item"),
+        ),
         tau_proto::ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::Assistant,
             content: vec![tau_proto::ContentPart::Text {

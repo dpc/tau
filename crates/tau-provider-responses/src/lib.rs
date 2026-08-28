@@ -695,10 +695,12 @@ impl Slot {
     fn new(index: u32) -> Self {
         Self {
             index,
-            item: ContextItem::UnknownProviderItem(tau_proto::OpaqueProviderItem {
-                value: tau_proto::CborValue::Null,
-                raw_json: None,
-            }),
+            // The empty slot is not durable provider output, but keeping its
+            // placeholder canonical avoids a second invalid opaque-item state.
+            item: ContextItem::UnknownProviderItem(
+                tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"tau_empty_slot"}"#)
+                    .expect("static JSON placeholder must be valid"),
+            ),
             reasoning_text: None,
             reasoning_parts: BTreeMap::new(),
             state: SlotState::Empty,
@@ -908,6 +910,9 @@ impl Slot {
                 qualifies
             }
             "reasoning" => {
+                if phase != OutputItemPhase::Added && raw_json.is_none() {
+                    return Err(Error::UnsupportedOutput);
+                }
                 match phase {
                     OutputItemPhase::Added if self.state != SlotState::Empty => {
                         return Err(Error::UnsupportedOutput);
@@ -958,12 +963,17 @@ impl Slot {
                     phase,
                     OutputItemPhase::Completed | OutputItemPhase::TerminalFallback
                 ) {
-                    self.item = ContextItem::Reasoning(tau_proto::OpaqueProviderItem {
-                        value: tau_proto::json_to_cbor(item),
-                        raw_json: Some(
-                            raw_json.map_or_else(|| item.to_string(), |raw| raw.get().to_owned()),
-                        ),
-                    });
+                    let raw_json = raw_json
+                        .expect("completed reasoning raw JSON checked above")
+                        .get()
+                        .to_owned();
+                    self.item = ContextItem::Reasoning(
+                        tau_proto::OpaqueProviderItem::try_new(
+                            tau_proto::json_to_cbor(item),
+                            raw_json,
+                        )
+                        .map_err(|_| Error::UnsupportedOutput)?,
+                    );
                     self.state = SlotState::ReasoningCompleted;
                 } else {
                     self.state = SlotState::ReasoningAdded;
@@ -2131,21 +2141,13 @@ fn lower_item(item: &ContextItem) -> Result<Option<ResponsesInputItem>, Error> {
         }
         ContextItem::ToolCall(_) | ContextItem::ToolResult(_) => Err(Error::UnsupportedTool),
         ContextItem::Reasoning(item) => {
-            let value = item
-                .raw_json
-                .as_deref()
-                .map(serde_json::from_str::<Value>)
-                .transpose()
-                .map_err(|_| Error::UnsupportedOutput)?
-                .unwrap_or_else(|| cbor_to_json(&item.value));
+            let value = serde_json::from_str::<Value>(item.raw_json())
+                .map_err(|_| Error::UnsupportedOutput)?;
             plain_reasoning(&value, OutputItemPhase::Completed)?;
-            match &item.raw_json {
-                Some(raw) => RawValue::from_string(raw.clone())
-                    .map(ResponsesInputItem::Raw)
-                    .map(Some)
-                    .map_err(|_| Error::UnsupportedOutput),
-                None => Ok(Some(ResponsesInputItem::Json(value))),
-            }
+            RawValue::from_string(item.raw_json().to_owned())
+                .map(ResponsesInputItem::Raw)
+                .map(Some)
+                .map_err(|_| Error::UnsupportedOutput)
         }
         ContextItem::UnknownProviderItem(_) | ContextItem::LocalCompactionNarrative(_) => {
             Err(Error::UnsupportedOutput)

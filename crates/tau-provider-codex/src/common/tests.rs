@@ -175,7 +175,8 @@ fn semantic_progress_excludes_transport_and_includes_output_items() {
     state
         .output_items
         .push(OutputItemAccumulator::UnknownProviderItem(
-            tau_proto::OpaqueProviderItem::new(tau_proto::CborValue::Null),
+            tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"future"}"#)
+                .expect("valid unknown item"),
         ));
     assert!(state.has_semantic_progress());
 }
@@ -189,7 +190,8 @@ fn timed_semantic_output_has_narrow_metric_categories() {
     state
         .output_items
         .push(OutputItemAccumulator::UnknownProviderItem(
-            tau_proto::OpaqueProviderItem::new(tau_proto::CborValue::Null),
+            tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"future"}"#)
+                .expect("valid unknown item"),
         ));
     state
         .output_items
@@ -253,7 +255,8 @@ fn compact_output_extraction_validates_projected_shape_before_consuming() {
     malformed
         .output_items
         .push(OutputItemAccumulator::Compaction(Some(
-            tau_proto::OpaqueProviderItem::new(tau_proto::CborValue::Null),
+            tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"compaction"}"#)
+                .expect("valid compaction item"),
         )));
     assert!(malformed.into_single_compaction_item().is_none());
 
@@ -262,23 +265,22 @@ fn compact_output_extraction_validates_projected_shape_before_consuming() {
     valid
         .output_items
         .push(OutputItemAccumulator::Compaction(None));
-    let raw_json = "x".repeat(1024 * 1024);
+    let raw_json = format!(
+        r#"{{"type":"compaction","value":"{}"}}"#,
+        "x".repeat(1024 * 1024)
+    );
     let raw_json_ptr = raw_json.as_ptr();
     valid
         .output_items
         .push(OutputItemAccumulator::Compaction(Some(
-            tau_proto::OpaqueProviderItem::with_raw_json(tau_proto::CborValue::Null, raw_json),
+            tau_proto::OpaqueProviderItem::from_raw_json(raw_json).expect("valid compaction item"),
         )));
 
     let extracted = valid
         .into_single_compaction_item()
         .expect("one completed compaction item should extract");
     assert_eq!(
-        extracted
-            .raw_json
-            .as_ref()
-            .expect("raw replay sidecar should remain present")
-            .as_ptr(),
+        extracted.raw_json().as_ptr(),
         raw_json_ptr,
         "consuming extraction must move rather than clone retained payloads"
     );
