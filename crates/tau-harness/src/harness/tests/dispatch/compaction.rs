@@ -5671,7 +5671,8 @@ fn inline_compaction_response_resets_context_size_alerts_without_injection() {
         .insert(
             "compact-soon".to_owned(),
             tau_config::settings::ContextSizeAlert {
-                threshold: 100,
+                threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
+                    .expect("positive test threshold"),
                 enable: true,
                 message: "stale compact advice".to_owned(),
                 when: tau_config::settings::ContextPolicyWhen {
@@ -5745,7 +5746,8 @@ fn inline_compaction_discards_other_queued_context_size_alerts() {
         role.context_size_alerts.insert(
             name.to_owned(),
             tau_config::settings::ContextSizeAlert {
-                threshold: 100,
+                threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
+                    .expect("positive test threshold"),
                 enable: true,
                 message: message.to_owned(),
                 when: tau_config::settings::ContextPolicyWhen {

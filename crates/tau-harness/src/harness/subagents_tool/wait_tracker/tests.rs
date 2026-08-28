@@ -1,3 +1,5 @@
+use tau_config::settings::WaitTimeoutMinutes;
+
 use super::*;
 use crate::harness::subagents_tool::wait_tool_spec;
 
@@ -1044,7 +1046,13 @@ fn default_input_wait_floor_preserves_early_activation() {
 fn configured_input_wait_bounds_clamp_both_ends_without_affecting_background_waits() {
     let now = Instant::now();
     let owner = conv("owner");
-    let mut tracker = WaitTracker::with_input_wait_timeout_bounds((7, 9));
+    let mut tracker = WaitTracker::with_input_wait_timeout_bounds(
+        WaitTimeoutBounds::new(
+            WaitTimeoutMinutes::new(7).expect("positive minimum"),
+            WaitTimeoutMinutes::new(9).expect("positive maximum"),
+        )
+        .expect("ordered bounds"),
+    );
 
     assert!(
         tracker
@@ -1232,7 +1240,13 @@ fn input_wait_deadlines_are_ordered_and_expire_exactly_once() {
     let first = conv("first");
     let first_peer = conv("first-peer");
     let second = conv("second");
-    let mut tracker = WaitTracker::with_input_wait_timeout_bounds((1, 1_440));
+    let mut tracker = WaitTracker::with_input_wait_timeout_bounds(
+        WaitTimeoutBounds::new(
+            WaitTimeoutMinutes::new(1).expect("positive minimum"),
+            WaitTimeoutMinutes::new(1_440).expect("positive maximum"),
+        )
+        .expect("ordered bounds"),
+    );
     assert!(
         tracker
             .handle_wait_invoke_at(

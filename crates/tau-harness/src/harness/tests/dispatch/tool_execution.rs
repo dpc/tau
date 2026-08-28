@@ -5241,7 +5241,8 @@ fn context_size_alert_waits_for_tool_round_completion() {
         .insert(
             "compact-soon".to_owned(),
             tau_config::settings::ContextSizeAlert {
-                threshold: 100,
+                threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
+                    .expect("positive test threshold"),
                 enable: true,
                 message: "compact after tools".to_owned(),
                 when: tau_config::settings::ContextPolicyWhen {

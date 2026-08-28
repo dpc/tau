@@ -116,6 +116,11 @@ and reject an inverted range during configuration loading. The maximum cannot
 exceed 65,535 minutes because the persisted wait registration represents its
 effective timeout as `u16`. They do not affect argument-free or exact
 background-result waits.
+The raw config layer retains both integer keys so layering and field-specific
+diagnostics see the authored values. Effective settings expose one validated
+`WaitTimeoutBounds` policy rather than independent integers. Named minimum,
+maximum, and duration accessors prevent runtime code from exchanging the bounds
+or bypassing their positive/order/range invariants.
 
 `agent_watch_retry_notification_threshold` suppresses model-visible
 `retrying` notifications through the configured attempt, while later attempts
@@ -175,6 +180,9 @@ array replacement:
   through role-group defaults to role overrides. Each inherited alert can
   therefore be customized or disabled without repeating its threshold and
   message.
+  Alert patches retain raw integer thresholds until merge validation. Effective
+  alerts carry a positive `ContextSizeAlertThreshold`, rather than a raw `u64`,
+  and compare provider token usage through its named policy method.
 - Named `compactions` likewise merge field-by-field. Absent fields inherit,
   `when: null` resets to `before_inference` with any status,
   `when.statuses: null` clears the restriction, and a nonempty status list

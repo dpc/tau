@@ -2529,7 +2529,8 @@ fn named_context_size_alerts_queue_once_per_usage_crossing() {
     role.context_size_alerts.insert(
         "compact-soon".to_owned(),
         tau_config::settings::ContextSizeAlert {
-            threshold: 100,
+            threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
+                .expect("positive test threshold"),
             enable: true,
             message: "compact soon".to_owned(),
             when: tau_config::settings::ContextPolicyWhen {
@@ -2541,7 +2542,8 @@ fn named_context_size_alerts_queue_once_per_usage_crossing() {
     role.context_size_alerts.insert(
         "later".to_owned(),
         tau_config::settings::ContextSizeAlert {
-            threshold: 200,
+            threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(200)
+                .expect("positive test threshold"),
             enable: true,
             message: "compact now".to_owned(),
             when: tau_config::settings::ContextPolicyWhen {
@@ -2553,7 +2555,8 @@ fn named_context_size_alerts_queue_once_per_usage_crossing() {
     role.context_size_alerts.insert(
         "disabled".to_owned(),
         tau_config::settings::ContextSizeAlert {
-            threshold: 1,
+            threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(1)
+                .expect("positive test threshold"),
             enable: false,
             message: "must not appear".to_owned(),
             when: tau_config::settings::ContextPolicyWhen {
@@ -2638,7 +2641,8 @@ fn context_size_alert_uses_prompt_owned_role_snapshot() {
         .insert(
             "compact-soon".to_owned(),
             tau_config::settings::ContextSizeAlert {
-                threshold: 100,
+                threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
+                    .expect("positive test threshold"),
                 enable: true,
                 message: "original role alert".to_owned(),
                 when: tau_config::settings::ContextPolicyWhen {
@@ -2655,7 +2659,8 @@ fn context_size_alert_uses_prompt_owned_role_snapshot() {
     replacement_role.context_size_alerts.insert(
         "compact-soon".to_owned(),
         tau_config::settings::ContextSizeAlert {
-            threshold: 1,
+            threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(1)
+                .expect("positive test threshold"),
             enable: true,
             message: "replacement role alert".to_owned(),
             when: tau_config::settings::ContextPolicyWhen {

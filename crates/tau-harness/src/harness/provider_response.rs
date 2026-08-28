@@ -1996,7 +1996,9 @@ impl Harness {
                         path_tau_config_settings::ContextPolicyPoint::AfterResponse
                             | path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished
                     )
-                    && input_tokens > alert.threshold
+                    && alert
+                        .threshold
+                        .is_exceeded_by(tau_proto::TokenCount::new(input_tokens))
             })
         });
         for (name, alert) in alerts {
@@ -2007,7 +2009,9 @@ impl Harness {
                     .statuses
                     .as_ref()
                     .is_none_or(|statuses| statuses.contains(&logical_status))
-                && input_tokens > alert.threshold
+                && alert
+                    .threshold
+                    .is_exceeded_by(tau_proto::TokenCount::new(input_tokens))
                 && agent
                     .execution
                     .fired_context_size_alerts
@@ -2055,7 +2059,9 @@ impl Harness {
                     .statuses
                     .as_ref()
                     .is_none_or(|statuses| statuses.contains(&logical_status))
-                && input_tokens > alert.threshold
+                && alert
+                    .threshold
+                    .is_exceeded_by(tau_proto::TokenCount::new(input_tokens))
                 && agent.execution.fired_context_size_alerts.insert(name)
             {
                 agent

@@ -21,7 +21,8 @@ fn configured_input_wait_bounds_survive_rollover_and_drive_wait_registration() {
         CborValue::Text("timeout_minutes".to_owned()),
         CborValue::Integer(1.into()),
     )]);
-    assert_eq!(h.input_wait_timeout_bounds(), (7, 9));
+    assert_eq!(h.input_wait_timeout_bounds().minimum().get(), 7);
+    assert_eq!(h.input_wait_timeout_bounds().maximum().get(), 9);
     assert_eq!(
         path_crate_internal_tools::InternalToolHost::new(&mut h)
             .normalized_wait_timeout_minutes(&input_wait_arguments),
@@ -33,7 +34,8 @@ fn configured_input_wait_bounds_survive_rollover_and_drive_wait_registration() {
         tau_proto::SessionStartReason::New,
     )
     .expect("switch session");
-    assert_eq!(h.input_wait_timeout_bounds(), (7, 9));
+    assert_eq!(h.input_wait_timeout_bounds().minimum().get(), 7);
+    assert_eq!(h.input_wait_timeout_bounds().maximum().get(), 9);
 
     let cid = ensure_test_user_agent(&mut h);
     let call = AgentToolCall {

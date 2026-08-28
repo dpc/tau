@@ -3483,7 +3483,8 @@ fn resumed_harness_replays_context_size_alert_at_delivery_position() {
             .insert(
                 "compact-soon".to_owned(),
                 tau_config::settings::ContextSizeAlert {
-                    threshold: 100,
+                    threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
+                        .expect("positive test threshold"),
                     enable: true,
                     message: alert_text.to_owned(),
                     when: tau_config::settings::ContextPolicyWhen {
@@ -3526,7 +3527,8 @@ fn resumed_harness_replays_context_size_alert_at_delivery_position() {
             .insert(
                 "compact-after-tools".to_owned(),
                 tau_config::settings::ContextSizeAlert {
-                    threshold: 200,
+                    threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(200)
+                        .expect("positive test threshold"),
                     enable: true,
                     message: steered_alert_text.to_owned(),
                     when: tau_config::settings::ContextPolicyWhen {

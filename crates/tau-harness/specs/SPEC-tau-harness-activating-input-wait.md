@@ -15,6 +15,9 @@ to five and 1,440 minutes. Both are positive whole-minute values, with a
 65,535-minute maximum because persisted wait registrations store the effective
 timeout as `u16`. The legacy `any_input` field is explicitly rejected. The
 deadline starts when the event loop registers the waiter.
+Configuration retains the two raw scalar keys through layering and validation,
+then the harness carries one validated `WaitTimeoutBounds` policy to argument
+normalization and duration conversion.
 
 It completes when canonical input for that agent has passed its normal
 acceptance boundary and is queued with inference activation:

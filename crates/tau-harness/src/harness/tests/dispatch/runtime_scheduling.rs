@@ -912,7 +912,8 @@ fn outer_finish_alert_uses_terminal_snapshot_and_retains_hysteresis() {
     let prompt_id = tau_proto::AgentPromptId::parse("ap-alert-finish").expect("prompt");
     let outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&prompt_id);
     let alert = tau_config::settings::ContextSizeAlert {
-        threshold: 100,
+        threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
+            .expect("positive test threshold"),
         enable: true,
         message: "captured finish alert".to_owned(),
         when: tau_config::settings::ContextPolicyWhen {

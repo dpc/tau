@@ -17,6 +17,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use tau_config::settings::WaitTimeoutBounds;
 use tau_proto::{
     AgentContextKey, AgentContextValue, AgentId, AgentMessageReceived, AgentMessageSent,
     AgentWatchUpdateCause, AgentWatchesUpdated, CborValue, Event, ToolBackgroundError,
@@ -163,13 +164,7 @@ pub(crate) const WAIT_TOOL_NAME: &str = "wait";
 /// unknown, or conflicting arguments return an error rather than choosing a
 /// wait mode implicitly.
 pub fn normalized_wait_timeout_minutes(arguments: &CborValue) -> Result<Option<u64>, String> {
-    normalized_wait_timeout_minutes_with_bounds(
-        arguments,
-        (
-            tau_config::settings::DEFAULT_WAIT_TIMEOUT_MINIMUM_MINUTES,
-            tau_config::settings::DEFAULT_WAIT_TIMEOUT_MAXIMUM_MINUTES,
-        ),
-    )
+    normalized_wait_timeout_minutes_with_bounds(arguments, WaitTimeoutBounds::built_in())
 }
 
 /// Returns the normalized effective input-wait timeout using inclusive
@@ -179,7 +174,7 @@ pub fn normalized_wait_timeout_minutes(arguments: &CborValue) -> Result<Option<u
 /// `None`.
 pub(crate) fn normalized_wait_timeout_minutes_with_bounds(
     arguments: &CborValue,
-    input_wait_timeout_bounds: (u64, u64),
+    input_wait_timeout_bounds: WaitTimeoutBounds,
 ) -> Result<Option<u64>, String> {
     normalized_wait_timeout_minutes_inner(arguments, input_wait_timeout_bounds)
 }
@@ -194,7 +189,9 @@ pub(crate) struct SubagentToolState {
 impl SubagentToolState {
     /// Creates state whose activating-input waits use the supplied inclusive
     /// timeout bounds in whole minutes.
-    pub(crate) fn with_input_wait_timeout_bounds(input_wait_timeout_bounds: (u64, u64)) -> Self {
+    pub(crate) fn with_input_wait_timeout_bounds(
+        input_wait_timeout_bounds: WaitTimeoutBounds,
+    ) -> Self {
         Self {
             wait_tracker: WaitTracker::with_input_wait_timeout_bounds(input_wait_timeout_bounds),
         }
@@ -379,7 +376,7 @@ fn next_agent_message_id(sender_id: &AgentId) -> tau_proto::AgentMessageId {
 impl Harness {
     /// Returns the inclusive effective bounds for activating-input `wait`
     /// calls.
-    pub(crate) fn input_wait_timeout_bounds(&self) -> (u64, u64) {
+    pub(crate) fn input_wait_timeout_bounds(&self) -> WaitTimeoutBounds {
         self.agent_runtime
             .subagents
             .wait_tracker

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroU16, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -42,6 +42,135 @@ const BUILT_IN_HARNESS_YAML: &str = include_str!("../config/built-in.harness.yam
 /// Default model-visible instruction for a context-size alert.
 const DEFAULT_CONTEXT_SIZE_ALERT_MESSAGE: &str =
     "Use the `compact` tool after finishing your current task.";
+
+/// One positive whole-minute activating-input wait timeout.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct WaitTimeoutMinutes(NonZeroU16);
+
+impl WaitTimeoutMinutes {
+    /// Creates a positive timeout representable by persisted wait metadata.
+    #[must_use]
+    pub const fn new(minutes: u16) -> Option<Self> {
+        match NonZeroU16::new(minutes) {
+            Some(minutes) => Some(Self(minutes)),
+            None => None,
+        }
+    }
+
+    /// Returns the timeout as whole minutes.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get() as u64
+    }
+
+    /// Returns the timeout as a scheduling duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        Duration::from_secs(self.get() * 60)
+    }
+}
+
+/// Validated inclusive bounds for activating-input wait timeouts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WaitTimeoutBounds {
+    /// Smallest effective activating-input wait timeout.
+    minimum: WaitTimeoutMinutes,
+    /// Largest effective activating-input wait timeout.
+    maximum: WaitTimeoutMinutes,
+}
+
+impl WaitTimeoutBounds {
+    /// Creates ordered inclusive timeout bounds.
+    #[must_use]
+    pub const fn new(minimum: WaitTimeoutMinutes, maximum: WaitTimeoutMinutes) -> Option<Self> {
+        if minimum.get() <= maximum.get() {
+            Some(Self { minimum, maximum })
+        } else {
+            None
+        }
+    }
+
+    /// Returns the configured minimum timeout.
+    #[must_use]
+    pub const fn minimum(self) -> WaitTimeoutMinutes {
+        self.minimum
+    }
+
+    /// Returns the configured maximum timeout.
+    #[must_use]
+    pub const fn maximum(self) -> WaitTimeoutMinutes {
+        self.maximum
+    }
+
+    /// Returns the configured minimum as a scheduling duration.
+    #[must_use]
+    pub const fn minimum_duration(self) -> Duration {
+        self.minimum.duration()
+    }
+
+    /// Returns the configured maximum as a scheduling duration.
+    #[must_use]
+    pub const fn maximum_duration(self) -> Duration {
+        self.maximum.duration()
+    }
+
+    /// Clamps a positive requested minute count to this effective policy.
+    #[must_use]
+    pub fn clamp(self, requested_minutes: u64) -> WaitTimeoutMinutes {
+        let minutes = requested_minutes.clamp(self.minimum.get(), self.maximum.get());
+        WaitTimeoutMinutes(NonZeroU16::new(minutes as u16).expect("validated wait bounds"))
+    }
+
+    /// Clamps a positive wide integer from decoded tool input to this policy.
+    #[must_use]
+    pub fn clamp_integer(self, requested_minutes: i128) -> WaitTimeoutMinutes {
+        let minutes = requested_minutes.clamp(
+            i128::from(self.minimum.0.get()),
+            i128::from(self.maximum.0.get()),
+        );
+        WaitTimeoutMinutes(
+            NonZeroU16::new(minutes as u16).expect("validated positive decoded wait timeout"),
+        )
+    }
+
+    fn from_raw(minimum: u64, maximum: u64) -> Result<Self, String> {
+        if minimum < 1 {
+            return Err("wait_timeout_minimum_minutes must be at least 1".to_owned());
+        }
+        if maximum < 1 {
+            return Err("wait_timeout_maximum_minutes must be at least 1".to_owned());
+        }
+        if u64::from(u16::MAX) < maximum {
+            return Err(format!(
+                "wait_timeout_maximum_minutes must not exceed {}",
+                u16::MAX
+            ));
+        }
+        if maximum < minimum {
+            return Err(
+                "wait_timeout_minimum_minutes must not exceed wait_timeout_maximum_minutes"
+                    .to_owned(),
+            );
+        }
+        let minimum = WaitTimeoutMinutes(
+            NonZeroU16::new(minimum as u16).expect("validated positive bounded wait minimum"),
+        );
+        let maximum = WaitTimeoutMinutes(
+            NonZeroU16::new(maximum as u16).expect("validated positive bounded wait maximum"),
+        );
+        Ok(Self { minimum, maximum })
+    }
+
+    /// Returns the built-in effective timeout policy.
+    #[must_use]
+    pub fn built_in() -> Self {
+        Self::from_raw(
+            DEFAULT_WAIT_TIMEOUT_MINIMUM_MINUTES,
+            DEFAULT_WAIT_TIMEOUT_MAXIMUM_MINUTES,
+        )
+        .expect("built-in wait timeout bounds are valid")
+    }
+}
 
 fn parse_built_in_yaml<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> T {
     serde_yaml_ng::from_str(text).unwrap_or_else(|err| {
@@ -782,12 +911,8 @@ pub struct HarnessSettings {
     /// Whether a newly spawned interactive harness greets its initial UI with
     /// the Tau onboarding notice.
     pub show_introduction_notice: bool,
-    /// Lowest effective activating-input wait timeout accepted from the `wait`
-    /// tool, measured in whole minutes.
-    pub wait_timeout_minimum_minutes: u64,
-    /// Highest effective activating-input wait timeout accepted from the `wait`
-    /// tool, measured in whole minutes.
-    pub wait_timeout_maximum_minutes: u64,
+    /// Validated inclusive policy for activating-input wait timeouts.
+    pub wait_timeout_bounds: WaitTimeoutBounds,
     /// Largest provider retry attempt suppressed from model-visible agent-watch
     /// notifications.
     pub agent_watch_retry_notification_threshold: u32,
@@ -979,12 +1104,16 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             validate_extension_name(extension_name).map_err(D::Error::custom)?;
         }
         let agent_defaults = wire.agents.role_defaults();
+        let wait_timeout_bounds = WaitTimeoutBounds::from_raw(
+            wire.wait_timeout_minimum_minutes,
+            wire.wait_timeout_maximum_minutes,
+        )
+        .map_err(D::Error::custom)?;
         let mut settings = Self {
             session_retention_days: wire.session_retention_days,
             diagnostic_retention_days: wire.diagnostic_retention_days,
             show_introduction_notice: wire.show_introduction_notice,
-            wait_timeout_minimum_minutes: wire.wait_timeout_minimum_minutes,
-            wait_timeout_maximum_minutes: wire.wait_timeout_maximum_minutes,
+            wait_timeout_bounds,
             agent_watch_retry_notification_threshold: wire.agent_watch_retry_notification_threshold,
             provider_cache_refresh: wire.provider_cache_refresh,
             tau_state_access: wire.tau_state_access,
@@ -1000,9 +1129,6 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             agent_id_template: wire.agents.id_template,
             agent_display_name_template: wire.agents.display_name_template,
         };
-        settings
-            .validate_wait_timeout_bounds()
-            .map_err(D::Error::custom)?;
         let mut effective_agent_defaults = AgentRole::default();
         effective_agent_defaults.apply_patch(&agent_defaults);
         settings.apply_agent_defaults_to_roles(&agent_defaults);
@@ -1823,36 +1949,11 @@ impl HarnessSettings {
         s
     }
 
-    /// Return the configured inclusive effective bounds for activating-input
-    /// `wait` calls, in whole minutes.
+    /// Returns the validated inclusive policy for activating-input `wait`
+    /// calls.
     #[must_use]
-    pub fn wait_timeout_bounds(&self) -> (u64, u64) {
-        (
-            self.wait_timeout_minimum_minutes,
-            self.wait_timeout_maximum_minutes,
-        )
-    }
-
-    fn validate_wait_timeout_bounds(&self) -> Result<(), String> {
-        if self.wait_timeout_minimum_minutes < 1 {
-            return Err("wait_timeout_minimum_minutes must be at least 1".to_owned());
-        }
-        if self.wait_timeout_maximum_minutes < 1 {
-            return Err("wait_timeout_maximum_minutes must be at least 1".to_owned());
-        }
-        if u64::from(u16::MAX) < self.wait_timeout_maximum_minutes {
-            return Err(format!(
-                "wait_timeout_maximum_minutes must not exceed {}",
-                u16::MAX
-            ));
-        }
-        if self.wait_timeout_maximum_minutes < self.wait_timeout_minimum_minutes {
-            return Err(
-                "wait_timeout_minimum_minutes must not exceed wait_timeout_maximum_minutes"
-                    .to_owned(),
-            );
-        }
-        Ok(())
+    pub const fn wait_timeout_bounds(&self) -> WaitTimeoutBounds {
+        self.wait_timeout_bounds
     }
 
     fn apply_role_group_overrides(
@@ -2033,7 +2134,7 @@ impl HarnessSettings {
     fn validate_context_size_alerts(&self) -> Result<(), SettingsError> {
         for (role_name, role) in &self.roles {
             for (alert_name, alert) in &role.context_size_alerts {
-                if alert.threshold == 0 {
+                if !alert.threshold.is_valid() {
                     return Err(SettingsError::Config(config::ConfigError::Message(
                         format!(
                             "role `{role_name}` context-size alert `{alert_name}` requires a positive threshold"
@@ -2076,6 +2177,17 @@ impl HarnessSettings {
                         ),
                     )));
                 }
+            }
+        }
+        // The global map is independently public effective state. Validate it
+        // after roles to retain established role-specific diagnostic priority.
+        for (alert_name, alert) in &self.context_size_alerts {
+            if !alert.threshold.is_valid() {
+                return Err(SettingsError::Config(config::ConfigError::Message(
+                    format!(
+                        "agent-global context-size alert `{alert_name}` requires a positive threshold"
+                    ),
+                )));
             }
         }
         Ok(())
@@ -2801,13 +2913,82 @@ where
     Ok(Some(statuses))
 }
 
+/// Positive provider-input-token policy threshold for a context-size alert.
+///
+/// Layer merging privately retains `None` for a missing or authored-zero
+/// threshold. Final settings validation must reject that marker before any
+/// effective alert reaches serialization or runtime policy evaluation. Delaying
+/// rejection preserves the role-and-alert-specific diagnostics produced after
+/// all config layers have been applied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextSizeAlertThreshold(Option<NonZeroU64>);
+
+impl ContextSizeAlertThreshold {
+    /// Creates a positive alert threshold.
+    #[must_use]
+    pub const fn new(tokens: u64) -> Option<Self> {
+        match NonZeroU64::new(tokens) {
+            Some(tokens) => Some(Self(Some(tokens))),
+            None => None,
+        }
+    }
+
+    /// Returns the positive threshold as a raw token count for config display.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        match self.0 {
+            Some(tokens) => tokens.get(),
+            None => panic!("incomplete context-size alert escaped validation"),
+        }
+    }
+
+    /// Returns whether provider-reported input usage strictly exceeds this
+    /// policy.
+    #[must_use]
+    pub fn is_exceeded_by(self, input_tokens: tau_proto::TokenCount) -> bool {
+        input_tokens.get() > self.get()
+    }
+
+    /// Creates the private invalid marker used only while merging raw patches.
+    const fn merge_seed() -> Self {
+        Self(None)
+    }
+
+    /// Returns whether layered configuration supplied a positive threshold.
+    ///
+    /// Every public effective alert map must check this before it can leave the
+    /// settings loader.
+    const fn is_valid(self) -> bool {
+        self.0.is_some()
+    }
+}
+
+impl Serialize for ContextSizeAlertThreshold {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u64(self.get())
+    }
+}
+
+impl<'de> Deserialize<'de> for ContextSizeAlertThreshold {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let threshold = u64::deserialize(deserializer)?;
+        Self::new(threshold)
+            .ok_or_else(|| D::Error::custom("context-size alert threshold must be positive"))
+    }
+}
+
 /// Effective configuration for one named context-size alert.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextSizeAlert {
     /// Provider-reported input-token count above which the alert fires.
-    #[serde(deserialize_with = "deserialize_positive_context_size_alert_threshold")]
-    pub threshold: u64,
+    pub threshold: ContextSizeAlertThreshold,
     /// Whether this alert is active. Defaults to `true`.
     #[serde(default = "context_size_alert_enabled_default")]
     pub enable: bool,
@@ -2827,7 +3008,7 @@ impl ContextSizeAlert {
     /// validated before this value can leave the settings loader.
     fn merge_seed() -> Self {
         Self {
-            threshold: 0,
+            threshold: ContextSizeAlertThreshold::merge_seed(),
             enable: true,
             message: context_size_alert_message_default(),
             when: context_size_alert_when_default(),
@@ -2844,21 +3025,6 @@ fn context_size_alert_when_default() -> ContextPolicyWhen {
 
 fn context_size_alert_enabled_default() -> bool {
     true
-}
-
-fn deserialize_positive_context_size_alert_threshold<'de, D>(
-    deserializer: D,
-) -> Result<u64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let threshold = u64::deserialize(deserializer)?;
-    if threshold == 0 {
-        return Err(D::Error::custom(
-            "context-size alert threshold must be positive",
-        ));
-    }
-    Ok(threshold)
 }
 
 fn context_size_alert_message_default() -> String {
@@ -2899,7 +3065,11 @@ impl ContextSizeAlertPatch {
     /// Applies every field present in this layer to an alert merge value.
     fn apply_to(&self, alert: &mut ContextSizeAlert) {
         if let Some(threshold) = self.threshold {
-            alert.threshold = threshold;
+            // Zero deliberately becomes the same private invalid marker as an
+            // omitted threshold. Post-merge validation then reports the fully
+            // resolved role/global path instead of a layer-local serde error.
+            alert.threshold = ContextSizeAlertThreshold::new(threshold)
+                .unwrap_or_else(ContextSizeAlertThreshold::merge_seed);
         }
         if let Some(enable) = self.enable {
             alert.enable = enable;

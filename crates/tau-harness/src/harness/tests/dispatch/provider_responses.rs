@@ -867,7 +867,8 @@ fn finished_response_injects_crossed_context_size_alert() {
         .insert(
             "compact-soon".to_owned(),
             tau_config::settings::ContextSizeAlert {
-                threshold: 100,
+                threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
+                    .expect("positive test threshold"),
                 enable: true,
                 message: "compact after this task".to_owned(),
                 when: tau_config::settings::ContextPolicyWhen {
@@ -951,7 +952,8 @@ fn failed_response_does_not_inject_context_size_alert() {
         .insert(
             "compact-soon".to_owned(),
             tau_config::settings::ContextSizeAlert {
-                threshold: 100,
+                threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
+                    .expect("positive test threshold"),
                 enable: true,
                 message: "must not continue".to_owned(),
                 when: tau_config::settings::ContextPolicyWhen {

@@ -24,7 +24,8 @@ fn after_response_alert_prefers_frozen_status_absence_over_stale_terminal_state(
     let alerts = path_std_collections::BTreeMap::from([(
         "working".to_owned(),
         tau_config::settings::ContextSizeAlert {
-            threshold: 100,
+            threshold: path_tau_config_settings::ContextSizeAlertThreshold::new(100)
+                .expect("positive test threshold"),
             enable: true,
             message: "working-only".to_owned(),
             when: tau_config::settings::ContextPolicyWhen {

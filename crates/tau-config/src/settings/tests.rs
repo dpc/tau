@@ -790,7 +790,13 @@ fn diagnostic_retention_has_independent_default_and_disable() {
 #[test]
 fn wait_timeout_bounds_default_and_override() {
     let built_in = HarnessSettings::built_in();
-    assert_eq!(built_in.wait_timeout_bounds(), (5, 1_440));
+    let built_in_bounds = built_in.wait_timeout_bounds();
+    assert_eq!(built_in_bounds.minimum().get(), 5);
+    assert_eq!(built_in_bounds.maximum().get(), 1_440);
+    assert_eq!(
+        built_in_bounds.minimum_duration(),
+        std::time::Duration::from_secs(5 * 60)
+    );
 
     let td = TempDir::new().expect("tempdir");
     std::fs::write(
@@ -801,7 +807,33 @@ fn wait_timeout_bounds_default_and_override() {
 
     let settings =
         load_harness_settings_in(&dirs_with_config(td.path())).expect("load overridden bounds");
-    assert_eq!(settings.wait_timeout_bounds(), (7, 11));
+    let bounds = settings.wait_timeout_bounds();
+    assert_eq!(bounds.minimum().get(), 7);
+    assert_eq!(bounds.maximum().get(), 11);
+}
+
+/// Ensures a higher-precedence one-field wait override retains the lower bound
+/// from an earlier layer before the pair enters effective validation.
+#[test]
+fn wait_timeout_bounds_merge_partial_override_before_validation() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        "wait_timeout_minimum_minutes: 7\nwait_timeout_maximum_minutes: 11\n",
+    )
+    .expect("write base bounds");
+    std::fs::create_dir_all(dir.join("harness.d")).expect("create drop-in directory");
+    std::fs::write(
+        dir.join("harness.d/10-maximum.yaml"),
+        "wait_timeout_maximum_minutes: 13\n",
+    )
+    .expect("write partial override");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load layered bounds");
+    let bounds = settings.wait_timeout_bounds();
+    assert_eq!(bounds.minimum().get(), 7);
+    assert_eq!(bounds.maximum().get(), 13);
 }
 
 /// The built-in watch retry threshold must suppress the first five attempts,
@@ -882,7 +914,48 @@ fn wait_timeout_bounds_accept_maximum_wait_metadata_range() {
 
     let settings =
         load_harness_settings_in(&dirs_with_config(td.path())).expect("load maximum bounds");
-    assert_eq!(settings.wait_timeout_bounds(), (1, u64::from(u16::MAX)));
+    let bounds = settings.wait_timeout_bounds();
+    assert_eq!(bounds.minimum().get(), 1);
+    assert_eq!(bounds.maximum().get(), u64::from(u16::MAX));
+}
+
+/// Ensures the effective wait policy rejects unordered construction and
+/// performs clamping through named semantic values rather than interchangeable
+/// scalars.
+#[test]
+fn effective_wait_timeout_bounds_preserve_order_and_clamp_at_boundaries() {
+    assert!(WaitTimeoutMinutes::new(0).is_none());
+    let minimum = WaitTimeoutMinutes::new(7).expect("positive minimum");
+    let maximum = WaitTimeoutMinutes::new(11).expect("positive maximum");
+    assert!(WaitTimeoutBounds::new(maximum, minimum).is_none());
+
+    let bounds = WaitTimeoutBounds::new(minimum, maximum).expect("ordered bounds");
+    assert_eq!(bounds.clamp(1), minimum);
+    assert_eq!(
+        bounds.clamp(9).duration(),
+        std::time::Duration::from_secs(9 * 60)
+    );
+    assert_eq!(bounds.clamp(u64::MAX), maximum);
+}
+
+/// Ensures raw wait validation retains its historical first-error ordering when
+/// both authored bounds are invalid, before any effective policy can escape.
+#[test]
+fn wait_timeout_bounds_report_minimum_zero_before_maximum_zero() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        "wait_timeout_minimum_minutes: 0\nwait_timeout_maximum_minutes: 0\n",
+    )
+    .expect("write invalid harness config");
+
+    let error =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("zero bounds must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("wait_timeout_minimum_minutes must be at least 1")
+    );
 }
 
 /// Ensures tag policy patterns support exact and terminal-prefix matching while
@@ -2620,7 +2693,7 @@ fn harness_settings_merge_named_context_size_alerts() {
 
     let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     let reviewer = &settings.roles["reviewer"].context_size_alerts;
-    assert_eq!(reviewer["compact-soon"].threshold, 160_000);
+    assert_eq!(reviewer["compact-soon"].threshold.get(), 160_000);
     assert!(!reviewer["compact-soon"].enable);
     assert_eq!(reviewer["compact-soon"].message, "Compact after this task.");
     assert_eq!(reviewer["final-warning"].message, "Finish immediately.");
@@ -2676,7 +2749,7 @@ fn harness_settings_merge_context_size_alert_alias_across_layers() {
 
     let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     let alert = &settings.roles["reviewer"].context_size_alerts["compact-soon"];
-    assert_eq!(alert.threshold, 160_000);
+    assert_eq!(alert.threshold.get(), 160_000);
     assert!(!alert.enable);
 }
 
@@ -2699,6 +2772,138 @@ fn harness_settings_reject_context_size_alert_without_threshold() {
     let error = load_harness_settings_in(&dirs_with_config(td.path()))
         .expect_err("missing threshold must fail");
     assert!(error.to_string().contains("requires a positive threshold"));
+}
+
+/// Ensures a higher-precedence raw zero threshold wins layering but cannot
+/// enter the effective alert domain, retaining the role-and-alert-specific
+/// diagnostic.
+#[test]
+fn layered_zero_context_size_alert_threshold_cannot_escape_validation() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    custom:
+      roles:
+        reviewer:
+          context_size_alerts:
+            compact-soon:
+              threshold: 100
+"#,
+    )
+    .expect("write base config");
+    std::fs::create_dir_all(dir.join("harness.d")).expect("create drop-in directory");
+    std::fs::write(
+        dir.join("harness.d/10-invalid.yaml"),
+        r#"
+agents:
+  role_groups:
+    custom:
+      roles:
+        reviewer:
+          context_size_alerts:
+            compact-soon:
+              threshold: 0
+"#,
+    )
+    .expect("write invalid override");
+
+    let error = load_harness_settings_in(&dirs_with_config(dir))
+        .expect_err("layered zero threshold must fail");
+    assert!(error.to_string().contains(
+        "role `reviewer` context-size alert `compact-soon` requires a positive threshold"
+    ));
+}
+
+/// Ensures disabling every role cannot let an incomplete agent-global alert
+/// bypass role validation and escape through the public effective global map.
+#[test]
+fn disabled_roles_do_not_hide_invalid_global_context_size_alert_thresholds() {
+    for alert_body in ["      enable: false\n", "      threshold: 0\n"] {
+        let td = TempDir::new().expect("tempdir");
+        std::fs::write(
+            td.path().join("harness.yaml"),
+            format!(
+                r#"
+agents:
+  enable: false
+  context_size_alerts:
+    incomplete:
+{alert_body}"#
+            ),
+        )
+        .expect("write invalid global alert");
+
+        let error = load_harness_settings_in(&dirs_with_config(td.path()))
+            .expect_err("invalid global threshold must fail with no effective roles");
+        assert!(
+            error.to_string().contains(
+                "agent-global context-size alert `incomplete` requires a positive threshold"
+            ),
+            "{error}"
+        );
+    }
+}
+
+/// Ensures a valid role override cannot mask an invalid global threshold that
+/// remains independently exposed by effective harness settings.
+#[test]
+fn role_override_does_not_hide_invalid_global_context_size_alert_threshold() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  enable: false
+  context_size_alerts:
+    compact-soon:
+      threshold: 0
+  role_groups:
+    custom:
+      roles:
+        reviewer:
+          enable: true
+          context_size_alerts:
+            compact-soon:
+              threshold: 100
+"#,
+    )
+    .expect("write invalid global alert with valid role override");
+
+    let error = load_harness_settings_in(&dirs_with_config(td.path()))
+        .expect_err("role override must not repair the separately exposed global alert");
+    assert!(
+        error.to_string().contains(
+            "agent-global context-size alert `compact-soon` requires a positive threshold"
+        ),
+        "{error}"
+    );
+}
+
+/// Ensures alert policy comparison is strict and remains explicitly
+/// token-domain aware at the provider-usage boundary.
+#[test]
+fn context_size_alert_threshold_compares_provider_tokens_strictly() {
+    let threshold = ContextSizeAlertThreshold::new(100).expect("positive threshold");
+    assert!(!threshold.is_exceeded_by(tau_proto::TokenCount::new(100)));
+    assert!(threshold.is_exceeded_by(tau_proto::TokenCount::new(101)));
+}
+
+/// Ensures neither direct semantic construction nor direct effective-alert
+/// deserialization can create a zero context-size alert threshold.
+#[test]
+fn context_size_alert_threshold_rejects_zero_at_public_boundaries() {
+    assert!(ContextSizeAlertThreshold::new(0).is_none());
+    let error = serde_yaml_ng::from_str::<ContextSizeAlert>("threshold: 0\n")
+        .expect_err("direct effective alert must reject zero");
+    assert!(
+        error
+            .to_string()
+            .contains("context-size alert threshold must be positive")
+    );
 }
 
 /// Ensures an explicitly empty internal-prompt message is rejected instead of
@@ -5725,6 +5930,18 @@ fn context_size_alert_default_selector_preserves_existing_behavior() {
     let alert: ContextSizeAlert =
         serde_yaml_ng::from_str("threshold: 100\nmessage: compact soon\n").expect("valid alert");
     assert_eq!(alert.when, context_size_alert_when_default());
+}
+
+/// Ensures the semantic effective threshold retains the established numeric
+/// scalar encoding instead of exposing its refinement in config output.
+#[test]
+fn context_size_alert_threshold_serializes_as_numeric_scalar() {
+    let alert: ContextSizeAlert =
+        serde_yaml_ng::from_str("threshold: 100\nmessage: compact soon\n").expect("valid alert");
+    assert_eq!(
+        serde_json::to_value(&alert).expect("serialize effective alert")["threshold"],
+        serde_json::json!(100)
+    );
 }
 
 /// Ensures legacy compaction replaces inherited named rules and seeds both the

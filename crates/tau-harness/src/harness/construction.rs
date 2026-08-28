@@ -38,7 +38,7 @@ struct HarnessBaseParts {
     /// Effective startup configuration retained by the harness.
     config: HarnessConfigState,
     /// Inclusive effective bounds for activating-input `wait` calls.
-    input_wait_timeout_bounds: (u64, u64),
+    input_wait_timeout_bounds: tau_config::settings::WaitTimeoutBounds,
     /// Approved disabled-by-default Provider cache refresh policy.
     provider_cache_refresh: tau_config::settings::ProviderCacheRefresh,
     /// Loaded system prompt templates keyed by template name.
