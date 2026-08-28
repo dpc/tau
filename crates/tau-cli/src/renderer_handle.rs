@@ -10,6 +10,8 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use tau_cli_term::RendererDeliveryId;
+
 use crate::MUTEX_POISONED;
 
 /// Routes transcript mutations either to the visible terminal or to one
@@ -259,7 +261,7 @@ impl RendererHandle {
     /// Registers one already-selected opaque fact with the raw terminal.
     pub(crate) fn observe_presentation_mutation(
         &self,
-        delivery_id: u64,
+        delivery_id: RendererDeliveryId,
         class: super::event_renderer::PresentationFactClass,
     ) {
         let fact = class.opaque_fact();
@@ -386,7 +388,7 @@ impl RendererHandle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TestPresentationObservation {
     /// CLI-local delivery identity.
-    pub(crate) delivery_id: u64,
+    pub(crate) delivery_id: RendererDeliveryId,
     /// Canonical CLI-owned fact class.
     pub(crate) class: super::event_renderer::PresentationFactClass,
     /// Exact typed opaque fact handed to the raw terminal.

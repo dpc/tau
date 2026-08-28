@@ -2,6 +2,7 @@
 
 mod tool_reconstruction;
 
+use tau_cli_term::RendererDeliveryId;
 use tau_proto::{Event, UnixMicros};
 
 use super::{
@@ -31,7 +32,7 @@ fn replay(event: Event, queue_bytes: usize, delivery_id: u64) -> RendererDeliver
         replay: true,
         recorded_at: UnixMicros::new(1),
         queue_bytes,
-        delivery_id,
+        delivery_id: RendererDeliveryId::new(delivery_id),
         presentation: RendererPresentation::Ordinary,
     }
 }
@@ -44,7 +45,7 @@ fn live(event: Event, delivery_id: u64) -> RendererDelivery {
         replay: false,
         recorded_at: UnixMicros::new(2),
         queue_bytes: 1,
-        delivery_id,
+        delivery_id: RendererDeliveryId::new(delivery_id),
         presentation: RendererPresentation::Ordinary,
     }
 }
@@ -61,7 +62,8 @@ fn socket_conversion_preserves_event_allocation_and_filters_replay_side_effects(
     let ordinary =
         tau_proto::EventDelivery::live(UnixMicros::new(9), historical_prompt("ordinary"));
     let ordinary_allocation = event_allocation(ordinary.event.as_ref());
-    let ordinary = renderer_event_from_delivery(ordinary, 42, 7).expect("ordinary delivery");
+    let ordinary = renderer_event_from_delivery(ordinary, 42, RendererDeliveryId::new(7))
+        .expect("ordinary delivery");
     assert_eq!(
         event_allocation(ordinary.event.as_ref()),
         ordinary_allocation
@@ -71,7 +73,7 @@ fn socket_conversion_preserves_event_allocation_and_filters_replay_side_effects(
         UnixMicros::new(10),
         Event::TermBell(tau_proto::TermBell {}),
     );
-    assert!(renderer_event_from_delivery(side_effect, 1, 8).is_none());
+    assert!(renderer_event_from_delivery(side_effect, 1, RendererDeliveryId::new(8)).is_none());
 }
 
 /// Cold-attach staging retains a decoded transcript box and releases that same
@@ -82,7 +84,8 @@ fn cold_attach_staging_preserves_event_allocations() {
     let transcript =
         tau_proto::EventDelivery::replay(UnixMicros::new(1), historical_prompt("held"));
     let transcript_allocation = event_allocation(transcript.event.as_ref());
-    let transcript = renderer_event_from_delivery(transcript, 1, 1).expect("transcript delivery");
+    let transcript = renderer_event_from_delivery(transcript, 1, RendererDeliveryId::new(1))
+        .expect("transcript delivery");
     assert!(stager.admit(transcript).is_empty());
 
     let ready = stager.admit(live(replay_complete(), 2));
@@ -219,7 +222,7 @@ fn drops_replayed_terminal_output_events() {
         }),
     ] {
         let delivery = tau_proto::EventDelivery::replay(recorded_at, event);
-        assert!(renderer_event_from_delivery(delivery, 1, 7).is_none());
+        assert!(renderer_event_from_delivery(delivery, 1, RendererDeliveryId::new(7)).is_none());
     }
 }
 
@@ -235,13 +238,13 @@ fn keeps_live_terminal_output_events() {
         }),
     ] {
         let delivery = tau_proto::EventDelivery::live(recorded_at, event.clone());
-        let rendered =
-            renderer_event_from_delivery(delivery, 1, 7).expect("live terminal output is retained");
+        let rendered = renderer_event_from_delivery(delivery, 1, RendererDeliveryId::new(7))
+            .expect("live terminal output is retained");
         assert_eq!(rendered.event.as_ref(), &event);
         assert_eq!(rendered.recorded_at, recorded_at);
         assert!(!rendered.replay);
         assert_eq!(rendered.queue_bytes, 1);
-        assert_eq!(rendered.delivery_id, 7);
+        assert_eq!(rendered.delivery_id, RendererDeliveryId::new(7));
     }
 }
 
@@ -269,13 +272,13 @@ fn places_state_before_history_and_live_after_boundary() {
         error: None,
     });
     let live = Event::TermBell(tau_proto::TermBell {});
-    let delivery = |event, replay, delivery_id| RendererDelivery {
+    let delivery = |event, replay, delivery_id: u64| RendererDelivery {
         abandoned_shell_starts: Vec::new(),
         event: Box::new(event),
         replay,
         recorded_at: UnixMicros::new(1),
         queue_bytes: 1,
-        delivery_id,
+        delivery_id: RendererDeliveryId::new(delivery_id),
         presentation: RendererPresentation::Ordinary,
     };
     let mut stager = ColdAttachStager::staging();
@@ -288,9 +291,9 @@ fn places_state_before_history_and_live_after_boundary() {
         ready.as_slice(),
         [history, complete]
             if history.event.as_ref() == &prompt
-                && history.delivery_id == 1
+                && history.delivery_id == RendererDeliveryId::new(1)
                 && complete.event.as_ref() == &boundary
-                && complete.delivery_id == 3
+                && complete.delivery_id == RendererDeliveryId::new(3)
     ));
     let ready = stager.admit(delivery(live.clone(), false, 4));
     assert!(matches!(ready.as_slice(), [value] if value.event.as_ref() == &live));
@@ -309,7 +312,7 @@ fn drains_history_before_disconnect() {
                 replay: true,
                 recorded_at: UnixMicros::new(1),
                 queue_bytes: 2,
-                delivery_id: 9,
+                delivery_id: RendererDeliveryId::new(9),
                 presentation: RendererPresentation::Ordinary,
             })
             .is_empty()
@@ -317,7 +320,7 @@ fn drains_history_before_disconnect() {
 
     let drained = stager.finish_before_disconnect();
     assert!(
-        matches!(drained.as_slice(), [value] if value.event.as_ref() == &event && value.delivery_id == 9)
+        matches!(drained.as_slice(), [value] if value.event.as_ref() == &event && value.delivery_id == RendererDeliveryId::new(9))
     );
 }
 
@@ -332,10 +335,10 @@ fn pass_through_preserves_protocol_order() {
     let second_ready = stager.admit(replay(second.clone(), 1, 2));
 
     assert!(
-        matches!(first_ready.as_slice(), [value] if value.event.as_ref() == &first && value.delivery_id == 1)
+        matches!(first_ready.as_slice(), [value] if value.event.as_ref() == &first && value.delivery_id == RendererDeliveryId::new(1))
     );
     assert!(
-        matches!(second_ready.as_slice(), [value] if value.event.as_ref() == &second && value.delivery_id == 2)
+        matches!(second_ready.as_slice(), [value] if value.event.as_ref() == &second && value.delivery_id == RendererDeliveryId::new(2))
     );
 }
 
@@ -372,11 +375,16 @@ fn item_overflow_flushes_and_stops_staging() {
             .iter()
             .take(RENDERER_QUEUE_MAX_ITEMS)
             .enumerate()
-            .all(|(index, delivery)| delivery.delivery_id == index as u64)
+            .all(|(index, delivery)| delivery.delivery_id == RendererDeliveryId::new(index as u64))
     );
-    assert_eq!(ready.last().expect("overflow row").delivery_id, 9_999);
+    assert_eq!(
+        ready.last().expect("overflow row").delivery_id,
+        RendererDeliveryId::new(9_999)
+    );
     let subsequent = stager.admit(replay(historical_prompt("subsequent"), 1, 10_000));
-    assert!(matches!(subsequent.as_slice(), [value] if value.delivery_id == 10_000));
+    assert!(
+        matches!(subsequent.as_slice(), [value] if value.delivery_id == RendererDeliveryId::new(10_000))
+    );
 }
 
 /// Byte overflow must use the same bounded flush transition as item overflow.
@@ -403,8 +411,10 @@ fn byte_overflow_flushes_and_stops_staging() {
     ));
 
     assert_eq!(ready.len(), 2);
-    assert_eq!(ready[0].delivery_id, 1);
-    assert_eq!(ready[1].delivery_id, 2);
+    assert_eq!(ready[0].delivery_id, RendererDeliveryId::new(1));
+    assert_eq!(ready[1].delivery_id, RendererDeliveryId::new(2));
     let subsequent = stager.admit(replay(historical_prompt("subsequent"), 1, 3));
-    assert!(matches!(subsequent.as_slice(), [value] if value.delivery_id == 3));
+    assert!(
+        matches!(subsequent.as_slice(), [value] if value.delivery_id == RendererDeliveryId::new(3))
+    );
 }

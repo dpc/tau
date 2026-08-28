@@ -31,6 +31,8 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
     )
 }
 
+use tau_cli_term::RendererDeliveryId;
+
 /// Flush correlation admits every approved canonical presentation class while
 /// excluding local redraws and provider-reported ingress variants.
 #[test]
@@ -110,14 +112,14 @@ fn presentation_mutation_eligibility_excludes_hidden_and_no_change_folds() {
     renderer.handle_socket_delivery(
         &queued("visible", tau_proto::PromptMessageClass::User),
         tau_proto::UnixMicros::new(1),
-        1,
+        RendererDeliveryId::new(1),
     );
     assert!(renderer.resources.handle.selected_delivery_mutated());
 
     renderer.handle_socket_delivery(
         &queued("visible", tau_proto::PromptMessageClass::Internal),
         tau_proto::UnixMicros::new(2),
-        2,
+        RendererDeliveryId::new(2),
     );
     assert!(!renderer.resources.handle.selected_delivery_mutated());
     let observations = renderer
@@ -125,13 +127,13 @@ fn presentation_mutation_eligibility_excludes_hidden_and_no_change_folds() {
         .handle
         .presentation_observations_for_test();
     assert_eq!(observations.len(), 1);
-    assert_eq!(observations[0].delivery_id, 1);
+    assert_eq!(observations[0].delivery_id.get(), 1);
     assert_eq!(observations[0].class, Class::PromptQueued);
 
     renderer.handle_socket_delivery(
         &queued("hidden", tau_proto::PromptMessageClass::User),
         tau_proto::UnixMicros::new(3),
-        3,
+        RendererDeliveryId::new(3),
     );
     assert!(!renderer.resources.handle.selected_delivery_mutated());
     let observations = renderer
@@ -139,7 +141,7 @@ fn presentation_mutation_eligibility_excludes_hidden_and_no_change_folds() {
         .handle
         .presentation_observations_for_test();
     assert_eq!(observations.len(), 1);
-    assert_eq!(observations[0].delivery_id, 1);
+    assert_eq!(observations[0].delivery_id.get(), 1);
     assert_eq!(observations[0].class, Class::PromptQueued);
 }
 
@@ -157,7 +159,7 @@ fn disabled_presentation_trace_bypasses_registration_seam() {
             message_class: tau_proto::PromptMessageClass::User,
         }),
         tau_proto::UnixMicros::new(1),
-        1,
+        RendererDeliveryId::new(1),
     );
     assert!(!renderer.resources.handle.selected_delivery_mutated());
     assert!(
@@ -191,9 +193,17 @@ fn presentation_mutation_eligibility_rejects_same_value_block_updates() {
         originator: tau_proto::PromptOriginator::User,
     });
 
-    renderer.handle_socket_delivery(&update, tau_proto::UnixMicros::new(1), 1);
+    renderer.handle_socket_delivery(
+        &update,
+        tau_proto::UnixMicros::new(1),
+        RendererDeliveryId::new(1),
+    );
     assert!(renderer.resources.handle.selected_delivery_mutated());
-    renderer.handle_socket_delivery(&update, tau_proto::UnixMicros::new(2), 2);
+    renderer.handle_socket_delivery(
+        &update,
+        tau_proto::UnixMicros::new(2),
+        RendererDeliveryId::new(2),
+    );
     assert!(!renderer.resources.handle.selected_delivery_mutated());
     let observations = renderer
         .resources
@@ -301,7 +311,7 @@ fn presentation_mutation_eligibility_covers_every_canonical_fold() {
         renderer.handle_socket_delivery(
             event,
             tau_proto::UnixMicros::new(delivery_id),
-            delivery_id,
+            RendererDeliveryId::new(delivery_id),
         );
         assert!(
             renderer.resources.handle.selected_delivery_mutated(),
@@ -320,8 +330,16 @@ fn presentation_mutation_eligibility_covers_every_canonical_fold() {
             response_stats: None,
             originator: PromptOriginator::User,
         });
-    renderer.handle_socket_delivery(&termination_update, tau_proto::UnixMicros::new(6), 6);
-    renderer.handle_socket_delivery(&terminated, tau_proto::UnixMicros::new(7), 7);
+    renderer.handle_socket_delivery(
+        &termination_update,
+        tau_proto::UnixMicros::new(6),
+        RendererDeliveryId::new(6),
+    );
+    renderer.handle_socket_delivery(
+        &terminated,
+        tau_proto::UnixMicros::new(7),
+        RendererDeliveryId::new(7),
+    );
     assert!(renderer.resources.handle.selected_delivery_mutated());
     let observations = renderer
         .resources
@@ -339,7 +357,7 @@ fn presentation_mutation_eligibility_covers_every_canonical_fold() {
     assert_eq!(observations.len(), expected.len());
     for (observation, (delivery_id, class, capture_suppressed)) in observations.iter().zip(expected)
     {
-        assert_eq!(observation.delivery_id, delivery_id);
+        assert_eq!(observation.delivery_id.get(), delivery_id);
         assert_eq!(observation.class, class);
         assert_eq!(observation.fact, class.opaque_fact());
         assert_eq!(observation.capture_suppressed, capture_suppressed);
@@ -610,7 +628,7 @@ fn background_terminal_handlers_normalize_status() {
                 originator: tau_proto::PromptOriginator::User,
             }),
             tau_proto::UnixMicros::new(1),
-            1,
+            RendererDeliveryId::new(1),
         );
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolResultDisplay(tau_proto::ToolResultDisplay {
@@ -622,7 +640,7 @@ fn background_terminal_handlers_normalize_status() {
                 originator: tau_proto::PromptOriginator::User,
             }),
             tau_proto::UnixMicros::new(2),
-            2,
+            RendererDeliveryId::new(2),
         );
     }
 
@@ -640,7 +658,7 @@ fn background_terminal_handlers_normalize_status() {
             originator: tau_proto::PromptOriginator::User,
         }),
         tau_proto::UnixMicros::new(3),
-        3,
+        RendererDeliveryId::new(3),
     );
     renderer.handle_socket_delivery(
         &tau_proto::Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
@@ -658,7 +676,7 @@ fn background_terminal_handlers_normalize_status() {
             originator: tau_proto::PromptOriginator::User,
         }),
         tau_proto::UnixMicros::new(4),
-        4,
+        RendererDeliveryId::new(4),
     );
 
     let headers = renderer
@@ -687,7 +705,7 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolStarted(add),
             tau_proto::UnixMicros::new(1),
-            1,
+            RendererDeliveryId::new(1),
         );
         assert_eq!(
             rendered_tool_header(
@@ -715,7 +733,7 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
                 }),
             }),
             tau_proto::UnixMicros::new(2),
-            2,
+            RendererDeliveryId::new(2),
         );
         let progress_header = rendered_tool_header(
             renderer.transcript.runtime.tool_calls["blocker-add"]
@@ -738,14 +756,14 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolError(blocker_error(tool_name, "blocker-add")),
             tau_proto::UnixMicros::new(3),
-            3,
+            RendererDeliveryId::new(3),
         );
 
         let cancel = blocker_started(tool_name, "blocker-cancel", "cancel");
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolStarted(cancel),
             tau_proto::UnixMicros::new(4),
-            4,
+            RendererDeliveryId::new(4),
         );
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolCancelled(tau_proto::ToolCancelled {
@@ -756,19 +774,19 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
                 display: None,
             }),
             tau_proto::UnixMicros::new(5),
-            5,
+            RendererDeliveryId::new(5),
         );
 
         let list = blocker_started(tool_name, "blocker-list", "list");
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolStarted(list),
             tau_proto::UnixMicros::new(6),
-            6,
+            RendererDeliveryId::new(6),
         );
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolResultDisplay(blocker_result(tool_name, "blocker-list")),
             tau_proto::UnixMicros::new(7),
-            7,
+            RendererDeliveryId::new(7),
         );
 
         let headers = renderer
@@ -803,12 +821,12 @@ fn malformed_blocker_action_hides_all_descriptor_payloads() {
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolStarted(started),
             tau_proto::UnixMicros::new(1),
-            1,
+            RendererDeliveryId::new(1),
         );
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolResultDisplay(blocker_result(tool_name, "malformed-blocker")),
             tau_proto::UnixMicros::new(2),
-            2,
+            RendererDeliveryId::new(2),
         );
         let header = rendered_tool_header(
             &renderer
@@ -883,12 +901,12 @@ fn reconstructed_blocker_start_preserves_action_for_replayed_completion() {
             &event,
             &owner,
             tau_proto::UnixMicros::new(10),
-            10,
+            RendererDeliveryId::new(10),
         );
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolResultDisplay(blocker_result(tool_name, "replayed-blocker")),
             tau_proto::UnixMicros::new(11),
-            11,
+            RendererDeliveryId::new(11),
         );
 
         assert_eq!(
@@ -1300,7 +1318,11 @@ fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
         originator: tau_proto::PromptOriginator::User,
     });
     let mut ordinary = renderer_for_agent_id_tests();
-    ordinary.handle_socket_delivery(&user_start, tau_proto::UnixMicros::new(1), 1);
+    ordinary.handle_socket_delivery(
+        &user_start,
+        tau_proto::UnixMicros::new(1),
+        RendererDeliveryId::new(1),
+    );
     assert_eq!(ordinary.selection.current_agent_id, None);
     assert_eq!(ordinary.selection.displayed_agent_id, None);
 
@@ -1309,7 +1331,7 @@ fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
         &user_start,
         &owner,
         tau_proto::UnixMicros::new(1),
-        1,
+        RendererDeliveryId::new(1),
     );
     assert_eq!(
         reconstructed.selection.current_agent_id.as_deref(),
@@ -1335,7 +1357,7 @@ fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
         &extension_start,
         &owner,
         tau_proto::UnixMicros::new(1),
-        1,
+        RendererDeliveryId::new(1),
     );
     assert_eq!(extension.selection.current_agent_id, None);
     assert_eq!(extension.selection.displayed_agent_id, None);
@@ -1805,7 +1827,7 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
             true,
         ),
         tau_proto::UnixMicros::new(1),
-        1,
+        RendererDeliveryId::new(1),
     );
     assert_eq!(renderer.transcript.history.message_history.len(), 0);
     assert_eq!(
@@ -1826,7 +1848,7 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
             false,
         ),
         tau_proto::UnixMicros::new(2),
-        2,
+        RendererDeliveryId::new(2),
     );
     assert_eq!(renderer.transcript.history.message_history.len(), 1);
     assert_eq!(

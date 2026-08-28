@@ -92,11 +92,15 @@ fn completed_tool_is_absent_from_reconstructed_pending_rows() {
     let mut stager = ColdAttachStager::staging();
     assert!(stager.admit(replay(tool_started("done"), 1, 1)).is_empty());
     let terminal = stager.admit(replay(tool_error("done"), 1, 2));
-    assert!(matches!(terminal.as_slice(), [delivery] if delivery.delivery_id == 2));
+    assert!(
+        matches!(terminal.as_slice(), [delivery] if delivery.delivery_id == tau_cli_term::RendererDeliveryId::new(2))
+    );
 
     let ready = stager.admit(live(replay_complete(), 3));
 
-    assert!(matches!(ready.as_slice(), [boundary] if boundary.delivery_id == 3));
+    assert!(
+        matches!(ready.as_slice(), [boundary] if boundary.delivery_id == tau_cli_term::RendererDeliveryId::new(3))
+    );
 }
 
 /// A dispatched start with no terminal remains pending in its original box even
@@ -174,8 +178,8 @@ fn live_progress_then_terminal_during_attach_preserves_tool_lifecycle() {
                     RendererPresentation::ReconstructedToolStart { owner }
                         if owner.as_str() == "agent-1"
                 )
-                && progress.delivery_id == 4
-                && terminal.delivery_id == 5
+                && progress.delivery_id == tau_cli_term::RendererDeliveryId::new(4)
+                && terminal.delivery_id == tau_cli_term::RendererDeliveryId::new(5)
                 && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))
     ));
 }
@@ -208,7 +212,7 @@ fn live_lifecycle_after_terminal_during_attach_is_discarded() {
     assert!(matches!(
         ready.as_slice(),
         [terminal, boundary]
-            if terminal.delivery_id == 4
+            if terminal.delivery_id == tau_cli_term::RendererDeliveryId::new(4)
                 && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))
     ));
 }
@@ -273,9 +277,9 @@ fn tool_history_keeps_protocol_order() {
         tool_ready.as_slice(),
         [held, tool_event]
             if held.event.as_ref() == &prompt
-                && held.delivery_id == 1
+                && held.delivery_id == tau_cli_term::RendererDeliveryId::new(1)
                 && tool_event.event.as_ref() == &tool
-                && tool_event.delivery_id == 2
+                && tool_event.delivery_id == tau_cli_term::RendererDeliveryId::new(2)
     ));
     assert!(matches!(after_ready.as_slice(), [value] if value.event.as_ref() == &after));
 }
@@ -460,7 +464,7 @@ fn replay_boundary_excludes_unowned_start_and_buffered_progress() {
 
     let ready = stager.admit(live(replay_complete(), 7));
     assert!(matches!(ready.as_slice(), [terminal, boundary]
-        if terminal.delivery_id == 6
+        if terminal.delivery_id == tau_cli_term::RendererDeliveryId::new(6)
             && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))));
 }
 
@@ -493,7 +497,7 @@ fn replay_error_discards_reconstructed_start_and_buffered_progress() {
 
     let ready = stager.admit(live(boundary, 7));
     assert!(matches!(ready.as_slice(), [terminal, boundary]
-        if terminal.delivery_id == 6
+        if terminal.delivery_id == tau_cli_term::RendererDeliveryId::new(6)
             && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))));
 }
 
@@ -779,8 +783,8 @@ fn duplicate_terminal_during_attach_is_discarded() {
         ready.as_slice(),
         [start, progress, terminal, boundary]
             if matches!(start.event.as_ref(), Event::ToolStarted(_))
-                && progress.delivery_id == 5
-                && terminal.delivery_id == 6
+                && progress.delivery_id == tau_cli_term::RendererDeliveryId::new(5)
+                && terminal.delivery_id == tau_cli_term::RendererDeliveryId::new(6)
                 && matches!(boundary.event.as_ref(), Event::SessionReplayComplete(_))
     ));
 }

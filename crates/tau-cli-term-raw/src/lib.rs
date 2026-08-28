@@ -16,6 +16,7 @@
 mod block_layout_state;
 mod presentation_observation_state;
 mod prompt_editor_state;
+mod renderer_delivery_id;
 mod terminal_runtime_state;
 
 use std::cell::RefCell;
@@ -88,6 +89,7 @@ pub use presentation_observation_state::{
     OpaquePresentationFact, PresentationInvalidation, PresentationObservationKey,
 };
 use prompt_editor_state::PromptEditorState;
+pub use renderer_delivery_id::RendererDeliveryId;
 pub use tau_term_screen::{
     Align, BlockId, Cell, Color, PriorityLine, PriorityLineAlignment, PriorityLinePriority,
     PriorityLineTruncation, Span, Style, StyledBlock, StyledText, TwoLineElision,
@@ -1327,7 +1329,7 @@ impl TermHandle {
     /// eventual writer success.
     pub fn observe_presentation_mutation(
         &self,
-        delivery_id: u64,
+        delivery_id: RendererDeliveryId,
         fact: OpaquePresentationFact,
     ) -> bool {
         self.observe_presentation_mutation_enabled(delivery_id, fact)
@@ -1336,7 +1338,7 @@ impl TermHandle {
     /// Registers a fact after the caller has established trace interest.
     fn observe_presentation_mutation_enabled(
         &self,
-        delivery_id: u64,
+        delivery_id: RendererDeliveryId,
         fact: OpaquePresentationFact,
     ) -> bool {
         let observed_at = path_std_time::Instant::now();
@@ -1360,7 +1362,7 @@ impl TermHandle {
     #[cfg(test)]
     fn observe_presentation_mutation_for_test(
         &self,
-        delivery_id: u64,
+        delivery_id: RendererDeliveryId,
         fact: OpaquePresentationFact,
     ) -> bool {
         self.observe_presentation_mutation_enabled(delivery_id, fact)
@@ -4475,7 +4477,7 @@ fn trace_flushed_presentation_observations(_state: &Arc<Mutex<SharedState>>, pas
     for fact in &observations.facts {
         tracing::trace!(
             target: "tau_cli_term_raw::frontend_progress",
-            delivery_id = fact.delivery_id,
+            delivery_id = fact.delivery_id.get(),
             fact = fact.fact,
             mutation_generation = fact.generation,
             frame_generation = observations.generation,

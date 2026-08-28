@@ -2,6 +2,11 @@ use std::{cell as path_std_cell, io as path_std_io, sync as path_std_sync, time 
 
 use super::*;
 
+/// Builds a delivery identity for raw-terminal seam tests.
+fn renderer_delivery_id(value: u64) -> RendererDeliveryId {
+    RendererDeliveryId::new(value)
+}
+
 /// Builds one typed opaque fact for raw-layer correlation tests.
 fn opaque_fact(label: &'static str, key: u8, invalidates: &[u8]) -> OpaquePresentationFact {
     let key =
@@ -4126,11 +4131,13 @@ fn successful_flush_reports_exact_coalesced_presentation_facts() {
     handle.redraw_sync();
     let _ = buffer.drain_bytes();
     handle.with_redraw_suppressed(|| {
-        handle
-            .observe_presentation_mutation_for_test(11, opaque_fact("agent.prompt_queued", 0, &[]));
+        handle.observe_presentation_mutation_for_test(
+            renderer_delivery_id(11),
+            opaque_fact("agent.prompt_queued", 0, &[]),
+        );
         handle.print_output("queued", "queued");
         handle.observe_presentation_mutation_for_test(
-            12,
+            renderer_delivery_id(12),
             opaque_fact("agent.prompt_steered", 2, &[]),
         );
         handle.print_output("steered", "steered");
@@ -4145,7 +4152,7 @@ fn successful_flush_reports_exact_coalesced_presentation_facts() {
     assert!(
         successful
             .iter()
-            .any(|pass| pass.iter().map(|fact| fact.0).collect::<Vec<_>>() == [11, 12])
+            .any(|pass| pass.iter().map(|fact| fact.0.get()).collect::<Vec<_>>() == [11, 12])
     );
     let reported_before_local_redraw = successful.iter().map(Vec::len).sum::<usize>();
     handle.redraw_sync();
@@ -4200,7 +4207,7 @@ fn presentation_observation_timestamp_precedes_registration_lock_wait() {
     let observer = std::thread::spawn(move || {
         observing_barrier.wait();
         observing_handle.observe_presentation_mutation_for_test(
-            1,
+            renderer_delivery_id(1),
             opaque_fact("provider.response_updated", 3, &[]),
         );
     });
@@ -4231,7 +4238,7 @@ fn presentation_mutation_during_flush_moves_to_next_pass() {
         .expect("term state mutex poisoned")
         .presentation_observations
         .register(
-            21,
+            renderer_delivery_id(21),
             opaque_fact("provider.response_updated", 3, &[]),
             path_std_time::Instant::now(),
         );
@@ -4252,7 +4259,7 @@ fn presentation_mutation_during_flush_moves_to_next_pass() {
         .expect("term state mutex poisoned")
         .presentation_observations
         .register(
-            22,
+            renderer_delivery_id(22),
             opaque_fact("agent.prompt_steered", 2, &[]),
             path_std_time::Instant::now(),
         );
@@ -4275,7 +4282,7 @@ fn presentation_mutation_during_flush_moves_to_next_pass() {
         .successful_test_passes
         .iter()
         .filter(|pass| !pass.is_empty())
-        .map(|pass| pass.iter().map(|fact| fact.0).collect::<Vec<_>>())
+        .map(|pass| pass.iter().map(|fact| fact.0.get()).collect::<Vec<_>>())
         .collect::<Vec<_>>();
     assert_eq!(exact_passes, vec![vec![21], vec![22]]);
 }
@@ -4288,7 +4295,7 @@ fn invalidating_observation_cannot_race_redraw_capture() {
     {
         let mut guard = state.lock().expect("term state");
         guard.presentation_observations.register(
-            1,
+            renderer_delivery_id(1),
             opaque_fact("agent.prompt_queued", 0, &[]),
             path_std_time::Instant::now(),
         );
@@ -4309,7 +4316,7 @@ fn invalidating_observation_cannot_race_redraw_capture() {
     {
         let mut guard = state.lock().expect("term state");
         guard.presentation_observations.register(
-            2,
+            renderer_delivery_id(2),
             opaque_fact("agent.prompt_submitted", 1, &[0]),
             path_std_time::Instant::now(),
         );
@@ -4330,7 +4337,7 @@ fn invalidating_observation_cannot_race_redraw_capture() {
             .expect("captured observations")
             .facts
             .iter()
-            .map(|fact| fact.delivery_id)
+            .map(|fact| fact.delivery_id.get())
             .collect::<Vec<_>>(),
         [2]
     );
@@ -4345,7 +4352,7 @@ fn presentation_observation_bound_and_supersession_are_conservative() {
         0..presentation_observation_state::MAX_PENDING_PRESENTATION_OBSERVATIONS as u64 + 3
     {
         observations.register(
-            delivery_id,
+            renderer_delivery_id(delivery_id),
             opaque_fact("agent.prompt_steered", 2, &[]),
             path_std_time::Instant::now(),
         );
@@ -4361,24 +4368,24 @@ fn presentation_observation_bound_and_supersession_are_conservative() {
         100..100 + presentation_observation_state::MAX_PENDING_PRESENTATION_OBSERVATIONS as u64 + 3
     {
         observations.register(
-            delivery_id,
+            renderer_delivery_id(delivery_id),
             opaque_fact("provider.response_updated", 3, &[]),
             path_std_time::Instant::now(),
         );
     }
     observations.register(
-        200,
+        renderer_delivery_id(200),
         opaque_fact("provider.response_updated", 3, &[]),
         path_std_time::Instant::now(),
     );
     observations.register(
-        201,
+        renderer_delivery_id(201),
         opaque_fact("provider.response_finished", 4, &[3]),
         path_std_time::Instant::now(),
     );
     let captured = observations.capture();
     assert_eq!(captured.facts.len(), 1);
-    assert_eq!(captured.facts[0].delivery_id, 201);
+    assert_eq!(captured.facts[0].delivery_id.get(), 201);
     assert_eq!(captured.omitted, 0);
 
     for (delivery_id, fact) in [
@@ -4388,14 +4395,18 @@ fn presentation_observation_bound_and_supersession_are_conservative() {
         (303, opaque_fact("steered", 2, &[])),
         (304, opaque_fact("terminated", 5, &[0, 1, 3])),
     ] {
-        observations.register(delivery_id, fact, path_std_time::Instant::now());
+        observations.register(
+            renderer_delivery_id(delivery_id),
+            fact,
+            path_std_time::Instant::now(),
+        );
     }
     let captured = observations.capture();
     assert_eq!(
         captured
             .facts
             .iter()
-            .map(|fact| fact.delivery_id)
+            .map(|fact| fact.delivery_id.get())
             .collect::<Vec<_>>(),
         [303, 304]
     );
@@ -4413,7 +4424,7 @@ fn presentation_observation_does_not_change_vt_output() {
         let _ = buffer.drain_bytes();
         if observe {
             handle.observe_presentation_mutation_for_test(
-                31,
+                renderer_delivery_id(31),
                 opaque_fact("agent.prompt_submitted", 1, &[0]),
             );
         }
@@ -4456,7 +4467,7 @@ fn presentation_observations_never_succeed_on_write_or_flush_error() {
             .expect("term state mutex poisoned")
             .presentation_observations
             .register(
-                41,
+                renderer_delivery_id(41),
                 opaque_fact("agent.prompt_queued", 0, &[]),
                 path_std_time::Instant::now(),
             );
@@ -4556,7 +4567,7 @@ fn redraw_loop_records_stage_specific_presentation_failures() {
         );
         handle.with_redraw_suppressed(|| {
             handle.observe_presentation_mutation_for_test(
-                1,
+                renderer_delivery_id(1),
                 opaque_fact("agent.prompt_queued", 0, &[]),
             );
             handle.print_output(

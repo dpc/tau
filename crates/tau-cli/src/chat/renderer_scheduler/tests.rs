@@ -1,3 +1,4 @@
+use tau_cli_term::RendererDeliveryId;
 use tau_proto::{
     AgentId, AgentPromptId, PromptOriginator, ProviderResponseStatsSample,
     ProviderResponseTextDelta, UnixMicros,
@@ -72,7 +73,7 @@ fn update(
         presentation: cold_attach_stager::RendererPresentation::Ordinary,
         abandoned_shell_starts: Vec::new(),
         recorded_at: UnixMicros::new(delivery_id),
-        delivery_id,
+        delivery_id: RendererDeliveryId::new(delivery_id),
         queue_bytes: delivery_id as usize,
         enqueued_at: Instant::now(),
         folded_frames: Vec::new(),
@@ -103,11 +104,11 @@ fn folds_adjacent_pure_updates_in_exact_order() {
     let encoded = tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte");
     for id in 1..=3 {
         memory.observe_decode(
-            id,
+            RendererDeliveryId::new(id),
             &tau_proto::HarnessOutputMessage::deliver(Event::TermBell(tau_proto::TermBell {})),
             encoded,
         );
-        memory.transition(id, DeliveryMemoryCut::RendererFifo);
+        memory.transition(RendererDeliveryId::new(id), DeliveryMemoryCut::RendererFifo);
     }
     let (admitted, remote_tx, _local_tx, mut receiver) =
         scheduler_with_memory(Some(Arc::clone(&memory)));
@@ -154,13 +155,22 @@ fn folds_adjacent_pure_updates_in_exact_order() {
     assert_eq!(text, "abc");
     assert_eq!(update.response_stats, Some(stats(0, 3, 99)));
     assert_eq!(folded_frames.len(), 2);
-    assert_eq!(memory.cut_for_test(1), Some(DeliveryMemoryCut::Scheduler));
-    assert_eq!(memory.cut_for_test(2), Some(DeliveryMemoryCut::Scheduler));
-    assert_eq!(memory.cut_for_test(3), Some(DeliveryMemoryCut::Scheduler));
+    assert_eq!(
+        memory.cut_for_test(RendererDeliveryId::new(1)),
+        Some(DeliveryMemoryCut::Scheduler)
+    );
+    assert_eq!(
+        memory.cut_for_test(RendererDeliveryId::new(2)),
+        Some(DeliveryMemoryCut::Scheduler)
+    );
+    assert_eq!(
+        memory.cut_for_test(RendererDeliveryId::new(3)),
+        Some(DeliveryMemoryCut::Scheduler)
+    );
     assert_eq!(
         folded_frames
             .iter()
-            .map(|RendererQueueFrame { delivery_id, .. }| *delivery_id)
+            .map(|RendererQueueFrame { delivery_id, .. }| delivery_id.get())
             .collect::<Vec<_>>(),
         vec![2, 3]
     );
@@ -171,11 +181,24 @@ fn folds_adjacent_pure_updates_in_exact_order() {
             .collect::<Vec<_>>(),
         vec![2, 3]
     );
-    let receipts = begin_remote_memory_handler(Some(memory.as_ref()), 1, &folded_frames);
-    assert_eq!(memory.cut_for_test(1), Some(DeliveryMemoryCut::Handler));
-    assert_eq!(memory.cut_for_test(2), Some(DeliveryMemoryCut::Handler));
-    assert_eq!(memory.cut_for_test(3), Some(DeliveryMemoryCut::Handler));
-    finish_remote_memory_handler(Some(memory.as_ref()), 1, receipts);
+    let receipts = begin_remote_memory_handler(
+        Some(memory.as_ref()),
+        RendererDeliveryId::new(1),
+        &folded_frames,
+    );
+    assert_eq!(
+        memory.cut_for_test(RendererDeliveryId::new(1)),
+        Some(DeliveryMemoryCut::Handler)
+    );
+    assert_eq!(
+        memory.cut_for_test(RendererDeliveryId::new(2)),
+        Some(DeliveryMemoryCut::Handler)
+    );
+    assert_eq!(
+        memory.cut_for_test(RendererDeliveryId::new(3)),
+        Some(DeliveryMemoryCut::Handler)
+    );
+    finish_remote_memory_handler(Some(memory.as_ref()), RendererDeliveryId::new(1), receipts);
     assert_eq!(memory.active_len_for_test(), 0);
 }
 
@@ -382,7 +405,7 @@ fn other_event_and_disconnect_are_fifo_barriers() {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
             abandoned_shell_starts: Vec::new(),
             recorded_at: UnixMicros::new(2),
-            delivery_id: 2,
+            delivery_id: RendererDeliveryId::new(2),
             queue_bytes: 2,
             enqueued_at: Instant::now(),
             folded_frames: Vec::new(),
@@ -391,7 +414,7 @@ fn other_event_and_disconnect_are_fifo_barriers() {
     remote_tx
         .send(RendererCmd::RemoteDisconnect {
             reason: Some("done".to_owned()),
-            delivery_id: 3,
+            delivery_id: RendererDeliveryId::new(3),
             queue_bytes: 3,
             enqueued_at: Instant::now(),
         })

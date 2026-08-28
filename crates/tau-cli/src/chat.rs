@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use cold_attach_stager::{ColdAttachStager, renderer_event_from_delivery};
 use delivery_memory::{DeliveryMemoryCut, DeliveryMemoryTracker};
 use renderer_scheduler::{LocalRendererSender, RemoteRendererSender, RendererCommandScheduler};
+use tau_cli_term::RendererDeliveryId;
 use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
@@ -59,6 +60,19 @@ use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
 /// Cumulative protocol-I/O accounting shared by UI socket writers and readers.
 pub(crate) type UiIoMeter = tau_client::ProtocolIoMeter;
 type UiIoCumulativeStats = tau_client::ProtocolIoCumulativeStats;
+
+/// Allocates the next process-local identity for one renderer delivery.
+fn allocate_renderer_delivery_id(
+    next_delivery_id: &path_std_cell::Cell<u64>,
+) -> RendererDeliveryId {
+    let delivery_id = next_delivery_id.get();
+    next_delivery_id.set(
+        delivery_id
+            .checked_add(1)
+            .expect("renderer delivery identity exhausted"),
+    );
+    RendererDeliveryId::new(delivery_id)
+}
 
 struct UiIoTracker {
     inner: tau_client::ProtocolIoTracker,
@@ -953,7 +967,7 @@ fn enqueue_remote_delivery(
     let enqueue_started = Instant::now();
     tracing::trace!(
         target: "tau_cli::frontend_progress",
-        delivery_id,
+        delivery_id = delivery_id.get(),
         frame_bytes = queue_bytes,
         "renderer event admission started"
     );
@@ -976,7 +990,7 @@ fn enqueue_remote_delivery(
     }
     tracing::trace!(
         target: "tau_cli::frontend_progress",
-        delivery_id,
+        delivery_id = delivery_id.get(),
         enqueue_wait_us = enqueue_started.elapsed().as_micros(),
         queue_items = queued_items,
         queue_bytes = *renderer_byte_budget.used.lock().expect(MUTEX_POISONED),
@@ -991,7 +1005,7 @@ fn release_remote_queue_frames(
     folded: Vec<RendererQueueFrame>,
     queued_remote_items: &path_std_sync_atomic::AtomicUsize,
     renderer_byte_budget: &RendererByteBudget,
-    mut observe_delivery: impl FnMut(u64),
+    mut observe_delivery: impl FnMut(RendererDeliveryId),
 ) {
     for frame in std::iter::once(first).chain(folded) {
         let queue_items = queued_remote_items.fetch_sub(1, Ordering::AcqRel) - 1;
@@ -999,7 +1013,7 @@ fn release_remote_queue_frames(
         let queue_age = frame.enqueued_at.elapsed();
         tracing::trace!(
             target: "tau_cli::frontend_progress",
-            delivery_id = frame.delivery_id,
+            delivery_id = frame.delivery_id.get(),
             queue_age_ms = queue_age.as_millis(),
             queue_items,
             queue_bytes = remaining_bytes,
@@ -1009,7 +1023,7 @@ fn release_remote_queue_frames(
         if Duration::from_millis(500) <= queue_age && admit_queue_stall_warning(Instant::now()) {
             tracing::warn!(
                 target: "tau_cli::frontend_progress",
-                delivery_id = frame.delivery_id,
+                delivery_id = frame.delivery_id.get(),
                 queue_age_ms = queue_age.as_millis(),
                 queue_items,
                 queue_bytes = remaining_bytes,
@@ -1023,9 +1037,9 @@ fn release_remote_queue_frames(
 /// source receipts.
 fn begin_remote_memory_handler(
     delivery_memory: Option<&DeliveryMemoryTracker>,
-    delivery_id: u64,
+    delivery_id: RendererDeliveryId,
     folded_frames: &[RendererQueueFrame],
-) -> Vec<u64> {
+) -> Vec<RendererDeliveryId> {
     let folded_ids = folded_frames
         .iter()
         .map(|frame| frame.delivery_id)
@@ -1042,8 +1056,8 @@ fn begin_remote_memory_handler(
 /// Releases every source receipt after the folded handler returns.
 fn finish_remote_memory_handler(
     delivery_memory: Option<&DeliveryMemoryTracker>,
-    delivery_id: u64,
-    folded_ids: Vec<u64>,
+    delivery_id: RendererDeliveryId,
+    folded_ids: Vec<RendererDeliveryId>,
 ) {
     if let Some(memory) = delivery_memory {
         memory.release(delivery_id);
@@ -1056,7 +1070,7 @@ fn finish_remote_memory_handler(
 /// Releases cold-stage receipts no longer retained or forwarded by a fold.
 fn release_filtered_cold_memory(
     delivery_memory: Option<&DeliveryMemoryTracker>,
-    retained_before: Vec<u64>,
+    retained_before: Vec<RendererDeliveryId>,
     forwarded: &[cold_attach_stager::RendererDelivery],
 ) {
     let Some(memory) = delivery_memory else {
@@ -1105,14 +1119,20 @@ fn admit_cold_delivery(
 }
 
 /// Moves a disconnect receipt into handler ownership.
-fn begin_disconnect_memory(delivery_memory: Option<&DeliveryMemoryTracker>, delivery_id: u64) {
+fn begin_disconnect_memory(
+    delivery_memory: Option<&DeliveryMemoryTracker>,
+    delivery_id: RendererDeliveryId,
+) {
     if let Some(memory) = delivery_memory {
         memory.transition(delivery_id, DeliveryMemoryCut::Handler);
     }
 }
 
 /// Releases a disconnect receipt after the handler returns.
-fn finish_disconnect_memory(delivery_memory: Option<&DeliveryMemoryTracker>, delivery_id: u64) {
+fn finish_disconnect_memory(
+    delivery_memory: Option<&DeliveryMemoryTracker>,
+    delivery_id: RendererDeliveryId,
+) {
     if let Some(memory) = delivery_memory {
         memory.release(delivery_id);
     }
@@ -1204,60 +1224,57 @@ pub(crate) fn run_chat(
             ColdAttachStager::pass_through()
         };
         let next_delivery_id = path_std_cell::Cell::new(1_u64);
-        let allocate_delivery_id = || {
-            let delivery_id = next_delivery_id.get();
-            next_delivery_id.set(delivery_id.saturating_add(1));
-            delivery_id
-        };
-        let notify_disconnect = |reason: Option<String>, delivery_id: u64, queue_bytes: usize| {
-            socket_remote_disconnected.store(true, Ordering::Release);
-            if let Some(handle) = socket_input_shutdown
-                .lock()
-                .expect(MUTEX_POISONED)
-                .as_ref()
-                .cloned()
-            {
-                handle.request_input_shutdown();
-            }
-            let enqueue_started = Instant::now();
-            tracing::trace!(
-                target: "tau_cli::frontend_progress",
-                delivery_id,
-                frame_bytes = queue_bytes,
-                "remote disconnect admission started"
-            );
-            socket_renderer_byte_budget.acquire(queue_bytes);
-            let queued_items = socket_queued_remote_items.fetch_add(1, Ordering::AcqRel) + 1;
-            {
-                let _guard = socket_renderer_arbiter.lock().expect(MUTEX_POISONED);
-                socket_remote_admitted.fetch_add(1, Ordering::AcqRel);
-            }
-            let cmd = RendererCmd::RemoteDisconnect {
-                reason,
-                delivery_id,
-                queue_bytes,
-                enqueued_at: Instant::now(),
-            };
-            if remote_tx.send(cmd).is_err() {
-                socket_renderer_byte_budget.release(queue_bytes);
-                socket_queued_remote_items.fetch_sub(1, Ordering::AcqRel);
-                if let Some(memory) = &socket_delivery_memory {
-                    memory.release(delivery_id);
+        let allocate_delivery_id = || allocate_renderer_delivery_id(&next_delivery_id);
+        let notify_disconnect =
+            |reason: Option<String>, delivery_id: RendererDeliveryId, queue_bytes: usize| {
+                socket_remote_disconnected.store(true, Ordering::Release);
+                if let Some(handle) = socket_input_shutdown
+                    .lock()
+                    .expect(MUTEX_POISONED)
+                    .as_ref()
+                    .cloned()
+                {
+                    handle.request_input_shutdown();
                 }
-            } else {
-                if let Some(memory) = &socket_delivery_memory {
-                    memory.transition(delivery_id, DeliveryMemoryCut::RendererFifo);
-                }
+                let enqueue_started = Instant::now();
                 tracing::trace!(
                     target: "tau_cli::frontend_progress",
-                    delivery_id,
-                    enqueue_wait_us = enqueue_started.elapsed().as_micros(),
+                    delivery_id = delivery_id.get(),
                     frame_bytes = queue_bytes,
-                    queue_items = queued_items,
-                    "remote disconnect enqueued"
+                    "remote disconnect admission started"
                 );
-            }
-        };
+                socket_renderer_byte_budget.acquire(queue_bytes);
+                let queued_items = socket_queued_remote_items.fetch_add(1, Ordering::AcqRel) + 1;
+                {
+                    let _guard = socket_renderer_arbiter.lock().expect(MUTEX_POISONED);
+                    socket_remote_admitted.fetch_add(1, Ordering::AcqRel);
+                }
+                let cmd = RendererCmd::RemoteDisconnect {
+                    reason,
+                    delivery_id,
+                    queue_bytes,
+                    enqueued_at: Instant::now(),
+                };
+                if remote_tx.send(cmd).is_err() {
+                    socket_renderer_byte_budget.release(queue_bytes);
+                    socket_queued_remote_items.fetch_sub(1, Ordering::AcqRel);
+                    if let Some(memory) = &socket_delivery_memory {
+                        memory.release(delivery_id);
+                    }
+                } else {
+                    if let Some(memory) = &socket_delivery_memory {
+                        memory.transition(delivery_id, DeliveryMemoryCut::RendererFifo);
+                    }
+                    tracing::trace!(
+                        target: "tau_cli::frontend_progress",
+                        delivery_id = delivery_id.get(),
+                        enqueue_wait_us = enqueue_started.elapsed().as_micros(),
+                        frame_bytes = queue_bytes,
+                        queue_items = queued_items,
+                        "remote disconnect enqueued"
+                    );
+                }
+            };
         let drain_staging = |stager: &mut ColdAttachStager| {
             let retained_before = socket_delivery_memory
                 .as_ref()
@@ -1296,7 +1313,7 @@ pub(crate) fn run_chat(
             let read_started = Instant::now();
             tracing::trace!(
                 target: "tau_cli::frontend_progress",
-                delivery_id,
+                delivery_id = delivery_id.get(),
                 "socket read and decode started"
             );
             match reader.read_message_with_size() {
@@ -1314,7 +1331,7 @@ pub(crate) fn run_chat(
                     let queue_bytes = usize::try_from(frame_bytes.get()).unwrap_or(usize::MAX);
                     tracing::trace!(
                         target: "tau_cli::frontend_progress",
-                        delivery_id,
+                        delivery_id = delivery_id.get(),
                         read_decode_us = read_elapsed.as_micros(),
                         frame_bytes = queue_bytes,
                         "socket frame read and decoded"
@@ -1658,7 +1675,7 @@ pub(crate) fn run_chat(
                             let remaining_bytes = renderer_byte_budget.release(queue_bytes);
                             tracing::trace!(
                                 target: "tau_cli::frontend_progress",
-                                delivery_id,
+                                delivery_id = delivery_id.get(),
                                 queue_age_ms = enqueued_at.elapsed().as_millis(),
                                 queue_items,
                                 queue_bytes = remaining_bytes,
@@ -2051,7 +2068,7 @@ enum RendererCmd {
         /// Harness-provided observation time.
         recorded_at: UnixMicros,
         /// Process-local content-free stage correlation.
-        delivery_id: u64,
+        delivery_id: RendererDeliveryId,
         /// Encoded frame bytes charged to the queue budget.
         queue_bytes: usize,
         /// Monotonic queue admission time.
@@ -2065,7 +2082,7 @@ enum RendererCmd {
         /// Optional harness-provided disconnect reason.
         reason: Option<String>,
         /// Process-local content-free stage correlation.
-        delivery_id: u64,
+        delivery_id: RendererDeliveryId,
         /// Encoded frame bytes charged to the queue budget.
         queue_bytes: usize,
         /// Monotonic queue admission time.
@@ -2076,7 +2093,7 @@ enum RendererCmd {
 /// Queue accounting retained for each frame absorbed into a folded projection.
 struct RendererQueueFrame {
     /// Process-local content-free stage correlation.
-    delivery_id: u64,
+    delivery_id: RendererDeliveryId,
     /// Encoded frame bytes charged to the queue budget.
     queue_bytes: usize,
     /// Monotonic queue admission time.

@@ -34,8 +34,9 @@ pub(crate) use tau_cli_term_raw::RawEvent as TestRawEvent;
 pub use tau_cli_term_raw::{
     Align, BlockId, Cell, Color, CursorShape, OpaquePresentationFact, OutputSnapshot,
     PresentationInvalidation, PresentationObservationKey, PriorityLine, PriorityLineAlignment,
-    PriorityLinePriority, PriorityLineTruncation, Span, Style, StyledBlock, StyledText, TermHandle,
-    TerminalOptions, TwoLineElision, is_output_failure, sanitize_hyperlink_target,
+    PriorityLinePriority, PriorityLineTruncation, RendererDeliveryId, Span, Style, StyledBlock,
+    StyledText, TermHandle, TerminalOptions, TwoLineElision, is_output_failure,
+    sanitize_hyperlink_target,
 };
 use tau_cli_term_raw::{Candidate, Event as RawEvent};
 use tau_term_screen::{display_width, truncate_to_width};

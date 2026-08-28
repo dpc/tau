@@ -1,5 +1,7 @@
 //! Tests for tool status rendering behavior.
 
+use tau_cli_term::RendererDeliveryId;
+
 use super::super::event_renderer::{UiIoStats, unix_time_millis};
 use super::*;
 
@@ -71,7 +73,7 @@ fn verbose_mode_reprojects_streaming_thinking_hidden_agents_and_attach_tools() {
         &reconstructed,
         &agent_id("worker"),
         tau_proto::UnixMicros::new(1),
-        1,
+        RendererDeliveryId::new(1),
     );
     sync(&handle);
     let pending = vt.screen_text(100).join("\n");
@@ -1994,7 +1996,11 @@ fn shell_replay_abandonment_covers_renderer_owners_and_collision() {
         exit_code: Some(0),
         cancelled: false,
     };
-    renderer.handle_standalone_socket_shell_finished(&terminal, tau_proto::UnixMicros::new(1), 1);
+    renderer.handle_standalone_socket_shell_finished(
+        &terminal,
+        tau_proto::UnixMicros::new(1),
+        RendererDeliveryId::new(1),
+    );
     sync(&handle);
     assert!(vt.screen_contains(100, "historical-output"));
     assert!(vt.screen_contains(100, "current-collision"));

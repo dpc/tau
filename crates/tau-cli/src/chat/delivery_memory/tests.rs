@@ -3,6 +3,8 @@ use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+use tau_cli_term::RendererDeliveryId;
+
 use super::{DeliveryMemoryCut, DeliveryMemoryTracker};
 
 /// Shared byte sink for inspecting actual formatted trace events.
@@ -31,19 +33,19 @@ impl Write for TraceWriter {
 fn guarded_owner_moves_release_without_changing_disabled_path() {
     let tracker = DeliveryMemoryTracker::new();
     let encoded = tau_proto::ProtocolMessageBytes::new(7).expect("nonzero encoded size");
-    tracker.observe_decode(1, &vec!["x".repeat(32)], encoded);
+    tracker.observe_decode(RendererDeliveryId::new(1), &vec!["x".repeat(32)], encoded);
     assert!(tracker.state.lock().expect("tracker").is_none());
 
     tracker.force_enabled.store(true, Ordering::Relaxed);
-    tracker.observe_decode(1, &vec!["x".repeat(32)], encoded);
-    tracker.transition(1, DeliveryMemoryCut::ColdStaging);
-    tracker.transition(1, DeliveryMemoryCut::RendererFifo);
-    tracker.transition(1, DeliveryMemoryCut::Scheduler);
-    tracker.transition(1, DeliveryMemoryCut::Handler);
+    tracker.observe_decode(RendererDeliveryId::new(1), &vec!["x".repeat(32)], encoded);
+    tracker.transition(RendererDeliveryId::new(1), DeliveryMemoryCut::ColdStaging);
+    tracker.transition(RendererDeliveryId::new(1), DeliveryMemoryCut::RendererFifo);
+    tracker.transition(RendererDeliveryId::new(1), DeliveryMemoryCut::Scheduler);
+    tracker.transition(RendererDeliveryId::new(1), DeliveryMemoryCut::Handler);
     let state = tracker.state.lock().expect("tracker");
     assert_eq!(state.as_ref().expect("enabled state").active.len(), 1);
     drop(state);
-    tracker.release(1);
+    tracker.release(RendererDeliveryId::new(1));
     assert!(
         tracker
             .state
@@ -114,7 +116,11 @@ fn enabled_trace_output_excludes_payload_and_identity() {
     tracing::subscriber::with_default(subscriber, || {
         let tracker = DeliveryMemoryTracker::new();
         let encoded = tau_proto::ProtocolMessageBytes::new(9).expect("encoded bytes");
-        tracker.observe_decode(8_675_309, &vec!["PRIVATE_CANARY_VALUE"], encoded);
+        tracker.observe_decode(
+            RendererDeliveryId::new(8_675_309),
+            &vec!["PRIVATE_CANARY_VALUE"],
+            encoded,
+        );
     });
     let trace = String::from_utf8(bytes.lock().expect("trace bytes").clone()).expect("UTF-8 trace");
     assert!(trace.contains("decoded_requested_capacity_estimate"));

@@ -4,6 +4,8 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use super::RendererDeliveryId;
+
 /// Maximum number of exact selected-presentation facts retained for one redraw.
 pub(super) const MAX_PENDING_PRESENTATION_OBSERVATIONS: usize = 64;
 /// Number of caller-defined opaque invalidation keys represented by one mask.
@@ -66,7 +68,7 @@ impl OpaquePresentationFact {
 /// One content-free process-local fact awaiting a successful terminal flush.
 pub(super) struct PresentationObservation {
     /// Socket delivery identity scoped to this CLI process.
-    pub(super) delivery_id: u64,
+    pub(super) delivery_id: RendererDeliveryId,
     /// Caller-owned stable content-free label.
     pub(super) fact: &'static str,
     /// Caller-owned invalidation key in `0..64`.
@@ -99,7 +101,7 @@ pub(super) struct PresentationObservationState {
     omitted_total: u64,
     /// Successful pass receipts retained only for focused unit-test assertions.
     #[cfg(test)]
-    pub(super) successful_test_passes: Vec<Vec<(u64, u64)>>,
+    pub(super) successful_test_passes: Vec<Vec<(RendererDeliveryId, u64)>>,
 }
 
 impl PresentationObservationState {
@@ -123,7 +125,7 @@ impl PresentationObservationState {
     /// Registers one caller-classified opaque presentation mutation.
     pub(super) fn register(
         &mut self,
-        delivery_id: u64,
+        delivery_id: RendererDeliveryId,
         fact: OpaquePresentationFact,
         observed_at: Instant,
     ) {

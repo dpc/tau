@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use tau_proto::{Event, UnixMicros};
 
-use super::{RENDERER_QUEUE_MAX_BYTES, RENDERER_QUEUE_MAX_ITEMS};
+use super::{RENDERER_QUEUE_MAX_BYTES, RENDERER_QUEUE_MAX_ITEMS, RendererDeliveryId};
 
 #[cfg(test)]
 mod tests;
@@ -24,7 +24,7 @@ pub(super) struct RendererDelivery {
     /// Encoded frame bytes charged to bounded staging or renderer admission.
     pub(super) queue_bytes: usize,
     /// Process-local correlation retained from socket decode through rendering.
-    pub(super) delivery_id: u64,
+    pub(super) delivery_id: RendererDeliveryId,
     /// Presentation-only event interpretation derived by cold-attach staging.
     pub(super) presentation: RendererPresentation,
     /// Starts shown before catch-up but absent from its authoritative snapshot.
@@ -177,7 +177,7 @@ impl ColdAttachStager {
     /// Returns whether reconstruction still owns one process-local delivery.
     ///
     /// This linear probe is used only by guarded decoded-memory measurement.
-    pub(super) fn retains_delivery(&self, delivery_id: u64) -> bool {
+    pub(super) fn retains_delivery(&self, delivery_id: RendererDeliveryId) -> bool {
         self.transcript
             .iter()
             .any(|delivery| delivery.delivery_id == delivery_id)
@@ -197,7 +197,7 @@ impl ColdAttachStager {
     ///
     /// The caller invokes this linear diagnostic probe only while
     /// decoded-memory measurement is enabled.
-    pub(super) fn retained_delivery_ids(&self) -> Vec<u64> {
+    pub(super) fn retained_delivery_ids(&self) -> Vec<RendererDeliveryId> {
         let mut ids = self
             .transcript
             .iter()
@@ -886,7 +886,7 @@ fn preserve_buffered_tool_lifecycle(
 pub(super) fn renderer_event_from_delivery(
     delivery: tau_proto::EventDelivery,
     queue_bytes: usize,
-    delivery_id: u64,
+    delivery_id: RendererDeliveryId,
 ) -> Option<RendererDelivery> {
     let tau_proto::EventDelivery {
         event,

@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
+use tau_cli_term::RendererDeliveryId;
 use tau_delivery_memory::DecodedMemoryEstimate;
 
 /// Independently observable CLI ownership cuts.
@@ -76,7 +77,7 @@ pub(super) struct DeliveryMemoryTracker {
 /// Enabled-only active estimates and bounded per-cut high-water values.
 struct TrackerState {
     /// Active delivery estimates.
-    active: HashMap<u64, ActiveEstimate>,
+    active: HashMap<RendererDeliveryId, ActiveEstimate>,
     /// Largest aggregate estimate observed at each cut.
     high_water: [DecodedMemoryEstimate; DeliveryMemoryCut::COUNT],
     /// Largest active item count observed at each cut.
@@ -97,7 +98,7 @@ impl DeliveryMemoryTracker {
     /// Recursively measures one current decoded message behind the trace guard.
     pub(super) fn observe_decode(
         &self,
-        delivery_id: u64,
+        delivery_id: RendererDeliveryId,
         message: &impl Serialize,
         encoded_bytes: tau_proto::ProtocolMessageBytes,
     ) {
@@ -127,7 +128,7 @@ impl DeliveryMemoryTracker {
     }
 
     /// Moves one estimate between independently observable owners.
-    pub(super) fn transition(&self, delivery_id: u64, cut: DeliveryMemoryCut) {
+    pub(super) fn transition(&self, delivery_id: RendererDeliveryId, cut: DeliveryMemoryCut) {
         if !self.enabled() {
             return;
         }
@@ -143,7 +144,7 @@ impl DeliveryMemoryTracker {
     }
 
     /// Releases one decoded-delivery estimate after its final observable owner.
-    pub(super) fn release(&self, delivery_id: u64) {
+    pub(super) fn release(&self, delivery_id: RendererDeliveryId) {
         if !self.enabled() {
             return;
         }
@@ -172,7 +173,10 @@ impl DeliveryMemoryTracker {
 
     /// Returns one active cut for focused production-seam tests.
     #[cfg(test)]
-    pub(super) fn cut_for_test(&self, delivery_id: u64) -> Option<DeliveryMemoryCut> {
+    pub(super) fn cut_for_test(
+        &self,
+        delivery_id: RendererDeliveryId,
+    ) -> Option<DeliveryMemoryCut> {
         self.state
             .lock()
             .expect("delivery-memory mutex poisoned")

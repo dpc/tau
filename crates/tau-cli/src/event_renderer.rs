@@ -12,6 +12,7 @@ use std::sync::{Arc, Condvar, Mutex, atomic as path_std_sync_atomic};
 use std::time::{Duration, Instant};
 use std::{sync as path_std_sync, time as path_std_time};
 
+use tau_cli_term::RendererDeliveryId;
 use tau_config::settings as path_tau_config_settings;
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem,
@@ -257,7 +258,7 @@ fn admit_handler_stall_warning(now: Instant) -> bool {
 /// Content-free renderer stage timing emitted on every handler exit.
 struct HandlerProgress {
     /// Process-local delivery correlation when the socket supplied this event.
-    delivery_id: Option<u64>,
+    delivery_id: Option<RendererDeliveryId>,
     /// Stable content-free protocol event name.
     event_name: tau_proto::EventName,
     /// Monotonic handler start time.
@@ -269,7 +270,7 @@ impl Drop for HandlerProgress {
         let elapsed = self.started_at.elapsed();
         tracing::trace!(
             target: "tau_cli::frontend_progress",
-            delivery_id = self.delivery_id,
+            delivery_id = self.delivery_id.map(RendererDeliveryId::get),
             event_name = %self.event_name,
             handler_us = elapsed.as_micros(),
             "renderer handler finished"
@@ -277,7 +278,7 @@ impl Drop for HandlerProgress {
         if Duration::from_millis(500) <= elapsed && admit_handler_stall_warning(Instant::now()) {
             tracing::warn!(
                 target: "tau_cli::frontend_progress",
-                delivery_id = self.delivery_id,
+                delivery_id = self.delivery_id.map(RendererDeliveryId::get),
                 event_name = %self.event_name,
                 handler_ms = elapsed.as_millis(),
                 "renderer handler stalled"
@@ -4716,7 +4717,7 @@ impl EventRenderer {
         &mut self,
         event: &Event,
         recorded_at: UnixMicros,
-        delivery_id: u64,
+        delivery_id: RendererDeliveryId,
     ) {
         self.handle_recorded_delivery(event, recorded_at, Some(delivery_id));
     }
@@ -4728,7 +4729,7 @@ impl EventRenderer {
         event: &Event,
         target_agent_id: &tau_proto::AgentId,
         recorded_at: UnixMicros,
-        delivery_id: u64,
+        delivery_id: RendererDeliveryId,
     ) {
         let user_originated =
             matches!(event, Event::ToolStarted(started) if started.originator.is_user());
@@ -4752,7 +4753,7 @@ impl EventRenderer {
         &mut self,
         event: &Event,
         recorded_at: UnixMicros,
-        delivery_id: Option<u64>,
+        delivery_id: Option<RendererDeliveryId>,
     ) {
         let observation = delivery_id
             .zip(presentation_fact(event))
@@ -4810,7 +4811,7 @@ impl EventRenderer {
         &mut self,
         event: &Event,
         recorded_at: UnixMicros,
-        observation: Option<(u64, PresentationFactClass)>,
+        observation: Option<(RendererDeliveryId, PresentationFactClass)>,
     ) {
         self.resources
             .handle
@@ -4835,12 +4836,12 @@ impl EventRenderer {
         &mut self,
         event: &Event,
         recorded_at: UnixMicros,
-        delivery_id: Option<u64>,
+        delivery_id: Option<RendererDeliveryId>,
     ) {
         let event_name = event.name();
         tracing::trace!(
             target: "tau_cli::frontend_progress",
-            delivery_id,
+            delivery_id = delivery_id.map(RendererDeliveryId::get),
             %event_name,
             "renderer handler started"
         );
@@ -8642,7 +8643,7 @@ impl EventRenderer {
         &mut self,
         finished: &tau_proto::ShellCommandFinished,
         recorded_at: UnixMicros,
-        delivery_id: u64,
+        delivery_id: RendererDeliveryId,
     ) {
         let event = Event::ShellCommandFinished(finished.clone());
         self.session
@@ -8651,7 +8652,7 @@ impl EventRenderer {
         self.learn_agent_metadata(&event);
         tracing::trace!(
             target: "tau_cli::frontend_progress",
-            delivery_id,
+            delivery_id = delivery_id.get(),
             event = %event.name(),
             "routing standalone historical shell terminal"
         );

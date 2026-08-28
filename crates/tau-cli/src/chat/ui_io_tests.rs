@@ -1,11 +1,37 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::os::unix::net::UnixStream;
 use std::sync::{atomic as path_std_sync_atomic, mpsc};
 
+use tau_cli_term::RendererDeliveryId;
 use tau_proto::HarnessOutputWriter;
 
 use super::delivery_memory::DeliveryMemoryTracker;
 use super::*;
+
+const TEST_DELIVERY_ID_ONE: RendererDeliveryId = RendererDeliveryId::new(1);
+const TEST_DELIVERY_ID_TWO: RendererDeliveryId = RendererDeliveryId::new(2);
+const TEST_DELIVERY_ID_THREE: RendererDeliveryId = RendererDeliveryId::new(3);
+
+/// Renderer delivery allocation starts at one and keeps each normal delivery
+/// distinct instead of sharing a counter with queue sizes or timestamps.
+#[test]
+fn renderer_delivery_allocator_starts_at_one_and_advances() {
+    let next_delivery_id = Cell::new(1);
+
+    assert_eq!(allocate_renderer_delivery_id(&next_delivery_id).get(), 1);
+    assert_eq!(allocate_renderer_delivery_id(&next_delivery_id).get(), 2);
+}
+
+/// Renderer delivery allocation must fail at the integer boundary rather than
+/// silently reusing the final identity for later deliveries.
+#[test]
+#[should_panic(expected = "renderer delivery identity exhausted")]
+fn renderer_delivery_allocator_rejects_exhaustion_without_reusing_maximum() {
+    let next_delivery_id = Cell::new(u64::MAX);
+
+    let _ = allocate_renderer_delivery_id(&next_delivery_id);
+}
 
 /// Creates production-shaped renderer channels for focused scheduler tests.
 fn renderer_scheduler_channels(
@@ -33,7 +59,7 @@ fn remote_bell(delivery_id: u64) -> RendererCmd {
         presentation: cold_attach_stager::RendererPresentation::Ordinary,
         event: Box::new(Event::TermBell(tau_proto::TermBell {})),
         recorded_at: UnixMicros::new(delivery_id),
-        delivery_id,
+        delivery_id: RendererDeliveryId::new(delivery_id),
         queue_bytes: 1,
         enqueued_at: Instant::now(),
         folded_frames: Vec::new(),
@@ -131,18 +157,18 @@ fn folded_remote_release_accounts_for_every_original_frame_once() {
 
     release_remote_queue_frames(
         RendererQueueFrame {
-            delivery_id: 11,
+            delivery_id: RendererDeliveryId::new(11),
             queue_bytes: 2,
             enqueued_at: Instant::now(),
         },
         vec![
             RendererQueueFrame {
-                delivery_id: 12,
+                delivery_id: RendererDeliveryId::new(12),
                 queue_bytes: 3,
                 enqueued_at: Instant::now(),
             },
             RendererQueueFrame {
-                delivery_id: 13,
+                delivery_id: RendererDeliveryId::new(13),
                 queue_bytes: 5,
                 enqueued_at: Instant::now(),
             },
@@ -153,7 +179,13 @@ fn folded_remote_release_accounts_for_every_original_frame_once() {
     );
     projections += 1;
 
-    assert_eq!(diagnosed, vec![11, 12, 13]);
+    assert_eq!(
+        diagnosed
+            .into_iter()
+            .map(RendererDeliveryId::get)
+            .collect::<Vec<_>>(),
+        vec![11, 12, 13]
+    );
     assert_eq!(queued_items.load(Ordering::Acquire), 0);
     assert_eq!(*budget.used.lock().expect(MUTEX_POISONED), 0);
     assert_eq!(projections, 1);
@@ -203,7 +235,7 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(1),
-            delivery_id: 1,
+            delivery_id: TEST_DELIVERY_ID_ONE,
             queue_bytes: 1,
             enqueued_at: Instant::now(),
             folded_frames: Vec::new(),
@@ -212,7 +244,7 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
     remote_tx
         .send(RendererCmd::RemoteDisconnect {
             reason: Some("done".to_owned()),
-            delivery_id: 2,
+            delivery_id: TEST_DELIVERY_ID_TWO,
             queue_bytes: 1,
             enqueued_at: Instant::now(),
         })
@@ -237,13 +269,16 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
         remote,
         RendererCmd::Remote {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
-            delivery_id: 1,
+            delivery_id: TEST_DELIVERY_ID_ONE,
             ..
         }
     ));
     assert!(matches!(
         scheduler.recv_timeout(Duration::from_millis(10)),
-        Ok(RendererCmd::RemoteDisconnect { delivery_id: 2, .. })
+        Ok(RendererCmd::RemoteDisconnect {
+            delivery_id: TEST_DELIVERY_ID_TWO,
+            ..
+        })
     ));
     assert!(matches!(
         scheduler.recv_timeout(Duration::from_millis(10)),
@@ -273,13 +308,14 @@ fn renderer_admission_preserves_decoded_event_box() {
     let source =
         tau_proto::EventDelivery::live(UnixMicros::new(1), Event::TermBell(tau_proto::TermBell {}));
     let source_allocation = std::ptr::from_ref(source.event.as_ref());
-    let delivery = renderer_event_from_delivery(source, 1, 1).expect("ordinary delivery");
+    let delivery =
+        renderer_event_from_delivery(source, 1, TEST_DELIVERY_ID_ONE).expect("ordinary delivery");
     let mut stager = cold_attach_stager::ColdAttachStager::pass_through();
     let delivery = stager.admit(delivery).pop().expect("staged delivery");
     let delivery_memory = Arc::new(DeliveryMemoryTracker::new());
     delivery_memory.force_enable_for_test();
     delivery_memory.observe_decode(
-        1,
+        TEST_DELIVERY_ID_ONE,
         &tau_proto::HarnessOutputMessage::deliver(Event::TermBell(tau_proto::TermBell {})),
         tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte"),
     );
@@ -307,7 +343,7 @@ fn renderer_admission_preserves_decoded_event_box() {
         Some(Arc::clone(&delivery_memory)),
     );
     assert_eq!(
-        delivery_memory.cut_for_test(1),
+        delivery_memory.cut_for_test(TEST_DELIVERY_ID_ONE),
         Some(DeliveryMemoryCut::RendererFifo)
     );
     let RendererCmd::Remote { event, .. } = scheduler
@@ -318,7 +354,7 @@ fn renderer_admission_preserves_decoded_event_box() {
     };
     assert_eq!(std::ptr::from_ref(event.as_ref()), source_allocation);
     assert_eq!(
-        delivery_memory.cut_for_test(1),
+        delivery_memory.cut_for_test(TEST_DELIVERY_ID_ONE),
         Some(DeliveryMemoryCut::Scheduler)
     );
 }
@@ -332,22 +368,35 @@ fn enabled_folded_handler_ownership_releases_every_source() {
     let encoded = tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte");
     for id in [1, 2] {
         memory.observe_decode(
-            id,
+            RendererDeliveryId::new(id),
             &tau_proto::HarnessOutputMessage::deliver(Event::TermBell(tau_proto::TermBell {})),
             encoded,
         );
-        memory.transition(id, DeliveryMemoryCut::Scheduler);
+        memory.transition(RendererDeliveryId::new(id), DeliveryMemoryCut::Scheduler);
     }
     let folded = vec![RendererQueueFrame {
-        delivery_id: 2,
+        delivery_id: TEST_DELIVERY_ID_TWO,
         queue_bytes: 1,
         enqueued_at: Instant::now(),
     }];
-    let receipts = begin_remote_memory_handler(Some(&memory), 1, &folded);
-    assert_eq!(receipts, [2]);
-    assert_eq!(memory.cut_for_test(1), Some(DeliveryMemoryCut::Handler));
-    assert_eq!(memory.cut_for_test(2), Some(DeliveryMemoryCut::Handler));
-    finish_remote_memory_handler(Some(&memory), 1, receipts);
+    let receipts = begin_remote_memory_handler(Some(&memory), TEST_DELIVERY_ID_ONE, &folded);
+    assert_eq!(
+        receipts
+            .iter()
+            .copied()
+            .map(RendererDeliveryId::get)
+            .collect::<Vec<_>>(),
+        [2]
+    );
+    assert_eq!(
+        memory.cut_for_test(TEST_DELIVERY_ID_ONE),
+        Some(DeliveryMemoryCut::Handler)
+    );
+    assert_eq!(
+        memory.cut_for_test(TEST_DELIVERY_ID_TWO),
+        Some(DeliveryMemoryCut::Handler)
+    );
+    finish_remote_memory_handler(Some(&memory), TEST_DELIVERY_ID_ONE, receipts);
     assert_eq!(memory.active_len_for_test(), 0);
 }
 
@@ -360,21 +409,28 @@ fn enabled_cold_filter_and_enqueue_failure_release_receipts() {
     let encoded = tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte");
     for id in [1, 2] {
         memory.observe_decode(
-            id,
+            RendererDeliveryId::new(id),
             &tau_proto::HarnessOutputMessage::deliver(Event::TermBell(tau_proto::TermBell {})),
             encoded,
         );
-        memory.transition(id, DeliveryMemoryCut::ColdStaging);
+        memory.transition(RendererDeliveryId::new(id), DeliveryMemoryCut::ColdStaging);
     }
     let forwarded = renderer_event_from_delivery(
         tau_proto::EventDelivery::live(UnixMicros::new(2), Event::TermBell(tau_proto::TermBell {})),
         1,
-        2,
+        TEST_DELIVERY_ID_TWO,
     )
     .expect("forwarded delivery");
-    release_filtered_cold_memory(Some(&memory), vec![1, 2], std::slice::from_ref(&forwarded));
-    assert_eq!(memory.cut_for_test(1), None);
-    assert_eq!(memory.cut_for_test(2), Some(DeliveryMemoryCut::ColdStaging));
+    release_filtered_cold_memory(
+        Some(&memory),
+        vec![TEST_DELIVERY_ID_ONE, TEST_DELIVERY_ID_TWO],
+        std::slice::from_ref(&forwarded),
+    );
+    assert_eq!(memory.cut_for_test(TEST_DELIVERY_ID_ONE), None);
+    assert_eq!(
+        memory.cut_for_test(TEST_DELIVERY_ID_TWO),
+        Some(DeliveryMemoryCut::ColdStaging)
+    );
 
     let (wake_tx, _wake_rx) = tau_blocking_notify_channel::channel();
     let (remote_tx, remote_rx) = RemoteRendererSender::channel(1, wake_tx);
@@ -407,25 +463,25 @@ fn enabled_real_cold_admission_tracks_retention_and_forwarding() {
         ctx_id: None,
     });
     memory.observe_decode(
-        41,
+        RendererDeliveryId::new(41),
         &tau_proto::HarnessOutputMessage::deliver(event.clone()),
         tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte"),
     );
     let delivery = renderer_event_from_delivery(
         tau_proto::EventDelivery::replay(UnixMicros::new(1), event),
         1,
-        41,
+        RendererDeliveryId::new(41),
     )
     .expect("replay delivery");
     let mut stager = cold_attach_stager::ColdAttachStager::staging();
     assert!(admit_cold_delivery(&mut stager, delivery, Some(&memory)).is_empty());
     assert_eq!(
-        memory.cut_for_test(41),
+        memory.cut_for_test(RendererDeliveryId::new(41)),
         Some(DeliveryMemoryCut::ColdStaging)
     );
     let forwarded = stager.finish_before_disconnect();
     assert_eq!(forwarded.len(), 1);
-    assert_eq!(forwarded[0].delivery_id, 41);
+    assert_eq!(forwarded[0].delivery_id.get(), 41);
 }
 
 /// Disconnect coordination must hold its enabled receipt through handler
@@ -435,14 +491,17 @@ fn enabled_disconnect_handler_releases_receipt() {
     let memory = DeliveryMemoryTracker::new();
     memory.force_enable_for_test();
     memory.observe_decode(
-        9,
+        RendererDeliveryId::new(9),
         &tau_proto::HarnessOutputMessage::Disconnect(tau_proto::Disconnect { reason: None }),
         tau_proto::ProtocolMessageBytes::new(1).expect("encoded byte"),
     );
-    memory.transition(9, DeliveryMemoryCut::Scheduler);
-    begin_disconnect_memory(Some(&memory), 9);
-    assert_eq!(memory.cut_for_test(9), Some(DeliveryMemoryCut::Handler));
-    finish_disconnect_memory(Some(&memory), 9);
+    memory.transition(RendererDeliveryId::new(9), DeliveryMemoryCut::Scheduler);
+    begin_disconnect_memory(Some(&memory), RendererDeliveryId::new(9));
+    assert_eq!(
+        memory.cut_for_test(RendererDeliveryId::new(9)),
+        Some(DeliveryMemoryCut::Handler)
+    );
+    finish_disconnect_memory(Some(&memory), RendererDeliveryId::new(9));
     assert_eq!(memory.active_len_for_test(), 0);
 }
 
@@ -465,7 +524,7 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(1),
-            delivery_id: 1,
+            delivery_id: TEST_DELIVERY_ID_ONE,
             queue_bytes: 1,
             enqueued_at: Instant::now(),
             folded_frames: Vec::new(),
@@ -477,7 +536,7 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
         next(),
         Ok(RendererCmd::Remote {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
-            delivery_id: 1,
+            delivery_id: TEST_DELIVERY_ID_ONE,
             ..
         })
     ));
@@ -502,7 +561,7 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(1),
-            delivery_id: 1,
+            delivery_id: TEST_DELIVERY_ID_ONE,
             queue_bytes: 1,
             enqueued_at: Instant::now(),
             folded_frames: Vec::new(),
@@ -536,7 +595,7 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
         scheduler.recv_timeout_after_local_check(Duration::from_secs(1), &mut after_local_check),
         Ok(RendererCmd::Remote {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
-            delivery_id: 1,
+            delivery_id: TEST_DELIVERY_ID_ONE,
             ..
         })
     ));
@@ -576,7 +635,10 @@ fn renderer_scheduler_wakes_for_remote_arriving_after_empty_scan() {
     };
     assert!(matches!(
         result,
-        Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        Ok(RendererCmd::Remote {
+            delivery_id: TEST_DELIVERY_ID_ONE,
+            ..
+        })
     ));
     worker.join().expect("scheduler worker");
 }
@@ -629,7 +691,10 @@ fn renderer_scheduler_coalesced_wake_preserves_remote_reservation() {
 
     assert!(matches!(
         scheduler.recv_timeout_before_wait(Duration::from_secs(1), &mut after_empty_scan),
-        Ok(RendererCmd::Remote { delivery_id: 1, .. })
+        Ok(RendererCmd::Remote {
+            delivery_id: TEST_DELIVERY_ID_ONE,
+            ..
+        })
     ));
     assert!(matches!(
         scheduler.recv_timeout(Duration::ZERO),
@@ -788,7 +853,7 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(1),
-            delivery_id: 1,
+            delivery_id: TEST_DELIVERY_ID_ONE,
             queue_bytes: 1,
             enqueued_at: Instant::now(),
             folded_frames: Vec::new(),
@@ -808,7 +873,7 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(2),
-            delivery_id: 2,
+            delivery_id: TEST_DELIVERY_ID_TWO,
             queue_bytes: 1,
             enqueued_at: Instant::now(),
             folded_frames: Vec::new(),
@@ -820,7 +885,7 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
         next(),
         Ok(RendererCmd::Remote {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
-            delivery_id: 1,
+            delivery_id: TEST_DELIVERY_ID_ONE,
             ..
         })
     ));
@@ -829,7 +894,7 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
         next(),
         Ok(RendererCmd::Remote {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
-            delivery_id: 2,
+            delivery_id: TEST_DELIVERY_ID_TWO,
             ..
         })
     ));
@@ -854,7 +919,7 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
                 presentation: cold_attach_stager::RendererPresentation::Ordinary,
                 event: Box::new(Event::TermBell(tau_proto::TermBell {})),
                 recorded_at: UnixMicros::new(delivery_id),
-                delivery_id,
+                delivery_id: RendererDeliveryId::new(delivery_id),
                 queue_bytes: 1,
                 enqueued_at: Instant::now(),
                 folded_frames: Vec::new(),
@@ -867,7 +932,7 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
         next(),
         Ok(RendererCmd::Remote {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
-            delivery_id: 1,
+            delivery_id: TEST_DELIVERY_ID_ONE,
             ..
         })
     ));
@@ -875,7 +940,7 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
         next(),
         Ok(RendererCmd::Remote {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
-            delivery_id: 2,
+            delivery_id: TEST_DELIVERY_ID_TWO,
             ..
         })
     ));
@@ -884,7 +949,7 @@ fn renderer_scheduler_bounds_local_progress_under_remote_replenishment() {
         next(),
         Ok(RendererCmd::Remote {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
-            delivery_id: 3,
+            delivery_id: TEST_DELIVERY_ID_THREE,
             ..
         })
     ));
@@ -907,7 +972,7 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
             event: Box::new(Event::TermBell(tau_proto::TermBell {})),
             recorded_at: UnixMicros::new(1),
-            delivery_id: 1,
+            delivery_id: TEST_DELIVERY_ID_ONE,
             queue_bytes: RENDERER_QUEUE_MAX_BYTES,
             enqueued_at: Instant::now(),
             folded_frames: Vec::new(),
@@ -930,7 +995,7 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
                 presentation: cold_attach_stager::RendererPresentation::Ordinary,
                 event: Box::new(Event::TermBell(tau_proto::TermBell {})),
                 recorded_at: UnixMicros::new(2),
-                delivery_id: 2,
+                delivery_id: TEST_DELIVERY_ID_TWO,
                 queue_bytes: 1,
                 enqueued_at: Instant::now(),
                 folded_frames: Vec::new(),
@@ -952,7 +1017,7 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
             .expect("admitted remote prefix"),
         RendererCmd::Remote {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
-            delivery_id: 1,
+            delivery_id: TEST_DELIVERY_ID_ONE,
             ..
         }
     ));
@@ -1013,7 +1078,7 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
             .expect("later remote arrival"),
         RendererCmd::Remote {
             presentation: cold_attach_stager::RendererPresentation::Ordinary,
-            delivery_id: 2,
+            delivery_id: TEST_DELIVERY_ID_TWO,
             ..
         }
     ));
