@@ -190,6 +190,331 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     h.shutdown().expect("shutdown");
 }
 
+/// An eager outer-turn-finished policy must defer its decision when a side
+/// agent's terminal will continue for a pending message wake. This prevents the
+/// first terminal from stranding decision ownership before the final terminal,
+/// and proves the accepted suffix remains identical under replay and restart.
+#[test]
+fn side_agent_pending_message_wake_defers_automatic_decision_until_final_response() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let durable_agent_id;
+    {
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        h.provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("test model")
+            .supports_standalone_compaction = true;
+        h.config
+            .available_roles
+            .get_mut(&h.config.selected_role)
+            .expect("selected role")
+            .compactions
+            .insert(
+                "side-message-final-terminal".to_owned(),
+                tau_config::settings::CompactionPolicy {
+                    threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(1),
+                    enable: true,
+                    when: tau_config::settings::ContextPolicyWhen {
+                        at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
+                        statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
+                    },
+                },
+            );
+        connect_test_tool(&mut h, "conn-delegate");
+        let parent = ensure_test_user_agent(&mut h);
+        h.tool_routing
+            .tool_runtime
+            .tool_agents
+            .insert("delegate-call".into(), parent);
+        h.handle_start_agent_request(
+            &crate::test_connection_id("conn-delegate"),
+            StartAgentRequest {
+                trusted_internal_spans: Vec::new(),
+                parent_agent: None,
+                query_id: "q-policy-message".to_owned(),
+                instruction: "side task".to_owned(),
+                role: None,
+                input_stats: tau_proto::ToolUseStats::default(),
+                tool_call_id: Some("delegate-call".into()),
+                task_name: None,
+            },
+        )
+        .expect("query");
+
+        let (first_prompt_id, side_cid) = h
+            .prompt_coordination
+            .prompt_runtime
+            .agents
+            .iter()
+            .find_map(|(prompt_id, prompt_cid)| {
+                (prompt_cid.as_str() != "default").then(|| (prompt_id.clone(), prompt_cid.clone()))
+            })
+            .expect("side prompt");
+        durable_agent_id = h.agent_runtime.agent_registry.agents[&side_cid]
+            .identity
+            .agent_id
+            .clone()
+            .expect("durable side agent");
+        h.publish_event(
+            Some(&crate::test_connection_id(HARNESS_CONNECTION_ID)),
+            Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+                message_id: tau_proto::AgentMessageId::parse("test-policy-message")
+                    .expect("message id"),
+                sender_id: crate::parse_agent_id("manager"),
+                sender_session_id: None,
+                recipient_id: crate::parse_agent_id(&durable_agent_id),
+                kind: tau_proto::AgentMessageKind::Message,
+                watch_provider_status: None,
+                watch_work_status: None,
+                watch_long_wait: None,
+                watch_lifecycle: None,
+                message: "include this before finishing".to_owned(),
+            }),
+        );
+
+        let first_prompt = read_prompt_created(&h, &first_prompt_id);
+        let mut first_response = provider_text_response(
+            &first_prompt.agent_prompt_id,
+            first_prompt.agent_id,
+            "initial answer",
+        );
+        first_response.originator = tau_proto::PromptOriginator::Extension {
+            name: crate::test_extension_name("conn-delegate"),
+            query_id: "q-policy-message".to_owned(),
+        };
+        first_response.usage = Some(tau_proto::ProviderTokenUsage {
+            model: Some("test/model".into()),
+            prompt_sent_tokens: 250,
+            response_received_tokens: 1,
+            ..Default::default()
+        });
+        reject_next_semantic_admission(&h);
+        h.handle_provider_response_finished(first_response)
+            .expect("first terminal");
+        assert!(
+            event_log_events(&h).iter().all(|event| !matches!(
+                event,
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == first_prompt_id
+            )),
+            "a rejected first terminal must not appear canonical"
+        );
+        let retained = h
+            .prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .get(&side_cid)
+            .expect("decision-free terminal continuation remains retryable");
+        let AgentPublishCompletion::GatedFinal {
+            disposition: GatedFinalDisposition::Accept { terminal },
+            retry_event: Some(retry_event),
+            ..
+        } = retained
+        else {
+            panic!("pending-message terminal must retain its exact gated acceptance");
+        };
+        assert_eq!(terminal.response.agent_prompt_id, first_prompt_id);
+        assert!(terminal.response.automatic_compaction_decision.is_none());
+        assert!(matches!(
+            retry_event.as_ref(),
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id == first_prompt_id
+                    && response.automatic_compaction_decision.is_none()
+        ));
+        assert!(
+            h.prompt_coordination
+                .prompt_runtime
+                .agents
+                .iter()
+                .all(|(prompt_id, prompt_cid)| {
+                    prompt_cid != &side_cid || prompt_id == &first_prompt_id
+                }),
+            "the message-wake successor cannot dispatch before T1 commits"
+        );
+        h.retry_pending_agent_publications();
+
+        let after_first = event_log_events(&h);
+        let first_terminal = after_first
+            .iter()
+            .find_map(|event| match event {
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == first_prompt_id =>
+                {
+                    Some(response)
+                }
+                _ => None,
+            })
+            .expect("canonical first terminal");
+        assert!(
+            first_terminal.automatic_compaction_decision.is_none(),
+            "a terminal that continues for a message wake cannot own the final decision"
+        );
+        assert!(after_first.iter().all(|event| !matches!(
+            event,
+            Event::AgentOuterTurnFinished(_) | Event::AgentStandaloneCompactionStarted(_)
+        )));
+        assert!(
+            h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .is_empty(),
+            "successful retry must clear the retained first-terminal completion"
+        );
+        let outer_turn_id = after_first
+            .iter()
+            .find_map(|event| match event {
+                Event::AgentOuterTurnStarted(started)
+                    if started.agent_prompt_id == first_prompt_id =>
+                {
+                    Some(started.outer_turn_id.clone())
+                }
+                _ => None,
+            })
+            .expect("outer turn");
+        let successor_prompt_id = h
+            .prompt_coordination
+            .prompt_runtime
+            .agents
+            .iter()
+            .find_map(|(prompt_id, prompt_cid)| {
+                (prompt_cid == &side_cid && prompt_id != &first_prompt_id)
+                    .then(|| prompt_id.clone())
+            })
+            .expect("message-wake successor");
+        assert!(after_first.iter().any(|event| matches!(
+            event,
+            Event::AgentPromptStarted(started)
+                if started.agent_prompt_id == successor_prompt_id
+                    && started.outer_turn_id.as_ref() == Some(&outer_turn_id)
+        )));
+
+        let successor_prompt = read_prompt_created(&h, &successor_prompt_id);
+        let mut final_response = provider_text_response(
+            &successor_prompt.agent_prompt_id,
+            successor_prompt.agent_id,
+            "final answer",
+        );
+        final_response.originator = tau_proto::PromptOriginator::Extension {
+            name: crate::test_extension_name("conn-delegate"),
+            query_id: "q-policy-message".to_owned(),
+        };
+        final_response.usage = Some(tau_proto::ProviderTokenUsage {
+            model: Some("test/model".into()),
+            prompt_sent_tokens: 250,
+            response_received_tokens: 1,
+            ..Default::default()
+        });
+        h.handle_provider_response_finished(final_response)
+            .expect("final terminal");
+
+        let events = event_log_events(&h);
+        let decisions = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ProviderResponseFinished(response) => {
+                    response.automatic_compaction_decision.as_ref()
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decisions.len(), 1);
+        let decision = decisions[0];
+        assert_eq!(decision.outer_turn_id, outer_turn_id);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::AgentOuterTurnFinished(finished)
+                        if finished.outer_turn_id == outer_turn_id
+                            && finished.automatic_compaction_decision.as_ref()
+                                == Some(&decision.transaction_id)
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::AgentStandaloneCompactionStarted(started)
+                        if matches!(
+                            &started.trigger,
+                            tau_proto::StandaloneCompactionTrigger::AutomaticPolicy {
+                                decision_id
+                            } if decision_id == &decision.transaction_id
+                        )
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .is_empty(),
+            "the final terminal and protected suffix must commit without retained retry"
+        );
+
+        let records = h
+            .session_runtime
+            .agent_store
+            .agent_events(&durable_agent_id)
+            .expect("durable records");
+        let live = h
+            .session_runtime
+            .agent_store
+            .agent(&durable_agent_id)
+            .expect("live tree");
+        let cold = tau_core::AgentTree::try_from_events(
+            crate::parse_agent_id(&durable_agent_id),
+            &records,
+        )
+        .expect("cold replay");
+        assert_eq!(live, &cold, "live append and cold replay must agree");
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let records = resumed
+        .session_runtime
+        .agent_store
+        .agent_events(&durable_agent_id)
+        .expect("resumed durable records");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentOuterTurnFinished(_)))
+            .count(),
+        1,
+        "restart must not duplicate the outer-turn finish"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record.event, Event::AgentStandaloneCompactionStarted(_)))
+            .count(),
+        1,
+        "restart must not duplicate the protected automatic start"
+    );
+    assert!(
+        resumed
+            .prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty(),
+        "restart must not reconstruct a rejected retained completion"
+    );
+    resumed.shutdown().expect("shutdown resumed harness");
+}
+
 #[test]
 fn agent_prompt_created_uses_refs_for_linear_extension() {
     let td = TempDir::new().expect("tempdir");

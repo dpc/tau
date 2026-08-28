@@ -15,9 +15,10 @@ use super::*;
 use crate::agent::{ActivationDispatchState, Agent, AgentTurnState, PendingPrompt};
 use crate::harness::interception::{AgentPublishCompletion, DeferredActivationObligation};
 use crate::harness::{
-    BackgroundCompletionPromptMode, PendingRenderedPreview, PendingRenderedPrompt, PendingTool,
-    RestoredCheckpointAuthority, STATUS_REMINDER, agent_message_activation_class,
-    background_completion_prompt, extension_disconnected_background_tool_call_error_message,
+    BackgroundCompletionPromptMode, GatedFinalDisposition, PendingRenderedPreview,
+    PendingRenderedPrompt, PendingTool, RestoredCheckpointAuthority, STATUS_REMINDER,
+    agent_message_activation_class, background_completion_prompt,
+    extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, final_status_reminder,
     is_restore_notice_prompt_text, restore_notice_prompt_for_elapsed,
     self_compaction_terminal_pending_prompt, self_compaction_terminal_prompt,

@@ -437,9 +437,17 @@ impl Harness {
         {
             *outer_turn_finish_owed = false;
         }
+        let continues_for_pending_message_wake = self
+            .finished_side_conversation_continues_for_pending_message_wake(
+                &cid,
+                &response,
+                requested_tool_calls,
+                is_non_tool_ext_query,
+            );
         let eager_decision_eligible = !final_status_challenged
             && !requested_tool_calls
             && !response_contains_compaction
+            && !continues_for_pending_message_wake
             && response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
             && response.recovery_disposition == tau_proto::ContextRecoveryDisposition::None
             && !matches!(
@@ -503,7 +511,8 @@ impl Harness {
             None => None,
         };
         let eager_terminal_owned = response.automatic_compaction_decision.is_some();
-        let completion = if eager_terminal_owned && completion.is_none() {
+        let commit_gated_terminal = eager_terminal_owned || continues_for_pending_message_wake;
+        let completion = if commit_gated_terminal && completion.is_none() {
             Some(AgentPublishCompletion::GatedFinal {
                 batch_parent: self
                     .agent_runtime
@@ -520,7 +529,11 @@ impl Harness {
                         context_size_alerts: context_size_alerts.clone(),
                         is_non_tool_ext_query,
                         source: source.cloned(),
-                        tool_effect: CommittedOutputLengthToolEffect::None,
+                        tool_effect: if requested_tool_calls {
+                            CommittedOutputLengthToolEffect::Dispatch(normalized_tool_calls.clone())
+                        } else {
+                            CommittedOutputLengthToolEffect::None
+                        },
                     }),
                 },
                 retry_event: None,
@@ -605,7 +618,7 @@ impl Harness {
             self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
         }
         if final_status_gated
-            || eager_terminal_owned
+            || commit_gated_terminal
             || matches!(
                 response.output_length_disposition,
                 tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
@@ -2547,7 +2560,12 @@ impl Harness {
         if side.requested_tool_calls {
             self.reject_finished_side_conversation_tool_calls(cid, normalized_tool_calls, source);
         }
-        if self.has_pending_agent_message_wake(cid) {
+        if self.finished_side_conversation_continues_for_pending_message_wake(
+            cid,
+            side.response,
+            side.requested_tool_calls,
+            side.is_non_tool_ext_query,
+        ) {
             self.dispatch_prompt_after_publish_idle(cid);
             return true;
         }
@@ -2567,6 +2585,29 @@ impl Harness {
         self.deliver_finished_side_conversation_result(cid, &name, &query_id, result, source);
         self.complete_finished_side_conversation(cid, Some(&side.response.agent_prompt_id));
         true
+    }
+
+    /// Return whether a side-conversation terminal will continue in the same
+    /// outer turn to process a pending agent-message wake.
+    fn finished_side_conversation_continues_for_pending_message_wake(
+        &self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        requested_tool_calls: bool,
+        is_non_tool_ext_query: bool,
+    ) -> bool {
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
+            return false;
+        };
+        !Self::is_peer_entrypoint_agent(agent)
+            && agent.identity.originator == response.originator
+            && Self::finished_response_side_originator(
+                &agent.identity.originator,
+                requested_tool_calls,
+                is_non_tool_ext_query,
+            )
+            .is_some()
+            && self.has_pending_agent_message_wake(cid)
     }
 
     pub(super) fn finished_response_side_originator(
