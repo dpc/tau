@@ -3058,7 +3058,7 @@ impl Harness {
             originator: tau_proto::PromptOriginator::User,
         };
         let transcript_owner = self.harness_owned_terminal_transcript_owner(cid, &call_id);
-        self.publish_terminal_tool_result(transcript_owner, None, result);
+        self.publish_harness_owned_terminal_tool_result(transcript_owner, None, result);
     }
 
     pub(crate) fn finish_harness_owned_tool_with_error(
@@ -3097,7 +3097,7 @@ impl Harness {
             originator: tau_proto::PromptOriginator::User,
         };
         let transcript_owner = self.harness_owned_terminal_transcript_owner(cid, &call_id);
-        self.publish_terminal_tool_error(transcript_owner, None, error);
+        self.publish_harness_owned_terminal_tool_error(transcript_owner, None, error);
     }
 
     pub(crate) fn finish_prebuilt_internal_tool_result(&mut self, result: ToolResult) {

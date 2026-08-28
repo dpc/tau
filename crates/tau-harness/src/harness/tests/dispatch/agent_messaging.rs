@@ -2112,6 +2112,432 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
     h.shutdown().expect("shutdown");
 }
 
+/// A local message received while its target is blocked on an unrelated exact
+/// wait must not let that target's deferred activation block the sender's
+/// terminal or the next parallel message. This reproduces the publication cut
+/// that stranded a coordinator after the first recipient committed the message
+/// but before the sender committed its tool result.
+#[test]
+fn local_message_to_exact_waiter_releases_sender_and_parallel_successor() {
+    const FIRST_BODY: &str = "first exact-wait message";
+    const SECOND_BODY: &str = "second parallel message";
+    const BACKGROUND_CALL_ID: &str = "exact-wait-background";
+    const WAIT_CALL_ID: &str = "exact-wait-message";
+    const STATUS_CALL_ID: &str = "status-before-messages";
+    const FIRST_MESSAGE_CALL_ID: &str = "message-exact-wait";
+    const SECOND_MESSAGE_CALL_ID: &str = "message-parallel-successor";
+
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("start");
+    h.config.selected_model = Some("test/model".into());
+    let sender_cid = ensure_test_user_agent(&mut h);
+    let role = h.config.selected_role.clone();
+    let first_recipient_cid =
+        h.create_durable_user_agent(h.session_runtime.current_session_id.clone(), &role);
+    let second_recipient_cid =
+        h.create_durable_user_agent(h.session_runtime.current_session_id.clone(), &role);
+    let sender_id = durable_agent_id_for_conversation(&h, &sender_cid);
+    let first_recipient_id = durable_agent_id_for_conversation(&h, &first_recipient_cid);
+    let second_recipient_id = durable_agent_id_for_conversation(&h, &second_recipient_cid);
+    finish_test_agent_context_wait(&mut h, &first_recipient_id);
+    finish_test_agent_context_wait(&mut h, &second_recipient_id);
+
+    let _tool_events = connect_test_tool(&mut h, "exact-wait-message-tool");
+    h.tool_routing.registry.register(
+        &crate::test_connection_id("exact-wait-message-tool"),
+        instant_background_test_tool_spec("slow_exact_wait"),
+    );
+    start_background_tool_and_finish_placeholder_turn(
+        &mut h,
+        &first_recipient_cid,
+        BACKGROUND_CALL_ID,
+        "slow_exact_wait",
+    );
+    h.dispatch_prompt_for_agent(
+        &first_recipient_cid,
+        PendingPrompt::user("wait for exact background call".to_owned()),
+    )
+    .expect("dispatch exact-wait setup");
+    let recipient_setup_id = h.agent_runtime.agent_registry.agents[&first_recipient_cid]
+        .dispatch
+        .in_flight_prompt
+        .clone()
+        .expect("exact-wait setup prompt");
+    let recipient_setup = read_prompt_created(&h, &recipient_setup_id);
+    h.handle_provider_response_finished(provider_tool_response(
+        &recipient_setup,
+        WAIT_CALL_ID,
+        "wait",
+        CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text(BACKGROUND_CALL_ID.to_owned()),
+        )]),
+    ))
+    .expect("register recipient exact wait");
+    assert_eq!(tool_result_count(&h, WAIT_CALL_ID), 0);
+
+    h.dispatch_prompt_for_agent(
+        &sender_cid,
+        PendingPrompt::user("wait for timer".to_owned()),
+    )
+    .expect("dispatch sender wait");
+    let sender_wait_prompt_id = h.agent_runtime.agent_registry.agents[&sender_cid]
+        .dispatch
+        .in_flight_prompt
+        .clone()
+        .expect("sender wait prompt");
+    let sender_wait_prompt = read_prompt_created(&h, &sender_wait_prompt_id);
+    h.handle_provider_response_finished(provider_input_wait_response(
+        &sender_wait_prompt,
+        "sender-activating-wait",
+        60,
+    ))
+    .expect("open sender activating wait");
+    assert_eq!(
+        h.submit_prompt_to_agent(
+            h.session_runtime.current_session_id.clone(),
+            sender_id.as_str(),
+            PendingPrompt::internal("timer activation".to_owned()),
+        )
+        .expect("activate sender wait"),
+        PromptSubmission::Queued
+    );
+    let sender_setup_id = h.agent_runtime.agent_registry.agents[&sender_cid]
+        .dispatch
+        .in_flight_prompt
+        .clone()
+        .expect("sender setup prompt");
+    let sender_setup = read_prompt_created(&h, &sender_setup_id);
+    let mut response = provider_tool_response(
+        &sender_setup,
+        STATUS_CALL_ID,
+        "status",
+        CborValue::Map(vec![
+            (
+                CborValue::Text("state".to_owned()),
+                CborValue::Text("working".to_owned()),
+            ),
+            (
+                CborValue::Text("task_name".to_owned()),
+                CborValue::Text("testing parallel message continuation".to_owned()),
+            ),
+        ]),
+    );
+    let first_call = message_tool_call(
+        FIRST_MESSAGE_CALL_ID,
+        first_recipient_id.as_str(),
+        FIRST_BODY,
+    );
+    response
+        .output_items
+        .push(ContextItem::ToolCall(ToolCallItem {
+            call_id: first_call.id,
+            name: first_call.name,
+            tool_type: first_call.tool_type,
+            arguments: first_call.arguments,
+            raw_arguments_json: None,
+            responses_envelope: None,
+        }));
+    let second_call = message_tool_call(
+        SECOND_MESSAGE_CALL_ID,
+        second_recipient_id.as_str(),
+        SECOND_BODY,
+    );
+    response
+        .output_items
+        .push(ContextItem::ToolCall(ToolCallItem {
+            call_id: second_call.id,
+            name: second_call.name,
+            tool_type: second_call.tool_type,
+            arguments: second_call.arguments,
+            raw_arguments_json: None,
+            responses_envelope: None,
+        }));
+    let checkpoints_before = event_log_count(&h, |event| {
+        matches!(event, Event::AgentInferenceDispatchStarted(_))
+    });
+    let sender_checkpoints_before = event_log_events(&h)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started) if started.agent_id == sender_id
+            )
+        })
+        .count();
+    let recipient_checkpoints_before =
+        [&first_recipient_id, &second_recipient_id].map(|agent_id| {
+            event_log_events(&h)
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::AgentInferenceDispatchStarted(started) if &started.agent_id == agent_id
+                )
+            })
+            .count()
+        });
+    let interceptor = connect_test_tool(&mut h, "exact-wait-message-interceptor");
+    h.handle_extension_event(
+        "exact-wait-message-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_SENT,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register sender projection interceptor");
+    h.handle_provider_response_finished(response)
+        .expect("run parallel local messages");
+    assert!(h.runtime_io.publication.pending_intercept.is_some());
+    let terminal_interceptor = connect_test_tool(&mut h, "message-terminal-interceptor");
+    h.handle_extension_event(
+        "message-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_TOOL_RESULT,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register sender terminal interceptor");
+    h.handle_extension_event(
+        "exact-wait-message-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit first recipient and park sender terminal");
+    h.handle_extension_event(
+        "message-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit exact-wait interruption and park sender terminal");
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "message-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("reject first sender terminal append");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentMessageReceived(message)
+                    if message.recipient_id == first_recipient_id
+                        && message.message == FIRST_BODY
+            ))
+            .count(),
+        1,
+        "the recipient side effect committed before sender-terminal retry"
+    );
+    reject_next_semantic_admission(&h);
+    h.retry_pending_agent_publish_completion(&sender_cid);
+    assert!(
+        h.cancel_remaining_tool_calls(
+            &sender_cid,
+            vec![ToolCallId::from(FIRST_MESSAGE_CALL_ID)],
+            BackgroundCompletionPromptMode::QueueAndAdvance,
+        ),
+        "retained terminal remains the foreground cancellation owner"
+    );
+    assert!(event_log_events(&h).iter().all(|event| !matches!(
+        event,
+        Event::ToolCancelled(cancelled)
+            if cancelled.call_id.as_str() == FIRST_MESSAGE_CALL_ID
+    )));
+    h.retry_pending_agent_publish_completion(&sender_cid);
+    assert!(
+        h.runtime_io.publication.pending_intercept.is_some(),
+        "retained sender terminal retry must release the second message"
+    );
+    h.handle_extension_event(
+        "exact-wait-message-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit second local-message batch");
+    h.handle_extension_event(
+        "message-terminal-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit second sender terminal");
+    drop(interceptor);
+    drop(terminal_interceptor);
+
+    assert_eq!(
+        tool_result_count(&h, WAIT_CALL_ID),
+        1,
+        "activating message interrupts the exact wait exactly once"
+    );
+    for (recipient_id, body) in [
+        (&first_recipient_id, FIRST_BODY),
+        (&second_recipient_id, SECOND_BODY),
+    ] {
+        assert_eq!(
+            event_log_events(&h)
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::AgentMessageReceived(message)
+                        if &message.recipient_id == recipient_id && message.message == body
+                ))
+                .count(),
+            1,
+            "missing receive for {body}"
+        );
+    }
+    for call_id in [FIRST_MESSAGE_CALL_ID, SECOND_MESSAGE_CALL_ID] {
+        assert_eq!(
+            event_log_events(&h)
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::ProviderToolResult(result) if result.call_id.as_str() == call_id
+                ))
+                .count(),
+            1,
+            "missing sender terminal for {call_id}"
+        );
+    }
+    let events = event_log_events(&h);
+    let position = |predicate: &dyn Fn(&Event) -> bool| {
+        events
+            .iter()
+            .position(predicate)
+            .expect("incident-defining event")
+    };
+    let first_receive = position(&|event| {
+        matches!(
+            event,
+            Event::AgentMessageReceived(message)
+                if message.recipient_id == first_recipient_id && message.message == FIRST_BODY
+        )
+    });
+    let first_terminal = position(&|event| {
+        matches!(
+            event,
+            Event::ProviderToolResult(result)
+                if result.call_id.as_str() == FIRST_MESSAGE_CALL_ID
+        )
+    });
+    let second_receive = position(&|event| {
+        matches!(
+            event,
+            Event::AgentMessageReceived(message)
+                if message.recipient_id == second_recipient_id && message.message == SECOND_BODY
+        )
+    });
+    let second_terminal = position(&|event| {
+        matches!(
+            event,
+            Event::ProviderToolResult(result)
+                if result.call_id.as_str() == SECOND_MESSAGE_CALL_ID
+        )
+    });
+    assert!(
+        first_receive < first_terminal
+            && first_terminal < second_receive
+            && second_receive < second_terminal,
+        "parallel calls must retain the incident-defining serial order"
+    );
+    assert_eq!(
+        event_log_count(&h, |event| {
+            matches!(event, Event::AgentInferenceDispatchStarted(_))
+        }),
+        checkpoints_before + 3,
+        "the sender and both activated recipients continue exactly once"
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(started) if started.agent_id == sender_id
+            ))
+            .count(),
+        sender_checkpoints_before + 1,
+        "the sender must continue exactly once after both terminals"
+    );
+    for (agent_id, before) in [
+        (&first_recipient_id, recipient_checkpoints_before[0]),
+        (&second_recipient_id, recipient_checkpoints_before[1]),
+    ] {
+        assert_eq!(
+            event_log_events(&h)
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::AgentInferenceDispatchStarted(started)
+                        if &started.agent_id == agent_id
+                ))
+                .count(),
+            before + 1,
+            "each activated recipient must continue exactly once"
+        );
+    }
+    assert!(h.runtime_io.publication.pending_intercept.is_none());
+    assert!(h.runtime_io.publication.deferred.is_empty());
+    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
+    let sender_successor = h.agent_runtime.agent_registry.agents[&sender_cid]
+        .dispatch
+        .in_flight_prompt
+        .as_ref()
+        .expect("sender successor");
+    assert_eq!(
+        read_prompt_created(&h, sender_successor).agent_id,
+        sender_id.clone()
+    );
+    h.shutdown().expect("shutdown");
+    drop(h);
+    wait_for_session_unlock(&state, "s1");
+    let resumed =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("cold resume");
+    let first_recipient_events = resumed
+        .session_runtime
+        .agent_store
+        .agent_events(first_recipient_id.as_str())
+        .expect("restored first recipient");
+    assert_eq!(
+        first_recipient_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentMessageReceived(message)
+                    if message.sender_id == sender_id && message.message == FIRST_BODY
+            ))
+            .count(),
+        1,
+        "cold replay must not resend the already committed message"
+    );
+    let sender_events = resumed
+        .session_runtime
+        .agent_store
+        .agent_events(sender_id.as_str())
+        .expect("restored sender");
+    assert_eq!(
+        sender_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentMessageSent(message) if message.message == FIRST_BODY
+            ))
+            .count(),
+        1
+    );
+}
+
 /// Explicit navigation may leave an owed wake dormant, but a sibling checkpoint
 /// must never acknowledge it; reselecting its branch makes it runnable again.
 #[test]

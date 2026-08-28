@@ -485,6 +485,27 @@ impl Harness {
         source: Option<&tau_proto::ConnectionId>,
         result: ToolResult,
     ) {
+        self.publish_terminal_tool_result_inner(cid, source, result, false);
+    }
+
+    /// Publish one harness-owned result while retaining its exact durable
+    /// terminal across append rejection.
+    pub(super) fn publish_harness_owned_terminal_tool_result(
+        &mut self,
+        cid: Option<&AgentId>,
+        source: Option<&tau_proto::ConnectionId>,
+        result: ToolResult,
+    ) {
+        self.publish_terminal_tool_result_inner(cid, source, result, true);
+    }
+
+    fn publish_terminal_tool_result_inner(
+        &mut self,
+        cid: Option<&AgentId>,
+        source: Option<&tau_proto::ConnectionId>,
+        result: ToolResult,
+        retain_rejected: bool,
+    ) {
         if result.kind == ToolResultKind::Final
             && let Some(cid) = cid
             && self.tool_terminal_has_open_durable_owner(cid, &result.call_id)
@@ -497,7 +518,21 @@ impl Harness {
         }
         match cid {
             Some(cid) if self.tool_terminal_has_open_durable_owner(cid, &result.call_id) => {
-                self.publish_for_agent_from(cid, source, Event::ProviderToolResult(result));
+                if retain_rejected {
+                    let call_id = result.call_id.clone();
+                    self.publish_event_for_agent_with_completion(
+                        cid,
+                        source,
+                        Event::ProviderToolResult(result),
+                        Some(AgentPublishCompletion::ToolTerminal {
+                            call_id,
+                            retry_event: None,
+                        }),
+                        false,
+                    );
+                } else {
+                    self.publish_for_agent_from(cid, source, Event::ProviderToolResult(result));
+                }
             }
             Some(cid) => {
                 self.tool_routing
@@ -550,6 +585,34 @@ impl Harness {
         error: ToolError,
         cause: tau_proto::ToolTerminalCause,
     ) {
+        self.publish_terminal_tool_error_with_cause_inner(cid, source, error, cause, false);
+    }
+
+    /// Publish one harness-owned error while retaining its exact durable
+    /// terminal across append rejection.
+    pub(super) fn publish_harness_owned_terminal_tool_error(
+        &mut self,
+        cid: Option<&AgentId>,
+        source: Option<&tau_proto::ConnectionId>,
+        error: ToolError,
+    ) {
+        self.publish_terminal_tool_error_with_cause_inner(
+            cid,
+            source,
+            error,
+            tau_proto::ToolTerminalCause::ToolError,
+            true,
+        );
+    }
+
+    fn publish_terminal_tool_error_with_cause_inner(
+        &mut self,
+        cid: Option<&AgentId>,
+        source: Option<&tau_proto::ConnectionId>,
+        error: ToolError,
+        cause: tau_proto::ToolTerminalCause,
+        retain_rejected: bool,
+    ) {
         if let Some(cid) = cid
             && self.tool_terminal_has_open_durable_owner(cid, &error.call_id)
         {
@@ -557,7 +620,21 @@ impl Harness {
         }
         match cid {
             Some(cid) if self.tool_terminal_has_open_durable_owner(cid, &error.call_id) => {
-                self.publish_for_agent_from(cid, source, Event::ProviderToolError(error));
+                if retain_rejected {
+                    let call_id = error.call_id.clone();
+                    self.publish_event_for_agent_with_completion(
+                        cid,
+                        source,
+                        Event::ProviderToolError(error),
+                        Some(AgentPublishCompletion::ToolTerminal {
+                            call_id,
+                            retry_event: None,
+                        }),
+                        false,
+                    );
+                } else {
+                    self.publish_for_agent_from(cid, source, Event::ProviderToolError(error));
+                }
             }
             Some(cid) => {
                 self.tool_routing

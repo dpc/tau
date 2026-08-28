@@ -2506,7 +2506,20 @@ impl Harness {
                 backgrounded: false,
             })
             .collect();
+        let retained_terminal_call = self
+            .prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .get(cid)
+            .and_then(|completion| match completion {
+                AgentPublishCompletion::ToolTerminal { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            });
+        to_cancel.retain(|target| Some(&target.call_id) != retained_terminal_call.as_ref());
         for call_id in remaining_calls {
+            if retained_terminal_call.as_ref() == Some(&call_id) {
+                continue;
+            }
             if to_cancel.iter().any(|target| target.call_id == call_id) {
                 continue;
             }
@@ -2606,9 +2619,10 @@ impl Harness {
                 self.clear_tool_call_tracking(call_id.as_str());
             }
         }
-        foreground_call_ids
-            .iter()
-            .any(|call_id| self.tool_routing.tool_runtime.tool_agents.get(call_id) == Some(cid))
+        retained_terminal_call.is_some()
+            || foreground_call_ids
+                .iter()
+                .any(|call_id| self.tool_routing.tool_runtime.tool_agents.get(call_id) == Some(cid))
     }
 
     pub(super) fn cancel_target_should_finish_as_background_error(

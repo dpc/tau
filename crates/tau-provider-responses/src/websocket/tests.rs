@@ -1,4 +1,5 @@
 use reqwest::header::{HeaderMap, HeaderValue};
+use tokio::runtime::Builder;
 use tungstenite::protocol::frame::Frame;
 use tungstenite::protocol::frame::coding::{Data, OpCode};
 
@@ -133,7 +134,7 @@ fn configured_transport_rejects_oversized_fragmented_aggregate_before_delivery()
 }
 
 fn transport_error(messages: Vec<Message>) -> tungstenite::Error {
-    tokio::runtime::Builder::new_current_thread()
+    Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime")

@@ -1327,6 +1327,103 @@ fn deferred_dispatch_waits_for_open_foreground_round_to_finish() {
     h.shutdown().expect("shutdown");
 }
 
+/// Visible input that settles an activating wait must release the complete
+/// foreground tool round and dispatch one continuation. A second visible input
+/// remains ordered behind that continuation instead of leaving the agent
+/// permanently idle with queued activation.
+#[test]
+fn activating_wait_settlement_dispatches_once_and_preserves_next_input() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("enter input wait".to_owned()))
+        .expect("dispatch initial inference");
+    let initial_prompt = read_nth_prompt_created(&h, 0);
+    let initial_provider =
+        h.provider_runtime.pending_prompts[&initial_prompt.agent_prompt_id].clone();
+    h.handle_extension_event_inner(
+        &initial_provider,
+        Event::ProviderPromptSubmittedReported(tau_proto::ProviderPromptSubmitted {
+            agent_prompt_id: initial_prompt.agent_prompt_id.clone(),
+            originator: initial_prompt.originator.clone(),
+        }),
+    )
+    .expect("record initial provider submission");
+    h.handle_provider_response_finished(provider_input_wait_response(
+        &initial_prompt,
+        "activating-wait-settlement",
+        60,
+    ))
+    .expect("open activating wait");
+    assert!(h.input_wait_pending_for(&cid));
+
+    let checkpoints_before = event_log_count(&h, |event| {
+        matches!(event, Event::AgentInferenceDispatchStarted(_))
+    });
+    assert_eq!(
+        h.submit_prompt_to_agent(
+            h.session_runtime.current_session_id.clone(),
+            agent_id.as_str(),
+            PendingPrompt::user("first visible activation".to_owned()),
+        )
+        .expect("submit first activation"),
+        PromptSubmission::Queued
+    );
+    assert!(!h.input_wait_pending_for(&cid));
+    assert_eq!(tool_result_count(&h, "activating-wait-settlement"), 1);
+    assert_eq!(
+        event_log_count(&h, |event| {
+            matches!(event, Event::AgentInferenceDispatchStarted(_))
+        }),
+        checkpoints_before + 1,
+        "settlement releases exactly one post-tool continuation"
+    );
+    let continuation_id = h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .in_flight_prompt
+        .clone()
+        .expect("continuation prompt");
+    let continuation = read_prompt_created(&h, &continuation_id);
+    assert!(continuation.context.flatten().iter().any(|item| {
+        text_part(item).is_some_and(|text| text.contains("first visible activation"))
+    }));
+
+    assert_eq!(
+        h.submit_prompt_to_agent(
+            h.session_runtime.current_session_id.clone(),
+            agent_id.as_str(),
+            PendingPrompt::user("second visible activation".to_owned()),
+        )
+        .expect("submit second activation"),
+        PromptSubmission::Queued
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &continuation.agent_prompt_id,
+        agent_id.clone(),
+        "continuation complete",
+    ))
+    .expect("finish continuation");
+    let next_prompt_id = h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .in_flight_prompt
+        .clone()
+        .expect("second activation prompt");
+    let next_prompt = read_prompt_created(&h, &next_prompt_id);
+    assert!(next_prompt.context.flatten().iter().any(|item| {
+        text_part(item).is_some_and(|text| text.contains("second visible activation"))
+    }));
+    assert!(h.runtime_io.publication.deferred.is_empty());
+    assert!(h.runtime_io.publication.idle_dispatches.is_empty());
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty()
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Committed endpoint unload crosses the production lifecycle boundary and
 /// drops runtime-only input waits, retained completion/checkpoint owners,
 /// attempt markers, and deferred activation obligations before removal.

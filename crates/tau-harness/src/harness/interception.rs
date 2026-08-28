@@ -407,6 +407,14 @@ impl DormantOutputLengthCompletion {
 /// Harness-owned continuation bound to one exact agent publication envelope.
 #[derive(Clone)]
 pub(crate) enum AgentPublishCompletion {
+    /// Retain one canonical foreground tool terminal until its durable append
+    /// commits.
+    ToolTerminal {
+        /// Exact call whose terminal already won runtime arbitration.
+        call_id: tau_proto::ToolCallId,
+        /// Exact interceptor-approved terminal retained after append rejection.
+        retry_event: Option<Box<Event>>,
+    },
     /// Report a correlated initial-prompt failure if its canonical submission
     /// cannot commit.
     InitialPromptSubmission {
@@ -574,7 +582,8 @@ impl AgentPublishCompletion {
                 Event::ProviderResponseFinished(response) => Some(response),
                 _ => None,
             },
-            Self::InitialPromptSubmission { .. }
+            Self::ToolTerminal { .. }
+            | Self::InitialPromptSubmission { .. }
             | Self::GatedFinal { .. }
             | Self::OutputLengthSteer { .. }
             | Self::OutputLengthDormantRepair { .. }
@@ -598,7 +607,8 @@ impl AgentPublishCompletion {
     fn transaction_id(&self) -> &tau_proto::CompactionTransactionId {
         match self {
             Self::StandaloneContinuation { transaction_id, .. } => transaction_id,
-            Self::GatedFinal { .. }
+            Self::ToolTerminal { .. }
+            | Self::GatedFinal { .. }
             | Self::OutputLengthContinuation { .. }
             | Self::OutputLengthSteer { .. }
             | Self::OutputLengthPreDeliveryFailure { .. }
@@ -1390,7 +1400,8 @@ impl Harness {
             AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => retry_prompts
                 .first()
                 .is_some_and(path_crate_agent::PendingPrompt::should_notify_watchers),
-            AgentPublishCompletion::GatedFinal { .. } => false,
+            AgentPublishCompletion::ToolTerminal { .. }
+            | AgentPublishCompletion::GatedFinal { .. } => false,
             AgentPublishCompletion::OutputLengthContinuation { .. } => false,
             AgentPublishCompletion::OutputLengthSteer { .. } => false,
             AgentPublishCompletion::OutputLengthPreDeliveryFailure { .. } => false,

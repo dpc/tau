@@ -204,7 +204,8 @@ impl Harness {
                 AgentPublishCompletion::ReactiveContextRecovery { reducer, .. } => {
                     Some(reducer.checkpoint.through)
                 }
-                AgentPublishCompletion::InitialPromptSubmission { .. }
+                AgentPublishCompletion::ToolTerminal { .. }
+                | AgentPublishCompletion::InitialPromptSubmission { .. }
                 | AgentPublishCompletion::OutputLengthSteer { .. }
                 | AgentPublishCompletion::OutputLengthDormantRepair { .. }
                 | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
@@ -633,6 +634,9 @@ impl Harness {
         if let AgentPublishCompletion::RollingCompactionStart { .. } = completion {
             return;
         }
+        if let AgentPublishCompletion::ToolTerminal { .. } = completion {
+            return;
+        }
         let AgentPublishCompletion::StandaloneContinuation {
             transaction_id,
             model,
@@ -786,6 +790,9 @@ impl Harness {
             return;
         }
         match &mut completion {
+            AgentPublishCompletion::ToolTerminal { retry_event, .. } => {
+                *retry_event = Some(Box::new(event.clone()));
+            }
             AgentPublishCompletion::StandaloneContinuation {
                 approved_retry_event,
                 ..
@@ -925,7 +932,8 @@ impl Harness {
         }
         if matches!(
             completion,
-            AgentPublishCompletion::GatedFinal { .. }
+            AgentPublishCompletion::ToolTerminal { .. }
+                | AgentPublishCompletion::GatedFinal { .. }
                 | AgentPublishCompletion::OutputLengthContinuation { .. }
                 | AgentPublishCompletion::OutputLengthSteer { .. }
                 | AgentPublishCompletion::OutputLengthPreDeliveryFailure { .. }
@@ -938,7 +946,8 @@ impl Harness {
         ) {
             if matches!(
                 completion,
-                AgentPublishCompletion::OutputLengthDormantRepair { .. }
+                AgentPublishCompletion::ToolTerminal { .. }
+                    | AgentPublishCompletion::OutputLengthDormantRepair { .. }
                     | AgentPublishCompletion::ReactiveContextRecovery { .. }
                     | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
                     | AgentPublishCompletion::StandaloneContextRejection { .. }
@@ -946,7 +955,8 @@ impl Harness {
                     | AgentPublishCompletion::RollingCompactionStart { .. }
             ) {
                 let retry_event = match &completion {
-                    AgentPublishCompletion::OutputLengthDormantRepair { retry_event, .. }
+                    AgentPublishCompletion::ToolTerminal { retry_event, .. }
+                    | AgentPublishCompletion::OutputLengthDormantRepair { retry_event, .. }
                     | AgentPublishCompletion::ReactiveContextRecovery { retry_event, .. }
                     | AgentPublishCompletion::ReactiveContextRecoveryStart {
                         retry_event, ..
@@ -961,7 +971,8 @@ impl Harness {
                 };
                 let mut approved = completion;
                 match &mut approved {
-                    AgentPublishCompletion::OutputLengthDormantRepair { retry_event, .. }
+                    AgentPublishCompletion::ToolTerminal { retry_event, .. }
+                    | AgentPublishCompletion::OutputLengthDormantRepair { retry_event, .. }
                     | AgentPublishCompletion::ReactiveContextRecovery { retry_event, .. }
                     | AgentPublishCompletion::ReactiveContextRecoveryStart {
                         retry_event, ..
@@ -1040,6 +1051,9 @@ impl Harness {
             return;
         }
         let (batch_parent, retry_prompts, approved_retry_event) = match &completion {
+            AgentPublishCompletion::ToolTerminal { .. } => {
+                unreachable!("tool terminal returned above")
+            }
             AgentPublishCompletion::StandaloneContinuation {
                 batch_parent,
                 retry_prompts,
