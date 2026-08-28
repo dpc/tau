@@ -5,9 +5,10 @@ use std::time::Instant;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::protocol::Role;
+use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{self, Message};
 
 use super::{
@@ -116,7 +117,7 @@ pub(super) async fn stream(
             return Err((Error::Canceled, State::default().progress()));
         }
     };
-    let mut socket = WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await;
+    let mut socket = configured_websocket_stream(upgraded).await;
     let mut envelope =
         serde_json::to_value(body).map_err(|_| (Error::Json, State::default().progress()))?;
     let object = envelope
@@ -201,6 +202,23 @@ pub(super) async fn stream(
             }
         }
     }
+}
+
+/// Bounds frame allocation and fragmented-message assembly at tungstenite's
+/// transport seam while retaining the application check as defense in depth.
+fn websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_frame_size(Some(MAX_EVENT_BYTES))
+        .max_message_size(Some(MAX_EVENT_BYTES))
+}
+
+/// Constructs the public Responses client socket with transport-level ingress
+/// limits applied before tungstenite reads provider-controlled payloads.
+async fn configured_websocket_stream<S>(stream: S) -> WebSocketStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    WebSocketStream::from_raw_socket(stream, Role::Client, Some(websocket_config())).await
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

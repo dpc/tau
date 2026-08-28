@@ -8,6 +8,8 @@ use std::time::Duration;
 use tokio::runtime as path_tokio_runtime;
 use tungstenite::Message;
 use tungstenite::handshake::server::Request as WebSocketRequest;
+use tungstenite::protocol::frame::Frame;
+use tungstenite::protocol::frame::coding::{Data as WebSocketData, OpCode};
 
 use super::*;
 
@@ -2178,17 +2180,12 @@ fn websocket_rejected_upgrade_is_terminal() {
     assert_eq!(error["error"]["body"], "[image data omitted]");
 }
 
-/// Binary and oversized text frames must fail the finite WebSocket attempt
-/// before untrusted payloads reach the Responses event parser.
+/// Binary frames must fail the finite WebSocket attempt before untrusted
+/// payloads reach the Responses event parser.
 #[test]
 fn websocket_rejects_invalid_and_oversized_frames() {
-    for message in [
-        Message::Binary(vec![0_u8; 8].into()),
-        Message::Text("x".repeat(MAX_EVENT_BYTES + 1).into()),
-    ] {
-        let outcome = run_websocket_message(message, &mut || false);
-        assert!(matches!(outcome, AttemptOutcome::Retryable { .. }));
-    }
+    let outcome = run_websocket_message(Message::Binary(vec![0_u8; 8].into()), &mut || false);
+    assert!(matches!(outcome, AttemptOutcome::Retryable { .. }));
     let outcome = run_websocket_message(
         Message::Text(r#"{"type":"error","status":401,"error":{"code":"invalid_api_key"}}"#.into()),
         &mut || false,
@@ -2215,6 +2212,69 @@ fn websocket_rejects_invalid_and_oversized_frames() {
         failure.failure_kind,
         Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
     );
+}
+
+/// A text message exactly at the established one-MiB event limit must still
+/// reach the application parser and preserve the inclusive boundary.
+#[test]
+fn websocket_transport_accepts_exact_limit_message() {
+    let event = padded_completed_websocket_event(MAX_EVENT_BYTES);
+    let outcome = run_websocket_message(Message::Text(event.into()), &mut || false);
+
+    let AttemptOutcome::Completed(success) = outcome else {
+        panic!("exact-limit WebSocket event must complete");
+    };
+    assert_eq!(success.response_bytes_received, MAX_EVENT_BYTES as u64);
+}
+
+/// A single frame one byte above the established event limit must be rejected
+/// from its declared length before tungstenite allocates or assembles its
+/// payload, so application byte accounting remains untouched.
+#[test]
+fn websocket_transport_rejects_limit_plus_one_frame_before_application() {
+    let outcome = run_websocket_message(
+        Message::Text("x".repeat(MAX_EVENT_BYTES + 1).into()),
+        &mut || false,
+    );
+
+    let AttemptOutcome::Retryable { progress, .. } = outcome else {
+        panic!("oversized WebSocket frame must fail retryably");
+    };
+    assert_eq!(progress.response_bytes_received, 0);
+}
+
+/// Individually permitted fragments whose aggregate crosses one MiB must be
+/// rejected by tungstenite's message assembler before the application sees a
+/// partially or fully assembled event.
+#[test]
+fn websocket_transport_rejects_fragmented_aggregate_before_application() {
+    let text = "x".repeat(MAX_EVENT_BYTES + 1);
+    let split = MAX_EVENT_BYTES / 2;
+    let outcome =
+        run_websocket_messages(fragmented_websocket_text(&text, split, false), &mut || {
+            false
+        });
+
+    let AttemptOutcome::Retryable { progress, .. } = outcome else {
+        panic!("oversized fragmented WebSocket message must fail retryably");
+    };
+    assert_eq!(progress.response_bytes_received, 0);
+}
+
+/// A control frame interleaved between fragments must not count toward the
+/// message limit or disturb assembly of an exact-limit text message.
+#[test]
+fn websocket_transport_preserves_control_frames_during_fragment_assembly() {
+    let event = padded_completed_websocket_event(MAX_EVENT_BYTES);
+    let outcome = run_websocket_messages(
+        fragmented_websocket_text(&event, MAX_EVENT_BYTES / 2, true),
+        &mut || false,
+    );
+
+    let AttemptOutcome::Completed(success) = outcome else {
+        panic!("interleaved ping must preserve exact-limit fragmented event");
+    };
+    assert_eq!(success.response_bytes_received, MAX_EVENT_BYTES as u64);
 }
 
 /// Individually valid WebSocket events must still fail once their aggregate
@@ -2257,6 +2317,34 @@ fn run_websocket_message(
     run_websocket_messages(vec![message], is_canceled)
 }
 
+fn padded_completed_websocket_event(target_len: usize) -> String {
+    let template = r#"{"type":"response.completed","padding":"","response":{"id":"resp_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}"#;
+    assert!(template.len() <= target_len);
+    template.replacen(
+        r#""padding":"""#,
+        &format!(r#""padding":"{}""#, "x".repeat(target_len - template.len())),
+        1,
+    )
+}
+
+fn fragmented_websocket_text(text: &str, split: usize, interleave_ping: bool) -> Vec<Message> {
+    assert!(split < text.len());
+    let mut messages = vec![Message::Frame(Frame::message(
+        text.as_bytes()[..split].to_vec(),
+        OpCode::Data(WebSocketData::Text),
+        false,
+    ))];
+    if interleave_ping {
+        messages.push(Message::Ping(b"bounded-ingress".to_vec().into()));
+    }
+    messages.push(Message::Frame(Frame::message(
+        text.as_bytes()[split..].to_vec(),
+        OpCode::Data(WebSocketData::Continue),
+        true,
+    )));
+    messages
+}
+
 fn run_websocket_messages(
     messages: Vec<Message>,
     is_canceled: &mut impl FnMut() -> bool,
@@ -2272,6 +2360,9 @@ fn run_websocket_messages_captured(
     Vec<tau_provider::debug_capture_writer::ProviderDebugCapture>,
 ) {
     let stall = matches!(messages.as_slice(), [Message::Ping(_)]);
+    let expects_pong = messages
+        .iter()
+        .any(|message| matches!(message, Message::Ping(_)));
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind WebSocket server");
     let address = listener.local_addr().expect("WebSocket server address");
     let server = std::thread::spawn(move || {
@@ -2289,8 +2380,10 @@ fn run_websocket_messages_captured(
                 break;
             }
         }
-        if stall {
+        if expects_pong {
             assert!(matches!(socket.read(), Ok(Message::Pong(_))));
+        }
+        if stall {
             let _ = socket.read();
         }
     });

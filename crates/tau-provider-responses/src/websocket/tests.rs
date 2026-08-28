@@ -1,4 +1,6 @@
 use reqwest::header::{HeaderMap, HeaderValue};
+use tungstenite::protocol::frame::Frame;
+use tungstenite::protocol::frame::coding::{Data, OpCode};
 
 use super::*;
 
@@ -88,4 +90,80 @@ fn response_byte_bounds_cover_frames_and_cumulative_streams() {
         checked_response_bytes(MAX_RESPONSE_BYTES - 1, 1),
         Some(MAX_RESPONSE_BYTES)
     );
+}
+
+/// The socket construction seam must retain the existing inclusive frame and
+/// fragmented-message limits rather than tungstenite's larger defaults.
+#[test]
+fn transport_config_uses_existing_event_limit_for_frames_and_messages() {
+    let config = websocket_config();
+
+    assert_eq!(config.max_frame_size, Some(MAX_EVENT_BYTES));
+    assert_eq!(config.max_message_size, Some(MAX_EVENT_BYTES));
+}
+
+/// The production socket seam must reject a declared limit-plus-one frame with
+/// tungstenite's capacity error before an application message can exist.
+#[test]
+fn configured_transport_rejects_oversized_frame_before_message_delivery() {
+    assert_message_too_long(transport_error(vec![Message::Text(
+        "x".repeat(MAX_EVENT_BYTES + 1).into(),
+    )]));
+}
+
+/// The production socket seam must reject permitted fragments once their
+/// aggregate crosses the limit, before delivering assembled application text.
+#[test]
+fn configured_transport_rejects_oversized_fragmented_aggregate_before_delivery() {
+    let split = MAX_EVENT_BYTES / 2;
+    let messages = vec![
+        Message::Frame(Frame::message(
+            vec![b'x'; split],
+            OpCode::Data(Data::Text),
+            false,
+        )),
+        Message::Frame(Frame::message(
+            vec![b'x'; MAX_EVENT_BYTES + 1 - split],
+            OpCode::Data(Data::Continue),
+            true,
+        )),
+    ];
+
+    assert_message_too_long(transport_error(messages));
+}
+
+fn transport_error(messages: Vec<Message>) -> tungstenite::Error {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(async move {
+            let (client_io, server_io) = tokio::io::duplex(2 * MAX_EVENT_BYTES);
+            let mut client = configured_websocket_stream(client_io).await;
+            let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+            let send = async move {
+                for message in messages {
+                    server.send(message).await.expect("send test frame");
+                }
+            };
+            let receive = async move {
+                match client.next().await {
+                    Some(Err(error)) => error,
+                    Some(Ok(message)) => panic!("unexpected application message: {message:?}"),
+                    None => panic!("test transport closed without a capacity error"),
+                }
+            };
+            let ((), error) = tokio::join!(send, receive);
+            error
+        })
+}
+
+fn assert_message_too_long(error: tungstenite::Error) {
+    assert!(matches!(
+        error,
+        tungstenite::Error::Capacity(tungstenite::error::CapacityError::MessageTooLong {
+            size,
+            max_size: MAX_EVENT_BYTES,
+        }) if size == MAX_EVENT_BYTES + 1
+    ));
 }

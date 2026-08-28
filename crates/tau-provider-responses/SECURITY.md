@@ -4,10 +4,11 @@ Public Responses profiles send complete typed transcripts over explicitly
 selected HTTP/SSE or WebSocket transport to an operator-configured endpoint
 under the shared outbound network policy
 documented in [`tau-provider/SECURITY.md`](../tau-provider/SECURITY.md). Provider
-payloads remain untrusted model data: response, SSE-line, and WebSocket-frame
-bounds apply before the
-parser admits only supported assistant text, plain reasoning, and Function
-calls.
+payloads remain untrusted model data. The WebSocket transport applies the
+existing 1 MiB limit to each frame and to fragmented-message assembly before
+the application receives a complete message; a postassembly event check remains
+as defense in depth. Response and SSE-line bounds apply before the parser admits
+only supported assistant text, plain reasoning, and Function calls.
 
 Explicit durable-session debug capture stores the finalized HTTP/SSE request at
 its send boundary or the exact WebSocket `response.create` envelope at frame
