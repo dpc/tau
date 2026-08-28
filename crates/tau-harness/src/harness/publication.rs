@@ -2321,9 +2321,9 @@ impl Harness {
             {
                 use crate::output_length_test_barrier::{OutputLengthCommitCut, reach};
                 match &completion {
-                    AgentPublishCompletion::OutputLengthContinuation { response, .. }
+                    AgentPublishCompletion::OutputLengthContinuation { reducer, .. }
                         if matches!(
-                            response.output_length_disposition,
+                            reducer.response.output_length_disposition,
                             tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
                         ) =>
                     {

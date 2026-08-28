@@ -436,10 +436,8 @@ pub(crate) enum AgentPublishCompletion {
     OutputLengthContinuation {
         /// Selected transcript head that owns the source response.
         batch_parent: tau_proto::AgentHead,
-        /// Exact planned response retained for post-commit runtime completion.
-        response: Box<tau_proto::ProviderResponseFinished>,
-        /// Display-only assistant text retained for common terminal handling.
-        assistant_text: Option<String>,
+        /// Typed post-commit transition for the committed response.
+        reducer: super::output_length_continuation_reducer::CommittedOutputLengthContinuation,
         /// Exact interceptor-approved event retained after append rejection.
         retry_event: Option<Box<Event>>,
     },
@@ -544,8 +542,8 @@ impl AgentPublishCompletion {
                 disposition: GatedFinalDisposition::Accept { terminal },
                 ..
             } => Some(&terminal.response),
-            Self::OutputLengthContinuation { response, .. }
-            | Self::OutputLengthPreDeliveryFailure { response, .. } => Some(response.as_ref()),
+            Self::OutputLengthContinuation { reducer, .. } => Some(reducer.response.as_ref()),
+            Self::OutputLengthPreDeliveryFailure { response, .. } => Some(response.as_ref()),
             Self::GatedFinal {
                 retry_event: Some(event),
                 ..
@@ -573,8 +571,8 @@ impl AgentPublishCompletion {
         agent_prompt_id: &tau_proto::AgentPromptId,
     ) -> bool {
         let response = match self {
-            Self::OutputLengthContinuation { response, .. }
-            | Self::OutputLengthPreDeliveryFailure { response, .. } => Some(response.as_ref()),
+            Self::OutputLengthContinuation { reducer, .. } => Some(reducer.response.as_ref()),
+            Self::OutputLengthPreDeliveryFailure { response, .. } => Some(response.as_ref()),
             Self::GatedFinal {
                 retry_event: Some(event),
                 ..

@@ -514,6 +514,9 @@ impl Harness {
             ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_) => {
                 unreachable!("commit-gated classification runs after final-status classification")
             }
+            ProviderTerminalPlan::OutputLengthContinuationSource(_) => {
+                unreachable!("output-length classification runs after final-status classification")
+            }
             ProviderTerminalPlan::Other => None,
         };
         let commit_gated_plan =
@@ -561,15 +564,25 @@ impl Harness {
             }),
             ProviderTerminalPlan::Other => completion,
             ProviderTerminalPlan::ReactiveContextRecovery(_)
-            | ProviderTerminalPlan::FinalStatusGated(_) => {
+            | ProviderTerminalPlan::FinalStatusGated(_)
+            | ProviderTerminalPlan::OutputLengthContinuationSource(_) => {
                 unreachable!("earlier provider-terminal family reached commit-gated classification")
             }
         };
-        let completion = if matches!(
-            response.output_length_disposition,
-            tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
-        ) {
-            Some(AgentPublishCompletion::OutputLengthContinuation {
+        let output_length_source_plan = Self::classify_output_length_continuation_source_terminal(
+            OutputLengthContinuationSourceClassification {
+                response: &response,
+                assistant_text: assistant_text.as_deref(),
+            },
+        );
+        let output_length_source = matches!(
+            output_length_source_plan,
+            ProviderTerminalPlan::OutputLengthContinuationSource(_)
+        );
+        let completion = match output_length_source_plan {
+            ProviderTerminalPlan::OutputLengthContinuationSource(
+                OutputLengthContinuationSourcePlan { reducer },
+            ) => Some(AgentPublishCompletion::OutputLengthContinuation {
                 batch_parent: self
                     .agent_runtime
                     .agent_registry
@@ -577,12 +590,17 @@ impl Harness {
                     .get(&cid)
                     .and_then(|agent| agent.identity.head)
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                response: Box::new(response.clone()),
-                assistant_text: assistant_text.clone(),
+                reducer,
                 retry_event: None,
-            })
-        } else {
-            completion
+            }),
+            ProviderTerminalPlan::Other => completion,
+            ProviderTerminalPlan::ReactiveContextRecovery(_)
+            | ProviderTerminalPlan::FinalStatusGated(_)
+            | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_) => {
+                unreachable!(
+                    "earlier provider-terminal family reached output-length source classification"
+                )
+            }
         };
         let output_length_terminal = matches!(
             response.output_length_disposition,
@@ -644,10 +662,7 @@ impl Harness {
         }
         if final_status_gated
             || commit_gated_terminal
-            || matches!(
-                response.output_length_disposition,
-                tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
-            )
+            || output_length_source
             || output_length_terminal
         {
             return Ok(());
@@ -933,6 +948,9 @@ impl Harness {
             }
             ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_) => {
                 unreachable!("commit-gated classification runs after shared terminal accounting")
+            }
+            ProviderTerminalPlan::OutputLengthContinuationSource(_) => {
+                unreachable!("output-length classification runs after shared terminal accounting")
             }
             ProviderTerminalPlan::Other => return false,
         };
@@ -3355,6 +3373,29 @@ impl Harness {
         ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(
             AutomaticCompactionOrPendingMessageWakePlan { tool_effect },
         )
+    }
+
+    /// Classify one fully prepared output-length continuation source without
+    /// changing runtime state.
+    fn classify_output_length_continuation_source_terminal(
+        classification: OutputLengthContinuationSourceClassification,
+    ) -> ProviderTerminalPlan {
+        let OutputLengthContinuationSourceClassification {
+            response,
+            assistant_text,
+        } = classification;
+        if !matches!(
+            response.output_length_disposition,
+            tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
+        ) {
+            return ProviderTerminalPlan::Other;
+        }
+        ProviderTerminalPlan::OutputLengthContinuationSource(OutputLengthContinuationSourcePlan {
+            reducer: CommittedOutputLengthContinuation {
+                response: Box::new(response.clone()),
+                assistant_text: assistant_text.map(str::to_owned),
+            },
+        })
     }
 
     /// Perform ordinary or delegated completion only after an accepted gated

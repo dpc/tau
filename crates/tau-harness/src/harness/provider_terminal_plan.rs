@@ -12,8 +12,26 @@ pub(crate) enum ProviderTerminalPlan {
     /// The terminal is commit-gated by an automatic compaction decision or a
     /// pending side-conversation message wake.
     AutomaticCompactionOrPendingMessageWake(AutomaticCompactionOrPendingMessageWakePlan),
+    /// The terminal is a committed source for one output-length continuation.
+    OutputLengthContinuationSource(OutputLengthContinuationSourcePlan),
     /// The terminal belongs to another provider-terminal family.
     Other,
+}
+
+/// Exact post-commit reducer selected for an output-length continuation source.
+pub(crate) struct OutputLengthContinuationSourcePlan {
+    /// Typed reducer retained across publication and interception.
+    pub(super) reducer:
+        super::output_length_continuation_reducer::CommittedOutputLengthContinuation,
+}
+
+/// Complete semantic input for classifying one output-length continuation
+/// source.
+pub(crate) struct OutputLengthContinuationSourceClassification<'a> {
+    /// Exact fully prepared provider response.
+    pub(super) response: &'a tau_proto::ProviderResponseFinished,
+    /// Display-only assistant text retained for common terminal handling.
+    pub(super) assistant_text: Option<&'a str>,
 }
 
 /// Exact authority needed to execute one reactive context-recovery terminal.

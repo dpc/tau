@@ -425,8 +425,10 @@ impl Harness {
                     batch_parent: self
                         .selected_head_for_agent(cid)
                         .unwrap_or(tau_proto::AgentHead::Root),
-                    response: Box::new(response.clone()),
-                    assistant_text: None,
+                    reducer: CommittedOutputLengthContinuation {
+                        response: Box::new(response.clone()),
+                        assistant_text: None,
+                    },
                     retry_event: None,
                 });
                 self.publish_finished_response_for_agent(cid, None, &response, completion, false);
@@ -569,8 +571,10 @@ impl Harness {
                 batch_parent: self
                     .selected_head_for_agent(cid)
                     .unwrap_or(tau_proto::AgentHead::Root),
-                response: Box::new(response.clone()),
-                assistant_text: None,
+                reducer: CommittedOutputLengthContinuation {
+                    response: Box::new(response.clone()),
+                    assistant_text: None,
+                },
                 retry_event: None,
             });
             self.publish_finished_response_for_agent(cid, None, response, completion, false);

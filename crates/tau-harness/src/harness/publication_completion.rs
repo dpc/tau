@@ -224,8 +224,10 @@ impl Harness {
             sync.continuation = Some(PostCommitContinuation::AgentPublish(Box::new(
                 AgentPublishCompletion::OutputLengthContinuation {
                     batch_parent,
-                    response: Box::new(response.clone()),
-                    assistant_text: None,
+                    reducer: CommittedOutputLengthContinuation {
+                        response: Box::new(response.clone()),
+                        assistant_text: None,
+                    },
                     retry_event: None,
                 },
             )));
@@ -499,17 +501,8 @@ impl Harness {
             }
             return;
         }
-        if let AgentPublishCompletion::OutputLengthContinuation {
-            response,
-            assistant_text,
-            ..
-        } = completion
-        {
-            self.complete_finished_response_without_tool_calls(
-                cid,
-                &response,
-                assistant_text.as_deref(),
-            );
+        if let AgentPublishCompletion::OutputLengthContinuation { reducer, .. } = completion {
+            self.reduce_committed_output_length_continuation(cid, reducer);
             return;
         }
         if let AgentPublishCompletion::OutputLengthSteer { .. } = completion {
@@ -549,8 +542,10 @@ impl Harness {
                 batch_parent: self
                     .selected_head_for_agent(cid)
                     .unwrap_or(tau_proto::AgentHead::Root),
-                response: response.clone(),
-                assistant_text: None,
+                reducer: CommittedOutputLengthContinuation {
+                    response: response.clone(),
+                    assistant_text: None,
+                },
                 retry_event: None,
             });
             self.publish_finished_response_for_agent(cid, None, &response, completion, false);
@@ -710,6 +705,20 @@ impl Harness {
                 activation_cut: Some(activation_cut),
                 output_length_continuation: None,
             }),
+        );
+    }
+
+    /// Reduce one committed response in an output-length continuation lineage
+    /// through the existing common no-tool terminal projection.
+    pub(super) fn reduce_committed_output_length_continuation(
+        &mut self,
+        cid: &AgentId,
+        reducer: CommittedOutputLengthContinuation,
+    ) {
+        self.complete_finished_response_without_tool_calls(
+            cid,
+            &reducer.response,
+            reducer.assistant_text.as_deref(),
         );
     }
 
