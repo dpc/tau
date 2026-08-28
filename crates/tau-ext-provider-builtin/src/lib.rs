@@ -84,6 +84,7 @@ use tau_proto::{
     ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderModelsDeclared, ProviderName,
     ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseStats,
     ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason, SecretValue,
+    ServerOffsetMillis, UnixMillis,
 };
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider_codex::{
@@ -385,7 +386,7 @@ impl QuotaCoordinator {
     }
 
     fn refresh_delay(&self, provider: &ProviderName) -> Duration {
-        let now = now_ms();
+        let now = UnixMillis::new(now_ms());
         self.profiles
             .get(provider)
             .into_iter()
@@ -395,8 +396,8 @@ impl QuotaCoordinator {
                     record.window.remaining_seconds_at_timing_anchor?,
                     record.window.timing_anchor_observed_at_unix_ms?,
                 );
-                let age = i64::try_from(now.saturating_sub(anchor).div_ceil(1_000)).ok()?;
-                u64::try_from(remaining.saturating_sub(age)).ok()
+                let age = i64::try_from(elapsed_seconds_since(anchor, now)).ok()?;
+                u64::try_from(remaining.get().saturating_sub(age)).ok()
             })
             .map(|seconds| Duration::from_secs(seconds).saturating_add(Duration::from_secs(1)))
             .min()
@@ -419,8 +420,8 @@ impl QuotaCoordinator {
                 .remaining_seconds_at_timing_anchor
                 .zip(record.window.timing_anchor_observed_at_unix_ms)
                 .is_some_and(|(remaining, anchor)| {
-                    let age_seconds = now_ms().saturating_sub(anchor).div_ceil(1_000);
-                    u64::try_from(remaining)
+                    let age_seconds = elapsed_seconds_since(anchor, UnixMillis::new(now_ms()));
+                    u64::try_from(remaining.get())
                         .ok()
                         .is_none_or(|remaining| remaining <= age_seconds)
                 })
@@ -489,7 +490,7 @@ impl QuotaCoordinator {
         epoch: tau_proto::ProviderQuotaEpoch,
         fetch_start_sequence: tau_proto::ProviderQuotaSequence,
         snapshot: tau_provider_codex::FullQuotaSnapshot,
-        observed_at_unix_ms: u64,
+        observed_at_unix_ms: UnixMillis,
     ) -> Option<Event> {
         let current = self.profiles.get_mut(&provider)?;
         if current.epoch != epoch {
@@ -549,7 +550,7 @@ impl QuotaCoordinator {
         model: ModelId,
         profile_identity: impl Into<QuotaProfileIdentity>,
         observation: tau_provider_codex::RollingQuotaObservation,
-        observed_at_unix_ms: u64,
+        observed_at_unix_ms: UnixMillis,
     ) -> Option<Event> {
         let profile_identity = profile_identity.into();
         let provider = model.provider.clone();
@@ -696,19 +697,24 @@ fn automatic_retry_identity_matches(pinned: Option<&ResolvedConfig>, next: &Prom
     }
 }
 
+/// Converts two Unix-millisecond observations into the elapsed whole seconds.
+fn elapsed_seconds_since(anchor: UnixMillis, now: UnixMillis) -> u64 {
+    now.get().saturating_sub(anchor.get()).div_ceil(1_000)
+}
+
 fn full_quota_window(
     observation: tau_provider_codex::QuotaWindowObservation,
-    observed_at_unix_ms: u64,
+    observed_at_unix_ms: UnixMillis,
 ) -> Option<tau_proto::ProviderQuotaWindow> {
     let window_seconds = observation.window_seconds?;
     let server_offset_ms = match (
         observation.reset_at_unix_seconds,
         observation.remaining_seconds,
     ) {
-        (Some(reset), Some(remaining)) => i128::from(reset)
-            .checked_sub(i128::from(remaining))?
+        (Some(reset), Some(remaining)) => i128::from(reset.get())
+            .checked_sub(i128::from(remaining.get()))?
             .checked_mul(1_000)?
-            .checked_sub(i128::from(observed_at_unix_ms))?
+            .checked_sub(i128::from(observed_at_unix_ms.get()))?
             .try_into()
             .ok(),
         _ => None,
@@ -726,7 +732,7 @@ fn full_quota_window(
         timing_anchor_observed_at_unix_ms: observation
             .remaining_seconds
             .map(|_| observed_at_unix_ms),
-        server_offset_ms,
+        server_offset_ms: server_offset_ms.map(ServerOffsetMillis::new),
         server_offset_observed_at_unix_ms: server_offset_ms.map(|_| observed_at_unix_ms),
     })
 }
@@ -734,7 +740,7 @@ fn full_quota_window(
 fn merge_sparse_quota_window(
     previous: Option<&tau_proto::ProviderQuotaWindow>,
     sparse: tau_provider_codex::QuotaWindowObservation,
-    observed_at_unix_ms: u64,
+    observed_at_unix_ms: UnixMillis,
 ) -> Option<tau_proto::ProviderQuotaWindow> {
     let duration_changed = previous.is_some_and(|previous| {
         sparse
@@ -755,7 +761,7 @@ fn merge_sparse_quota_window(
         else {
             return true;
         };
-        if old.abs_diff(new) <= 60 {
+        if old.get().abs_diff(new.get()) <= 60 {
             return true;
         }
         if new < old {
@@ -765,10 +771,9 @@ fn merge_sparse_quota_window(
             .remaining_seconds_at_timing_anchor
             .zip(previous.timing_anchor_observed_at_unix_ms)
             .map(|(remaining, anchor)| {
-                let age_seconds =
-                    i64::try_from(observed_at_unix_ms.saturating_sub(anchor).div_ceil(1_000))
-                        .unwrap_or(i64::MAX);
-                remaining.saturating_sub(age_seconds)
+                let age_seconds = i64::try_from(elapsed_seconds_since(anchor, observed_at_unix_ms))
+                    .unwrap_or(i64::MAX);
+                remaining.get().saturating_sub(age_seconds)
             });
         old_remaining.is_some_and(|remaining| remaining <= 5 * 60)
     });
@@ -3103,7 +3108,7 @@ where
                     provider,
                     profile_epoch,
                     fetch_start_sequence,
-                    observed_at_unix_ms: now_ms(),
+                    observed_at_unix_ms: UnixMillis::new(now_ms()),
                     result,
                 },
             );
@@ -5096,7 +5101,7 @@ enum WorkerMessage {
         /// Provider-normalized sparse rolling observation.
         observation: tau_provider_codex::RollingQuotaObservation,
         /// Original wall-clock observation time.
-        observed_at_unix_ms: u64,
+        observed_at_unix_ms: UnixMillis,
     },
     /// Result of one coalesced full account-usage fetch.
     QuotaFetchFinished {
@@ -5107,7 +5112,7 @@ enum WorkerMessage {
         /// State sequence captured before starting I/O.
         fetch_start_sequence: tau_proto::ProviderQuotaSequence,
         /// Wall-clock completion time sampled by the acquisition worker.
-        observed_at_unix_ms: u64,
+        observed_at_unix_ms: UnixMillis,
         /// Sanitized full-fetch result.
         result: Result<tau_provider_codex::FullQuotaSnapshot, tau_provider_codex::UsageFetchError>,
     },
@@ -5441,7 +5446,7 @@ fn production_prompt_executor() -> PromptExecutor {
                     model: model.clone(),
                     profile_identity,
                     observation: observation.clone(),
-                    observed_at_unix_ms: now_ms(),
+                    observed_at_unix_ms: UnixMillis::new(now_ms()),
                 },
             );
         };

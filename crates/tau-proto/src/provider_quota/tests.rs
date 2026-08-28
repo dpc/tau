@@ -21,18 +21,18 @@ fn state_validation_rejects_ambiguous_or_untrusted_shapes() {
             window_id: ProviderQuotaWindowId::parse("secondary").expect("valid quota test value"),
         },
         used_basis_points: 5_000,
-        usage_observed_at_unix_ms: 1,
-        window_seconds: 604_800,
-        reset_at_unix_seconds: Some(700_000),
-        remaining_seconds_at_timing_anchor: Some(300_000),
-        timing_anchor_observed_at_unix_ms: Some(1),
-        server_offset_ms: Some(0),
-        server_offset_observed_at_unix_ms: Some(1),
+        usage_observed_at_unix_ms: UnixMillis::new(1),
+        window_seconds: QuotaWindowSeconds::new(604_800),
+        reset_at_unix_seconds: Some(UnixSeconds::new(700_000)),
+        remaining_seconds_at_timing_anchor: Some(SignedSeconds::new(300_000)),
+        timing_anchor_observed_at_unix_ms: Some(UnixMillis::new(1)),
+        server_offset_ms: Some(ServerOffsetMillis::new(0)),
+        server_offset_observed_at_unix_ms: Some(UnixMillis::new(1)),
     };
     let binding = ProviderQuotaRouteBinding {
         model: ModelId::from("chatgpt/gpt-5.6-sol"),
         limit_ids: vec![ProviderQuotaLimitId::parse("codex").expect("valid quota test value")],
-        observed_at_unix_ms: 1,
+        observed_at_unix_ms: UnixMillis::new(1),
         provenance: ProviderQuotaBindingProvenance::TurnEvent,
     };
     assert!(

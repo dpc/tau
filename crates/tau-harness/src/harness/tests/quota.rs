@@ -39,13 +39,13 @@ fn quota_window_for(limit_id: &str, used_basis_points: u16) -> tau_proto::Provid
             window_id: tau_proto::ProviderQuotaWindowId::parse("secondary").expect("window id"),
         },
         used_basis_points,
-        usage_observed_at_unix_ms: 123_000,
-        window_seconds: 604_800,
-        reset_at_unix_seconds: Some(700_000),
-        remaining_seconds_at_timing_anchor: Some(300_000),
-        timing_anchor_observed_at_unix_ms: Some(123_000),
-        server_offset_ms: Some(0),
-        server_offset_observed_at_unix_ms: Some(123_000),
+        usage_observed_at_unix_ms: tau_proto::UnixMillis::new(123_000),
+        window_seconds: tau_proto::QuotaWindowSeconds::new(604_800),
+        reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(700_000)),
+        remaining_seconds_at_timing_anchor: Some(tau_proto::SignedSeconds::new(300_000)),
+        timing_anchor_observed_at_unix_ms: Some(tau_proto::UnixMillis::new(123_000)),
+        server_offset_ms: Some(tau_proto::ServerOffsetMillis::new(0)),
+        server_offset_observed_at_unix_ms: Some(tau_proto::UnixMillis::new(123_000)),
     }
 }
 
@@ -53,7 +53,7 @@ fn quota_binding() -> tau_proto::ProviderQuotaRouteBinding {
     tau_proto::ProviderQuotaRouteBinding {
         model: "chatgpt/gpt-5.6-sol".into(),
         limit_ids: vec![tau_proto::ProviderQuotaLimitId::parse("codex").expect("quota pool")],
-        observed_at_unix_ms: 123_000,
+        observed_at_unix_ms: tau_proto::UnixMillis::new(123_000),
         provenance: tau_proto::ProviderQuotaBindingProvenance::TurnEvent,
     }
 }
@@ -915,7 +915,7 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
         observed,
         Some((
             Some(crate::test_connection_id(HARNESS_CONNECTION_ID)),
-            123_000
+            tau_proto::UnixMillis::new(123_000)
         ))
     );
     drop(routed_events);

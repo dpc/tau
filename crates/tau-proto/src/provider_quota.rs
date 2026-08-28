@@ -7,7 +7,10 @@ use std::{collections as path_std_collections, fmt};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ModelId, ProviderName, ProviderQuotaSequence};
+use crate::{
+    ModelId, ProviderName, ProviderQuotaSequence, QuotaWindowSeconds, ServerOffsetMillis,
+    SignedSeconds, UnixMillis, UnixSeconds,
+};
 
 /// Maximum number of quota windows accepted in one provider snapshot.
 pub const MAX_PROVIDER_QUOTA_WINDOWS: usize = 32;
@@ -110,24 +113,24 @@ pub struct ProviderQuotaWindow {
     /// Used quota in basis points, where 10,000 means 100 percent.
     pub used_basis_points: u16,
     /// Unix milliseconds when usage was observed from the provider.
-    pub usage_observed_at_unix_ms: u64,
+    pub usage_observed_at_unix_ms: UnixMillis,
     /// Server-declared window duration in seconds.
-    pub window_seconds: u64,
+    pub window_seconds: QuotaWindowSeconds,
     /// Server-declared absolute reset time, when supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reset_at_unix_seconds: Option<u64>,
+    pub reset_at_unix_seconds: Option<UnixSeconds>,
     /// Remaining seconds at the independent timing anchor, when supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remaining_seconds_at_timing_anchor: Option<i64>,
+    pub remaining_seconds_at_timing_anchor: Option<SignedSeconds>,
     /// Unix milliseconds at which the relative timing value was observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timing_anchor_observed_at_unix_ms: Option<u64>,
+    pub timing_anchor_observed_at_unix_ms: Option<UnixMillis>,
     /// Calibrated provider-server offset in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_offset_ms: Option<i64>,
+    pub server_offset_ms: Option<ServerOffsetMillis>,
     /// Unix milliseconds when the server offset was calibrated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_offset_observed_at_unix_ms: Option<u64>,
+    pub server_offset_observed_at_unix_ms: Option<UnixMillis>,
 }
 
 /// Provenance proving that a model route uses an exact quota pool set.
@@ -149,7 +152,7 @@ pub struct ProviderQuotaRouteBinding {
     /// Complete all-of set of quota pools applying to this route.
     pub limit_ids: Vec<ProviderQuotaLimitId>,
     /// Unix milliseconds when applicability was explicitly observed.
-    pub observed_at_unix_ms: u64,
+    pub observed_at_unix_ms: UnixMillis,
     /// Provider evidence establishing this binding.
     pub provenance: ProviderQuotaBindingProvenance,
 }
@@ -236,7 +239,7 @@ pub fn validate_provider_quota_state(
         if window.used_basis_points > 10_000 {
             return Err("provider quota usage exceeds 100 percent");
         }
-        if window.window_seconds == 0 {
+        if window.window_seconds.get() == 0 {
             return Err("provider quota duration must be positive");
         }
         if !window_keys.insert(&window.key) {

@@ -7,7 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use serde::Deserialize;
-use tau_proto::{ProviderQuotaLimitId, ProviderQuotaWindowId};
+use tau_proto::{
+    ProviderQuotaLimitId, ProviderQuotaWindowId, QuotaWindowSeconds, SignedSeconds, UnixSeconds,
+};
 use tokio::runtime as path_tokio_runtime;
 
 /// Maximum accepted `/wham/usage` response body.
@@ -26,11 +28,11 @@ pub struct QuotaWindowObservation {
     /// Observed usage in basis points.
     pub used_basis_points: u16,
     /// Server-declared window duration, when present in this observation.
-    pub window_seconds: Option<u64>,
+    pub window_seconds: Option<QuotaWindowSeconds>,
     /// Server-declared absolute reset, when present.
-    pub reset_at_unix_seconds: Option<u64>,
+    pub reset_at_unix_seconds: Option<UnixSeconds>,
     /// Server-declared remaining seconds, available from full snapshots.
-    pub remaining_seconds: Option<i64>,
+    pub remaining_seconds: Option<SignedSeconds>,
 }
 
 /// One supported rolling quota observation from an in-band WebSocket event.
@@ -345,13 +347,13 @@ fn normalize_window(
         return None;
     }
     let window_seconds = match raw.limit_window_seconds {
-        Some(seconds) if 0 < seconds => Some(u64::try_from(seconds).ok()?),
+        Some(seconds) if 0 < seconds => Some(QuotaWindowSeconds::new(u64::try_from(seconds).ok()?)),
         Some(_) => return None,
         None if require_duration => return None,
         None => None,
     };
     let reset_at_unix_seconds = match raw.reset_at {
-        Some(value) if 0 < value => Some(u64::try_from(value).ok()?),
+        Some(value) if 0 < value => Some(UnixSeconds::new(u64::try_from(value).ok()?)),
         Some(_) => return None,
         None => None,
     };
@@ -362,7 +364,7 @@ fn normalize_window(
         used_basis_points,
         window_seconds,
         reset_at_unix_seconds,
-        remaining_seconds: raw.reset_after_seconds,
+        remaining_seconds: raw.reset_after_seconds.map(SignedSeconds::new),
     })
 }
 

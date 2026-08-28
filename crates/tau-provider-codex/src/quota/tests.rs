@@ -77,9 +77,13 @@ fn full_usage_normalizes_all_supported_windows() {
                 window.limit_id.as_str(),
                 window.window_id.as_str(),
                 window.used_basis_points,
-                window.window_seconds,
-                window.remaining_seconds,
-                window.reset_at_unix_seconds,
+                window
+                    .window_seconds
+                    .map(tau_proto::QuotaWindowSeconds::get),
+                window.remaining_seconds.map(tau_proto::SignedSeconds::get),
+                window
+                    .reset_at_unix_seconds
+                    .map(tau_proto::UnixSeconds::get),
             )
         })
         .collect::<Vec<_>>();
@@ -164,9 +168,13 @@ fn websocket_event_normalizes_and_binds_named_pool() {
                 window.limit_id.as_str(),
                 window.window_id.as_str(),
                 window.used_basis_points,
-                window.window_seconds,
-                window.remaining_seconds,
-                window.reset_at_unix_seconds,
+                window
+                    .window_seconds
+                    .map(tau_proto::QuotaWindowSeconds::get),
+                window.remaining_seconds.map(tau_proto::SignedSeconds::get),
+                window
+                    .reset_at_unix_seconds
+                    .map(tau_proto::UnixSeconds::get),
             )
         })
         .collect::<Vec<_>>();
@@ -215,7 +223,10 @@ fn websocket_event_binds_nameless_official_shape_to_default_pool() {
         Some(tau_proto::ProviderQuotaBindingProvenance::TurnEvent)
     );
     assert_eq!(observation.windows.len(), 1);
-    assert_eq!(observation.windows[0].window_seconds, Some(604_800));
+    assert_eq!(
+        observation.windows[0].window_seconds,
+        Some(tau_proto::QuotaWindowSeconds::new(604_800))
+    );
 }
 
 /// A present malformed explicit pool remains external untrusted data and must

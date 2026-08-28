@@ -4077,8 +4077,11 @@ impl EventRenderer {
             || self.role.current_model.clone(),
             |agent_id| self.watches.agent_models.get(agent_id).cloned(),
         );
-        let quota = quota_model
-            .and_then(|model| self.role.quota_pacing.classify(&model, unix_time_millis()));
+        let quota = quota_model.and_then(|model| {
+            self.role
+                .quota_pacing
+                .classify(&model, tau_proto::UnixMillis::new(unix_time_millis()))
+        });
         if let Some(quota) = quota {
             let style = match quota {
                 path_crate_provider_quota::QuotaPacing::FarUnder => names::STATUS_QUOTA_UNDER,

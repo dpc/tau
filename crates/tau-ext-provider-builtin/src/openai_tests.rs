@@ -2775,8 +2775,12 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                                 window_id: tau_proto::ProviderQuotaWindowId::parse("primary")
                                     .expect("window id"),
                                 used_basis_points,
-                                window_seconds: Some(5 * 86_400),
-                                reset_at_unix_seconds: Some(2_100_000_000),
+                                window_seconds: Some(tau_proto::QuotaWindowSeconds::new(
+                                    5 * 86_400,
+                                )),
+                                reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(
+                                    2_100_000_000,
+                                )),
                                 remaining_seconds: None,
                             }],
                             active_limit_id: Some(
@@ -2786,7 +2790,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                                 tau_proto::ProviderQuotaBindingProvenance::TurnEvent,
                             ),
                         },
-                        observed_at_unix_ms: now_ms(),
+                        observed_at_unix_ms: tau_proto::UnixMillis::new(now_ms()),
                     },
                 )
                 .expect("publish display-only quota transition");
@@ -3221,8 +3225,8 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
                         window_id: tau_proto::ProviderQuotaWindowId::parse("primary")
                             .expect("window id"),
                         used_basis_points: 0,
-                        window_seconds: Some(604_800),
-                        reset_at_unix_seconds: Some(2_100_000_000),
+                        window_seconds: Some(tau_proto::QuotaWindowSeconds::new(604_800)),
+                        reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(2_100_000_000)),
                         remaining_seconds: None,
                     }],
                     active_limit_id: Some(
@@ -3230,7 +3234,7 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
                     ),
                     binding_provenance: Some(tau_proto::ProviderQuotaBindingProvenance::TurnEvent),
                 },
-                observed_at_unix_ms: now_ms(),
+                observed_at_unix_ms: tau_proto::UnixMillis::new(now_ms()),
             },
         )
         .expect("inject quota telemetry");

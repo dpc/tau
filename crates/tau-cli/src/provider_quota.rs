@@ -4,17 +4,18 @@
 //! formats and account credentials intentionally remain below it.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use tau_proto::{
     HarnessProviderQuotaChanged, ModelId, ProviderName, ProviderQuotaEpoch, ProviderQuotaWindow,
-    ProviderQuotaWindowKey,
+    ProviderQuotaWindowKey, QuotaWindowSeconds, SignedSeconds, UnixMillis, UnixSeconds,
 };
 
-const WEEK_SECONDS: u64 = 7 * 24 * 60 * 60;
-const WEEK_TOLERANCE_SECONDS: u64 = WEEK_SECONDS * 5 / 100;
-const CLOCK_TOLERANCE_MS: i128 = 5 * 60 * 1_000;
-const SOFT_STALE_MS: u64 = 15 * 60 * 1_000;
-const HARD_STALE_MS: u64 = 60 * 60 * 1_000;
+const WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const WEEK_TOLERANCE: Duration = Duration::from_secs(7 * 24 * 60 * 60 * 5 / 100);
+const CLOCK_TOLERANCE: Duration = Duration::from_secs(5 * 60);
+const SOFT_STALE: Duration = Duration::from_secs(15 * 60);
+const HARD_STALE: Duration = Duration::from_secs(60 * 60);
 
 /// User-visible quota pacing classification.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -58,7 +59,7 @@ struct HysteresisKey {
     epoch: ProviderQuotaEpoch,
     model: ModelId,
     window: ProviderQuotaWindowKey,
-    cycle: Option<u64>,
+    cycle: Option<UnixSeconds>,
 }
 
 /// UI-local provider-current-state cache and Schmitt-trigger memory.
@@ -96,7 +97,11 @@ impl QuotaPacingState {
     /// `None` means the selected model's provider has published no quota
     /// current-state capability. Once that capability is known, incomplete,
     /// unbound, stale, expired, or timing-untrusted state is neutral unknown.
-    pub(crate) fn classify(&mut self, model: &ModelId, now_unix_ms: u64) -> Option<QuotaPacing> {
+    pub(crate) fn classify(
+        &mut self,
+        model: &ModelId,
+        now_unix_ms: UnixMillis,
+    ) -> Option<QuotaPacing> {
         let current = self.current.get(&model.provider)?.clone();
         let Some(binding) = current
             .bindings
@@ -105,11 +110,11 @@ impl QuotaPacingState {
         else {
             return Some(QuotaPacing::Unknown);
         };
-        let binding_age = match age_ms(binding.observed_at_unix_ms, now_unix_ms) {
+        let binding_age = match age(binding.observed_at_unix_ms, now_unix_ms) {
             Some(age) => age,
             None => return Some(QuotaPacing::Unknown),
         };
-        if HARD_STALE_MS < binding_age {
+        if HARD_STALE < binding_age {
             return Some(QuotaPacing::Unknown);
         }
 
@@ -138,7 +143,7 @@ impl QuotaPacingState {
         {
             return Some(QuotaPacing::Unknown);
         }
-        if missing_pool || SOFT_STALE_MS < binding_age {
+        if missing_pool || SOFT_STALE < binding_age {
             return Some(QuotaPacing::Unknown);
         }
 
@@ -176,19 +181,18 @@ impl QuotaPacingState {
     }
 }
 
-fn window_hard_expired(window: &ProviderQuotaWindow, now_unix_ms: u64) -> bool {
-    if age_ms(window.usage_observed_at_unix_ms, now_unix_ms).is_some_and(|age| HARD_STALE_MS < age)
-    {
+fn window_hard_expired(window: &ProviderQuotaWindow, now_unix_ms: UnixMillis) -> bool {
+    if age(window.usage_observed_at_unix_ms, now_unix_ms).is_some_and(|age| HARD_STALE < age) {
         return true;
     }
     let relative_expired = window
         .timing_anchor_observed_at_unix_ms
-        .and_then(|observed| age_ms(observed, now_unix_ms))
-        .is_some_and(|age| HARD_STALE_MS < age);
+        .and_then(|observed| age(observed, now_unix_ms))
+        .is_some_and(|age| HARD_STALE < age);
     let offset_expired = window
         .server_offset_observed_at_unix_ms
-        .and_then(|observed| age_ms(observed, now_unix_ms))
-        .is_some_and(|age| HARD_STALE_MS < age);
+        .and_then(|observed| age(observed, now_unix_ms))
+        .is_some_and(|age| HARD_STALE < age);
     match (
         window.timing_anchor_observed_at_unix_ms,
         window.server_offset_observed_at_unix_ms,
@@ -200,24 +204,24 @@ fn window_hard_expired(window: &ProviderQuotaWindow, now_unix_ms: u64) -> bool {
     }
 }
 
-fn valid_fractions(window: &ProviderQuotaWindow, now_unix_ms: u64) -> Option<(f64, f64)> {
-    let usage_age = age_ms(window.usage_observed_at_unix_ms, now_unix_ms)?;
-    if SOFT_STALE_MS < usage_age {
+fn valid_fractions(window: &ProviderQuotaWindow, now_unix_ms: UnixMillis) -> Option<(f64, f64)> {
+    let usage_age = age(window.usage_observed_at_unix_ms, now_unix_ms)?;
+    if SOFT_STALE < usage_age {
         return None;
     }
-    let duration_ms = i128::from(window.window_seconds).checked_mul(1_000)?;
+    let duration_ms = duration_millis(Duration::from_secs(window.window_seconds.get()))?;
     let relative_remaining_ms = match (
         window.remaining_seconds_at_timing_anchor,
         window.timing_anchor_observed_at_unix_ms,
     ) {
         (Some(remaining), Some(anchor)) => (|| {
-            let timing_age = i128::from(now_unix_ms) - i128::from(anchor);
-            if !(-CLOCK_TOLERANCE_MS..=i128::from(SOFT_STALE_MS)).contains(&timing_age) {
+            let timing_age = signed_milliseconds_between(anchor, now_unix_ms);
+            if !(-duration_millis(CLOCK_TOLERANCE)?..=duration_millis(SOFT_STALE)?)
+                .contains(&timing_age)
+            {
                 return None;
             }
-            i128::from(remaining)
-                .checked_mul(1_000)?
-                .checked_sub(timing_age)
+            signed_seconds_to_millis(remaining)?.checked_sub(timing_age)
         })(),
         (None, None) => None,
         _ => None,
@@ -228,26 +232,24 @@ fn valid_fractions(window: &ProviderQuotaWindow, now_unix_ms: u64) -> Option<(f6
         window.server_offset_observed_at_unix_ms,
     ) {
         (Some(reset), Some(offset), Some(observed)) => {
-            if age_ms(observed, now_unix_ms)? > SOFT_STALE_MS {
+            if age(observed, now_unix_ms)? > SOFT_STALE {
                 None
             } else {
-                Some(
-                    i128::from(reset)
-                        .checked_mul(1_000)?
-                        .checked_sub(i128::from(now_unix_ms).checked_add(i128::from(offset))?)?,
-                )
+                Some(unix_seconds_to_millis(reset)?.checked_sub(
+                    i128::from(now_unix_ms.get()).checked_add(i128::from(offset.get()))?,
+                )?)
             }
         }
         _ => None,
     };
     if let (Some(relative), Some(absolute)) = (relative_remaining_ms, absolute_remaining_ms)
-        && (relative - absolute).abs() > CLOCK_TOLERANCE_MS
+        && (relative - absolute).abs() > duration_millis(CLOCK_TOLERANCE)?
     {
         return None;
     }
     let remaining_ms = relative_remaining_ms.or(absolute_remaining_ms)?;
-    if remaining_ms < -CLOCK_TOLERANCE_MS
-        || remaining_ms > duration_ms.checked_add(CLOCK_TOLERANCE_MS)?
+    if remaining_ms < -duration_millis(CLOCK_TOLERANCE)?
+        || remaining_ms > duration_ms.checked_add(duration_millis(CLOCK_TOLERANCE)?)?
     {
         return None;
     }
@@ -261,20 +263,48 @@ fn valid_fractions(window: &ProviderQuotaWindow, now_unix_ms: u64) -> Option<(f6
     Some((used, elapsed))
 }
 
-fn age_ms(observed_at: u64, now: u64) -> Option<u64> {
-    if observed_at > now.saturating_add(CLOCK_TOLERANCE_MS as u64) {
+/// Returns elapsed wall-clock duration, rejecting observations too far in the
+/// future.
+fn age(observed_at: UnixMillis, now: UnixMillis) -> Option<Duration> {
+    let tolerance = u64::try_from(CLOCK_TOLERANCE.as_millis()).expect("clock tolerance fits u64");
+    if observed_at.get() > now.get().saturating_add(tolerance) {
         return None;
     }
-    Some(now.saturating_sub(observed_at))
+    Some(Duration::from_millis(
+        now.get().saturating_sub(observed_at.get()),
+    ))
 }
 
-fn is_weekly(seconds: u64) -> bool {
-    seconds.abs_diff(WEEK_SECONDS) <= WEEK_TOLERANCE_SECONDS
+/// Converts a `Duration` to signed milliseconds for quota timing arithmetic.
+fn duration_millis(duration: Duration) -> Option<i128> {
+    duration.as_millis().try_into().ok()
 }
 
-fn same_reset_cycle(left: Option<u64>, right: Option<u64>) -> bool {
+/// Projects a Unix-seconds timestamp onto the millisecond arithmetic scale.
+fn unix_seconds_to_millis(seconds: UnixSeconds) -> Option<i128> {
+    i128::from(seconds.get()).checked_mul(1_000)
+}
+
+/// Projects a signed provider duration onto the millisecond arithmetic scale.
+fn signed_seconds_to_millis(seconds: SignedSeconds) -> Option<i128> {
+    i128::from(seconds.get()).checked_mul(1_000)
+}
+
+/// Computes the signed millisecond difference between two Unix-millisecond
+/// timestamps.
+fn signed_milliseconds_between(earlier: UnixMillis, later: UnixMillis) -> i128 {
+    i128::from(later.get()) - i128::from(earlier.get())
+}
+
+/// Returns whether a provider-declared duration is within the weekly pacing
+/// band.
+fn is_weekly(seconds: QuotaWindowSeconds) -> bool {
+    Duration::from_secs(seconds.get()).abs_diff(WEEK) <= WEEK_TOLERANCE
+}
+
+fn same_reset_cycle(left: Option<UnixSeconds>, right: Option<UnixSeconds>) -> bool {
     match (left, right) {
-        (Some(left), Some(right)) => left.abs_diff(right) <= 60,
+        (Some(left), Some(right)) => left.get().abs_diff(right.get()) <= 60,
         (None, None) => true,
         _ => false,
     }

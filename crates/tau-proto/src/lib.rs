@@ -40,6 +40,7 @@ mod provider_cache_privacy;
 mod provider_cache_quota;
 mod provider_cache_usage;
 mod provider_quota;
+mod provider_quota_clock;
 mod provider_quota_sequence;
 mod suggestion;
 mod token_count;
@@ -71,6 +72,9 @@ pub use provider_cache_privacy::*;
 pub use provider_cache_quota::*;
 pub use provider_cache_usage::*;
 pub use provider_quota::*;
+pub use provider_quota_clock::{
+    QuotaWindowSeconds, ServerOffsetMillis, SignedSeconds, UnixMillis, UnixSeconds,
+};
 pub use provider_quota_sequence::ProviderQuotaSequence;
 use serde::Serialize;
 use serde::de::DeserializeOwned;

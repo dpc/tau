@@ -534,13 +534,17 @@ fn quota_status_renders_all_accessible_compact_chips() {
                             .expect("valid quota test value"),
                     },
                     used_basis_points: used,
-                    usage_observed_at_unix_ms: now - age,
-                    window_seconds: 604_800,
-                    reset_at_unix_seconds: Some(now / 1_000 + remaining),
-                    remaining_seconds_at_timing_anchor: Some(remaining as i64),
-                    timing_anchor_observed_at_unix_ms: Some(now - age),
-                    server_offset_ms: Some(0),
-                    server_offset_observed_at_unix_ms: Some(now - age),
+                    usage_observed_at_unix_ms: tau_proto::UnixMillis::new(now - age),
+                    window_seconds: tau_proto::QuotaWindowSeconds::new(604_800),
+                    reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(
+                        now / 1_000 + remaining,
+                    )),
+                    remaining_seconds_at_timing_anchor: Some(tau_proto::SignedSeconds::new(
+                        remaining as i64,
+                    )),
+                    timing_anchor_observed_at_unix_ms: Some(tau_proto::UnixMillis::new(now - age)),
+                    server_offset_ms: Some(tau_proto::ServerOffsetMillis::new(0)),
+                    server_offset_observed_at_unix_ms: Some(tau_proto::UnixMillis::new(now - age)),
                 }],
                 route_bindings: vec![tau_proto::ProviderQuotaRouteBinding {
                     model: model.clone(),
@@ -548,7 +552,7 @@ fn quota_status_renders_all_accessible_compact_chips() {
                         tau_proto::ProviderQuotaLimitId::parse("codex")
                             .expect("valid quota test value"),
                     ],
-                    observed_at_unix_ms: now - age,
+                    observed_at_unix_ms: tau_proto::UnixMillis::new(now - age),
                     provenance: tau_proto::ProviderQuotaBindingProvenance::TurnEvent,
                 }],
             },
@@ -585,13 +589,13 @@ fn quota_status_narrow_two_pool_state_uses_only_bound_default_pool() {
             window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
         },
         used_basis_points,
-        usage_observed_at_unix_ms: now,
-        window_seconds: 604_800,
-        reset_at_unix_seconds: Some(now / 1_000 + remaining),
-        remaining_seconds_at_timing_anchor: Some(remaining as i64),
-        timing_anchor_observed_at_unix_ms: Some(now),
-        server_offset_ms: Some(0),
-        server_offset_observed_at_unix_ms: Some(now),
+        usage_observed_at_unix_ms: tau_proto::UnixMillis::new(now),
+        window_seconds: tau_proto::QuotaWindowSeconds::new(604_800),
+        reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(now / 1_000 + remaining)),
+        remaining_seconds_at_timing_anchor: Some(tau_proto::SignedSeconds::new(remaining as i64)),
+        timing_anchor_observed_at_unix_ms: Some(tau_proto::UnixMillis::new(now)),
+        server_offset_ms: Some(tau_proto::ServerOffsetMillis::new(0)),
+        server_offset_observed_at_unix_ms: Some(tau_proto::UnixMillis::new(now)),
     };
     renderer.handle(&Event::HarnessProviderQuotaChanged(
         tau_proto::HarnessProviderQuotaChanged {
@@ -605,7 +609,7 @@ fn quota_status_narrow_two_pool_state_uses_only_bound_default_pool() {
                 limit_ids: vec![
                     tau_proto::ProviderQuotaLimitId::parse("codex").expect("default pool"),
                 ],
-                observed_at_unix_ms: now,
+                observed_at_unix_ms: tau_proto::UnixMillis::new(now),
                 provenance: tau_proto::ProviderQuotaBindingProvenance::TurnEvent,
             }],
         },

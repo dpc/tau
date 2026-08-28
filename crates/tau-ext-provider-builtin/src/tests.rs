@@ -3172,8 +3172,8 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
             window_id: tau_proto::ProviderQuotaWindowId::parse("secondary")
                 .expect("valid quota test value"),
             used_basis_points: 6_000,
-            window_seconds: Some(604_800),
-            reset_at_unix_seconds: Some(2_100_000_000),
+            window_seconds: Some(tau_proto::QuotaWindowSeconds::new(604_800)),
+            reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(2_100_000_000)),
             remaining_seconds: None,
         }],
         active_limit_id: Some(
@@ -3182,7 +3182,7 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
         binding_provenance: Some(tau_proto::ProviderQuotaBindingProvenance::TurnEvent),
     };
     assert!(matches!(
-        quota.merge_rolling(model, 7, rolling, 2_000_000_000_000),
+        quota.merge_rolling(model, 7, rolling, UnixMillis::new(2_000_000_000_000)),
         Some(Event::ProviderQuotaPatchReported(_))
     ));
     let full = tau_provider_codex::FullQuotaSnapshot {
@@ -3192,13 +3192,19 @@ fn quota_reconciliation_does_not_revert_newer_rolling_state() {
             window_id: tau_proto::ProviderQuotaWindowId::parse("secondary")
                 .expect("valid quota test value"),
             used_basis_points: 5_000,
-            window_seconds: Some(604_800),
-            reset_at_unix_seconds: Some(2_100_000_000),
-            remaining_seconds: Some(500_000),
+            window_seconds: Some(tau_proto::QuotaWindowSeconds::new(604_800)),
+            reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(2_100_000_000)),
+            remaining_seconds: Some(tau_proto::SignedSeconds::new(500_000)),
         }],
     };
     let Event::ProviderQuotaReplaceReported(replaced) = quota
-        .finish_fetch(provider, epoch, fetch_sequence, full, 2_000_000_001_000)
+        .finish_fetch(
+            provider,
+            epoch,
+            fetch_sequence,
+            full,
+            UnixMillis::new(2_000_000_001_000),
+        )
         .expect("valid quota test value")
     else {
         panic!("expected replacement");
@@ -3257,15 +3263,21 @@ fn quota_two_pool_snapshot_then_nameless_turn_binds_default_pool() {
         limit_id: tau_proto::ProviderQuotaLimitId::parse(limit_id).expect("pool id"),
         window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
         used_basis_points,
-        window_seconds: Some(604_800),
-        reset_at_unix_seconds: Some(2_100_000_000),
-        remaining_seconds: Some(500_000),
+        window_seconds: Some(tau_proto::QuotaWindowSeconds::new(604_800)),
+        reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(2_100_000_000)),
+        remaining_seconds: Some(tau_proto::SignedSeconds::new(500_000)),
     };
     let full = tau_provider_codex::FullQuotaSnapshot {
         windows: vec![window("codex", 4_400), window("codex_bengalfox", 0)],
     };
     let Event::ProviderQuotaReplaceReported(replaced) = quota
-        .finish_fetch(provider, epoch, fetch_sequence, full, 2_000_000_000_000)
+        .finish_fetch(
+            provider,
+            epoch,
+            fetch_sequence,
+            full,
+            UnixMillis::new(2_000_000_000_000),
+        )
         .expect("full quota replacement")
     else {
         panic!("expected quota replacement");
@@ -3278,7 +3290,12 @@ fn quota_two_pool_snapshot_then_nameless_turn_binds_default_pool() {
     )
     .expect("official nameless turn event");
     let Event::ProviderQuotaPatchReported(patch) = quota
-        .merge_rolling(model.clone(), 7, observation, 2_000_000_001_000)
+        .merge_rolling(
+            model.clone(),
+            7,
+            observation,
+            UnixMillis::new(2_000_000_001_000),
+        )
         .expect("quota binding patch")
     else {
         panic!("expected quota patch");
@@ -3312,7 +3329,7 @@ fn quota_profile_rotation_rejects_old_fetch_completion() {
                 old_epoch,
                 sequence,
                 tau_provider_codex::FullQuotaSnapshot::default(),
-                1,
+                UnixMillis::new(1),
             )
             .is_none()
     );
@@ -3333,8 +3350,8 @@ fn quota_sparse_state_is_bounded_before_mutation() {
                     .expect("pool id"),
                 window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
                 used_basis_points: 100,
-                window_seconds: Some(604_800),
-                reset_at_unix_seconds: Some(2_100_000_000),
+                window_seconds: Some(tau_proto::QuotaWindowSeconds::new(604_800)),
+                reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(2_100_000_000)),
                 remaining_seconds: None,
             }],
             active_limit_id: None,
@@ -3342,7 +3359,12 @@ fn quota_sparse_state_is_bounded_before_mutation() {
         };
         assert!(
             quota
-                .merge_rolling(model.clone(), 7, observation, 2_000_000_000_000)
+                .merge_rolling(
+                    model.clone(),
+                    7,
+                    observation,
+                    UnixMillis::new(2_000_000_000_000)
+                )
                 .is_some()
         );
     }
@@ -3352,8 +3374,8 @@ fn quota_sparse_state_is_bounded_before_mutation() {
             limit_id: tau_proto::ProviderQuotaLimitId::parse("overflow").expect("pool id"),
             window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
             used_basis_points: 100,
-            window_seconds: Some(604_800),
-            reset_at_unix_seconds: Some(2_100_000_000),
+            window_seconds: Some(tau_proto::QuotaWindowSeconds::new(604_800)),
+            reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(2_100_000_000)),
             remaining_seconds: None,
         }],
         active_limit_id: None,
@@ -3361,7 +3383,7 @@ fn quota_sparse_state_is_bounded_before_mutation() {
     };
     assert!(
         quota
-            .merge_rolling(model, 7, overflow, 2_000_000_000_001)
+            .merge_rolling(model, 7, overflow, UnixMillis::new(2_000_000_000_001))
             .is_none()
     );
     assert_eq!(quota.profiles[&provider].sequence, sequence);
@@ -3385,19 +3407,29 @@ fn quota_full_merge_with_post_start_keys_cannot_overflow_bound() {
                 .expect("pool id"),
             window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
             used_basis_points: 100,
-            window_seconds: Some(604_800),
-            reset_at_unix_seconds: Some(2_100_000_000),
+            window_seconds: Some(tau_proto::QuotaWindowSeconds::new(604_800)),
+            reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(2_100_000_000)),
             remaining_seconds: None,
         }],
         active_limit_id: None,
         binding_provenance: None,
     };
     for index in 0..16 {
-        quota.merge_rolling(model.clone(), 7, rolling("old", index), 2_000_000_000_000);
+        quota.merge_rolling(
+            model.clone(),
+            7,
+            rolling("old", index),
+            UnixMillis::new(2_000_000_000_000),
+        );
     }
     let (epoch, fetch_sequence) = quota.begin_fetch(&provider).expect("fetch");
     for index in 0..16 {
-        quota.merge_rolling(model.clone(), 7, rolling("new", index), 2_000_000_000_001);
+        quota.merge_rolling(
+            model.clone(),
+            7,
+            rolling("new", index),
+            UnixMillis::new(2_000_000_000_001),
+        );
     }
     let sequence = quota.profiles[&provider].sequence;
     let full = tau_provider_codex::FullQuotaSnapshot {
@@ -3407,9 +3439,9 @@ fn quota_full_merge_with_post_start_keys_cannot_overflow_bound() {
                     .expect("pool id"),
                 window_id: tau_proto::ProviderQuotaWindowId::parse("primary").expect("window id"),
                 used_basis_points: 200,
-                window_seconds: Some(604_800),
-                reset_at_unix_seconds: Some(2_100_000_000),
-                remaining_seconds: Some(300_000),
+                window_seconds: Some(tau_proto::QuotaWindowSeconds::new(604_800)),
+                reset_at_unix_seconds: Some(tau_proto::UnixSeconds::new(2_100_000_000)),
+                remaining_seconds: Some(tau_proto::SignedSeconds::new(300_000)),
             })
             .collect(),
     };
@@ -3420,7 +3452,7 @@ fn quota_full_merge_with_post_start_keys_cannot_overflow_bound() {
                 epoch,
                 fetch_sequence,
                 full,
-                2_000_000_000_002,
+                UnixMillis::new(2_000_000_000_002),
             )
             .is_none()
     );
