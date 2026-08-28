@@ -2727,6 +2727,110 @@ fn intercepted_final_response_cannot_fan_out_after_watched_agent_unload() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ordinary no-tool completion deliberately remains eager: parking the
+/// canonical response must make the agent idle before the response commits,
+/// and releasing publication must not append or reduce the terminal twice.
+#[test]
+fn intercepted_no_tool_response_completes_once_before_commit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let prompt_id =
+        tau_proto::AgentPromptId::parse("intercepted-eager-no-tool").expect("valid prompt id");
+    seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
+    h.prompt_coordination
+        .prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
+    let assistant_text = "ordinary eager terminal response long enough to track";
+    assert!(
+        crate::harness::normalize_loop_text(assistant_text).is_some(),
+        "fixture must arm loop-signature tracking"
+    );
+    h.record_assistant_loop_signature(&cid, Some(assistant_text));
+    let interceptor = connect_test_tool(&mut h, "eager-no-tool-response-owner");
+    h.handle_extension_event(
+        "eager-no-tool-response-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.handle_provider_response_finished(provider_text_response(
+        &prompt_id,
+        durable_agent_id_for_conversation(&h, &cid),
+        assistant_text,
+    ))
+    .expect("park canonical response and reduce no-tool terminal");
+    let (candidate, _) = intercepted_payload(&interceptor);
+    assert!(matches!(
+        candidate,
+        Event::ProviderResponseFinished(ref response)
+            if response.agent_prompt_id == prompt_id
+    ));
+    assert!(
+        !event_log_events(&h).iter().any(|event| matches!(
+            event,
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id == prompt_id
+        )),
+        "parked response must remain uncommitted"
+    );
+    assert!(
+        matches!(
+            h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
+            AgentTurnState::Idle
+        ),
+        "ordinary no-tool reduction must remain eager"
+    );
+    assert!(
+        event_log_events(&h).iter().all(|event| !matches!(
+            event,
+            Event::AgentPromptSteered(steered)
+                if steered.message_class == tau_proto::PromptMessageClass::Internal
+                    && steered.text.contains("Loop guard:")
+        )),
+        "one eager reduction must remain below the preseeded loop threshold"
+    );
+
+    h.handle_extension_event(
+        "eager-no-tool-response-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit parked response");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == prompt_id
+            ))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        h.agent_runtime.agent_registry.agents[&cid].turn.turn_state,
+        AgentTurnState::Idle
+    ));
+    assert!(
+        event_log_events(&h).iter().all(|event| !matches!(
+            event,
+            Event::AgentPromptSteered(steered)
+                if steered.message_class == tau_proto::PromptMessageClass::Internal
+                    && steered.text.contains("Loop guard:")
+        )),
+        "release must not run the reducer again and cross the loop threshold"
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// A checkpoint parked before commit owns its provider-qualified model even if
 /// `:model` timing changes the loaded agent before prompt materialization.
 #[test]

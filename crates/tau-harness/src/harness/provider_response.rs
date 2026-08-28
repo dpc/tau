@@ -525,6 +525,9 @@ impl Harness {
             ProviderTerminalPlan::ToolCalls(_) => {
                 unreachable!("tool-call classification runs after response publication")
             }
+            ProviderTerminalPlan::OrdinaryNoTool(_) => {
+                unreachable!("no-tool classification runs after response publication")
+            }
             ProviderTerminalPlan::Other => None,
         };
         let commit_gated_plan =
@@ -575,7 +578,8 @@ impl Harness {
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::OutputLengthContinuationSource(_)
             | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
-            | ProviderTerminalPlan::ToolCalls(_) => {
+            | ProviderTerminalPlan::ToolCalls(_)
+            | ProviderTerminalPlan::OrdinaryNoTool(_) => {
                 unreachable!("earlier provider-terminal family reached commit-gated classification")
             }
         };
@@ -608,7 +612,8 @@ impl Harness {
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
             | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
-            | ProviderTerminalPlan::ToolCalls(_) => {
+            | ProviderTerminalPlan::ToolCalls(_)
+            | ProviderTerminalPlan::OrdinaryNoTool(_) => {
                 unreachable!(
                     "earlier provider-terminal family reached output-length source classification"
                 )
@@ -658,7 +663,8 @@ impl Harness {
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
             | ProviderTerminalPlan::OutputLengthContinuationSource(_)
-            | ProviderTerminalPlan::ToolCalls(_) => {
+            | ProviderTerminalPlan::ToolCalls(_)
+            | ProviderTerminalPlan::OrdinaryNoTool(_) => {
                 unreachable!(
                     "earlier provider-terminal family reached output-length terminal classification"
                 )
@@ -722,28 +728,28 @@ impl Harness {
         {
             return Ok(());
         }
-        let tool_call_plan = Self::classify_tool_call_terminal(ToolCallTerminalClassification {
+        let ordinary_plan = Self::classify_ordinary_terminal(OrdinaryTerminalClassification {
             requested_tool_calls,
             normalized_tool_calls,
             source: source.cloned(),
+            response,
+            assistant_text,
         });
-        match tool_call_plan {
+        match ordinary_plan {
             ProviderTerminalPlan::ToolCalls(ToolCallTerminalPlan { reducer }) => {
                 self.reduce_tool_call_terminal(&cid, reducer)?;
             }
-            ProviderTerminalPlan::Other => {
-                self.complete_finished_response_without_tool_calls(
-                    &cid,
-                    &response,
-                    assistant_text.as_deref(),
-                );
+            ProviderTerminalPlan::OrdinaryNoTool(plan) => {
+                let OrdinaryNoToolTerminalPlan { reducer } = *plan;
+                self.reduce_ordinary_no_tool_terminal(&cid, reducer);
             }
             ProviderTerminalPlan::ReactiveContextRecovery(_)
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
             | ProviderTerminalPlan::OutputLengthContinuationSource(_)
-            | ProviderTerminalPlan::OutputLengthContinuationTerminal(_) => {
-                unreachable!("earlier provider-terminal family reached tool-call classification")
+            | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
+            | ProviderTerminalPlan::Other => {
+                unreachable!("earlier provider-terminal family reached ordinary classification")
             }
         }
 
@@ -1002,6 +1008,9 @@ impl Harness {
             }
             ProviderTerminalPlan::ToolCalls(_) => {
                 unreachable!("tool-call classification runs after shared terminal accounting")
+            }
+            ProviderTerminalPlan::OrdinaryNoTool(_) => {
+                unreachable!("no-tool classification runs after shared terminal accounting")
             }
             ProviderTerminalPlan::Other => return false,
         };
@@ -3472,17 +3481,25 @@ impl Harness {
         )
     }
 
-    /// Classify one ordinary normalized tool-call round after every owning
-    /// provider-terminal family and side-conversation terminal has returned.
-    fn classify_tool_call_terminal(
-        ToolCallTerminalClassification {
+    /// Exhaustively classify the ordinary tool-call and no-tool families after
+    /// every earlier provider-terminal family and side-conversation has
+    /// returned.
+    fn classify_ordinary_terminal(
+        OrdinaryTerminalClassification {
             requested_tool_calls,
             normalized_tool_calls,
             source,
-        }: ToolCallTerminalClassification,
+            response,
+            assistant_text,
+        }: OrdinaryTerminalClassification,
     ) -> ProviderTerminalPlan {
         if !requested_tool_calls {
-            return ProviderTerminalPlan::Other;
+            return ProviderTerminalPlan::OrdinaryNoTool(Box::new(OrdinaryNoToolTerminalPlan {
+                reducer: EagerOrdinaryNoToolTerminal {
+                    response,
+                    assistant_text,
+                },
+            }));
         }
         ProviderTerminalPlan::ToolCalls(ToolCallTerminalPlan {
             reducer: EagerToolCallTerminal {
@@ -3504,6 +3521,24 @@ impl Harness {
             reducer.normalized_tool_calls,
             reducer.source.as_ref(),
         )
+    }
+
+    /// Execute the unchanged eager ordinary no-tool completion after canonical
+    /// response publication has been offered.
+    fn reduce_ordinary_no_tool_terminal(
+        &mut self,
+        cid: &AgentId,
+        reducer: EagerOrdinaryNoToolTerminal,
+    ) {
+        let EagerOrdinaryNoToolTerminal {
+            response,
+            assistant_text,
+        } = reducer;
+        self.complete_finished_response_without_tool_calls(
+            cid,
+            &response,
+            assistant_text.as_deref(),
+        );
     }
 
     /// Perform ordinary or delegated completion only after an accepted gated

@@ -151,6 +151,7 @@ use crate::harness::interception::{
     InterceptorRegistry, PendingIntercept, PostCommitContinuation, PromptDispatchAuthority,
     PromptDispatchContinuation, PromptDispatchPhase,
 };
+use crate::harness::ordinary_no_tool_terminal_reducer::EagerOrdinaryNoToolTerminal;
 use crate::harness::output_length_continuation_reducer::CommittedOutputLengthContinuation;
 use crate::harness::peer_messaging::PeerMessagingState;
 use crate::harness::pending_notices::{PendingPromptNoticeState, PendingToolAvailabilityNotice};
@@ -159,10 +160,10 @@ use crate::harness::provider_runtime_state::ProviderRuntimeState;
 use crate::harness::provider_startup::ProviderStartupSnapshot;
 use crate::harness::provider_terminal_plan::{
     AutomaticCompactionOrPendingMessageWakeClassification,
-    AutomaticCompactionOrPendingMessageWakePlan, FinalStatusGatedPlan,
-    OutputLengthContinuationSourceClassification, OutputLengthContinuationSourcePlan,
-    OutputLengthContinuationTerminalClassification, OutputLengthContinuationTerminalPlan,
-    ProviderTerminalPlan, ReactiveContextRecoveryPlan, ToolCallTerminalClassification,
+    AutomaticCompactionOrPendingMessageWakePlan, FinalStatusGatedPlan, OrdinaryNoToolTerminalPlan,
+    OrdinaryTerminalClassification, OutputLengthContinuationSourceClassification,
+    OutputLengthContinuationSourcePlan, OutputLengthContinuationTerminalClassification,
+    OutputLengthContinuationTerminalPlan, ProviderTerminalPlan, ReactiveContextRecoveryPlan,
     ToolCallTerminalPlan,
 };
 use crate::harness::publication_state::PublicationState;
@@ -1421,6 +1422,7 @@ mod context_discovery_state;
 mod extension_activation;
 mod extension_lifecycle;
 mod harness_config_state;
+mod ordinary_no_tool_terminal_reducer;
 mod output_length_continuation_reducer;
 mod peer_messaging;
 mod peer_reports;
