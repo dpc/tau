@@ -667,7 +667,27 @@ fn responses_profile_identity(config: &ResolvedConfig) -> InferenceProfileIdenti
     config.inference_identity()
 }
 
-fn backend_profile_identity(backend: &PromptBackend) -> Option<u64> {
+/// Process-local correlation identity for one resolved provider backend
+/// generation.
+///
+/// Its opaque hash combines the backend and credential state used by prompt
+/// workers, cooldowns, and OAuth recovery. It never crosses a protocol or
+/// persistence boundary.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct BackendProfileIdentity {
+    /// Opaque hash of the resolved backend generation.
+    hash: u64,
+}
+
+#[cfg(test)]
+impl BackendProfileIdentity {
+    /// Constructs a deterministic backend identity for focused state tests.
+    fn from_test_value(value: u64) -> Self {
+        Self { hash: value }
+    }
+}
+
+fn backend_profile_identity(backend: &PromptBackend) -> Option<BackendProfileIdentity> {
     let mut hasher = path_std_collections_hash_map::DefaultHasher::new();
     match backend {
         PromptBackend::Unavailable { .. } => return None,
@@ -685,7 +705,9 @@ fn backend_profile_identity(backend: &PromptBackend) -> Option<u64> {
             provider.api_key.hash(&mut hasher);
         }
     }
-    Some(hasher.finish())
+    Some(BackendProfileIdentity {
+        hash: hasher.finish(),
+    })
 }
 
 fn automatic_retry_identity_matches(pinned: Option<&ResolvedConfig>, next: &PromptBackend) -> bool {
@@ -2985,7 +3007,7 @@ struct ProviderRuntime<F> {
     prewarm_supervisor: PrewarmSupervisor,
     /// Last resolved inference identity for every configured provider
     /// namespace.
-    provider_profile_identities: BTreeMap<ProviderName, Option<u64>>,
+    provider_profile_identities: BTreeMap<ProviderName, Option<BackendProfileIdentity>>,
     /// Last Responses identity used to supervise prewarm transport state.
     prewarm_profile_identities: BTreeMap<ProviderName, InferenceProfileIdentity>,
     /// Cooperative cancellation state shared with prompt workers.
@@ -3415,7 +3437,11 @@ where
         Ok(())
     }
 
-    fn reconcile_provider_profile(&mut self, provider: &ProviderName, identity: Option<u64>) {
+    fn reconcile_provider_profile(
+        &mut self,
+        provider: &ProviderName,
+        identity: Option<BackendProfileIdentity>,
+    ) {
         let (changed, removed_cooldown) = reconcile_inference_identity(
             &mut self.provider_profile_identities,
             &mut self.shared_cooldowns,
@@ -4075,10 +4101,10 @@ where
 /// Reconciles one material inference identity and removes only that provider's
 /// obsolete shared cooldown when the identity changes or disappears.
 fn reconcile_inference_identity(
-    identities: &mut BTreeMap<ProviderName, Option<u64>>,
+    identities: &mut BTreeMap<ProviderName, Option<BackendProfileIdentity>>,
     cooldowns: &mut BTreeMap<ProviderName, SharedCooldown>,
     provider: &ProviderName,
-    identity: Option<u64>,
+    identity: Option<BackendProfileIdentity>,
 ) -> (bool, Option<SharedCooldown>) {
     let changed = identities
         .insert(provider.clone(), identity)
@@ -4275,7 +4301,7 @@ struct PromptJob {
     /// Immutable account anchor for every automatic retry of this owned prompt.
     pinned_chatgpt_identity: Option<ResolvedConfig>,
     /// Inference profile identity used by the next finite attempt.
-    profile_identity: Option<u64>,
+    profile_identity: Option<BackendProfileIdentity>,
     retry_state: PromptRetryState,
     /// Runtime global-cancel generation at logical prompt creation.
     cancel_generation: u64,

@@ -1423,25 +1423,28 @@ fn oauth_cas_race_adoption_preserves_identity_and_replaces_rejected_access() {
 fn oauth_unauthorized_recovery_is_exact_generation_and_once_only() {
     let provider = ProviderName::new("chatgpt");
     let mut cache = OAuthRefreshRejectionCache::default();
-    cache.record_unauthorized(provider.clone(), 41);
-    assert!(!cache.take_unauthorized(&provider, 40));
-    assert!(cache.take_unauthorized(&provider, 41));
-    assert!(cache.unauthorized_exhausted(&provider, 41));
-    cache.record_unauthorized(provider.clone(), 41);
-    assert!(!cache.take_unauthorized(&provider, 41));
-    cache.record_unauthorized(provider.clone(), 42);
-    assert!(cache.take_unauthorized(&provider, 42));
-    cache.record_unauthorized(provider.clone(), 41);
-    cache.record_unauthorized(provider.clone(), 42);
-    assert!(cache.unauthorized_exhausted(&provider, 42));
-    assert!(!cache.take_unauthorized(&provider, 42));
+    let first = BackendProfileIdentity::from_test_value(41);
+    let different = BackendProfileIdentity::from_test_value(40);
+    let second = BackendProfileIdentity::from_test_value(42);
+    cache.record_unauthorized(provider.clone(), first);
+    assert!(!cache.take_unauthorized(&provider, different));
+    assert!(cache.take_unauthorized(&provider, first));
+    assert!(cache.unauthorized_exhausted(&provider, first));
+    cache.record_unauthorized(provider.clone(), first);
+    assert!(!cache.take_unauthorized(&provider, first));
+    cache.record_unauthorized(provider.clone(), second);
+    assert!(cache.take_unauthorized(&provider, second));
+    cache.record_unauthorized(provider.clone(), first);
+    cache.record_unauthorized(provider.clone(), second);
+    assert!(cache.unauthorized_exhausted(&provider, second));
+    assert!(!cache.take_unauthorized(&provider, second));
     cache.clear_refresh_rejection(&provider);
-    cache.record_unauthorized(provider.clone(), 41);
-    assert!(cache.unauthorized_exhausted(&provider, 41));
-    assert!(!cache.take_unauthorized(&provider, 41));
+    cache.record_unauthorized(provider.clone(), first);
+    assert!(cache.unauthorized_exhausted(&provider, first));
+    assert!(!cache.take_unauthorized(&provider, first));
     cache.clear(&provider);
-    cache.record_unauthorized(provider.clone(), 41);
-    assert!(cache.unauthorized_exhausted(&provider, 41));
+    cache.record_unauthorized(provider.clone(), first);
+    assert!(cache.unauthorized_exhausted(&provider, first));
 }
 
 /// A canonical 401 forces refresh while the token is locally valid, and a

@@ -1380,7 +1380,16 @@ fn removed_and_readded_profile_does_not_inherit_shared_cooldown() {
         class: RetryClass::Throttle,
         generation: 3,
     };
-    let mut identities = BTreeMap::from([(limited.clone(), Some(10)), (healthy.clone(), Some(20))]);
+    let mut identities = BTreeMap::from([
+        (
+            limited.clone(),
+            Some(BackendProfileIdentity::from_test_value(10)),
+        ),
+        (
+            healthy.clone(),
+            Some(BackendProfileIdentity::from_test_value(20)),
+        ),
+    ]);
     let mut cooldowns = BTreeMap::from([(limited.clone(), old), (healthy.clone(), unrelated)]);
 
     let (removed, old_cooldown) =
@@ -1402,8 +1411,12 @@ fn removed_and_readded_profile_does_not_inherit_shared_cooldown() {
         },
     );
 
-    let (readded, inherited) =
-        reconcile_inference_identity(&mut identities, &mut cooldowns, &limited, Some(11));
+    let (readded, inherited) = reconcile_inference_identity(
+        &mut identities,
+        &mut cooldowns,
+        &limited,
+        Some(BackendProfileIdentity::from_test_value(11)),
+    );
     assert!(readded);
     assert_eq!(
         inherited
@@ -1412,7 +1425,10 @@ fn removed_and_readded_profile_does_not_inherit_shared_cooldown() {
         8
     );
     assert!(!cooldowns.contains_key(&limited));
-    assert_eq!(identities.get(&limited), Some(&Some(11)));
+    assert_eq!(
+        identities.get(&limited),
+        Some(&Some(BackendProfileIdentity::from_test_value(11)))
+    );
     assert_eq!(
         cooldowns.get(&healthy).map(|state| state.generation),
         Some(3)

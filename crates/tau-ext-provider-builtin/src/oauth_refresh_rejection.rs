@@ -8,7 +8,7 @@ use tau_proto::ProviderName;
 use tau_provider_codex::CodexMode;
 use tau_provider_codex::oauth::OAuthError;
 
-use crate::OpenAiAuth;
+use crate::{BackendProfileIdentity, OpenAiAuth};
 
 const MAX_UNAUTHORIZED_GENERATIONS_PER_PROVIDER: usize = 64;
 
@@ -48,7 +48,7 @@ pub(crate) struct OAuthRefreshRejectionCache {
 #[derive(Default)]
 struct UnauthorizedGenerations {
     /// Whether each observed generation spent its forced recovery.
-    generations: BTreeMap<u64, bool>,
+    generations: BTreeMap<BackendProfileIdentity, bool>,
     /// Whether capacity exhaustion disables unknown-generation recovery.
     saturated: bool,
 }
@@ -61,7 +61,11 @@ impl OAuthRefreshRejectionCache {
 
     /// Records one canonical provider 401 for an exact resolved credential
     /// identity.
-    pub(crate) fn record_unauthorized(&mut self, provider: ProviderName, identity: u64) {
+    pub(crate) fn record_unauthorized(
+        &mut self,
+        provider: ProviderName,
+        identity: BackendProfileIdentity,
+    ) {
         let state = self.unauthorized.entry(provider).or_default();
         if state.generations.contains_key(&identity) || state.saturated {
             return;
@@ -74,7 +78,11 @@ impl OAuthRefreshRejectionCache {
     }
 
     /// Consumes forced-refresh authority only for the exact rejected identity.
-    pub(crate) fn take_unauthorized(&mut self, provider: &ProviderName, identity: u64) -> bool {
+    pub(crate) fn take_unauthorized(
+        &mut self,
+        provider: &ProviderName,
+        identity: BackendProfileIdentity,
+    ) -> bool {
         self.unauthorized.get_mut(provider).is_some_and(|state| {
             let Some(consumed) = state.generations.get_mut(&identity) else {
                 return false;
@@ -88,7 +96,11 @@ impl OAuthRefreshRejectionCache {
     }
 
     /// Returns whether this exact rejected generation already spent recovery.
-    pub(crate) fn unauthorized_exhausted(&self, provider: &ProviderName, identity: u64) -> bool {
+    pub(crate) fn unauthorized_exhausted(
+        &self,
+        provider: &ProviderName,
+        identity: BackendProfileIdentity,
+    ) -> bool {
         self.unauthorized.get(provider).is_some_and(|state| {
             state.saturated || state.generations.get(&identity).copied() == Some(true)
         })
