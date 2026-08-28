@@ -1153,7 +1153,9 @@ fn provider_input_wait_response(
     )
 }
 
-fn provider_tool_response(
+/// Build one provider ToolCalls response for lifecycle tests outside this
+/// module.
+pub(super) fn provider_tool_response(
     prompt: &tau_proto::AgentPromptCreated,
     call_id: &str,
     tool_name: &str,

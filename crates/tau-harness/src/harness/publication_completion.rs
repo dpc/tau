@@ -29,9 +29,8 @@ impl Harness {
     }
 
     /// Lets a cancellation accepted before terminal write-complete own the one
-    /// canonical continuation terminal, regardless of the response queued
-    /// first.
-    pub(super) fn arbitrate_output_length_terminal_cancellation(
+    /// canonical prompt terminal, regardless of the response queued first.
+    pub(super) fn arbitrate_prompt_terminal_cancellation(
         &mut self,
         event: &mut Event,
         sync: &mut Option<ConversationHeadSync>,
@@ -62,20 +61,79 @@ impl Harness {
         else {
             return;
         };
-        let cancellation_owns_prompt = self
+        let ordinary_gated_terminal = sync.as_ref().is_some_and(|sync| {
+            matches!(
+                sync.completion(),
+                Some(AgentPublishCompletion::GatedFinal {
+                    disposition: GatedFinalDisposition::Accept { .. },
+                    ..
+                })
+            )
+        });
+        let cancellation_owns_ordinary_terminal = ordinary_gated_terminal
+            && self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(&cid)
+                .is_some_and(|agent| {
+                    agent
+                        .dispatch
+                        .pending_cancel
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            pending.agent_prompt_id.as_ref() == Some(&response.agent_prompt_id)
+                        })
+                });
+        if cancellation_owns_ordinary_terminal
+            && !matches!(
+                response.output_length_disposition,
+                tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+            )
+        {
+            response.stop_reason = ProviderStopReason::Error;
+            response.error = Some("cancelled".to_owned());
+            response.failure_kind = None;
+            response.output_items.clear();
+            response.recovery_disposition = tau_proto::ContextRecoveryDisposition::None;
+            if let Some(telemetry) = response.context_limit_telemetry.as_mut() {
+                telemetry.recovery_eligible = false;
+                telemetry.action = tau_proto::ContextLimitAction::Terminal;
+            }
+            if let Some(sync) = sync.as_mut() {
+                sync.notify_watchers = false;
+                if let Some(PostCommitContinuation::AgentPublish(completion)) =
+                    sync.continuation.as_mut()
+                    && let AgentPublishCompletion::GatedFinal {
+                        disposition: GatedFinalDisposition::Accept { terminal },
+                        ..
+                    } = completion.as_mut()
+                {
+                    terminal.response = response.clone();
+                }
+            }
+            return;
+        }
+        let cancellation_owns_output_length_terminal = self
             .agent_runtime
             .agent_registry
             .agents
             .get(&cid)
             .is_some_and(|agent| {
-                agent.dispatch.pending_cancel.is_some()
+                agent
+                    .dispatch
+                    .pending_cancel
+                    .as_ref()
+                    .is_some_and(|pending| {
+                        pending.agent_prompt_id.as_ref() == Some(&response.agent_prompt_id)
+                    })
                     && matches!(
                         &agent.turn.output_length_continuation,
                         path_crate_agent::OutputLengthContinuationState::Active(continuation)
                             if continuation.plan.agent_prompt_id == response.agent_prompt_id
                     )
             });
-        if cancellation_owns_prompt
+        if cancellation_owns_output_length_terminal
             && response.recovery_disposition
                 == tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
             && response.output_length_disposition == tau_proto::OutputLengthDisposition::None
@@ -113,7 +171,7 @@ impl Harness {
         ) {
             return;
         }
-        if !cancellation_owns_prompt {
+        if !cancellation_owns_output_length_terminal {
             return;
         }
         let tau_proto::OutputLengthDisposition::ContinuationTerminal {
@@ -170,6 +228,80 @@ impl Harness {
                 },
             )));
         }
+    }
+
+    /// Whether one provider terminal for this prompt already owns publication.
+    pub(super) fn provider_terminal_publication_pending(
+        &self,
+        cid: &AgentId,
+        agent_prompt_id: &tau_proto::AgentPromptId,
+    ) -> bool {
+        let matches_prompt = |event: &Event| {
+            matches!(
+                event,
+                Event::ProviderResponseFinished(response)
+                    if &response.agent_prompt_id == agent_prompt_id
+            )
+        };
+        self.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .is_some_and(|pending| matches_prompt(&pending.event))
+            || self
+                .runtime_io
+                .publication
+                .deferred
+                .iter()
+                .any(|pending| matches_prompt(pending.event()))
+            || self
+                .prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .get(cid)
+                .is_some_and(|completion| completion.owns_provider_terminal(agent_prompt_id))
+    }
+
+    /// Return the exact prompt id of a provider terminal publication owned by
+    /// this agent, if one is currently parked or retained.
+    pub(super) fn pending_provider_terminal_prompt_id(
+        &self,
+        cid: &AgentId,
+    ) -> Option<AgentPromptId> {
+        let agent_id = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)?
+            .identity
+            .agent_id
+            .as_deref()?;
+        let from_event = |event: &Event| match event {
+            Event::ProviderResponseFinished(response) if response.agent_id.as_str() == agent_id => {
+                Some(response.agent_prompt_id.clone())
+            }
+            _ => None,
+        };
+        self.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .and_then(|pending| from_event(&pending.event))
+            .or_else(|| {
+                self.runtime_io
+                    .publication
+                    .deferred
+                    .iter()
+                    .find_map(|pending| from_event(pending.event()))
+            })
+            .or_else(|| {
+                self.prompt_coordination
+                    .prompt_runtime
+                    .pending_publish_completions
+                    .get(cid)
+                    .and_then(AgentPublishCompletion::provider_terminal_prompt_id)
+                    .cloned()
+            })
     }
 
     /// Restore a claimed wait when its canonical preemption terminal did not
@@ -338,6 +470,19 @@ impl Harness {
                     self.continue_after_gated_final_challenge(cid);
                 }
                 GatedFinalDisposition::Accept { terminal } => {
+                    let cancellation_owns_other_prompt = self
+                        .agent_runtime
+                        .agent_registry
+                        .agents
+                        .get(cid)
+                        .and_then(|agent| agent.dispatch.pending_cancel.as_ref())
+                        .and_then(|pending| pending.agent_prompt_id.as_ref())
+                        .is_some_and(|prompt_id| prompt_id != &terminal.response.agent_prompt_id);
+                    if cancellation_owns_other_prompt {
+                        // This earlier terminal remains durable, but a later
+                        // prompt owns every live completion effect.
+                        return;
+                    }
                     if self
                         .agent_runtime
                         .agent_registry
@@ -2271,10 +2416,66 @@ impl Harness {
     ) {
         self.react_to_committed_tool_terminal(source, event, append_outcome);
         if let Event::AgentManualCompactionRequested(requested) = event
-            && requested.is_ui_request()
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(requested.target_agent_id.as_str()))
         {
+            if !requested.is_ui_request() {
+                if let Some(staged) = self
+                    .prompt_coordination
+                    .compaction_runtime
+                    .pending_model_acceptances
+                    .remove(&requested.request_id)
+                {
+                    let source = staged.request.required_tool_source();
+                    let call_id = source.initiating_tool_call_id.clone();
+                    let self_request = source.resume_inference;
+                    self.prompt_coordination
+                        .compaction_runtime
+                        .accepted_manual_tools
+                        .insert(
+                            requested.request_id.clone(),
+                            AcceptedManualCompactionTool {
+                                request: requested.clone(),
+                                visible_tool_name: staged.visible_tool_name,
+                            },
+                        );
+                    if self
+                        .tool_routing
+                        .tool_runtime
+                        .tool_turn
+                        .begin_backgrounding(&call_id)
+                    {
+                        self.observe_tool_backgrounded(&call_id);
+                        self.publish_internal_background_placeholder(
+                            &call_id,
+                            tau_proto::CborValue::Map(vec![
+                                (
+                                    tau_proto::CborValue::Text("status".into()),
+                                    tau_proto::CborValue::Text("accepted".into()),
+                                ),
+                                (
+                                    tau_proto::CborValue::Text("target_agent_id".into()),
+                                    tau_proto::CborValue::Text(
+                                        requested.target_agent_id.to_string(),
+                                    ),
+                                ),
+                                (
+                                    tau_proto::CborValue::Text("request_id".into()),
+                                    tau_proto::CborValue::Text(requested.request_id.to_string()),
+                                ),
+                                (
+                                    tau_proto::CborValue::Text("deferred".into()),
+                                    tau_proto::CborValue::Bool(self_request),
+                                ),
+                            ]),
+                        );
+                    }
+                    if !self_request {
+                        self.start_accepted_manual_compaction(&cid, &requested.request_id);
+                    }
+                }
+                return;
+            }
             if let Some(accepted) = self
                 .prompt_coordination
                 .compaction_runtime
@@ -2812,6 +3013,10 @@ impl Harness {
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(compacted.agent_id.as_str()))
         {
+            if let Some(prompt_id) = compacted.compact_prompt_id.as_ref() {
+                self.clear_finished_response_prompt_route(prompt_id);
+                self.clear_prompt_tool_snapshot(prompt_id);
+            }
             if let Some(transaction_id) = compacted.transaction_id.as_ref() {
                 self.prompt_coordination
                     .compaction_runtime

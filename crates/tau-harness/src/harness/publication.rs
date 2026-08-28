@@ -1650,7 +1650,7 @@ impl Harness {
         mut prompt_acceptance: Option<PromptAcceptanceTiming>,
     ) {
         let mut event = event;
-        self.arbitrate_output_length_terminal_cancellation(&mut event, &mut sync_head_for);
+        self.arbitrate_prompt_terminal_cancellation(&mut event, &mut sync_head_for);
         let watch_retirement = sync_head_for
             .as_ref()
             .and_then(ConversationHeadSync::watch_retirement)

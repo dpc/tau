@@ -872,6 +872,15 @@ struct AcceptedManualCompactionTool {
     visible_tool_name: ToolName,
 }
 
+#[derive(Clone)]
+/// Runtime state for a model-tool request whose acceptance has not committed.
+struct StagedManualCompactionTool {
+    /// Proposed acceptance fact retained until durable admission.
+    request: tau_proto::AgentManualCompactionRequested,
+    /// Prompt-visible name used by the originating call.
+    visible_tool_name: ToolName,
+}
+
 fn manual_request_failure_message(
     reason: tau_proto::ManualCompactionRequestFailureReason,
 ) -> &'static str {

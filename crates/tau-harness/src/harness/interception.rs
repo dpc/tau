@@ -28,6 +28,7 @@ use tau_proto::{
     InterceptReply, InterceptRequest, InterceptionPriority,
 };
 
+use super::gated_final::GatedFinalDisposition;
 use crate::harness::prompt_acceptance_timing::PromptAcceptanceTiming;
 use crate::harness::{InferenceDispatchSelectionError, SessionGeneration};
 use crate::{agent as path_crate_agent, extension as path_crate_extension};
@@ -529,6 +530,36 @@ pub(crate) enum AgentPublishCompletion {
 }
 
 impl AgentPublishCompletion {
+    /// Return the exact provider terminal prompt retained by this completion.
+    pub(super) fn provider_terminal_prompt_id(&self) -> Option<&tau_proto::AgentPromptId> {
+        let response = match self {
+            Self::GatedFinal {
+                disposition: GatedFinalDisposition::Accept { terminal },
+                ..
+            } => Some(&terminal.response),
+            Self::OutputLengthContinuation { response, .. }
+            | Self::OutputLengthPreDeliveryFailure { response, .. } => Some(response.as_ref()),
+            Self::GatedFinal {
+                retry_event: Some(event),
+                ..
+            } => match event.as_ref() {
+                Event::ProviderResponseFinished(response) => Some(response),
+                _ => None,
+            },
+            _ => None,
+        };
+        response.map(|response| &response.agent_prompt_id)
+    }
+
+    /// Whether this retained completion owns a provider terminal for the
+    /// prompt.
+    pub(super) fn owns_provider_terminal(
+        &self,
+        agent_prompt_id: &tau_proto::AgentPromptId,
+    ) -> bool {
+        self.provider_terminal_prompt_id() == Some(agent_prompt_id)
+    }
+
     /// Whether this retained completion owns one terminal for the prompt.
     pub(super) fn owns_output_length_terminal(
         &self,
@@ -1210,6 +1241,56 @@ impl Harness {
             // FIFO. Preserve and resume every publication not owned by that
             // completion; another agent's durable work must not disappear with
             // the unloading owner.
+            self.drain_deferred_publishes();
+            self.drain_publish_idle_dispatches();
+        }
+    }
+
+    /// Cancel exact pre-commit model-compaction acceptances whose caller or
+    /// target is being torn down, without disturbing other target work.
+    pub(crate) fn cancel_staged_model_acceptance_publications(
+        &mut self,
+        request_ids: &[tau_proto::CompactionRequestId],
+    ) {
+        let matches_request = |event: &Event| {
+            matches!(
+                event,
+                Event::AgentManualCompactionRequested(request)
+                    if request_ids.contains(&request.request_id)
+            )
+        };
+        let removed_pending = self
+            .runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .is_some_and(|pending| matches_request(&pending.event));
+        if removed_pending {
+            let pending = self
+                .runtime_io
+                .publication
+                .pending_intercept
+                .take()
+                .expect("matched staged acceptance");
+            self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
+        }
+        self.runtime_io
+            .publication
+            .deferred
+            .retain(|pending| !matches_request(pending.event()));
+        self.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .retain(|_, completion| {
+                !matches!(
+                    completion,
+                    AgentPublishCompletion::OwedCompactionFact {
+                        retry_event: Some(event),
+                        ..
+                    } if matches_request(event)
+                )
+            });
+        if removed_pending {
             self.drain_deferred_publishes();
             self.drain_publish_idle_dispatches();
         }

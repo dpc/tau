@@ -345,6 +345,9 @@ pub(crate) enum AgentTurnState {
 pub(crate) struct PendingCancel {
     /// UI that initiated this cancellation.
     pub(crate) requester_client_id: tau_proto::ConnectionId,
+    /// Exact prompt whose canonical terminal this cancellation may claim, or
+    /// `None` while cancellation owns only a non-provider tool phase.
+    pub(crate) agent_prompt_id: Option<tau_proto::AgentPromptId>,
     /// Canonical cancellation reason.
     pub(crate) reason: String,
 }

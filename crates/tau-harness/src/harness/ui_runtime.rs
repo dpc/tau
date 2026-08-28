@@ -562,6 +562,7 @@ impl Harness {
             self.send_ui_error_response(client_id, "cancel request targets an unknown agent");
             return;
         };
+        let retained_terminal_prompt_id = self.pending_provider_terminal_prompt_id(&cid);
         let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) else {
             self.send_ui_error_response(client_id, "cancel request targets an unloaded agent");
             return;
@@ -586,9 +587,20 @@ impl Harness {
             self.send_ui_error_response(client_id, "no active turn to cancel");
             return;
         }
-        let prompt_id = conv.dispatch.in_flight_prompt.clone();
+        let prompt_id = conv
+            .dispatch
+            .in_flight_prompt
+            .clone()
+            .or_else(|| match &conv.turn.output_length_continuation {
+                path_crate_agent::OutputLengthContinuationState::Active(continuation) => {
+                    Some(continuation.plan.agent_prompt_id.clone())
+                }
+                _ => None,
+            })
+            .or(retained_terminal_prompt_id);
         conv.dispatch.pending_cancel = Some(PendingCancel {
             requester_client_id: client_id.clone(),
+            agent_prompt_id: prompt_id.clone(),
             reason: "cancelled by user".to_owned(),
         });
         let _ = conv;
@@ -1253,6 +1265,12 @@ impl Harness {
                 retry_event: None,
             });
             self.publish_finished_response_for_agent(cid, None, &response, completion, false);
+            return;
+        }
+        if self.provider_terminal_publication_pending(cid, &canceled_prompt_id) {
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+                agent.dispatch.pending_prompts.clear();
+            }
             return;
         }
         let status_was_available = self

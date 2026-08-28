@@ -4524,6 +4524,413 @@ fn manual_compaction_lifecycle_distinguishes_status_from_failure() {
     )));
     h.shutdown().expect("shutdown");
 }
+
+/// Model-tool acceptance and its successor start each retain their exact
+/// target-owned parent across append rejection; acknowledgement and successor
+/// runtime ownership install only after the corresponding durable commit.
+#[test]
+fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
+    let (_td, mut h, caller_cid, _target_cid, call, target_id) =
+        setup_manual_cross_compaction_test();
+    let target_cid = h
+        .runtime_agent_id_for_target_agent(Some(target_id.as_str()))
+        .expect("target route");
+    let acceptance_parent = h
+        .selected_head_for_agent(&target_cid)
+        .unwrap_or(tau_proto::AgentHead::Root);
+    connect_test_tool(&mut h, "model-compaction-cuts");
+    h.handle_extension_event(
+        "model-compaction-cuts",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::AGENT_MANUAL_COMPACTION_REQUESTED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_STANDALONE_COMPACTION_STARTED),
+            ],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register compaction cut interceptor");
+    h.request_agent_tool_compaction(
+        &caller_cid,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    let request_id = h
+        .prompt_coordination
+        .compaction_runtime
+        .pending_model_acceptances
+        .keys()
+        .next()
+        .cloned()
+        .expect("staged model acceptance");
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .accepted_manual_tools
+            .is_empty()
+            && !h
+                .tool_routing
+                .tool_runtime
+                .tool_turn
+                .is_backgrounded(&call.id)
+    );
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "model-compaction-cuts",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("reject acceptance append");
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .pending_model_acceptances
+            .contains_key(&request_id)
+            && h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .contains_key(&target_cid)
+            && !h
+                .tool_routing
+                .tool_runtime
+                .tool_turn
+                .is_backgrounded(&call.id)
+    );
+    h.retry_pending_agent_publish_completion(&target_cid);
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .pending_model_acceptances
+            .is_empty()
+            && h.prompt_coordination
+                .compaction_runtime
+                .accepted_manual_tools
+                .contains_key(&request_id)
+            && h.prompt_coordination
+                .compaction_runtime
+                .pending_manual_tools
+                .is_empty()
+            && h.tool_routing
+                .tool_runtime
+                .tool_turn
+                .is_backgrounded(&call.id),
+        "acceptance commit acknowledges before the parked start installs runtime ownership"
+    );
+    assert!(matches!(
+        h.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
+        Some(Event::AgentStandaloneCompactionStarted(_))
+    ));
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "model-compaction-cuts",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("reject start append");
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .accepted_manual_tools
+            .contains_key(&request_id)
+            && h.prompt_coordination
+                .compaction_runtime
+                .pending_manual_tools
+                .is_empty()
+            && h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .contains_key(&target_cid)
+    );
+    h.retry_pending_agent_publish_completion(&target_cid);
+
+    let records = h
+        .session_runtime
+        .agent_store
+        .agent_events(target_id.as_str())
+        .expect("target events");
+    let requests = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentManualCompactionRequested(request)
+                    if request.request_id == request_id
+            )
+        })
+        .collect::<Vec<_>>();
+    let starts = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if matches!(
+                        &started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+                            request_id: started_request_id,
+                            ..
+                        } if started_request_id == &request_id
+                    )
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].parent,
+        tau_core::AgentEventParent::from_head(acceptance_parent)
+    );
+    assert_eq!(starts.len(), 1);
+    assert_eq!(
+        starts[0].parent,
+        tau_core::AgentEventParent::from_head(acceptance_parent)
+    );
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .pending_model_acceptances
+            .is_empty()
+            && !h
+                .prompt_coordination
+                .compaction_runtime
+                .accepted_manual_tools
+                .contains_key(&request_id)
+            && h.prompt_coordination
+                .compaction_runtime
+                .pending_manual_tools
+                .contains_key(match &starts[0].event {
+                    Event::AgentStandaloneCompactionStarted(started) => &started.transaction_id,
+                    _ => unreachable!("filtered start"),
+                })
+            && !h
+                .prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .contains_key(&target_cid)
+    );
+}
+
+/// A second model-tool request for the same target cannot overwrite the first
+/// request's staged pre-commit acceptance or steal its ACK and transaction.
+#[test]
+fn staged_model_compaction_acceptance_preserves_first_call_correlation() {
+    let (_td, mut h, caller_cid, _target_cid, first_call, target_id) =
+        setup_manual_cross_compaction_test();
+    let second_call =
+        register_manual_cross_compaction_call(&mut h, &caller_cid, "call-cross-compact-second");
+    connect_test_tool(&mut h, "model-acceptance-double-request");
+    h.handle_extension_event(
+        "model-acceptance-double-request",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MANUAL_COMPACTION_REQUESTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register acceptance interceptor");
+    h.request_agent_tool_compaction(
+        &caller_cid,
+        &first_call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    h.request_agent_tool_compaction(
+        &caller_cid,
+        &second_call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    let staged = h
+        .prompt_coordination
+        .compaction_runtime
+        .pending_model_acceptances
+        .values()
+        .collect::<Vec<_>>();
+    assert_eq!(staged.len(), 1);
+    assert_eq!(
+        staged[0]
+            .request
+            .required_tool_source()
+            .initiating_tool_call_id,
+        first_call.id
+    );
+    assert!(
+        !h.tool_routing
+            .tool_runtime
+            .tool_turn
+            .is_backgrounded(&first_call.id)
+    );
+    h.handle_extension_event(
+        "model-acceptance-double-request",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit first acceptance");
+
+    let events = event_log_events(&h);
+    let requests = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentManualCompactionRequested(request) => Some(request),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 1);
+    let request_id = requests[0].request_id.clone();
+    let starts = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 1);
+    assert!(matches!(
+        &starts[0].trigger,
+        tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+            request_id: started_request_id,
+            initiating_tool_call_id,
+            ..
+        } if started_request_id == &request_id && initiating_tool_call_id == &first_call.id
+    ));
+    assert!(
+        h.tool_routing
+            .tool_runtime
+            .tool_turn
+            .is_backgrounded(&first_call.id)
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::ToolError(error)
+            if error.call_id == second_call.id && error.message == "already_pending"
+    )));
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .pending_manual_tools
+            .values()
+            .any(|pending| pending.call_id == first_call.id && pending.request_id == request_id)
+    );
+}
+
+/// Caller/target teardown and session rollover discard a model-tool acceptance
+/// that has not committed, without ACKing or retaining stale quota ownership.
+#[test]
+fn staged_model_compaction_acceptance_is_cleared_by_teardown() {
+    for teardown in ["target_unload", "caller_unload", "session_switch"] {
+        let (_td, mut h, caller_cid, target_cid, call, target_id) =
+            setup_manual_cross_compaction_test();
+        let interceptor = match teardown {
+            "target_unload" => "model-acceptance-target-unload",
+            "caller_unload" => "model-acceptance-caller-unload",
+            "session_switch" => "model-acceptance-session-switch",
+            _ => unreachable!("fixed teardown cases"),
+        };
+        connect_test_tool(&mut h, interceptor);
+        h.handle_extension_event(
+            interceptor,
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_MANUAL_COMPACTION_REQUESTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register acceptance interceptor");
+        h.request_agent_tool_compaction(
+            &caller_cid,
+            &call,
+            ToolName::new("agent_compact"),
+            Some(&target_id),
+        );
+        assert_eq!(
+            h.prompt_coordination
+                .compaction_runtime
+                .pending_model_acceptances
+                .len(),
+            1
+        );
+        let request_id = h
+            .prompt_coordination
+            .compaction_runtime
+            .pending_model_acceptances
+            .keys()
+            .next()
+            .cloned()
+            .expect("staged request id");
+        if teardown == "caller_unload" {
+            reject_next_semantic_admission(&h);
+            h.handle_extension_event(
+                interceptor,
+                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                    action: InterceptAction::Pass(None),
+                })),
+            )
+            .expect("retain append-rejected acceptance");
+            assert!(
+                h.prompt_coordination
+                    .prompt_runtime
+                    .pending_publish_completions
+                    .contains_key(&target_cid)
+            );
+        }
+        match teardown {
+            "target_unload" => h.remove_agent_expected(&target_cid),
+            "caller_unload" => h.remove_agent_expected(&caller_cid),
+            "session_switch" => h
+                .switch_session(test_session_id("s2"), tau_proto::SessionStartReason::New)
+                .expect("switch session"),
+            _ => unreachable!("fixed teardown cases"),
+        }
+        assert!(
+            h.prompt_coordination
+                .compaction_runtime
+                .pending_model_acceptances
+                .is_empty()
+                && !h
+                    .tool_routing
+                    .tool_runtime
+                    .tool_turn
+                    .is_backgrounded(&call.id),
+            "teardown={teardown}"
+        );
+        assert!(
+            h.runtime_io.publication.pending_intercept.is_none()
+                && h.runtime_io.publication.deferred.iter().all(|pending| {
+                    !matches!(
+                        pending.event(),
+                        Event::AgentManualCompactionRequested(request)
+                            if request.request_id == request_id
+                    )
+                }),
+            "teardown={teardown}"
+        );
+        assert!(
+            h.prompt_coordination
+                .compaction_runtime
+                .accepted_manual_tools
+                .is_empty()
+                && h.prompt_coordination
+                    .compaction_runtime
+                    .pending_manual_tools
+                    .is_empty()
+                && h.prompt_coordination
+                    .prompt_runtime
+                    .pending_publish_completions
+                    .is_empty(),
+            "teardown={teardown}"
+        );
+    }
+}
+
 /// Possession of the cross-agent capability authorizes an unrelated loaded
 /// agent without ancestry, watch, or message relationships.
 #[test]

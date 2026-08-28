@@ -1701,6 +1701,43 @@ impl Harness {
             self.peer_messaging
                 .uncommitted_peer_auto_starts
                 .remove(&unloading_agent_id_proto);
+            let staged_request_ids =
+                self.prompt_coordination
+                    .compaction_runtime
+                    .pending_model_acceptances
+                    .iter()
+                    .filter(|(_, staged)| {
+                        staged.request.tool_source().is_some_and(|source| {
+                            source.caller_agent_id.as_str() == unloading_agent_id
+                        }) || staged.request.target_agent_id.as_str() == unloading_agent_id
+                    })
+                    .map(|(request_id, _)| request_id.clone())
+                    .collect::<Vec<_>>();
+            self.cancel_staged_model_acceptance_publications(&staged_request_ids);
+            for request_id in staged_request_ids {
+                let Some(staged) = self
+                    .prompt_coordination
+                    .compaction_runtime
+                    .pending_model_acceptances
+                    .remove(&request_id)
+                else {
+                    continue;
+                };
+                let source = staged.request.required_tool_source();
+                if source.caller_agent_id.as_str() != unloading_agent_id
+                    && let Some(caller_cid) = self
+                        .runtime_agent_id_for_target_agent(Some(source.caller_agent_id.as_str()))
+                {
+                    self.finish_harness_owned_tool_with_error(
+                        &caller_cid,
+                        source.initiating_tool_call_id.clone(),
+                        staged.visible_tool_name,
+                        tau_proto::ToolType::Function,
+                        "target_unavailable_or_unauthorized".to_owned(),
+                        None,
+                    );
+                }
+            }
             let requests: Vec<_> =
                 self.prompt_coordination
                     .compaction_runtime

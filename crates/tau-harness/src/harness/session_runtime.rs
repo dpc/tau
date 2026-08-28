@@ -1064,6 +1064,10 @@ impl Harness {
             .compaction_runtime
             .pending_manual_tools
             .clear();
+        self.prompt_coordination
+            .compaction_runtime
+            .pending_model_acceptances
+            .clear();
         let queued_ui_compactions = self
             .prompt_coordination
             .compaction_runtime

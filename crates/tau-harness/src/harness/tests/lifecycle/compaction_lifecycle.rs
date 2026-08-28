@@ -6,6 +6,148 @@ use super::super::dispatch::{
 };
 use super::*;
 
+/// A successful standalone response retains its exact compacted boundary and
+/// prompt ownership through append rejection, then clears both exactly once
+/// after durable admission and cold replay.
+#[test]
+fn standalone_success_is_owed_until_compacted_admission() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = quiet_provider_harness(&state).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let parent = h
+        .selected_head_for_agent(&cid)
+        .unwrap_or(tau_proto::AgentHead::Root);
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-s1-success").expect("transaction id");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: transaction_id.clone(),
+            compact_prompt_id: test_agent_prompt_id("ap-s1-success"),
+            cut: parent,
+            resume_through: None,
+            model: "test/model".into(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: tau_proto::PromptOriginator::User,
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+        }),
+    );
+    let prompt = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt)
+                if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction =>
+            {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .expect("standalone prompt");
+    let boundary_parent = h
+        .selected_head_for_agent(&cid)
+        .unwrap_or(tau_proto::AgentHead::Root);
+    connect_test_tool(&mut h, "s1-compacted-reject");
+    h.handle_extension_event(
+        "s1-compacted-reject",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_COMPACTED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register compacted interceptor");
+    h.handle_provider_response_finished(standalone_compaction_success_response(
+        &prompt,
+        "replacement",
+    ))
+    .expect("park compacted boundary");
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .agents
+            .contains_key(&prompt.agent_prompt_id)
+            && h.prompt_coordination
+                .prompt_runtime
+                .tool_specs
+                .contains_key(&prompt.agent_prompt_id)
+    );
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "s1-compacted-reject",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("reject compacted append");
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .contains_key(&cid)
+            && h.prompt_coordination
+                .prompt_runtime
+                .agents
+                .contains_key(&prompt.agent_prompt_id)
+            && h.prompt_coordination
+                .prompt_runtime
+                .tool_specs
+                .contains_key(&prompt.agent_prompt_id)
+    );
+    h.retry_pending_agent_publish_completion(&cid);
+    assert!(
+        !h.prompt_coordination
+            .prompt_runtime
+            .agents
+            .contains_key(&prompt.agent_prompt_id)
+            && !h
+                .prompt_coordination
+                .prompt_runtime
+                .tool_specs
+                .contains_key(&prompt.agent_prompt_id)
+            && !h
+                .prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .contains_key(&cid)
+    );
+    let compacted = |h: &Harness| {
+        h.session_runtime
+            .agent_store
+            .agent_events(agent_id.as_str())
+            .expect("agent events")
+            .into_iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    Event::AgentCompacted(compacted)
+                        if compacted.transaction_id.as_ref() == Some(&transaction_id)
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let live = compacted(&h);
+    assert_eq!(live.len(), 1);
+    assert_eq!(
+        live[0].parent,
+        tau_core::AgentEventParent::from_head(boundary_parent)
+    );
+    drop(h);
+    wait_for_session_unlock(&state, "s1");
+    let resumed =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    assert_eq!(compacted(&resumed).len(), 1);
+}
+
 /// Automatic success must satisfy an already queued UI intent exactly once
 /// after either an attempted interceptor Drop or a rejected semantic append.
 #[test]

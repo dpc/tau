@@ -73,6 +73,7 @@ fn ui_command_response_is_requester_only_and_not_logged() {
         .dispatch
         .pending_cancel = Some(crate::agent::PendingCancel {
         requester_client_id: requesting_ui_id.clone(),
+        agent_prompt_id: None,
         reason: "cancelled by user".to_owned(),
     });
     h.handle_client_ui_event(

@@ -2,8 +2,13 @@
 
 use super::super::dispatch::{
     context_overflow_response, enable_remote_compaction_for_test_model, provider_text_response,
+    provider_tool_response,
 };
 use super::*;
+use crate::harness::{
+    AgentPublishCompletion, CommittedGatedFinal, CommittedOutputLengthToolEffect,
+    ConversationHeadSync, GatedFinalDisposition, PostCommitContinuation,
+};
 
 /// Ensures targetless user shell output is routed to the default user agent
 /// instead of panicking when the shell extension omits a target agent id.
@@ -2417,6 +2422,409 @@ fn output_length_append_rejected_terminal_cancellation_repairs_once() {
             .all(|agent| agent.dispatch.pending_cancel.is_none())
     );
     h.shutdown().expect("shutdown");
+}
+
+/// Cancellation accepted while an ordinary provider terminal is parked owns
+/// the sole durable initial or post-tool terminal, outer finish, and protected
+/// standalone start; it releases retained/runtime state only after commit and
+/// cold replay preserves each fact exactly once.
+#[test]
+fn parked_provider_terminal_cancellation_arbitrates_once() {
+    for post_tool in [false, true] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td
+            .path()
+            .join(if post_tool { "post-tool" } else { "initial" });
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        h.provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("test model")
+            .supports_standalone_compaction = true;
+        let cid = ensure_test_user_agent(&mut h);
+        h.config
+            .available_roles
+            .get_mut(&h.config.selected_role)
+            .expect("selected role")
+            .compactions
+            .insert(
+                "terminal-race".to_owned(),
+                tau_config::settings::CompactionPolicy {
+                    threshold: path_tau_config_settings::CompactionPolicyThreshold::Tokens(1),
+                    enable: true,
+                    when: tau_config::settings::ContextPolicyWhen {
+                        at: path_tau_config_settings::ContextPolicyPoint::OuterTurnFinished,
+                        statuses: Some(vec![tau_proto::AgentWorkStatusPhase::Done]),
+                    },
+                },
+            );
+        {
+            let agent = h
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get_mut(&cid)
+                .expect("agent");
+            agent.execution.context_input_tokens = Some(100);
+            agent.execution.context_usage_model = Some("test/model".into());
+            agent.execution.context_usage_prompt_id =
+                Some(test_agent_prompt_id("ap-terminal-race-usage"));
+            agent.execution.context_usage_head = agent.identity.head;
+        }
+        h.dispatch_prompt_for_agent(
+            &cid,
+            PendingPrompt::user(format!("terminal race post_tool={post_tool}")),
+        )
+        .expect("dispatch initial prompt");
+        let initial = read_nth_prompt_created(&h, 0);
+        let terminal_prompt = if post_tool {
+            h.handle_provider_response_finished(provider_tool_response(
+                &initial,
+                "terminal-race-tool",
+                "self_info",
+                CborValue::Map(Vec::new()),
+            ))
+            .expect("complete tool-call response");
+            read_nth_prompt_created(&h, 1)
+        } else {
+            initial
+        };
+        let parent = h
+            .selected_head_for_agent(&cid)
+            .unwrap_or(tau_proto::AgentHead::Root);
+        let interceptor = if post_tool {
+            "post-tool-terminal-race"
+        } else {
+            "initial-terminal-race"
+        };
+        connect_test_tool(&mut h, interceptor);
+        h.handle_extension_event(
+            interceptor,
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register terminal interceptor");
+        let mut response = provider_text_response(
+            &terminal_prompt.agent_prompt_id,
+            terminal_prompt.agent_id.clone(),
+            "provider won before durable admission",
+        );
+        response.usage = Some(tau_proto::ProviderTokenUsage {
+            prompt_sent_tokens: 250,
+            response_received_tokens: 1,
+            ..Default::default()
+        });
+        h.handle_provider_response_finished(response)
+            .expect("park provider terminal");
+        reject_next_semantic_admission(&h);
+        h.handle_extension_event(
+            interceptor,
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("retain append-rejected provider terminal");
+        assert!(
+            h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .get(&cid)
+                .is_some_and(|completion| {
+                    completion.owns_provider_terminal(&terminal_prompt.agent_prompt_id)
+                }),
+            "post_tool={post_tool}"
+        );
+        h.handle_cancel_prompt(
+            crate::harness::harness_connection_id(),
+            &tau_proto::UiCancelPrompt {
+                session_id: h.session_runtime.current_session_id.clone(),
+                target_agent_id: Some(terminal_prompt.agent_id.clone()),
+                agent_prompt_id: None,
+            },
+        );
+        assert!(
+            h.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
+                .pending_cancel
+                .is_some(),
+            "post_tool={post_tool}"
+        );
+        h.retry_pending_agent_publish_completion(&cid);
+        assert!(
+            h.runtime_io.publication.pending_intercept.is_none(),
+            "approved retry bypasses interception post_tool={post_tool}"
+        );
+
+        let terminals = |h: &Harness| {
+            h.session_runtime
+                .agent_store
+                .agent_events(terminal_prompt.agent_id.as_str())
+                .expect("durable agent events")
+                .into_iter()
+                .filter(|record| match &record.event {
+                    Event::ProviderResponseFinished(response) => {
+                        response.agent_prompt_id == terminal_prompt.agent_prompt_id
+                    }
+                    Event::AgentPromptTerminated(terminated) => {
+                        terminated.agent_prompt_id == terminal_prompt.agent_prompt_id
+                    }
+                    _ => false,
+                })
+                .collect::<Vec<_>>()
+        };
+        let live = terminals(&h);
+        assert_eq!(
+            live.len(),
+            1,
+            "post_tool={post_tool}, retained={}, pending_cancel={}, events={:?}",
+            h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .contains_key(&cid),
+            h.agent_runtime.agent_registry.agents[&cid]
+                .dispatch
+                .pending_cancel
+                .is_some(),
+            event_log_events(&h)
+        );
+        assert_eq!(
+            live[0].parent,
+            tau_core::AgentEventParent::from_head(parent),
+            "post_tool={post_tool}"
+        );
+        assert!(matches!(
+            &live[0].event,
+            Event::ProviderResponseFinished(response)
+                if response.stop_reason == tau_proto::ProviderStopReason::Error
+                    && response.error.as_deref() == Some("cancelled")
+                    && response.output_items.is_empty()
+        ));
+        let Event::ProviderResponseFinished(response) = &live[0].event else {
+            unreachable!("filtered cancellation terminal");
+        };
+        let decision = response
+            .automatic_compaction_decision
+            .as_ref()
+            .expect("exact provider observation retains automatic decision");
+        let records = h
+            .session_runtime
+            .agent_store
+            .agent_events(terminal_prompt.agent_id.as_str())
+            .expect("durable records");
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(
+                    &record.event,
+                    Event::AgentOuterTurnFinished(finished)
+                        if finished.outer_turn_id == decision.outer_turn_id
+                ))
+                .count(),
+            1,
+            "post_tool={post_tool}"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(
+                    &record.event,
+                    Event::AgentStandaloneCompactionStarted(started)
+                        if started.transaction_id == decision.transaction_id
+                ))
+                .count(),
+            1,
+            "post_tool={post_tool}"
+        );
+        assert!(
+            h.prompt_coordination
+                .prompt_runtime
+                .pending_publish_completions
+                .is_empty()
+                && h.agent_runtime.agent_registry.agents[&cid]
+                    .dispatch
+                    .pending_cancel
+                    .is_none(),
+            "post_tool={post_tool}"
+        );
+        drop(h);
+        wait_for_session_unlock(&state, "s1");
+        let resumed =
+            echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        assert_eq!(terminals(&resumed).len(), 1, "post_tool={post_tool}");
+        let resumed_records = resumed
+            .session_runtime
+            .agent_store
+            .agent_events(terminal_prompt.agent_id.as_str())
+            .expect("resumed durable records");
+        assert_eq!(
+            resumed_records
+                .iter()
+                .filter(|record| matches!(
+                    &record.event,
+                    Event::AgentOuterTurnFinished(finished)
+                        if finished.outer_turn_id == decision.outer_turn_id
+                ))
+                .count(),
+            1,
+            "post_tool={post_tool}"
+        );
+        assert_eq!(
+            resumed_records
+                .iter()
+                .filter(|record| matches!(
+                    &record.event,
+                    Event::AgentStandaloneCompactionStarted(started)
+                        if started.transaction_id == decision.transaction_id
+                ))
+                .count(),
+            1,
+            "post_tool={post_tool}"
+        );
+    }
+}
+
+/// An earlier same-agent gated terminal cannot consume a cancellation owned by
+/// a later prompt; only the exact later response is rewritten and clears its
+/// retained completion after durable admission.
+#[test]
+fn earlier_gated_terminal_cannot_claim_later_prompt_cancellation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let earlier_prompt_id = test_agent_prompt_id("ap-earlier-gated-terminal");
+    let later_prompt_id = test_agent_prompt_id("ap-later-cancelled-terminal");
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .pending_cancel = Some(crate::agent::PendingCancel {
+        requester_client_id: crate::harness::harness_connection_id().clone(),
+        agent_prompt_id: Some(later_prompt_id.clone()),
+        reason: "cancelled by user".to_owned(),
+    });
+    let session_generation = h.session_runtime.current_session_generation;
+    let make = |prompt_id: &tau_proto::AgentPromptId| {
+        let response = provider_text_response(prompt_id, agent_id.clone(), "candidate");
+        let completion = AgentPublishCompletion::GatedFinal {
+            batch_parent: tau_proto::AgentHead::Root,
+            disposition: GatedFinalDisposition::Accept {
+                terminal: Box::new(CommittedGatedFinal {
+                    response: response.clone(),
+                    response_contains_compaction: false,
+                    input_tokens: None,
+                    context_size_alerts: Default::default(),
+                    is_non_tool_ext_query: false,
+                    source: None,
+                    tool_effect: CommittedOutputLengthToolEffect::None,
+                }),
+            },
+            retry_event: None,
+        };
+        let sync = ConversationHeadSync {
+            cid: cid.clone(),
+            agent_id: Some(agent_id.clone()),
+            session_generation,
+            fold_parent: None,
+            suppress_activation_dispatch: true,
+            continuation: Some(PostCommitContinuation::AgentPublish(Box::new(completion))),
+            notify_watchers: false,
+        };
+        (Event::ProviderResponseFinished(response), Some(sync))
+    };
+
+    let (mut earlier, mut earlier_sync) = make(&earlier_prompt_id);
+    if let Event::ProviderResponseFinished(response) = &mut earlier {
+        response.stop_reason = tau_proto::ProviderStopReason::Error;
+        response.error = Some("cancelled".to_owned());
+        response.output_items.clear();
+    }
+    h.arbitrate_prompt_terminal_cancellation(&mut earlier, &mut earlier_sync);
+    assert!(matches!(
+        earlier,
+        Event::ProviderResponseFinished(response)
+            if response.agent_prompt_id == earlier_prompt_id
+                && response.error.as_deref() == Some("cancelled")
+    ));
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_cancel
+            .is_some()
+    );
+    let earlier_completion = match earlier_sync
+        .take()
+        .and_then(|sync| sync.continuation)
+        .expect("earlier completion")
+    {
+        PostCommitContinuation::AgentPublish(completion) => *completion,
+        _ => panic!("expected agent completion"),
+    };
+    h.report_agent_work_status(
+        &cid,
+        crate::WorkStatusReport::new(
+            tau_proto::AgentWorkStatusPhase::Working,
+            "later prompt still working".to_owned(),
+        )
+        .expect("working report"),
+    )
+    .expect("record later working status");
+    let through = h
+        .selected_head_for_agent(&cid)
+        .unwrap_or(tau_proto::AgentHead::Root);
+    h.complete_agent_publish(&cid, earlier_completion, through);
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_cancel
+            .as_ref()
+            .is_some_and(|pending| pending.agent_prompt_id.as_ref() == Some(&later_prompt_id)),
+        "earlier post-commit completion cannot consume later cancellation"
+    );
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .turn
+            .work_status
+            .phase(),
+        tau_proto::AgentWorkStatusPhase::Working,
+        "earlier completion cannot invalidate later Working status"
+    );
+    let (mut later, mut later_sync) = make(&later_prompt_id);
+    h.arbitrate_prompt_terminal_cancellation(&mut later, &mut later_sync);
+    assert!(matches!(
+        later,
+        Event::ProviderResponseFinished(response)
+            if response.agent_prompt_id == later_prompt_id
+                && response.error.as_deref() == Some("cancelled")
+                && response.output_items.is_empty()
+    ));
+    let later_completion = match later_sync
+        .take()
+        .and_then(|sync| sync.continuation)
+        .expect("later completion")
+    {
+        PostCommitContinuation::AgentPublish(completion) => *completion,
+        _ => panic!("expected agent completion"),
+    };
+    let through = h
+        .selected_head_for_agent(&cid)
+        .unwrap_or(tau_proto::AgentHead::Root);
+    h.complete_agent_publish(&cid, later_completion, through);
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_cancel
+            .is_none(),
+        "exact later post-commit completion clears cancellation"
+    );
 }
 
 /// Replay eligibility is limited to ordinary user work on the exact adapter

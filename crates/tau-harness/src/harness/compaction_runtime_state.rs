@@ -27,6 +27,9 @@ pub(crate) struct CompactionRuntimeState {
     /// Accepted manual requests waiting for a safe start boundary.
     pub(super) accepted_manual_tools:
         HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
+    /// Model-tool requests staged until their acceptance fact commits.
+    pub(super) pending_model_acceptances:
+        HashMap<tau_proto::CompactionRequestId, StagedManualCompactionTool>,
     /// UI compactions waiting for a claimed wait cancellation to commit.
     pub(super) pending_ui_after_wait: HashMap<AgentId, PendingUiCompactionAfterWait>,
     /// Requesting UIs awaiting the durable acceptance commit.

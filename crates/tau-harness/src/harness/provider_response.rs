@@ -1389,7 +1389,7 @@ impl Harness {
         replacement_window: tau_proto::ValidatedCompactionWindow,
         source: Option<&tau_proto::ConnectionId>,
     ) {
-        let Some((_, _, boundary)) =
+        let Some((_, parent, boundary)) =
             self.standalone_compaction_boundary(cid, response, &replacement_window)
         else {
             self.emit_info("ignoring standalone compaction response without an active transaction");
@@ -1404,9 +1404,22 @@ impl Harness {
             );
             return;
         }
-        self.publish_for_agent_from(cid, source, boundary);
-        self.clear_finished_response_prompt_route(&response.agent_prompt_id);
-        self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+        self.publish_event_for_agent_with_completion(
+            cid,
+            source,
+            boundary,
+            Some(AgentPublishCompletion::OwedCompactionFact {
+                batch_parent: match parent {
+                    tau_core::AgentEventParent::Root => tau_proto::AgentHead::Root,
+                    tau_core::AgentEventParent::Under(node) => tau_proto::AgentHead::Node(node),
+                    tau_core::AgentEventParent::InheritHead => {
+                        unreachable!("standalone boundary always captures an explicit parent")
+                    }
+                },
+                retry_event: None,
+            }),
+            false,
+        );
     }
 
     pub(super) fn standalone_compaction_response_matches_current_branch(
@@ -3271,6 +3284,26 @@ impl Harness {
             source,
             tool_effect,
         } = terminal;
+        let committed_user_cancellation = response.error.as_deref() == Some("cancelled")
+            && self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(cid)
+                .and_then(|agent| agent.dispatch.pending_cancel.as_ref())
+                .is_some_and(|pending| {
+                    pending.agent_prompt_id.as_ref() == Some(&response.agent_prompt_id)
+                });
+        if committed_user_cancellation {
+            self.prompt_coordination
+                .canceled_prompts
+                .insert(response.agent_prompt_id.clone());
+            if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
+                agent.dispatch.pending_cancel = None;
+                agent.dispatch.pending_prompts.clear();
+                agent.turn.terminal_notice_eligible = false;
+            }
+        }
         let (requested_tool_calls, mut normalized_tool_calls) = match tool_effect {
             CommittedOutputLengthToolEffect::None => {
                 (false, NormalizedFinishedToolCalls::default())
