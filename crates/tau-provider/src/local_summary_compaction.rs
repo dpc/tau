@@ -1,6 +1,9 @@
 //! Shared policy for Tau-owned cache-aligned summary compaction.
 
+use std::io::{self, Write};
 use std::num::{NonZeroU32, NonZeroU64};
+
+use serde::Serialize;
 
 /// Default maximum summary generation.
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
@@ -106,6 +109,31 @@ pub const REQUEST: &str = concat!(
 pub fn replace_trailing_trigger(
     context: &mut tau_proto::PromptContext,
 ) -> Result<(), &'static str> {
+    validate_trailing_trigger(context)?;
+    context.blocks.pop();
+    context.blocks.push(tau_proto::ContextBlock::UserInput(
+        tau_proto::UserInputBlock {
+            items: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                role: tau_proto::ContextRole::User,
+                content: vec![tau_proto::ContentPart::Text {
+                    text: REQUEST.to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        },
+    ));
+    Ok(())
+}
+
+/// Validates the exact trailing standalone-compaction trigger shape without
+/// cloning or mutating the provider context.
+///
+/// # Errors
+///
+/// Returns an error unless the context contains exactly one compaction trigger
+/// anywhere and that trigger is the sole item in the final `UserInput` block.
+pub fn validate_trailing_trigger(context: &tau_proto::PromptContext) -> Result<(), &'static str> {
     let trigger_count = context
         .blocks
         .iter()
@@ -132,20 +160,81 @@ pub fn replace_trailing_trigger(
     if block.items.as_slice() != [tau_proto::ContextItem::CompactionTrigger] {
         return Err("local compaction prompt has a malformed harness trigger");
     }
-    context.blocks.pop();
-    context.blocks.push(tau_proto::ContextBlock::UserInput(
-        tau_proto::UserInputBlock {
-            items: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
-                role: tau_proto::ContextRole::User,
-                content: vec![tau_proto::ContentPart::Text {
-                    text: REQUEST.to_owned(),
-                }],
-                phase: None,
-                responses_raw_json: None,
-            })],
-        },
-    ));
     Ok(())
+}
+
+/// Checks whether the exact canonical historical prefix fits `budget` without
+/// cloning the context or materializing its serialized JSON.
+///
+/// The caller must first validate the exact trailing trigger shape with
+/// [`validate_trailing_trigger`]. `None` reports a malformed shape or an
+/// unexpected serialization failure; `Some(false)` reports budget exhaustion.
+#[must_use]
+pub fn historical_prefix_fits_json_budget(
+    context: &tau_proto::PromptContext,
+    budget: tau_proto::ByteCount,
+) -> Option<bool> {
+    let (last_block, historical_blocks) = context.blocks.split_last()?;
+    if !matches!(
+        last_block,
+        tau_proto::ContextBlock::UserInput(block)
+            if block.items.as_slice() == [tau_proto::ContextItem::CompactionTrigger]
+    ) {
+        return None;
+    }
+    let mut writer = JsonBudgetWriter::new(budget);
+    let result = serde_json::to_writer(
+        &mut writer,
+        &HistoricalPromptContext {
+            blocks: historical_blocks,
+        },
+    );
+    match result {
+        Ok(()) => Some(true),
+        Err(_) if writer.exceeded => Some(false),
+        Err(_) => None,
+    }
+}
+
+/// Borrowed serialization view of a validated historical prompt prefix.
+#[derive(Serialize)]
+struct HistoricalPromptContext<'a> {
+    /// Ordered blocks before the standalone compaction trigger.
+    blocks: &'a [tau_proto::ContextBlock],
+}
+
+/// Counting JSON sink that rejects the first write beyond an exact byte budget.
+struct JsonBudgetWriter {
+    /// Bytes still available to the serializer.
+    remaining: u64,
+    /// Whether the serializer attempted to cross the budget.
+    exceeded: bool,
+}
+
+impl JsonBudgetWriter {
+    /// Start a sink with the addressable part of the selected byte budget.
+    fn new(budget: tau_proto::ByteCount) -> Self {
+        Self {
+            remaining: budget.get(),
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for JsonBudgetWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let byte_count = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if self.remaining < byte_count {
+            self.exceeded = true;
+            return Err(io::Error::other("historical prompt prefix exceeds budget"));
+        }
+        self.remaining -= byte_count;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Measure the canonical historical `PromptContext` prefix without its final

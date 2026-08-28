@@ -33,3 +33,37 @@ fn request_is_the_cache_aligned_trailing_user_instruction() {
         Some(tau_proto::ByteCount::new(255))
     );
 }
+
+/// Bounded prefix measurement must preserve the canonical JSON byte boundary
+/// while avoiding a cloned context or materialized serialized buffer.
+#[test]
+fn historical_prefix_budget_accepts_exact_bytes_and_rejects_the_next_byte() {
+    let context = tau_proto::PromptContext {
+        blocks: vec![
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                    role: tau_proto::ContextRole::User,
+                    content: vec![tau_proto::ContentPart::Text {
+                        text: "bounded prefix".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            }),
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::CompactionTrigger],
+            }),
+        ],
+    };
+    validate_trailing_trigger(&context).expect("exact trailing trigger");
+    let exact = historical_prefix_json_bytes(&context).expect("canonical prefix bytes");
+
+    assert_eq!(
+        historical_prefix_fits_json_budget(&context, exact),
+        Some(true)
+    );
+    assert_eq!(
+        historical_prefix_fits_json_budget(&context, tau_proto::ByteCount::new(exact.get() - 1)),
+        Some(false)
+    );
+}

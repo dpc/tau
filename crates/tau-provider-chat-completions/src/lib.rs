@@ -1545,6 +1545,29 @@ fn try_build_request(
     if explicit_system_prompt && prompt.system_prompt.trim().is_empty() {
         return Err(LlmError::PromptCacheSystemPromptRequired);
     }
+    with_admitted_historical_prefix(
+        summary_config,
+        &prompt.context,
+        tau_provider::local_summary_compaction::historical_prefix_fits_json_budget,
+        || {
+            build_request_after_prefix_admission(
+                provider,
+                model,
+                prompt,
+                summary_config,
+                explicit_system_prompt,
+            )
+        },
+    )
+}
+
+fn build_request_after_prefix_admission(
+    provider: &AttemptConfig,
+    model: &AttemptModel,
+    prompt: &tau_proto::AgentPromptCreated,
+    summary_config: Option<LocalSummaryCompactionConfig>,
+    explicit_system_prompt: bool,
+) -> Result<ChatRequest, LlmError> {
     let mut context = prompt.context.clone();
     if summary_config.is_some() {
         tau_provider::local_summary_compaction::replace_trailing_trigger(&mut context)
@@ -1582,18 +1605,6 @@ fn try_build_request(
             &mut image_budget,
             &mut messages,
         );
-    }
-    if let Some(config) = summary_config {
-        let prefix_bytes =
-            tau_provider::local_summary_compaction::historical_prefix_json_bytes(&prompt.context);
-        if config
-            .max_input_bytes()
-            .is_some_and(|budget| prefix_bytes.is_none_or(|bytes| budget < bytes))
-        {
-            return Err(LlmError::InvalidCompaction(
-                "summary compaction prefix exceeds the published safe budget".to_owned(),
-            ));
-        }
     }
     let tools = prompt
         .tools
@@ -1648,6 +1659,26 @@ fn try_build_request(
         tool_choice,
     };
     Ok(request)
+}
+
+fn with_admitted_historical_prefix<T>(
+    summary_config: Option<LocalSummaryCompactionConfig>,
+    context: &tau_proto::PromptContext,
+    fits_budget: impl FnOnce(&tau_proto::PromptContext, tau_proto::ByteCount) -> Option<bool>,
+    lower: impl FnOnce() -> Result<T, LlmError>,
+) -> Result<T, LlmError> {
+    if let Some(config) = summary_config {
+        tau_provider::local_summary_compaction::validate_trailing_trigger(context)
+            .map_err(|error| LlmError::InvalidCompaction(error.to_owned()))?;
+        if let Some(budget) = config.max_input_bytes()
+            && fits_budget(context, budget) != Some(true)
+        {
+            return Err(LlmError::InvalidCompaction(
+                "summary compaction prefix exceeds the published safe budget".to_owned(),
+            ));
+        }
+    }
+    lower()
 }
 
 fn context_block_has_system_authority(block: &tau_proto::ContextBlock) -> bool {

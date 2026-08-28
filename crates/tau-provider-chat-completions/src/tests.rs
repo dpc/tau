@@ -1403,6 +1403,66 @@ fn local_summary_prefix_byte_cap_accepts_equality_and_rejects_plus_one() {
     assert!(matches!(error, LlmError::InvalidCompaction(_)));
 }
 
+/// The generic no-cap profile must not invoke prefix measurement, because doing
+/// so would serialize the entire historical prefix without an enforcing bound.
+#[test]
+fn local_summary_without_prefix_cap_skips_measurement() {
+    let context = tau_proto::PromptContext {
+        blocks: vec![tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            },
+        )],
+    };
+    with_admitted_historical_prefix(
+        LocalSummaryCompactionConfig::default_for(8_192),
+        &context,
+        |_, _| panic!("no-cap admission must not measure the prefix"),
+        || Ok(()),
+    )
+    .expect("no-cap admission is inert");
+}
+
+/// Production request construction must reject an over-budget historical prefix
+/// before lowering tool definitions or expanding image data URLs.
+#[test]
+fn local_summary_prefix_cap_precedes_request_lowering() {
+    let mut created = prompt();
+    created.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    created
+        .context
+        .blocks
+        .push(image_tool_results_block("call-image", [11_u8, 22, 33]));
+    created
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            },
+        ));
+    let mut config = resolved_provider(&provider());
+    config.local_summary_compaction = LocalSummaryCompactionConfig::new(
+        NonZeroU64::new(8_192).expect("positive token context"),
+        8_192,
+        NonZeroU64::new(1).expect("positive byte cap"),
+        NonZeroU32::new(321).expect("positive token output cap"),
+        NonZeroU64::new(2_048).expect("positive byte output cap"),
+    );
+    let error = match with_admitted_historical_prefix(
+        config.local_summary_compaction,
+        &created.context,
+        tau_provider::local_summary_compaction::historical_prefix_fits_json_budget,
+        || -> Result<(), LlmError> {
+            panic!("over-budget prefix must reject before cloning or lowering the image")
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("prefix admission must reject before request lowering"),
+    };
+    assert!(matches!(error, LlmError::InvalidCompaction(_)));
+}
+
 fn image_tool_results_block(call_id: &str, data: impl Into<Arc<[u8]>>) -> tau_proto::ContextBlock {
     tau_proto::ContextBlock::ToolResults(tau_proto::ToolResultsBlock {
         items: vec![tau_proto::ToolResultItem {
