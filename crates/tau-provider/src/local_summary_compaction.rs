@@ -95,12 +95,37 @@ pub const REQUEST: &str = concat!(
 /// Replaces the harness standalone trigger with the cache-aligned user request.
 ///
 /// The trigger is a harness/provider-native control marker, not part of the
-/// preceding ordinary request. Requiring it as the final one-item block
-/// prevents a malformed standalone prompt from silently changing its selected
-/// prefix.
+/// preceding ordinary request.
+///
+/// # Errors
+///
+/// Returns an error unless the context contains exactly one compaction trigger
+/// anywhere and that trigger is the sole item in the final `UserInput` block.
+/// This prevents a malformed standalone prompt from silently changing its
+/// selected prefix.
 pub fn replace_trailing_trigger(
     context: &mut tau_proto::PromptContext,
 ) -> Result<(), &'static str> {
+    let trigger_count = context
+        .blocks
+        .iter()
+        .map(|block| match block {
+            tau_proto::ContextBlock::UserInput(block) => block
+                .items
+                .iter()
+                .filter(|item| matches!(item, tau_proto::ContextItem::CompactionTrigger))
+                .count(),
+            tau_proto::ContextBlock::AssistantResponse(block) => block
+                .output_items
+                .iter()
+                .filter(|item| matches!(item, tau_proto::ContextItem::CompactionTrigger))
+                .count(),
+            tau_proto::ContextBlock::ToolResults(_) => 0,
+        })
+        .sum::<usize>();
+    if trigger_count != 1 {
+        return Err("local compaction prompt must contain exactly one harness trigger");
+    }
     let Some(tau_proto::ContextBlock::UserInput(block)) = context.blocks.last() else {
         return Err("local compaction prompt lacks its trailing harness trigger");
     };

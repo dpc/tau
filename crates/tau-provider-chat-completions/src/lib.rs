@@ -3,6 +3,8 @@
 //! Component responsibilities and provider/replay trust boundaries are
 //! documented in `ARCH-tau-provider-chat-completions`.
 
+mod compact_stream;
+
 use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
 use std::io::Read;
@@ -340,9 +342,9 @@ impl LlmError {
             Self::HttpStatus(status, body) | Self::HttpStatusHinted(status, body, _) => {
                 http_failure_kind(*status, body)
             }
-            Self::ExtraBodyCollision(_) | Self::PromptCacheSystemPromptRequired => {
-                Some(tau_proto::ProviderFailureKind::RequestRejected)
-            }
+            Self::ExtraBodyCollision(_)
+            | Self::PromptCacheSystemPromptRequired
+            | Self::InvalidCompaction(_) => Some(tau_proto::ProviderFailureKind::RequestRejected),
             Self::StreamError(failure) => failure.failure_kind,
             _ => None,
         }
@@ -591,6 +593,8 @@ struct StreamState {
     repetition_guard: StreamRepetitionGuard,
     transport_response_bytes: u64,
     semantic_progress: SemanticProgress,
+    /// Compact-only event validator, absent during ordinary inference.
+    compact_validator: Option<compact_stream::CompactStreamValidator>,
 }
 
 impl StreamState {
@@ -600,7 +604,16 @@ impl StreamState {
     }
 
     /// Construct empty parser state for an explicitly enabled cache schema.
+    #[cfg(test)]
     fn new_with_cache_usage(cache_usage: CacheUsageCompat) -> Self {
+        Self::new_for_attempt(cache_usage, None)
+    }
+
+    /// Construct parser state with an optional compact-only output validator.
+    fn new_for_attempt(
+        cache_usage: CacheUsageCompat,
+        compact_output_bytes: Option<tau_proto::ByteCount>,
+    ) -> Self {
         Self {
             text: String::new(),
             thinking: String::new(),
@@ -618,7 +631,18 @@ impl StreamState {
             repetition_guard: StreamRepetitionGuard::new(),
             transport_response_bytes: 0,
             semantic_progress: SemanticProgress::None,
+            compact_validator: compact_output_bytes
+                .map(compact_stream::CompactStreamValidator::new),
         }
+    }
+
+    /// Validate a standalone compact response before releasing its parsed
+    /// items.
+    fn validate_compaction(mut self) -> Result<Self, LlmError> {
+        if let Some(validator) = self.compact_validator.take() {
+            validator.finish(&self)?;
+        }
+        Ok(self)
     }
 
     fn output_items(&self) -> Vec<ContextItem> {
@@ -1067,7 +1091,7 @@ fn chat_completions_stream(
         &state,
         &raw_events,
     );
-    ensure_non_empty_end_turn(state)
+    ensure_non_empty_end_turn(state.validate_compaction()?)
 }
 
 fn debug_capture_enabled_for_prompt(
@@ -1187,7 +1211,17 @@ async fn chat_completions_stream_async(
             None => LlmError::HttpStatus(code, body),
         });
     }
-    let mut state = StreamState::new_with_cache_usage(context.provider.compat.cache_usage);
+    let compact_output_bytes =
+        (context.prompt.operation == tau_proto::PromptOperation::StandaloneCompaction).then(|| {
+            let max_output_bytes = context
+                .provider
+                .local_summary_compaction
+                .expect("standalone request lowering already validated its compaction config")
+                .max_output_bytes();
+            tau_proto::ByteCount::new(max_output_bytes)
+        });
+    let mut state =
+        StreamState::new_for_attempt(context.provider.compat.cache_usage, compact_output_bytes);
     let mut raw_events = Vec::new();
     let mut pending = Vec::new();
     let mut last_event_at = Instant::now();
@@ -1308,6 +1342,11 @@ fn try_build_request(
     if explicit_system_prompt && prompt.system_prompt.trim().is_empty() {
         return Err(LlmError::PromptCacheSystemPromptRequired);
     }
+    let mut context = prompt.context.clone();
+    if summary_config.is_some() {
+        tau_provider::local_summary_compaction::replace_trailing_trigger(&mut context)
+            .map_err(|error| LlmError::InvalidCompaction(error.to_owned()))?;
+    }
     let mut messages = Vec::new();
     if !prompt.system_prompt.trim().is_empty() {
         messages.push(serde_json::json!({
@@ -1333,7 +1372,7 @@ fn try_build_request(
         return Err(LlmError::UnsupportedMessageRole);
     }
     let mut image_budget = ImageRequestBudget::new(model.supports_image_tool_results);
-    for block in &prompt.context.blocks {
+    for block in &context.blocks {
         append_context_block(
             block,
             provider.compat.reasoning_replay,
@@ -1352,10 +1391,6 @@ fn try_build_request(
                 "summary compaction prefix exceeds the published safe budget".to_owned(),
             ));
         }
-        messages.push(serde_json::json!({
-            "role": "user",
-            "content": tau_provider::local_summary_compaction::REQUEST,
-        }));
     }
     let tools = prompt
         .tools
@@ -1937,36 +1972,46 @@ fn apply_event(
     event: &serde_json::Value,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<(), LlmError> {
-    if let Some(usage) = event.get("usage") {
-        capture_usage(state, usage);
-    }
-    apply_stream_error(event)?;
-    let Some(choice) = first_stream_choice(event) else {
-        return Ok(());
-    };
-    let delta = &choice["delta"];
-    if let Err(error) = apply_text_delta(state, delta) {
+    // Observe compact shape separately, but still run the ordinary parser and
+    // callbacks. The extension's transient sampling seam is intentionally
+    // unchanged until its separately approved boundary change.
+    let compact_validation = state
+        .compact_validator
+        .as_mut()
+        .map_or(Ok(()), |validator| validator.observe(event));
+    let parsed = (|| {
+        if let Some(usage) = event.get("usage") {
+            capture_usage(state, usage);
+        }
+        apply_stream_error(event)?;
+        let Some(choice) = first_stream_choice(event) else {
+            return Ok(());
+        };
+        let delta = &choice["delta"];
+        if let Err(error) = apply_text_delta(state, delta) {
+            if state.semantic_progress == SemanticProgress::Parsed {
+                on_update(state);
+            }
+            return Err(error);
+        }
+        // Preserve the semantic fact before a later parser for the same event can
+        // fail (for example, repetitive tool arguments after accepted content).
         if state.semantic_progress == SemanticProgress::Parsed {
             on_update(state);
         }
-        return Err(error);
-    }
-    // Preserve the semantic fact before a later parser for the same event can
-    // fail (for example, repetitive tool arguments after accepted content).
-    if state.semantic_progress == SemanticProgress::Parsed {
-        on_update(state);
-    }
-    if let Err(error) = apply_tool_call_deltas(state, delta) {
+        if let Err(error) = apply_tool_call_deltas(state, delta) {
+            if state.semantic_progress == SemanticProgress::Parsed {
+                on_update(state);
+            }
+            return Err(error);
+        }
+        apply_finish_reason(state, choice)?;
         if state.semantic_progress == SemanticProgress::Parsed {
             on_update(state);
         }
-        return Err(error);
-    }
-    apply_finish_reason(state, choice)?;
-    if state.semantic_progress == SemanticProgress::Parsed {
-        on_update(state);
-    }
-    Ok(())
+        Ok(())
+    })();
+    compact_validation.and(parsed)
 }
 
 fn apply_stream_error(event: &serde_json::Value) -> Result<(), LlmError> {

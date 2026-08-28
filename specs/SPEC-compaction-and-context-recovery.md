@@ -30,7 +30,11 @@ remains preferred and unchanged.
 The compaction request lowers the selected immutable cut exactly as ordinary
 inference does: the same system prompt, tool definitions, ordered typed history,
 images, raw tool-call arguments, route/model fields, and configured cache
-controls. It appends one harness-authored user message last, inside
+controls. Before lowering, the provider adapter requires exactly one
+`CompactionTrigger` in the complete standalone context, as the sole item of the
+final `UserInput` block. Missing, malformed, non-final, duplicated, and mixed
+triggers reject the request. The adapter replaces that trigger with one
+harness-authored user message last, inside
 `<tau_internal>`, which asks for a continuation summary and forbids tool calls.
 The ordinary prefix is not canonicalized, stripped, or rewritten, so a provider
 may reuse the prefix warmed by ordinary inference. Cache reuse remains a

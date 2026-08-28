@@ -1362,6 +1362,342 @@ fn standalone_compaction_requires_enabled_local_summary_config() {
     );
 }
 
+/// Standalone lowering must require one exact final harness trigger rather than
+/// silently ignoring missing, non-final, duplicated, or mixed markers.
+#[test]
+fn standalone_compaction_requires_exact_trailing_trigger() {
+    let invalid_contexts = [
+        Vec::new(),
+        vec![
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            }),
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![assistant_text_item("later")],
+            }),
+        ],
+        vec![
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            }),
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            }),
+        ],
+        vec![tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![assistant_text_item("mixed"), ContextItem::CompactionTrigger],
+            },
+        )],
+        vec![
+            tau_proto::ContextBlock::AssistantResponse(tau_proto::AssistantResponseBlock {
+                provider_response_id: None,
+                backend: None,
+                output_items: vec![ContextItem::CompactionTrigger],
+                usage: None,
+            }),
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            }),
+        ],
+        vec![tau_proto::ContextBlock::AssistantResponse(
+            tau_proto::AssistantResponseBlock {
+                provider_response_id: None,
+                backend: None,
+                output_items: vec![ContextItem::CompactionTrigger],
+                usage: None,
+            },
+        )],
+    ];
+    for blocks in invalid_contexts {
+        let mut created = prompt();
+        created.operation = tau_proto::PromptOperation::StandaloneCompaction;
+        created.context.blocks = blocks;
+        assert!(
+            matches!(
+                try_build_request(
+                    &resolved_provider(&provider()),
+                    &provider().models[0],
+                    &created
+                ),
+                Err(LlmError::InvalidCompaction(_))
+            ),
+            "invalid trigger shape must reject before lowering"
+        );
+    }
+}
+
+/// The compact-only event validator accepts one bounded narrative with optional
+/// bounded reasoning and an exact `stop` terminal.
+#[test]
+fn compact_stream_accepts_only_final_narrative_and_reasoning() {
+    let mut state =
+        StreamState::new_for_attempt(CacheUsageCompat::None, Some(tau_proto::ByteCount::new(15)));
+    for event in [
+        serde_json::json!({
+            "provider": "openai",
+            "obfuscation": "padding",
+            "choices": [{"index": 0, "delta": {
+                "role": "assistant",
+                "reasoning_content": "private-private"
+            }}]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "durable summary"},
+                "finish_reason": "stop",
+                "native_finish_reason": "end_turn",
+                "logprobs": null
+            }]
+        }),
+        serde_json::json!({
+            "choices": [],
+            "usage": {"completion_tokens": 7}
+        }),
+    ] {
+        apply_event(&mut state, &event, &mut |_| {}).expect("permitted compact event");
+    }
+    let state = state
+        .validate_compaction()
+        .expect("complete compact response");
+    assert_eq!(
+        state.output_items(),
+        vec![
+            reasoning_text_context_item("private-private").expect("reasoning"),
+            assistant_text_item("durable summary"),
+        ]
+    );
+}
+
+/// Tool calls and provider-specific opaque or mixed semantic events must fail
+/// before ordinary compatibility parsing can discard or normalize them.
+#[test]
+fn compact_stream_rejects_tool_opaque_and_mixed_output() {
+    for event in [
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{"index": 0, "function": {"name": "shell"}}]}
+            }]
+        }),
+        serde_json::json!({"provider_item": {"opaque": true}}),
+        serde_json::json!({
+            "choices": [
+                {"index": 0, "delta": {"content": "one"}},
+                {"index": 1, "delta": {"content": "two"}}
+            ]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "summary"},
+                "logprobs": {"content": []}
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{"index": 1, "delta": {"content": "wrong choice"}}]
+        }),
+        serde_json::json!({
+            "error": {"code": "server_error"},
+            "choices": [{"index": 0, "delta": {"content": "partial"}}]
+        }),
+        serde_json::json!({
+            "error": {"code": "server_error"},
+            "provider_item": {"opaque": true}
+        }),
+        serde_json::json!({
+            "error": {"code": "server_error"},
+            "choices": [{"index": 0, "message": {"content": "partial"}}]
+        }),
+        serde_json::json!({
+            "error": {"code": "server_error"},
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": {"bad": true},
+                "native_finish_reason": 7,
+                "error": ["bad"]
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "summary"},
+                "finish_reason": "stop",
+                "native_finish_reason": 7
+            }]
+        }),
+    ] {
+        let mut state = StreamState::new_for_attempt(
+            CacheUsageCompat::None,
+            Some(tau_proto::ByteCount::new(64)),
+        );
+        assert!(matches!(
+            apply_event(&mut state, &event, &mut |_| {}),
+            Err(LlmError::InvalidCompaction(_))
+        ));
+    }
+}
+
+/// Unknown provider fields remain ordinary-inference compatibility metadata,
+/// while the compact-only language rejects the same opaque event.
+#[test]
+fn compact_only_opaque_rejection_preserves_ordinary_compatibility() {
+    let event = serde_json::json!({"provider_item": {"opaque": true}});
+    let mut ordinary = StreamState::new();
+    apply_event(&mut ordinary, &event, &mut |_| {}).expect("ordinary parser ignores unknown field");
+    assert!(ordinary.output_items().is_empty());
+    assert_eq!(ordinary.semantic_progress, SemanticProgress::None);
+
+    let mut compact =
+        StreamState::new_for_attempt(CacheUsageCompat::None, Some(tau_proto::ByteCount::new(64)));
+    assert!(matches!(
+        apply_event(&mut compact, &event, &mut |_| {}),
+        Err(LlmError::InvalidCompaction(_))
+    ));
+}
+
+/// Compact rejection must not suppress the existing transient progress
+/// callback; the separately approved extension-publication change owns that
+/// boundary.
+#[test]
+fn compact_rejection_preserves_ordinary_transient_progress_callback() {
+    let mut state =
+        StreamState::new_for_attempt(CacheUsageCompat::None, Some(tau_proto::ByteCount::new(64)));
+    let mut observed = SemanticProgress::None;
+    let result = apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "content": "tentative",
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"name": "shell", "arguments": "{}"}
+                    }]
+                }
+            }]
+        }),
+        &mut |state| observed = state.semantic_progress,
+    );
+    assert!(matches!(result, Err(LlmError::InvalidCompaction(_))));
+    assert_eq!(observed, SemanticProgress::Parsed);
+}
+
+/// Compact-shape rejection remains the existing deterministic request-rejected
+/// terminal rather than becoming a retry or an unclassified failure.
+#[test]
+fn compact_rejection_is_a_classified_terminal_attempt() {
+    let outcome = finish_attempt(
+        Err(LlmError::InvalidCompaction(
+            "invalid compact shape".to_owned(),
+        )),
+        SemanticProgress::Parsed,
+    );
+    let AttemptOutcome::Terminal(failure) = outcome else {
+        panic!("invalid compact shape must terminalize");
+    };
+    assert_eq!(
+        failure.failure_kind,
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
+    assert_eq!(failure.stop_reason, ProviderStopReason::Error);
+}
+
+/// Missing, duplicated, wrong, and non-final terminals must not turn
+/// parser-compatible partial output into a successful compact response.
+#[test]
+fn compact_stream_requires_one_final_stop_terminal() {
+    let cases = [
+        vec![serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": "unterminated"}}]
+        })],
+        vec![serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "truncated"},
+                "finish_reason": "length"
+            }]
+        })],
+        vec![
+            serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "first"},
+                    "finish_reason": "stop"
+                }]
+            }),
+            serde_json::json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+            }),
+        ],
+        vec![
+            serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "early"},
+                    "finish_reason": "stop"
+                }]
+            }),
+            serde_json::json!({
+                "choices": [{"index": 0, "delta": {"content": "late"}}]
+            }),
+        ],
+    ];
+    for events in cases {
+        let mut state = StreamState::new_for_attempt(
+            CacheUsageCompat::None,
+            Some(tau_proto::ByteCount::new(64)),
+        );
+        let mut rejected = false;
+        for event in events {
+            if matches!(
+                apply_event(&mut state, &event, &mut |_| {}),
+                Err(LlmError::InvalidCompaction(_))
+            ) {
+                rejected = true;
+                break;
+            }
+        }
+        if !rejected {
+            rejected = matches!(
+                state.validate_compaction(),
+                Err(LlmError::InvalidCompaction(_))
+            );
+        }
+        assert!(rejected, "invalid compact terminal shape must reject");
+    }
+}
+
+/// Narrative and reasoning consume separate compact byte budgets, and neither
+/// channel may exceed the selected bound.
+#[test]
+fn compact_stream_bounds_narrative_and_reasoning_separately() {
+    for delta in [
+        serde_json::json!({"content": "12345"}),
+        serde_json::json!({"reasoning_content": "12345", "content": "ok"}),
+    ] {
+        let mut state = StreamState::new_for_attempt(
+            CacheUsageCompat::None,
+            Some(tau_proto::ByteCount::new(4)),
+        );
+        apply_event(
+            &mut state,
+            &serde_json::json!({
+                "choices": [{"index": 0, "delta": delta, "finish_reason": "stop"}]
+            }),
+            &mut |_| {},
+        )
+        .expect("shape is valid before complete-output bounds");
+        assert!(matches!(
+            state.validate_compaction(),
+            Err(LlmError::InvalidCompaction(_))
+        ));
+    }
+}
+
 /// Standalone local compaction must use the ordinary durable provider
 /// diagnostics policy.
 #[test]

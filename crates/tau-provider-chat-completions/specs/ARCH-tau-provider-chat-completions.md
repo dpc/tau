@@ -40,6 +40,15 @@ marks the end of a non-empty system message with the documented content-block
 breakpoint. It does not mark conversation or tool suffixes, so it does not
 implicitly write a volatile suffix. The standalone local compactor preserves these ordinary cache fields and appends its instruction after the unchanged ordinary message prefix. Opaque `extra_body` cannot collide with these typed top-level members.
 
+## Local summary response validation
+
+Standalone local-summary output uses a compact-only validator over original
+stream events before the ordinary compatibility projection can discard unknown
+fields or collapse terminal shape. It requires one final `stop`, one bounded
+nonempty narrative, and independently bounded optional reasoning; tool calls,
+opaque or extra semantic fields, multiple choices, and post-terminal output
+reject the attempt. Ordinary inference keeps its broader parser behavior.
+
 ## Cache telemetry route capabilities
 
 The adapter parses cache counters only after the extension selects
