@@ -517,6 +517,11 @@ impl Harness {
             ProviderTerminalPlan::OutputLengthContinuationSource(_) => {
                 unreachable!("output-length classification runs after final-status classification")
             }
+            ProviderTerminalPlan::OutputLengthContinuationTerminal(_) => {
+                unreachable!(
+                    "output-length terminal classification runs after source classification"
+                )
+            }
             ProviderTerminalPlan::Other => None,
         };
         let commit_gated_plan =
@@ -565,7 +570,8 @@ impl Harness {
             ProviderTerminalPlan::Other => completion,
             ProviderTerminalPlan::ReactiveContextRecovery(_)
             | ProviderTerminalPlan::FinalStatusGated(_)
-            | ProviderTerminalPlan::OutputLengthContinuationSource(_) => {
+            | ProviderTerminalPlan::OutputLengthContinuationSource(_)
+            | ProviderTerminalPlan::OutputLengthContinuationTerminal(_) => {
                 unreachable!("earlier provider-terminal family reached commit-gated classification")
             }
         };
@@ -596,18 +602,27 @@ impl Harness {
             ProviderTerminalPlan::Other => completion,
             ProviderTerminalPlan::ReactiveContextRecovery(_)
             | ProviderTerminalPlan::FinalStatusGated(_)
-            | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_) => {
+            | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
+            | ProviderTerminalPlan::OutputLengthContinuationTerminal(_) => {
                 unreachable!(
                     "earlier provider-terminal family reached output-length source classification"
                 )
             }
         };
-        let output_length_terminal = matches!(
-            response.output_length_disposition,
-            tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+        let output_length_terminal_plan = Self::classify_output_length_continuation_terminal(
+            OutputLengthContinuationTerminalClassification {
+                final_status_challenged,
+                response: &response,
+            },
         );
-        let completion = if output_length_terminal && !final_status_challenged {
-            Some(AgentPublishCompletion::GatedFinal {
+        let output_length_terminal = matches!(
+            output_length_terminal_plan,
+            ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
+        );
+        let completion = match output_length_terminal_plan {
+            ProviderTerminalPlan::OutputLengthContinuationTerminal(
+                OutputLengthContinuationTerminalPlan { reducer },
+            ) => Some(AgentPublishCompletion::GatedFinal {
                 batch_parent: self
                     .agent_runtime
                     .agent_registry
@@ -628,13 +643,20 @@ impl Harness {
                         } else {
                             CommittedOutputLengthToolEffect::None
                         },
-                        reducer: CommittedGatedFinalReducer::Shared,
+                        reducer,
                     }),
                 },
                 retry_event: None,
-            })
-        } else {
-            completion
+            }),
+            ProviderTerminalPlan::Other => completion,
+            ProviderTerminalPlan::ReactiveContextRecovery(_)
+            | ProviderTerminalPlan::FinalStatusGated(_)
+            | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
+            | ProviderTerminalPlan::OutputLengthContinuationSource(_) => {
+                unreachable!(
+                    "earlier provider-terminal family reached output-length terminal classification"
+                )
+            }
         };
         let notify_watchers_after_commit = completion.is_none()
             && !requested_tool_calls
@@ -951,6 +973,11 @@ impl Harness {
             }
             ProviderTerminalPlan::OutputLengthContinuationSource(_) => {
                 unreachable!("output-length classification runs after shared terminal accounting")
+            }
+            ProviderTerminalPlan::OutputLengthContinuationTerminal(_) => {
+                unreachable!(
+                    "output-length terminal classification runs after shared terminal accounting"
+                )
             }
             ProviderTerminalPlan::Other => return false,
         };
@@ -3398,6 +3425,29 @@ impl Harness {
         })
     }
 
+    /// Classify one fully prepared reserved output-length successor without
+    /// changing runtime state.
+    fn classify_output_length_continuation_terminal(
+        OutputLengthContinuationTerminalClassification {
+            final_status_challenged,
+            response,
+        }: OutputLengthContinuationTerminalClassification,
+    ) -> ProviderTerminalPlan {
+        if final_status_challenged
+            || !matches!(
+                response.output_length_disposition,
+                tau_proto::OutputLengthDisposition::ContinuationTerminal { .. }
+            )
+        {
+            return ProviderTerminalPlan::Other;
+        }
+        ProviderTerminalPlan::OutputLengthContinuationTerminal(
+            OutputLengthContinuationTerminalPlan {
+                reducer: CommittedGatedFinalReducer::OutputLengthContinuationTerminal,
+            },
+        )
+    }
+
     /// Perform ordinary or delegated completion only after an accepted gated
     /// final crossed its semantic append boundary.
     pub(super) fn complete_committed_gated_final(
@@ -3412,12 +3462,25 @@ impl Harness {
             CommittedGatedFinalReducer::AutomaticCompactionOrPendingMessageWake => {
                 self.complete_committed_automatic_compaction_or_pending_message_wake(cid, terminal);
             }
+            CommittedGatedFinalReducer::OutputLengthContinuationTerminal => {
+                self.complete_committed_output_length_continuation_terminal(cid, terminal);
+            }
         }
     }
 
     /// Reduce one committed automatic-compaction-owned or pending-message-wake
     /// terminal through the unchanged shared terminal projection.
     fn complete_committed_automatic_compaction_or_pending_message_wake(
+        &mut self,
+        cid: &AgentId,
+        terminal: CommittedGatedFinal,
+    ) {
+        self.complete_committed_gated_final_state(cid, terminal);
+    }
+
+    /// Reduce one committed reserved output-length successor through the
+    /// unchanged shared terminal projection.
+    fn complete_committed_output_length_continuation_terminal(
         &mut self,
         cid: &AgentId,
         terminal: CommittedGatedFinal,

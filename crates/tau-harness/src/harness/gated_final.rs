@@ -48,4 +48,6 @@ pub(crate) enum CommittedGatedFinalReducer {
     Shared,
     /// Apply the automatic-compaction or pending-message-wake reducer.
     AutomaticCompactionOrPendingMessageWake,
+    /// Apply the reserved output-length successor terminal reducer.
+    OutputLengthContinuationTerminal,
 }

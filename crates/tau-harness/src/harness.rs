@@ -161,6 +161,7 @@ use crate::harness::provider_terminal_plan::{
     AutomaticCompactionOrPendingMessageWakeClassification,
     AutomaticCompactionOrPendingMessageWakePlan, FinalStatusGatedPlan,
     OutputLengthContinuationSourceClassification, OutputLengthContinuationSourcePlan,
+    OutputLengthContinuationTerminalClassification, OutputLengthContinuationTerminalPlan,
     ProviderTerminalPlan, ReactiveContextRecoveryPlan,
 };
 use crate::harness::publication_state::PublicationState;
