@@ -164,12 +164,16 @@ use crate::harness::provider_terminal_plan::{
     OrdinaryTerminalClassification, OutputLengthContinuationSourceClassification,
     OutputLengthContinuationSourcePlan, OutputLengthContinuationTerminalClassification,
     OutputLengthContinuationTerminalPlan, ProviderTerminalPlan, ReactiveContextRecoveryPlan,
-    SideConversationTerminalClassification, SideConversationTerminalPlan, ToolCallTerminalPlan,
+    SideConversationTerminalClassification, SideConversationTerminalPlan,
+    StandaloneCompactionRejection, StandaloneCompactionTerminalPlan, ToolCallTerminalPlan,
 };
 use crate::harness::publication_state::PublicationState;
 use crate::harness::reactive_context_recovery_reducer::CommittedReactiveContextRecovery;
 use crate::harness::side_conversation_terminal_reducer::{
     EagerSideConversationTerminal, SideConversationToolEffect,
+};
+use crate::harness::standalone_compaction_terminal_reducer::{
+    CommittedStandaloneContextRejection, EagerStandaloneCompactionTerminal,
 };
 use crate::harness::subagents_tool::SubagentToolState;
 use crate::harness::tool_call_terminal_reducer::EagerToolCallTerminal;
@@ -212,45 +216,6 @@ fn canonical_tool_terminal_call_id(event: &Event) -> Option<&ToolCallId> {
         Event::ToolBackgroundResult(result) => Some(&result.call_id),
         Event::ToolBackgroundError(error) => Some(&error.call_id),
         _ => None,
-    }
-}
-
-/// A standalone compaction terminal classified before it can mutate context
-/// state.
-enum StandaloneCompactionTerminal {
-    /// The provider returned a structurally valid replacement window.
-    Accepted(tau_proto::ValidatedCompactionWindow),
-    /// The provider terminal cannot commit a replacement window.
-    Rejected(StandaloneCompactionRejection),
-}
-
-/// The only locally classified reasons a standalone provider terminal can fail.
-#[derive(Clone, Copy)]
-enum StandaloneCompactionRejection {
-    /// The provider explicitly reported a terminal failure.
-    ProviderError,
-    /// The provider canonically rejected an output-free request for context
-    /// size.
-    ContextWindowExceeded,
-    /// The provider did not report a completed terminal turn.
-    InvalidStop,
-    /// The provider did not return an acceptable replacement window.
-    InvalidWindow,
-}
-
-impl StandaloneCompactionRejection {
-    /// Convert this local classification to the durable transaction failure
-    /// reason.
-    fn durable_reason(self) -> tau_proto::StandaloneCompactionFailureReason {
-        match self {
-            Self::ProviderError => tau_proto::StandaloneCompactionFailureReason::ProviderError,
-            Self::ContextWindowExceeded => {
-                tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
-            }
-            Self::InvalidStop | Self::InvalidWindow => {
-                tau_proto::StandaloneCompactionFailureReason::InvalidWindow
-            }
-        }
     }
 }
 
@@ -1431,6 +1396,7 @@ mod runtime_loop;
 mod session_runtime;
 mod session_runtime_state;
 mod side_conversation_terminal_reducer;
+mod standalone_compaction_terminal_reducer;
 mod tool_call_terminal_reducer;
 mod tool_routing_state;
 mod tool_runtime;

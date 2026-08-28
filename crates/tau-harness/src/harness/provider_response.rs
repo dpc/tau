@@ -156,7 +156,9 @@ impl Harness {
         normalize_finished_response_cached_usage(&mut response);
         let standalone_success = matches!(
             standalone_terminal,
-            Some(StandaloneCompactionTerminal::Accepted(_))
+            Some(ProviderTerminalPlan::StandaloneCompaction(
+                StandaloneCompactionTerminalPlan::Accepted(_)
+            ))
         );
         let refresh_success = response.error.is_none()
             && response.failure_kind.is_none()
@@ -340,15 +342,29 @@ impl Harness {
         if prompt_operation.0 == tau_proto::PromptOperation::StandaloneCompaction
             || standalone_compaction
         {
-            match standalone_terminal.expect("standalone compaction was classified before mutation")
-            {
-                StandaloneCompactionTerminal::Accepted(replacement_window) => {
-                    self.accept_standalone_compaction(&cid, &response, replacement_window, source);
-                }
-                StandaloneCompactionTerminal::Rejected(reason) => {
-                    self.reject_standalone_compaction(&cid, &response, reason, source);
-                }
-            }
+            self.reduce_standalone_compaction_terminal(EagerStandaloneCompactionTerminal {
+                cid: &cid,
+                plan: match standalone_terminal
+                    .expect("standalone compaction was classified before mutation")
+                {
+                    ProviderTerminalPlan::StandaloneCompaction(plan) => plan,
+                    ProviderTerminalPlan::ReactiveContextRecovery(_)
+                    | ProviderTerminalPlan::FinalStatusGated(_)
+                    | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
+                    | ProviderTerminalPlan::OutputLengthContinuationSource(_)
+                    | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
+                    | ProviderTerminalPlan::SideConversation(_)
+                    | ProviderTerminalPlan::ToolCalls(_)
+                    | ProviderTerminalPlan::OrdinaryNoTool(_)
+                    | ProviderTerminalPlan::Other => {
+                        unreachable!(
+                            "unrelated provider-terminal family reached standalone reduction"
+                        )
+                    }
+                },
+                response: &response,
+                source,
+            });
             return Ok(());
         }
         let (mut requested_tool_calls, tool_calls_with_non_tool_stop) =
@@ -508,6 +524,9 @@ impl Harness {
                     retry_event: None,
                 })
             }
+            ProviderTerminalPlan::StandaloneCompaction(_) => {
+                unreachable!("standalone classification returns before shared terminal accounting")
+            }
             ProviderTerminalPlan::ReactiveContextRecovery(_) => {
                 unreachable!("reactive recovery returns before final-status classification")
             }
@@ -577,7 +596,8 @@ impl Harness {
                 retry_event: None,
             }),
             ProviderTerminalPlan::Other => completion,
-            ProviderTerminalPlan::ReactiveContextRecovery(_)
+            ProviderTerminalPlan::StandaloneCompaction(_)
+            | ProviderTerminalPlan::ReactiveContextRecovery(_)
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::OutputLengthContinuationSource(_)
             | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
@@ -612,7 +632,8 @@ impl Harness {
                 retry_event: None,
             }),
             ProviderTerminalPlan::Other => completion,
-            ProviderTerminalPlan::ReactiveContextRecovery(_)
+            ProviderTerminalPlan::StandaloneCompaction(_)
+            | ProviderTerminalPlan::ReactiveContextRecovery(_)
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
             | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
@@ -664,7 +685,8 @@ impl Harness {
                 retry_event: None,
             }),
             ProviderTerminalPlan::Other => completion,
-            ProviderTerminalPlan::ReactiveContextRecovery(_)
+            ProviderTerminalPlan::StandaloneCompaction(_)
+            | ProviderTerminalPlan::ReactiveContextRecovery(_)
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
             | ProviderTerminalPlan::OutputLengthContinuationSource(_)
@@ -745,7 +767,8 @@ impl Harness {
                     return Ok(());
                 }
                 ProviderTerminalPlan::Other => {}
-                ProviderTerminalPlan::ReactiveContextRecovery(_)
+                ProviderTerminalPlan::StandaloneCompaction(_)
+                | ProviderTerminalPlan::ReactiveContextRecovery(_)
                 | ProviderTerminalPlan::FinalStatusGated(_)
                 | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
                 | ProviderTerminalPlan::OutputLengthContinuationSource(_)
@@ -773,7 +796,8 @@ impl Harness {
                 let OrdinaryNoToolTerminalPlan { reducer } = *plan;
                 self.reduce_ordinary_no_tool_terminal(&cid, reducer);
             }
-            ProviderTerminalPlan::ReactiveContextRecovery(_)
+            ProviderTerminalPlan::StandaloneCompaction(_)
+            | ProviderTerminalPlan::ReactiveContextRecovery(_)
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
             | ProviderTerminalPlan::OutputLengthContinuationSource(_)
@@ -1023,6 +1047,9 @@ impl Harness {
     ) -> bool {
         let plan = match plan {
             ProviderTerminalPlan::ReactiveContextRecovery(plan) => plan,
+            ProviderTerminalPlan::StandaloneCompaction(_) => {
+                unreachable!("standalone classification returns before reactive recovery")
+            }
             ProviderTerminalPlan::FinalStatusGated(_) => {
                 unreachable!("final-status classification runs after shared terminal accounting")
             }
@@ -1417,23 +1444,29 @@ impl Harness {
         &mut self,
         cid: &AgentId,
         response: &ProviderResponseFinished,
-    ) -> StandaloneCompactionTerminal {
+    ) -> ProviderTerminalPlan {
         if response.error.is_some() || response.failure_kind.is_some() {
             if response.failure_kind == Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
                 && response.stop_reason == ProviderStopReason::Error
                 && response.output_items.is_empty()
             {
-                return StandaloneCompactionTerminal::Rejected(
-                    StandaloneCompactionRejection::ContextWindowExceeded,
+                return ProviderTerminalPlan::StandaloneCompaction(
+                    StandaloneCompactionTerminalPlan::Rejected(
+                        StandaloneCompactionRejection::ContextWindowExceeded,
+                    ),
                 );
             }
-            return StandaloneCompactionTerminal::Rejected(
-                StandaloneCompactionRejection::ProviderError,
+            return ProviderTerminalPlan::StandaloneCompaction(
+                StandaloneCompactionTerminalPlan::Rejected(
+                    StandaloneCompactionRejection::ProviderError,
+                ),
             );
         }
         if response.stop_reason != ProviderStopReason::EndTurn {
-            return StandaloneCompactionTerminal::Rejected(
-                StandaloneCompactionRejection::InvalidStop,
+            return ProviderTerminalPlan::StandaloneCompaction(
+                StandaloneCompactionTerminalPlan::Rejected(
+                    StandaloneCompactionRejection::InvalidStop,
+                ),
             );
         }
         let replacement_window = match self.local_summary_compaction_window(&response.output_items)
@@ -1443,24 +1476,32 @@ impl Harness {
                 let Ok(window) =
                     tau_proto::ValidatedCompactionWindow::new(response.output_items.clone())
                 else {
-                    return StandaloneCompactionTerminal::Rejected(
-                        StandaloneCompactionRejection::InvalidWindow,
+                    return ProviderTerminalPlan::StandaloneCompaction(
+                        StandaloneCompactionTerminalPlan::Rejected(
+                            StandaloneCompactionRejection::InvalidWindow,
+                        ),
                     );
                 };
                 window
             }
             Err(()) => {
-                return StandaloneCompactionTerminal::Rejected(
-                    StandaloneCompactionRejection::InvalidWindow,
+                return ProviderTerminalPlan::StandaloneCompaction(
+                    StandaloneCompactionTerminalPlan::Rejected(
+                        StandaloneCompactionRejection::InvalidWindow,
+                    ),
                 );
             }
         };
         if !self.standalone_compaction_boundary_is_valid(cid, response, &replacement_window) {
-            return StandaloneCompactionTerminal::Rejected(
-                StandaloneCompactionRejection::InvalidWindow,
+            return ProviderTerminalPlan::StandaloneCompaction(
+                StandaloneCompactionTerminalPlan::Rejected(
+                    StandaloneCompactionRejection::InvalidWindow,
+                ),
             );
         }
-        StandaloneCompactionTerminal::Accepted(replacement_window)
+        ProviderTerminalPlan::StandaloneCompaction(StandaloneCompactionTerminalPlan::Accepted(
+            replacement_window,
+        ))
     }
 
     /// Converts a local narrative into its exact synthetic user checkpoint.
@@ -1548,6 +1589,44 @@ impl Harness {
                 replacement_window: replacement_window.items().to_vec(),
             }),
         ))
+    }
+
+    /// Reduce one standalone terminal at its existing multi-fact publication
+    /// cut.
+    pub(super) fn reduce_standalone_compaction_terminal(
+        &mut self,
+        terminal: EagerStandaloneCompactionTerminal<'_>,
+    ) {
+        let EagerStandaloneCompactionTerminal {
+            cid,
+            plan,
+            response,
+            source,
+        } = terminal;
+        match plan {
+            StandaloneCompactionTerminalPlan::Accepted(replacement_window) => {
+                self.accept_standalone_compaction(cid, response, replacement_window, source);
+            }
+            StandaloneCompactionTerminalPlan::Rejected(reason) => {
+                self.reject_standalone_compaction(cid, response, reason, source);
+            }
+        }
+    }
+
+    /// Derive the existing typed standalone failure after its canonical
+    /// provider context rejection commits.
+    pub(super) fn reduce_committed_standalone_context_rejection(
+        &mut self,
+        cid: &AgentId,
+        reducer: CommittedStandaloneContextRejection,
+    ) {
+        let CommittedStandaloneContextRejection { response, source } = reducer;
+        self.fail_standalone_compaction(
+            cid,
+            &response,
+            tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded,
+            source.as_ref(),
+        );
     }
 
     pub(super) fn accept_standalone_compaction(
@@ -1691,8 +1770,10 @@ impl Harness {
                 source,
                 Event::ProviderResponseFinished(response.clone()),
                 Some(AgentPublishCompletion::StandaloneContextRejection {
-                    response: Box::new(response.clone()),
-                    source: source.cloned(),
+                    reducer: CommittedStandaloneContextRejection {
+                        response: Box::new(response.clone()),
+                        source: source.cloned(),
+                    },
                     retry_event: None,
                 }),
                 false,
@@ -3744,7 +3825,8 @@ impl Harness {
                     return;
                 }
                 ProviderTerminalPlan::Other => {}
-                ProviderTerminalPlan::ReactiveContextRecovery(_)
+                ProviderTerminalPlan::StandaloneCompaction(_)
+                | ProviderTerminalPlan::ReactiveContextRecovery(_)
                 | ProviderTerminalPlan::FinalStatusGated(_)
                 | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
                 | ProviderTerminalPlan::OutputLengthContinuationSource(_)

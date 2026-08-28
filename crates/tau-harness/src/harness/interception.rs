@@ -489,10 +489,8 @@ pub(crate) enum AgentPublishCompletion {
     /// Commit one canonical standalone context rejection before deriving and
     /// appending its typed failure and retreat plan.
     StandaloneContextRejection {
-        /// Exact canonical response used to derive the post-commit failure.
-        response: Box<tau_proto::ProviderResponseFinished>,
-        /// Provider connection retained for derived-failure attribution.
-        source: Option<tau_proto::ConnectionId>,
+        /// Typed post-commit transition for the committed provider rejection.
+        reducer: super::standalone_compaction_terminal_reducer::CommittedStandaloneContextRejection,
         /// Exact interceptor-approved response retained after append rejection.
         retry_event: Option<Box<Event>>,
     },

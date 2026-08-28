@@ -611,16 +611,8 @@ impl Harness {
             }
             return;
         }
-        if let AgentPublishCompletion::StandaloneContextRejection {
-            response, source, ..
-        } = completion
-        {
-            self.fail_standalone_compaction(
-                cid,
-                &response,
-                tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded,
-                source.as_ref(),
-            );
+        if let AgentPublishCompletion::StandaloneContextRejection { reducer, .. } = completion {
+            self.reduce_committed_standalone_context_rejection(cid, reducer);
             return;
         }
         if let AgentPublishCompletion::OwedCompactionFact { .. } = completion {
@@ -3450,7 +3442,8 @@ impl Harness {
                         return;
                     }
                     ProviderTerminalPlan::Other => {}
-                    ProviderTerminalPlan::ReactiveContextRecovery(_)
+                    ProviderTerminalPlan::StandaloneCompaction(_)
+                    | ProviderTerminalPlan::ReactiveContextRecovery(_)
                     | ProviderTerminalPlan::FinalStatusGated(_)
                     | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
                     | ProviderTerminalPlan::OutputLengthContinuationSource(_)

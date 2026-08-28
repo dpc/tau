@@ -5,6 +5,8 @@ use tau_proto::ConnectionId;
 /// Exhaustive classification at each incrementally typed provider-terminal
 /// family boundary.
 pub(crate) enum ProviderTerminalPlan {
+    /// The terminal settles one standalone-compaction transaction.
+    StandaloneCompaction(StandaloneCompactionTerminalPlan),
     /// The terminal is an eligible ordinary-inference context rejection.
     ReactiveContextRecovery(Box<ReactiveContextRecoveryPlan>),
     /// The terminal is governed by the agent's final-status contract.
@@ -24,6 +26,44 @@ pub(crate) enum ProviderTerminalPlan {
     OrdinaryNoTool(Box<OrdinaryNoToolTerminalPlan>),
     /// The terminal belongs to another provider-terminal family.
     Other,
+}
+
+/// Exact terminal decision for one standalone-compaction provider response.
+pub(crate) enum StandaloneCompactionTerminalPlan {
+    /// The provider returned a structurally valid replacement window.
+    Accepted(tau_proto::ValidatedCompactionWindow),
+    /// The provider terminal cannot commit a replacement window.
+    Rejected(StandaloneCompactionRejection),
+}
+
+/// The only locally classified reasons a standalone provider terminal can fail.
+#[derive(Clone, Copy)]
+pub(crate) enum StandaloneCompactionRejection {
+    /// The provider explicitly reported a terminal failure.
+    ProviderError,
+    /// The provider canonically rejected an output-free request for context
+    /// size.
+    ContextWindowExceeded,
+    /// The provider did not report a completed terminal turn.
+    InvalidStop,
+    /// The provider did not return an acceptable replacement window.
+    InvalidWindow,
+}
+
+impl StandaloneCompactionRejection {
+    /// Convert this local classification to the durable transaction failure
+    /// reason.
+    pub(super) fn durable_reason(self) -> tau_proto::StandaloneCompactionFailureReason {
+        match self {
+            Self::ProviderError => tau_proto::StandaloneCompactionFailureReason::ProviderError,
+            Self::ContextWindowExceeded => {
+                tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
+            }
+            Self::InvalidStop | Self::InvalidWindow => {
+                tau_proto::StandaloneCompactionFailureReason::InvalidWindow
+            }
+        }
+    }
 }
 
 /// Exact eager reducer decision for one side-conversation terminal.
