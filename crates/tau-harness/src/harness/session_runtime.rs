@@ -1062,8 +1062,7 @@ impl Harness {
         self.peer_messaging.uncommitted_peer_auto_starts.clear();
         self.prompt_coordination
             .compaction_runtime
-            .pending_manual_tools
-            .clear();
+            .clear_model_tool_starts();
         self.prompt_coordination
             .compaction_runtime
             .pending_model_acceptances

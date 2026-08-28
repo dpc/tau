@@ -115,9 +115,7 @@ impl Harness {
         if self
             .prompt_coordination
             .compaction_runtime
-            .active_ui_transactions
-            .keys()
-            .any(|(target, _)| target == &agent_id)
+            .has_ui_start_for_agent(&agent_id)
         {
             self.send_ui_response(client_id, "compaction already queued");
             return;
@@ -729,10 +727,7 @@ impl Harness {
                 + self
                     .prompt_coordination
                     .compaction_runtime
-                    .pending_manual_tools
-                    .values()
-                    .filter(|entry| entry.caller_agent_id.as_str() == caller_public_id)
-                    .count();
+                    .model_tool_start_count_for_caller(&caller_public_id);
         if 4 <= caller_active_requests {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
@@ -2180,16 +2175,11 @@ impl Harness {
                 } => {
                     if requested.is_ui_request() {
                         if outcome.is_none() {
-                            self.prompt_coordination
-                                .compaction_runtime
-                                .active_ui_transactions
-                                .insert(
-                                    (
-                                        requested.target_agent_id.clone(),
-                                        started.transaction_id.clone(),
-                                    ),
-                                    requested.request_id.clone(),
-                                );
+                            self.prompt_coordination.compaction_runtime.record_ui_start(
+                                requested.target_agent_id.clone(),
+                                started.transaction_id.clone(),
+                                requested.request_id.clone(),
+                            );
                         }
                         continue;
                     }
@@ -2205,12 +2195,9 @@ impl Harness {
                     };
                     self.prompt_coordination
                         .compaction_runtime
-                        .pending_manual_tools
-                        .insert(
-                            (
-                                requested.target_agent_id.clone(),
-                                started.transaction_id.clone(),
-                            ),
+                        .record_model_tool_start(
+                            requested.target_agent_id.clone(),
+                            started.transaction_id.clone(),
                             pending,
                         );
                     (requested, Some((started, outcome)))
@@ -2303,11 +2290,10 @@ impl Harness {
             ) {
                 self.prompt_coordination
                     .compaction_runtime
-                    .pending_manual_tools
-                    .remove(&(
+                    .take_model_tool_start(
                         request.target_agent_id.clone(),
                         started.transaction_id.clone(),
-                    ));
+                    );
                 if request.required_tool_source().resume_inference
                     && !self.self_compaction_terminal_delivered(&request)
                 {
@@ -2405,11 +2391,10 @@ impl Harness {
                     );
                     self.prompt_coordination
                         .compaction_runtime
-                        .pending_manual_tools
-                        .remove(&(
+                        .take_model_tool_start(
                             request.target_agent_id.clone(),
                             started.transaction_id.clone(),
-                        ));
+                        );
                     if request.required_tool_source().resume_inference {
                         self.consume_wait_background_completion(
                             &request.required_tool_source().initiating_tool_call_id,
@@ -2464,11 +2449,10 @@ impl Harness {
                     );
                     self.prompt_coordination
                         .compaction_runtime
-                        .pending_manual_tools
-                        .remove(&(
+                        .take_model_tool_start(
                             request.target_agent_id.clone(),
                             started.transaction_id.clone(),
-                        ));
+                        );
                     if request.required_tool_source().resume_inference {
                         self.consume_wait_background_completion(&call_id);
                         if let Some(agent) = self
@@ -2633,9 +2617,7 @@ impl Harness {
             || self
                 .prompt_coordination
                 .compaction_runtime
-                .pending_manual_tools
-                .values()
-                .any(|pending| pending.call_id == *call_id)
+                .has_model_tool_start_for_call(call_id)
     }
 
     pub(super) fn manual_request_has_complete_tool_round(

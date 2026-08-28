@@ -1461,10 +1461,7 @@ impl Harness {
         if let Some((transaction_id, pending)) = self
             .prompt_coordination
             .compaction_runtime
-            .pending_manual_tools
-            .iter()
-            .find(|(_, pending)| pending.call_id == target.call_id)
-            .map(|((_, id), pending)| (id.clone(), pending.clone()))
+            .model_tool_start_by_call(&target.call_id)
             && let Some(target_cid) =
                 self.runtime_agent_id_for_target_agent(Some(pending.target_agent_id.as_str()))
         {

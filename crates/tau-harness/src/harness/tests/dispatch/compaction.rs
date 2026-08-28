@@ -4610,8 +4610,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
                 .contains_key(&request_id)
             && h.prompt_coordination
                 .compaction_runtime
-                .pending_manual_tools
-                .is_empty()
+                .active_manual_starts_is_empty()
             && h.tool_routing
                 .tool_runtime
                 .tool_turn
@@ -4641,8 +4640,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
             .contains_key(&request_id)
             && h.prompt_coordination
                 .compaction_runtime
-                .pending_manual_tools
-                .is_empty()
+                .active_manual_starts_is_empty()
             && h.prompt_coordination
                 .prompt_runtime
                 .pending_publish_completions
@@ -4703,13 +4701,20 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
                 .contains_key(&request_id)
             && h.prompt_coordination
                 .compaction_runtime
-                .pending_manual_tools
-                .contains_key(&match &starts[0].event {
-                    Event::AgentStandaloneCompactionStarted(started) => {
-                        (started.agent_id.clone(), started.transaction_id.clone())
-                    }
-                    _ => unreachable!("filtered start"),
-                })
+                .has_model_tool_start(
+                    match &starts[0].event {
+                        Event::AgentStandaloneCompactionStarted(started) => {
+                            started.agent_id.clone()
+                        }
+                        _ => unreachable!("filtered start"),
+                    },
+                    match &starts[0].event {
+                        Event::AgentStandaloneCompactionStarted(started) => {
+                            started.transaction_id.clone()
+                        }
+                        _ => unreachable!("filtered start"),
+                    },
+                )
             && !h
                 .prompt_coordination
                 .prompt_runtime
@@ -4817,9 +4822,8 @@ fn staged_model_compaction_acceptance_preserves_first_call_correlation() {
     assert!(
         h.prompt_coordination
             .compaction_runtime
-            .pending_manual_tools
-            .values()
-            .any(|pending| pending.call_id == first_call.id && pending.request_id == request_id)
+            .model_tool_start_by_call(&first_call.id)
+            .is_some_and(|(_, pending)| pending.request_id == request_id)
     );
 }
 
@@ -4922,8 +4926,7 @@ fn staged_model_compaction_acceptance_is_cleared_by_teardown() {
                 .is_empty()
                 && h.prompt_coordination
                     .compaction_runtime
-                    .pending_manual_tools
-                    .is_empty()
+                    .active_manual_starts_is_empty()
                 && h.prompt_coordination
                     .prompt_runtime
                     .pending_publish_completions
@@ -5268,13 +5271,10 @@ fn manual_cross_compaction_rejects_caller_limit() {
     for index in 0..4 {
         h.prompt_coordination
             .compaction_runtime
-            .pending_manual_tools
-            .insert(
-                (
-                    tau_proto::AgentId::parse(format!("target-{index}")).expect("target id"),
-                    tau_proto::CompactionTransactionId::parse(format!("ct-cap-{index}"))
-                        .expect("transaction id"),
-                ),
+            .record_model_tool_start(
+                tau_proto::AgentId::parse(format!("target-{index}")).expect("target id"),
+                tau_proto::CompactionTransactionId::parse(format!("ct-cap-{index}"))
+                    .expect("transaction id"),
                 crate::harness::PendingManualCompactionTool {
                     request_id: tau_proto::CompactionRequestId::parse(format!("cr-cap-{index}"))
                         .expect("request id"),
@@ -8917,8 +8917,7 @@ fn failed_ui_compaction_replay_restores_nonblocking_suppression() {
         resumed
             .prompt_coordination
             .compaction_runtime
-            .active_ui_transactions
-            .is_empty(),
+            .active_manual_starts_is_empty(),
         "a terminal UI transaction must not reappear as active after replay"
     );
     resumed.shutdown().expect("shutdown");
@@ -8984,21 +8983,18 @@ fn restored_ui_transactions_with_equal_local_ids_remain_agent_scoped() {
     assert_eq!(
         h.prompt_coordination
             .compaction_runtime
-            .active_ui_transactions
-            .len(),
+            .active_manual_start_count(),
         2
     );
     assert!(
         h.prompt_coordination
             .compaction_runtime
-            .active_ui_transactions
-            .contains_key(&(first_id, transaction_id.clone()))
+            .has_ui_start(first_id, transaction_id.clone())
     );
     assert!(
         h.prompt_coordination
             .compaction_runtime
-            .active_ui_transactions
-            .contains_key(&(second_id, transaction_id))
+            .has_ui_start(second_id, transaction_id)
     );
     h.shutdown().expect("shutdown");
 }
@@ -9029,9 +9025,9 @@ fn model_tool_terminal_with_equal_local_id_keeps_other_agent_owner() {
     ] {
         h.prompt_coordination
             .compaction_runtime
-            .pending_manual_tools
-            .insert(
-                (agent_id.clone(), transaction_id.clone()),
+            .record_model_tool_start(
+                agent_id.clone(),
+                transaction_id.clone(),
                 crate::harness::PendingManualCompactionTool {
                     request_id: tau_proto::CompactionRequestId::parse(format!("cr-{ordinal}"))
                         .expect("request id"),
@@ -9060,14 +9056,12 @@ fn model_tool_terminal_with_equal_local_id_keeps_other_agent_owner() {
     assert!(
         !h.prompt_coordination
             .compaction_runtime
-            .pending_manual_tools
-            .contains_key(&(first_id, transaction_id.clone()))
+            .has_model_tool_start(first_id, transaction_id.clone())
     );
     assert!(
         h.prompt_coordination
             .compaction_runtime
-            .pending_manual_tools
-            .contains_key(&(second_id, transaction_id))
+            .has_model_tool_start(second_id, transaction_id)
     );
     assert!(!event_log_events(&h).iter().any(|event| {
         matches!(

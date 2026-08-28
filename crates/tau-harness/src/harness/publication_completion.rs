@@ -2582,18 +2582,20 @@ impl Harness {
                     .remove(request_id);
                 self.prompt_coordination
                     .compaction_runtime
-                    .pending_manual_tools
-                    .entry((started.agent_id.clone(), started.transaction_id.clone()))
-                    .or_insert_with(|| PendingManualCompactionTool {
-                        request_id: request_id.clone(),
-                        caller_agent_id: caller_agent_id.clone(),
-                        call_id: initiating_tool_call_id.clone(),
-                        tool_name: accepted.as_ref().map_or_else(
-                            || ToolName::new("compact"),
-                            |entry| entry.visible_tool_name.clone(),
-                        ),
-                        target_agent_id: started.agent_id.clone(),
-                    });
+                    .record_model_tool_start(
+                        started.agent_id.clone(),
+                        started.transaction_id.clone(),
+                        PendingManualCompactionTool {
+                            request_id: request_id.clone(),
+                            caller_agent_id: caller_agent_id.clone(),
+                            call_id: initiating_tool_call_id.clone(),
+                            tool_name: accepted.as_ref().map_or_else(
+                                || ToolName::new("compact"),
+                                |entry| entry.visible_tool_name.clone(),
+                            ),
+                            target_agent_id: started.agent_id.clone(),
+                        },
+                    );
             }
             if let tau_proto::StandaloneCompactionTrigger::ManualUi { request_id } =
                 &started.trigger
@@ -2602,13 +2604,11 @@ impl Harness {
                     .compaction_runtime
                     .accepted_manual_tools
                     .remove(request_id);
-                self.prompt_coordination
-                    .compaction_runtime
-                    .active_ui_transactions
-                    .insert(
-                        (started.agent_id.clone(), started.transaction_id.clone()),
-                        request_id.clone(),
-                    );
+                self.prompt_coordination.compaction_runtime.record_ui_start(
+                    started.agent_id.clone(),
+                    started.transaction_id.clone(),
+                    request_id.clone(),
+                );
             }
             let suppression_key = (started.agent_id.clone(), started.transaction_id.clone());
             let durable_preflight_reason = match &started.trigger {
@@ -2882,13 +2882,11 @@ impl Harness {
         if let Event::AgentStandaloneCompactionFailed(failed) = event {
             self.prompt_coordination
                 .compaction_runtime
-                .active_ui_transactions
-                .remove(&(failed.agent_id.clone(), failed.transaction_id.clone()));
+                .remove_ui_start(failed.agent_id.clone(), failed.transaction_id.clone());
             if let Some(pending) = self
                 .prompt_coordination
                 .compaction_runtime
-                .pending_manual_tools
-                .remove(&(failed.agent_id.clone(), failed.transaction_id.clone()))
+                .take_model_tool_start(failed.agent_id.clone(), failed.transaction_id.clone())
             {
                 let self_request = pending.caller_agent_id == pending.target_agent_id;
                 if self_request {
@@ -3020,8 +3018,7 @@ impl Harness {
             if let Some(transaction_id) = compacted.transaction_id.as_ref() {
                 self.prompt_coordination
                     .compaction_runtime
-                    .active_ui_transactions
-                    .remove(&(compacted.agent_id.clone(), transaction_id.clone()));
+                    .remove_ui_start(compacted.agent_id.clone(), transaction_id.clone());
             }
             self.clear_agent_context_usage(&cid);
             if let Some(transaction_id) = compacted.transaction_id.as_ref()
@@ -3061,8 +3058,7 @@ impl Harness {
             && let Some(pending) = self
                 .prompt_coordination
                 .compaction_runtime
-                .pending_manual_tools
-                .remove(&(compacted.agent_id.clone(), transaction_id.clone()))
+                .take_model_tool_start(compacted.agent_id.clone(), transaction_id.clone())
         {
             let self_request = pending.caller_agent_id == pending.target_agent_id;
             let call_id = pending.call_id.clone();
