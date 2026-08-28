@@ -2841,8 +2841,9 @@ impl Harness {
                     ..
                 }) => {
                     if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                        conv.turn.pending_automatic_compaction_decision =
-                            Some(decision.transaction_id.clone());
+                        conv.turn
+                            .automatic_compaction
+                            .record_decision(decision.transaction_id.clone());
                         if !finish_committed {
                             conv.turn.outer_turn =
                                 path_crate_agent::OuterTurnRuntimeState::FinishInFlight(

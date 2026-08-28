@@ -1523,8 +1523,9 @@ impl Harness {
                     Some(tau_proto::AgentOuterTurnFinished {
                         automatic_compaction_decision: agent
                             .turn
-                            .pending_automatic_compaction_decision
-                            .clone(),
+                            .automatic_compaction
+                            .decision_id()
+                            .cloned(),
                         agent_id: crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
                         session_id: agent.identity.session_id.clone(),
                         outer_turn_id,

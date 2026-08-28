@@ -361,9 +361,9 @@ impl Harness {
                 ui_compact: tau_proto::UiManualCompactionSource {
                     eligible_automatic_transaction_id: agent
                         .turn
-                        .pending_automatic_compaction_start
-                        .clone()
-                        .or_else(|| agent.turn.pending_automatic_compaction_decision.clone())
+                        .automatic_compaction
+                        .transaction_id()
+                        .cloned()
                         .or_else(|| match &agent.dispatch.activation_dispatch {
                             ActivationDispatchState::Running { id, .. } => Some(id.clone()),
                             _ => None,
@@ -1650,7 +1650,11 @@ impl Harness {
         let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
         };
-        if conv.turn.pending_automatic_compaction_start.as_ref() == Some(&decision.transaction_id) {
+        if conv
+            .turn
+            .automatic_compaction
+            .start_is_pending_for(&decision.transaction_id)
+        {
             return true;
         }
         let Some(agent_id) = conv.identity.agent_id.clone() else {
@@ -1667,8 +1671,10 @@ impl Harness {
             .is_some_and(|tree| !tree.is_ancestor_head(cut, selected))
         {
             if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
-                agent.turn.pending_automatic_compaction_start =
-                    Some(decision.transaction_id.clone());
+                agent
+                    .turn
+                    .automatic_compaction
+                    .record_start(decision.transaction_id.clone());
             }
             self.publish_for_agent(
                 cid,
@@ -1704,7 +1710,10 @@ impl Harness {
         let resume_through = Some(selected);
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             agent.dispatch.next_prompt_index = agent.dispatch.next_prompt_index.saturating_add(1);
-            agent.turn.pending_automatic_compaction_start = Some(decision.transaction_id.clone());
+            agent
+                .turn
+                .automatic_compaction
+                .record_start(decision.transaction_id.clone());
         }
         if fitting_cut.is_none() {
             self.prompt_coordination

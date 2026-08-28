@@ -852,9 +852,12 @@ impl Harness {
         };
         if let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
-            && agent.turn.pending_automatic_compaction_start.as_ref() == Some(decision_id)
+            && agent
+                .turn
+                .automatic_compaction
+                .start_is_pending_for(decision_id)
         {
-            agent.turn.pending_automatic_compaction_start = None;
+            agent.turn.automatic_compaction.clear_start(decision_id);
         }
     }
 
@@ -1377,8 +1380,9 @@ impl Harness {
                 Some(tau_proto::AgentOuterTurnFinished {
                     automatic_compaction_decision: agent
                         .turn
-                        .pending_automatic_compaction_decision
-                        .clone(),
+                        .automatic_compaction
+                        .decision_id()
+                        .cloned(),
                     agent_id: crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
                     session_id: agent.identity.session_id.clone(),
                     outer_turn_id,
@@ -2512,8 +2516,10 @@ impl Harness {
                 self.runtime_agent_id_for_target_agent(Some(response.agent_id.as_str()))
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
         {
-            agent.turn.pending_automatic_compaction_decision =
-                Some(decision.transaction_id.clone());
+            agent
+                .turn
+                .automatic_compaction
+                .record_decision(decision.transaction_id.clone());
         }
         if let Event::AgentPromptTerminated(terminated) = event
             && let Some(decision) = &terminated.automatic_compaction_decision
@@ -2521,8 +2527,10 @@ impl Harness {
                 self.runtime_agent_id_for_target_agent(Some(terminated.agent_id.as_str()))
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
         {
-            agent.turn.pending_automatic_compaction_decision =
-                Some(decision.transaction_id.clone());
+            agent
+                .turn
+                .automatic_compaction
+                .record_decision(decision.transaction_id.clone());
         }
         if let Event::AgentOuterTurnFinished(finished) = event
             && let Some(cid) =
@@ -2531,7 +2539,7 @@ impl Harness {
             && agent.turn.outer_turn.owned_id() == Some(&finished.outer_turn_id)
         {
             agent.turn.outer_turn = path_crate_agent::OuterTurnRuntimeState::None;
-            agent.turn.pending_automatic_compaction_decision = None;
+            agent.turn.automatic_compaction.clear_decision();
             if agent.turn.output_length_continuation.outer_turn_id()
                 == Some(&finished.outer_turn_id)
             {
@@ -2566,9 +2574,12 @@ impl Harness {
                 && let Some(cid) =
                     self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
                 && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
-                && agent.turn.pending_automatic_compaction_start.as_ref() == Some(decision_id)
+                && agent
+                    .turn
+                    .automatic_compaction
+                    .start_is_pending_for(decision_id)
             {
-                agent.turn.pending_automatic_compaction_start = None;
+                agent.turn.automatic_compaction.clear_start(decision_id);
             }
             if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
                 request_id,
@@ -2777,10 +2788,15 @@ impl Harness {
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
-            && agent.turn.pending_automatic_compaction_start.as_ref()
-                == Some(&failed.transaction_id)
+            && agent
+                .turn
+                .automatic_compaction
+                .start_is_pending_for(&failed.transaction_id)
         {
-            agent.turn.pending_automatic_compaction_start = None;
+            agent
+                .turn
+                .automatic_compaction
+                .clear_start(&failed.transaction_id);
         }
         if let Event::AgentStandaloneCompactionFailed(failed) = event
             && let Some(plan) = failed.context_retreat.clone()
