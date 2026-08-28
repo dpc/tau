@@ -162,11 +162,13 @@ use crate::harness::provider_terminal_plan::{
     AutomaticCompactionOrPendingMessageWakePlan, FinalStatusGatedPlan,
     OutputLengthContinuationSourceClassification, OutputLengthContinuationSourcePlan,
     OutputLengthContinuationTerminalClassification, OutputLengthContinuationTerminalPlan,
-    ProviderTerminalPlan, ReactiveContextRecoveryPlan,
+    ProviderTerminalPlan, ReactiveContextRecoveryPlan, ToolCallTerminalClassification,
+    ToolCallTerminalPlan,
 };
 use crate::harness::publication_state::PublicationState;
 use crate::harness::reactive_context_recovery_reducer::CommittedReactiveContextRecovery;
 use crate::harness::subagents_tool::SubagentToolState;
+use crate::harness::tool_call_terminal_reducer::EagerToolCallTerminal;
 use crate::harness::tool_runtime::ToolRuntimeState;
 use crate::harness::ui_runtime::UiRuntimeState;
 use crate::internal_tools::InternalToolHandlers;
@@ -1436,6 +1438,7 @@ mod runtime_io_state;
 mod runtime_loop;
 mod session_runtime;
 mod session_runtime_state;
+mod tool_call_terminal_reducer;
 mod tool_routing_state;
 mod tool_runtime;
 mod ui_runtime;

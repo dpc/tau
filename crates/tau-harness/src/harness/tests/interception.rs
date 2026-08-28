@@ -299,6 +299,104 @@ fn challenged_working_final_drop_is_overridden_until_post_commit() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ordinary tool-call dispatch deliberately remains eager: parking the
+/// canonical response must not withhold normalized call registration, and
+/// later committing that response must not dispatch the call again.
+#[test]
+fn intercepted_tool_call_response_dispatches_once_before_commit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path().join("state")).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let prompt_id =
+        tau_proto::AgentPromptId::parse("intercepted-eager-tool").expect("known-safe prompt id");
+    seed_agent_thinking(&mut h, &cid, prompt_id.as_str());
+    h.prompt_coordination
+        .prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
+    let interceptor = connect_test_tool(&mut h, "eager-tool-response-owner");
+    h.handle_extension_event(
+        "eager-tool-response-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let call_id = ToolCallId::from("call-intercepted-eager");
+    let mut response = provider_text_response(&prompt_id, agent_id, "");
+    response.output_items = vec![ContextItem::ToolCall(ToolCallItem {
+        call_id: call_id.clone(),
+        name: ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("path".to_owned()),
+            CborValue::Text("/nonexistent/intercepted-eager-tool".to_owned()),
+        )]),
+        raw_arguments_json: None,
+        responses_envelope: None,
+    })];
+    response.stop_reason = tau_proto::ProviderStopReason::ToolCalls;
+
+    h.handle_provider_response_finished(response)
+        .expect("park canonical response and dispatch tool");
+    let (candidate, _) = intercepted_payload(&interceptor);
+    assert!(matches!(
+        candidate,
+        Event::ProviderResponseFinished(ref response)
+            if response.agent_prompt_id == prompt_id
+    ));
+    assert!(
+        !event_log_events(&h).iter().any(|event| matches!(
+            event,
+            Event::ProviderResponseFinished(response)
+                if response.agent_prompt_id == prompt_id
+        )),
+        "parked response must remain uncommitted"
+    );
+    assert!(
+        h.tool_routing
+            .tool_runtime
+            .pending_tools
+            .contains_key(&call_id),
+        "normalized call must register before response commit"
+    );
+    assert!(
+        h.tool_routing.tool_runtime.tool_turn.is_in_flight(&call_id),
+        "ordinary tool dispatch must remain eager"
+    );
+    assert_eq!(h.tool_routing.tool_runtime.tool_turn.in_flight_len(), 1);
+
+    h.handle_extension_event(
+        "eager-tool-response-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit parked response");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == prompt_id
+            ))
+            .count(),
+        1
+    );
+    assert!(h.tool_routing.tool_runtime.tool_turn.is_in_flight(&call_id));
+    assert_eq!(
+        h.tool_routing.tool_runtime.tool_turn.in_flight_len(),
+        1,
+        "committing the response must not dispatch the call twice"
+    );
+}
+
 /// A delayed interceptor release cannot append a Root-owned Working final below
 /// a child selected while the provider response was parked.
 #[test]

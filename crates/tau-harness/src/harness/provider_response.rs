@@ -522,6 +522,9 @@ impl Harness {
                     "output-length terminal classification runs after source classification"
                 )
             }
+            ProviderTerminalPlan::ToolCalls(_) => {
+                unreachable!("tool-call classification runs after response publication")
+            }
             ProviderTerminalPlan::Other => None,
         };
         let commit_gated_plan =
@@ -571,7 +574,8 @@ impl Harness {
             ProviderTerminalPlan::ReactiveContextRecovery(_)
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::OutputLengthContinuationSource(_)
-            | ProviderTerminalPlan::OutputLengthContinuationTerminal(_) => {
+            | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
+            | ProviderTerminalPlan::ToolCalls(_) => {
                 unreachable!("earlier provider-terminal family reached commit-gated classification")
             }
         };
@@ -603,7 +607,8 @@ impl Harness {
             ProviderTerminalPlan::ReactiveContextRecovery(_)
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
-            | ProviderTerminalPlan::OutputLengthContinuationTerminal(_) => {
+            | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
+            | ProviderTerminalPlan::ToolCalls(_) => {
                 unreachable!(
                     "earlier provider-terminal family reached output-length source classification"
                 )
@@ -652,7 +657,8 @@ impl Harness {
             ProviderTerminalPlan::ReactiveContextRecovery(_)
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
-            | ProviderTerminalPlan::OutputLengthContinuationSource(_) => {
+            | ProviderTerminalPlan::OutputLengthContinuationSource(_)
+            | ProviderTerminalPlan::ToolCalls(_) => {
                 unreachable!(
                     "earlier provider-terminal family reached output-length terminal classification"
                 )
@@ -716,14 +722,29 @@ impl Harness {
         {
             return Ok(());
         }
-        if requested_tool_calls {
-            self.dispatch_finished_response_tool_calls(&cid, normalized_tool_calls, source)?;
-        } else {
-            self.complete_finished_response_without_tool_calls(
-                &cid,
-                &response,
-                assistant_text.as_deref(),
-            );
+        let tool_call_plan = Self::classify_tool_call_terminal(ToolCallTerminalClassification {
+            requested_tool_calls,
+            normalized_tool_calls,
+            source: source.cloned(),
+        });
+        match tool_call_plan {
+            ProviderTerminalPlan::ToolCalls(ToolCallTerminalPlan { reducer }) => {
+                self.reduce_tool_call_terminal(&cid, reducer)?;
+            }
+            ProviderTerminalPlan::Other => {
+                self.complete_finished_response_without_tool_calls(
+                    &cid,
+                    &response,
+                    assistant_text.as_deref(),
+                );
+            }
+            ProviderTerminalPlan::ReactiveContextRecovery(_)
+            | ProviderTerminalPlan::FinalStatusGated(_)
+            | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
+            | ProviderTerminalPlan::OutputLengthContinuationSource(_)
+            | ProviderTerminalPlan::OutputLengthContinuationTerminal(_) => {
+                unreachable!("earlier provider-terminal family reached tool-call classification")
+            }
         }
 
         Ok(())
@@ -978,6 +999,9 @@ impl Harness {
                 unreachable!(
                     "output-length terminal classification runs after shared terminal accounting"
                 )
+            }
+            ProviderTerminalPlan::ToolCalls(_) => {
+                unreachable!("tool-call classification runs after shared terminal accounting")
             }
             ProviderTerminalPlan::Other => return false,
         };
@@ -3445,6 +3469,40 @@ impl Harness {
             OutputLengthContinuationTerminalPlan {
                 reducer: CommittedGatedFinalReducer::OutputLengthContinuationTerminal,
             },
+        )
+    }
+
+    /// Classify one ordinary normalized tool-call round after every owning
+    /// provider-terminal family and side-conversation terminal has returned.
+    fn classify_tool_call_terminal(
+        ToolCallTerminalClassification {
+            requested_tool_calls,
+            normalized_tool_calls,
+            source,
+        }: ToolCallTerminalClassification,
+    ) -> ProviderTerminalPlan {
+        if !requested_tool_calls {
+            return ProviderTerminalPlan::Other;
+        }
+        ProviderTerminalPlan::ToolCalls(ToolCallTerminalPlan {
+            reducer: EagerToolCallTerminal {
+                normalized_tool_calls,
+                source,
+            },
+        })
+    }
+
+    /// Execute the unchanged eager tool-call dispatch after canonical response
+    /// publication has been offered.
+    fn reduce_tool_call_terminal(
+        &mut self,
+        cid: &AgentId,
+        reducer: EagerToolCallTerminal,
+    ) -> Result<(), HarnessError> {
+        self.dispatch_finished_response_tool_calls(
+            cid,
+            reducer.normalized_tool_calls,
+            reducer.source.as_ref(),
         )
     }
 

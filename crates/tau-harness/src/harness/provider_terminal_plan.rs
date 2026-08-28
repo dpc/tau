@@ -16,8 +16,27 @@ pub(crate) enum ProviderTerminalPlan {
     OutputLengthContinuationSource(OutputLengthContinuationSourcePlan),
     /// The terminal settles one reserved output-length continuation successor.
     OutputLengthContinuationTerminal(OutputLengthContinuationTerminalPlan),
+    /// The terminal eagerly dispatches one ordinary normalized tool-call round.
+    ToolCalls(ToolCallTerminalPlan),
     /// The terminal belongs to another provider-terminal family.
     Other,
+}
+
+/// Exact eager reducer selected for one ordinary tool-call terminal.
+pub(crate) struct ToolCallTerminalPlan {
+    /// Typed reducer executed after the canonical response is offered for
+    /// publication.
+    pub(super) reducer: super::tool_call_terminal_reducer::EagerToolCallTerminal,
+}
+
+/// Complete semantic input for classifying one ordinary tool-call terminal.
+pub(crate) struct ToolCallTerminalClassification {
+    /// Whether the normalized response requests executable tool calls.
+    pub(super) requested_tool_calls: bool,
+    /// Exact normalized call aggregate retained for eager dispatch.
+    pub(super) normalized_tool_calls: super::NormalizedFinishedToolCalls,
+    /// Provider connection retained for tool-result attribution.
+    pub(super) source: Option<ConnectionId>,
 }
 
 /// Exact post-commit reducer selected for a reserved output-length successor.
