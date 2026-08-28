@@ -1,6 +1,6 @@
 //! ChatGPT Responses-v2 standalone compaction replacement projection.
 
-use tau_proto::{ContentPart, ContextItem, ContextRole, MessageItem, PromptContext};
+use tau_proto::{ContentPart, ContextBlock, ContextItem, ContextRole, MessageItem, PromptContext};
 
 const RETAINED_MESSAGE_BYTE_BUDGET: usize = 256_000;
 const MAX_RETAINED_AGENT_MESSAGE_BYTES: usize = 40_000;
@@ -12,8 +12,15 @@ pub(super) fn build_v2_compacted_window(
     mut provider_output: Vec<ContextItem>,
 ) -> Vec<ContextItem> {
     let candidates = context
-        .flatten_iter()
-        .filter_map(|item| retained_message(&item))
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContextBlock::UserInput(block) => Some(block.items.as_slice()),
+            ContextBlock::AssistantResponse(block) => Some(block.output_items.as_slice()),
+            ContextBlock::ToolResults(_) => None,
+        })
+        .flatten()
+        .filter_map(retained_message)
         .collect::<Vec<_>>();
     let mut remaining = RETAINED_MESSAGE_BYTE_BUDGET;
     let mut retained = Vec::new();
@@ -50,17 +57,24 @@ fn retained_message(item: &ContextItem) -> Option<MessageItem> {
     }) {
         return None;
     }
-    let is_agent_message = message.content.first().is_some_and(|part| {
-        content_text(part).is_some_and(|text| {
-            (text.starts_with("<tau_internal>") && text.contains("\n\n<message>"))
-                || text.starts_with("<tau_peer_message ")
-                || (text.starts_with("<tau_internal>") && text.contains("\n\n<tau_peer_message "))
-        })
-    });
+    let is_agent_message = message
+        .content
+        .first()
+        .and_then(content_text)
+        .is_some_and(is_non_final_agent_message);
     if is_agent_message && MAX_RETAINED_AGENT_MESSAGE_BYTES < message_bytes(message) {
         return None;
     }
     Some(message.clone())
+}
+
+fn is_non_final_agent_message(text: &str) -> bool {
+    (text.starts_with("<tau_internal>") && text.contains("\n\n<message>"))
+        || text.starts_with("<tau_peer_message ")
+        || (text.starts_with("<tau_internal>") && text.contains("\n\n<tau_peer_message "))
+        || (text.starts_with("<tau_internal>Watched agent ")
+            && text.contains(" received a user prompt\n\n<prompt>\n")
+            && text.ends_with("\n</prompt>&lt;/tau_internal&gt;"))
 }
 
 fn message_bytes(message: &MessageItem) -> usize {

@@ -23,6 +23,12 @@ fn compact_item() -> ContextItem {
     )))
 }
 
+fn watch_prompt(body_bytes: usize) -> ContextItem {
+    let prefix = "<tau_internal>Watched agent worker received a user prompt\n\n<prompt>\n";
+    let suffix = "\n</prompt>&lt;/tau_internal&gt;";
+    message(format!("{prefix}{}{suffix}", "x".repeat(body_bytes)))
+}
+
 /// The v2 replacement keeps eligible input order and appends the provider
 /// compaction item last while dropping non-message transcript mechanics.
 #[test]
@@ -53,6 +59,46 @@ fn oversized_agent_message_is_not_retained() {
     let output = build_v2_compacted_window(&input, vec![compact_item()]);
 
     assert_eq!(output, vec![message("recent"), compact_item()]);
+}
+
+/// The production replacement builder must apply the existing per-agent-message
+/// cap to canonical watch-prompt input before cloning it into the candidate
+/// set. Equality remains accepted, while one additional UTF-8 byte omits the
+/// prompt.
+#[test]
+fn watch_prompt_obeys_exact_agent_message_byte_cap() {
+    let wrapper_bytes = match watch_prompt(0) {
+        ContextItem::Message(message) => message_bytes(&message),
+        _ => unreachable!("watch prompt helper always builds a message"),
+    };
+    let exact = watch_prompt(MAX_RETAINED_AGENT_MESSAGE_BYTES - wrapper_bytes);
+    let oversized = watch_prompt(MAX_RETAINED_AGENT_MESSAGE_BYTES - wrapper_bytes + 1);
+
+    assert_eq!(
+        build_v2_compacted_window(&context(vec![exact.clone()]), vec![compact_item()]),
+        vec![exact, compact_item()]
+    );
+    assert_eq!(
+        build_v2_compacted_window(&context(vec![oversized]), vec![compact_item()]),
+        vec![compact_item()]
+    );
+}
+
+/// A harness-internal message cannot enter the WatchPrompt limit domain merely
+/// by containing the wrapper's inner wording. It remains eligible under the
+/// separate aggregate retained-message budget.
+#[test]
+fn unrelated_internal_message_does_not_match_watch_prompt_cap() {
+    let unrelated = message(format!(
+        "<tau_internal>Notice: worker received a user prompt\n\n<prompt>\n{}\
+         \n</prompt>&lt;/tau_internal&gt;",
+        "x".repeat(MAX_RETAINED_AGENT_MESSAGE_BYTES)
+    ));
+
+    assert_eq!(
+        build_v2_compacted_window(&context(vec![unrelated.clone()]), vec![compact_item()]),
+        vec![unrelated, compact_item()]
+    );
 }
 
 /// Aggregate overflow keeps the newest window and middle-truncates exactly
