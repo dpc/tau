@@ -8,6 +8,7 @@ mod debug_capture;
 mod websocket;
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,128 @@ const IMAGE_OMISSION_MARKER: &str =
 /// Maximum distinct provider output positions accepted in one bounded attempt.
 const MAX_OUTPUT_ITEMS: u32 = 1024;
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Append-only buffer and scan cursor for one HTTP/SSE response.
+#[derive(Default)]
+struct SseLineBuffer {
+    /// Bytes not yet discarded after complete-line processing.
+    bytes: Vec<u8>,
+    /// First byte not yet inspected for a newline.
+    scan_cursor: usize,
+    /// Prefix ending after the final complete line returned to the parser.
+    line_start: usize,
+    /// Number of bytes inspected by newline discovery in tests.
+    #[cfg(test)]
+    inspected_bytes: usize,
+}
+
+/// Whether complete-line processing should continue through the current pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SseLineControl {
+    /// Parse the next complete line.
+    Continue,
+    /// Stop after the current line, such as after a terminal event.
+    Break,
+}
+
+impl SseLineBuffer {
+    /// Append a decoded response chunk without rescanning the retained
+    /// residual.
+    fn append(&mut self, chunk: &[u8]) {
+        self.bytes.extend_from_slice(chunk);
+    }
+
+    /// Return the next complete line as a content range without allocating
+    /// provider-controlled per-line metadata.
+    fn next_complete_line(&mut self) -> Option<Range<usize>> {
+        let line_start = self.consumed();
+        for index in self.scan_cursor..self.bytes.len() {
+            #[cfg(test)]
+            {
+                self.inspected_bytes += 1;
+            }
+            if self.bytes[index] != b'\n' {
+                continue;
+            }
+            self.scan_cursor = index + 1;
+            self.line_start = index + 1;
+            let mut content_end = index;
+            while line_start < content_end && self.bytes[content_end - 1] == b'\r' {
+                content_end -= 1;
+            }
+            return Some(line_start..content_end);
+        }
+        self.scan_cursor = self.bytes.len();
+        None
+    }
+
+    /// Validate the incomplete line retained after complete-line processing.
+    fn validate_residual(&self) -> Result<(), Error> {
+        if MAX_EVENT_BYTES < self.bytes.len().saturating_sub(self.consumed()) {
+            return Err(Error::StreamFailure);
+        }
+        Ok(())
+    }
+
+    /// Borrow bytes retained for the current parsing pass.
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Discard the parsed prefix once after all complete lines have been
+    /// applied.
+    fn compact(&mut self) {
+        let consumed = self.consumed();
+        if consumed == 0 {
+            return;
+        }
+        self.bytes.drain(..consumed);
+        self.scan_cursor -= consumed;
+        self.line_start = 0;
+    }
+
+    /// Return the prefix ending after the final complete line.
+    fn consumed(&self) -> usize {
+        self.line_start
+    }
+
+    /// Return deterministic newline-discovery work for scaling tests.
+    #[cfg(test)]
+    fn inspected_bytes(&self) -> usize {
+        self.inspected_bytes
+    }
+}
+
+/// Decode, validate, and apply complete lines in wire order, then compact once.
+fn process_complete_sse_lines(
+    pending: &mut SseLineBuffer,
+    mut apply: impl FnMut(&str) -> Result<SseLineControl, Error>,
+) -> Result<SseLineControl, Error> {
+    let mut control = SseLineControl::Continue;
+    while let Some(range) = pending.next_complete_line() {
+        let line = String::from_utf8_lossy(&pending.bytes()[range]);
+        if MAX_EVENT_BYTES < line.len() {
+            pending.compact();
+            return Err(Error::StreamFailure);
+        }
+        match apply(&line) {
+            Ok(SseLineControl::Continue) => {}
+            Ok(SseLineControl::Break) => {
+                control = SseLineControl::Break;
+                break;
+            }
+            Err(error) => {
+                pending.compact();
+                return Err(error);
+            }
+        }
+    }
+    pending.compact();
+    if control == SseLineControl::Continue {
+        pending.validate_residual()?;
+    }
+    Ok(control)
+}
 
 /// Wire transport selected explicitly by a public Responses profile.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -1535,7 +1658,7 @@ async fn stream_sse(
         debug_capture,
         ..Default::default()
     };
-    let mut pending = Vec::new();
+    let mut pending = SseLineBuffer::default();
     let mut deadlines = deadlines::StreamDeadlines::new(Instant::now());
     loop {
         if is_canceled() {
@@ -1572,37 +1695,27 @@ async fn stream_sse(
         if MAX_RESPONSE_BYTES < state.bytes {
             return Err((Error::StreamFailure, state.progress()));
         }
-        pending.extend_from_slice(&chunk);
-        if MAX_EVENT_BYTES < pending.len() {
-            return Err((Error::StreamFailure, state.progress()));
-        }
-        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
-            let mut line = pending.drain(..=newline).collect::<Vec<_>>();
-            while matches!(line.last(), Some(b'\r' | b'\n')) {
-                line.pop();
-            }
-            let line = String::from_utf8_lossy(&line);
-            if MAX_EVENT_BYTES < line.len() {
-                return Err((Error::StreamFailure, state.progress()));
-            }
+        pending.append(&chunk);
+        let control = process_complete_sse_lines(&mut pending, |line| {
             if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
                 if data == "[DONE]" {
-                    state
-                        .terminalize()
-                        .map_err(|error| (error, state.progress()))?;
-                    return Ok(state);
+                    state.terminalize()?;
+                    return Ok(SseLineControl::Break);
                 }
-                let qualifying_progress = state
-                    .apply_event(data)
-                    .map_err(|error| (error, state.progress()))?;
+                let qualifying_progress = state.apply_event(data)?;
                 on_update(state.progress());
                 if qualifying_progress {
                     deadlines.renew_for_qualifying_progress(Instant::now());
                 }
                 if state.terminal {
-                    return Ok(state);
+                    return Ok(SseLineControl::Break);
                 }
             }
+            Ok(SseLineControl::Continue)
+        })
+        .map_err(|error| (error, state.progress()))?;
+        if control == SseLineControl::Break {
+            return Ok(state);
         }
     }
 }

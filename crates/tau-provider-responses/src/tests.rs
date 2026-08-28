@@ -2595,6 +2595,161 @@ fn compressed_sse_line_uses_decoded_limits_and_statistics() {
     assert!(MAX_EVENT_BYTES < progress.response_bytes_received as usize);
 }
 
+/// Complete lines must apply in wire order so a later line whose lossy UTF-8
+/// projection exceeds the cap cannot erase an earlier semantic progress update.
+#[test]
+fn sse_later_lossy_over_limit_line_preserves_earlier_progress() {
+    let mut body =
+        br#"data: {"type":"response.output_text.delta","output_index":0,"delta":"accepted"}
+"#
+        .to_vec();
+    body.extend(std::iter::repeat_n(b'\xff', MAX_EVENT_BYTES / 3 + 1));
+    body.push(b'\n');
+    assert!(body.len() < MAX_EVENT_BYTES);
+    let mut pending = SseLineBuffer::default();
+    pending.append(&body);
+    let mut state = State::default();
+    let mut update_count = 0;
+
+    let error = process_complete_sse_lines(&mut pending, |line| {
+        if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
+            state.apply_event(data)?;
+            update_count += 1;
+        }
+        Ok(SseLineControl::Continue)
+    })
+    .expect_err("later lossy-over-limit line must reject the parser pass");
+
+    assert!(matches!(error, Error::StreamFailure));
+    assert_eq!(update_count, 1);
+    let progress = state.progress();
+    assert!(progress.has_timed_semantic_output);
+    assert!(matches!(
+        progress.output_items.as_slice(),
+        [AttemptOutputItem {
+            item: ContextItem::Message(message),
+            ..
+        }] if message.content == vec![ContentPart::Text {
+            text: "accepted".to_owned(),
+        }]
+    ));
+}
+
+/// The residual SSE-line bound accepts exactly one MiB before any newline
+/// arrives, preserving the existing inclusive boundary.
+#[test]
+fn sse_line_buffer_accepts_exact_limit_residual() {
+    let mut pending = SseLineBuffer::default();
+    pending.append(&vec![b'x'; MAX_EVENT_BYTES]);
+
+    assert!(pending.next_complete_line().is_none());
+    pending
+        .validate_residual()
+        .expect("exact-limit residual must be accepted");
+
+    assert_eq!(pending.consumed(), 0);
+}
+
+/// One byte beyond the residual SSE-line bound must fail before another chunk
+/// can grow the unterminated provider-controlled line.
+#[test]
+fn sse_line_buffer_rejects_residual_over_limit() {
+    let mut pending = SseLineBuffer::default();
+    pending.append(&vec![b'x'; MAX_EVENT_BYTES + 1]);
+
+    assert!(pending.next_complete_line().is_none());
+    let error = pending
+        .validate_residual()
+        .expect_err("cap-plus-one residual must be rejected");
+
+    assert!(matches!(error, Error::StreamFailure));
+}
+
+/// Complete-line validation excludes CR/LF framing and applies the existing
+/// limit to every newline-terminated line.
+#[test]
+fn sse_line_buffer_enforces_complete_line_limit() {
+    let mut exact = SseLineBuffer::default();
+    exact.append(&vec![b'x'; MAX_EVENT_BYTES]);
+    exact.append(b"\r\n");
+    let mut exact_lines = 0;
+    process_complete_sse_lines(&mut exact, |_| {
+        exact_lines += 1;
+        Ok(SseLineControl::Continue)
+    })
+    .expect("exact-limit complete line must be accepted");
+    assert_eq!(exact_lines, 1);
+
+    let mut oversized = SseLineBuffer::default();
+    oversized.append(&vec![b'x'; MAX_EVENT_BYTES + 1]);
+    oversized.append(b"\n");
+    let error = process_complete_sse_lines(&mut oversized, |_| Ok(SseLineControl::Continue))
+        .expect_err("cap-plus-one complete line must be rejected");
+    assert!(matches!(error, Error::StreamFailure));
+}
+
+/// Aggregate buffered bytes may exceed the per-line cap when every complete
+/// line remains independently valid.
+#[test]
+fn sse_line_buffer_accepts_many_valid_aggregate_lines_over_limit() {
+    let line = b": keepalive\n";
+    let line_count = MAX_EVENT_BYTES / line.len() + 1;
+    let bytes = line.repeat(line_count);
+    assert!(MAX_EVENT_BYTES < bytes.len());
+    let mut pending = SseLineBuffer::default();
+    pending.append(&bytes);
+
+    let mut parsed = 0;
+    process_complete_sse_lines(&mut pending, |_| {
+        parsed += 1;
+        Ok(SseLineControl::Continue)
+    })
+    .expect("many independently valid lines must be accepted");
+
+    assert_eq!(parsed, line_count);
+    assert!(pending.bytes().is_empty());
+}
+
+/// Byte-at-a-time appends inspect each byte exactly once, and doubling the
+/// workload doubles newline-discovery work instead of producing quadratic work.
+#[test]
+fn sse_line_buffer_cursor_work_scales_linearly() {
+    fn inspected_for(payload_len: usize) -> usize {
+        let mut pending = SseLineBuffer::default();
+        for byte in std::iter::repeat_n(b'x', payload_len).chain(std::iter::once(b'\n')) {
+            pending.append(&[byte]);
+            while pending.next_complete_line().is_some() {}
+            pending
+                .validate_residual()
+                .expect("sub-limit byte-at-a-time line must be accepted");
+            pending.compact();
+        }
+        pending.inspected_bytes()
+    }
+
+    let small = inspected_for(4 * 1024);
+    let large = inspected_for(8 * 1024);
+    assert_eq!(small, 4 * 1024 + 1);
+    assert_eq!(large, 8 * 1024 + 1);
+    assert_eq!(large - 1, 2 * (small - 1));
+
+    fn inspected_blank_lines(line_count: usize) -> usize {
+        let mut pending = SseLineBuffer::default();
+        pending.append(&vec![b'\n'; line_count]);
+        let mut parsed = 0;
+        while pending.next_complete_line().is_some() {
+            parsed += 1;
+        }
+        assert_eq!(parsed, line_count);
+        pending.inspected_bytes()
+    }
+
+    let small_lines = inspected_blank_lines(4 * 1024);
+    let large_lines = inspected_blank_lines(8 * 1024);
+    assert_eq!(small_lines, 4 * 1024);
+    assert_eq!(large_lines, 2 * small_lines);
+}
+
 fn minimal_prompt() -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
         agent_prompt_id: "responses-test".parse().expect("prompt id"),
