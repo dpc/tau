@@ -1119,6 +1119,52 @@ fn local_summary_compaction_is_an_ordinary_cache_aligned_prefix() {
     assert!(wire.contains("data:image/png;base64,CxYh"));
 }
 
+/// Historical-prefix admission uses only exact bytes: equality is accepted and
+/// the same prefix is rejected when the independent byte cap decreases by one.
+#[test]
+fn local_summary_prefix_byte_cap_accepts_equality_and_rejects_plus_one() {
+    let mut created = prompt();
+    created.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    created
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![ContextItem::CompactionTrigger],
+            },
+        ));
+    let exact =
+        tau_provider::local_summary_compaction::historical_prefix_json_bytes(&created.context)
+            .expect("standalone prompt has a measurable historical prefix");
+    let config_with_cap = |cap| {
+        let mut config = resolved_provider(&provider());
+        config.local_summary_compaction = LocalSummaryCompactionConfig::new(
+            NonZeroU64::new(8_192).expect("positive token context"),
+            8_192,
+            NonZeroU64::new(cap).expect("positive byte cap"),
+            NonZeroU32::new(321).expect("positive token output cap"),
+            NonZeroU64::new(2_048).expect("positive byte output cap"),
+        );
+        config
+    };
+
+    try_build_request(
+        &config_with_cap(exact.get()),
+        &provider().models[0],
+        &created,
+    )
+    .expect("exact byte-cap equality is admitted");
+    let error = match try_build_request(
+        &config_with_cap(exact.get() - 1),
+        &provider().models[0],
+        &created,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("one byte above the independent cap must be rejected"),
+    };
+    assert!(matches!(error, LlmError::InvalidCompaction(_)));
+}
+
 fn image_tool_results_block(call_id: &str, data: impl Into<Arc<[u8]>>) -> tau_proto::ContextBlock {
     tau_proto::ContextBlock::ToolResults(tau_proto::ToolResultsBlock {
         items: vec![tau_proto::ToolResultItem {

@@ -86,7 +86,8 @@ fn standalone_prefix_byte_fit_matches_fully_materialized_context() {
 }
 
 /// The xk8g incident's 164,126-token ordinary report must not cross a
-/// 200,000-token policy merely because a large unmeasured suffix exists.
+/// 200,000-token policy merely because its normalized replay has more than 1.6
+/// MiB of unmeasured structural suffix.
 #[test]
 fn provider_report_below_threshold_never_schedules_from_suffix_size() {
     let td = TempDir::new().expect("tempdir");
@@ -103,6 +104,25 @@ fn provider_report_below_threshold_never_schedules_from_suffix_size() {
         info.supports_standalone_compaction = true;
         info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(u64::MAX));
         establish_exact_provider_usage(&mut h, &cid, 164_126);
+        // Slightly exceed xk8g's exact 1,673,640-byte suffix so the fixture
+        // also clears the binary 1.6 MiB boundary.
+        const MINIMUM_REPLAY_BYTES: usize = 1_677_722;
+        append_byte_fit_text(&mut h, &cid, "x".repeat(MINIMUM_REPLAY_BYTES));
+        let agent_id = durable_agent_id_for_conversation(&h, &cid);
+        let tree = h
+            .session_runtime
+            .agent_store
+            .agent(&agent_id)
+            .expect("agent tree");
+        let suffix_heavy_context =
+            crate::prompt::assemble_prompt_context_from(tree, tree.head()).context;
+        assert!(
+            serde_json::to_vec(&suffix_heavy_context)
+                .expect("serialize normalized replay")
+                .len()
+                >= MINIMUM_REPLAY_BYTES,
+            "the causal oracle must retain more than 1.6 MiB of exact byte evidence"
+        );
         h.provider_runtime
             .model_info
             .get_mut(&"test/model".into())
@@ -113,6 +133,14 @@ fn provider_report_below_threshold_never_schedules_from_suffix_size() {
             event_log_count(&h, |event| matches!(
                 event,
                 Event::AgentStandaloneCompactionStarted(_)
+            )),
+            0
+        );
+        assert_eq!(
+            event_log_count(&h, |event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
             )),
             0
         );
@@ -165,6 +193,70 @@ fn provider_report_below_threshold_never_schedules_from_suffix_size() {
         event_log_events(&h)
             .iter()
             .all(|event| !matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Exact provider input at the token threshold must authorize one proactive
+/// transaction even when the complete durable transcript is tiny in bytes.
+#[test]
+fn provider_report_at_threshold_schedules_once_despite_tiny_transcript() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(u64::MAX));
+    let cid = ensure_test_user_agent(&mut h);
+    let evidence_prompt = establish_exact_provider_usage(&mut h, &cid, 200_000);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let tree = h
+        .session_runtime
+        .agent_store
+        .agent(&agent_id)
+        .expect("agent tree");
+    let context = crate::prompt::assemble_prompt_context_from(tree, tree.head()).context;
+    assert!(
+        serde_json::to_vec(&context)
+            .expect("serialize transcript")
+            .len()
+            < 16_384,
+        "the reverse-asymmetry oracle requires bytes far below the token threshold"
+    );
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .standalone_compaction_threshold = Some(tau_proto::TokenCount::new(200_000));
+
+    assert!(h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+    let starts: Vec<_> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), 1);
+    assert!(matches!(
+        &starts[0].trigger,
+        tau_proto::StandaloneCompactionTrigger::AutomaticThresholdEvidence { evidence }
+            if evidence.provider_prompt_id == evidence_prompt
+                && evidence.provider_input_tokens == tau_proto::TokenCount::new(200_000)
+                && evidence.threshold == tau_proto::TokenCount::new(200_000)
+    ));
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::AgentPromptCreated(prompt)
+                if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+        )),
+        1
     );
     h.shutdown().expect("shutdown");
 }
