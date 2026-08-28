@@ -631,6 +631,39 @@ impl WsConn {
         on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<WsTurnResult, LlmError> {
+        self.run_response_with_capture_submit(
+            config,
+            agent_prompt_id,
+            request,
+            correlation,
+            recording_stream,
+            response_mode,
+            abort,
+            on_dispatched,
+            on_update,
+            tau_provider::debug_capture_writer::submit_provider_debug_capture,
+        )
+    }
+
+    /// Runs one response with an injected debug-capture sink for deterministic
+    /// transport-boundary verification.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the injected sink observes the existing transport lifecycle"
+    )]
+    fn run_response_with_capture_submit(
+        &mut self,
+        config: &ResponsesConfig,
+        agent_prompt_id: &str,
+        request: &PromptPayload<'_>,
+        correlation: Option<crate::attempt_failure::DispatchCorrelation>,
+        recording_stream: Option<&mut ProviderRawEventStream>,
+        response_mode: ResponseMode,
+        abort: &mut impl TurnAbort,
+        on_dispatched: &mut impl FnMut(Instant),
+        on_update: &mut impl FnMut(&StreamState),
+        capture_submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
+    ) -> Result<WsTurnResult, LlmError> {
         let mut envelope =
             build_ws_envelope(config, request, self.cached_response_anchor.as_ref(), None);
         let eligible_previous_input_tokens = envelope
@@ -650,13 +683,14 @@ impl WsConn {
             }
         }
         let request_body = recorded_request_body(&envelope, recording_stream.is_some())?;
-        super::maybe_debug_submit_provider_request(
+        super::maybe_debug_submit_provider_request_with(
             agent_prompt_id,
             config,
             request,
             tau_proto::ProviderBackendTransport::Websocket,
             correlation,
             &envelope,
+            capture_submit,
         );
         let mut state = self.run_envelope_with_timeouts(
             agent_prompt_id,
@@ -769,22 +803,20 @@ impl WsConn {
         on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<StreamState, LlmError> {
-        if abort.is_aborted() {
-            return Err(LlmError::Canceled);
-        }
-        let text = serde_json::to_string(&envelope).map_err(LlmError::Json)?;
-        on_dispatched(Instant::now());
-        self.outbound_tx
-            .send(WsCommand::SendText(text))
-            .map_err(|_| {
-                LlmError::HttpStatus(0, "stream error: ws writer task gone".to_owned()).observed(
-                    path_crate_attempt_failure::AttemptFailureEvidence::transport(
-                        path_crate_attempt_failure::TransportPhase::Send,
-                        true,
-                        path_crate_attempt_failure::TransportFailureKind::Send,
-                    ),
-                )
-            })?;
+        serialize_and_enqueue_envelope(&envelope, abort, on_dispatched, |text| {
+            self.outbound_tx
+                .send(WsCommand::SendText(text))
+                .map_err(|_| {
+                    LlmError::HttpStatus(0, "stream error: ws writer task gone".to_owned())
+                        .observed(
+                            path_crate_attempt_failure::AttemptFailureEvidence::transport(
+                                path_crate_attempt_failure::TransportPhase::Send,
+                                true,
+                                path_crate_attempt_failure::TransportFailureKind::Send,
+                            ),
+                        )
+                })
+        })?;
 
         let mut state = StreamState::new();
         let mut compact_shape =
@@ -1155,6 +1187,26 @@ where
         result
     }
 }
+
+/// Serializes one Responses envelope and hands it to the writer only while the
+/// turn still owns cancellation authority.
+fn serialize_and_enqueue_envelope(
+    envelope: &impl serde::Serialize,
+    abort: &mut impl TurnAbort,
+    on_dispatched: &mut impl FnMut(Instant),
+    enqueue: impl FnOnce(String) -> Result<(), LlmError>,
+) -> Result<(), LlmError> {
+    if abort.is_aborted() {
+        return Err(LlmError::Canceled);
+    }
+    let text = serde_json::to_string(envelope).map_err(LlmError::Json)?;
+    if abort.is_aborted() {
+        return Err(LlmError::Canceled);
+    }
+    on_dispatched(Instant::now());
+    enqueue(text)
+}
+
 impl Drop for WsConn {
     fn drop(&mut self) {
         // Stops the two background tasks at the next await point —

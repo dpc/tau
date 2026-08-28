@@ -11,8 +11,9 @@ mod scripted_tcp_server;
 mod test_ca;
 mod test_server;
 
+use std::cell::RefCell;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
@@ -266,6 +267,250 @@ impl TurnAbort for CapturingAbort {
 struct TestAbortWaker;
 
 impl TurnAbortWaker for TestAbortWaker {}
+
+/// Shared-flag abort source used to place cancellation exactly around request
+/// serialization.
+struct FlagAbort {
+    /// Authoritative cancellation state.
+    aborted: Arc<AtomicBool>,
+}
+
+impl TurnAbort for FlagAbort {
+    fn is_aborted(&mut self) -> bool {
+        self.aborted.load(Ordering::SeqCst)
+    }
+
+    fn register_waker(
+        &mut self,
+        _waker: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Box<dyn TurnAbortWaker> {
+        Box::new(TestAbortWaker)
+    }
+}
+
+/// Test envelope that records serialization and can cancel its owning turn
+/// before serialization returns.
+struct CancellationSeamEnvelope {
+    /// Number of serializer entries.
+    serialization_count: Arc<AtomicUsize>,
+    /// Cancellation authority shared with the abort source.
+    aborted: Arc<AtomicBool>,
+    /// Whether serialization should publish cancellation.
+    cancel_during_serialization: bool,
+}
+
+impl serde::Serialize for CancellationSeamEnvelope {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.serialization_count.fetch_add(1, Ordering::SeqCst);
+        if self.cancel_during_serialization {
+            self.aborted.store(true, Ordering::SeqCst);
+        }
+        serializer.serialize_str("exact-wire")
+    }
+}
+
+/// A turn canceled before request serialization must retain typed cancellation
+/// policy and perform neither serialization, dispatch publication, nor enqueue.
+#[test]
+fn websocket_enqueue_rejects_cancellation_before_serialization() {
+    let aborted = Arc::new(AtomicBool::new(true));
+    let serialization_count = Arc::new(AtomicUsize::new(0));
+    let envelope = CancellationSeamEnvelope {
+        serialization_count: Arc::clone(&serialization_count),
+        aborted: Arc::clone(&aborted),
+        cancel_during_serialization: false,
+    };
+    let mut abort = FlagAbort { aborted };
+    let mut dispatched = false;
+    let mut enqueued = None;
+
+    let error =
+        serialize_and_enqueue_envelope(&envelope, &mut abort, &mut |_| dispatched = true, |text| {
+            enqueued = Some(text);
+            Ok(())
+        })
+        .expect_err("cancellation must prevent request build");
+
+    assert!(matches!(error, LlmError::Canceled));
+    assert_eq!(error.retry_decision(), None);
+    assert_eq!(serialization_count.load(Ordering::SeqCst), 0);
+    assert!(!dispatched);
+    assert_eq!(enqueued, None);
+}
+
+/// Cancellation published by request serialization must win at the final
+/// pre-enqueue check without changing terminal or retry classification.
+#[test]
+fn websocket_enqueue_rechecks_cancellation_after_serialization() {
+    let aborted = Arc::new(AtomicBool::new(false));
+    let serialization_count = Arc::new(AtomicUsize::new(0));
+    let envelope = CancellationSeamEnvelope {
+        serialization_count: Arc::clone(&serialization_count),
+        aborted: Arc::clone(&aborted),
+        cancel_during_serialization: true,
+    };
+    let mut abort = FlagAbort { aborted };
+    let mut dispatched = false;
+    let mut enqueued = None;
+
+    let error =
+        serialize_and_enqueue_envelope(&envelope, &mut abort, &mut |_| dispatched = true, |text| {
+            enqueued = Some(text);
+            Ok(())
+        })
+        .expect_err("post-serialization cancellation must prevent enqueue");
+
+    assert!(matches!(error, LlmError::Canceled));
+    assert_eq!(error.retry_decision(), None);
+    assert_eq!(serialization_count.load(Ordering::SeqCst), 1);
+    assert!(!dispatched);
+    assert_eq!(enqueued, None);
+}
+
+/// A live turn must preserve the serializer's exact bytes and publish dispatch
+/// exactly once immediately before the sole enqueue.
+#[test]
+fn websocket_enqueue_preserves_live_request_bytes_and_order() {
+    let aborted = Arc::new(AtomicBool::new(false));
+    let serialization_count = Arc::new(AtomicUsize::new(0));
+    let envelope = CancellationSeamEnvelope {
+        serialization_count: Arc::clone(&serialization_count),
+        aborted: Arc::clone(&aborted),
+        cancel_during_serialization: false,
+    };
+    let mut abort = FlagAbort { aborted };
+    let events = RefCell::new(Vec::new());
+
+    serialize_and_enqueue_envelope(
+        &envelope,
+        &mut abort,
+        &mut |_| events.borrow_mut().push(("dispatch", String::new())),
+        |text| {
+            events.borrow_mut().push(("enqueue", text));
+            Ok(())
+        },
+    )
+    .expect("live request must enqueue");
+
+    assert_eq!(serialization_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        events.into_inner(),
+        [
+            ("dispatch", String::new()),
+            ("enqueue", "\"exact-wire\"".to_owned()),
+        ]
+    );
+}
+
+/// The production response path must preserve correlated debug capture while a
+/// post-build cancellation suppresses both dispatch publication and the actual
+/// writer-channel enqueue.
+#[test]
+fn websocket_response_cancellation_after_build_preserves_capture_without_enqueue() {
+    let (mut conn, _inbound_tx, mut outbound_rx) = test_ws_conn();
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let mut request = fixture.payload();
+    request.debug_provider_requests = true;
+    let mut correlation =
+        path_crate_attempt_failure::AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(7));
+    let dispatch = correlation.next_dispatch();
+    let mut abort = AbortAfterChecks { remaining_false: 1 };
+    let mut capture = None;
+    let mut dispatched = false;
+
+    let error = match conn.run_response_with_capture_submit(
+        &config,
+        "ap-cancel-after-build",
+        &request,
+        Some(dispatch),
+        None,
+        ResponseMode::Ordinary,
+        &mut abort,
+        &mut |_| dispatched = true,
+        &mut |_| {},
+        |submitted| capture = Some(submitted),
+    ) {
+        Ok(_) => panic!("post-build cancellation must prevent enqueue"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, LlmError::Canceled));
+    assert_eq!(error.retry_decision(), None);
+    assert!(!dispatched);
+    assert!(matches!(
+        outbound_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    let capture = capture.expect("debug capture remains at its existing boundary");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(capture.json()).expect("capture metadata");
+    assert_eq!(metadata["logical_attempt"], 7);
+    assert_eq!(metadata["wire_dispatch_index"], 1);
+}
+
+/// The production response path must submit correlated debug capture, publish
+/// dispatch before the actual enqueue, and preserve the exact live wire bytes.
+#[test]
+fn websocket_response_live_path_preserves_capture_enqueue_bytes_and_order() {
+    let (mut conn, inbound_tx, mut outbound_rx) = test_ws_conn();
+    inbound_tx
+        .send_blocking(InboundEvent::Event {
+            text: r#"{"type":"response.completed","response":{"id":"resp-live"}}"#
+                .to_owned()
+                .into(),
+        })
+        .expect("queue completion");
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let mut request = fixture.payload();
+    request.debug_provider_requests = true;
+    let expected = serde_json::to_string(&build_ws_envelope(&config, &request, None, None))
+        .expect("wire JSON");
+    let mut correlation =
+        path_crate_attempt_failure::AttemptCaptureCorrelation::new(crate::LogicalAttempt::new(9));
+    let dispatch = correlation.next_dispatch();
+    let events = RefCell::new(Vec::new());
+    let mut abort = NeverAbort;
+
+    conn.run_response_with_capture_submit(
+        &config,
+        "ap-live-enqueue",
+        &request,
+        Some(dispatch),
+        None,
+        ResponseMode::Ordinary,
+        &mut abort,
+        &mut |_| {
+            assert!(matches!(
+                outbound_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            events.borrow_mut().push("dispatch");
+        },
+        &mut |_| {},
+        |capture| {
+            let metadata: serde_json::Value =
+                serde_json::from_slice(capture.json()).expect("capture metadata");
+            assert_eq!(metadata["logical_attempt"], 9);
+            assert_eq!(metadata["wire_dispatch_index"], 1);
+            events.borrow_mut().push("capture");
+        },
+    )
+    .expect("live response completes");
+
+    let WsCommand::SendText(enqueued) = outbound_rx.try_recv().expect("writer enqueue");
+    assert_eq!(enqueued, expected);
+    events.borrow_mut().push("enqueue");
+    assert_eq!(
+        events.into_inner(),
+        ["capture", "dispatch", "enqueue"],
+        "capture policy and dispatch-before-enqueue ordering must not drift"
+    );
+}
 
 /// Synthetic abort source that becomes canceled after a fixed number of checks.
 struct AbortAfterChecks {

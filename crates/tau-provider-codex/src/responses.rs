@@ -313,6 +313,27 @@ pub(super) fn maybe_debug_submit_provider_request(
     correlation: Option<crate::attempt_failure::DispatchCorrelation>,
     body: &impl Serialize,
 ) {
+    maybe_debug_submit_provider_request_with(
+        agent_prompt_id,
+        config,
+        request,
+        transport,
+        correlation,
+        body,
+        tau_provider::debug_capture_writer::submit_provider_debug_capture,
+    );
+}
+
+/// Applies debug-capture policy and submits through an injected sink.
+pub(super) fn maybe_debug_submit_provider_request_with(
+    agent_prompt_id: &str,
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+    transport: tau_proto::ProviderBackendTransport,
+    correlation: Option<crate::attempt_failure::DispatchCorrelation>,
+    body: &impl Serialize,
+    submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
+) {
     if !request.debug_provider_requests {
         return;
     }
@@ -323,7 +344,7 @@ pub(super) fn maybe_debug_submit_provider_request(
         transport,
         correlation,
         body,
-        tau_provider::debug_capture_writer::submit_provider_debug_capture,
+        submit,
     ) {
         tracing::warn!(
             target: crate::LOG_TARGET,
