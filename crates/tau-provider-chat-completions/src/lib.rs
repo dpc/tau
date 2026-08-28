@@ -1148,7 +1148,16 @@ fn take_complete_sse_lines(pending: &mut Vec<u8>) -> Result<Vec<u8>, LlmError> {
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |index| index + 1);
-    if MAX_SSE_LINE_BYTES < pending.len().saturating_sub(complete_len) {
+    let has_oversized_complete_line = pending[..complete_len]
+        .split_inclusive(|byte| *byte == b'\n')
+        .any(|line| {
+            let line = line.strip_suffix(b"\n").unwrap_or(line);
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            MAX_SSE_LINE_BYTES < line.len()
+        });
+    if has_oversized_complete_line
+        || MAX_SSE_LINE_BYTES < pending.len().saturating_sub(complete_len)
+    {
         return Err(LlmError::Io(path_std_io::Error::new(
             path_std_io::ErrorKind::InvalidData,
             "provider SSE line exceeds limit",

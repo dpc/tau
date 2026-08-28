@@ -692,6 +692,53 @@ fn chat_stream_body_rejects_oversized_partial_line() {
     ));
 }
 
+/// Ensures the SSE line limit excludes complete CRLF framing and accepts
+/// content at the exact existing byte boundary.
+#[test]
+fn complete_sse_line_accepts_exact_byte_limit() {
+    let mut pending = vec![b'x'; MAX_SSE_LINE_BYTES];
+    pending.extend_from_slice(b"\r\n");
+
+    let complete =
+        take_complete_sse_lines(&mut pending).expect("exact-limit complete line must be accepted");
+
+    assert_eq!(complete.len(), MAX_SSE_LINE_BYTES + 2);
+    assert!(pending.is_empty());
+}
+
+/// Ensures CRLF-terminating an oversized pending line cannot bypass the
+/// existing SSE line limit by moving those bytes into the complete prefix.
+#[test]
+fn complete_sse_line_rejects_byte_over_limit() {
+    let mut pending = vec![b'x'; MAX_SSE_LINE_BYTES + 1];
+    pending.extend_from_slice(b"\r\n");
+
+    let error = take_complete_sse_lines(&mut pending)
+        .expect_err("oversized complete line must be rejected");
+
+    assert!(matches!(
+        error,
+        LlmError::Io(error) if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+}
+
+/// Ensures every line in a multi-line complete prefix is checked rather than
+/// only the final incomplete suffix after the last newline.
+#[test]
+fn complete_sse_lines_reject_oversized_nonfinal_line() {
+    let mut pending = b"data: {}\n".to_vec();
+    pending.extend(std::iter::repeat_n(b'x', MAX_SSE_LINE_BYTES + 1));
+    pending.extend_from_slice(b"\ndata: {}\npartial");
+
+    let error = take_complete_sse_lines(&mut pending)
+        .expect_err("oversized line inside complete prefix must be rejected");
+
+    assert!(matches!(
+        error,
+        LlmError::Io(error) if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+}
+
 /// Ensures one decoded HTTP chunk may contain more than one MiB of complete,
 /// individually bounded SSE lines without tripping the residual-line bound.
 #[test]
