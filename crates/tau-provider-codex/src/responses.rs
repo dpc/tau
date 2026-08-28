@@ -4,6 +4,7 @@
 //! retained only for the unary compact operation.
 #![allow(dead_code)]
 
+mod codex_response_wake_generation;
 mod compact_failure_capture;
 mod compact_stream;
 
@@ -21,6 +22,7 @@ use tau_proto::{
 use tau_provider::debug_capture_writer as path_tau_provider_debug_capture_writer;
 use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync};
 
+use self::codex_response_wake_generation::CodexResponseWakeGeneration;
 use crate::canonical_identifier::CanonicalIdentifierFamily;
 use crate::common::{
     LlmError, OutputItemAccumulator, PromptPayload, StreamState, cbor_to_json, effort_wire,
@@ -57,7 +59,7 @@ const MAX_COMPACT_SUCCESS_BODY_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Default)]
 struct CompactTransportState {
     active: usize,
-    wake_generation: u64,
+    wake_generation: CodexResponseWakeGeneration,
 }
 
 struct CompactTransportPermit;
@@ -67,7 +69,7 @@ impl Drop for CompactTransportPermit {
         let (state, changed) = compact_transport_gate();
         if let Ok(mut state) = state.lock() {
             state.active = state.active.saturating_sub(1);
-            state.wake_generation = state.wake_generation.wrapping_add(1);
+            state.wake_generation.advance();
             changed.notify_all();
         }
     }
@@ -94,7 +96,7 @@ fn acquire_compact_transport(
     let _abort_waker = abort.register_waker(path_std_sync::Arc::new(|| {
         let (state, changed) = compact_transport_gate();
         if let Ok(mut state) = state.lock() {
-            state.wake_generation = state.wake_generation.wrapping_add(1);
+            state.wake_generation.advance();
             changed.notify_all();
         }
     }));

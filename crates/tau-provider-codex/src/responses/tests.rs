@@ -18,7 +18,24 @@ use tau_proto::{
     ToolResultItem, ToolResultStatus,
 };
 
+use super::codex_response_wake_generation::CodexResponseWakeGeneration;
 use super::*;
+
+/// Ensures the compact transport wake authority retains its zero initial value
+/// and wrapping overflow policy, so a wake at the scalar maximum remains
+/// distinguishable from an unrelated asynchronous generation domain.
+#[test]
+fn codex_response_wake_generation_starts_at_zero_and_wraps() {
+    let mut generation = CodexResponseWakeGeneration::default();
+    assert_eq!(generation, CodexResponseWakeGeneration::new(0));
+
+    generation.advance();
+    assert_eq!(generation, CodexResponseWakeGeneration::new(1));
+
+    let mut maximum = CodexResponseWakeGeneration::new(u64::MAX);
+    maximum.advance();
+    assert_eq!(maximum, CodexResponseWakeGeneration::default());
+}
 
 /// Private local-compaction envelopes are harness control output and can never
 /// become a Codex Responses input item.
