@@ -17,6 +17,7 @@
 //! [`Harness::dispatch_blocked_for`] is the predicate the rest of the harness
 //! uses to decide whether to dispatch immediately or queue.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use tau_proto::{AgentId, Event, SessionId};
@@ -334,6 +335,16 @@ impl Harness {
     /// models, this drain rejects queued prompts and retires selected-branch
     /// message wakes without creating provider work.
     pub(crate) fn try_advance_queue(&mut self) {
+        self.try_advance_queue_for(None);
+    }
+
+    /// Advances only the exact agents whose admission-rejected activations
+    /// became capacity-ready.
+    pub(super) fn try_advance_capacity_rejected_agents(&mut self, agents: &HashSet<AgentId>) {
+        self.try_advance_queue_for(Some(agents));
+    }
+
+    fn try_advance_queue_for(&mut self, allowed: Option<&HashSet<AgentId>>) {
         if !self.session_runtime.turn_state.is_idle()
             || !self.extensions_all_ready()
             || self.extensions.pending_connects != 0
@@ -345,21 +356,22 @@ impl Harness {
                 .agent_runtime
                 .agent_registry
                 .agents
-                .values()
-                .any(|agent| {
-                    matches!(
-                        agent.turn.output_length_continuation,
-                        path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
-                    )
+                .iter()
+                .any(|(agent_id, agent)| {
+                    allowed.is_none_or(|allowed| allowed.contains(agent_id))
+                        && matches!(
+                            agent.turn.output_length_continuation,
+                            path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
+                        )
                 });
             if self.config.selected_model.is_none()
                 && self.provider_runtime.model_info.is_empty()
                 && !has_captured_output_length_owner
             {
-                self.reject_runnable_activations_without_provider_models();
+                self.reject_runnable_activations_without_provider_models(allowed);
                 return;
             }
-            let Some(agent_id) = self.next_runnable_agent() else {
+            let Some(agent_id) = self.next_runnable_agent(allowed) else {
                 break;
             };
             let session_id = self
@@ -507,6 +519,15 @@ impl Harness {
                         },
                     ),
                 );
+                if allowed.is_some()
+                    || self
+                        .runtime_io
+                        .publication
+                        .capacity_rejected_activations
+                        .contains_key(&agent_id)
+                {
+                    return;
+                }
                 continue;
             }
 
@@ -585,26 +606,31 @@ impl Harness {
 
     /// Terminalize runnable prompt and message activations after provider
     /// startup has settled with no published models.
-    fn reject_runnable_activations_without_provider_models(&mut self) {
+    fn reject_runnable_activations_without_provider_models(
+        &mut self,
+        allowed: Option<&HashSet<AgentId>>,
+    ) {
         let runnable_agents = self
             .agent_runtime
             .agent_registry
             .agents
             .keys()
             .filter(|agent_id| {
-                self.agent_runtime
-                    .agent_registry
-                    .agents
-                    .get(*agent_id)
-                    .is_some_and(|agent| {
-                        agent
-                            .dispatch
-                            .pending_prompts
-                            .iter()
-                            .any(|prompt| !prompt.is_passive_background_completion())
-                            || agent.dispatch.pending_replay_activation
-                            || self.has_ready_message_wake_on_selected_branch(agent_id)
-                    })
+                allowed.is_none_or(|allowed| allowed.contains(*agent_id))
+                    && self
+                        .agent_runtime
+                        .agent_registry
+                        .agents
+                        .get(*agent_id)
+                        .is_some_and(|agent| {
+                            agent
+                                .dispatch
+                                .pending_prompts
+                                .iter()
+                                .any(|prompt| !prompt.is_passive_background_completion())
+                                || agent.dispatch.pending_replay_activation
+                                || self.has_ready_message_wake_on_selected_branch(agent_id)
+                        })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -672,20 +698,27 @@ impl Harness {
         }
     }
 
-    fn next_runnable_agent(&self) -> Option<AgentId> {
+    fn next_runnable_agent(&self, allowed: Option<&HashSet<AgentId>>) -> Option<AgentId> {
         let runnable = self
             .agent_runtime
             .agent_registry
             .agents
             .iter()
             .filter(|(agent_id, conv)| {
-                (conv
-                    .dispatch
-                    .pending_prompts
-                    .iter()
-                    .any(|prompt| !prompt.is_passive_background_completion())
-                    || self.has_ready_message_wake_on_selected_branch(agent_id)
-                    || conv.dispatch.pending_replay_activation)
+                allowed.is_none_or(|allowed| allowed.contains(*agent_id))
+                    && (allowed.is_some()
+                        || !self
+                            .runtime_io
+                            .publication
+                            .capacity_rejected_activations
+                            .contains_key(*agent_id))
+                    && (conv
+                        .dispatch
+                        .pending_prompts
+                        .iter()
+                        .any(|prompt| !prompt.is_passive_background_completion())
+                        || self.has_ready_message_wake_on_selected_branch(agent_id)
+                        || conv.dispatch.pending_replay_activation)
                     && matches!(conv.turn.turn_state, AgentTurnState::Idle)
                     && !conv.dispatch.terminating
                     && matches!(

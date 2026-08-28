@@ -107,7 +107,7 @@ impl Harness {
     }
     fn from_base_parts(parts: HarnessBaseParts) -> Self {
         let initial_session_id = parts.session_runtime.current_session_id.clone();
-        Self {
+        let harness = Self {
             runtime_io: parts.runtime_io,
             session_runtime: parts.session_runtime,
             config: parts.config,
@@ -159,7 +159,16 @@ impl Harness {
             peer_messaging: PeerMessagingState::default(),
             extensions: ExtensionRuntimeState::default(),
             provider_runtime: ProviderRuntimeState::new(parts.provider_cache_refresh),
+        };
+        if let Some(owner) = harness.session_runtime.persistence_owner.as_ref() {
+            let tx = harness.runtime_io.tx.clone();
+            owner.set_operational_wake(Arc::new(move || {
+                let _ = tx.send(HarnessEvent::Command(
+                    HarnessCommand::SemanticPersistenceProgress,
+                ));
+            }));
         }
+        harness
     }
     #[cfg(any(test, feature = "echo-agent"))]
     pub(crate) fn new_with_provider(

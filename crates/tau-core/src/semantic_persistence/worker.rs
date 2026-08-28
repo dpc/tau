@@ -104,6 +104,15 @@ impl FrameJob {
         }
     }
 
+    /// Removes the complete off-side replacement after the atomic swap drops
+    /// the superseded live projection.
+    pub(crate) fn release_staging_replacement(&mut self) {
+        self.reserved_bytes = self
+            .reserved_bytes
+            .checked_sub(self.charge.replacement)
+            .expect("replacement staging charge is part of the reservation");
+    }
+
     fn stream(&self) -> &StreamIdentity {
         &self.identity.stream
     }
@@ -1115,6 +1124,7 @@ fn transfer_or_release(shared: &Shared, mut job: FrameJob, debts: &mut VecDeque<
             .bytes
             .checked_sub(released_bytes)
             .expect("completed frame releases non-debt bytes exactly once");
+        super::owner::report_capacity_recovered(shared, &mut state);
     }
     let key = (job.stream(), job.generation());
     if let Some(existing) = debts
@@ -1439,6 +1449,7 @@ fn release_job(shared: &Shared, job: &FrameJob) {
         .bytes
         .checked_sub(job.reserved_bytes)
         .expect("terminal frame releases bytes exactly once");
+    super::owner::report_capacity_recovered(shared, &mut state);
     shared.wake.notify_all();
 }
 
@@ -1449,5 +1460,6 @@ fn release_debt_bytes(shared: &Shared, bytes: usize) {
         .bytes
         .checked_sub(bytes)
         .expect("debt releases transferred bytes exactly once");
+    super::owner::report_capacity_recovered(shared, &mut state);
     shared.wake.notify_all();
 }

@@ -9,6 +9,159 @@ use super::compaction_runtime_state::SuppressedStart;
 use super::*;
 
 impl Harness {
+    /// Drains content-free persistence diagnostics and retries exact retained
+    /// runtime publication owners only after worker capacity returns.
+    pub(super) fn observe_semantic_persistence_progress(&mut self) {
+        let Some(owner) = self.session_runtime.persistence_owner.as_ref() else {
+            return;
+        };
+        let status = owner.drain_operational_status();
+        for kind in [
+            tau_core::PersistenceFailureKind::Open,
+            tau_core::PersistenceFailureKind::Lock,
+            tau_core::PersistenceFailureKind::Write,
+            tau_core::PersistenceFailureKind::Rollback,
+            tau_core::PersistenceFailureKind::Collision,
+            tau_core::PersistenceFailureKind::GenerationFailed,
+            tau_core::PersistenceFailureKind::Sync,
+            tau_core::PersistenceFailureKind::WorkerExit,
+        ] {
+            let count = status
+                .failures
+                .iter()
+                .filter(|failure| failure.kind() == kind)
+                .count();
+            if count != 0 {
+                tracing::warn!(
+                    target: "tau_harness::semantic_persistence",
+                    failure = ?kind,
+                    count,
+                    frames = status.usage.frames,
+                    bytes = status.usage.bytes,
+                    streams = status.usage.streams,
+                    "semantic persistence worker failure"
+                );
+            }
+        }
+        if let Some(pressure) = status.capacity_full {
+            tracing::warn!(
+                target: "tau_harness::semantic_persistence",
+                reason = ?pressure.limit,
+                frames = pressure.usage.frames,
+                bytes = pressure.usage.bytes,
+                streams = pressure.usage.streams,
+                "semantic persistence capacity is full"
+            );
+        }
+        if let Some(usage) = status.recovered {
+            tracing::info!(
+                target: "tau_harness::semantic_persistence",
+                frames = usage.frames,
+                bytes = usage.bytes,
+                streams = usage.streams,
+                "semantic persistence capacity recovered; retrying retained publications"
+            );
+            let pending_finishes = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .iter()
+                .filter(|(_, agent)| {
+                    matches!(
+                        agent.turn.outer_turn,
+                        path_crate_agent::OuterTurnRuntimeState::FinishRetry(_)
+                    )
+                })
+                .map(|(cid, _)| cid.clone())
+                .collect::<Vec<_>>();
+            for cid in pending_finishes {
+                self.retry_outer_turn_finish(&cid);
+            }
+            if !self
+                .runtime_io
+                .publication
+                .capacity_rejected_activations
+                .is_empty()
+            {
+                self.retry_capacity_rejected_activations();
+            }
+        }
+        if let Some(usage) = status.drained {
+            tracing::info!(
+                target: "tau_harness::semantic_persistence",
+                frames = usage.frames,
+                bytes = usage.bytes,
+                streams = usage.streams,
+                "semantic persistence accepted-frame FIFO drained after recovery"
+            );
+        }
+    }
+
+    /// Retries only activation owners retained by a prior capacity rejection.
+    pub(super) fn retry_capacity_rejected_activations(&mut self) {
+        let retained =
+            std::mem::take(&mut self.runtime_io.publication.capacity_rejected_activations);
+        let mut current = HashMap::new();
+        for (cid, owner) in retained {
+            let owner_is_current = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(&cid)
+                .is_some_and(|agent| {
+                    let through = agent
+                        .identity
+                        .head
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                    let continuation = match &agent.turn.output_length_continuation {
+                        path_crate_agent::OutputLengthContinuationState::OwnerReady(dispatch) => {
+                            Some(&dispatch.plan.owner)
+                        }
+                        _ => None,
+                    };
+                    through == owner.through
+                        && continuation == owner.output_length_continuation.as_ref()
+                        && self
+                            .select_inference_dispatch(&cid, owner.activation_cut)
+                            .is_ok_and(|selection| {
+                                owner.model.as_ref() == Some(&selection.model)
+                                    && owner.operation == Some(selection.operation)
+                                    && owner.activation_cut == Some(selection.activation_cut)
+                            })
+                });
+            if owner_is_current {
+                current.insert(cid, owner);
+            }
+        }
+        self.runtime_io.publication.capacity_rejected_activations = current;
+        let rejected = self
+            .runtime_io
+            .publication
+            .capacity_rejected_activations
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        for cid in &rejected {
+            let before = self.runtime_io.publication.idle_dispatches.len();
+            self.runtime_io
+                .publication
+                .idle_dispatches
+                .retain(|dispatch| &dispatch.cid != cid);
+            if self.runtime_io.publication.idle_dispatches.len() != before
+                && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid)
+            {
+                agent.dispatch.next_prompt_index = agent
+                    .dispatch
+                    .next_prompt_index
+                    .checked_sub(1)
+                    .expect("retained activation discards one speculative idle claim");
+            }
+        }
+        self.try_advance_capacity_rejected_agents(&rejected);
+        self.drain_deferred_publishes();
+        self.drain_capacity_rejected_idle_dispatches(&rejected);
+    }
+
     /// Publishes one documented owed compaction fact with its exact semantic
     /// parent retained across append rejection.
     pub(super) fn publish_owed_compaction_fact(
@@ -1201,6 +1354,14 @@ impl Harness {
         for cid in pending_finishes {
             self.retry_outer_turn_finish(&cid);
         }
+        if !self
+            .runtime_io
+            .publication
+            .capacity_rejected_activations
+            .is_empty()
+        {
+            self.retry_capacity_rejected_activations();
+        }
     }
 
     /// Advance one core-projected dormant output-length repair step, restoring
@@ -1576,6 +1737,28 @@ impl Harness {
         }
         self.discard_finished_response_prompt_tracking(&started.agent_prompt_id);
         self.set_agent_turn_state(&cid, AgentTurnState::Idle);
+    }
+
+    /// Retains one ordinary durable activation after its synchronized
+    /// inference checkpoint was rejected before canonical admission.
+    pub(super) fn retain_admission_rejected_activation_successor(&mut self, event: &Event) {
+        let Event::AgentInferenceDispatchStarted(started) = event else {
+            return;
+        };
+        if started.transaction_id.is_some() || started.output_length_continuation.is_some() {
+            return;
+        }
+        let Some(cid) = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
+        else {
+            return;
+        };
+        if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
+            agent.dispatch.pending_replay_activation = true;
+            self.runtime_io
+                .publication
+                .capacity_rejected_activations
+                .insert(cid, started.clone());
+        }
     }
 
     pub(super) fn pending_external_receive_message_id(
@@ -3270,6 +3453,37 @@ impl Harness {
                     )
                 });
             if checkpoint_matches {
+                let capacity_owner_matches = self
+                    .runtime_io
+                    .publication
+                    .capacity_rejected_activations
+                    .get(&cid)
+                    .is_some_and(|rejected| {
+                        rejected.agent_id == started.agent_id
+                            && rejected.transaction_id == started.transaction_id
+                            && rejected.through == started.through
+                            && rejected.model == started.model
+                            && rejected.operation == started.operation
+                            && rejected.activation_cut == started.activation_cut
+                            && rejected.output_length_continuation
+                                == started.output_length_continuation
+                    });
+                if capacity_owner_matches {
+                    self.runtime_io
+                        .publication
+                        .capacity_rejected_activations
+                        .remove(&cid);
+                    if !self
+                        .runtime_io
+                        .publication
+                        .capacity_rejected_activations
+                        .is_empty()
+                    {
+                        let _ = self.runtime_io.tx.send(HarnessEvent::Command(
+                            HarnessCommand::SemanticPersistenceActivationRetry,
+                        ));
+                    }
+                }
                 self.acknowledge_deferred_activations_through(&cid, started.through);
                 self.acknowledge_message_wakes_through(&cid, started.through);
                 if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
@@ -3632,6 +3846,10 @@ impl Harness {
                 .enqueued_inference_checkpoints
                 .retain(|(agent_id, _)| agent_id != &unloaded.agent_id);
             self.tombstone_ephemeral_provider_prompts_for_agent(&cid);
+            self.runtime_io
+                .publication
+                .capacity_rejected_activations
+                .remove(&cid);
             self.agent_runtime.agent_registry.agents.remove(&cid);
             self.cancel_agent_synchronized_publications(&cid);
         }

@@ -30,4 +30,8 @@ pub(crate) struct PublicationState {
     pub(crate) deferred: VecDeque<DeferredPublish>,
     /// Publish-idle dispatch and committed activation obligations.
     pub(crate) idle_dispatches: VecDeque<interception::DeferredPromptDispatch>,
+    /// Exact agents whose ordinary activation checkpoint was rejected by
+    /// semantic capacity before canonical admission.
+    pub(crate) capacity_rejected_activations:
+        HashMap<AgentId, tau_proto::AgentInferenceDispatchStarted>,
 }

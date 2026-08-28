@@ -41,9 +41,10 @@ pub use connection::{
 };
 pub use memory::{MemoryInbox, memory_connection};
 pub use semantic_persistence::{
-    PersistenceAdmissionError, PersistenceCapacity, PersistenceFailure, PersistenceFailureKind,
-    PersistenceGeneration, PersistenceLease, PreparedAgentStream, PreparedSessionStreams,
-    SemanticPersistenceOwner, SessionPreparationMode, StreamIdentity,
+    PersistenceAdmissionError, PersistenceCapacity, PersistenceCapacityLimit,
+    PersistenceCapacityPressure, PersistenceFailure, PersistenceFailureKind, PersistenceGeneration,
+    PersistenceLease, PersistenceOperationalStatus, PersistenceUsage, PreparedAgentStream,
+    PreparedSessionStreams, SemanticPersistenceOwner, SessionPreparationMode, StreamIdentity,
 };
 pub use session::{
     AgentEntry, AgentEventParent, AgentEventValidationError, AgentJournalFoldSemantics,

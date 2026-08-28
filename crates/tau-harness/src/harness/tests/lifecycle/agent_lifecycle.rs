@@ -8,7 +8,7 @@ use super::*;
 use crate::harness::{
     AgentPublishCompletion, CommittedGatedFinal, CommittedGatedFinalReducer,
     CommittedOutputLengthToolEffect, ConversationHeadSync, GatedFinalDisposition,
-    PostCommitContinuation,
+    PostCommitContinuation, RuntimeEventWait,
 };
 
 /// Ensures targetless user shell output is routed to the default user agent
@@ -526,7 +526,24 @@ fn output_length_branch_move_finishes_dormant_lineage_without_dispatch() {
             head: tau_proto::AgentHead::Node(sibling),
         }),
     );
-    h.retry_pending_agent_publications();
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("durable harness owner")
+        .signal_capacity_ready_for_test();
+    let RuntimeEventWait::Event(event) = h.next_runtime_event() else {
+        panic!("capacity recovery must wake the runtime loop");
+    };
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = false;
+    h.handle_runtime_event(
+        event,
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("capacity-ready retry");
     h.handle_disconnect(&crate::test_connection_id("dormant-length-interceptor"));
     h.handle_disconnect(&crate::test_connection_id("dormant-owner-interceptor"));
 
@@ -1745,13 +1762,15 @@ fn output_length_reactive_staged_failure_arbitrates_cancellation() {
     h.shutdown().expect("shutdown");
 }
 
-/// A rejected settled-finish append must retain the exact open turn until the
-/// finish commits, then allow ordinary work on the same agent.
+/// The semantic-capacity incident must retain the exact rejected settled
+/// finish, omit the rejected provisional successor, wake without extension
+/// traffic, and replay one recovered finish plus one fresh successor.
 #[test]
-fn output_length_finish_append_failure_retries_before_new_work() {
+fn semantic_capacity_incident_retries_finish_and_fresh_successor_once() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path()).expect("start");
     let _interceptor = connect_test_tool(&mut h, "length-finish-interceptor");
+    let _dispatch_interceptor = connect_test_tool(&mut h, "capacity-dispatch-interceptor");
     h.handle_extension_event(
         "length-finish-interceptor",
         TestProtocolItem::Message(TestMessage::Intercept(Intercept {
@@ -1765,6 +1784,13 @@ fn output_length_finish_append_failure_retries_before_new_work() {
     h.submit_user_prompt(test_session_id("s1"), "finish with retry".to_owned())
         .expect("submit");
     let source = read_nth_prompt_created(&h, 0);
+    let source_cid = h
+        .agent_runtime
+        .agent_registry
+        .agent_routes
+        .get(source.agent_id.as_str())
+        .cloned()
+        .expect("source route");
     h.handle_provider_response_finished(reasoning_only_length_response(&source, 5))
         .expect("source response");
     let successor = read_nth_prompt_created(&h, 1);
@@ -1809,6 +1835,54 @@ fn output_length_finish_append_failure_retries_before_new_work() {
             _ => None,
         })
         .expect("append rejection retains exact finish");
+    assert!(
+        h.session_runtime
+            .persistence_owner
+            .as_ref()
+            .expect("durable harness owner")
+            .wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        "durable prefix reaches the abrupt-cut oracle"
+    );
+    let abrupt_cut = tau_core::AgentStore::open(td.path().join("agents"))
+        .expect("read-only abrupt-cut cold replay");
+    assert!(
+        abrupt_cut
+            .agent_events(source.agent_id.as_str())
+            .expect("abrupt-cut agent")
+            .iter()
+            .all(|record| !matches!(
+                &record.event,
+                Event::AgentOuterTurnFinished(finished)
+                    if finished.outer_turn_id == retained_outer_turn_id
+            )),
+        "cold replay exposes only the durable prefix and cannot reconstruct FinishRetry"
+    );
+    h.runtime_io
+        .publication
+        .interceptors
+        .remove_connection(&crate::test_connection_id("length-finish-interceptor"));
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "capacity-dispatch-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("ordinary extension progress retries the retained finish");
+    assert!(h.agent_runtime.agent_registry.agents.values().any(|agent| {
+        matches!(
+            &agent.turn.outer_turn,
+            OuterTurnRuntimeState::FinishRetry(outer_turn_id)
+                if outer_turn_id == &retained_outer_turn_id
+        )
+    }));
+    assert!(
+        h.runtime_io.publication.pending_intercept.is_none(),
+        "ordinary progress must preserve retry ownership after the second Full"
+    );
     h.submit_user_prompt(test_session_id("s1"), "new work".to_owned())
         .expect("queue work behind finish");
     assert_eq!(
@@ -1819,19 +1893,88 @@ fn output_length_finish_append_failure_retries_before_new_work() {
         2,
         "new work remains deferred while the old finish is retryable"
     );
-
-    h.retry_pending_agent_publications();
+    let rejected_prompt_index = h.agent_runtime.agent_registry.agents[&source_cid]
+        .dispatch
+        .next_prompt_index;
+    let rejected_prompt_id =
+        tau_proto::AgentPromptId::parse(format!("ap-{}-{rejected_prompt_index}", source.agent_id))
+            .expect("rejected prompt id");
+    let fresh_prompt_id = tau_proto::AgentPromptId::parse(format!(
+        "ap-{}-{}",
+        source.agent_id,
+        rejected_prompt_index + 1
+    ))
+    .expect("fresh prompt id");
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("durable harness owner")
+        .signal_capacity_ready_for_test();
+    let RuntimeEventWait::Event(event) = h.next_runtime_event() else {
+        panic!("capacity recovery must wake the runtime loop");
+    };
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = false;
+    h.handle_runtime_event(
+        event,
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("capacity-ready retry");
+    h.handle_disconnect(&crate::test_connection_id("length-finish-interceptor"));
     assert!(
         h.runtime_io.publication.pending_intercept.is_some(),
-        "retried finish is interceptable"
+        "fresh successor dispatch is parked immediately before semantic admission"
+    );
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&source_cid]
+            .dispatch
+            .next_prompt_index,
+        rejected_prompt_index + 1,
+        "parking the provisional dispatch must not claim its successor"
+    );
+    let expected_through = match h
+        .runtime_io
+        .publication
+        .pending_intercept
+        .as_ref()
+        .map(|pending| &pending.event)
+    {
+        Some(Event::AgentInferenceDispatchStarted(started)) => {
+            assert_eq!(started.agent_prompt_id, rejected_prompt_id);
+            started.through
+        }
+        pending => panic!("expected provisional dispatch, got {pending:?}"),
+    };
+    h.runtime_io
+        .publication
+        .interceptors
+        .remove_connection(&crate::test_connection_id("capacity-dispatch-interceptor"));
+    reject_semantic_admissions(&h, 2);
+    assert_eq!(
+        h.agent_runtime.agent_registry.agents[&source_cid]
+            .dispatch
+            .next_prompt_index,
+        rejected_prompt_index + 1,
+        "arming admission rejection must not claim another correlation"
     );
     h.handle_extension_event(
-        "length-finish-interceptor",
+        "capacity-dispatch-interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
         })),
     )
-    .expect("release retried finish");
+    .expect("release provisional successor into Full");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        2,
+        "the rejected provisional successor must not become canonical"
+    );
     assert!(
         h.agent_runtime.agent_registry.agents.values().all(|agent| {
             !matches!(
@@ -1852,9 +1995,83 @@ fn output_length_finish_append_failure_retries_before_new_work() {
             .collect::<Vec<_>>(),
         h.runtime_io.publication.pending_intercept.is_some()
     );
-    h.handle_disconnect(&crate::test_connection_id("length-finish-interceptor"));
-    let next = read_nth_prompt_created(&h, 2);
-    assert_ne!(next.agent_prompt_id, successor.agent_prompt_id);
+    let full_event = h.expand_component_ingress_wake(
+        h.runtime_io
+            .rx
+            .try_recv()
+            .expect("capacity-Full progress edge"),
+    );
+    assert!(matches!(
+        full_event,
+        HarnessEvent::Command(crate::harness::HarnessCommand::SemanticPersistenceProgress)
+    ));
+    h.handle_runtime_event(
+        full_event,
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("observe capacity-Full edge before recovery");
+    h.session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("durable harness owner")
+        .signal_capacity_ready_for_test();
+    let RuntimeEventWait::Event(event) = h.next_runtime_event() else {
+        panic!("dispatch capacity recovery must wake the runtime loop");
+    };
+    h.handle_runtime_event(
+        event,
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("dispatch capacity-ready progress");
+    assert!(
+        h.runtime_io
+            .publication
+            .capacity_rejected_activations
+            .is_empty(),
+        "capacity wake consumes the exact retained activation owner; turn_idle={}, pending_intercept={}, deferred={}, idle={}, agent={:?}",
+        h.session_runtime.turn_state.is_idle(),
+        h.runtime_io.publication.pending_intercept.is_some(),
+        h.runtime_io.publication.deferred.len(),
+        h.runtime_io.publication.idle_dispatches.len(),
+        h.agent_runtime.agent_registry.agents[&source_cid]
+    );
+    let next = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptCreated(created) => Some(created),
+            _ => None,
+        })
+        .nth(2)
+        .unwrap_or_else(|| {
+            panic!(
+                "fresh prompt missing; agent={:?}, events={:?}",
+                h.agent_runtime.agent_registry.agents[&source_cid],
+                event_log_events(&h)
+                    .iter()
+                    .map(Event::name)
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(next.agent_prompt_id, fresh_prompt_id);
+    assert!(event_log_events(&h).iter().all(|event| match event {
+        Event::AgentPromptCreated(created) => created.agent_prompt_id != rejected_prompt_id,
+        Event::AgentInferenceDispatchStarted(started) => {
+            started.agent_prompt_id != rejected_prompt_id
+        }
+        Event::AgentPromptStarted(started) => started.agent_prompt_id != rejected_prompt_id,
+        _ => true,
+    }));
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_publish_completions
+            .is_empty(),
+        "recovered finish and fresh successor leave no retained completion owner"
+    );
     assert_eq!(
         h.session_runtime
             .agent_store
@@ -1871,7 +2088,228 @@ fn output_length_finish_append_failure_retries_before_new_work() {
             .count(),
         1
     );
+    let durable_events = h
+        .session_runtime
+        .agent_store
+        .agent_events(source.agent_id.as_str())
+        .expect("durable events after retry");
+    let fresh_dispatch = durable_events
+        .iter()
+        .find(|record| {
+            matches!(
+                &record.event,
+                Event::AgentInferenceDispatchStarted(started)
+                    if started.agent_prompt_id == fresh_prompt_id
+            )
+        })
+        .expect("fresh successor checkpoint");
+    let Event::AgentInferenceDispatchStarted(fresh_started) = &fresh_dispatch.event else {
+        unreachable!("matched fresh dispatch")
+    };
+    assert_eq!(
+        fresh_started.activation_cut,
+        Some(expected_through),
+        "fresh successor starts after the exact rejected activation parent"
+    );
+    let tau_proto::AgentHead::Node(expected_parent) = expected_through else {
+        panic!("queued user activation must own a node parent");
+    };
+    let tau_proto::AgentHead::Node(fresh_through) = fresh_started.through else {
+        panic!("fresh successor must cover the newly folded activation node");
+    };
+    assert_eq!(
+        h.session_runtime
+            .agent_store
+            .agent(source.agent_id.as_str())
+            .and_then(|tree| tree.node(fresh_through))
+            .and_then(|node| node.parent_id),
+        Some(expected_parent),
+        "fresh successor extends exactly the rejected activation parent"
+    );
+    assert_eq!(
+        fresh_dispatch.parent,
+        tau_core::AgentEventParent::Under(fresh_through)
+    );
     h.shutdown().expect("shutdown");
+    let live_records = h
+        .session_runtime
+        .agent_store
+        .agent_events(source.agent_id.as_str())
+        .expect("live records after clean drain")
+        .to_vec();
+    drop(h);
+    wait_for_session_unlock(td.path(), "s1");
+    let resumed =
+        echo_harness_with_start_reason("s1", td.path(), tau_proto::SessionStartReason::Resume)
+            .expect("cold resume after recovered finish");
+    let cold_records = resumed
+        .session_runtime
+        .agent_store
+        .agent_events(source.agent_id.as_str())
+        .expect("cold records");
+    let cold_prefix = cold_records
+        .get(..live_records.len())
+        .expect("resume retains the complete pre-resume journal");
+    assert_eq!(
+        cold_prefix, live_records,
+        "clean recovery must replay the exact accepted records before resume facts"
+    );
+    assert_eq!(
+        cold_records
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::AgentOuterTurnFinished(finished)
+                    if finished.outer_turn_id == retained_outer_turn_id
+            ))
+            .count(),
+        1
+    );
+}
+
+/// One recovery must chain every exact retained activation owner without
+/// requiring unrelated extension progress.
+#[test]
+fn semantic_capacity_recovery_chains_plural_exact_activation_owners() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let session = h.session_runtime.current_session_id.clone();
+    let role = h.config.selected_role.clone();
+    let first = h.create_durable_user_agent(session.clone(), &role);
+    let second = h.create_durable_user_agent(session, &role);
+    for cid in [&first, &second] {
+        seed_capacity_rejected_activation(&mut h, cid);
+    }
+
+    h.retry_capacity_rejected_activations();
+    assert_eq!(
+        h.runtime_io.publication.capacity_rejected_activations.len(),
+        1,
+        "one bounded retry retires exactly one owner"
+    );
+    let mut chained = 0;
+    for event in h.runtime_io.rx.try_iter().take(8) {
+        if matches!(
+            h.expand_component_ingress_wake(event),
+            HarnessEvent::Command(
+                crate::harness::HarnessCommand::SemanticPersistenceActivationRetry
+            )
+        ) {
+            chained += 1;
+        }
+    }
+    assert_eq!(
+        chained, 1,
+        "first commit queues exactly one next-owner retry"
+    );
+    h.retry_capacity_rejected_activations();
+    assert!(
+        h.runtime_io
+            .publication
+            .capacity_rejected_activations
+            .is_empty()
+    );
+    let started = event_log_events(&h)
+        .iter()
+        .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+        .count();
+    assert_eq!(started, 2, "each retained owner commits exactly once");
+}
+
+/// A retained owner whose selected head diverges must retire without
+/// dispatching its replacement or consuming unrelated runnable authority.
+#[test]
+fn semantic_capacity_retry_retires_divergent_owner_without_overtaking() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let session = h.session_runtime.current_session_id.clone();
+    let role = h.config.selected_role.clone();
+    let retained = h.create_durable_user_agent(session.clone(), &role);
+    let unrelated = h.create_durable_user_agent(session, &role);
+    seed_capacity_rejected_activation(&mut h, &retained);
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&unrelated)
+        .expect("unrelated agent")
+        .dispatch
+        .pending_replay_activation = true;
+    let durable_id = durable_agent_id_for_conversation(&h, &retained);
+    let moved = h
+        .append_direct_agent_semantic_event(
+            durable_id.as_str(),
+            tau_core::AgentEventParent::Root,
+            Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: durable_id.clone(),
+                text: "divergent head".to_owned(),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+        )
+        .expect("append divergent head")
+        .selected_head_id
+        .expect("divergent node");
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&retained)
+        .expect("retained agent")
+        .identity
+        .head = Some(moved);
+
+    h.retry_capacity_rejected_activations();
+    assert!(
+        h.runtime_io
+            .publication
+            .capacity_rejected_activations
+            .is_empty(),
+        "divergent capacity owner is retired"
+    );
+    assert!(
+        h.agent_runtime.agent_registry.agents[&unrelated]
+            .dispatch
+            .pending_replay_activation,
+        "narrow retry leaves unrelated runnable authority untouched"
+    );
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+    );
+}
+
+/// Installs one exact retained capacity owner without provider traffic.
+fn seed_capacity_rejected_activation(h: &mut Harness, cid: &AgentId) {
+    let durable_id = durable_agent_id_for_conversation(h, cid);
+    let through = h.agent_runtime.agent_registry.agents[cid]
+        .identity
+        .head
+        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+    let selection = h
+        .select_inference_dispatch(cid, Some(through))
+        .expect("exact retained selection");
+    let owner = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: durable_id,
+        transaction_id: None,
+        agent_prompt_id: tau_proto::AgentPromptId::parse("ap-retained-0")
+            .expect("synthetic prompt id"),
+        through,
+        model: Some(selection.model),
+        operation: Some(selection.operation),
+        activation_cut: Some(selection.activation_cut),
+        output_length_continuation: None,
+    };
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(cid)
+        .expect("retained agent")
+        .dispatch
+        .pending_replay_activation = true;
+    h.runtime_io
+        .publication
+        .capacity_rejected_activations
+        .insert(cid.clone(), owner);
 }
 
 /// Cancellation accepted while a post-start route failure is parked must

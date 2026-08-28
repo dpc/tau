@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
 use std::time::Duration;
 use std::{fmt, mem, thread};
@@ -81,6 +81,54 @@ pub enum PersistenceFailureKind {
     Sync,
     /// The unique worker exited and invalidated every generation.
     WorkerExit,
+}
+
+/// Capacity boundary which rejected one nonblocking semantic publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PersistenceCapacityLimit {
+    /// The retained authoritative-frame count reached its configured limit.
+    Frames,
+    /// The aggregate retained-byte ledger lacked the requested bytes.
+    Bytes,
+    /// The prepared-stream count reached its configured limit.
+    Streams,
+    /// A deterministic test injected the same pre-publication rejection.
+    Injected,
+}
+
+/// Content-free exact persistence resource totals at an operational transition.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PersistenceUsage {
+    /// Staged, queued, and in-flight authoritative frames.
+    pub frames: usize,
+    /// Aggregate retained bytes, including registry and durability debt.
+    pub bytes: usize,
+    /// Registered stream generations.
+    pub streams: usize,
+}
+
+/// One edge-triggered capacity-pressure observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PersistenceCapacityPressure {
+    /// Capacity boundary which rejected publication.
+    pub limit: PersistenceCapacityLimit,
+    /// Exact resource totals at rejection.
+    pub usage: PersistenceUsage,
+}
+
+/// Drained content-free operational state from the persistence owner.
+#[derive(Default)]
+pub struct PersistenceOperationalStatus {
+    /// Exact resource totals at the drain cut.
+    pub usage: PersistenceUsage,
+    /// Bounded asynchronous worker failures since the previous drain.
+    pub failures: Vec<PersistenceFailure>,
+    /// First capacity-full transition since the previous recovery.
+    pub capacity_full: Option<PersistenceCapacityPressure>,
+    /// Exact totals after capacity became available again.
+    pub recovered: Option<PersistenceUsage>,
+    /// Exact totals after the previously pressured frame FIFO fully drained.
+    pub drained: Option<PersistenceUsage>,
 }
 
 /// Bounded content-free asynchronous persistence failure.
@@ -215,6 +263,13 @@ impl FrameReservation {
                 .max_bytes
                 .saturating_sub(state.ledger.bytes)
         {
+            state.ledger.frames = state
+                .ledger
+                .frames
+                .checked_sub(1)
+                .expect("byte rejection releases its frame reservation");
+            self.transferred = true;
+            report_capacity_full(&self.shared, &mut state, PersistenceCapacityLimit::Bytes);
             return Err(PersistenceAdmissionError::Full);
         }
         state.ledger.bytes += bytes;
@@ -242,6 +297,7 @@ impl Drop for FrameReservation {
             .frames
             .checked_sub(1)
             .expect("frame reservation released exactly once");
+        report_capacity_recovered(&self.shared, &mut state);
         self.shared.wake.notify_all();
     }
 }
@@ -310,7 +366,7 @@ impl StagingReservation {
         let admission_watermark = state.next_frame_token;
         state.next_frame_token = admission_watermark.checked_successor();
         state.last_admitted_frame = Some(admission_watermark);
-        let job = FrameJob::from_reservation(
+        let mut job = FrameJob::from_reservation(
             Arc::clone(&self.identity),
             frame,
             self.charge,
@@ -320,13 +376,23 @@ impl StagingReservation {
         );
         /*
          * The lifecycle match above is deliberately exhaustive. Keep the swap and
-         * preallocated insertion adjacent: no fallible work belongs after this cut.
+         * accounting transfer and preallocated insertion adjacent: no fallible
+         * or destructor work belongs after this cut.
          */
         mem::swap(target, &mut replacement);
+        job.release_staging_replacement();
         state.frames.push_back(job);
         self.committed = true;
         drop(state);
         self.shared.wake.notify_one();
+        drop(replacement);
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.ledger.bytes = state
+            .ledger
+            .bytes
+            .checked_sub(self.charge.replacement)
+            .expect("committed swap releases retired replacement staging");
+        report_capacity_recovered(&self.shared, &mut state);
         Ok(())
     }
 }
@@ -347,6 +413,7 @@ impl Drop for StagingReservation {
             .bytes
             .checked_sub(self.bytes)
             .expect("staging bytes released exactly once");
+        report_capacity_recovered(&self.shared, &mut state);
         self.shared.wake.notify_all();
     }
 }
@@ -379,6 +446,10 @@ pub(crate) struct Shared {
     pub(crate) state: Mutex<AdmissionState>,
     /// Notification paired with state and retry deadlines.
     pub(crate) wake: Condvar,
+    /// Content-free harness-loop wake installed by the lifecycle owner.
+    operational_wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Coalesces arbitrarily many bounded outcomes into one outstanding wake.
+    operational_wake_pending: AtomicBool,
 }
 
 pub(crate) struct AdmissionState {
@@ -390,6 +461,8 @@ pub(crate) struct AdmissionState {
     pub(crate) worker_exited: bool,
     /// One-shot deterministic test rejection before count admission.
     pub(crate) rejected_admissions_remaining: usize,
+    /// Successful admissions to allow before the injected rejection run.
+    pub(crate) admissions_before_rejection: usize,
     /// Next generation allocated within this owner.
     pub(crate) next_generation: u64,
     /// Next owner-local authoritative FIFO acceptance token.
@@ -410,6 +483,16 @@ pub(crate) struct AdmissionState {
     /// Bounded content-free worker outcomes for diagnostics and deterministic
     /// tests.
     pub(crate) failures: VecDeque<PersistenceFailure>,
+    /// Active edge-triggered capacity pressure.
+    capacity_pressure: Option<PersistenceCapacityPressure>,
+    /// Newly entered pressure edge awaiting observation.
+    capacity_full_pending: Option<PersistenceCapacityPressure>,
+    /// Most recent recovery edge awaiting observation.
+    capacity_recovered: Option<PersistenceUsage>,
+    /// Whether a recovery cycle still owns an eventual drained edge.
+    recovery_in_progress: bool,
+    /// Most recent fully drained recovery edge awaiting observation.
+    capacity_drained: Option<PersistenceUsage>,
 }
 
 #[derive(Default)]
@@ -499,6 +582,7 @@ impl SemanticPersistenceOwner {
                 shutting_down: false,
                 worker_exited: false,
                 rejected_admissions_remaining: 0,
+                admissions_before_rejection: 0,
                 next_generation: 1,
                 next_frame_token: FrameAdmissionToken::FIRST,
                 last_admitted_frame: None,
@@ -511,8 +595,15 @@ impl SemanticPersistenceOwner {
                     ..ResourceLedger::default()
                 },
                 failures: VecDeque::with_capacity(capacity.max_frames),
+                capacity_pressure: None,
+                capacity_full_pending: None,
+                capacity_recovered: None,
+                recovery_in_progress: false,
+                capacity_drained: None,
             }),
             wake: Condvar::new(),
+            operational_wake: Mutex::new(None),
+            operational_wake_pending: AtomicBool::new(false),
         });
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
@@ -527,8 +618,57 @@ impl SemanticPersistenceOwner {
 
     /// Drains bounded content-free asynchronous failure outcomes.
     pub fn drain_failures(&self) -> Vec<PersistenceFailure> {
+        self.shared
+            .operational_wake_pending
+            .store(false, Ordering::Release);
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         state.failures.drain(..).collect()
+    }
+
+    /// Installs the process-local wake used for failure observation and
+    /// retained publication retry.
+    ///
+    /// The callback must return immediately and must not call back into this
+    /// owner; it can run while an admission transition owns the state lock.
+    pub fn set_operational_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .shared
+            .operational_wake
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(Arc::clone(&wake));
+        let pending = {
+            let state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            !state.failures.is_empty()
+                || state.capacity_full_pending.is_some()
+                || state.capacity_recovered.is_some()
+                || state.capacity_drained.is_some()
+        };
+        if pending {
+            self.shared
+                .operational_wake_pending
+                .store(true, Ordering::Release);
+            wake();
+        }
+    }
+
+    /// Drains bounded failures and edge-triggered capacity transitions without
+    /// exposing stream identities or persisted content.
+    pub fn drain_operational_status(&self) -> PersistenceOperationalStatus {
+        self.shared
+            .operational_wake_pending
+            .store(false, Ordering::Release);
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        PersistenceOperationalStatus {
+            usage: usage(&state.ledger),
+            failures: state.failures.drain(..).collect(),
+            capacity_full: state.capacity_full_pending.take(),
+            recovered: state.capacity_recovered.take(),
+            drained: state.capacity_drained.take(),
+        }
     }
 
     /// Waits on the owner condition variable for one exact deterministic test
@@ -539,6 +679,9 @@ impl SemanticPersistenceOwner {
         kind: PersistenceFailureKind,
         timeout: Duration,
     ) -> bool {
+        self.shared
+            .operational_wake_pending
+            .store(false, Ordering::Release);
         let state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         let (mut state, _) = self
             .shared
@@ -590,7 +733,28 @@ impl SemanticPersistenceOwner {
     #[doc(hidden)]
     pub fn reject_admissions_for_test(&self, count: usize) {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.admissions_before_rejection = 0;
         state.rejected_admissions_remaining = count;
+    }
+
+    /// Injects rejections after a fixed number of successful admissions.
+    #[cfg(any(test, feature = "test-legacy-writer"))]
+    #[doc(hidden)]
+    pub fn reject_admissions_after_for_test(&self, successful: usize, count: usize) {
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.admissions_before_rejection = successful;
+        state.rejected_admissions_remaining = count;
+    }
+
+    /// Emits the same capacity-ready edge as worker disposal for deterministic
+    /// harness tests.
+    #[cfg(any(test, feature = "test-legacy-writer"))]
+    #[doc(hidden)]
+    pub fn signal_capacity_ready_for_test(&self) {
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.rejected_admissions_remaining = 0;
+        state.admissions_before_rejection = 0;
+        report_capacity_recovered(&self.shared, &mut state);
     }
 
     /// Waits until every currently accepted frame is fully durable.
@@ -835,6 +999,7 @@ impl SemanticPersistenceOwner {
                     .checked_sub(registered.registry_charge)
                     .expect("final release charge exists");
             }
+            report_capacity_recovered(&self.shared, &mut state);
         }
         Ok(())
     }
@@ -914,6 +1079,7 @@ impl SemanticPersistenceOwner {
                 .checked_sub(registered.registry_charge)
                 .expect("maintenance registry charge exists");
         }
+        report_capacity_recovered(&self.shared, &mut state);
         Ok(())
     }
 
@@ -965,16 +1131,23 @@ impl SemanticPersistenceOwner {
                 .bytes
                 .checked_sub(released.registry_charge)
                 .expect("released registry charge exists");
+            report_capacity_recovered(&self.shared, &mut state);
         }
-        if state.ledger.streams >= self.shared.capacity.max_streams
-            || state.streams.contains_key(&stream)
-            || registry_charge
-                > self
-                    .shared
-                    .capacity
-                    .max_bytes
-                    .saturating_sub(state.ledger.bytes)
+        if state.streams.contains_key(&stream) {
+            return Err(PersistenceAdmissionError::Full);
+        }
+        if state.ledger.streams >= self.shared.capacity.max_streams {
+            report_capacity_full(&self.shared, &mut state, PersistenceCapacityLimit::Streams);
+            return Err(PersistenceAdmissionError::Full);
+        }
+        if registry_charge
+            > self
+                .shared
+                .capacity
+                .max_bytes
+                .saturating_sub(state.ledger.bytes)
         {
+            report_capacity_full(&self.shared, &mut state, PersistenceCapacityLimit::Bytes);
             return Err(PersistenceAdmissionError::Full);
         }
         let generation = PersistenceGeneration(state.next_generation);
@@ -1027,6 +1200,7 @@ impl SemanticPersistenceOwner {
             .bytes
             .checked_sub(registered.registry_charge)
             .expect("registry charge released once");
+        report_capacity_recovered(&self.shared, &mut state);
     }
 }
 
@@ -1145,11 +1319,15 @@ impl PersistenceLease {
             &self.identity.stream,
             self.identity.generation,
         )?;
-        if state.rejected_admissions_remaining != 0 {
+        if state.admissions_before_rejection != 0 {
+            state.admissions_before_rejection -= 1;
+        } else if state.rejected_admissions_remaining != 0 {
             state.rejected_admissions_remaining -= 1;
+            report_capacity_full(&shared, &mut state, PersistenceCapacityLimit::Injected);
             return Err(PersistenceAdmissionError::Full);
         }
         if state.ledger.frames >= shared.capacity.max_frames {
+            report_capacity_full(&shared, &mut state, PersistenceCapacityLimit::Frames);
             return Err(PersistenceAdmissionError::Full);
         }
         state.ledger.frames += 1;
@@ -1258,7 +1436,9 @@ pub(crate) fn invalidate_worker(shared: &Weak<Shared>) {
                 PersistenceFailureKind::WorkerExit,
             );
         }
+        drop(state);
         shared.wake.notify_all();
+        notify_operational(&shared);
     }
 }
 
@@ -1271,6 +1451,60 @@ pub(crate) fn report_failure(
     push_failure(&mut state, shared.capacity.max_frames, identity, kind);
     drop(state);
     shared.wake.notify_all();
+    notify_operational(shared);
+}
+
+/// Records the first full edge until worker progress makes capacity available.
+pub(crate) fn report_capacity_full(
+    shared: &Shared,
+    state: &mut AdmissionState,
+    limit: PersistenceCapacityLimit,
+) {
+    if state.capacity_pressure.is_none() {
+        let pressure = PersistenceCapacityPressure {
+            limit,
+            usage: usage(&state.ledger),
+        };
+        state.capacity_pressure = Some(pressure);
+        state.capacity_full_pending = Some(pressure);
+        notify_operational(shared);
+    }
+}
+
+/// Records that worker disposal freed capacity after a reported full edge.
+pub(crate) fn report_capacity_recovered(shared: &Shared, state: &mut AdmissionState) {
+    if state.capacity_pressure.take().is_some() {
+        state.capacity_recovered = Some(usage(&state.ledger));
+        state.recovery_in_progress = true;
+        notify_operational(shared);
+    }
+    if state.recovery_in_progress && state.ledger.frames == 0 {
+        state.recovery_in_progress = false;
+        state.capacity_drained = Some(usage(&state.ledger));
+        notify_operational(shared);
+    }
+}
+
+fn usage(ledger: &ResourceLedger) -> PersistenceUsage {
+    PersistenceUsage {
+        frames: ledger.frames,
+        bytes: ledger.bytes,
+        streams: ledger.streams,
+    }
+}
+
+fn notify_operational(shared: &Shared) {
+    if shared.operational_wake_pending.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let wake = shared
+        .operational_wake
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    if let Some(wake) = wake {
+        wake();
+    }
 }
 
 fn push_failure(

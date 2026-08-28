@@ -57,6 +57,9 @@ debt to its sole worker. Stores retain generation-bound leases and complete
 in-memory projections; live admission reserves count and aggregate bytes, builds
 the frame and replacement off-side, then performs one nonblocking revalidation,
 swap, and FIFO insertion. Rejection changes no projection or publication state.
+The atomic swap drops the superseded complete projection and releases its
+staging-only byte reservation immediately; queued work retains only its frame,
+incremental projection ownership, checkpoint candidate, and worker/debt state.
 
 The worker retries exact-EOF rollback-safe heads on deadlines, poisons only
 generations whose rollback cannot be proven, coalesces watermarked checkpoint and
@@ -69,6 +72,11 @@ maintenance uses a distinct release/claim/read/finalize lifecycle. Normal
 compatibility writer exists only behind the explicit test-fixture feature. Exact
 semantics are governed by
 [SPEC-semantic-journal-writeback-durability](../../../specs/SPEC-semantic-journal-writeback-durability.md).
+
+Content-free operational observation reports bounded worker failures and
+edge-triggered full, recovered, and drained resource totals. A process-local
+wake lets the Harness retry retained runtime publication owners when capacity
+returns; it changes neither admission nor asynchronous durability semantics.
 
 Store IDs used as path components share one bounded safe grammar with CLI
 minting, metadata listing, lock probes, and cleanup. They exclude path separators,

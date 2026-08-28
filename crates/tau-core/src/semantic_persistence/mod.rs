@@ -14,7 +14,9 @@ mod worker;
 pub use capacity::PersistenceCapacity;
 pub use identity::{PersistenceGeneration, PersistenceLease, StreamIdentity};
 pub use owner::{
-    PersistenceAdmissionError, PersistenceFailure, PersistenceFailureKind, SemanticPersistenceOwner,
+    PersistenceAdmissionError, PersistenceCapacityLimit, PersistenceCapacityPressure,
+    PersistenceFailure, PersistenceFailureKind, PersistenceOperationalStatus, PersistenceUsage,
+    SemanticPersistenceOwner,
 };
 pub(crate) use owner::{RetentionCharge, StagedFrame};
 pub use preparation::{PreparedAgentStream, PreparedSessionStreams, SessionPreparationMode};

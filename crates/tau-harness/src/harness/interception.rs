@@ -19,7 +19,7 @@
 
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::Arc;
 
@@ -2574,9 +2574,28 @@ impl Harness {
     /// start commits and acknowledges every covered selected-branch watermark;
     /// a rejected successor therefore remains retryable.
     pub(crate) fn drain_publish_idle_dispatches(&mut self) {
+        self.drain_publish_idle_dispatches_for(None);
+    }
+
+    pub(super) fn drain_capacity_rejected_idle_dispatches(&mut self, agents: &HashSet<AgentId>) {
+        self.drain_publish_idle_dispatches_for(Some(agents));
+    }
+
+    fn drain_publish_idle_dispatches_for(&mut self, allowed: Option<&HashSet<AgentId>>) {
         let mut attempted = Vec::new();
         while self.publish_chain_is_idle() {
             for index in 0..self.runtime_io.publication.idle_dispatches.len() {
+                if allowed.is_some_and(|allowed| {
+                    !allowed.contains(&self.runtime_io.publication.idle_dispatches[index].cid)
+                }) || (allowed.is_none()
+                    && self
+                        .runtime_io
+                        .publication
+                        .capacity_rejected_activations
+                        .contains_key(&self.runtime_io.publication.idle_dispatches[index].cid))
+                {
+                    continue;
+                }
                 let needs_binding = self.runtime_io.publication.idle_dispatches[index]
                     .obligation
                     .is_committed()
@@ -2627,6 +2646,9 @@ impl Harness {
                 .iter()
                 .enumerate()
                 .find_map(|(index, deferred)| {
+                    if allowed.is_some_and(|allowed| !allowed.contains(&deferred.cid)) {
+                        return None;
+                    }
                     if attempted
                         .iter()
                         .any(|prior| Self::same_deferred_prompt_dispatch(prior, deferred))

@@ -14,6 +14,13 @@ delivery, reactions, or continuations. Worker I/O follows in one global FIFO.
 Rollback-safe failures retain the accepted head; uncertain rollback poisons that
 generation. Restart therefore sees the longest valid durable prefix.
 
+The owner wakes the central runtime loop when bounded worker failures arrive or
+previously full capacity becomes available. The harness drains content-free
+failure and capacity transitions into operational tracing, then retries exact
+retained publication owners; ordinary runtime progress remains a fallback.
+These wakes carry no semantic event or payload and do not strengthen the
+asynchronous crash boundary.
+
 Live delivery uses one process-local logical stream with runtime-only positions.
 The event bus freezes selector, visibility, exclusion, and directed-route
 eligibility as consumer generations when admitting a frame. Per-connection

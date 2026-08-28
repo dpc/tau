@@ -1817,6 +1817,10 @@ impl Harness {
                 .agent_registry
                 .stopped_ids
                 .insert(agent_id);
+            self.runtime_io
+                .publication
+                .capacity_rejected_activations
+                .remove(cid);
             self.agent_runtime.agent_registry.agents.remove(cid);
         }
     }

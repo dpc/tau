@@ -4,11 +4,14 @@ use std::fs::{File, Permissions};
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use super::backend::{FilesystemBackend, PersistenceBackend};
-use super::{PersistenceCapacity, PersistenceFailureKind, SemanticPersistenceOwner};
+use super::{
+    PersistenceCapacity, PersistenceFailureKind, RetentionCharge, SemanticPersistenceOwner,
+    StagedFrame,
+};
 use crate::{AgentStore, SessionPreparationMode, SessionStore};
 
 /// One-shot exact-prefix write fault over the production filesystem backend.
@@ -16,6 +19,10 @@ struct WriteFaultBackend {
     fail_next_write: AtomicBool,
     fail_next_truncate: AtomicBool,
     fail_writes: AtomicBool,
+    fail_writes_with_enospc: AtomicBool,
+    hold_writes: AtomicBool,
+    write_held: Mutex<bool>,
+    write_hold_wake: Condvar,
     exit_next_write: AtomicBool,
     fail_next_sync_data: AtomicBool,
     fail_next_sync_all: AtomicBool,
@@ -32,12 +39,42 @@ struct WriteFaultBackend {
     failed_sync_path: Mutex<Option<String>>,
 }
 
+/// Projection whose selected retirement blocks until the test releases it.
+struct HeldProjection {
+    /// Encoded projection body.
+    bytes: Vec<u8>,
+    /// Whether this instance blocks while being dropped.
+    hold_drop: bool,
+    /// Drop-entered and release flags shared with the test.
+    drop_state: Arc<(Mutex<(bool, bool)>, Condvar)>,
+}
+
+impl Drop for HeldProjection {
+    fn drop(&mut self) {
+        if !self.hold_drop {
+            return;
+        }
+        let (state, wake) = &*self.drop_state;
+        let mut state = state.lock().expect("projection drop state");
+        state.0 = true;
+        wake.notify_all();
+        while !state.1 {
+            state = wake.wait(state).expect("projection drop wait");
+        }
+        let _ = self.bytes.len();
+    }
+}
+
 impl WriteFaultBackend {
     fn new() -> Self {
         Self {
             fail_next_write: AtomicBool::new(false),
             fail_next_truncate: AtomicBool::new(false),
             fail_writes: AtomicBool::new(false),
+            fail_writes_with_enospc: AtomicBool::new(false),
+            hold_writes: AtomicBool::new(false),
+            write_held: Mutex::new(false),
+            write_hold_wake: Condvar::new(),
             exit_next_write: AtomicBool::new(false),
             fail_next_sync_data: AtomicBool::new(false),
             fail_next_sync_all: AtomicBool::new(false),
@@ -71,6 +108,20 @@ impl WriteFaultBackend {
     fn inject_short_write(&self, call: usize, offset: usize) {
         self.write_call.store(0, Ordering::SeqCst);
         *self.short_write.lock().expect("short-write fault") = Some((call, offset));
+    }
+
+    fn wait_until_write_held(&self) {
+        let held = self.write_held.lock().expect("write hold");
+        let (held, _) = self
+            .write_hold_wake
+            .wait_timeout_while(held, Duration::from_secs(2), |held| !*held)
+            .expect("write hold wait");
+        assert!(*held, "worker did not reach held healthy write");
+    }
+
+    fn release_writes(&self) {
+        self.hold_writes.store(false, Ordering::SeqCst);
+        self.write_hold_wake.notify_all();
     }
 }
 
@@ -127,6 +178,15 @@ impl PersistenceBackend for WriteFaultBackend {
             file.write_all(&bytes[..offset.min(bytes.len())])?;
             return Err(io::Error::other("injected exact-offset write failure"));
         }
+        if self.hold_writes.load(Ordering::SeqCst) {
+            let mut held = self.write_held.lock().expect("write hold");
+            *held = true;
+            self.write_hold_wake.notify_all();
+            while self.hold_writes.load(Ordering::SeqCst) {
+                held = self.write_hold_wake.wait(held).expect("write hold wait");
+            }
+            *held = false;
+        }
         #[cfg(target_os = "linux")]
         if let Ok(path) = std::fs::read_link(format!(
             "/proc/self/fd/{}",
@@ -150,6 +210,11 @@ impl PersistenceBackend for WriteFaultBackend {
             let prefix = bytes.len().min(3);
             file.write_all(&bytes[..prefix])?;
             return Err(io::Error::other("injected exact-prefix write failure"));
+        }
+        if self.fail_writes_with_enospc.load(Ordering::SeqCst) {
+            let prefix = bytes.len().min(3);
+            file.write_all(&bytes[..prefix])?;
+            return Err(io::Error::from_raw_os_error(28));
         }
         FilesystemBackend.write_all(file, bytes)
     }
@@ -271,6 +336,10 @@ fn worker_exit_makes_every_lease_unavailable() {
     );
     let mut store =
         SessionStore::open_managed(root.path().join("sessions"), owner.clone()).expect("store");
+    let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+    owner.set_operational_wake(Arc::new(move || {
+        let _ = wake_tx.try_send(());
+    }));
     store
         .prepare_session("managed-session", SessionPreparationMode::New)
         .expect("prepare");
@@ -283,9 +352,15 @@ fn worker_exit_makes_every_lease_unavailable() {
             tau_proto::UnixMicros::new(7),
         )
         .expect("frame accepted before injected worker exit");
+    wake_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker exit wakes operational observer");
     assert!(
         owner
-            .wait_for_failure_for_test(PersistenceFailureKind::WorkerExit, Duration::from_secs(2),)
+            .drain_operational_status()
+            .failures
+            .iter()
+            .any(|failure| failure.kind() == PersistenceFailureKind::WorkerExit)
     );
     let error = store
         .append_session_event_at(
@@ -340,6 +415,12 @@ fn in_flight_frame_consumes_the_only_capacity_permit() {
         )
         .expect_err("in-flight frame owns the sole permit");
     assert!(error.to_string().contains("full"));
+    let pressure = owner
+        .drain_operational_status()
+        .capacity_full
+        .expect("frame pressure");
+    assert_eq!(pressure.limit, super::PersistenceCapacityLimit::Frames);
+    assert_eq!(pressure.usage.frames, 1);
     assert_eq!(
         store
             .session_events("managed-session")
@@ -353,6 +434,32 @@ fn in_flight_frame_consumes_the_only_capacity_permit() {
     owner
         .release(&leases, Duration::from_secs(2))
         .expect("retained head retries and releases");
+}
+
+/// Stream registration reports only the exact stream-permit boundary and
+/// observes rollback of the partially prepared session as recovered capacity.
+#[test]
+fn stream_capacity_pressure_reports_exact_registration_boundary() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let owner = Arc::new(
+        SemanticPersistenceOwner::new(PersistenceCapacity {
+            max_frames: 8,
+            max_bytes: 256 * 1024 * 1024,
+            max_streams: 1,
+        })
+        .expect("owner"),
+    );
+    let mut store =
+        SessionStore::open_managed(root.path().join("sessions"), owner.clone()).expect("store");
+    let error = store
+        .prepare_session("managed-session", SessionPreparationMode::New)
+        .expect_err("ordinary plus restore streams exceed one permit");
+    assert!(error.to_string().contains("full"));
+    let status = owner.drain_operational_status();
+    let pressure = status.capacity_full.expect("stream pressure");
+    assert_eq!(pressure.limit, super::PersistenceCapacityLimit::Streams);
+    assert_eq!(pressure.usage.streams, 1);
+    assert_eq!(status.recovered.expect("registration rollback").streams, 0);
 }
 
 /// Unprovable rollback poisons only the affected generation in memory.
@@ -946,6 +1053,149 @@ fn repeated_release_reuses_capacity_and_rejects_stale_generation() {
     ));
 }
 
+/// Retiring a superseded complete projection must not hold the global admission
+/// mutex, and releasing its staging bytes must wake a concurrent byte-Full
+/// publisher without waiting for worker traffic.
+#[test]
+fn held_projection_retirement_releases_capacity_outside_admission_lock() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    let capacity = PersistenceCapacity {
+        max_frames: 8,
+        max_bytes: 256 * 1024 * 1024,
+        max_streams: 4,
+    };
+    let charge = RetentionCharge {
+        frame: 8,
+        replacement: 8 * 1024 * 1024,
+        checkpoint: 0,
+        projections: 0,
+    };
+    let (prepared_bytes, first_total) = {
+        let owner = Arc::new(SemanticPersistenceOwner::new(capacity).expect("probe owner"));
+        let mut store = SessionStore::open_managed(&sessions, owner.clone()).expect("probe store");
+        store
+            .prepare_session("held-retirement", SessionPreparationMode::New)
+            .expect("probe prepare");
+        let prepared = owner.ledger_for_test().1;
+        let lease = store.managed_persistence_leases("held-retirement")[0].clone();
+        let staging = lease
+            .try_reserve_frame()
+            .expect("probe frame")
+            .reserve_bytes(charge)
+            .expect("probe bytes");
+        let total = owner.ledger_for_test().1 - prepared;
+        drop(staging);
+        owner
+            .release(
+                &store.managed_persistence_leases("held-retirement"),
+                Duration::from_secs(2),
+            )
+            .expect("probe release");
+        (prepared, total)
+    };
+    let backend = Arc::new(WriteFaultBackend::new());
+    backend.hold_writes.store(true, Ordering::SeqCst);
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(
+            PersistenceCapacity {
+                max_bytes: prepared_bytes + first_total + 512 * 1024,
+                ..capacity
+            },
+            backend.clone(),
+        )
+        .expect("bounded owner"),
+    );
+    let mut store = SessionStore::open_managed(&sessions, owner.clone()).expect("store");
+    store
+        .prepare_session("held-retirement", SessionPreparationMode::Resume)
+        .expect("resume");
+    let lease = store.managed_persistence_leases("held-retirement")[0].clone();
+    let staging = lease
+        .try_reserve_frame()
+        .expect("held frame")
+        .reserve_bytes(charge)
+        .expect("held bytes");
+    let drop_state = Arc::new((Mutex::new((false, false)), Condvar::new()));
+    let target = HeldProjection {
+        bytes: vec![0; charge.replacement],
+        hold_drop: true,
+        drop_state: Arc::clone(&drop_state),
+    };
+    let replacement = HeldProjection {
+        bytes: vec![1],
+        hold_drop: false,
+        drop_state: Arc::clone(&drop_state),
+    };
+    let (commit_tx, commit_rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut target = target;
+        let result = staging.commit_swap(
+            &mut target,
+            replacement,
+            StagedFrame::ordinary(Vec::new(), None),
+        );
+        let _ = commit_tx.send(result);
+    });
+    {
+        let (state, wake) = &*drop_state;
+        let state = state.lock().expect("drop state");
+        let (state, _) = wake
+            .wait_timeout_while(state, Duration::from_secs(2), |state| !state.0)
+            .expect("drop-start wait");
+        assert!(state.0, "superseded projection did not enter Drop");
+    }
+    backend.wait_until_write_held();
+
+    let (admission_tx, admission_rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = lease
+            .try_reserve_frame()
+            .and_then(|frame| {
+                frame.reserve_bytes(RetentionCharge {
+                    frame: 8,
+                    replacement: 1024 * 1024,
+                    checkpoint: 0,
+                    projections: 0,
+                })
+            })
+            .map(drop);
+        let _ = admission_tx.send(result);
+    });
+    let error = admission_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("independent admission must not wait for projection Drop")
+        .expect_err("retained staging owns the remaining byte capacity");
+    assert!(matches!(error, super::PersistenceAdmissionError::Full));
+    assert_eq!(
+        owner
+            .drain_operational_status()
+            .capacity_full
+            .expect("byte pressure")
+            .limit,
+        super::PersistenceCapacityLimit::Bytes
+    );
+    let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+    owner.set_operational_wake(Arc::new(move || {
+        let _ = wake_tx.try_send(());
+    }));
+    {
+        let (state, wake) = &*drop_state;
+        let mut state = state.lock().expect("drop state");
+        state.1 = true;
+        wake.notify_all();
+    }
+    commit_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("commit returns after retirement")
+        .expect("commit");
+    wake_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("retirement capacity recovery wake");
+    assert!(owner.drain_operational_status().recovered.is_some());
+    backend.release_writes();
+}
+
 /// Aggregate registry/path/handle/root-target capacity rejects at one byte
 /// below the exact two-stream boundary and restores every partial reservation.
 #[test]
@@ -1113,10 +1363,17 @@ fn exact_prefix_write_failure_retries_without_duplicate_frame() {
     );
     let mut store =
         SessionStore::open_managed(root.path().join("sessions"), owner.clone()).expect("store");
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let wake_count = Arc::clone(&wakes);
+    let (wake_tx, wake_rx) = mpsc::sync_channel(4);
+    owner.set_operational_wake(Arc::new(move || {
+        wake_count.fetch_add(1, Ordering::SeqCst);
+        let _ = wake_tx.try_send(());
+    }));
     store
         .prepare_session("managed-session", SessionPreparationMode::New)
         .expect("prepare");
-    backend.fail_next_write.store(true, Ordering::SeqCst);
+    backend.fail_writes.store(true, Ordering::SeqCst);
     store
         .append_session_event_at(
             "managed-session",
@@ -1126,9 +1383,24 @@ fn exact_prefix_write_failure_retries_without_duplicate_frame() {
         )
         .expect("live fact remains accepted");
 
+    wake_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first write failure wake");
     assert!(
-        owner.wait_for_failure_for_test(PersistenceFailureKind::Write, Duration::from_secs(2),)
+        owner
+            .drain_failures()
+            .iter()
+            .any(|failure| failure.kind() == PersistenceFailureKind::Write)
     );
+    wake_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("legacy drain rearms the next write failure wake");
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
+        2,
+        "each legacy drain rearms exactly one coalesced operational wake"
+    );
+    backend.fail_writes.store(false, Ordering::SeqCst);
     let leases = store.managed_persistence_leases("managed-session");
     owner
         .release(&leases, Duration::from_secs(2))
@@ -1152,6 +1424,257 @@ fn exact_prefix_write_failure_retries_without_duplicate_frame() {
             .len(),
         1
     );
+}
+
+/// Rollback-safe ENOSPC must stop the global FIFO at its head, fill the exact
+/// byte ledger rather than the frame limit, roll back a rejected append, and
+/// recover the accepted live prefix identically after cold replay.
+#[test]
+fn rollback_safe_enospc_byte_boundary_recovers_fifo_and_replay() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let capacity = PersistenceCapacity {
+        max_frames: 64,
+        max_bytes: 256 * 1024 * 1024,
+        max_streams: 8,
+    };
+    let agent_id = tau_proto::AgentId::parse("byte-ledger-agent").expect("agent id");
+    let backend = Arc::new(WriteFaultBackend::new());
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(capacity, backend.clone())
+            .expect("boundary owner"),
+    );
+    let baseline = owner.ledger_for_test().1;
+    let agents_path = root.path().join("store-a");
+    let sessions_path = root.path().join("store-s");
+    let mut agents = AgentStore::open_managed(&agents_path, owner.clone()).expect("agents");
+    let mut sessions = SessionStore::open_managed(&sessions_path, owner.clone()).expect("sessions");
+    sessions
+        .prepare_session("byte-ledger-session", SessionPreparationMode::New)
+        .expect("prepare session");
+    agents
+        .reserve_new_agent(agent_id.as_str())
+        .expect("reserve agent");
+    backend
+        .fail_writes_with_enospc
+        .store(true, Ordering::SeqCst);
+    agents
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            crate::AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            tau_proto::UnixMicros::new(1),
+        )
+        .expect("admit failed head");
+    assert!(
+        owner.wait_for_failure_for_test(PersistenceFailureKind::Write, Duration::from_secs(2),)
+    );
+    sessions
+        .append_session_event_at(
+            "byte-ledger-session",
+            None,
+            loaded_event("byte-ledger-session"),
+            tau_proto::UnixMicros::new(2),
+        )
+        .expect("admit session behind head");
+    agents
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            crate::AgentEventParent::InheritHead,
+            tau_proto::Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {
+                agent_id: agent_id.clone(),
+                display_name: "accepted".to_owned(),
+            }),
+            tau_proto::UnixMicros::new(3),
+        )
+        .expect("admit later agent frame");
+    let before_filler = owner.ledger_for_test().1;
+    let lease = agents.managed_persistence_leases()[0].clone();
+    let internal_probe = lease
+        .try_reserve_frame()
+        .expect("probe filler frame")
+        .reserve_bytes(RetentionCharge {
+            frame: 0,
+            replacement: 0,
+            checkpoint: 0,
+            projections: 0,
+        })
+        .expect("probe filler bytes");
+    let internal_bytes = owner.ledger_for_test().1 - before_filler;
+    drop(internal_probe);
+    let filler = lease
+        .try_reserve_frame()
+        .expect("exact filler frame")
+        .reserve_bytes(RetentionCharge {
+            frame: capacity.max_bytes - before_filler - internal_bytes,
+            replacement: 0,
+            checkpoint: 0,
+            projections: 0,
+        })
+        .expect("fill exact byte boundary");
+    assert_eq!(owner.ledger_for_test(), (4, capacity.max_bytes, 3));
+    let before = sessions
+        .session_events("byte-ledger-session")
+        .expect("live session")
+        .to_vec();
+    let rejected = sessions.append_session_event_at(
+        "byte-ledger-session",
+        None,
+        loaded_event("byte-ledger-session"),
+        tau_proto::UnixMicros::new(4),
+    );
+    assert!(matches!(
+        rejected,
+        Err(crate::SessionStoreError::Persistence(
+            super::PersistenceAdmissionError::Full
+        ))
+    ));
+    let pressure = owner
+        .drain_operational_status()
+        .capacity_full
+        .expect("byte pressure transition");
+    assert_eq!(pressure.limit, super::PersistenceCapacityLimit::Bytes);
+    assert_eq!(pressure.usage.bytes, capacity.max_bytes);
+    assert_eq!(pressure.usage.frames, 4);
+    assert_eq!(
+        sessions
+            .session_events("byte-ledger-session")
+            .expect("live session"),
+        before
+    );
+    assert_eq!(owner.ledger_for_test(), (4, capacity.max_bytes, 3));
+    assert!(
+        std::fs::metadata(sessions_path.join("byte-ledger-session/events.cbor"))
+            .expect("session journal")
+            .len()
+            == 0,
+        "later stream must not overtake the failed head"
+    );
+
+    drop(filler);
+    backend
+        .fail_writes_with_enospc
+        .store(false, Ordering::SeqCst);
+    let mut leases = agents.managed_persistence_leases();
+    leases.extend(sessions.managed_persistence_leases("byte-ledger-session"));
+    owner
+        .release(&leases, Duration::from_secs(2))
+        .expect("recovery drains FIFO");
+    agents.finish_managed_release();
+    sessions.finish_managed_release("byte-ledger-session");
+    assert_eq!(owner.ledger_for_test(), (0, baseline, 0));
+    let recovered = owner.drain_operational_status();
+    assert!(recovered.recovered.is_some());
+    assert_eq!(recovered.drained.expect("drained transition").frames, 0);
+    drop(agents);
+    drop(sessions);
+    drop(owner);
+
+    let owner = Arc::new(
+        SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("cold owner"),
+    );
+    let mut cold_agents =
+        AgentStore::open_managed(&agents_path, owner.clone()).expect("cold agents");
+    let mut cold_sessions =
+        SessionStore::open_managed(&sessions_path, owner).expect("cold sessions");
+    cold_agents
+        .prepare_existing_agent(agent_id.as_str())
+        .expect("cold agent replay");
+    cold_sessions
+        .prepare_session("byte-ledger-session", SessionPreparationMode::Resume)
+        .expect("cold session replay");
+    let cold_agent = cold_agents.agent(agent_id.as_str()).expect("cold agent");
+    assert_eq!(cold_agent.display_name(), Some("accepted"));
+    assert_eq!(
+        cold_sessions
+            .session_events("byte-ledger-session")
+            .expect("cold session"),
+        before
+    );
+}
+
+/// Healthy small-event bursts behind a slow worker retain only frame, delta,
+/// checkpoint, and worker ownership; they must not reserve four encoded copies
+/// of the complete live projection for every queued frame.
+#[test]
+fn slow_healthy_worker_does_not_amplify_complete_projection_per_frame() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let backend = Arc::new(WriteFaultBackend::new());
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(
+            PersistenceCapacity::default(),
+            backend.clone(),
+        )
+        .expect("owner"),
+    );
+    let agent_id = tau_proto::AgentId::parse("healthy-burst-agent").expect("agent id");
+    let mut store =
+        AgentStore::open_managed(root.path().join("agents"), owner.clone()).expect("store");
+    store
+        .reserve_new_agent(agent_id.as_str())
+        .expect("reserve agent");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            crate::AgentEventParent::InheritHead,
+            started_event(&agent_id),
+            tau_proto::UnixMicros::new(1),
+        )
+        .expect("create agent");
+    store
+        .append_agent_event_at(
+            agent_id.as_str(),
+            None,
+            crate::AgentEventParent::InheritHead,
+            tau_proto::Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: "x".repeat(1024 * 1024),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+            tau_proto::UnixMicros::new(2),
+        )
+        .expect("build large live projection");
+    assert!(owner.wait_for_latest_durability_for_test(Duration::from_secs(2)));
+    let before_burst = owner.ledger_for_test().1;
+
+    backend.hold_writes.store(true, Ordering::SeqCst);
+    for ordinal in 0..64 {
+        store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                crate::AgentEventParent::InheritHead,
+                tau_proto::Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {
+                    agent_id: agent_id.clone(),
+                    display_name: format!("healthy-{ordinal}"),
+                }),
+                tau_proto::UnixMicros::new(3 + ordinal),
+            )
+            .expect("healthy burst must fit actual retained ownership");
+        if ordinal == 0 {
+            backend.wait_until_write_held();
+        }
+    }
+    let burst = owner.ledger_for_test();
+    assert_eq!(burst.0, 64);
+    assert!(
+        burst.1 - before_burst < 16 * 1024 * 1024,
+        "small queued deltas retained {} bytes above baseline",
+        burst.1 - before_burst
+    );
+    assert!(
+        owner.drain_operational_status().capacity_full.is_none(),
+        "healthy burst must not hit byte pressure"
+    );
+
+    backend.release_writes();
+    owner
+        .release(&store.managed_persistence_leases(), Duration::from_secs(2))
+        .expect("healthy burst drains");
+    store.finish_managed_release();
 }
 
 /// Every length-prefix and payload offset proves exact rollback before the same

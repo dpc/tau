@@ -25,6 +25,10 @@ pub(crate) const SUPERVISED_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 /// Commands that mutate harness-owned state from inside the central loop.
 pub(crate) enum HarnessCommand {
+    /// Observe persistence transitions and retry exact retained publications.
+    SemanticPersistenceProgress,
+    /// Retry exact ordinary activations after the recovery observation returns.
+    SemanticPersistenceActivationRetry,
     /// Install a spawned extension connection and release its reader.
     ConnectExtension(Box<ExtensionConnectCommand>),
     /// Complete an asynchronous external message tool delivery attempt.

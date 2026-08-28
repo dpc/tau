@@ -499,6 +499,12 @@ impl Harness {
         command: HarnessCommand,
     ) -> Result<(), HarnessError> {
         match command {
+            HarnessCommand::SemanticPersistenceProgress => {
+                self.observe_semantic_persistence_progress();
+            }
+            HarnessCommand::SemanticPersistenceActivationRetry => {
+                self.retry_capacity_rejected_activations();
+            }
             HarnessCommand::ConnectExtension(command) => self.connect_extension(*command)?,
             HarnessCommand::ExternalMessageToolCompleted(command) => {
                 self.peer_messaging

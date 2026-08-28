@@ -1872,6 +1872,19 @@ impl Harness {
                 .cloned()
                 .map(tau_core::PersistedEventSource::Connection),
         };
+        let activation_next_prompt_index_before_append =
+            if let Event::AgentInferenceDispatchStarted(started) = &event {
+                self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
+                    .and_then(|cid| {
+                        self.agent_runtime
+                            .agent_registry
+                            .agents
+                            .get(&cid)
+                            .map(|agent| (cid, agent.dispatch.next_prompt_index))
+                    })
+            } else {
+                None
+            };
         let semantic_persist_started = Instant::now();
         let append_result = self.persist_semantic_event(
             persistence_source,
@@ -1888,11 +1901,23 @@ impl Harness {
         let append_outcome = match append_result {
             Ok(append_outcome) => append_outcome,
             Err(error) => {
+                let capacity_full = matches!(
+                    &error,
+                    HarnessError::AgentStore(tau_core::AgentStoreError::Persistence(
+                        tau_core::PersistenceAdmissionError::Full
+                    ))
+                );
+                let rejected_activation_index = capacity_full
+                    .then_some(activation_next_prompt_index_before_append)
+                    .flatten();
                 commit_timing.result = CommitEventTimingResult::SemanticPersistError;
                 if let Some(timing) = prompt_acceptance.take() {
                     timing.finish(PromptAcceptanceTerminal::SemanticAdmissionRejected);
                 }
                 self.rollback_rejected_activation_successor(&event);
+                if capacity_full {
+                    self.retain_admission_rejected_activation_successor(&event);
+                }
                 self.rollback_rejected_ui_compaction_acceptance(&event);
                 self.retain_rejected_ui_compaction_start(&event);
                 self.clear_rejected_eager_compaction_start(&event);
@@ -1937,6 +1962,16 @@ impl Harness {
                 }
                 if let Some(completion) = watch_retirement.as_ref() {
                     self.finish_watch_retirement_delivery(completion, false);
+                }
+                if let Some((cid, next_prompt_index)) = rejected_activation_index
+                    && self
+                        .runtime_io
+                        .publication
+                        .capacity_rejected_activations
+                        .contains_key(&cid)
+                    && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
+                {
+                    agent.dispatch.next_prompt_index = next_prompt_index;
                 }
                 return;
             }
