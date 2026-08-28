@@ -6,7 +6,6 @@ use crate::tools as path_crate_tools;
 mod tests;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use tau_proto::{
@@ -15,12 +14,12 @@ use tau_proto::{
 use tracing::debug;
 
 use super::{
-    DiscoverySourcePolicy, UiShellScheduleContext, apply_started_cwd_metadata,
-    apply_working_directory, cwd_context_event, cwd_notice_event, dir_lock_tool_spec,
-    dispatch_action_invoke, dispatch_session_agent_loaded, dispatch_session_started,
-    invalid_cwd_context_event, is_shell_tool, publish_agent_discovery_snapshot_for,
-    schedule_tool_started, schedule_ui_shell_command, send_tool_failure,
-    send_ui_shell_saturated_failure, with_lock_wait_duration,
+    DiscoverySourcePolicy, UiShellScheduleContext, UiShellShutdownGenerationCounter,
+    apply_started_cwd_metadata, apply_working_directory, cwd_context_event, cwd_notice_event,
+    dir_lock_tool_spec, dispatch_action_invoke, dispatch_session_agent_loaded,
+    dispatch_session_started, invalid_cwd_context_event, is_shell_tool,
+    publish_agent_discovery_snapshot_for, schedule_tool_started, schedule_ui_shell_command,
+    send_tool_failure, send_ui_shell_saturated_failure, with_lock_wait_duration,
 };
 use crate::Output;
 use crate::config::ExtConfig;
@@ -46,7 +45,7 @@ pub(super) struct ShellRuntime {
     /// Shared pre-effect and active cancellation state for model tool calls.
     cancellation: ToolCancellationState,
     running_ui_commands: Arc<Mutex<HashMap<tau_proto::ShellCommandId, mpsc::Sender<()>>>>,
-    shutdown_generation: Arc<AtomicU64>,
+    shutdown_generation_counter: Arc<UiShellShutdownGenerationCounter>,
     lock_manager: DirLockManager,
     cwd_state: CwdState,
     /// Identifies whether startup cwd comes from the process or a test fixture,
@@ -115,7 +114,7 @@ impl ShellRuntime {
             tx,
             cancellation: ToolCancellationState::default(),
             running_ui_commands: Arc::new(Mutex::new(HashMap::new())),
-            shutdown_generation: Arc::new(AtomicU64::new(0)),
+            shutdown_generation_counter: Arc::new(UiShellShutdownGenerationCounter::default()),
             lock_manager: DirLockManager::default(),
             cwd_state,
             startup_cwd_source,
@@ -135,7 +134,7 @@ impl ShellRuntime {
     }
 
     pub(super) fn shutdown(&mut self) {
-        self.shutdown_generation.fetch_add(1, Ordering::SeqCst);
+        self.shutdown_generation_counter.advance();
         // Dir-lock waiters must be woken before the scheduler is dropped,
         // because scheduler drop joins workers that may be blocked on locks.
         self.lock_manager.shutdown();
@@ -725,8 +724,8 @@ impl ShellRuntime {
                 tx: &self.tx,
                 shell_config: self.config.shell.clone(),
                 running_ui_commands: Arc::clone(&self.running_ui_commands),
-                shutdown_generation: Arc::clone(&self.shutdown_generation),
-                scheduled_generation: self.shutdown_generation.load(Ordering::SeqCst),
+                shutdown_generation_counter: Arc::clone(&self.shutdown_generation_counter),
+                scheduled_generation: self.shutdown_generation_counter.current(),
                 cwd,
             },
         ) {

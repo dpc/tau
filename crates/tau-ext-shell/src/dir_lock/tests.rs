@@ -1383,6 +1383,21 @@ fn filesystem_wait_polling_skips_sleep_after_observed_wake() {
     );
 }
 
+/// Ensures directory-lock wake authority retains its saturating overflow
+/// policy, so a max-value wake still leaves waiters observing the same
+/// predicate.
+#[test]
+fn wake_generation_saturates_at_maximum() {
+    let mut state = LockState {
+        wake_generation: DirLockWakeGeneration::new(u64::MAX),
+        ..Default::default()
+    };
+
+    state.record_wake();
+
+    assert_eq!(state.wake_generation, DirLockWakeGeneration::new(u64::MAX));
+}
+
 /// Ensures the liveness deadline caps the actual timed wait without resetting
 /// or preserving the current cross-process backoff step.
 #[test]

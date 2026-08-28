@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -50,6 +49,7 @@ mod terminal_frame;
 mod tool_lifecycle;
 mod tools;
 mod truncate;
+mod ui_shell_shutdown_generation;
 
 #[cfg(test)]
 mod tests;
@@ -68,6 +68,9 @@ use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, GREP_TOOL_NAME,
     LS_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_TOOL_NAME, REPLACE_TOOL_NAME, SHELL_TOOL_NAME,
     WORKDIR_TOOL_NAME, execute_tool,
+};
+use crate::ui_shell_shutdown_generation::{
+    UiShellShutdownGeneration, UiShellShutdownGenerationCounter,
 };
 
 /// Cloneable shell output adapter.
@@ -1687,10 +1690,10 @@ struct UiShellScheduleContext<'a> {
     shell_config: ShellConfig,
     /// Cancellation senders for commands currently executing.
     running_ui_commands: Arc<Mutex<HashMap<tau_proto::ShellCommandId, mpsc::Sender<()>>>>,
-    /// Lifecycle generation shared with shutdown handling.
-    shutdown_generation: Arc<AtomicU64>,
+    /// Shutdown authority shared with the runtime teardown handler.
+    shutdown_generation_counter: Arc<UiShellShutdownGenerationCounter>,
     /// Lifecycle generation captured when the command was admitted.
-    scheduled_generation: u64,
+    scheduled_generation: UiShellShutdownGeneration,
     /// Canonical workdir captured when the command was admitted.
     cwd: PathBuf,
 }
@@ -1704,7 +1707,7 @@ fn schedule_ui_shell_command(
         tx,
         shell_config,
         running_ui_commands,
-        shutdown_generation,
+        shutdown_generation_counter,
         scheduled_generation,
         cwd,
     } = context;
@@ -1723,7 +1726,7 @@ fn schedule_ui_shell_command(
                 .lock()
                 .expect("running ui shell registry lock poisoned")
                 .insert(command_id.clone(), cancel_tx.clone());
-            if shutdown_generation.load(Ordering::SeqCst) != scheduled_generation {
+            if shutdown_generation_counter.current() != scheduled_generation {
                 let _ = cancel_tx.send(());
             }
             path_crate_tools::shell::dispatch_user_shell_command(

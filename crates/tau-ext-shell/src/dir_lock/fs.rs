@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 use tau_proto::{AgentId, ToolCallId};
 
 use super::{
-    AbandonedLock, AutoDirLockGuard, AutoLockToken, DirLockManager, ForceUnlockedLock,
-    LockAcquireError, LockWaitPolicy, ManualLockAcquireError, UnlockOwnerScope, WaitKind,
-    dirs_overlap, normalize_lock_dirs, paths_overlap,
+    AbandonedLock, AutoDirLockGuard, AutoLockToken, DirLockManager, DirLockWakeGeneration,
+    ForceUnlockedLock, LockAcquireError, LockWaitPolicy, ManualLockAcquireError, UnlockOwnerScope,
+    WaitKind, dirs_overlap, normalize_lock_dirs, paths_overlap,
 };
 
 // Keep at zero per `GATE-no-backward-compatibility`.
@@ -933,7 +933,7 @@ fn wait_for_lock_change(
     manager: &DirLockManager,
     next_liveness_check: Instant,
     backoff: &mut FsWaitBackoff,
-    observed_wake_generation: u64,
+    observed_wake_generation: DirLockWakeGeneration,
 ) {
     let guard = manager.inner.state.lock().expect("dir lock state poisoned");
     if guard.wake_generation != observed_wake_generation {

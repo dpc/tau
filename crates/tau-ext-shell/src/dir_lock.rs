@@ -20,6 +20,7 @@ use std::io as path_std_io;
 use crate::tools as path_crate_tools;
 
 mod fs;
+mod wake_generation;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,7 @@ use self::fs::{
     FsAutoAcquireRequest, FsLockBackend, FsManualAcquireRequest, StateDirSource,
     default_fs_state_dir,
 };
+use self::wake_generation::DirLockWakeGeneration;
 use crate::Output;
 use crate::argument::{argument_text, optional_argument_text};
 use crate::config::{DirLockBackendConfig, DirLockConfig};
@@ -192,7 +194,7 @@ struct LockState {
     /// Filesystem-backend waiters use this as the condvar predicate so
     /// same-process notifications cannot be lost between a registry check and a
     /// timed cross-process re-check sleep.
-    wake_generation: u64,
+    wake_generation: DirLockWakeGeneration,
     /// Manual locks owned by agents in this process when using the memory
     /// backend.
     manual: Vec<ManualLock>,
@@ -422,7 +424,7 @@ impl DirLockManager {
             .clone()
     }
 
-    fn wake_generation(&self) -> u64 {
+    fn wake_generation(&self) -> DirLockWakeGeneration {
         self.inner
             .state
             .lock()
@@ -964,7 +966,7 @@ fn pause_configure_after_active_check_for_test() {}
 
 impl LockState {
     fn record_wake(&mut self) {
-        self.wake_generation = self.wake_generation.saturating_add(1);
+        self.wake_generation = self.wake_generation.saturating_next();
     }
 
     fn push_waiter(
