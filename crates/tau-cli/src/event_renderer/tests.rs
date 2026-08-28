@@ -1736,7 +1736,7 @@ fn watch_work_status_renders_all_reportable_states() {
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
                 subscription_id: "subscription-1".to_owned(),
-                status_epoch: 1,
+                status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
                 phase,
                 title: Some(format!("{label} task")),
                 initial: false,
@@ -1786,7 +1786,7 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
             watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
                 session_id: tau_proto::SessionId::parse("session-1").expect("valid session ID"),
                 subscription_id: "subscription-1".to_owned(),
-                status_epoch: 1,
+                status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
                 phase,
                 title,
                 initial,
@@ -1862,7 +1862,7 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
         watch_provider_status: Some(tau_proto::AgentWatchProviderStatusNotification {
             session_id: tau_proto::SessionId::parse("session-1").expect("valid session id"),
             subscription_id: "subscription-1".to_owned(),
-            turn_generation: 1,
+            turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
             agent_prompt_id: tau_proto::AgentPromptId::parse("prompt-1").expect("valid prompt id"),
             state: tau_proto::AgentWatchProviderState::Blocked {
                 category: tau_proto::AgentWatchProviderCategory::Account,
@@ -1899,7 +1899,7 @@ fn watch_provider_and_long_wait_statuses_use_intentional_markers() {
         watch_long_wait: Some(tau_proto::AgentWatchLongWaitNotification {
             session_id: tau_proto::SessionId::parse("session-1").expect("valid session id"),
             subscription_id: "subscription-1".to_owned(),
-            status_epoch: 1,
+            status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
             threshold_minutes: 5,
         }),
         watch_lifecycle: None,
@@ -2021,7 +2021,7 @@ fn watch_work_status_visibly_escapes_structural_unicode() {
                 .parse::<tau_proto::SessionId>()
                 .expect("known-safe SessionId must be valid"),
             subscription_id: "subscription-1".to_owned(),
-            status_epoch: 1,
+            status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
             phase: tau_proto::AgentWorkStatusPhase::Blocked,
             title: Some("blocked \u{202e} task".to_owned()),
             initial: false,

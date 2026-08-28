@@ -12,6 +12,7 @@ use tau_proto::{Event, HarnessInputMessage, PromptFragment, ToolRegistrationDecl
 
 use crate::event::SupervisedWriterHandle;
 use crate::extension::ExtensionEntry;
+use crate::harness::SessionGeneration;
 
 /// One extension's initial readiness deadline and availability policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,7 +52,7 @@ pub(super) struct ExtensionFrameAdmission {
     /// Session id active at frame admission.
     pub(super) session_id: tau_proto::SessionId,
     /// In-process generation of that session binding.
-    pub(super) session_generation: u64,
+    pub(super) session_generation: SessionGeneration,
 }
 
 /// One session-bound capability projection retained until extension activation.

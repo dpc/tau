@@ -394,7 +394,7 @@ fn manual_compaction_request(agent_id: &str, request_id: &str) -> Event {
             resume_inference: false,
         }),
         requested_target_head: tau_proto::AgentHead::Root,
-        target_generation: 0,
+        target_generation: tau_proto::MaterializedPromptGeneration::from_inference_generation(0),
         model: "provider/model".into(),
     })
 }
@@ -489,11 +489,17 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
             .append_agent_event("target", None, event)
             .expect("append prompt");
     }
-    assert_eq!(counters(&store), 2);
+    assert_eq!(
+        counters(&store),
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(2)
+    );
 
     drop(store);
     let mut reopened = AgentStore::open(&agents_dir).expect("reopen store");
-    assert_eq!(counters(&reopened), 2);
+    assert_eq!(
+        counters(&reopened),
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(2)
+    );
 
     let sequence_before = reopened
         .agent("target")
@@ -507,7 +513,8 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
     let Event::AgentManualCompactionRequested(requested) = &mut request else {
         unreachable!("helper constructs a manual compaction request");
     };
-    requested.target_generation = 1;
+    requested.target_generation =
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(1);
     assert!(matches!(
         reopened.append_agent_event("target", None, request.clone()),
         Err(AgentStoreError::InvalidEvent { .. })
@@ -526,19 +533,26 @@ fn manual_compaction_generation_replays_and_guards_durable_admission() {
             .len(),
         event_count_before
     );
-    assert_eq!(counters(&reopened), 2);
+    assert_eq!(
+        counters(&reopened),
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(2)
+    );
 
     let Event::AgentManualCompactionRequested(requested) = &mut request else {
         unreachable!("helper constructs a manual compaction request");
     };
-    requested.target_generation = 2;
+    requested.target_generation =
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(2);
     reopened
         .append_agent_event("target", None, request)
         .expect("append current-generation request");
     drop(reopened);
 
     let reopened = AgentStore::open(&agents_dir).expect("reopen accepted request");
-    assert_eq!(counters(&reopened), 2);
+    assert_eq!(
+        counters(&reopened),
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(2)
+    );
     assert!(matches!(
         reopened
             .agent("target")

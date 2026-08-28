@@ -88,7 +88,7 @@ fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
     let status = |state| tau_proto::AgentWatchProviderStatusNotification {
         session_id: session_id.clone(),
         subscription_id: String::new(),
-        turn_generation: 4,
+        turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(4),
         agent_prompt_id: test_agent_prompt_id("sp-provider-watch"),
         state,
         initial: false,
@@ -307,7 +307,7 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
     let status = |state| tau_proto::AgentWatchProviderStatusNotification {
         session_id: session_id.clone(),
         subscription_id: String::new(),
-        turn_generation: 1,
+        turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
         agent_prompt_id: test_agent_prompt_id("target-unload-prompt"),
         state,
         initial: false,
@@ -572,7 +572,7 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
             tau_proto::AgentWatchProviderStatusNotification {
                 session_id: h.session_runtime.current_session_id.clone(),
                 subscription_id: String::new(),
-                turn_generation: 1,
+                turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
                 agent_prompt_id: test_agent_prompt_id("sp-replay-status"),
                 state: tau_proto::AgentWatchProviderState::Retrying {
                     category: tau_proto::AgentWatchProviderCategory::Throttle,
@@ -716,7 +716,10 @@ fn agent_watch_reports_structured_work_status() {
     assert_eq!(live.len(), 2, "identical updates do not fan out");
     let update = live[1].watch_work_status.as_ref().expect("live status");
     assert!(!update.initial);
-    assert_eq!(update.status_epoch, 1);
+    assert_eq!(
+        update.status_epoch,
+        tau_proto::AgentWorkStatusEpoch::from_raw(1)
+    );
     assert_eq!(update.title.as_deref(), Some("trace lifecycle"));
 
     let late_cid = h.create_durable_user_agent(
@@ -931,7 +934,7 @@ fn watch_chain_provider_status_turn_does_not_fan_out_final_response() {
         tau_proto::AgentWatchProviderStatusNotification {
             session_id: h.session_runtime.current_session_id.clone(),
             subscription_id: String::new(),
-            turn_generation: 1,
+            turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
             agent_prompt_id: test_agent_prompt_id("sp-a-retry"),
             state: tau_proto::AgentWatchProviderState::Retrying {
                 category: tau_proto::AgentWatchProviderCategory::Transport,

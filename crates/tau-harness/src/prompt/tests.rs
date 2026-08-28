@@ -16,7 +16,7 @@ fn work_status_prompt_is_generic_escaped_and_ignores_initial_snapshot() {
     let mut status = tau_proto::AgentWatchWorkStatusNotification {
         session_id: "session-1".parse().expect("valid session id"),
         subscription_id: "watch-1".to_owned(),
-        status_epoch: 2,
+        status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(2),
         phase: tau_proto::AgentWorkStatusPhase::Working,
         title: Some("trace\u{202e}restore".to_owned()),
         initial: false,
@@ -194,7 +194,7 @@ fn watch_provider_status_text_is_concise_readable_and_safe() {
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
         subscription_id: "watch".to_owned(),
-        turn_generation: 1,
+        turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
         agent_prompt_id: "prompt"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -2538,7 +2538,7 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
         watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
             session_id: session_id.clone(),
             subscription_id: "watch-1".to_owned(),
-            status_epoch: 3,
+            status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(3),
             phase: tau_proto::AgentWorkStatusPhase::Working,
             title: Some("trace restore".to_owned()),
             initial,
@@ -2558,7 +2558,7 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
         watch_long_wait: Some(tau_proto::AgentWatchLongWaitNotification {
             session_id: session_id.clone(),
             subscription_id: "watch-1".to_owned(),
-            status_epoch: 3,
+            status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(3),
             threshold_minutes: 30,
         }),
         watch_lifecycle: None,

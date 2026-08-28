@@ -2471,6 +2471,40 @@ impl AgentWatchProviderState {
     }
 }
 
+/// Runtime-local generation of a watched agent's outer turn.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentOuterTurnGeneration(u64);
+
+impl AgentOuterTurnGeneration {
+    /// Reconstructs a generation in protocol fixtures and decoded boundaries.
+    #[must_use]
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the initial outer-turn generation.
+    #[must_use]
+    pub const fn initial() -> Self {
+        Self(0)
+    }
+
+    /// Advances the generation while preserving saturation at the scalar
+    /// maximum.
+    #[must_use]
+    pub const fn saturating_next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+
+    /// Returns the scalar representation for diagnostics and foreign
+    /// boundaries.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// Harness-authored current provider-work snapshot for one watched agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentWatchProviderStatusNotification {
@@ -2479,7 +2513,7 @@ pub struct AgentWatchProviderStatusNotification {
     /// Fresh identity for the directed watch relation.
     pub subscription_id: String,
     /// Watched-agent outer-turn generation.
-    pub turn_generation: u64,
+    pub turn_generation: AgentOuterTurnGeneration,
     /// Prompt whose provider work produced this status.
     pub agent_prompt_id: AgentPromptId,
     /// Tagged provider-work state whose variants enforce phase invariants.
@@ -2506,6 +2540,39 @@ pub enum AgentWorkStatusPhase {
     Unknown,
 }
 
+/// Runtime-local epoch of a watched agent's semantic work report.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentWorkStatusEpoch(u64);
+
+impl AgentWorkStatusEpoch {
+    /// Reconstructs an epoch in protocol fixtures and decoded boundaries.
+    #[must_use]
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the initial work-status epoch.
+    #[must_use]
+    pub const fn initial() -> Self {
+        Self(0)
+    }
+
+    /// Advances the epoch while preserving saturation at the scalar maximum.
+    #[must_use]
+    pub const fn saturating_next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+
+    /// Returns the scalar representation for diagnostics and foreign
+    /// boundaries.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// Harness-authored current self-reported work-status snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentWatchWorkStatusNotification {
@@ -2514,7 +2581,7 @@ pub struct AgentWatchWorkStatusNotification {
     /// Fresh identity for the directed watch relation.
     pub subscription_id: String,
     /// Runtime-local generation of the watched agent's work report.
-    pub status_epoch: u64,
+    pub status_epoch: AgentWorkStatusEpoch,
     /// Closed self-reported task phase.
     pub phase: AgentWorkStatusPhase,
     /// Canonical model-authored title: absent for `Unreported`; otherwise
@@ -2534,7 +2601,7 @@ pub struct AgentWatchLongWaitNotification {
     /// Fresh identity for the directed watch relation.
     pub subscription_id: String,
     /// Work-status epoch in which waiting accumulated.
-    pub status_epoch: u64,
+    pub status_epoch: AgentWorkStatusEpoch,
     /// Newly crossed threshold in whole minutes.
     pub threshold_minutes: u32,
 }
@@ -4459,6 +4526,33 @@ pub struct ManualToolCompactionSource {
     pub resume_inference: bool,
 }
 
+/// Target-owned materialized prompt generation captured by durable compaction.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MaterializedPromptGeneration(u64);
+
+impl MaterializedPromptGeneration {
+    /// Returns the initial materialized-prompt generation.
+    #[must_use]
+    pub const fn initial() -> Self {
+        Self(0)
+    }
+
+    /// Creates a durable prompt generation at its owning inference boundary.
+    #[must_use]
+    pub const fn from_inference_generation(generation: u64) -> Self {
+        Self(generation)
+    }
+
+    /// Returns the scalar representation for diagnostics and foreign
+    /// boundaries.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// Harness-owned durable acceptance fact for a manual compaction.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentManualCompactionRequested {
@@ -4472,7 +4566,7 @@ pub struct AgentManualCompactionRequested {
     /// Target branch head observed at acceptance.
     pub requested_target_head: AgentHead,
     /// Target-owned materialized prompt generation observed at acceptance.
-    pub target_generation: u64,
+    pub target_generation: MaterializedPromptGeneration,
     /// Provider-qualified model observed at acceptance.
     pub model: ModelId,
 }

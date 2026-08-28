@@ -746,7 +746,7 @@ impl Agent {
             turn: AgentTurnRuntimeState {
                 turn_state: AgentTurnState::Idle,
                 published_runtime_state: tau_proto::AgentRuntimeState::Idle,
-                turn_generation: 0,
+                turn_generation: tau_proto::AgentOuterTurnGeneration::initial(),
                 work_status: WorkStatus::default(),
                 terminal_status_was_available: false,
                 terminal_notice_eligible: false,

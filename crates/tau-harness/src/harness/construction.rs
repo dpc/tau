@@ -427,7 +427,7 @@ impl Harness {
                 current_session_id: eager_session_id
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
-                current_session_generation: 0,
+                current_session_generation: SessionGeneration::default(),
                 current_session_start_reason: launch.reason,
                 lifecycle_messages: Vec::new(),
                 user_interaction_order: HashMap::new(),
@@ -968,7 +968,7 @@ impl Harness {
                     .eager_session_id
                     .parse::<tau_proto::SessionId>()
                     .expect("known-safe SessionId must be valid"),
-                current_session_generation: 0,
+                current_session_generation: SessionGeneration::default(),
                 current_session_start_reason: parts.launch.reason,
                 lifecycle_messages: Vec::new(),
                 user_interaction_order: HashMap::new(),

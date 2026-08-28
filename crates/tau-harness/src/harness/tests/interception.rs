@@ -2154,7 +2154,7 @@ fn stale_or_disconnected_auth_completion_cannot_auto_start() {
             peer.clone(),
             h.session_runtime
                 .current_session_generation
-                .saturating_add(1),
+                .saturating_next(),
             request("generation"),
             Ok(()),
         )

@@ -234,7 +234,9 @@ fn manual_compaction_lifecycle_status_follows_target_agent_selection() {
                 },
             ),
             requested_target_head: tau_proto::AgentHead::Root,
-            target_generation: 0,
+            target_generation: tau_proto::MaterializedPromptGeneration::from_inference_generation(
+                0,
+            ),
             model: "test/model".parse().expect("model id"),
         },
     ));
@@ -413,7 +415,7 @@ fn no_agent_overview_excludes_structured_current_watch_status() {
             watch_provider_status: Some(tau_proto::AgentWatchProviderStatusNotification {
                 session_id: test_session_id("s1"),
                 subscription_id: "sub-1".to_owned(),
-                turn_generation: 1,
+                turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
                 agent_prompt_id: test_agent_prompt_id("prompt-1"),
                 state: tau_proto::AgentWatchProviderState::Blocked {
                     category: tau_proto::AgentWatchProviderCategory::Account,
@@ -440,7 +442,7 @@ fn no_agent_overview_excludes_structured_current_watch_status() {
             watch_long_wait: Some(tau_proto::AgentWatchLongWaitNotification {
                 session_id: test_session_id("s1"),
                 subscription_id: "sub-1".to_owned(),
-                status_epoch: 1,
+                status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
                 threshold_minutes: 5,
             }),
             watch_lifecycle: None,
@@ -1283,7 +1285,7 @@ fn watched_agent_stats_redraws_status_row() {
             watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
                 session_id: test_session_id("s1"),
                 subscription_id: "watch-engineer-1".to_owned(),
-                status_epoch: 1,
+                status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
                 phase: tau_proto::AgentWorkStatusPhase::Working,
                 title: Some("investigate session".to_owned()),
                 initial: true,
@@ -1585,7 +1587,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
             watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
                 session_id: test_session_id("s1"),
                 subscription_id: "watch-1".to_owned(),
-                status_epoch: 1,
+                status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
                 phase,
                 title: title.map(str::to_owned),
                 initial: false,
@@ -1769,7 +1771,7 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
     let status = tau_proto::AgentWatchWorkStatusNotification {
         session_id: test_session_id("s1"),
         subscription_id: "watch-1".to_owned(),
-        status_epoch: 1,
+        status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
         phase: tau_proto::AgentWorkStatusPhase::Working,
         title: Some("review changes".to_owned()),
         initial: false,

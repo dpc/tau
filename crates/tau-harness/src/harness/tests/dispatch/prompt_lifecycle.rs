@@ -1724,7 +1724,7 @@ fn ordinary_prompt_started_advances_persisted_inference_generation() {
             .agent(agent_id.as_str())
             .expect("agent tree")
             .ordinary_inference_generation(),
-        0
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(0)
     );
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("ordinary inference".to_owned()))
@@ -1785,7 +1785,7 @@ fn ordinary_prompt_started_advances_persisted_inference_generation() {
             .agent(agent_id.as_str())
             .expect("agent tree")
             .ordinary_inference_generation(),
-        1
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(1)
     );
     let full_prompt_count = event_log_events(&h)
         .iter()

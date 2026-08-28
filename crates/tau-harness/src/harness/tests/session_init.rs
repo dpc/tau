@@ -227,7 +227,7 @@ fn staged_discovery_renews_only_after_current_generation_activation() {
     h.session_runtime.current_session_generation = h
         .session_runtime
         .current_session_generation
-        .saturating_add(1);
+        .saturating_next();
     h.handle_extension_message(
         &stale,
         TestMessage::Ready(tau_proto::Ready { message: None }),
@@ -236,7 +236,7 @@ fn staged_discovery_renews_only_after_current_generation_activation() {
     h.session_runtime.current_session_generation = h
         .session_runtime
         .current_session_generation
-        .saturating_sub(1);
+        .saturating_previous();
     assert_eq!(
         h.session_runtime.session_init_progress_generation, before_stale_activation,
         "stale-generation staged discovery must not renew session init"

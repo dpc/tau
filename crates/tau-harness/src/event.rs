@@ -18,6 +18,7 @@ use tau_proto::{
 };
 
 use crate::extension::ExtensionConnectCommand;
+use crate::harness::SessionGeneration;
 
 /// Grace period before a blocked supervised writer is forcefully unblocked.
 pub(crate) const SUPERVISED_CLEANUP_GRACE: Duration = Duration::from_secs(2);
@@ -39,7 +40,7 @@ pub(crate) struct SessionDiscoveryCompletedCommand {
     /// Conversation that owns the tool call.
     pub(crate) conversation_id: tau_proto::AgentId,
     /// Session generation active when discovery began.
-    pub(crate) session_generation: u64,
+    pub(crate) session_generation: SessionGeneration,
     /// Tool call id being completed.
     pub(crate) call_id: tau_proto::ToolCallId,
     /// Visible tool name.
@@ -58,7 +59,7 @@ pub(crate) struct ExternalMessageToolCompletedCommand {
     pub(crate) conversation_id: tau_proto::AgentId,
     /// Session generation that was active when the external message tool call
     /// started.
-    pub(crate) session_generation: u64,
+    pub(crate) session_generation: SessionGeneration,
     /// Tool call id being completed.
     pub(crate) call_id: tau_proto::ToolCallId,
     /// Visible tool name for terminal result/error events.
@@ -131,7 +132,7 @@ pub(crate) struct ExternalMessageAuthCompletedCommand {
     /// Socket client that sent the external message RPC.
     pub(crate) client_id: tau_proto::ConnectionId,
     /// Session generation in which callback authentication began.
-    pub(crate) session_generation: u64,
+    pub(crate) session_generation: SessionGeneration,
     /// Request to publish after successful sender authentication.
     pub(crate) request: tau_proto::ExternalAgentMessageRequest,
     /// Authentication result from the helper thread.

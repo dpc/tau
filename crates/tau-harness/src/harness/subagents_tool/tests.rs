@@ -9,7 +9,7 @@ fn terminal_incomplete_watch_state_is_sticky() {
     let status = |state| tau_proto::AgentWatchProviderStatusNotification {
         session_id: tau_proto::SessionId::parse("session").expect("session id"),
         subscription_id: String::new(),
-        turn_generation: 7,
+        turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(7),
         agent_prompt_id: tau_proto::AgentPromptId::parse("ap-length").expect("prompt id"),
         state,
         initial: false,

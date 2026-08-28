@@ -545,7 +545,7 @@ fn manual_request(id: &str) -> tau_proto::AgentManualCompactionRequested {
             resume_inference: false,
         }),
         requested_target_head: AgentHead::Root,
-        target_generation: 0,
+        target_generation: tau_proto::MaterializedPromptGeneration::from_inference_generation(0),
         model: "provider/model".into(),
     }
 }
@@ -1531,7 +1531,7 @@ fn reactive_overflow_claim_rejects_invalid_source_correlations() {
         tree.inference_dispatches.insert(
             checkpoint.agent_prompt_id.clone(),
             InferenceDispatchFold {
-                head_move_generation: 0,
+                head_move_generation: HeadMoveGeneration::default(),
                 fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
                 checkpoint: checkpoint.clone(),
                 finished: true,
@@ -2459,7 +2459,7 @@ fn validate_event_enforces_watch_payload_discriminator() {
             .parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
         subscription_id: "watch-1".to_owned(),
-        turn_generation: 1,
+        turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
         agent_prompt_id: "sp-watch"
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
@@ -2512,7 +2512,7 @@ fn validate_event_rejects_noncanonical_work_status_title_shape() {
             watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
                 session_id: "session-1".parse().expect("valid session id"),
                 subscription_id: "watch-1".to_owned(),
-                status_epoch: 1,
+                status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
                 phase,
                 title,
                 initial: true,
@@ -2572,7 +2572,7 @@ fn validate_event_enforces_semantic_watch_payload_discriminators() {
     let work = tau_proto::AgentWatchWorkStatusNotification {
         session_id: "session-1".parse().expect("valid session id"),
         subscription_id: "watch-1".to_owned(),
-        status_epoch: 1,
+        status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
         phase: tau_proto::AgentWorkStatusPhase::Working,
         title: Some("work".to_owned()),
         initial: false,
@@ -2580,7 +2580,7 @@ fn validate_event_enforces_semantic_watch_payload_discriminators() {
     let wait = tau_proto::AgentWatchLongWaitNotification {
         session_id: "session-1".parse().expect("valid session id"),
         subscription_id: "watch-1".to_owned(),
-        status_epoch: 1,
+        status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
         threshold_minutes: 15,
     };
     for (kind, watch_work_status, watch_long_wait) in [
@@ -4383,7 +4383,10 @@ fn manual_compaction_generation_excludes_standalone_prompts() {
     tree.validate_event(&compact_prompt)
         .expect("standalone materialization");
     tree.apply_event(&compact_prompt);
-    assert_eq!(tree.ordinary_inference_generation(), 0);
+    assert_eq!(
+        tree.ordinary_inference_generation(),
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(0)
+    );
     let checkpoint = tau_proto::AgentInferenceDispatchStarted {
         agent_id: agent_id(),
         transaction_id: None,
@@ -4403,7 +4406,10 @@ fn manual_compaction_generation_excludes_standalone_prompts() {
     tree.validate_event(&inference_prompt)
         .expect("inference materialization");
     tree.apply_event(&inference_prompt);
-    assert_eq!(tree.ordinary_inference_generation(), 1);
+    assert_eq!(
+        tree.ordinary_inference_generation(),
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(1)
+    );
 }
 
 /// Compact prompt facts require one exact unresolved owner, reject identity
@@ -4473,9 +4479,15 @@ fn prompt_started_requires_unique_matching_owner() {
     );
     assert!(tree.prompt_started_is_dispatchable(&started));
     assert!(!tree.prompt_started_can_materialize(&started));
-    assert_eq!(tree.ordinary_inference_generation(), 1);
+    assert_eq!(
+        tree.ordinary_inference_generation(),
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(1)
+    );
     assert!(validation_error(&tree, Event::AgentPromptStarted(started)).contains("duplicate"));
-    assert_eq!(tree.ordinary_inference_generation(), 1);
+    assert_eq!(
+        tree.ordinary_inference_generation(),
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(1)
+    );
 }
 
 /// Complete, valid source → plan → steer → owner → prompt-start → terminal

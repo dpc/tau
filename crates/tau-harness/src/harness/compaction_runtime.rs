@@ -341,7 +341,10 @@ impl Harness {
             .session_runtime
             .agent_store
             .agent(agent_id.as_str())
-            .map_or(0, tau_core::AgentTree::ordinary_inference_generation);
+            .map_or(
+                tau_proto::MaterializedPromptGeneration::initial(),
+                tau_core::AgentTree::ordinary_inference_generation,
+            );
         let target_role = self.role_name_for_agent(agent);
         let ordinal = self
             .session_runtime
@@ -745,7 +748,10 @@ impl Harness {
             .session_runtime
             .agent_store
             .agent(target_public_id.as_str())
-            .map_or(0, tau_core::AgentTree::ordinary_inference_generation);
+            .map_or(
+                tau_proto::MaterializedPromptGeneration::initial(),
+                tau_core::AgentTree::ordinary_inference_generation,
+            );
         let repeated_generation = self
             .session_runtime
             .agent_store

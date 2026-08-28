@@ -117,7 +117,7 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
         watch_provider_status: Some(tau_proto::AgentWatchProviderStatusNotification {
             session_id: test_session_id("s1"),
             subscription_id: "subscription-1".to_owned(),
-            turn_generation: 1,
+            turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
             agent_prompt_id: test_agent_prompt_id("prompt-1"),
             state: tau_proto::AgentWatchProviderState::Retrying {
                 category: tau_proto::AgentWatchProviderCategory::Unknown,

@@ -13,6 +13,18 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use std::{fmt, io, thread};
 
+/// Process-local generation authorizing one journal-sync dirty watermark.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct JournalSyncGeneration(u64);
+
+impl JournalSyncGeneration {
+    /// Advances the generation with the existing wrapping overflow behavior.
+    #[must_use]
+    const fn wrapping_next(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
+}
+
 /// Filesystem operations used by one background sync attempt.
 trait SyncBackend: Send + Sync + 'static {
     /// Syncs journal data through the current dirty watermark.
@@ -225,13 +237,15 @@ impl JournalSyncWorker {
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            state.next_generation = state.next_generation.wrapping_add(1);
+            state.next_generation = state.next_generation.wrapping_next();
             let generation = state.next_generation;
             let path = path.to_path_buf();
             let is_new = !state.dirty.contains_key(&path);
             let entry = state.dirty.entry(path.clone()).or_default();
             // ast-grep-ignore: debug-assert-expression-must-not-mutate
-            debug_assert!(entry.generation == 0 || entry.kind == kind);
+            debug_assert!(
+                entry.generation == JournalSyncGeneration::default() || entry.kind == kind
+            );
             entry.kind = kind;
             entry.generation = generation;
             entry.end_offset = entry.end_offset.max(end_offset);
@@ -347,7 +361,7 @@ struct State {
     /// temporarily absent and requeued after their generation handshake.
     ready: VecDeque<PathBuf>,
     /// Wrapping generation used with the complete target as a watermark.
-    next_generation: u64,
+    next_generation: JournalSyncGeneration,
     /// Base delay for per-target exponential retry.
     retry_base: Duration,
     /// Owner requested one best-effort pass and detached.
@@ -359,7 +373,7 @@ impl Default for State {
         Self {
             dirty: BTreeMap::new(),
             ready: VecDeque::new(),
-            next_generation: 0,
+            next_generation: JournalSyncGeneration::default(),
             retry_base: Duration::from_millis(250),
             stopping: false,
         }
@@ -372,7 +386,7 @@ struct DirtyJournal {
     /// Whether this target syncs journal data or a directory boundary.
     kind: SyncTargetKind,
     /// Latest foreground dirty generation.
-    generation: u64,
+    generation: JournalSyncGeneration,
     /// Largest journal EOF requiring coverage; unused for a boundary target.
     end_offset: u64,
     /// Ancestor directories after the primary journal or boundary path.

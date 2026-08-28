@@ -40,6 +40,7 @@ use crate::daemon::{
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSource};
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
+use crate::harness::SessionGeneration;
 use crate::model::{
     InterSessionReceiverRole, clamp_effort, efforts_for_model, load_roles, role_infos,
     select_model_for_role, selected_params_for_role, thinking_summaries_for_model,
@@ -2157,7 +2158,8 @@ fn generated_runtime_initialization_and_shell_ids_accept_maximum_inputs() {
     assert_eq!(runtime.as_str(), "ffffffffffffffff");
     assert!(runtime.as_str().len() <= 32);
 
-    let initialization = super::agent_initialization_id(&runtime, u64::MAX, u64::MAX);
+    let initialization =
+        super::agent_initialization_id(&runtime, SessionGeneration::from_raw(u64::MAX), u64::MAX);
     assert_eq!(
         initialization.as_str(),
         "ffffffffffffffff-ffffffffffffffff-ffffffffffffffff"

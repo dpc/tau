@@ -14,7 +14,7 @@ pub(crate) struct AgentTurnRuntimeState {
     pub(crate) published_runtime_state: tau_proto::AgentRuntimeState,
     /// Runtime-scoped outer agent-turn generation used by provider-status
     /// notifications.
-    pub(crate) turn_generation: u64,
+    pub(crate) turn_generation: tau_proto::AgentOuterTurnGeneration,
     /// Runtime-only semantic progress reported through the status tool.
     pub(crate) work_status: WorkStatus,
     /// Whether the final canonical prompt of the current outer turn exposed

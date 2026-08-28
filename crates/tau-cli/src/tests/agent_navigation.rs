@@ -2046,7 +2046,7 @@ fn watched_agent_indirect_context_respects_width_priorities() {
     let status = tau_proto::AgentWatchWorkStatusNotification {
         session_id: test_session_id("s1"),
         subscription_id: "watch-1".to_owned(),
-        status_epoch: 1,
+        status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
         phase: tau_proto::AgentWorkStatusPhase::Working,
         title: Some("review changes".to_owned()),
         initial: false,

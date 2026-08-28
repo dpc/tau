@@ -1634,7 +1634,10 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
         .agent_store
         .agent(caller_id.as_str())
         .expect("caller tree");
-    assert_eq!(first_tree.ordinary_inference_generation(), 2);
+    assert_eq!(
+        first_tree.ordinary_inference_generation(),
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(2)
+    );
 
     let first_background_index = first_records
         .iter()
@@ -1743,7 +1746,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
         .expect("reopened caller tree");
     assert_eq!(
         reopened_tree.ordinary_inference_generation(),
-        durable_ordinary
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(durable_ordinary)
     );
     assert_eq!((durable_materialized, durable_ordinary), (3, 2));
 
@@ -1794,7 +1797,10 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
             .initiating_agent_prompt_id,
         second_inference.agent_prompt_id
     );
-    assert!(second_request.target_generation > durable_ordinary);
+    assert!(
+        second_request.target_generation
+            > tau_proto::MaterializedPromptGeneration::from_inference_generation(durable_ordinary)
+    );
     assert_ne!(second_request.request_id, first_request_id);
     let second_starts = final_records
         .iter()
@@ -3224,7 +3230,10 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         .filter(|record| is_correlation(&record.event))
         .count();
     assert_eq!(seeded_correlation_count, 10);
-    assert_eq!(requested.target_generation, 1);
+    assert_eq!(
+        requested.target_generation,
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(1)
+    );
     assert_eq!(
         seeded_records
             .iter()
@@ -3510,7 +3519,9 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
             .agent(agent_id.as_str())
             .expect("first reopened tree")
             .ordinary_inference_generation(),
-        requested.target_generation + 1
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(
+            requested.target_generation.get() + 1,
+        )
     );
     assert!(matches!(
         first
@@ -3800,7 +3811,7 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
             resume_inference: false,
         }),
         requested_target_head: tau_proto::AgentHead::Root,
-        target_generation: 0,
+        target_generation: tau_proto::MaterializedPromptGeneration::from_inference_generation(0),
         model: "strict/model".into(),
     };
     store
@@ -4191,7 +4202,7 @@ fn manual_self_compaction_retries_matching_failed_transaction() {
             resume_inference: true,
         }),
         requested_target_head: current_head,
-        target_generation: 0,
+        target_generation: tau_proto::MaterializedPromptGeneration::from_inference_generation(0),
         model: "echo/model".into(),
     };
     h.publish_for_agent(
@@ -4391,7 +4402,7 @@ fn manual_compaction_accepts_later_inference_generation() {
             resume_inference: false,
         }),
         requested_target_head: tau_proto::AgentHead::Root,
-        target_generation: 0,
+        target_generation: tau_proto::MaterializedPromptGeneration::from_inference_generation(0),
         model: "echo/model".into(),
     };
     h.publish_for_agent(
@@ -4428,7 +4439,7 @@ fn manual_compaction_accepts_later_inference_generation() {
             .agent(target_id.as_str())
             .expect("target tree")
             .ordinary_inference_generation(),
-        1
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(1)
     );
 
     h.request_agent_tool_compaction(
@@ -4441,7 +4452,7 @@ fn manual_compaction_accepts_later_inference_generation() {
     assert!(event_log_events(&h).into_iter().any(|event| matches!(
         event,
         Event::AgentManualCompactionRequested(request)
-            if request.required_tool_source().initiating_tool_call_id == call.id && request.target_generation == 1
+            if request.required_tool_source().initiating_tool_call_id == call.id && request.target_generation == tau_proto::MaterializedPromptGeneration::from_inference_generation(1)
     )));
     assert!(event_log_events(&h).into_iter().any(|event| matches!(
         event,
@@ -4894,7 +4905,7 @@ fn manual_cross_compaction_rejects_repeat_guard() {
             resume_inference: false,
         }),
         requested_target_head: tau_proto::AgentHead::Root,
-        target_generation: 0,
+        target_generation: tau_proto::MaterializedPromptGeneration::from_inference_generation(0),
         model: "echo/model".into(),
     };
     h.publish_for_agent(

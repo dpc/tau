@@ -760,7 +760,7 @@ fn manual_compaction_request_events_round_trip() {
             resume_inference: false,
         }),
         requested_target_head: AgentHead::Root,
-        target_generation: 7,
+        target_generation: crate::MaterializedPromptGeneration::from_inference_generation(7),
         model: "provider/model".into(),
     });
     let bytes = encode_message_to_vec(&requested).expect("encode request");
@@ -3065,7 +3065,7 @@ fn semantic_watch_notifications_round_trip_with_closed_phases() {
     let status = AgentWatchWorkStatusNotification {
         session_id: test_session_id("session-1"),
         subscription_id: "watch-1".to_owned(),
-        status_epoch: 4,
+        status_epoch: crate::AgentWorkStatusEpoch::from_raw(4),
         phase: AgentWorkStatusPhase::Working,
         title: Some("trace restore".to_owned()),
         initial: false,
@@ -3087,13 +3087,38 @@ fn semantic_watch_notifications_round_trip_with_closed_phases() {
     let wait = AgentWatchLongWaitNotification {
         session_id: test_session_id("session-1"),
         subscription_id: "watch-1".to_owned(),
-        status_epoch: 4,
+        status_epoch: crate::AgentWorkStatusEpoch::from_raw(4),
         threshold_minutes: 30,
     };
     let decoded: AgentWatchLongWaitNotification =
         serde_json::from_value(serde_json::to_value(&wait).expect("serialize long wait"))
             .expect("decode long wait");
     assert_eq!(decoded, wait);
+}
+
+/// Ensures semantic generation wrappers retain their previous scalar CBOR
+/// representation at protocol and durable boundaries.
+#[test]
+fn semantic_generation_wrappers_preserve_scalar_cbor() {
+    let raw = 17_u64;
+    let raw_cbor = encode_message_to_vec(&raw).expect("encode raw generation");
+    assert_eq!(
+        encode_message_to_vec(&AgentOuterTurnGeneration::from_raw(raw))
+            .expect("encode outer-turn generation"),
+        raw_cbor
+    );
+    assert_eq!(
+        encode_message_to_vec(&AgentWorkStatusEpoch::from_raw(raw))
+            .expect("encode work-status epoch"),
+        raw_cbor
+    );
+    assert_eq!(
+        encode_message_to_vec(&MaterializedPromptGeneration::from_inference_generation(
+            raw
+        ))
+        .expect("encode materialized-prompt generation"),
+        raw_cbor
+    );
 }
 
 /// Visible metadata classification covers spoofing-prone default ignorables,
@@ -6141,7 +6166,7 @@ fn agent_watch_provider_state_wire_contract_enforces_phase_invariants() {
     let notification = AgentWatchProviderStatusNotification {
         session_id: test_session_id("session-wire"),
         subscription_id: "watch-wire".to_owned(),
-        turn_generation: 4,
+        turn_generation: crate::AgentOuterTurnGeneration::from_raw(4),
         agent_prompt_id: test_agent_prompt_id("sp-wire"),
         state: AgentWatchProviderState::Retrying {
             category: AgentWatchProviderCategory::Throttle,

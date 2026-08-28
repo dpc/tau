@@ -480,7 +480,7 @@ fn self_compaction_requested(request_id: &str, call_id: &str) -> AgentManualComp
             resume_inference: true,
         }),
         requested_target_head: tau_proto::AgentHead::Root,
-        target_generation: 0,
+        target_generation: tau_proto::MaterializedPromptGeneration::from_inference_generation(0),
         model: "test/model".parse().expect("model id"),
     }
 }

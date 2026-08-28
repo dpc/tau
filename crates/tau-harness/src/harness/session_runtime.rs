@@ -248,7 +248,7 @@ impl ReplayPromptActivationOccurrence {
 
 pub(super) fn agent_initialization_id(
     runtime_id: &tau_proto::AccountingRuntimeId,
-    session_generation: u64,
+    session_generation: SessionGeneration,
     sequence: u64,
 ) -> tau_proto::AgentInitializationId {
     tau_proto::AgentInitializationId::parse(format!(
@@ -797,7 +797,7 @@ impl Harness {
         self.session_runtime.current_session_generation = self
             .session_runtime
             .current_session_generation
-            .saturating_add(1);
+            .saturating_next();
         // Callback capabilities are live only for the generation that issued
         // them. Clearing them before a session id can be selected again makes
         // an old callback fail even after an S -> other -> S rollover.

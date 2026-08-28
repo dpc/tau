@@ -1609,7 +1609,7 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
             crate::event::ExternalMessageToolCompletedCommand {
                 _permit: None,
                 conversation_id: cid,
-                session_generation: 0,
+                session_generation: SessionGeneration::default(),
                 call_id: call_id.clone(),
                 tool_name: ToolName::new(path_crate_harness::subagents_tool::MESSAGE_TOOL_NAME),
                 tool_type: tau_proto::ToolType::Function,
@@ -3024,7 +3024,7 @@ fn agent_watch_provider_retry_threshold_enforces_exact_delivery_boundary() {
     let retry_status = |category, attempt| tau_proto::AgentWatchProviderStatusNotification {
         session_id: session_id.clone(),
         subscription_id: String::new(),
-        turn_generation: 1,
+        turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
         agent_prompt_id: test_agent_prompt_id("sp-threshold-boundary"),
         state: tau_proto::AgentWatchProviderState::Retrying {
             category,
@@ -3079,7 +3079,7 @@ fn agent_watch_provider_retry_threshold_enforces_exact_delivery_boundary() {
         tau_proto::AgentWatchProviderStatusNotification {
             session_id,
             subscription_id: String::new(),
-            turn_generation: 1,
+            turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
             agent_prompt_id: test_agent_prompt_id("sp-threshold-terminal"),
             state: tau_proto::AgentWatchProviderState::TerminalError {
                 failure_kind: tau_proto::ProviderFailureKind::RequestRejected,
@@ -3155,7 +3155,7 @@ fn agent_watch_provider_retry_threshold_zero_preserves_category_dedupe() {
     let status = |category, attempt| tau_proto::AgentWatchProviderStatusNotification {
         session_id: session_id.clone(),
         subscription_id: String::new(),
-        turn_generation: 1,
+        turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
         agent_prompt_id: test_agent_prompt_id("sp-zero-threshold"),
         state: tau_proto::AgentWatchProviderState::Retrying {
             category,
@@ -3237,7 +3237,7 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
     let status = |state| tau_proto::AgentWatchProviderStatusNotification {
         session_id: session_id.clone(),
         subscription_id: String::new(),
-        turn_generation: 1,
+        turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
         agent_prompt_id: test_agent_prompt_id("watcher-unload-prompt"),
         state,
         initial: false,
@@ -3255,7 +3255,7 @@ fn unloading_agent_watcher_retires_topology_and_stops_durable_fanout() {
         tau_proto::AgentWatchProviderStatusNotification {
             session_id: session_id.clone(),
             subscription_id: String::new(),
-            turn_generation: 1,
+            turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
             agent_prompt_id: test_agent_prompt_id("unloaded-watcher-status"),
             state: tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
             initial: false,
@@ -3390,7 +3390,7 @@ fn agent_watch_provider_dedupe_isolated_across_watched_agents() {
     let b_status = |attempt| tau_proto::AgentWatchProviderStatusNotification {
         session_id: session_id.clone(),
         subscription_id: String::new(),
-        turn_generation: 1,
+        turn_generation: tau_proto::AgentOuterTurnGeneration::from_raw(1),
         agent_prompt_id: test_agent_prompt_id("sp-b-retry"),
         state: tau_proto::AgentWatchProviderState::Retrying {
             category: tau_proto::AgentWatchProviderCategory::Transport,
@@ -3511,7 +3511,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         .get_mut(&watched_cid)
         .expect("watched")
         .turn
-        .turn_generation = 1;
+        .turn_generation = tau_proto::AgentOuterTurnGeneration::from_raw(1);
     h.prompt_coordination
         .prompt_runtime
         .agents

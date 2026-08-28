@@ -65,7 +65,7 @@ pub(crate) struct PendingExternalAgentMessageAuth {
 /// Remote acknowledgement held until the exact receive projection commits.
 pub(crate) struct PendingExternalReceiveAck {
     /// Target session generation in which validation and selection occurred.
-    pub(crate) session_generation: u64,
+    pub(crate) session_generation: SessionGeneration,
     /// Concrete recipient selected before the projection was enqueued.
     pub(crate) recipient_id: tau_proto::AgentId,
     /// Typed authority whose semantics must still hold at commit.

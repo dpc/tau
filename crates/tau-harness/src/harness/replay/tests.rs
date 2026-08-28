@@ -119,7 +119,7 @@ fn late_subscriber_replays_manual_compaction_acceptance() {
             resume_inference: false,
         }),
         requested_target_head: tau_proto::AgentHead::Root,
-        target_generation: 0,
+        target_generation: tau_proto::MaterializedPromptGeneration::from_inference_generation(0),
         model: "test/model".parse().expect("model id"),
     });
 

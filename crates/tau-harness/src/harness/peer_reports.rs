@@ -1586,7 +1586,9 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&updated.agent_id)
-                .map_or(0, |agent| agent.turn.turn_generation);
+                .map_or(tau_proto::AgentOuterTurnGeneration::initial(), |agent| {
+                    agent.turn.turn_generation
+                });
             self.update_agent_watch_provider_status(
                 &public_id,
                 tau_proto::AgentWatchProviderStatusNotification {

@@ -207,7 +207,7 @@ fn long_wait_thresholds_use_fake_monotonic_deadlines_without_late_replay() {
         message
             .watch_long_wait
             .as_ref()
-            .is_some_and(|wait| wait.status_epoch == 1)
+            .is_some_and(|wait| wait.status_epoch == tau_proto::AgentWorkStatusEpoch::from_raw(1))
     }));
     harness.shutdown().expect("shutdown");
 }

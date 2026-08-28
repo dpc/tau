@@ -142,7 +142,7 @@ pub(crate) struct WorkStatus {
     /// Canonical title, absent until the first accepted report.
     title: Option<String>,
     /// Runtime-local generation incremented by a new working epoch.
-    epoch: u64,
+    epoch: tau_proto::AgentWorkStatusEpoch,
     /// Whether the current foreground tool round began substantive work before
     /// an accepted Working report.
     working_reminder_pending: bool,
@@ -170,7 +170,7 @@ impl Default for WorkStatus {
         Self {
             phase: AgentWorkStatusPhase::Unreported,
             title: None,
-            epoch: 0,
+            epoch: tau_proto::AgentWorkStatusEpoch::initial(),
             working_reminder_pending: false,
             final_challenges_sent: 0,
             completed_wait: Duration::ZERO,
@@ -195,7 +195,7 @@ impl WorkStatus {
     }
 
     /// Return the runtime-local Working epoch.
-    pub(crate) fn epoch(&self) -> u64 {
+    pub(crate) fn epoch(&self) -> tau_proto::AgentWorkStatusEpoch {
         self.epoch
     }
 
@@ -217,7 +217,7 @@ impl WorkStatus {
             return false;
         }
         if phase == AgentWorkStatusPhase::Working && self.phase != AgentWorkStatusPhase::Working {
-            self.epoch = self.epoch.saturating_add(1);
+            self.epoch = self.epoch.saturating_next();
             self.final_challenges_sent = 0;
             self.completed_wait = Duration::ZERO;
             self.wait_started_at = wait_installed.then_some(now);

@@ -521,8 +521,8 @@ impl Harness {
                         target: "tau_harness::external_agent_message",
                         conversation_id = %command.conversation_id,
                         call_id = %command.call_id,
-                        completion_generation = command.session_generation,
-                        current_generation = self.session_runtime.current_session_generation,
+                        completion_generation = %command.session_generation,
+                        current_generation = %self.session_runtime.current_session_generation,
                         "dropping stale external message tool completion"
                     );
                     return Ok(());

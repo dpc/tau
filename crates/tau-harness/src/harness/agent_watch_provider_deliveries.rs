@@ -30,7 +30,7 @@ pub(crate) struct ProviderStatusDeliveryDecision {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AgentWatchProviderDeliveries {
     /// Turn generation to which all retained prompt entries belong.
-    turn_generation: Option<u64>,
+    turn_generation: Option<tau_proto::AgentOuterTurnGeneration>,
     /// Delivered phase/category projections grouped by provider prompt.
     prompt_deliveries: HashMap<AgentPromptId, HashSet<AgentWatchProviderDeliveryKind>>,
     /// Prompt insertion order used for deterministic capacity eviction.
@@ -46,7 +46,7 @@ impl AgentWatchProviderDeliveries {
     /// nonterminal, the oldest prompt is evicted before admitting another.
     pub(crate) fn record(
         &mut self,
-        turn_generation: u64,
+        turn_generation: tau_proto::AgentOuterTurnGeneration,
         agent_prompt_id: &AgentPromptId,
         kind: AgentWatchProviderDeliveryKind,
     ) -> ProviderStatusDeliveryDecision {

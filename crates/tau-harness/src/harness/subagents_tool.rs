@@ -7,6 +7,7 @@
 use std::sync as path_std_sync;
 use std::sync::{atomic as path_std_sync_atomic, mpsc as path_std_sync_mpsc};
 
+use crate::harness::SessionGeneration;
 use crate::{harness as path_crate_harness, runtime_dir as path_crate_runtime_dir};
 
 mod wait_tracker;
@@ -70,7 +71,7 @@ pub(crate) struct PendingLongWaitNotifications {
     /// Watched sender whose wait crossed the thresholds.
     sender_id: String,
     /// Working epoch at the crossing cut.
-    status_epoch: u64,
+    status_epoch: tau_proto::AgentWorkStatusEpoch,
     /// Watch subscriptions present at the crossing cut.
     recipients: Vec<(String, String)>,
     /// Crossed thresholds awaiting per-recipient publication.
@@ -1807,7 +1808,7 @@ impl Harness {
         watched_agent_id: &str,
         watcher_id: &str,
         subscription_id: String,
-        status_epoch: u64,
+        status_epoch: tau_proto::AgentWorkStatusEpoch,
         threshold_minutes: u32,
     ) {
         if self.agent_message_recipient_status(watcher_id) != AgentMessageRecipientStatus::Live {
@@ -1888,7 +1889,9 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .map_or(0, |agent| agent.turn.turn_generation);
+            .map_or(tau_proto::AgentOuterTurnGeneration::initial(), |agent| {
+                agent.turn.turn_generation
+            });
         self.update_agent_watch_provider_status(
             &watched_agent_id,
             tau_proto::AgentWatchProviderStatusNotification {
@@ -1952,7 +1955,7 @@ impl Harness {
             tracing::trace!(
                 target: "tau_harness::agent_watch",
                 subscription_id,
-                turn_generation = status.turn_generation,
+                turn_generation = status.turn_generation.get(),
                 tracked_prompts = deliveries.prompt_count(),
                 tracked_delivery_keys = deliveries.delivery_key_count(),
                 should_deliver = decision.should_deliver,
@@ -1965,7 +1968,7 @@ impl Harness {
                 tracing::debug!(
                     target: "tau_harness::agent_watch",
                     subscription_id,
-                    turn_generation = status.turn_generation,
+                    turn_generation = status.turn_generation.get(),
                     tracked_prompts = deliveries.prompt_count(),
                     tracked_delivery_keys = deliveries.delivery_key_count(),
                     "evicted oldest provider-status prompt from delivery dedupe state"
@@ -2239,7 +2242,7 @@ impl Harness {
     pub(crate) fn complete_external_agent_message_auth(
         &mut self,
         client_id: tau_proto::ConnectionId,
-        session_generation: u64,
+        session_generation: SessionGeneration,
         request: tau_proto::ExternalAgentMessageRequest,
         result: Result<(), String>,
     ) -> Option<tau_proto::ExternalAgentMessageResult> {
@@ -2259,7 +2262,7 @@ impl Harness {
     fn queue_external_agent_message_receive(
         &mut self,
         client_id: tau_proto::ConnectionId,
-        session_generation: u64,
+        session_generation: SessionGeneration,
         request: tau_proto::ExternalAgentMessageRequest,
     ) -> Result<(), tau_proto::ExternalAgentMessageFailure> {
         self.validate_external_agent_message_target(&request)?;
@@ -3302,7 +3305,7 @@ pub(crate) struct ExternalMessageToolCompletion {
     /// Conversation that owns the tool call.
     pub(crate) conversation_id: AgentId,
     /// Session generation active when the tool call was dispatched.
-    pub(crate) session_generation: u64,
+    pub(crate) session_generation: SessionGeneration,
     /// Tool call id to complete.
     pub(crate) call_id: ToolCallId,
     /// Visible tool name for the result/error.

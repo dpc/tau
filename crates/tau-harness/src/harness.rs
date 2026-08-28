@@ -1428,6 +1428,7 @@ pub(crate) use peer_messaging::{
 };
 use prompt_coordination_state::PromptCoordinationState;
 use runtime_io_state::RuntimeIoState;
+pub(crate) use session_runtime_state::SessionGeneration;
 use session_runtime_state::SessionRuntimeState;
 pub(crate) use subagents_tool::ExternalMessageToolCompletion;
 use tool_routing_state::ToolRoutingState;
@@ -1866,7 +1867,7 @@ struct PendingTerminalObservation {
 /// One UI compaction waiting for a claimed wait cancellation to commit.
 struct PendingUiCompactionAfterWait {
     /// Session generation in which the request claimed the waiter.
-    session_generation: u64,
+    session_generation: SessionGeneration,
     /// Durable public identity used to reject a new runtime incarnation.
     agent_id: tau_proto::AgentId,
     /// Wait call whose terminal must close the foreground round.

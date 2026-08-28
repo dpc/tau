@@ -211,7 +211,7 @@ fn terminal_reports_disable_final_status_gate() {
         assert!(report(&mut status, phase, "terminal report"));
         assert_eq!(status.phase(), phase);
         assert_eq!(status.decide_final(final_input(true, true)), None);
-        assert_eq!(status.epoch(), 0);
+        assert_eq!(status.epoch(), tau_proto::AgentWorkStatusEpoch::initial());
     }
 }
 

@@ -28,8 +28,8 @@ use tau_proto::{
     InterceptReply, InterceptRequest, InterceptionPriority,
 };
 
-use crate::harness::InferenceDispatchSelectionError;
 use crate::harness::prompt_acceptance_timing::PromptAcceptanceTiming;
+use crate::harness::{InferenceDispatchSelectionError, SessionGeneration};
 use crate::{agent as path_crate_agent, extension as path_crate_extension};
 
 /// Materialization-phase owner of one full prompt until the compact fact
@@ -308,7 +308,7 @@ pub(crate) struct ConversationHeadSync {
     /// Durable agent identity retained if the runtime conversation disappears.
     pub(crate) agent_id: Option<AgentId>,
     /// Harness session generation that owned this publication at enqueue time.
-    pub(crate) session_generation: u64,
+    pub(crate) session_generation: SessionGeneration,
     /// Exact durable fold parent override for inference-owned completion.
     pub(crate) fold_parent: Option<tau_core::AgentEventParent>,
     /// Suppress the ordinary activation obligation because a stronger

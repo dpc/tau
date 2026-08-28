@@ -1,6 +1,46 @@
 //! Session binding, persistence, and lifecycle runtime ownership.
 
+use std::fmt::{Display as FmtDisplay, LowerHex as FmtLowerHex};
+
 use super::*;
+
+/// Process-local authority generation for the active harness session binding.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SessionGeneration(u64);
+
+impl SessionGeneration {
+    /// Reconstructs a generation in focused state-machine tests.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Advances the session generation while preserving scalar saturation.
+    #[must_use]
+    pub(crate) const fn saturating_next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+
+    /// Moves back one generation in focused rollover tests.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn saturating_previous(self) -> Self {
+        Self(self.0.saturating_sub(1))
+    }
+}
+
+impl std::fmt::Display for SessionGeneration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        FmtDisplay::fmt(&self.0, formatter)
+    }
+}
+
+impl std::fmt::LowerHex for SessionGeneration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        FmtLowerHex::fmt(&self.0, formatter)
+    }
+}
 
 /// Harness storage plus the active session's binding and lifecycle state.
 pub(crate) struct SessionRuntimeState {
@@ -21,7 +61,7 @@ pub(crate) struct SessionRuntimeState {
     /// Active session binding.
     pub(crate) current_session_id: SessionId,
     /// Monotonic generation of the active session binding.
-    pub(crate) current_session_generation: u64,
+    pub(crate) current_session_generation: SessionGeneration,
     /// Reason associated with the active session binding.
     pub(crate) current_session_start_reason: tau_proto::SessionStartReason,
     /// Buffered lifecycle messages for the next interaction outcome.

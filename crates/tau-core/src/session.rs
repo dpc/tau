@@ -29,6 +29,37 @@ use tau_proto::{
 
 const MAX_RETAINED_PROVIDER_IMAGE_BYTES_PER_AGENT: u64 = 128 * 1024 * 1024;
 
+/// Process-local generation of durable ordinary-inference prompt
+/// materialization.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct InferenceGeneration(u64);
+
+impl InferenceGeneration {
+    /// Advances the generation with the existing saturating overflow behavior.
+    #[must_use]
+    const fn saturating_next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+
+    /// Projects this authority into the durable prompt-generation domain.
+    #[must_use]
+    const fn materialized_prompt_generation(self) -> tau_proto::MaterializedPromptGeneration {
+        tau_proto::MaterializedPromptGeneration::from_inference_generation(self.0)
+    }
+}
+
+/// Process-local authority generation for selected-head async completions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HeadMoveGeneration(u64);
+
+impl HeadMoveGeneration {
+    /// Advances the generation with the existing saturating overflow behavior.
+    #[must_use]
+    const fn saturating_next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentEventValidationError {
     message: String,
@@ -410,7 +441,7 @@ pub struct AgentTree {
     /// quadratic over a long agent).
     pub(crate) next_event_seq: PersistedAgentEventSeq,
     /// Number of ordinary inference prompts, excluding compaction operations.
-    ordinary_inference_generation: u64,
+    ordinary_inference_generation: InferenceGeneration,
     /// Unique content-free materialization facts keyed by provider prompt id.
     prompt_starts: HashMap<tau_proto::AgentPromptId, tau_proto::AgentPromptStarted>,
     /// Durable outer turns keyed by stable identity and their session/terminal
@@ -461,7 +492,7 @@ pub struct AgentTree {
     /// Context occurrences waiting behind marked ordinary inference ownership.
     pending_inference_inputs: Vec<PendingInferenceInput>,
     /// Number of durable selected-head moves folded so far.
-    head_move_generation: u64,
+    head_move_generation: HeadMoveGeneration,
 }
 
 /// Folded durable state for one outer turn.
@@ -484,7 +515,7 @@ struct InferenceDispatchFold {
     /// Journal projection semantics selected by the checkpoint record.
     fold_semantics: AgentJournalFoldSemantics,
     /// Selected-head generation in which this owner was opened.
-    head_move_generation: u64,
+    head_move_generation: HeadMoveGeneration,
     finished: bool,
     recovery_disposition: tau_proto::ContextRecoveryDisposition,
     /// Output-length terminal or plan recorded by this exact response owner.
@@ -1838,7 +1869,7 @@ impl AgentTree {
             display_name: None,
             initialization_context: None,
             next_event_seq: PersistedAgentEventSeq::new(0),
-            ordinary_inference_generation: 0,
+            ordinary_inference_generation: InferenceGeneration::default(),
             prompt_starts: HashMap::new(),
             outer_turns: HashMap::new(),
             active_outer_turn: None,
@@ -1859,7 +1890,7 @@ impl AgentTree {
             inference_dispatches: HashMap::new(),
             inference_dispatch_order: Vec::new(),
             pending_inference_inputs: Vec::new(),
-            head_move_generation: 0,
+            head_move_generation: HeadMoveGeneration::default(),
         };
         for record in events {
             tree.apply_persisted_record(record)?;
@@ -1878,8 +1909,9 @@ impl AgentTree {
 
     /// Returns target-owned ordinary inference progress for manual rate guards.
     #[must_use]
-    pub fn ordinary_inference_generation(&self) -> u64 {
+    pub fn ordinary_inference_generation(&self) -> tau_proto::MaterializedPromptGeneration {
         self.ordinary_inference_generation
+            .materialized_prompt_generation()
     }
 
     /// Return the exact branch checkpoint for one unresolved V1 inference
@@ -2486,7 +2518,7 @@ impl AgentTree {
                     .insert(started.agent_prompt_id.clone(), started.clone());
                 if started.operation == tau_proto::PromptOperation::Inference {
                     self.ordinary_inference_generation =
-                        self.ordinary_inference_generation.saturating_add(1);
+                        self.ordinary_inference_generation.saturating_next();
                 }
             }
             Event::ProviderResponseFinished(response) => {
@@ -2616,7 +2648,7 @@ impl AgentTree {
     fn apply_head_moved(&mut self, moved: &AgentHeadMoved) {
         if moved.agent_id == self.agent_id && self.validate_head_moved(moved).is_ok() {
             self.head = moved.head.as_option();
-            self.head_move_generation = self.head_move_generation.saturating_add(1);
+            self.head_move_generation = self.head_move_generation.saturating_next();
         }
     }
 
@@ -3703,7 +3735,10 @@ impl AgentTree {
                 )
                 || accepted.target_agent_id != started.agent_id
                 || accepted.model != started.model
-                || accepted.target_generation != self.ordinary_inference_generation
+                || accepted.target_generation
+                    != self
+                        .ordinary_inference_generation
+                        .materialized_prompt_generation()
                 || !eligible_automatic_finished
                 || !valid_cut
             {
@@ -4608,7 +4643,11 @@ impl AgentTree {
                 "manual compaction request references an unknown target head",
             ));
         }
-        if requested.target_generation != self.ordinary_inference_generation {
+        if requested.target_generation
+            != self
+                .ordinary_inference_generation
+                .materialized_prompt_generation()
+        {
             return Err(AgentEventValidationError::new(
                 "manual compaction request has a stale target generation",
             ));

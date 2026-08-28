@@ -318,7 +318,7 @@ fn assert_boot_a_agent_payloads(
         || initial.subscription_id.is_empty()
         || !initial.initial
         || initial.phase != tau_proto::AgentWorkStatusPhase::Unreported
-        || initial.status_epoch != 0
+        || initial.status_epoch != tau_proto::AgentWorkStatusEpoch::initial()
         || initial.title.is_some()
         || messages[1].watch_work_status.is_some()
     {

@@ -112,7 +112,7 @@ fn spawn_failure_preserves_one_dirty_state() {
     assert_eq!(state.ready.len(), 1);
     let dirty = state.dirty.get(path).expect("dirty journal");
     assert_eq!(dirty.end_offset, 20);
-    assert_eq!(dirty.generation, 2);
+    assert_eq!(dirty.generation, JournalSyncGeneration(2));
 }
 
 /// A sync racing a later write must run again across generation rollover.
@@ -130,7 +130,7 @@ fn racing_generation_is_resynced_without_blocking_mark() {
         .state
         .lock()
         .expect("worker state")
-        .next_generation = u64::MAX;
+        .next_generation = JournalSyncGeneration(u64::MAX);
     let path = Path::new("/tmp/a/events.cbor");
     worker.mark_dirty(path, 10, std::iter::empty());
     backend.wait_for(|state| state.blocked_entered);
@@ -139,7 +139,7 @@ fn racing_generation_is_resynced_without_blocking_mark() {
     {
         let state = worker.shared.state.lock().expect("worker state");
         let target = state.dirty.get(path).expect("raced target");
-        assert_eq!(target.generation, 1);
+        assert_eq!(target.generation, JournalSyncGeneration(1));
         assert_eq!(target.end_offset, 20);
         assert_eq!(
             target.directories,
@@ -236,7 +236,7 @@ fn file_and_directory_coverage_is_ordered() {
         .insert(PathBuf::from("/tmp/a"));
     let target = DirtyJournal {
         kind: SyncTargetKind::Journal,
-        generation: 1,
+        generation: JournalSyncGeneration(1),
         end_offset: 10,
         directories: [
             PathBuf::from("/tmp/a/b"),
@@ -374,7 +374,7 @@ fn relative_directory_coverage_is_child_to_parent() {
     let backend = TestBackend::default();
     let target = DirtyJournal {
         kind: SyncTargetKind::DirectoryBoundary,
-        generation: 1,
+        generation: JournalSyncGeneration(1),
         end_offset: 0,
         directories: [PathBuf::from("state"), PathBuf::from(".")]
             .into_iter()
@@ -405,7 +405,7 @@ fn boundary_child_failure_stops_parent_sync() {
         .insert(PathBuf::from("state/child"));
     let target = DirtyJournal {
         kind: SyncTargetKind::DirectoryBoundary,
-        generation: 1,
+        generation: JournalSyncGeneration(1),
         end_offset: 0,
         directories: [PathBuf::from("state"), PathBuf::from(".")]
             .into_iter()

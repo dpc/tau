@@ -1494,7 +1494,7 @@ impl Harness {
             if changed_agent_id.is_some() {
                 agent.turn.published_runtime_state = new_state;
                 if new_state == tau_proto::AgentRuntimeState::Running {
-                    agent.turn.turn_generation = agent.turn.turn_generation.saturating_add(1);
+                    agent.turn.turn_generation = agent.turn.turn_generation.saturating_next();
                 }
             }
         }

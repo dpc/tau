@@ -294,7 +294,9 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(&cid)
-                .map_or(0, |agent| agent.turn.turn_generation);
+                .map_or(tau_proto::AgentOuterTurnGeneration::initial(), |agent| {
+                    agent.turn.turn_generation
+                });
             self.update_agent_watch_provider_status(
                 &public_id,
                 tau_proto::AgentWatchProviderStatusNotification {
@@ -3159,7 +3161,9 @@ impl Harness {
                     .agent_registry
                     .agents
                     .get(cid)
-                    .map_or(0, |agent| agent.turn.turn_generation),
+                    .map_or(tau_proto::AgentOuterTurnGeneration::initial(), |agent| {
+                        agent.turn.turn_generation
+                    }),
                 agent_prompt_id: response.agent_prompt_id.clone(),
                 state: tau_proto::AgentWatchProviderState::TerminalIncomplete {
                     category: tau_proto::AgentWatchProviderCategory::OutputLength,
