@@ -2335,8 +2335,8 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
     h.shutdown().expect("shutdown");
 }
 
-/// A pending non-tool side query must terminalize its parent tool call while
-/// retaining committed message activation for the side agent.
+/// A rejected non-tool side query settles and re-evaluates its pending message
+/// wake before the unparented query completes exactly once and is removed.
 #[test]
 fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
     let td = TempDir::new().expect("tempdir");
@@ -2424,8 +2424,42 @@ fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
         &node.entry,
         AgentEntry::ToolResults { items }
             if items.iter().any(|item| item.call_id == "invalid_tool_call_sp-query-pending_1"
-                && matches!(item.status, ToolResultStatus::Error { .. }))
+                 && matches!(item.status, ToolResultStatus::Error { .. }))
     )));
+    assert!(
+        !h.agent_runtime.agent_registry.agents.contains_key(&cid),
+        "unparented rejected side query did not complete"
+    );
+    let events = event_log_events(&h);
+    let tool_error_pos = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::ProviderToolError(error)
+                    if error.call_id == "invalid_tool_call_sp-query-pending_1"
+            )
+        })
+        .expect("rejected tool terminal");
+    let results = events
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, event)| match event {
+            Event::StartAgentResult(result) if result.query_id == "query-2" => {
+                Some((position, result))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(result_pos, result)] = results.as_slice() else {
+        panic!("expected one rejected side-conversation result, got {results:?}");
+    };
+    assert!(tool_error_pos < *result_pos);
+    assert!(result.text.is_empty());
+    assert_eq!(
+        result.error.as_deref(),
+        Some("non-tool extension query attempted to call 1 tool(s); refusing to execute")
+    );
 
     h.shutdown().expect("shutdown");
 }

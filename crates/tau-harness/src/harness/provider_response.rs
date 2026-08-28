@@ -522,6 +522,9 @@ impl Harness {
                     "output-length terminal classification runs after source classification"
                 )
             }
+            ProviderTerminalPlan::SideConversation(_) => {
+                unreachable!("side-conversation classification runs after response publication")
+            }
             ProviderTerminalPlan::ToolCalls(_) => {
                 unreachable!("tool-call classification runs after response publication")
             }
@@ -578,6 +581,7 @@ impl Harness {
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::OutputLengthContinuationSource(_)
             | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
+            | ProviderTerminalPlan::SideConversation(_)
             | ProviderTerminalPlan::ToolCalls(_)
             | ProviderTerminalPlan::OrdinaryNoTool(_) => {
                 unreachable!("earlier provider-terminal family reached commit-gated classification")
@@ -612,6 +616,7 @@ impl Harness {
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
             | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
+            | ProviderTerminalPlan::SideConversation(_)
             | ProviderTerminalPlan::ToolCalls(_)
             | ProviderTerminalPlan::OrdinaryNoTool(_) => {
                 unreachable!(
@@ -663,6 +668,7 @@ impl Harness {
             | ProviderTerminalPlan::FinalStatusGated(_)
             | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
             | ProviderTerminalPlan::OutputLengthContinuationSource(_)
+            | ProviderTerminalPlan::SideConversation(_)
             | ProviderTerminalPlan::ToolCalls(_)
             | ProviderTerminalPlan::OrdinaryNoTool(_) => {
                 unreachable!(
@@ -713,20 +719,44 @@ impl Harness {
         }
         if response.recovery_disposition
             != tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
-            && self.handle_finished_response_side_conversation(
-                &cid,
-                FinishedSideConversation {
-                    response: &response,
-                    requested_tool_calls,
-                    is_non_tool_ext_query,
-                    assistant_text: assistant_text.as_deref(),
-                    tool_call_count: tool_calls.len(),
-                },
-                &mut normalized_tool_calls,
-                source,
-            )
         {
-            return Ok(());
+            match self.classify_side_conversation_terminal(SideConversationTerminalClassification {
+                cid: &cid,
+                response: &response,
+                requested_tool_calls,
+                is_non_tool_ext_query,
+            }) {
+                ProviderTerminalPlan::SideConversation(plan) => {
+                    self.reduce_side_conversation_terminal(
+                        &cid,
+                        EagerSideConversationTerminal {
+                            plan,
+                            response: &response,
+                            is_non_tool_ext_query,
+                            assistant_text: assistant_text.as_deref(),
+                            tool_effect: if requested_tool_calls {
+                                SideConversationToolEffect::Reject(&mut normalized_tool_calls)
+                            } else {
+                                SideConversationToolEffect::ClearPromptSnapshot
+                            },
+                            source,
+                        },
+                    );
+                    return Ok(());
+                }
+                ProviderTerminalPlan::Other => {}
+                ProviderTerminalPlan::ReactiveContextRecovery(_)
+                | ProviderTerminalPlan::FinalStatusGated(_)
+                | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
+                | ProviderTerminalPlan::OutputLengthContinuationSource(_)
+                | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
+                | ProviderTerminalPlan::ToolCalls(_)
+                | ProviderTerminalPlan::OrdinaryNoTool(_) => {
+                    unreachable!(
+                        "unrelated provider-terminal family reached side-conversation classification"
+                    )
+                }
+            }
         }
         let ordinary_plan = Self::classify_ordinary_terminal(OrdinaryTerminalClassification {
             requested_tool_calls,
@@ -748,6 +778,7 @@ impl Harness {
             | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
             | ProviderTerminalPlan::OutputLengthContinuationSource(_)
             | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
+            | ProviderTerminalPlan::SideConversation(_)
             | ProviderTerminalPlan::Other => {
                 unreachable!("earlier provider-terminal family reached ordinary classification")
             }
@@ -1004,6 +1035,11 @@ impl Harness {
             ProviderTerminalPlan::OutputLengthContinuationTerminal(_) => {
                 unreachable!(
                     "output-length terminal classification runs after shared terminal accounting"
+                )
+            }
+            ProviderTerminalPlan::SideConversation(_) => {
+                unreachable!(
+                    "side-conversation classification runs after shared terminal accounting"
                 )
             }
             ProviderTerminalPlan::ToolCalls(_) => {
@@ -2658,13 +2694,18 @@ impl Harness {
         }
     }
 
-    pub(super) fn handle_finished_response_side_conversation(
-        &mut self,
-        cid: &AgentId,
-        side: FinishedSideConversation<'_>,
-        normalized_tool_calls: &mut NormalizedFinishedToolCalls,
-        source: Option<&tau_proto::ConnectionId>,
-    ) -> bool {
+    /// Classify a normalized terminal as extension-originated side-conversation
+    /// work without mutating terminal state.
+    pub(super) fn classify_side_conversation_terminal(
+        &self,
+        side: SideConversationTerminalClassification<'_>,
+    ) -> ProviderTerminalPlan {
+        let SideConversationTerminalClassification {
+            cid,
+            response,
+            requested_tool_calls,
+            is_non_tool_ext_query,
+        } = side;
         if self
             .agent_runtime
             .agent_registry
@@ -2672,7 +2713,7 @@ impl Harness {
             .get(cid)
             .is_some_and(Self::is_peer_entrypoint_agent)
         {
-            return false;
+            return ProviderTerminalPlan::Other;
         }
         let Some(active_originator) = self
             .agent_runtime
@@ -2681,55 +2722,79 @@ impl Harness {
             .get(cid)
             .map(|agent| &agent.identity.originator)
         else {
-            return false;
+            return ProviderTerminalPlan::Other;
         };
         // A tool completion can synchronously dispatch another prompt while the
         // delegate's terminal StartAgentResult is being published. The prompt
         // retains the old extension originator, but the delegate is detached
         // before its response arrives. Do not treat that stale response as a
         // second completion of the already-finished start request.
-        if active_originator != &side.response.originator {
-            return false;
+        if active_originator != &response.originator {
+            return ProviderTerminalPlan::Other;
         }
         let Some((name, query_id)) = Self::finished_response_side_originator(
             active_originator,
-            side.requested_tool_calls,
-            side.is_non_tool_ext_query,
+            requested_tool_calls,
+            is_non_tool_ext_query,
         ) else {
-            return false;
+            return ProviderTerminalPlan::Other;
         };
+        ProviderTerminalPlan::SideConversation(SideConversationTerminalPlan { name, query_id })
+    }
 
-        if !side.requested_tool_calls {
-            self.clear_prompt_tool_snapshot(&side.response.agent_prompt_id);
-        }
-        if side.requested_tool_calls {
-            self.reject_finished_side_conversation_tool_calls(cid, normalized_tool_calls, source);
-        }
+    /// Execute the unchanged eager side-conversation completion after canonical
+    /// response publication has been offered.
+    pub(super) fn reduce_side_conversation_terminal(
+        &mut self,
+        cid: &AgentId,
+        terminal: EagerSideConversationTerminal,
+    ) {
+        let EagerSideConversationTerminal {
+            plan: SideConversationTerminalPlan { name, query_id },
+            response,
+            is_non_tool_ext_query,
+            assistant_text,
+            tool_effect,
+            source,
+        } = terminal;
+        let (requested_tool_calls, tool_call_count) = match tool_effect {
+            SideConversationToolEffect::ClearPromptSnapshot => {
+                self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+                (false, 0)
+            }
+            SideConversationToolEffect::Reject(normalized_tool_calls) => {
+                let tool_call_count = normalized_tool_calls.calls.len();
+                self.reject_finished_side_conversation_tool_calls(
+                    cid,
+                    normalized_tool_calls,
+                    source,
+                );
+                (true, tool_call_count)
+            }
+        };
         if self.finished_side_conversation_continues_for_pending_message_wake(
             cid,
-            side.response,
-            side.requested_tool_calls,
-            side.is_non_tool_ext_query,
+            response,
+            requested_tool_calls,
+            is_non_tool_ext_query,
         ) {
             self.dispatch_prompt_after_publish_idle(cid);
-            return true;
+            return;
         }
-
         let error = Self::finished_side_conversation_error(
-            side.response,
-            side.is_non_tool_ext_query,
-            side.requested_tool_calls,
-            side.assistant_text,
-            side.tool_call_count,
+            response,
+            is_non_tool_ext_query,
+            requested_tool_calls,
+            assistant_text,
+            tool_call_count,
         );
         let result = tau_proto::StartAgentResult {
             query_id: query_id.clone(),
-            text: side.assistant_text.unwrap_or_default().to_owned(),
+            text: assistant_text.unwrap_or_default().to_owned(),
             error,
         };
         self.deliver_finished_side_conversation_result(cid, &name, &query_id, result, source);
-        self.complete_finished_side_conversation(cid, Some(&side.response.agent_prompt_id));
-        true
+        self.complete_finished_side_conversation(cid, Some(&response.agent_prompt_id));
     }
 
     /// Return whether a side-conversation terminal will continue in the same
@@ -3653,20 +3718,44 @@ impl Harness {
             .is_some_and(|agent| !agent.turn.lifecycle_notification_only_turn);
         if response.recovery_disposition
             != tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
-            && self.handle_finished_response_side_conversation(
-                cid,
-                FinishedSideConversation {
-                    response: &response,
-                    requested_tool_calls,
-                    is_non_tool_ext_query,
-                    assistant_text: assistant_text.as_deref(),
-                    tool_call_count: normalized_tool_calls.calls.len(),
-                },
-                &mut normalized_tool_calls,
-                source.as_ref(),
-            )
         {
-            return;
+            match self.classify_side_conversation_terminal(SideConversationTerminalClassification {
+                cid,
+                response: &response,
+                requested_tool_calls,
+                is_non_tool_ext_query,
+            }) {
+                ProviderTerminalPlan::SideConversation(plan) => {
+                    self.reduce_side_conversation_terminal(
+                        cid,
+                        EagerSideConversationTerminal {
+                            plan,
+                            response: &response,
+                            is_non_tool_ext_query,
+                            assistant_text: assistant_text.as_deref(),
+                            tool_effect: if requested_tool_calls {
+                                SideConversationToolEffect::Reject(&mut normalized_tool_calls)
+                            } else {
+                                SideConversationToolEffect::ClearPromptSnapshot
+                            },
+                            source: source.as_ref(),
+                        },
+                    );
+                    return;
+                }
+                ProviderTerminalPlan::Other => {}
+                ProviderTerminalPlan::ReactiveContextRecovery(_)
+                | ProviderTerminalPlan::FinalStatusGated(_)
+                | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
+                | ProviderTerminalPlan::OutputLengthContinuationSource(_)
+                | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
+                | ProviderTerminalPlan::ToolCalls(_)
+                | ProviderTerminalPlan::OrdinaryNoTool(_) => {
+                    unreachable!(
+                        "unrelated provider-terminal family reached committed side-conversation classification"
+                    )
+                }
+            }
         }
         if notify_watchers
             && !requested_tool_calls

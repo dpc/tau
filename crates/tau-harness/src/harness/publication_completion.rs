@@ -3426,21 +3426,41 @@ impl Harness {
                         attempt: 1,
                     },
                 );
-                let mut normalized_tool_calls = NormalizedFinishedToolCalls::default();
                 let is_non_tool_ext_query = self.is_non_tool_extension_query(&cid);
-                if self.handle_finished_response_side_conversation(
-                    &cid,
-                    FinishedSideConversation {
+                match self.classify_side_conversation_terminal(
+                    SideConversationTerminalClassification {
+                        cid: &cid,
                         response,
                         requested_tool_calls: false,
                         is_non_tool_ext_query,
-                        assistant_text: None,
-                        tool_call_count: 0,
                     },
-                    &mut normalized_tool_calls,
-                    None,
                 ) {
-                    return;
+                    ProviderTerminalPlan::SideConversation(plan) => {
+                        self.reduce_side_conversation_terminal(
+                            &cid,
+                            EagerSideConversationTerminal {
+                                plan,
+                                response,
+                                is_non_tool_ext_query,
+                                assistant_text: None,
+                                tool_effect: SideConversationToolEffect::ClearPromptSnapshot,
+                                source: None,
+                            },
+                        );
+                        return;
+                    }
+                    ProviderTerminalPlan::Other => {}
+                    ProviderTerminalPlan::ReactiveContextRecovery(_)
+                    | ProviderTerminalPlan::FinalStatusGated(_)
+                    | ProviderTerminalPlan::AutomaticCompactionOrPendingMessageWake(_)
+                    | ProviderTerminalPlan::OutputLengthContinuationSource(_)
+                    | ProviderTerminalPlan::OutputLengthContinuationTerminal(_)
+                    | ProviderTerminalPlan::ToolCalls(_)
+                    | ProviderTerminalPlan::OrdinaryNoTool(_) => {
+                        unreachable!(
+                            "unrelated provider-terminal family reached restored side-conversation classification"
+                        )
+                    }
                 }
                 self.set_agent_turn_state(&cid, AgentTurnState::Idle);
                 self.try_advance_queue();

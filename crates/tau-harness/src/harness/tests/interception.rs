@@ -72,6 +72,126 @@ fn provider_models_declaration(model: &str, context_window: u64) -> Event {
     })
 }
 
+/// A side-conversation terminal completes eagerly after its canonical response
+/// is offered, so interception must not delay or duplicate result delivery.
+#[test]
+fn side_conversation_terminal_completes_once_while_response_is_intercepted() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path().join("state")).expect("harness");
+    h.config.selected_model = Some("test/model".into());
+    let delegate_frames =
+        connect_test_client(&mut h, "side-owner", tau_proto::ClientKind::External);
+    h.handle_start_agent_request(
+        &crate::test_connection_id("side-owner"),
+        StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
+            parent_agent: None,
+            query_id: "q-intercepted-side".to_owned(),
+            instruction: "answer briefly".to_owned(),
+            role: None,
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: None,
+            task_name: None,
+        },
+    )
+    .expect("start side conversation");
+    let side_cid = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .iter()
+        .find_map(|(cid, agent)| {
+            matches!(
+                &agent.identity.originator,
+                tau_proto::PromptOriginator::Extension { query_id, .. }
+                    if query_id == "q-intercepted-side"
+            )
+            .then(|| cid.clone())
+        })
+        .expect("side conversation");
+    let side_prompt_id = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get(&side_cid)
+        .and_then(|agent| agent.dispatch.in_flight_prompt.clone())
+        .expect("side prompt");
+    let side_agent_id = durable_agent_id_for_conversation(&h, &side_cid);
+    let interceptor = connect_test_tool(&mut h, "side-terminal-owner");
+    h.handle_extension_event(
+        "side-terminal-owner",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register canonical-response interceptor");
+    let mut response = provider_text_response(&side_prompt_id, side_agent_id, "delegated answer");
+    response.originator = tau_proto::PromptOriginator::Extension {
+        name: crate::test_extension_name("side-owner"),
+        query_id: "q-intercepted-side".to_owned(),
+    };
+
+    h.handle_provider_response_finished(response)
+        .expect("finish side conversation");
+
+    assert!(matches!(
+        intercepted_payload(&interceptor).0,
+        Event::ProviderResponseFinished(_)
+    ));
+    assert!(
+        h.agent_runtime
+            .agent_registry
+            .agents
+            .get(&side_cid)
+            .is_none_or(|agent| agent.dispatch.in_flight_prompt.is_none()),
+        "eager side completion waited for canonical response commit"
+    );
+    let result_count = || {
+        delegate_frames
+            .lock()
+            .expect("delegate frames")
+            .iter()
+            .filter(|routed| {
+                matches!(
+                    peel_inner_event(&routed.frame),
+                    Some(Event::StartAgentResult(result))
+                        if result.query_id == "q-intercepted-side"
+                            && result.text == "delegated answer"
+                )
+            })
+            .count()
+    };
+    assert_eq!(result_count(), 1);
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+            .count(),
+        0
+    );
+
+    h.handle_extension_event(
+        "side-terminal-owner",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release canonical response");
+
+    assert_eq!(result_count(), 1, "release duplicated eager reduction");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// Clear the quiet fixture's startup model without adding declaration log
 /// noise.
 fn clear_interception_fixture_models(h: &mut Harness) {

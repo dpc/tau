@@ -1082,8 +1082,8 @@ fn cold_restore_detaches_explicit_parent_worker_at_terminal_before_teardown_cut(
         };
 
         // Deliberately persist only the terminal provider fact. This models the
-        // crash cut before handle_finished_response_side_conversation can return
-        // StartAgentResult and call complete_finished_side_conversation.
+        // crash cut before side-conversation classification and reduction can
+        // deliver StartAgentResult and detach the completed request owner.
         h.publish_finished_response_for_agent(&worker_cid, None, &terminal, None, false);
         assert!(matches!(
             h.agent_runtime.agent_registry.agents[&worker_cid]

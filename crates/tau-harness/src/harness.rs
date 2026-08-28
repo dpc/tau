@@ -164,10 +164,13 @@ use crate::harness::provider_terminal_plan::{
     OrdinaryTerminalClassification, OutputLengthContinuationSourceClassification,
     OutputLengthContinuationSourcePlan, OutputLengthContinuationTerminalClassification,
     OutputLengthContinuationTerminalPlan, ProviderTerminalPlan, ReactiveContextRecoveryPlan,
-    ToolCallTerminalPlan,
+    SideConversationTerminalClassification, SideConversationTerminalPlan, ToolCallTerminalPlan,
 };
 use crate::harness::publication_state::PublicationState;
 use crate::harness::reactive_context_recovery_reducer::CommittedReactiveContextRecovery;
+use crate::harness::side_conversation_terminal_reducer::{
+    EagerSideConversationTerminal, SideConversationToolEffect,
+};
 use crate::harness::subagents_tool::SubagentToolState;
 use crate::harness::tool_call_terminal_reducer::EagerToolCallTerminal;
 use crate::harness::tool_runtime::ToolRuntimeState;
@@ -980,19 +983,6 @@ struct RestoredCompactionCheckpoint {
     dispatch: crate::agent::InferenceDispatchOwnership,
 }
 
-struct FinishedSideConversation<'a> {
-    /// Response whose side-conversation originator is being processed.
-    response: &'a ProviderResponseFinished,
-    /// Whether this response requested tool calls after stop reconciliation.
-    requested_tool_calls: bool,
-    /// Whether the response belongs to a non-tool extension query.
-    is_non_tool_ext_query: bool,
-    /// Assistant text extracted before publication.
-    assistant_text: Option<&'a str>,
-    /// Normalized tool-call count for result error text.
-    tool_call_count: usize,
-}
-
 impl FinishedToolCallNormalization {
     fn new(
         response: &ProviderResponseFinished,
@@ -1440,6 +1430,7 @@ mod runtime_io_state;
 mod runtime_loop;
 mod session_runtime;
 mod session_runtime_state;
+mod side_conversation_terminal_reducer;
 mod tool_call_terminal_reducer;
 mod tool_routing_state;
 mod tool_runtime;

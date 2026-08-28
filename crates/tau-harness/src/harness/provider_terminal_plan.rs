@@ -16,12 +16,35 @@ pub(crate) enum ProviderTerminalPlan {
     OutputLengthContinuationSource(OutputLengthContinuationSourcePlan),
     /// The terminal settles one reserved output-length continuation successor.
     OutputLengthContinuationTerminal(OutputLengthContinuationTerminalPlan),
+    /// The terminal completes one extension-originated side conversation.
+    SideConversation(SideConversationTerminalPlan),
     /// The terminal eagerly dispatches one ordinary normalized tool-call round.
     ToolCalls(ToolCallTerminalPlan),
     /// The terminal eagerly completes one ordinary no-tool response.
     OrdinaryNoTool(Box<OrdinaryNoToolTerminalPlan>),
     /// The terminal belongs to another provider-terminal family.
     Other,
+}
+
+/// Exact eager reducer decision for one side-conversation terminal.
+pub(crate) struct SideConversationTerminalPlan {
+    /// Extension that receives the completed side-conversation result.
+    pub(super) name: tau_proto::ExtensionName,
+    /// Extension-owned query correlation.
+    pub(super) query_id: String,
+}
+
+/// Complete semantic input for classifying one possible side-conversation
+/// terminal.
+pub(crate) struct SideConversationTerminalClassification<'a> {
+    /// Conversation whose active originator owns classification authority.
+    pub(super) cid: &'a tau_proto::AgentId,
+    /// Fully normalized canonical provider terminal.
+    pub(super) response: &'a tau_proto::ProviderResponseFinished,
+    /// Whether the terminal requests tool calls after stop reconciliation.
+    pub(super) requested_tool_calls: bool,
+    /// Whether this is an extension query without tool authority.
+    pub(super) is_non_tool_ext_query: bool,
 }
 
 /// Exact eager reducer selected for one ordinary no-tool terminal.
