@@ -7,7 +7,7 @@ use std::{collections as path_std_collections, fmt};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ModelId, ProviderName};
+use crate::{ModelId, ProviderName, ProviderQuotaSequence};
 
 /// Maximum number of quota windows accepted in one provider snapshot.
 pub const MAX_PROVIDER_QUOTA_WINDOWS: usize = 32;
@@ -163,7 +163,7 @@ pub struct ProviderQuotaReplace {
     /// Opaque profile/account generation.
     pub profile_epoch: ProviderQuotaEpoch,
     /// Strictly increasing sequence within the epoch.
-    pub sequence: u64,
+    pub sequence: ProviderQuotaSequence,
     /// Whether this report proposes establishing a previously unseen epoch.
     pub establishes_new_epoch: bool,
     /// Complete bounded set of current windows.
@@ -182,7 +182,7 @@ pub struct ProviderQuotaPatch {
     /// Opaque profile/account generation.
     pub profile_epoch: ProviderQuotaEpoch,
     /// Strictly increasing sequence within the epoch.
-    pub sequence: u64,
+    pub sequence: ProviderQuotaSequence,
     /// Complete records to upsert by stable key.
     pub windows: Vec<ProviderQuotaWindow>,
     /// Stable keys to remove.
@@ -200,7 +200,7 @@ pub struct ProviderQuotaClear {
     /// Epoch targeted by this clear report.
     pub profile_epoch: ProviderQuotaEpoch,
     /// Proposed strictly increasing sequence within the targeted epoch.
-    pub sequence: u64,
+    pub sequence: ProviderQuotaSequence,
 }
 
 /// Harness-validated full current quota state for UI consumers.
@@ -212,7 +212,7 @@ pub struct HarnessProviderQuotaChanged {
     /// Opaque profile/account generation.
     pub profile_epoch: ProviderQuotaEpoch,
     /// Latest accepted sequence for this epoch.
-    pub sequence: u64,
+    pub sequence: ProviderQuotaSequence,
     /// Complete validated current windows.
     pub windows: Vec<ProviderQuotaWindow>,
     /// Complete validated current route bindings.

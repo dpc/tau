@@ -1035,7 +1035,7 @@ fn selected_agent_empty_quota_state_renders_unknown() {
             provider: model.provider.clone(),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-empty")
                 .expect("quota epoch"),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             windows: Vec::new(),
             route_bindings: Vec::new(),
         },

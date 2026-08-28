@@ -62,7 +62,7 @@ fn quota_replace_report(epoch: &str, used_basis_points: u16) -> Event {
     Event::ProviderQuotaReplaceReported(tau_proto::ProviderQuotaReplace {
         provider: tau_proto::ProviderName::new("chatgpt"),
         profile_epoch: tau_proto::ProviderQuotaEpoch::parse(epoch).expect("epoch"),
-        sequence: 1,
+        sequence: tau_proto::ProviderQuotaSequence::new(1),
         establishes_new_epoch: true,
         windows: vec![quota_window(used_basis_points)],
         route_bindings: vec![quota_binding()],
@@ -256,7 +256,7 @@ fn provider_quota_report_family_drives_state_end_to_end() {
         Event::ProviderQuotaReplaceReported(tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: vec![quota_window(1_000)],
             route_bindings: vec![quota_binding()],
@@ -264,7 +264,7 @@ fn provider_quota_report_family_drives_state_end_to_end() {
         Event::ProviderQuotaPatchReported(tau_proto::ProviderQuotaPatch {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
-            sequence: 2,
+            sequence: tau_proto::ProviderQuotaSequence::new(2),
             windows: vec![quota_window(2_000)],
             removed_window_keys: Vec::new(),
             route_bindings: vec![quota_binding()],
@@ -272,7 +272,7 @@ fn provider_quota_report_family_drives_state_end_to_end() {
         Event::ProviderQuotaClearReported(tau_proto::ProviderQuotaClear {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch,
-            sequence: 3,
+            sequence: tau_proto::ProviderQuotaSequence::new(3),
         }),
     ];
     for report in reports {
@@ -660,7 +660,7 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: vec![quota_window(1_000)],
             route_bindings: vec![quota_binding()],
@@ -672,7 +672,7 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: vec![quota_window(1_000)],
             route_bindings: vec![quota_binding()],
@@ -682,14 +682,14 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
         harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .sequence,
-        1
+        tau_proto::ProviderQuotaSequence::new(1)
     );
     harness.handle_provider_quota_patch(
         &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaPatch {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch,
-            sequence: 2,
+            sequence: tau_proto::ProviderQuotaSequence::new(2),
             windows: vec![quota_window(2_000)],
             removed_window_keys: Vec::new(),
             route_bindings: Vec::new(),
@@ -697,7 +697,7 @@ fn provider_quota_replace_patch_and_spoofing_are_validated() {
     );
     let snapshot =
         &harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")].snapshot;
-    assert_eq!(snapshot.sequence, 2);
+    assert_eq!(snapshot.sequence, tau_proto::ProviderQuotaSequence::new(2));
     assert_eq!(snapshot.windows[0].used_basis_points, 2_000);
 }
 
@@ -715,7 +715,7 @@ fn provider_quota_two_pool_default_binding_projects_without_ambiguity() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: vec![
                 quota_window_for("codex", 4_400),
@@ -729,7 +729,7 @@ fn provider_quota_two_pool_default_binding_projects_without_ambiguity() {
         tau_proto::ProviderQuotaPatch {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch,
-            sequence: 2,
+            sequence: tau_proto::ProviderQuotaSequence::new(2),
             windows: Vec::new(),
             removed_window_keys: Vec::new(),
             route_bindings: vec![quota_binding()],
@@ -767,9 +767,15 @@ fn duplicate_provider_namespace_cannot_spoof_effective_route() {
         windows: vec![quota_window(1_000)],
         route_bindings: vec![quota_binding()],
     };
-    harness.handle_provider_quota_replace(&crate::test_connection_id("a-owner"), replace(1));
+    harness.handle_provider_quota_replace(
+        &crate::test_connection_id("a-owner"),
+        replace(tau_proto::ProviderQuotaSequence::new(1)),
+    );
     assert!(harness.provider_runtime.quota.is_empty());
-    harness.handle_provider_quota_replace(&crate::test_connection_id("z-winner"), replace(1));
+    harness.handle_provider_quota_replace(
+        &crate::test_connection_id("z-winner"),
+        replace(tau_proto::ProviderQuotaSequence::new(1)),
+    );
     assert_eq!(
         harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .source_id
@@ -793,7 +799,7 @@ fn split_namespace_ownership_fails_closed() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: vec![quota_window(1_000)],
             route_bindings: vec![quota_binding()],
@@ -816,7 +822,7 @@ fn model_change_preserves_provider_sequence_space() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: vec![quota_window(1_000)],
             route_bindings: vec![quota_binding()],
@@ -829,14 +835,14 @@ fn model_change_preserves_provider_sequence_space() {
         harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .sequence,
-        1
+        tau_proto::ProviderQuotaSequence::new(1)
     );
     harness.handle_provider_quota_patch(
         &crate::test_connection_id("owner"),
         tau_proto::ProviderQuotaPatch {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch,
-            sequence: 2,
+            sequence: tau_proto::ProviderQuotaSequence::new(2),
             windows: vec![quota_window(2_000)],
             removed_window_keys: Vec::new(),
             route_bindings: Vec::new(),
@@ -846,7 +852,7 @@ fn model_change_preserves_provider_sequence_space() {
         harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .sequence,
-        2
+        tau_proto::ProviderQuotaSequence::new(2)
     );
 }
 
@@ -864,7 +870,7 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: vec![quota_window(1_000)],
             route_bindings: vec![quota_binding()],
@@ -957,7 +963,7 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
-            sequence: 2,
+            sequence: tau_proto::ProviderQuotaSequence::new(2),
             establishes_new_epoch: false,
             windows: vec![quota_window(2_000)],
             route_bindings: vec![quota_binding()],
@@ -967,7 +973,7 @@ fn quota_catch_up_preserves_clocks_and_model_withdrawal_clears() {
         harness.provider_runtime.quota[&tau_proto::ProviderName::new("chatgpt")]
             .snapshot
             .sequence,
-        2
+        tau_proto::ProviderQuotaSequence::new(2)
     );
     assert!(
         harness.provider_runtime.quota_capabilities.is_empty(),
@@ -982,14 +988,14 @@ fn validated_quota_projection_is_must_pass_and_immutable() {
     let original = Event::HarnessProviderQuotaChanged(tau_proto::HarnessProviderQuotaChanged {
         provider: tau_proto::ProviderName::new("chatgpt"),
         profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
-        sequence: 1,
+        sequence: tau_proto::ProviderQuotaSequence::new(1),
         windows: vec![quota_window(1_000)],
         route_bindings: vec![quota_binding()],
     });
     let replacement = Event::HarnessProviderQuotaChanged(tau_proto::HarnessProviderQuotaChanged {
         provider: tau_proto::ProviderName::new("chatgpt"),
         profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
-        sequence: 1,
+        sequence: tau_proto::ProviderQuotaSequence::new(1),
         windows: vec![quota_window(9_000)],
         route_bindings: vec![quota_binding()],
     });
@@ -1076,7 +1082,7 @@ fn provider_quota_clear_orders_and_retires_epochs() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch_a.clone(),
-            sequence: 5,
+            sequence: tau_proto::ProviderQuotaSequence::new(5),
             establishes_new_epoch: true,
             windows: vec![quota_window(1_000)],
             route_bindings: vec![quota_binding()],
@@ -1087,7 +1093,7 @@ fn provider_quota_clear_orders_and_retires_epochs() {
         tau_proto::ProviderQuotaClear {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch_a.clone(),
-            sequence: 6,
+            sequence: tau_proto::ProviderQuotaSequence::new(6),
         },
     );
     assert!(harness.provider_runtime.quota.is_empty());
@@ -1100,7 +1106,7 @@ fn provider_quota_clear_orders_and_retires_epochs() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch_a,
-            sequence: 7,
+            sequence: tau_proto::ProviderQuotaSequence::new(7),
             establishes_new_epoch: true,
             windows: vec![quota_window(2_000)],
             route_bindings: vec![quota_binding()],
@@ -1112,7 +1118,7 @@ fn provider_quota_clear_orders_and_retires_epochs() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-b").expect("epoch"),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: vec![quota_window(2_000)],
             route_bindings: vec![quota_binding()],
@@ -1140,7 +1146,7 @@ fn restored_owner_accepts_unretired_rotated_full_epoch() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-e").expect("epoch"),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: vec![quota_window(1_000)],
             route_bindings: vec![quota_binding()],
@@ -1154,7 +1160,7 @@ fn restored_owner_accepts_unretired_rotated_full_epoch() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-f").expect("epoch"),
-            sequence: 2,
+            sequence: tau_proto::ProviderQuotaSequence::new(2),
             establishes_new_epoch: false,
             windows: vec![quota_window(2_000)],
             route_bindings: vec![quota_binding()],
@@ -1183,7 +1189,7 @@ fn clear_consumes_matching_route_loss_tombstone() {
         tau_proto::ProviderQuotaReplace {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: vec![quota_window(1_000)],
             route_bindings: vec![quota_binding()],
@@ -1201,7 +1207,7 @@ fn clear_consumes_matching_route_loss_tombstone() {
         tau_proto::ProviderQuotaClear {
             provider: tau_proto::ProviderName::new("chatgpt"),
             profile_epoch: epoch.clone(),
-            sequence: 2,
+            sequence: tau_proto::ProviderQuotaSequence::new(2),
         },
     );
     assert!(

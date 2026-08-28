@@ -3220,7 +3220,7 @@ fn quota_report_messages_use_persist_false_for_every_operation() {
     let patch = Event::ProviderQuotaPatchReported(tau_proto::ProviderQuotaPatch {
         provider: provider.clone(),
         profile_epoch: epoch,
-        sequence: 2,
+        sequence: tau_proto::ProviderQuotaSequence::new(2),
         windows: Vec::new(),
         removed_window_keys: Vec::new(),
         route_bindings: Vec::new(),

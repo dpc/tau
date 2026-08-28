@@ -1831,7 +1831,7 @@ fn representative_events() -> Vec<Event> {
         Event::ProviderQuotaReplaceReported(ProviderQuotaReplace {
             provider: ProviderName::new("chatgpt"),
             profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
-            sequence: 1,
+            sequence: ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: Vec::new(),
             route_bindings: Vec::new(),
@@ -1839,7 +1839,7 @@ fn representative_events() -> Vec<Event> {
         Event::ProviderQuotaPatchReported(ProviderQuotaPatch {
             provider: ProviderName::new("chatgpt"),
             profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
-            sequence: 2,
+            sequence: ProviderQuotaSequence::new(2),
             windows: Vec::new(),
             removed_window_keys: Vec::new(),
             route_bindings: Vec::new(),
@@ -1847,7 +1847,7 @@ fn representative_events() -> Vec<Event> {
         Event::ProviderQuotaClearReported(ProviderQuotaClear {
             provider: ProviderName::new("chatgpt"),
             profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
-            sequence: 3,
+            sequence: ProviderQuotaSequence::new(3),
         }),
         Event::ProviderToolResult(ToolResult {
             presentation: Default::default(),
@@ -1922,7 +1922,7 @@ fn representative_events() -> Vec<Event> {
         Event::HarnessProviderQuotaChanged(HarnessProviderQuotaChanged {
             provider: ProviderName::new("chatgpt"),
             profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
-            sequence: 1,
+            sequence: ProviderQuotaSequence::new(1),
             windows: Vec::new(),
             route_bindings: Vec::new(),
         }),

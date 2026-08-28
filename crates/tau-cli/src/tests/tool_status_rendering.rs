@@ -521,7 +521,7 @@ fn quota_status_renders_all_accessible_compact_chips() {
                 provider: model.provider.clone(),
                 profile_epoch: tau_proto::ProviderQuotaEpoch::parse(format!("epoch-{epoch}"))
                     .expect("valid quota test value"),
-                sequence: 1,
+                sequence: tau_proto::ProviderQuotaSequence::new(1),
                 windows: vec![tau_proto::ProviderQuotaWindow {
                     key: tau_proto::ProviderQuotaWindowKey {
                         limit_id: tau_proto::ProviderQuotaLimitId::parse("codex")
@@ -594,7 +594,7 @@ fn quota_status_narrow_two_pool_state_uses_only_bound_default_pool() {
             provider: model.provider.clone(),
             profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-two-pool")
                 .expect("quota epoch"),
-            sequence: 2,
+            sequence: tau_proto::ProviderQuotaSequence::new(2),
             windows: vec![window("codex", 1_000), window("codex_bengalfox", 9_500)],
             route_bindings: vec![tau_proto::ProviderQuotaRouteBinding {
                 model,

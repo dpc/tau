@@ -509,7 +509,7 @@ fn danger_quota_event(model: &tau_proto::ModelId) -> Event {
     Event::HarnessProviderQuotaChanged(tau_proto::HarnessProviderQuotaChanged {
         provider: model.provider.clone(),
         profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-danger").expect("quota epoch"),
-        sequence: 1,
+        sequence: tau_proto::ProviderQuotaSequence::new(1),
         windows: vec![tau_proto::ProviderQuotaWindow {
             key: tau_proto::ProviderQuotaWindowKey {
                 limit_id: tau_proto::ProviderQuotaLimitId::parse("codex").expect("quota pool"),

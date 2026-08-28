@@ -77,7 +77,7 @@ fn quota_report_family_round_trips_as_transient_wire_state() {
             crate::Event::ProviderQuotaReplaceReported(ProviderQuotaReplace {
                 provider: provider.clone(),
                 profile_epoch: epoch.clone(),
-                sequence: 1,
+                sequence: ProviderQuotaSequence::new(1),
                 establishes_new_epoch: true,
                 windows: Vec::new(),
                 route_bindings: Vec::new(),
@@ -89,7 +89,7 @@ fn quota_report_family_round_trips_as_transient_wire_state() {
             crate::Event::ProviderQuotaPatchReported(ProviderQuotaPatch {
                 provider: provider.clone(),
                 profile_epoch: epoch.clone(),
-                sequence: 2,
+                sequence: ProviderQuotaSequence::new(2),
                 windows: Vec::new(),
                 removed_window_keys: Vec::new(),
                 route_bindings: Vec::new(),
@@ -101,7 +101,7 @@ fn quota_report_family_round_trips_as_transient_wire_state() {
             crate::Event::ProviderQuotaClearReported(ProviderQuotaClear {
                 provider: provider.clone(),
                 profile_epoch: epoch.clone(),
-                sequence: 3,
+                sequence: ProviderQuotaSequence::new(3),
             }),
             "provider.quota_clear_reported",
             crate::EventName::PROVIDER_QUOTA_CLEAR_REPORTED,

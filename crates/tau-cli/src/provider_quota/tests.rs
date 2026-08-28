@@ -34,7 +34,7 @@ fn make_state(sample: ProviderQuotaWindow) -> (QuotaPacingState, ModelId) {
     let changed = HarnessProviderQuotaChanged {
         provider: model.provider.clone(),
         profile_epoch: ProviderQuotaEpoch::parse("epoch-1").expect("valid quota test value"),
-        sequence: 2,
+        sequence: tau_proto::ProviderQuotaSequence::new(2),
         windows: vec![sample],
         route_bindings: vec![ProviderQuotaRouteBinding {
             model: model.clone(),
@@ -239,7 +239,7 @@ fn provider_capability_controls_unknown_visibility() {
     state.update(&HarnessProviderQuotaChanged {
         provider: model.provider.clone(),
         profile_epoch: ProviderQuotaEpoch::parse("epoch-empty").expect("quota epoch"),
-        sequence: 1,
+        sequence: tau_proto::ProviderQuotaSequence::new(1),
         windows: Vec::new(),
         route_bindings: Vec::new(),
     });

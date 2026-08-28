@@ -243,7 +243,7 @@ fn provider_quota_state_never_enters_semantic_history() {
         Event::ProviderQuotaReplaceReported(ProviderQuotaReplace {
             provider: provider.clone(),
             profile_epoch: epoch.clone(),
-            sequence: 1,
+            sequence: tau_proto::ProviderQuotaSequence::new(1),
             establishes_new_epoch: true,
             windows: Vec::new(),
             route_bindings: Vec::new(),
@@ -251,7 +251,7 @@ fn provider_quota_state_never_enters_semantic_history() {
         Event::ProviderQuotaPatchReported(ProviderQuotaPatch {
             provider: provider.clone(),
             profile_epoch: epoch.clone(),
-            sequence: 2,
+            sequence: tau_proto::ProviderQuotaSequence::new(2),
             windows: Vec::new(),
             removed_window_keys: Vec::new(),
             route_bindings: Vec::new(),
@@ -259,12 +259,12 @@ fn provider_quota_state_never_enters_semantic_history() {
         Event::ProviderQuotaClearReported(ProviderQuotaClear {
             provider: provider.clone(),
             profile_epoch: epoch.clone(),
-            sequence: 3,
+            sequence: tau_proto::ProviderQuotaSequence::new(3),
         }),
         Event::HarnessProviderQuotaChanged(tau_proto::HarnessProviderQuotaChanged {
             provider,
             profile_epoch: epoch,
-            sequence: 3,
+            sequence: tau_proto::ProviderQuotaSequence::new(3),
             windows: Vec::new(),
             route_bindings: Vec::new(),
         }),

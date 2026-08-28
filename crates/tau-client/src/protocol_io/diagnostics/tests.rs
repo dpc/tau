@@ -549,7 +549,7 @@ fn protocol_io_meter_separates_quota_equality_caches_by_both_axes() {
     let quota = tau_proto::HarnessProviderQuotaChanged {
         provider: tau_proto::ProviderName::new("provider"),
         profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
-        sequence: 1,
+        sequence: tau_proto::ProviderQuotaSequence::new(1),
         windows: Vec::new(),
         route_bindings: Vec::new(),
     };
@@ -600,7 +600,7 @@ fn protocol_io_meter_classifies_quota_snapshot_changes() {
     let mut quota = tau_proto::HarnessProviderQuotaChanged {
         provider: tau_proto::ProviderName::new("provider"),
         profile_epoch: tau_proto::ProviderQuotaEpoch::parse("epoch-1").expect("epoch"),
-        sequence: 1,
+        sequence: tau_proto::ProviderQuotaSequence::new(1),
         windows: Vec::new(),
         route_bindings: Vec::new(),
     };
@@ -612,7 +612,7 @@ fn protocol_io_meter_classifies_quota_snapshot_changes() {
     };
     record(&mut meter, &quota);
     record(&mut meter, &quota);
-    quota.sequence = 2;
+    quota.sequence = tau_proto::ProviderQuotaSequence::new(2);
     record(&mut meter, &quota);
     quota.profile_epoch = tau_proto::ProviderQuotaEpoch::parse("epoch-2").expect("epoch");
     record(&mut meter, &quota);

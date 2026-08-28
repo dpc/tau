@@ -291,13 +291,13 @@ const QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 #[derive(Clone)]
 struct QuotaWindowRecord {
     window: tau_proto::ProviderQuotaWindow,
-    updated_sequence: u64,
+    updated_sequence: tau_proto::ProviderQuotaSequence,
 }
 
 struct QuotaProfileState {
     identity: QuotaProfileIdentity,
     epoch: tau_proto::ProviderQuotaEpoch,
-    sequence: u64,
+    sequence: tau_proto::ProviderQuotaSequence,
     windows: BTreeMap<tau_proto::ProviderQuotaWindowKey, QuotaWindowRecord>,
     bindings: BTreeMap<ModelId, tau_proto::ProviderQuotaRouteBinding>,
     fetch_in_flight: bool,
@@ -352,7 +352,7 @@ impl QuotaCoordinator {
             QuotaProfileState {
                 identity,
                 epoch: epoch.clone(),
-                sequence: 1,
+                sequence: tau_proto::ProviderQuotaSequence::new(1),
                 windows: BTreeMap::new(),
                 bindings: BTreeMap::new(),
                 fetch_in_flight: false,
@@ -365,7 +365,7 @@ impl QuotaCoordinator {
             tau_proto::ProviderQuotaReplace {
                 provider,
                 profile_epoch: epoch,
-                sequence: 1,
+                sequence: tau_proto::ProviderQuotaSequence::new(1),
                 establishes_new_epoch: true,
                 windows: Vec::new(),
                 route_bindings: Vec::new(),
@@ -379,7 +379,7 @@ impl QuotaCoordinator {
             tau_proto::ProviderQuotaClear {
                 provider: provider.clone(),
                 profile_epoch: current.epoch,
-                sequence: current.sequence.saturating_add(1),
+                sequence: current.sequence.saturating_next(),
             },
         ))
     }
@@ -408,7 +408,10 @@ impl QuotaCoordinator {
     fn begin_fetch(
         &mut self,
         provider: &ProviderName,
-    ) -> Option<(tau_proto::ProviderQuotaEpoch, u64)> {
+    ) -> Option<(
+        tau_proto::ProviderQuotaEpoch,
+        tau_proto::ProviderQuotaSequence,
+    )> {
         let current = self.profiles.get_mut(provider)?;
         let reset_due = current.windows.values().any(|record| {
             record
@@ -484,7 +487,7 @@ impl QuotaCoordinator {
         &mut self,
         provider: ProviderName,
         epoch: tau_proto::ProviderQuotaEpoch,
-        fetch_start_sequence: u64,
+        fetch_start_sequence: tau_proto::ProviderQuotaSequence,
         snapshot: tau_provider_codex::FullQuotaSnapshot,
         observed_at_unix_ms: u64,
     ) -> Option<Event> {
@@ -513,7 +516,7 @@ impl QuotaCoordinator {
                 key,
                 QuotaWindowRecord {
                     window,
-                    updated_sequence: current.sequence.saturating_add(1),
+                    updated_sequence: current.sequence.saturating_next(),
                 },
             );
         }
@@ -521,7 +524,7 @@ impl QuotaCoordinator {
             current.failure_attempt = current.failure_attempt.saturating_add(1);
             return None;
         }
-        current.sequence = current.sequence.saturating_add(1);
+        current.sequence = current.sequence.saturating_next();
         current.failure_attempt = 0;
         let sequence = current.sequence;
         current.windows = candidate;
@@ -578,7 +581,7 @@ impl QuotaCoordinator {
         {
             return None;
         }
-        current.sequence = current.sequence.saturating_add(1);
+        current.sequence = current.sequence.saturating_next();
         let sequence = current.sequence;
         let mut windows = Vec::new();
         for sparse in observation.windows {
@@ -5102,7 +5105,7 @@ enum WorkerMessage {
         /// Epoch captured before starting I/O.
         profile_epoch: tau_proto::ProviderQuotaEpoch,
         /// State sequence captured before starting I/O.
-        fetch_start_sequence: u64,
+        fetch_start_sequence: tau_proto::ProviderQuotaSequence,
         /// Wall-clock completion time sampled by the acquisition worker.
         observed_at_unix_ms: u64,
         /// Sanitized full-fetch result.

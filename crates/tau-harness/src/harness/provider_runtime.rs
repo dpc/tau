@@ -18,7 +18,7 @@ pub(crate) struct CurrentProviderQuota {
 pub(super) struct ProviderQuotaTombstone {
     source_id: tau_proto::ConnectionId,
     profile_epoch: tau_proto::ProviderQuotaEpoch,
-    sequence: u64,
+    sequence: tau_proto::ProviderQuotaSequence,
 }
 
 impl Harness {
@@ -831,13 +831,15 @@ impl Harness {
             .provider_runtime
             .quota
             .get(provider)
-            .map_or(0, |current| current.snapshot.sequence);
+            .map_or_else(tau_proto::ProviderQuotaSequence::default, |current| {
+                current.snapshot.sequence
+            });
         self.remove_provider_quota_at(provider, sequence, true);
     }
     fn remove_provider_quota_at(
         &mut self,
         provider: &tau_proto::ProviderName,
-        sequence: u64,
+        sequence: tau_proto::ProviderQuotaSequence,
         allow_recovery: bool,
     ) {
         let Some(current) = self.provider_runtime.quota.remove(provider) else {
