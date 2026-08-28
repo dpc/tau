@@ -2428,8 +2428,7 @@ impl Harness {
                 if let Some(staged) = self
                     .prompt_coordination
                     .compaction_runtime
-                    .pending_model_acceptances
-                    .remove(&requested.request_id)
+                    .remove_pending_model_acceptance(&requested.request_id)
                 {
                     let source = staged.request.required_tool_source();
                     let call_id = source.initiating_tool_call_id.clone();
@@ -2484,8 +2483,7 @@ impl Harness {
             if let Some(accepted) = self
                 .prompt_coordination
                 .compaction_runtime
-                .pending_ui_acceptances
-                .remove(&requested.request_id)
+                .remove_pending_ui_acceptance(&requested.request_id)
             {
                 self.prompt_coordination
                     .compaction_runtime

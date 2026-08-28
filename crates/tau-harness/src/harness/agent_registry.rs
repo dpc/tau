@@ -1702,25 +1702,28 @@ impl Harness {
             self.peer_messaging
                 .uncommitted_peer_auto_starts
                 .remove(&unloading_agent_id_proto);
-            let staged_request_ids =
-                self.prompt_coordination
-                    .compaction_runtime
-                    .pending_model_acceptances
-                    .iter()
-                    .filter(|(_, staged)| {
-                        staged.request.tool_source().is_some_and(|source| {
-                            source.caller_agent_id.as_str() == unloading_agent_id
-                        }) || staged.request.target_agent_id.as_str() == unloading_agent_id
-                    })
-                    .map(|(request_id, _)| request_id.clone())
-                    .collect::<Vec<_>>();
+            let staged_request_ids = self
+                .prompt_coordination
+                .compaction_runtime
+                .pending_manual_acceptances
+                .iter()
+                .filter(|(_, pending)| {
+                    matches!(
+                        pending,
+                        PendingManualCompactionAcceptance::ModelTool(staged)
+                            if staged.request.tool_source().is_some_and(|source| {
+                                source.caller_agent_id.as_str() == unloading_agent_id
+                            }) || staged.request.target_agent_id.as_str() == unloading_agent_id
+                    )
+                })
+                .map(|(request_id, _)| request_id.clone())
+                .collect::<Vec<_>>();
             self.cancel_staged_model_acceptance_publications(&staged_request_ids);
             for request_id in staged_request_ids {
                 let Some(staged) = self
                     .prompt_coordination
                     .compaction_runtime
-                    .pending_model_acceptances
-                    .remove(&request_id)
+                    .remove_pending_model_acceptance(&request_id)
                 else {
                     continue;
                 };

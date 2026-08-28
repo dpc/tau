@@ -97,8 +97,9 @@ impl Harness {
             if self
                 .prompt_coordination
                 .compaction_runtime
-                .pending_ui_acceptances
-                .contains_key(&request_id)
+                .pending_manual_acceptances
+                .get(&request_id)
+                .is_some_and(|pending| matches!(pending, PendingManualCompactionAcceptance::Ui(_)))
             {
                 self.prompt_coordination
                     .compaction_runtime
@@ -123,18 +124,28 @@ impl Harness {
         if let Some(request_id) = self
             .prompt_coordination
             .compaction_runtime
-            .pending_ui_acceptances
+            .pending_manual_acceptances
             .iter()
-            .find_map(|(id, accepted)| {
-                (accepted.request.target_agent_id == agent_id).then(|| id.clone())
+            .find_map(|(id, pending)| {
+                (pending.request().target_agent_id == agent_id).then(|| id.clone())
             })
         {
-            self.prompt_coordination
-                .compaction_runtime
-                .pending_ui_acknowledgements
-                .entry(request_id)
-                .or_default()
-                .push(client_id.clone());
+            if matches!(
+                self.prompt_coordination
+                    .compaction_runtime
+                    .pending_manual_acceptances
+                    .get(&request_id),
+                Some(PendingManualCompactionAcceptance::Ui(_))
+            ) {
+                self.prompt_coordination
+                    .compaction_runtime
+                    .pending_ui_acknowledgements
+                    .entry(request_id)
+                    .or_default()
+                    .push(client_id.clone());
+            } else {
+                self.send_ui_response(client_id, "compaction already queued");
+            }
             return;
         }
         let standalone = self.model_for_agent_role(agent).filter(|model| {
@@ -377,13 +388,13 @@ impl Harness {
         };
         self.prompt_coordination
             .compaction_runtime
-            .pending_ui_acceptances
+            .pending_manual_acceptances
             .insert(
                 request_id.clone(),
-                AcceptedManualCompactionTool {
+                PendingManualCompactionAcceptance::Ui(AcceptedManualCompactionTool {
                     request: request.clone(),
                     visible_tool_name: ToolName::new("compact"),
-                },
+                }),
             );
         self.prompt_coordination
             .compaction_runtime
@@ -402,8 +413,7 @@ impl Harness {
         }
         self.prompt_coordination
             .compaction_runtime
-            .pending_ui_acceptances
-            .remove(&requested.request_id);
+            .remove_pending_ui_acceptance(&requested.request_id);
         if let Some(requesters) = self
             .prompt_coordination
             .compaction_runtime
@@ -617,9 +627,9 @@ impl Harness {
         let staged_target_pending = self
             .prompt_coordination
             .compaction_runtime
-            .pending_model_acceptances
+            .pending_manual_acceptances
             .values()
-            .any(|entry| Some(entry.request.target_agent_id.to_string()) == target_public_id);
+            .any(|entry| Some(entry.request().target_agent_id.to_string()) == target_public_id);
         if committed_target_pending || staged_target_pending {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
@@ -701,33 +711,37 @@ impl Harness {
             );
             return;
         };
-        let caller_active_requests =
-            self.prompt_coordination
+        let caller_active_requests = self
+            .prompt_coordination
+            .compaction_runtime
+            .accepted_manual_tools
+            .values()
+            .filter(|entry| {
+                entry
+                    .request
+                    .tool_source()
+                    .is_some_and(|source| source.caller_agent_id.as_str() == caller_public_id)
+            })
+            .count()
+            + self
+                .prompt_coordination
                 .compaction_runtime
-                .accepted_manual_tools
+                .pending_manual_acceptances
                 .values()
                 .filter(|entry| {
-                    entry
-                        .request
-                        .tool_source()
-                        .is_some_and(|source| source.caller_agent_id.as_str() == caller_public_id)
+                    matches!(
+                        entry,
+                        PendingManualCompactionAcceptance::ModelTool(staged)
+                            if staged.request.tool_source().is_some_and(|source| {
+                                source.caller_agent_id.as_str() == caller_public_id
+                            })
+                    )
                 })
                 .count()
-                + self
-                    .prompt_coordination
-                    .compaction_runtime
-                    .pending_model_acceptances
-                    .values()
-                    .filter(|entry| {
-                        entry.request.tool_source().is_some_and(|source| {
-                            source.caller_agent_id.as_str() == caller_public_id
-                        })
-                    })
-                    .count()
-                + self
-                    .prompt_coordination
-                    .compaction_runtime
-                    .model_tool_start_count_for_caller(&caller_public_id);
+            + self
+                .prompt_coordination
+                .compaction_runtime
+                .model_tool_start_count_for_caller(&caller_public_id);
         if 4 <= caller_active_requests {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
@@ -829,13 +843,13 @@ impl Harness {
         };
         self.prompt_coordination
             .compaction_runtime
-            .pending_model_acceptances
+            .pending_manual_acceptances
             .insert(
                 request_id.clone(),
-                StagedManualCompactionTool {
+                PendingManualCompactionAcceptance::ModelTool(StagedManualCompactionTool {
                     request: request.clone(),
                     visible_tool_name,
-                },
+                }),
             );
         self.publish_owed_compaction_fact(
             &target_cid,

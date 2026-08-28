@@ -77,17 +77,14 @@ pub(crate) struct CompactionRuntimeState {
     /// Accepted manual requests waiting for a safe start boundary.
     pub(super) accepted_manual_tools:
         HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
-    /// Model-tool requests staged until their acceptance fact commits.
-    pub(super) pending_model_acceptances:
-        HashMap<tau_proto::CompactionRequestId, StagedManualCompactionTool>,
+    /// Exclusive request origin staged until its acceptance fact commits.
+    pub(super) pending_manual_acceptances:
+        HashMap<tau_proto::CompactionRequestId, PendingManualCompactionAcceptance>,
     /// UI compactions waiting for a claimed wait cancellation to commit.
     pub(super) pending_ui_after_wait: HashMap<AgentId, PendingUiCompactionAfterWait>,
     /// Requesting UIs awaiting the durable acceptance commit.
     pub(super) pending_ui_acknowledgements:
         HashMap<tau_proto::CompactionRequestId, Vec<tau_proto::ConnectionId>>,
-    /// UI requests staged until their acceptance fact commits.
-    pub(super) pending_ui_acceptances:
-        HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
     /// Exact UI start publications retained after an append rejection.
     pub(super) rejected_ui_starts: HashMap<AgentId, Event>,
     /// Standalone inference checkpoints currently queued through publication.
@@ -96,6 +93,42 @@ pub(crate) struct CompactionRuntimeState {
 }
 
 impl CompactionRuntimeState {
+    /// Remove and return one staged model-tool acceptance without consuming a
+    /// colliding UI acceptance.
+    pub(super) fn remove_pending_model_acceptance(
+        &mut self,
+        request_id: &tau_proto::CompactionRequestId,
+    ) -> Option<StagedManualCompactionTool> {
+        match self.pending_manual_acceptances.get(request_id) {
+            Some(PendingManualCompactionAcceptance::ModelTool(_)) => {}
+            Some(PendingManualCompactionAcceptance::Ui(_)) | None => return None,
+        }
+        let Some(PendingManualCompactionAcceptance::ModelTool(staged)) =
+            self.pending_manual_acceptances.remove(request_id)
+        else {
+            unreachable!("checked pending acceptance origin")
+        };
+        Some(staged)
+    }
+
+    /// Remove and return one staged UI acceptance without consuming a colliding
+    /// model-tool acceptance.
+    pub(super) fn remove_pending_ui_acceptance(
+        &mut self,
+        request_id: &tau_proto::CompactionRequestId,
+    ) -> Option<AcceptedManualCompactionTool> {
+        match self.pending_manual_acceptances.get(request_id) {
+            Some(PendingManualCompactionAcceptance::Ui(_)) => {}
+            Some(PendingManualCompactionAcceptance::ModelTool(_)) | None => return None,
+        }
+        let Some(PendingManualCompactionAcceptance::Ui(accepted)) =
+            self.pending_manual_acceptances.remove(request_id)
+        else {
+            unreachable!("checked pending acceptance origin")
+        };
+        Some(accepted)
+    }
+
     /// Record a local preflight failure as the highest-priority
     /// suppressed-start reaction.
     pub(super) fn suppress_start_for_preflight(

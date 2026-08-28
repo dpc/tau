@@ -1065,8 +1065,8 @@ impl Harness {
             .clear_model_tool_starts();
         self.prompt_coordination
             .compaction_runtime
-            .pending_model_acceptances
-            .clear();
+            .pending_manual_acceptances
+            .retain(|_, pending| matches!(pending, PendingManualCompactionAcceptance::Ui(_)));
         let queued_ui_compactions = self
             .prompt_coordination
             .compaction_runtime

@@ -4559,7 +4559,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
     let request_id = h
         .prompt_coordination
         .compaction_runtime
-        .pending_model_acceptances
+        .pending_manual_acceptances
         .keys()
         .next()
         .cloned()
@@ -4586,7 +4586,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
     assert!(
         h.prompt_coordination
             .compaction_runtime
-            .pending_model_acceptances
+            .pending_manual_acceptances
             .contains_key(&request_id)
             && h.prompt_coordination
                 .prompt_runtime
@@ -4602,7 +4602,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
     assert!(
         h.prompt_coordination
             .compaction_runtime
-            .pending_model_acceptances
+            .pending_manual_acceptances
             .is_empty()
             && h.prompt_coordination
                 .compaction_runtime
@@ -4692,7 +4692,7 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
     assert!(
         h.prompt_coordination
             .compaction_runtime
-            .pending_model_acceptances
+            .pending_manual_acceptances
             .is_empty()
             && !h
                 .prompt_coordination
@@ -4723,14 +4723,62 @@ fn model_compaction_acceptance_and_start_commit_before_runtime_installation() {
     );
 }
 
-/// A second model-tool request for the same target cannot overwrite the first
-/// request's staged pre-commit acceptance or steal its ACK and transaction.
+/// A staged UI acceptance excludes a model-tool acceptance for the same target,
+/// preserving the `already_pending` rejection instead of retaining two origins.
 #[test]
-fn staged_model_compaction_acceptance_preserves_first_call_correlation() {
+fn staged_ui_acceptance_excludes_model_acceptance_for_same_target() {
+    let (_td, mut h, caller_cid, _target_cid, call, target_id) =
+        setup_manual_cross_compaction_test();
+    connect_test_tool(&mut h, "cross-origin-acceptance");
+    h.handle_extension_event(
+        "cross-origin-acceptance",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MANUAL_COMPACTION_REQUESTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register acceptance interceptor");
+
+    h.handle_compact_request(
+        crate::harness::harness_connection_id(),
+        test_session_id("s1"),
+        Some(target_id.as_str()),
+    );
+    h.request_agent_tool_compaction(
+        &caller_cid,
+        &call,
+        ToolName::new("agent_compact"),
+        Some(&target_id),
+    );
+    assert!(matches!(
+        h.prompt_coordination
+            .compaction_runtime
+            .pending_manual_acceptances
+            .values()
+            .next(),
+        Some(crate::harness::PendingManualCompactionAcceptance::Ui(_))
+    ));
+
+    h.handle_extension_event(
+        "cross-origin-acceptance",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit UI acceptance");
+    assert_manual_cross_compaction_error(&h, &call, "already_pending");
+}
+
+/// A UI request cannot overwrite a staged model-tool acceptance or steal its
+/// acknowledgement and transaction correlation.
+#[test]
+fn staged_model_acceptance_excludes_ui_and_preserves_call_correlation() {
     let (_td, mut h, caller_cid, _target_cid, first_call, target_id) =
         setup_manual_cross_compaction_test();
-    let second_call =
-        register_manual_cross_compaction_call(&mut h, &caller_cid, "call-cross-compact-second");
+    let ui_frames =
+        connect_test_client(&mut h, "acceptance-collision-ui", tau_proto::ClientKind::Ui);
     connect_test_tool(&mut h, "model-acceptance-double-request");
     h.handle_extension_event(
         "model-acceptance-double-request",
@@ -4748,26 +4796,39 @@ fn staged_model_compaction_acceptance_preserves_first_call_correlation() {
         ToolName::new("agent_compact"),
         Some(&target_id),
     );
-    h.request_agent_tool_compaction(
-        &caller_cid,
-        &second_call,
-        ToolName::new("agent_compact"),
-        Some(&target_id),
+    h.handle_compact_request(
+        &crate::test_connection_id("acceptance-collision-ui"),
+        test_session_id("s1"),
+        Some(target_id.as_str()),
     );
     let staged = h
         .prompt_coordination
         .compaction_runtime
-        .pending_model_acceptances
+        .pending_manual_acceptances
         .values()
         .collect::<Vec<_>>();
     assert_eq!(staged.len(), 1);
     assert_eq!(
         staged[0]
-            .request
+            .request()
             .required_tool_source()
             .initiating_tool_call_id,
         first_call.id
     );
+    assert!(
+        h.prompt_coordination
+            .compaction_runtime
+            .pending_ui_acknowledgements
+            .is_empty(),
+        "the rejected UI origin must not acquire ACK delivery"
+    );
+    assert!(ui_frames.lock().expect("UI frames").iter().any(|routed| {
+        matches!(
+            peel_inner_event(&routed.frame),
+            Some(Event::HarnessNotice(notice))
+                if notice.message == "compaction already queued"
+        )
+    }));
     assert!(
         !h.tool_routing
             .tool_runtime
@@ -4814,11 +4875,6 @@ fn staged_model_compaction_acceptance_preserves_first_call_correlation() {
             .tool_turn
             .is_backgrounded(&first_call.id)
     );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        Event::ToolError(error)
-            if error.call_id == second_call.id && error.message == "already_pending"
-    )));
     assert!(
         h.prompt_coordination
             .compaction_runtime
@@ -4860,14 +4916,14 @@ fn staged_model_compaction_acceptance_is_cleared_by_teardown() {
         assert_eq!(
             h.prompt_coordination
                 .compaction_runtime
-                .pending_model_acceptances
+                .pending_manual_acceptances
                 .len(),
             1
         );
         let request_id = h
             .prompt_coordination
             .compaction_runtime
-            .pending_model_acceptances
+            .pending_manual_acceptances
             .keys()
             .next()
             .cloned()
@@ -4899,7 +4955,7 @@ fn staged_model_compaction_acceptance_is_cleared_by_teardown() {
         assert!(
             h.prompt_coordination
                 .compaction_runtime
-                .pending_model_acceptances
+                .pending_manual_acceptances
                 .is_empty()
                 && !h
                     .tool_routing

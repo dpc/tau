@@ -881,6 +881,25 @@ struct StagedManualCompactionTool {
     visible_tool_name: ToolName,
 }
 
+#[derive(Clone)]
+/// Runtime state for one manual request whose acceptance has not committed.
+enum PendingManualCompactionAcceptance {
+    /// A model-tool request awaiting durable admission.
+    ModelTool(StagedManualCompactionTool),
+    /// A UI request awaiting durable admission.
+    Ui(AcceptedManualCompactionTool),
+}
+
+impl PendingManualCompactionAcceptance {
+    /// Return the proposed durable request shared by either acceptance origin.
+    fn request(&self) -> &tau_proto::AgentManualCompactionRequested {
+        match self {
+            Self::ModelTool(staged) => &staged.request,
+            Self::Ui(accepted) => &accepted.request,
+        }
+    }
+}
+
 fn manual_request_failure_message(
     reason: tau_proto::ManualCompactionRequestFailureReason,
 ) -> &'static str {
