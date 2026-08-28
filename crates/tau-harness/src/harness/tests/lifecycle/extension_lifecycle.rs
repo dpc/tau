@@ -7540,7 +7540,10 @@ fn nonreading_child_is_reaped_before_delayed_replacement() {
         let event = h
             .runtime_io
             .rx
-            .recv_timeout(Duration::from_secs(2))
+            // The cleanup worker must terminate and reap the process group, then
+            // let the blocked writer report completion. Two seconds is shorter
+            // than that bounded asynchronous sequence under coverage.
+            .recv_timeout(Duration::from_secs(10))
             .expect("cleanup-complete event");
         match h.expand_component_ingress_wake(event) {
             HarnessEvent::SupervisedWriterCleanupComplete {

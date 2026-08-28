@@ -137,9 +137,6 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
     )?;
     second.wait_for("worker completion observed", deadline)?;
     let trace_before_presentation = fixture.trace()?;
-    let durable_before_presentation =
-        DurableSessionSnapshot::load(&fixture.tau_state(), &session_id)?;
-    durable_before_presentation.require_prefix(&durable_before)?;
     let observer_before_presentation = observer.events.len();
 
     const FIRST_DRAFT: &str = "first-ui-private-draft";
@@ -392,8 +389,8 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
         .into());
     }
     let durable_after = DurableSessionSnapshot::load(&fixture.tau_state(), &session_id)?;
-    durable_after.require_prefix(&durable_before_presentation)?;
-    durable_before_presentation.require_prefix(&durable_after)?;
+    durable_after.require_prefix(&durable_before)?;
+    assert_presentation_snapshot_suffix(&durable_before, &durable_after, &identities)?;
     fixture.complete();
     Ok(())
 }

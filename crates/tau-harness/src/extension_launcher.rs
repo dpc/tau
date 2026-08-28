@@ -180,88 +180,16 @@ pub(crate) fn configure_command(
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 fn install_linux_namespace(plan: &PreExecIsolationPlan) -> path_std_io::Result<()> {
-    fn syscall(result: libc::c_int) -> path_std_io::Result<()> {
-        if result == -1 {
-            Err(path_std_io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-    fn bind(source: &std::ffi::CStr, target: &std::ffi::CStr) -> path_std_io::Result<()> {
-        syscall(unsafe {
-            libc::mount(
-                source.as_ptr(),
-                target.as_ptr(),
-                std::ptr::null(),
-                libc::MS_BIND | libc::MS_REC,
-                std::ptr::null(),
-            )
-        })
-    }
-    fn remount_read_only(target: &std::ffi::CStr, recursive: bool) -> path_std_io::Result<()> {
-        let recursive_flag = if recursive { libc::MS_REC } else { 0 };
-        syscall(unsafe {
-            libc::mount(
-                std::ptr::null(),
-                target.as_ptr(),
-                std::ptr::null(),
-                libc::MS_BIND
-                    | libc::MS_REMOUNT
-                    | recursive_flag
-                    | libc::MS_RDONLY
-                    | libc::MS_NOSUID
-                    | libc::MS_NODEV
-                    | libc::MS_NOEXEC,
-                std::ptr::null(),
-            )
-        })
-    }
-    fn make_recursively_read_only(target: &std::ffi::CStr) -> path_std_io::Result<()> {
-        #[repr(C)]
-        struct MountAttr {
-            /// Linux `mount_attr.attr_set` bitset.
-            attr_set: u64,
-            /// Linux `mount_attr.attr_clr` bitset.
-            attr_clr: u64,
-            /// Linux `mount_attr.propagation` bitset.
-            propagation: u64,
-            /// Linux `mount_attr.userns_fd` selector.
-            userns_fd: u64,
-        }
-        const AT_RECURSIVE: u32 = 0x8000;
-        const MOUNT_ATTR_RDONLY: u64 = 0x0000_0001;
-        const MOUNT_ATTR_NOSUID: u64 = 0x0000_0002;
-        const MOUNT_ATTR_NODEV: u64 = 0x0000_0004;
-        const MOUNT_ATTR_NOEXEC: u64 = 0x0000_0008;
-        let mut attributes = MountAttr {
-            attr_set: MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC,
-            attr_clr: 0,
-            propagation: 0,
-            userns_fd: 0,
-        };
-        // `mount_setattr(2)` and AT_RECURSIVE require Linux 5.12. Do not fall
-        // back to a non-recursive remount on older kernels: inherited nested
-        // mounts could stay writable. ENOSYS/EINVAL therefore propagates and
-        // fails extension startup closed.
-        //
-        // SAFETY: `attributes` has the kernel ABI layout and remains live for
-        // this synchronous syscall; every scalar argument is prevalidated.
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_mount_setattr,
-                libc::AT_FDCWD,
-                target.as_ptr(),
-                AT_RECURSIVE,
-                std::ptr::addr_of_mut!(attributes),
-                std::mem::size_of::<MountAttr>(),
-            )
-        };
-        if result == -1 {
-            return Err(path_std_io::Error::last_os_error());
-        }
-        Ok(())
-    }
+    enter_linux_namespaces(plan)?;
+    install_state_mounts(plan)?;
+    hide_runtime_socket_when_required(plan)?;
+    finish_linux_isolation(plan)
+}
 
+/// Creates the private user and mount namespaces before applying mount policy.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn enter_linux_namespaces(plan: &PreExecIsolationPlan) -> path_std_io::Result<()> {
     syscall(unsafe { libc::unshare(libc::CLONE_NEWUSER) })?;
     match write_proc_file(c"/proc/self/setgroups", b"deny\n") {
         Ok(()) => {}
@@ -279,65 +207,199 @@ fn install_linux_namespace(plan: &PreExecIsolationPlan) -> path_std_io::Result<(
             libc::MS_REC | libc::MS_PRIVATE,
             std::ptr::null(),
         )
-    })?;
+    })
+}
 
-    if let Some(state_root) = plan.state_root.as_deref() {
-        bind(state_root, &plan.staging_root)?;
-        syscall(unsafe {
-            libc::mount(
-                std::ptr::null(),
-                plan.staging_root.as_ptr(),
-                std::ptr::null(),
-                libc::MS_REC | libc::MS_PRIVATE,
-                std::ptr::null(),
-            )
-        })?;
-        #[cfg(test)]
-        if let Some(test_nested_mount) = plan.test_nested_mount.as_deref() {
-            bind(test_nested_mount, test_nested_mount)?;
-        }
-        match plan.tau_state_access {
-            TauStateAccess::Hidden => {
-                bind(&plan.outer_mask, state_root)?;
-                remount_read_only(state_root, false)?;
-            }
-            TauStateAccess::ReadOnly => {
-                bind(&plan.staging_root, state_root)?;
-                make_recursively_read_only(state_root)?;
-                if let Some(secret_mask_target) = plan.secret_mask_target.as_deref() {
-                    bind(&plan.outer_mask, secret_mask_target)?;
-                    remount_read_only(secret_mask_target, false)?;
-                }
-            }
-            TauStateAccess::Legacy => {
-                if let Some(secret_mask_target) = plan.secret_mask_target.as_deref() {
-                    bind(&plan.outer_mask, secret_mask_target)?;
-                    remount_read_only(secret_mask_target, false)?;
-                }
-            }
-        }
-        if let Some(mount) = plan.own_state.as_ref() {
-            bind(&mount.source, &mount.target)?;
-        }
-        if let Some(mount) = plan.provider_settings.as_ref() {
-            bind(&mount.source, &mount.target)?;
-            make_recursively_read_only(&mount.target)?;
-        }
+/// Applies the prevalidated extension-state visibility policy inside the new
+/// namespace.
+#[cfg(target_os = "linux")]
+fn install_state_mounts(plan: &PreExecIsolationPlan) -> path_std_io::Result<()> {
+    let Some(state_root) = plan.state_root.as_deref() else {
+        return Ok(());
+    };
+    bind(state_root, &plan.staging_root)?;
+    make_mount_private(&plan.staging_root)?;
+    #[cfg(test)]
+    if let Some(test_nested_mount) = plan.test_nested_mount.as_deref() {
+        bind(test_nested_mount, test_nested_mount)?;
     }
+    install_tau_state_access(plan, state_root)?;
+    if let Some(mount) = plan.own_state.as_ref() {
+        bind(&mount.source, &mount.target)?;
+    }
+    if let Some(mount) = plan.provider_settings.as_ref() {
+        bind(&mount.source, &mount.target)?;
+        make_recursively_read_only(&mount.target)?;
+    }
+    Ok(())
+}
+
+/// Applies the selected visibility policy to Tau-owned state and its secret
+/// mask.
+#[cfg(target_os = "linux")]
+fn install_tau_state_access(
+    plan: &PreExecIsolationPlan,
+    state_root: &std::ffi::CStr,
+) -> path_std_io::Result<()> {
+    match plan.tau_state_access {
+        TauStateAccess::Hidden => {
+            bind(&plan.outer_mask, state_root)?;
+            remount_read_only(state_root, false)
+        }
+        TauStateAccess::ReadOnly => {
+            bind(&plan.staging_root, state_root)?;
+            make_recursively_read_only(state_root)?;
+            install_secret_mask(plan)
+        }
+        TauStateAccess::Legacy => install_secret_mask(plan),
+    }
+}
+
+/// Hides the optional secret target without changing the surrounding state
+/// policy.
+#[cfg(target_os = "linux")]
+fn install_secret_mask(plan: &PreExecIsolationPlan) -> path_std_io::Result<()> {
+    if let Some(secret_mask_target) = plan.secret_mask_target.as_deref() {
+        bind(&plan.outer_mask, secret_mask_target)?;
+        remount_read_only(secret_mask_target, false)?;
+    }
+    Ok(())
+}
+
+/// Removes runtime-socket visibility only for the explicitly hidden policy.
+#[cfg(target_os = "linux")]
+fn hide_runtime_socket_when_required(plan: &PreExecIsolationPlan) -> path_std_io::Result<()> {
     if plan.tau_runtime_socket_access == TauRuntimeSocketAccess::Hidden {
         bind(&plan.runtime_socket_mask, &plan.runtime_socket_root)?;
         remount_read_only(&plan.runtime_socket_root, false)?;
     }
+    Ok(())
+}
 
+/// Covers staging, enters the prepared directory, and removes child privilege.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn finish_linux_isolation(plan: &PreExecIsolationPlan) -> path_std_io::Result<()> {
     // The staged real state was needed only as a bind source. Existing
     // destination binds retain their mount references after this empty
     // read-only cover hides the entire temporary tree from the child.
     bind(&plan.outer_mask, &plan.isolation_root)?;
     make_recursively_read_only(&plan.isolation_root)?;
-
     syscall(unsafe { libc::chdir(plan.cwd.as_ptr()) })?;
     drop_linux_capabilities()?;
-    syscall(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })?;
+    syscall(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })
+}
+
+/// Converts a direct libc return value into the corresponding operating-system
+/// error.
+#[cfg(target_os = "linux")]
+fn syscall(result: libc::c_int) -> path_std_io::Result<()> {
+    if result == -1 {
+        Err(path_std_io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Recursively bind-mounts a prevalidated source at its prevalidated
+/// destination.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn bind(source: &std::ffi::CStr, target: &std::ffi::CStr) -> path_std_io::Result<()> {
+    syscall(unsafe {
+        libc::mount(
+            source.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REC,
+            std::ptr::null(),
+        )
+    })
+}
+
+/// Makes a mount private so subsequent child changes cannot propagate outward.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn make_mount_private(target: &std::ffi::CStr) -> path_std_io::Result<()> {
+    syscall(unsafe {
+        libc::mount(
+            std::ptr::null(),
+            target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        )
+    })
+}
+
+/// Rebinds a mount read-only, optionally including its descendants.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn remount_read_only(target: &std::ffi::CStr, recursive: bool) -> path_std_io::Result<()> {
+    let recursive_flag = if recursive { libc::MS_REC } else { 0 };
+    syscall(unsafe {
+        libc::mount(
+            std::ptr::null(),
+            target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND
+                | libc::MS_REMOUNT
+                | recursive_flag
+                | libc::MS_RDONLY
+                | libc::MS_NOSUID
+                | libc::MS_NODEV
+                | libc::MS_NOEXEC,
+            std::ptr::null(),
+        )
+    })
+}
+
+/// Applies the recursive Linux mount attributes required for an immutable tree.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn make_recursively_read_only(target: &std::ffi::CStr) -> path_std_io::Result<()> {
+    #[repr(C)]
+    struct MountAttr {
+        /// Linux `mount_attr.attr_set` bitset.
+        attr_set: u64,
+        /// Linux `mount_attr.attr_clr` bitset.
+        attr_clr: u64,
+        /// Linux `mount_attr.propagation` bitset.
+        propagation: u64,
+        /// Linux `mount_attr.userns_fd` selector.
+        userns_fd: u64,
+    }
+    const AT_RECURSIVE: u32 = 0x8000;
+    const MOUNT_ATTR_RDONLY: u64 = 0x0000_0001;
+    const MOUNT_ATTR_NOSUID: u64 = 0x0000_0002;
+    const MOUNT_ATTR_NODEV: u64 = 0x0000_0004;
+    const MOUNT_ATTR_NOEXEC: u64 = 0x0000_0008;
+    let mut attributes = MountAttr {
+        attr_set: MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC,
+        attr_clr: 0,
+        propagation: 0,
+        userns_fd: 0,
+    };
+    // `mount_setattr(2)` and AT_RECURSIVE require Linux 5.12. Do not fall
+    // back to a non-recursive remount on older kernels: inherited nested
+    // mounts could stay writable. ENOSYS/EINVAL therefore propagates and
+    // fails extension startup closed.
+    //
+    // SAFETY: `attributes` has the kernel ABI layout and remains live for
+    // this synchronous syscall; every scalar argument is prevalidated.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_mount_setattr,
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            AT_RECURSIVE,
+            std::ptr::addr_of_mut!(attributes),
+            std::mem::size_of::<MountAttr>(),
+        )
+    };
+    if result == -1 {
+        return Err(path_std_io::Error::last_os_error());
+    }
     Ok(())
 }
 

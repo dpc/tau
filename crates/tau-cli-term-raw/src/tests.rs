@@ -4538,19 +4538,23 @@ fn redraw_loop_records_stage_specific_presentation_failures() {
     struct RejectStage {
         /// Output stage rejected by this writer.
         stage: &'static str,
+        /// Whether a frame has reached the test's unique visible canary.
+        saw_trigger: bool,
     }
 
     impl Write for RejectStage {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if self.stage == "write" {
+            let has_trigger = bytes.contains(&b'x');
+            if self.stage == "write" && has_trigger {
                 Err(io::Error::other("injected write failure"))
             } else {
+                self.saw_trigger |= has_trigger;
                 Ok(bytes.len())
             }
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            if self.stage == "flush" {
+            if self.stage == "flush" && self.saw_trigger {
                 Err(io::Error::other("injected flush failure"))
             } else {
                 Ok(())
@@ -4563,9 +4567,15 @@ fn redraw_loop_records_stage_specific_presentation_failures() {
             40,
             5,
             "> ",
-            Box::new(RejectStage { stage }),
+            Box::new(RejectStage {
+                stage,
+                saw_trigger: false,
+            }),
             CursorShape::Bar,
         );
+        // Drain the constructor's initial observation-free redraw before this
+        // test arms a failure for the mutation it owns.
+        handle.redraw_sync();
         handle.with_redraw_suppressed(|| {
             handle.observe_presentation_mutation_for_test(
                 renderer_delivery_id(1),

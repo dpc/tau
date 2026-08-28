@@ -142,494 +142,25 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
         return Err(ClientError::handler("scenario exceeds 16384 bytes"));
     }
     let mut ids = path_std_collections::HashSet::new();
-    let mut barriers: HashMap<&str, (usize, std::collections::HashSet<&str>)> = HashMap::new();
+    let mut barriers: HashMap<String, (usize, std::collections::HashSet<String>)> = HashMap::new();
     let mut dummy_call_ids = path_std_collections::HashSet::new();
     let mut core_call_ids = path_std_collections::HashSet::new();
     let mut agent_start_call_ids = path_std_collections::HashSet::new();
     let mut agent_watch_call_ids = path_std_collections::HashSet::new();
     for lane in &scenario.lanes {
-        if lane.ctx_id.is_empty() || lane.ctx_id.len() > 64 || !ids.insert(lane.ctx_id.as_str()) {
-            return Err(ClientError::handler(
-                "lane ctx_id must be unique and contain 1..=64 bytes",
-            ));
-        }
-        if lane.actions.is_empty() || lane.actions.len() > MAX_TURNS {
-            return Err(ClientError::handler("lane must contain 1..=8 actions"));
-        }
+        validate_v2_lane_header(lane, &mut ids)?;
         for (action_index, action) in lane.actions.iter().enumerate() {
-            match action {
-                ScenarioActionV2::OutputLengthReasoning {
-                    user_text,
-                    reasoning,
-                    ..
-                } if user_text.is_empty()
-                    || 4 * 1024 < user_text.len()
-                    || reasoning.is_empty()
-                    || 4 * 1024 < reasoning.len()
-                    || !matches!(
-                        lane.actions.get(action_index + 1),
-                        Some(ScenarioActionV2::OutputLengthContinuation {
-                            user_text: next_user,
-                            reasoning: next_reasoning,
-                            ..
-                        }) if next_user == user_text && next_reasoning == reasoning
-                    ) =>
-                {
-                    return Err(ClientError::handler(
-                        "output-length reasoning must have bounded text and one adjacent matching continuation",
-                    ));
-                }
-                ScenarioActionV2::OutputLengthContinuation {
-                    user_text,
-                    reasoning,
-                    response,
-                    ..
-                } if user_text.is_empty()
-                    || 4 * 1024 < user_text.len()
-                    || reasoning.is_empty()
-                    || 4 * 1024 < reasoning.len()
-                    || response.is_empty()
-                    || 4 * 1024 < response.len()
-                    || !matches!(
-                        action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
-                        Some(ScenarioActionV2::OutputLengthReasoning {
-                            user_text: source_user,
-                            reasoning: source_reasoning,
-                            ..
-                        }) if source_user == user_text && source_reasoning == reasoning
-                    ) =>
-                {
-                    return Err(ClientError::handler(
-                        "output-length continuation must be bounded and follow its matching reasoning terminal",
-                    ));
-                }
-                ScenarioActionV2::DummyToolCall { call_id, .. }
-                    if !dummy_call_ids.insert(call_id.as_str())
-                        || 2 < dummy_call_ids.len()
-                        || call_id.is_empty()
-                        || call_id.len() > 256
-                        || !matches!(
-                            lane.actions.get(action_index + 1),
-                             Some(ScenarioActionV2::DummyToolResult {
-                                 call_id: result_id,
-                                 ..
-                             }) | Some(ScenarioActionV2::DummyToolResultWithUsage {
-                                 call_id: result_id,
-                                 ..
-                             }) | Some(ScenarioActionV2::DummyToolRepair {
-                                call_id: result_id,
-                                ..
-                            }) if result_id == call_id
-                        ) =>
-                {
-                    return Err(ClientError::handler(
-                        "scenario requires exactly one unique bounded dummy call/result pair",
-                    ));
-                }
-                ScenarioActionV2::DummyToolResult { call_id, .. }
-                | ScenarioActionV2::DummyToolResultWithUsage { call_id, .. }
-                    if call_id.is_empty()
-                        || call_id.len() > 256
-                        || !matches!(
-                            action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
-                            Some(ScenarioActionV2::DummyToolCall {
-                                call_id: request_id,
-                                ..
-                            }) if request_id == call_id
-                        ) =>
-                {
-                    return Err(ClientError::handler(
-                        "dummy tool result must have a 1..=256 byte id and matching prior call",
-                    ));
-                }
-                ScenarioActionV2::DummyToolRepair {
-                    call_id,
-                    diagnostic,
-                    ..
-                } if call_id.is_empty()
-                    || call_id.len() > 256
-                    || diagnostic.is_empty()
-                    || diagnostic.len() > 512
-                    || !matches!(
-                        action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
-                        Some(ScenarioActionV2::DummyToolCall {
-                            call_id: request_id,
-                            ..
-                        }) if request_id == call_id
-                    ) =>
-                {
-                    return Err(ClientError::handler(
-                        "dummy tool repair must be bounded and follow its matching call",
-                    ));
-                }
-                ScenarioActionV2::MessageCall {
-                    call_id, message, ..
-                } if call_id.is_empty()
-                    || call_id.len() > 256
-                    || message.is_empty()
-                    || 4 * 1024 < message.len()
-                    || !matches!(
-                        lane.actions.get(action_index + 1),
-                        Some(ScenarioActionV2::MessageSenderResult {
-                            call_id: result_id,
-                            message: result_message,
-                            ..
-                        }) if result_id == call_id && result_message == message
-                    ) =>
-                {
-                    return Err(ClientError::handler(
-                        "message call must have one bounded adjacent matching result",
-                    ));
-                }
-                ScenarioActionV2::MessageSenderResult {
-                    call_id, message, ..
-                } if call_id.is_empty()
-                    || call_id.len() > 256
-                    || message.is_empty()
-                    || 4 * 1024 < message.len() =>
-                {
-                    return Err(ClientError::handler(
-                        "message result fields must be bounded and nonempty",
-                    ));
-                }
-                ScenarioActionV2::ProviderContextRawMessageCall {
-                    call_id, raw_text, ..
-                } if call_id.is_empty()
-                    || call_id.len() > 256
-                    || raw_text.is_empty()
-                    || 4 * 1024 < raw_text.len()
-                    || !matches!(
-                        lane.actions.get(action_index + 1),
-                        Some(ScenarioActionV2::ProviderContextRawMessageResult {
-                            call_id: result_id,
-                            raw_text: result_text,
-                            ..
-                        }) if result_id == call_id && result_text == raw_text
-                    ) =>
-                {
-                    return Err(ClientError::handler(
-                        "raw message call must have one bounded adjacent matching result",
-                    ));
-                }
-                ScenarioActionV2::MessageInbound {
-                    call_id, message, ..
-                }
-                | ScenarioActionV2::MessageInboundAfterHeld {
-                    call_id, message, ..
-                }
-                | ScenarioActionV2::MessageAndRawInboundAfterHeld {
-                    call_id, message, ..
-                }
-                | ScenarioActionV2::MessageAndRawInboundAfterParallelTools {
-                    call_id,
-                    message,
-                    ..
-                } if call_id.is_empty()
-                    || call_id.len() > 256
-                    || message.is_empty()
-                    || 4 * 1024 < message.len() =>
-                {
-                    return Err(ClientError::handler(
-                        "message inbound fields must be bounded and nonempty",
-                    ));
-                }
-                ScenarioActionV2::AgentStartCall {
-                    call_id,
-                    prompt,
-                    role,
-                    ..
-                } if call_id.is_empty()
-                    || call_id.len() > 256
-                    || prompt.is_empty()
-                    || prompt.len() > 4 * 1024
-                    || role.is_empty()
-                    || role.len() > 256
-                    || !agent_start_call_ids.insert(call_id.as_str())
-                    || agent_start_call_ids.len() > MAX_AGENT_START_PAIRS
-                    || !matches!(
-                        lane.actions.get(action_index + 1),
-                        Some(ScenarioActionV2::AgentStartResult {
-                            call_id: result_id,
-                            ..
-                        }) if result_id == call_id
-                    ) =>
-                {
-                    return Err(ClientError::handler(
-                        "scenario allows at most two unique bounded adjacent agent_start call/result pairs",
-                    ));
-                }
-                ScenarioActionV2::AgentStartResult { call_id, .. }
-                    if call_id.is_empty()
-                        || call_id.len() > 256
-                        || !matches!(
-                            action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
-                            Some(ScenarioActionV2::AgentStartCall {
-                                call_id: request_id,
-                                ..
-                            }) if request_id == call_id
-                        ) =>
-                {
-                    return Err(ClientError::handler(
-                        "agent_start result must have a bounded matching prior call",
-                    ));
-                }
-                ScenarioActionV2::AgentWatchCall { call_id, .. }
-                    if call_id.is_empty()
-                        || call_id.len() > 256
-                        || !agent_watch_call_ids.insert(call_id.as_str())
-                        || agent_watch_call_ids.len() > 1
-                        || !matches!(
-                            lane.actions.get(action_index + 1),
-                            Some(ScenarioActionV2::AgentWatchResult {
-                                call_id: result_id,
-                                ..
-                            }) if result_id == call_id
-                        ) =>
-                {
-                    return Err(ClientError::handler(
-                        "scenario requires exactly one unique bounded adjacent agent_watch call/result pair",
-                    ));
-                }
-                ScenarioActionV2::AgentWatchResult { call_id, .. }
-                    if call_id.is_empty()
-                        || call_id.len() > 256
-                        || !matches!(
-                            action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
-                            Some(ScenarioActionV2::AgentWatchCall {
-                                call_id: request_id,
-                                ..
-                            }) if request_id == call_id
-                        ) =>
-                {
-                    return Err(ClientError::handler(
-                        "agent_watch result must have a bounded matching prior call",
-                    ));
-                }
-                ScenarioActionV2::WatchNotifications { notifications, .. }
-                    if notifications.is_empty()
-                        || notifications.len() > 4
-                        || notifications.iter().any(|notification| match notification {
-                            crate::WatchNotificationV2::Response { content }
-                            | crate::WatchNotificationV2::Prompt { content } => {
-                                content.is_empty() || content.len() > 4 * 1024
-                            }
-                        }) =>
-                {
-                    return Err(ClientError::handler(
-                        "watch notification batches require 1..=4 bounded notifications",
-                    ));
-                }
-                ScenarioActionV2::WatchNotificationChains {
-                    prompt, response, ..
-                } if prompt.is_empty()
-                    || prompt.len() > 4 * 1024
-                    || response.is_empty()
-                    || response.len() > 4 * 1024 =>
-                {
-                    return Err(ClientError::handler(
-                        "watch notification chains require bounded prompt and response text",
-                    ));
-                }
-                ScenarioActionV2::ContextOverflow {
-                    user_text,
-                    removed_user_text,
-                    removed_assistant_text,
-                    failure_kind,
-                } if user_text.is_empty()
-                    || user_text.len() > 4 * 1024
-                    || removed_user_text.is_empty()
-                    || removed_user_text.len() > 4 * 1024
-                    || removed_assistant_text.is_empty()
-                    || removed_assistant_text.len() > 4 * 1024
-                    || *failure_kind != ProviderFailureKind::ContextWindowExceeded
-                    || !matches!(
-                        action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
-                        Some(ScenarioActionV2::Text {
-                            user_text: prior_user_text,
-                            response: prior_response,
-                        }) if prior_user_text == removed_user_text
-                            && prior_response == removed_assistant_text
-                    )
-                    || !matches!(
-                        lane.actions.get(action_index + 1),
-                        Some(ScenarioActionV2::ReactiveOpaqueCompaction {
-                            removed_user_text: reactive_removed,
-                            removed_assistant_text: reactive_response,
-                            overflow_user_text,
-                        }) if reactive_removed == removed_user_text
-                            && reactive_response == removed_assistant_text
-                            && overflow_user_text == user_text
-                    ) =>
-                {
-                    return Err(ClientError::handler(
-                        "context overflow must be bounded, canonical, and immediately start reactive opaque compaction",
-                    ));
-                }
-                ScenarioActionV2::ReactiveOpaqueCompaction {
-                    removed_user_text,
-                    removed_assistant_text,
-                    overflow_user_text,
-                } if removed_user_text.is_empty()
-                    || removed_user_text.len() > 4 * 1024
-                    || removed_assistant_text.is_empty()
-                    || removed_assistant_text.len() > 4 * 1024
-                    || overflow_user_text.is_empty()
-                    || overflow_user_text.len() > 4 * 1024
-                    || !matches!(
-                    action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
-                    Some(ScenarioActionV2::ContextOverflow {
-                        removed_user_text: overflow_removed,
-                        removed_assistant_text: overflow_response,
-                        user_text,
-                        ..
-                    }) if overflow_removed == removed_user_text
-                        && overflow_response == removed_assistant_text
-                        && user_text == overflow_user_text
-                    )
-                    || !matches!(
-                        lane.actions.get(action_index + 1),
-                        Some(ScenarioActionV2::ReactiveCompactedOpaqueText {
-                            removed_user_text: continued_removed,
-                            removed_assistant_text: continued_response,
-                            overflow_user_text: continued_overflow,
-                            response: _,
-                        }) if continued_removed == removed_user_text
-                            && continued_response == removed_assistant_text
-                            && continued_overflow == overflow_user_text
-                    ) =>
-                {
-                    return Err(ClientError::handler(
-                        "reactive opaque compaction must uniquely follow its overflow and precede its continuation",
-                    ));
-                }
-                ScenarioActionV2::ReactiveCompactedOpaqueText {
-                    removed_user_text,
-                    removed_assistant_text,
-                    overflow_user_text,
-                    response,
-                } if removed_user_text.is_empty()
-                    || removed_user_text.len() > 4 * 1024
-                    || removed_assistant_text.is_empty()
-                    || removed_assistant_text.len() > 4 * 1024
-                    || overflow_user_text.is_empty()
-                    || overflow_user_text.len() > 4 * 1024
-                    || response.is_empty()
-                    || response.len() > 4 * 1024
-                    || !matches!(
-                        action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
-                        Some(ScenarioActionV2::ReactiveOpaqueCompaction {
-                            removed_user_text: compacted_removed,
-                            removed_assistant_text: compacted_response,
-                            overflow_user_text: compacted_overflow,
-                        }) if compacted_removed == removed_user_text
-                            && compacted_response == removed_assistant_text
-                            && compacted_overflow == overflow_user_text
-                    ) =>
-                {
-                    return Err(ClientError::handler(
-                        "reactive continuation must be bounded and immediately follow its matching compaction",
-                    ));
-                }
-                ScenarioActionV2::CoreShellWorkdirCall { call_id, .. }
-                | ScenarioActionV2::CoreShellResumeEditCall { call_id, .. }
-                    if call_id.is_empty()
-                        || call_id.len() > 256
-                        || !core_call_ids.insert(call_id.as_str()) =>
-                {
-                    return Err(ClientError::handler(
-                        "core-shell call ids must be unique and bounded",
-                    ));
-                }
-                ScenarioActionV2::CoreShellWorkdirResult {
-                    call_id,
-                    edit_call_id,
-                    nonce,
-                    ..
-                } if !matches!(action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
-                        Some(ScenarioActionV2::CoreShellWorkdirCall { call_id: prior, .. }) if prior == call_id)
-                    || edit_call_id.is_empty()
-                    || edit_call_id.len() > 256
-                    || !core_call_ids.insert(edit_call_id.as_str())
-                    || nonce.is_empty()
-                    || nonce.len() > 128 =>
-                {
-                    return Err(ClientError::handler("workdir result must follow its call"));
-                }
-                ScenarioActionV2::CoreShellCreateResult { call_id, .. }
-                    if !matches!(action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
-                        Some(ScenarioActionV2::CoreShellWorkdirResult { edit_call_id: prior, .. }) if prior == call_id) =>
-                {
-                    return Err(ClientError::handler("create result must follow its call"));
-                }
-                ScenarioActionV2::CoreShellResumeEditResult { call_id, .. }
-                    if !matches!(action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
-                        Some(ScenarioActionV2::CoreShellResumeEditCall { call_id: prior, .. }) if prior == call_id) =>
-                {
-                    return Err(ClientError::handler(
-                        "resume edit result must follow its call",
-                    ));
-                }
-                ScenarioActionV2::HoldUntilCancel { timeout_ms, .. }
-                | ScenarioActionV2::StandaloneCompactionHold { timeout_ms }
-                    if !(100..=10_000).contains(timeout_ms) =>
-                {
-                    return Err(ClientError::handler(
-                        "hold timeout_ms must be in 100..=10000",
-                    ));
-                }
-                ScenarioActionV2::BarrierText {
-                    barrier,
-                    participants,
-                    ..
-                }
-                | ScenarioActionV2::BarrierParallelDummyTools {
-                    barrier,
-                    participants,
-                    ..
-                } if barrier.is_empty()
-                    || barrier.len() > 64
-                    || !(2..=scenario.lanes.len()).contains(participants) =>
-                {
-                    return Err(ClientError::handler(
-                        "a bounded barrier must name 2..=lane-count participants",
-                    ));
-                }
-                ScenarioActionV2::BarrierText {
-                    barrier,
-                    participants,
-                    ..
-                }
-                | ScenarioActionV2::BarrierParallelDummyTools {
-                    barrier,
-                    participants,
-                    ..
-                } => {
-                    let entry = barriers
-                        .entry(barrier)
-                        .or_insert_with(|| (*participants, path_std_collections::HashSet::new()));
-                    if entry.0 != *participants {
-                        return Err(ClientError::handler(
-                            "barrier participant counts must agree",
-                        ));
-                    }
-                    if !entry.1.insert(lane.ctx_id.as_str()) {
-                        return Err(ClientError::handler(
-                            "a barrier may appear at most once per lane",
-                        ));
-                    }
-                }
-                ScenarioActionV2::Error { error, .. }
-                | ScenarioActionV2::Disconnect { reason: error, .. }
-                | ScenarioActionV2::StandaloneCompactionError {
-                    failure_kind: _,
-                    error,
-                } if error.is_empty() || error.len() > 256 => {
-                    return Err(ClientError::handler(
-                        "synthetic diagnostic must contain 1..=256 bytes",
-                    ));
-                }
-                _ => {}
-            }
+            validate_v2_action(
+                lane,
+                action_index,
+                action,
+                scenario.lanes.len(),
+                &mut dummy_call_ids,
+                &mut core_call_ids,
+                &mut agent_start_call_ids,
+                &mut agent_watch_call_ids,
+                &mut barriers,
+            )?;
         }
     }
     let message_lanes = scenario
@@ -861,6 +392,704 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
         return Err(ClientError::handler(
             "barriers may share a lane only in a closed message scenario",
         ));
+    }
+    Ok(())
+}
+
+/// Validates one lane header before validating its individual closed actions.
+fn validate_v2_lane_header(
+    lane: &ScenarioLaneV2,
+    ids: &mut path_std_collections::HashSet<String>,
+) -> ClientResult<()> {
+    if lane.ctx_id.is_empty() || lane.ctx_id.len() > 64 || !ids.insert(lane.ctx_id.to_owned()) {
+        return Err(ClientError::handler(
+            "lane ctx_id must be unique and contain 1..=64 bytes",
+        ));
+    }
+    if lane.actions.is_empty() || lane.actions.len() > MAX_TURNS {
+        return Err(ClientError::handler("lane must contain 1..=8 actions"));
+    }
+    Ok(())
+}
+
+/// Validates one action while keeping each closed grammar family independently
+/// readable.
+#[allow(clippy::too_many_arguments)]
+fn validate_v2_action(
+    lane: &ScenarioLaneV2,
+    action_index: usize,
+    action: &ScenarioActionV2,
+    lane_count: usize,
+    dummy_call_ids: &mut path_std_collections::HashSet<String>,
+    core_call_ids: &mut path_std_collections::HashSet<String>,
+    agent_start_call_ids: &mut path_std_collections::HashSet<String>,
+    agent_watch_call_ids: &mut path_std_collections::HashSet<String>,
+    barriers: &mut HashMap<String, (usize, std::collections::HashSet<String>)>,
+) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::OutputLengthReasoning { .. }
+        | ScenarioActionV2::OutputLengthContinuation { .. } => {
+            validate_v2_output_action(lane, action_index, action)
+        }
+        ScenarioActionV2::DummyToolCall { .. }
+        | ScenarioActionV2::DummyToolResult { .. }
+        | ScenarioActionV2::DummyToolResultWithUsage { .. }
+        | ScenarioActionV2::DummyToolRepair { .. } => {
+            validate_v2_dummy_action(lane, action_index, action, dummy_call_ids)
+        }
+        ScenarioActionV2::MessageCall { .. }
+        | ScenarioActionV2::MessageSenderResult { .. }
+        | ScenarioActionV2::ProviderContextRawMessageCall { .. }
+        | ScenarioActionV2::MessageInbound { .. }
+        | ScenarioActionV2::MessageInboundAfterHeld { .. }
+        | ScenarioActionV2::MessageAndRawInboundAfterHeld { .. }
+        | ScenarioActionV2::MessageAndRawInboundAfterParallelTools { .. } => {
+            validate_v2_message_action(lane, action_index, action)
+        }
+        ScenarioActionV2::AgentStartCall { .. }
+        | ScenarioActionV2::AgentStartResult { .. }
+        | ScenarioActionV2::AgentWatchCall { .. }
+        | ScenarioActionV2::AgentWatchResult { .. } => validate_v2_agent_action(
+            lane,
+            action_index,
+            action,
+            agent_start_call_ids,
+            agent_watch_call_ids,
+        ),
+        ScenarioActionV2::WatchNotifications { .. }
+        | ScenarioActionV2::WatchNotificationChains { .. } => validate_v2_watch_action(action),
+        ScenarioActionV2::ContextOverflow { .. }
+        | ScenarioActionV2::ReactiveOpaqueCompaction { .. }
+        | ScenarioActionV2::ReactiveCompactedOpaqueText { .. } => {
+            validate_v2_context_action(lane, action_index, action)
+        }
+        ScenarioActionV2::CoreShellWorkdirCall { .. }
+        | ScenarioActionV2::CoreShellResumeEditCall { .. }
+        | ScenarioActionV2::CoreShellWorkdirResult { .. }
+        | ScenarioActionV2::CoreShellCreateResult { .. }
+        | ScenarioActionV2::CoreShellResumeEditResult { .. } => {
+            validate_v2_core_action(lane, action_index, action, core_call_ids)
+        }
+        ScenarioActionV2::HoldUntilCancel { .. }
+        | ScenarioActionV2::StandaloneCompactionHold { .. }
+        | ScenarioActionV2::BarrierText { .. }
+        | ScenarioActionV2::BarrierParallelDummyTools { .. }
+        | ScenarioActionV2::Error { .. }
+        | ScenarioActionV2::Disconnect { .. }
+        | ScenarioActionV2::StandaloneCompactionError { .. } => {
+            validate_v2_misc_action(lane, action, lane_count, barriers)
+        }
+        _ => Ok(()),
+    }
+}
+/// Validates the output subset of the closed version-two action grammar.
+fn validate_v2_output_action(
+    lane: &ScenarioLaneV2,
+    action_index: usize,
+    action: &ScenarioActionV2,
+) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::OutputLengthReasoning {
+            user_text,
+            reasoning,
+            ..
+        } if user_text.is_empty()
+            || 4 * 1024 < user_text.len()
+            || reasoning.is_empty()
+            || 4 * 1024 < reasoning.len()
+            || !matches!(
+                lane.actions.get(action_index + 1),
+                Some(ScenarioActionV2::OutputLengthContinuation {
+                    user_text: next_user,
+                    reasoning: next_reasoning,
+                    ..
+                }) if next_user == user_text && next_reasoning == reasoning
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "output-length reasoning must have bounded text and one adjacent matching continuation",
+            ));
+        }
+        ScenarioActionV2::OutputLengthContinuation {
+            user_text,
+            reasoning,
+            response,
+            ..
+        } if user_text.is_empty()
+            || 4 * 1024 < user_text.len()
+            || reasoning.is_empty()
+            || 4 * 1024 < reasoning.len()
+            || response.is_empty()
+            || 4 * 1024 < response.len()
+            || !matches!(
+                action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                Some(ScenarioActionV2::OutputLengthReasoning {
+                    user_text: source_user,
+                    reasoning: source_reasoning,
+                    ..
+                }) if source_user == user_text && source_reasoning == reasoning
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "output-length continuation must be bounded and follow its matching reasoning terminal",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validates the dummy subset of the closed version-two action grammar.
+fn validate_v2_dummy_action(
+    lane: &ScenarioLaneV2,
+    action_index: usize,
+    action: &ScenarioActionV2,
+    dummy_call_ids: &mut path_std_collections::HashSet<String>,
+) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::DummyToolCall { call_id, .. }
+            if !dummy_call_ids.insert(call_id.as_str().to_owned())
+                || 2 < dummy_call_ids.len()
+                || call_id.is_empty()
+                || call_id.len() > 256
+                || !matches!(
+                    lane.actions.get(action_index + 1),
+                     Some(ScenarioActionV2::DummyToolResult {
+                         call_id: result_id,
+                         ..
+                     }) | Some(ScenarioActionV2::DummyToolResultWithUsage {
+                         call_id: result_id,
+                         ..
+                     }) | Some(ScenarioActionV2::DummyToolRepair {
+                        call_id: result_id,
+                        ..
+                    }) if result_id == call_id
+                ) =>
+        {
+            return Err(ClientError::handler(
+                "scenario requires exactly one unique bounded dummy call/result pair",
+            ));
+        }
+        ScenarioActionV2::DummyToolResult { call_id, .. }
+        | ScenarioActionV2::DummyToolResultWithUsage { call_id, .. }
+            if call_id.is_empty()
+                || call_id.len() > 256
+                || !matches!(
+                    action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                    Some(ScenarioActionV2::DummyToolCall {
+                        call_id: request_id,
+                        ..
+                    }) if request_id == call_id
+                ) =>
+        {
+            return Err(ClientError::handler(
+                "dummy tool result must have a 1..=256 byte id and matching prior call",
+            ));
+        }
+        ScenarioActionV2::DummyToolRepair {
+            call_id,
+            diagnostic,
+            ..
+        } if call_id.is_empty()
+            || call_id.len() > 256
+            || diagnostic.is_empty()
+            || diagnostic.len() > 512
+            || !matches!(
+                action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                Some(ScenarioActionV2::DummyToolCall {
+                    call_id: request_id,
+                    ..
+                }) if request_id == call_id
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "dummy tool repair must be bounded and follow its matching call",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validates the message subset of the closed version-two action grammar.
+fn validate_v2_message_action(
+    lane: &ScenarioLaneV2,
+    action_index: usize,
+    action: &ScenarioActionV2,
+) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::MessageCall {
+            call_id, message, ..
+        } if call_id.is_empty()
+            || call_id.len() > 256
+            || message.is_empty()
+            || 4 * 1024 < message.len()
+            || !matches!(
+                lane.actions.get(action_index + 1),
+                Some(ScenarioActionV2::MessageSenderResult {
+                    call_id: result_id,
+                    message: result_message,
+                    ..
+                }) if result_id == call_id && result_message == message
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "message call must have one bounded adjacent matching result",
+            ));
+        }
+        ScenarioActionV2::MessageSenderResult {
+            call_id, message, ..
+        } if call_id.is_empty()
+            || call_id.len() > 256
+            || message.is_empty()
+            || 4 * 1024 < message.len() =>
+        {
+            return Err(ClientError::handler(
+                "message result fields must be bounded and nonempty",
+            ));
+        }
+        ScenarioActionV2::ProviderContextRawMessageCall {
+            call_id, raw_text, ..
+        } if call_id.is_empty()
+            || call_id.len() > 256
+            || raw_text.is_empty()
+            || 4 * 1024 < raw_text.len()
+            || !matches!(
+                lane.actions.get(action_index + 1),
+                Some(ScenarioActionV2::ProviderContextRawMessageResult {
+                    call_id: result_id,
+                    raw_text: result_text,
+                    ..
+                }) if result_id == call_id && result_text == raw_text
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "raw message call must have one bounded adjacent matching result",
+            ));
+        }
+        ScenarioActionV2::MessageInbound {
+            call_id, message, ..
+        }
+        | ScenarioActionV2::MessageInboundAfterHeld {
+            call_id, message, ..
+        }
+        | ScenarioActionV2::MessageAndRawInboundAfterHeld {
+            call_id, message, ..
+        }
+        | ScenarioActionV2::MessageAndRawInboundAfterParallelTools {
+            call_id, message, ..
+        } if call_id.is_empty()
+            || call_id.len() > 256
+            || message.is_empty()
+            || 4 * 1024 < message.len() =>
+        {
+            return Err(ClientError::handler(
+                "message inbound fields must be bounded and nonempty",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validates the agent subset of the closed version-two action grammar.
+fn validate_v2_agent_action(
+    lane: &ScenarioLaneV2,
+    action_index: usize,
+    action: &ScenarioActionV2,
+    agent_start_call_ids: &mut path_std_collections::HashSet<String>,
+    agent_watch_call_ids: &mut path_std_collections::HashSet<String>,
+) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::AgentStartCall {
+            call_id,
+            prompt,
+            role,
+            ..
+        } if call_id.is_empty()
+            || call_id.len() > 256
+            || prompt.is_empty()
+            || prompt.len() > 4 * 1024
+            || role.is_empty()
+            || role.len() > 256
+            || !agent_start_call_ids.insert(call_id.as_str().to_owned())
+            || agent_start_call_ids.len() > MAX_AGENT_START_PAIRS
+            || !matches!(
+                lane.actions.get(action_index + 1),
+                Some(ScenarioActionV2::AgentStartResult {
+                    call_id: result_id,
+                    ..
+                }) if result_id == call_id
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "scenario allows at most two unique bounded adjacent agent_start call/result pairs",
+            ));
+        }
+        ScenarioActionV2::AgentStartResult { call_id, .. }
+            if call_id.is_empty()
+                || call_id.len() > 256
+                || !matches!(
+                    action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                    Some(ScenarioActionV2::AgentStartCall {
+                        call_id: request_id,
+                        ..
+                    }) if request_id == call_id
+                ) =>
+        {
+            return Err(ClientError::handler(
+                "agent_start result must have a bounded matching prior call",
+            ));
+        }
+        ScenarioActionV2::AgentWatchCall { call_id, .. }
+            if call_id.is_empty()
+                || call_id.len() > 256
+                || !agent_watch_call_ids.insert(call_id.as_str().to_owned())
+                || agent_watch_call_ids.len() > 1
+                || !matches!(
+                    lane.actions.get(action_index + 1),
+                    Some(ScenarioActionV2::AgentWatchResult {
+                        call_id: result_id,
+                        ..
+                    }) if result_id == call_id
+                ) =>
+        {
+            return Err(ClientError::handler(
+                "scenario requires exactly one unique bounded adjacent agent_watch call/result pair",
+            ));
+        }
+        ScenarioActionV2::AgentWatchResult { call_id, .. }
+            if call_id.is_empty()
+                || call_id.len() > 256
+                || !matches!(
+                    action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                    Some(ScenarioActionV2::AgentWatchCall {
+                        call_id: request_id,
+                        ..
+                    }) if request_id == call_id
+                ) =>
+        {
+            return Err(ClientError::handler(
+                "agent_watch result must have a bounded matching prior call",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validates the watch subset of the closed version-two action grammar.
+fn validate_v2_watch_action(action: &ScenarioActionV2) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::WatchNotifications { notifications, .. }
+            if notifications.is_empty()
+                || notifications.len() > 4
+                || notifications.iter().any(|notification| match notification {
+                    crate::WatchNotificationV2::Response { content }
+                    | crate::WatchNotificationV2::Prompt { content } => {
+                        content.is_empty() || content.len() > 4 * 1024
+                    }
+                }) =>
+        {
+            return Err(ClientError::handler(
+                "watch notification batches require 1..=4 bounded notifications",
+            ));
+        }
+        ScenarioActionV2::WatchNotificationChains {
+            prompt, response, ..
+        } if prompt.is_empty()
+            || prompt.len() > 4 * 1024
+            || response.is_empty()
+            || response.len() > 4 * 1024 =>
+        {
+            return Err(ClientError::handler(
+                "watch notification chains require bounded prompt and response text",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Routes each context-recovery action to its immediate-neighbor validator.
+fn validate_v2_context_action(
+    lane: &ScenarioLaneV2,
+    action_index: usize,
+    action: &ScenarioActionV2,
+) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::ContextOverflow { .. } => {
+            validate_v2_context_overflow_action(lane, action_index, action)
+        }
+        ScenarioActionV2::ReactiveOpaqueCompaction { .. } => {
+            validate_v2_reactive_opaque_compaction_action(lane, action_index, action)
+        }
+        ScenarioActionV2::ReactiveCompactedOpaqueText { .. } => {
+            validate_v2_reactive_compacted_opaque_text_action(lane, action_index, action)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Validates the context overflow branch of the closed context-recovery
+/// grammar.
+fn validate_v2_context_overflow_action(
+    lane: &ScenarioLaneV2,
+    action_index: usize,
+    action: &ScenarioActionV2,
+) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::ContextOverflow {
+            user_text,
+            removed_user_text,
+            removed_assistant_text,
+            failure_kind,
+        } if user_text.is_empty()
+            || user_text.len() > 4 * 1024
+            || removed_user_text.is_empty()
+            || removed_user_text.len() > 4 * 1024
+            || removed_assistant_text.is_empty()
+            || removed_assistant_text.len() > 4 * 1024
+            || *failure_kind != ProviderFailureKind::ContextWindowExceeded
+            || !matches!(
+                action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                Some(ScenarioActionV2::Text {
+                    user_text: prior_user_text,
+                    response: prior_response,
+                }) if prior_user_text == removed_user_text
+                    && prior_response == removed_assistant_text
+            )
+            || !matches!(
+                lane.actions.get(action_index + 1),
+                Some(ScenarioActionV2::ReactiveOpaqueCompaction {
+                    removed_user_text: reactive_removed,
+                    removed_assistant_text: reactive_response,
+                    overflow_user_text,
+                }) if reactive_removed == removed_user_text
+                    && reactive_response == removed_assistant_text
+                    && overflow_user_text == user_text
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "context overflow must be bounded, canonical, and immediately start reactive opaque compaction",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validates the reactive opaque compaction branch of the closed
+/// context-recovery grammar.
+fn validate_v2_reactive_opaque_compaction_action(
+    lane: &ScenarioLaneV2,
+    action_index: usize,
+    action: &ScenarioActionV2,
+) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::ReactiveOpaqueCompaction {
+            removed_user_text,
+            removed_assistant_text,
+            overflow_user_text,
+        } if removed_user_text.is_empty()
+            || removed_user_text.len() > 4 * 1024
+            || removed_assistant_text.is_empty()
+            || removed_assistant_text.len() > 4 * 1024
+            || overflow_user_text.is_empty()
+            || overflow_user_text.len() > 4 * 1024
+            || !matches!(
+            action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+            Some(ScenarioActionV2::ContextOverflow {
+                removed_user_text: overflow_removed,
+                removed_assistant_text: overflow_response,
+                user_text,
+                ..
+            }) if overflow_removed == removed_user_text
+                && overflow_response == removed_assistant_text
+                && user_text == overflow_user_text
+            )
+            || !matches!(
+                lane.actions.get(action_index + 1),
+                Some(ScenarioActionV2::ReactiveCompactedOpaqueText {
+                    removed_user_text: continued_removed,
+                    removed_assistant_text: continued_response,
+                    overflow_user_text: continued_overflow,
+                    response: _,
+                }) if continued_removed == removed_user_text
+                    && continued_response == removed_assistant_text
+                    && continued_overflow == overflow_user_text
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "reactive opaque compaction must uniquely follow its overflow and precede its continuation",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validates the reactive compacted opaque text branch of the closed
+/// context-recovery grammar.
+fn validate_v2_reactive_compacted_opaque_text_action(
+    lane: &ScenarioLaneV2,
+    action_index: usize,
+    action: &ScenarioActionV2,
+) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::ReactiveCompactedOpaqueText {
+            removed_user_text,
+            removed_assistant_text,
+            overflow_user_text,
+            response,
+        } if removed_user_text.is_empty()
+            || removed_user_text.len() > 4 * 1024
+            || removed_assistant_text.is_empty()
+            || removed_assistant_text.len() > 4 * 1024
+            || overflow_user_text.is_empty()
+            || overflow_user_text.len() > 4 * 1024
+            || response.is_empty()
+            || response.len() > 4 * 1024
+            || !matches!(
+                action_index.checked_sub(1).and_then(|index| lane.actions.get(index)),
+                Some(ScenarioActionV2::ReactiveOpaqueCompaction {
+                    removed_user_text: compacted_removed,
+                    removed_assistant_text: compacted_response,
+                    overflow_user_text: compacted_overflow,
+                }) if compacted_removed == removed_user_text
+                    && compacted_response == removed_assistant_text
+                    && compacted_overflow == overflow_user_text
+            ) =>
+        {
+            return Err(ClientError::handler(
+                "reactive continuation must be bounded and immediately follow its matching compaction",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validates the core subset of the closed version-two action grammar.
+fn validate_v2_core_action(
+    lane: &ScenarioLaneV2,
+    action_index: usize,
+    action: &ScenarioActionV2,
+    core_call_ids: &mut path_std_collections::HashSet<String>,
+) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::CoreShellWorkdirCall { call_id, .. }
+        | ScenarioActionV2::CoreShellResumeEditCall { call_id, .. }
+            if call_id.is_empty()
+                || call_id.len() > 256
+                || !core_call_ids.insert(call_id.as_str().to_owned()) =>
+        {
+            return Err(ClientError::handler(
+                "core-shell call ids must be unique and bounded",
+            ));
+        }
+        ScenarioActionV2::CoreShellWorkdirResult {
+            call_id,
+            edit_call_id,
+            nonce,
+            ..
+        } if !matches!(action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
+                Some(ScenarioActionV2::CoreShellWorkdirCall { call_id: prior, .. }) if prior == call_id)
+            || edit_call_id.is_empty()
+            || edit_call_id.len() > 256
+            || !core_call_ids.insert(edit_call_id.as_str().to_owned())
+            || nonce.is_empty()
+            || nonce.len() > 128 =>
+        {
+            return Err(ClientError::handler("workdir result must follow its call"));
+        }
+        ScenarioActionV2::CoreShellCreateResult { call_id, .. }
+            if !matches!(action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
+                Some(ScenarioActionV2::CoreShellWorkdirResult { edit_call_id: prior, .. }) if prior == call_id) =>
+        {
+            return Err(ClientError::handler("create result must follow its call"));
+        }
+        ScenarioActionV2::CoreShellResumeEditResult { call_id, .. }
+            if !matches!(action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
+                Some(ScenarioActionV2::CoreShellResumeEditCall { call_id: prior, .. }) if prior == call_id) =>
+        {
+            return Err(ClientError::handler(
+                "resume edit result must follow its call",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validates the misc subset of the closed version-two action grammar.
+fn validate_v2_misc_action(
+    lane: &ScenarioLaneV2,
+    action: &ScenarioActionV2,
+    lane_count: usize,
+    barriers: &mut HashMap<String, (usize, std::collections::HashSet<String>)>,
+) -> ClientResult<()> {
+    match action {
+        ScenarioActionV2::HoldUntilCancel { timeout_ms, .. }
+        | ScenarioActionV2::StandaloneCompactionHold { timeout_ms }
+            if !(100..=10_000).contains(timeout_ms) =>
+        {
+            return Err(ClientError::handler(
+                "hold timeout_ms must be in 100..=10000",
+            ));
+        }
+        ScenarioActionV2::BarrierText {
+            barrier,
+            participants,
+            ..
+        }
+        | ScenarioActionV2::BarrierParallelDummyTools {
+            barrier,
+            participants,
+            ..
+        } if barrier.is_empty()
+            || barrier.len() > 64
+            || !(2..=lane_count).contains(participants) =>
+        {
+            return Err(ClientError::handler(
+                "a bounded barrier must name 2..=lane-count participants",
+            ));
+        }
+        ScenarioActionV2::BarrierText {
+            barrier,
+            participants,
+            ..
+        }
+        | ScenarioActionV2::BarrierParallelDummyTools {
+            barrier,
+            participants,
+            ..
+        } => {
+            let entry = barriers
+                .entry(barrier.to_owned())
+                .or_insert_with(|| (*participants, path_std_collections::HashSet::new()));
+            if entry.0 != *participants {
+                return Err(ClientError::handler(
+                    "barrier participant counts must agree",
+                ));
+            }
+            if !entry.1.insert(lane.ctx_id.to_owned()) {
+                return Err(ClientError::handler(
+                    "a barrier may appear at most once per lane",
+                ));
+            }
+        }
+        ScenarioActionV2::Error { error, .. }
+        | ScenarioActionV2::Disconnect { reason: error, .. }
+        | ScenarioActionV2::StandaloneCompactionError {
+            failure_kind: _,
+            error,
+        } if error.is_empty() || error.len() > 256 => {
+            return Err(ClientError::handler(
+                "synthetic diagnostic must contain 1..=256 bytes",
+            ));
+        }
+        _ => {}
     }
     Ok(())
 }

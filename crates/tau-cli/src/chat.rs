@@ -1146,8 +1146,6 @@ pub(crate) fn run_chat(
     cli_overrides: DaemonCliOverrides<'_>,
     ephemeral: bool,
 ) -> Result<(), CliError> {
-    use tau_cli_term::{CommandCompletion, HighTerm};
-
     let (startup_profile, ui_logging, mut daemon, startup_started_at) = start_chat_daemon(
         session_id,
         attach,
@@ -1184,6 +1182,36 @@ pub(crate) fn run_chat(
     send_frame(&writer, &crate::ui_client::chat_subscribe_message())?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent subscribe");
 
+    run_chat_session(
+        session_id,
+        attach,
+        startup_profile,
+        ui_logging,
+        daemon,
+        harness_socket_path,
+        ui_io_meter,
+        writer,
+        shutdown,
+        socket_reader_input,
+    )
+}
+
+/// Runs the interactive UI after the daemon handshake admitted this session.
+#[allow(clippy::too_many_arguments)]
+fn run_chat_session(
+    session_id: &tau_proto::SessionId,
+    attach: bool,
+    startup_profile: Option<tau_config::settings::ProfileSelection>,
+    ui_logging: ui_logging::UiLogging,
+    daemon: DaemonHandle,
+    harness_socket_path: std::path::PathBuf,
+    ui_io_meter: UiIoMeter,
+    writer: WriterHandle,
+    shutdown: UiTransportShutdown,
+    socket_reader_input: crate::ui_client::UiInputReader,
+) -> Result<(), CliError> {
+    use tau_cli_term::{CommandCompletion, HighTerm};
+
     // The socket reader feeds a bounded remote FIFO. Local renderer commands
     // use a separate channel, while direct input/cancel uplink bypasses both.
     // Each local command captures a finite remote admission watermark. The
@@ -1217,7 +1245,512 @@ pub(crate) fn run_chat(
         tracing::enabled!(target: "tau_cli::delivery_memory", tracing::Level::TRACE)
             .then(|| Arc::new(DeliveryMemoryTracker::new()));
     let socket_delivery_memory = delivery_memory.clone();
-    let socket_reader = std::thread::spawn(move || {
+    let socket_reader = spawn_socket_reader(
+        socket_reader_input,
+        attach,
+        remote_tx,
+        socket_renderer_byte_budget,
+        socket_queued_remote_items,
+        socket_remote_admitted,
+        socket_renderer_arbiter,
+        socket_input_shutdown,
+        socket_remote_disconnected,
+        socket_ui_io_meter,
+        socket_local_disconnect_started,
+        socket_delivery_memory,
+    );
+
+    // Terminal setup.
+    let commands: Vec<CommandCompletion> = BUILTIN_COMMANDS
+        .iter()
+        .map(|(name, description)| CommandCompletion::new(*name, *description))
+        .collect();
+    let action_state = ActionCommandState::new(BUILTIN_COMMANDS.iter().map(|(name, _)| *name));
+    // Fail fast on a malformed `cli.yaml`. The fields here drive
+    // keybindings, prompt symbol, cursor shape, and theme — silently
+    // falling back to defaults would leave the user with broken
+    // keybindings or unreadable colors and no clue why. Refuse to
+    // start the TUI instead.
+    let dirs = path_tau_config_settings::TauDirs::default();
+    let settings = tau_config::settings::load_cli_settings_in(&dirs)
+        .map_err(|error| CliError::Participant(format!("cli.yaml failed to parse:\n{error}")))?;
+    let theme = crate::theme::select_theme(&dirs, settings.theme.clone())
+        .map_err(|error| CliError::Participant(format!("cli theme failed to load:\n{error}")))?;
+    let prompt = crate::theme::active_prompt_marker(&theme, &settings.prompt_symbol, None);
+    let cwd = std::env::current_dir()?;
+    let home_dir = dirs::home_dir();
+    let right_prompt =
+        crate::theme::right_prompt_context(&theme, &cwd, home_dir.as_deref(), session_id.as_str());
+    let completions = settings
+        .completions
+        .iter()
+        .map(|(prefix, spec)| {
+            tau_cli_term::CompletionRule::parse(prefix.clone(), spec).ok_or_else(|| {
+                CliError::Participant(format!("invalid completion rule `{prefix}: {spec}`"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let completion_rules = tau_cli_term::CompletionRules::new(completions);
+    let bindings = settings
+        .bind
+        .iter()
+        .map(|(key, action)| (key.clone(), encode_binding_action(action)));
+    let cli_state =
+        path_tau_config_settings::CliState::load_with_default(&dirs, settings.default_state());
+    let prompt_history = PromptHistoryStore::new(&dirs);
+    let input_history = match prompt_history.load() {
+        Ok(history) => history,
+        Err(error) => {
+            tracing::warn!(target: "tau_cli::ui", %error, "failed to load persistent prompt history");
+            Vec::new()
+        }
+    };
+    let terminal_options = terminal_options_from_settings(&settings);
+    let (mut term, handle, completion_data) = HighTerm::new_with_completion_rules(
+        prompt,
+        commands,
+        theme.clone(),
+        bindings,
+        input_history,
+        completion_rules,
+        terminal_options,
+    )?;
+    *input_shutdown_handle.lock().expect(MUTEX_POISONED) = Some(handle.clone());
+    if remote_disconnected.load(Ordering::Acquire) {
+        handle.request_input_shutdown();
+    }
+    handle.set_right_prompt(right_prompt);
+    handle.set_prompt_scroll_indicator(cli_state.show_prompt_scroll_indicator);
+    handle.set_redraw_history_size(cli_state.redraw_history_size);
+    // Show logo if enabled.
+    if settings.show_logo {
+        handle.print_output(
+            "banner",
+            tau_cli_term::StyledBlock::new(build_banner(&theme)),
+        );
+    }
+    if tau_proto::NoticeLevel::Info.visible_at(cli_state.notice_level) {
+        handle.print_output("ui-dir", ui_dir_block(&theme, ui_logging.dir()));
+    }
+
+    handle.redraw();
+    let draft_handle: DraftHandle = Arc::new((
+        Mutex::new(DraftSlot {
+            send_content: settings.send_prompt_draft_content,
+            ..DraftSlot::default()
+        }),
+        Condvar::new(),
+    ));
+    let active_session_state = Arc::new(Mutex::new(session_id.to_owned()));
+
+    // Event renderer thread — drains the channel and renders via
+    // the thread-safe TermHandle.
+    let renderer_handle = handle.clone();
+    let renderer_rx = event_rx;
+    // Pre-build the renderer so we can grab its shared state handles
+    // for the input loop. CLI config provides the default UI toggle values;
+    // persisted `cli.json` state overrides them so `:set show-*` changes
+    // survive restarts.
+    let mut renderer = EventRenderer::new_with_state(
+        renderer_handle,
+        completion_data.clone(),
+        theme.clone(),
+        cli_state,
+        dirs.clone(),
+        settings.prompt_symbol.clone(),
+        settings.submitted_prompt_symbol,
+    );
+    renderer.set_startup_profile_selection(startup_profile);
+    renderer.set_osc8_links(settings.osc8_links);
+    renderer.set_draft_retargeter(draft_handle.clone(), active_session_state.clone());
+    renderer.set_right_prompt_paths(cwd.clone(), home_dir.clone());
+    renderer.set_action_state(action_state.clone());
+    completion_data.set_arg_completer(
+        tau_cli_term::CommandName::new(":skill"),
+        renderer.skill_arg_completer(),
+    );
+    let tool_timer = ToolTimerNotifier::new();
+    renderer.set_tool_timer(tool_timer.clone());
+    let timer_tx = event_tx.clone();
+    let timer_state = tool_timer.inner();
+    let timer_thread = std::thread::spawn(move || tool_timer_loop(timer_state, timer_tx));
+    // Register `:set`'s context-aware arg completer. The first-arg
+    // menu shows each setting's *current* value (read through the
+    // renderer's shared mirror), and the second-arg menu shows
+    // value-with-meaning for the selected setting.
+    completion_data.set_arg_completer(
+        tau_cli_term::CommandName::new(":set"),
+        build_set_arg_completer(renderer.cli_state_mirror()),
+    );
+    let agent_in_progress = renderer.agent_in_progress_state();
+    let fast_service_tier_state = renderer.fast_service_tier_state();
+    let current_role_state = renderer.current_role_state();
+    let current_agent_state = renderer.current_agent_state();
+    let known_agents = renderer.known_agents();
+    let agent_display_names = renderer.agent_display_names();
+    let agent_navigation = renderer.agent_navigation();
+    let ephemeral_agents = renderer.ephemeral_agents();
+    let agent_estimated_api_costs = renderer.agent_estimated_api_costs();
+    let input_routing = InputRoutingState::new(
+        current_agent_state.clone(),
+        known_agents.clone(),
+        agent_navigation,
+        ephemeral_agents.clone(),
+    );
+    completion_data.set_arg_completer(
+        tau_cli_term::CommandName::new(":agent"),
+        build_agent_arg_completer(input_routing.clone(), agent_display_names.clone()),
+    );
+    completion_data
+        .set_agent_mention_completer(build_agent_mention_completer(input_routing.clone()));
+    completion_data.set_arg_completer(
+        tau_cli_term::CommandName::new(":session"),
+        build_session_arg_completer(),
+    );
+    completion_data.set_arg_completer(
+        tau_cli_term::CommandName::new(":theme"),
+        build_theme_arg_completer(dirs.clone()),
+    );
+    let roles_available = renderer.roles_available();
+    let custom_prompts = renderer.custom_prompts();
+    let role_groups_available = renderer.role_groups_available();
+    let role_group_memory = renderer.role_group_memory();
+    let editor_context = renderer.editor_context();
+    term.set_editor_context_handle(editor_context.clone());
+    let renderer_ui_io_meter = ui_io_meter.clone();
+    let renderer_thread = spawn_renderer_thread(
+        renderer,
+        renderer_ui_io_meter,
+        remote_rx,
+        renderer_rx,
+        remote_admitted,
+        renderer_arbiter,
+        renderer_wake_rx,
+        delivery_memory.clone(),
+        queued_remote_items,
+        renderer_byte_budget,
+    );
+
+    // Spawn the prompt-draft debounce thread. The input loop signals
+    // it on every `BufferChanged` event with the latest buffer
+    // contents; the thread coalesces a typing burst into one
+    // `UiPromptDraft` per `DRAFT_DEBOUNCE` window and sends it on the
+    // shared writer.
+    let debounce_thread = {
+        let handle = draft_handle.clone();
+        let writer = writer.clone();
+        std::thread::spawn(move || debounce_loop(handle, writer))
+    };
+
+    // Terminal input loop — shares the writer with the debounce
+    // thread via `WriterHandle`. Theme clone is for printing local
+    // validation errors (e.g. `:role engineer effort foo`) through the same
+    // TermHandle as remote events, so they don't garble the TUI like
+    // `eprintln!` would.
+    let mut active_session_id = session_id.to_owned();
+    tracing::info!(target: "tau_cli::ui", "terminal UI input ready");
+    let input_result = terminal_input_loop(
+        &mut term,
+        &writer,
+        &mut active_session_id,
+        TerminalInputLoopCtx {
+            fast_service_tier_state,
+            current_role_state,
+            routing: input_routing,
+            roles_available,
+            role_groups_available,
+            role_group_memory,
+            theme,
+            dirs: dirs.clone(),
+            cwd,
+            home_dir,
+            prompt_symbol: settings.prompt_symbol,
+            agent_in_progress,
+            remote_disconnected,
+            renderer_tx: event_tx,
+            active_session_state,
+            editor_context,
+            action_state,
+            draft_handle: draft_handle.clone(),
+            prompt_history,
+            custom_prompts,
+            ui_io_meter: ui_io_meter.clone(),
+            harness_socket_path,
+            agent_estimated_api_costs,
+        },
+    );
+    let (exit, attachment_error) = match input_result {
+        Ok(exit) => (exit, None),
+        Err(CliError::ForegroundOwnershipUnconfirmed(message)) => {
+            (InputLoopExit::ForegroundOwnershipUnconfirmed, Some(message))
+        }
+        Err(CliError::TerminalOutputFailed(message)) => {
+            (InputLoopExit::TerminalOutputFailed, Some(message))
+        }
+        Err(error) => return Err(error),
+    };
+
+    tool_timer.stop();
+    let _ = timer_thread.join();
+
+    // Tell the debounce thread to exit and wait for it so we don't
+    // race with the disconnect below (the thread might otherwise
+    // emit one final draft on the closing socket and trip an `EPIPE`).
+    {
+        let (mtx, cv) = &*draft_handle;
+        let mut g = locked(mtx);
+        g.done = true;
+        cv.notify_all();
+    }
+    let _ = debounce_thread.join();
+
+    let reason = shutdown_ui_connection(
+        writer,
+        shutdown,
+        socket_reader,
+        renderer_thread,
+        exit,
+        local_disconnect_started,
+    );
+    finish_daemon_for_exit(exit, daemon);
+
+    tracing::info!(target: "tau_cli::ui", reason, "terminal UI exiting");
+
+    match (exit, attachment_error) {
+        (InputLoopExit::ForegroundOwnershipUnconfirmed, Some(message)) => {
+            Err(CliError::ForegroundOwnershipUnconfirmed(message))
+        }
+        (InputLoopExit::TerminalOutputFailed, Some(message)) => {
+            Err(CliError::TerminalOutputFailed(message))
+        }
+        (_, None) => Ok(()),
+        _ => Ok(()),
+    }
+}
+
+/// Starts the renderer worker after command queues and shared accounting are
+/// ready.
+#[allow(clippy::too_many_arguments)]
+fn spawn_renderer_thread(
+    renderer: EventRenderer,
+    renderer_ui_io_meter: UiIoMeter,
+    remote_rx: mpsc::Receiver<RendererCmd>,
+    renderer_rx: renderer_scheduler::LocalRendererReceiver,
+    remote_admitted: Arc<path_std_sync_atomic::AtomicU64>,
+    renderer_arbiter: Arc<Mutex<()>>,
+    renderer_wake_rx: tau_blocking_notify_channel::Receiver,
+    delivery_memory: Option<Arc<DeliveryMemoryTracker>>,
+    queued_remote_items: Arc<path_std_sync_atomic::AtomicUsize>,
+    renderer_byte_budget: Arc<RendererByteBudget>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut renderer = renderer;
+        let mut ui_io_tracker = UiIoTracker::new(renderer_ui_io_meter);
+        let mut scheduler = RendererCommandScheduler::new(
+            remote_rx,
+            renderer_rx,
+            remote_admitted,
+            renderer_arbiter,
+            renderer_wake_rx,
+            delivery_memory.clone(),
+        );
+        loop {
+            let cmd = scheduler.recv_timeout(ui_io_tracker.recv_timeout());
+            match cmd {
+                Ok(cmd) => {
+                    match cmd {
+                        RendererCmd::Remote {
+                            event,
+                            presentation,
+                            abandoned_shell_starts,
+                            recorded_at,
+                            delivery_id,
+                            queue_bytes,
+                            enqueued_at,
+                            folded_frames,
+                        } => {
+                            let folded_delivery_ids = begin_remote_memory_handler(
+                                delivery_memory.as_deref(),
+                                delivery_id,
+                                &folded_frames,
+                            );
+                            release_remote_queue_frames(
+                                RendererQueueFrame {
+                                    delivery_id,
+                                    queue_bytes,
+                                    enqueued_at,
+                                },
+                                folded_frames,
+                                &queued_remote_items,
+                                &renderer_byte_budget,
+                                |_| {},
+                            );
+                            renderer.abandon_shell_starts(&abandoned_shell_starts);
+                            match presentation {
+                                cold_attach_stager::RendererPresentation::Ordinary => {
+                                    renderer.handle_socket_delivery(
+                                        &event,
+                                        recorded_at,
+                                        delivery_id,
+                                    );
+                                }
+                                cold_attach_stager::RendererPresentation::StandaloneShellTerminal => {
+                                    let Event::ShellCommandFinished(finished) = &*event else {
+                                        unreachable!(
+                                            "standalone shell presentation requires a shell terminal"
+                                        );
+                                    };
+                                    renderer.handle_standalone_socket_shell_finished(
+                                        finished,
+                                        recorded_at,
+                                        delivery_id,
+                                    );
+                                }
+                                cold_attach_stager::RendererPresentation::ReconstructedToolStart {
+                                    owner,
+                                } => {
+                                    assert!(
+                                        matches!(&*event, Event::ToolStarted(started) if started.agent_id == owner),
+                                        "reconstructed start presentation requires its validated owner"
+                                    );
+                                    renderer.handle_reconstructed_tool_start_socket_delivery(
+                                        &event,
+                                        &owner,
+                                        recorded_at,
+                                        delivery_id,
+                                    );
+                                }
+                            }
+                            finish_remote_memory_handler(
+                                delivery_memory.as_deref(),
+                                delivery_id,
+                                folded_delivery_ids,
+                            );
+                        }
+                        RendererCmd::RemoteDisconnect {
+                            reason,
+                            delivery_id,
+                            queue_bytes,
+                            enqueued_at,
+                        } => {
+                            begin_disconnect_memory(delivery_memory.as_deref(), delivery_id);
+                            let queue_items =
+                                queued_remote_items.fetch_sub(1, Ordering::AcqRel) - 1;
+                            let remaining_bytes = renderer_byte_budget.release(queue_bytes);
+                            tracing::trace!(
+                                target: "tau_cli::frontend_progress",
+                                delivery_id = delivery_id.get(),
+                                queue_age_ms = enqueued_at.elapsed().as_millis(),
+                                queue_items,
+                                queue_bytes = remaining_bytes,
+                                "remote disconnect dequeued"
+                            );
+                            renderer.handle_disconnect(reason);
+                            finish_disconnect_memory(delivery_memory.as_deref(), delivery_id);
+                        }
+                        RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
+                        RendererCmd::ToggleVerboseMode => renderer.toggle_verbose_mode(),
+                        RendererCmd::SwitchAgent { agent_id } => renderer.switch_agent(agent_id),
+                        RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
+                        RendererCmd::SetTheme { theme } => renderer.apply_theme(theme),
+                        RendererCmd::ShowSessionStats => renderer.show_session_token_stats(),
+                        RendererCmd::ActionInvoked {
+                            invocation_id,
+                            owner_agent_id,
+                        } => renderer.record_action_invocation(invocation_id, owner_agent_id),
+                        RendererCmd::ToolTimerTick => renderer.handle_tool_timer_tick(),
+                    }
+                    ui_io_tracker.sample_if_due(&mut renderer);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => ui_io_tracker.sample_now(&mut renderer),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    })
+}
+
+/// Translates static CLI settings into the immutable raw-terminal policy.
+pub(crate) fn terminal_options_from_settings(
+    settings: &path_tau_config_settings::CliSettings,
+) -> tau_cli_term::TerminalOptions {
+    tau_cli_term::TerminalOptions {
+        cursor_shape: if settings.bar_cursor {
+            tau_cli_term::CursorShape::Bar
+        } else {
+            tau_cli_term::CursorShape::Block
+        },
+        mouse: settings.mouse,
+    }
+}
+
+/// Starts or attaches the daemon and establishes process-local UI logging.
+fn start_chat_daemon(
+    session_id: &tau_proto::SessionId,
+    attach: bool,
+    session_status: SessionLaunchStatus,
+    startup_role: Option<&str>,
+    cli_overrides: DaemonCliOverrides<'_>,
+    ephemeral: bool,
+) -> Result<
+    (
+        Option<tau_config::settings::ProfileSelection>,
+        ui_logging::UiLogging,
+        DaemonHandle,
+        Instant,
+    ),
+    CliError,
+> {
+    let startup_profile = (!attach).then(|| cli_overrides.profile.cloned()).flatten();
+    let state_dir = tau_session_inspect::default_state_dir();
+    let ui_logging = if ephemeral {
+        ui_logging::init_ephemeral()
+    } else {
+        ui_logging::init(&state_dir)?
+    };
+    tracing::info!(
+        target: "tau_cli::ui",
+        ui_id = ui_logging.ui_id(),
+        ui_dir = %ui_logging.dir().display(),
+        log_path = %ui_logging.log_path().display(),
+        session_id = %session_id,
+        attach,
+        "terminal UI starting"
+    );
+    let startup_started_at = Instant::now();
+    let storage_mode = storage_mode_from_ephemeral(ephemeral);
+    let daemon_output = (!attach)
+        .then(|| daemon_output_for_chat_session(session_id.as_str(), storage_mode, session_status))
+        .transpose()?;
+    let daemon = resolve_daemon(
+        attach,
+        session_id.as_str(),
+        session_status,
+        daemon_output,
+        startup_role,
+        cli_overrides,
+        storage_mode,
+    )?;
+    Ok((startup_profile, ui_logging, daemon, startup_started_at))
+}
+
+/// Starts the socket-to-renderer worker after all shared queue state is
+/// initialized.
+#[allow(clippy::too_many_arguments)]
+fn spawn_socket_reader(
+    socket_reader_input: crate::ui_client::UiInputReader,
+    attach: bool,
+    remote_tx: RemoteRendererSender,
+    socket_renderer_byte_budget: Arc<RendererByteBudget>,
+    socket_queued_remote_items: Arc<path_std_sync_atomic::AtomicUsize>,
+    socket_remote_admitted: Arc<path_std_sync_atomic::AtomicU64>,
+    socket_renderer_arbiter: Arc<Mutex<()>>,
+    socket_input_shutdown: Arc<Mutex<Option<tau_cli_term::TermHandle>>>,
+    socket_remote_disconnected: Arc<AtomicBool>,
+    socket_ui_io_meter: UiIoMeter,
+    socket_local_disconnect_started: Arc<AtomicBool>,
+    socket_delivery_memory: Option<Arc<DeliveryMemoryTracker>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
         let mut cold_attach_stager = if attach {
             ColdAttachStager::staging()
         } else {
@@ -1419,450 +1952,7 @@ pub(crate) fn run_chat(
                 }
             }
         }
-    });
-
-    // Terminal setup.
-    let commands: Vec<CommandCompletion> = BUILTIN_COMMANDS
-        .iter()
-        .map(|(name, description)| CommandCompletion::new(*name, *description))
-        .collect();
-    let action_state = ActionCommandState::new(BUILTIN_COMMANDS.iter().map(|(name, _)| *name));
-    // Fail fast on a malformed `cli.yaml`. The fields here drive
-    // keybindings, prompt symbol, cursor shape, and theme — silently
-    // falling back to defaults would leave the user with broken
-    // keybindings or unreadable colors and no clue why. Refuse to
-    // start the TUI instead.
-    let dirs = path_tau_config_settings::TauDirs::default();
-    let settings = tau_config::settings::load_cli_settings_in(&dirs)
-        .map_err(|error| CliError::Participant(format!("cli.yaml failed to parse:\n{error}")))?;
-    let theme = crate::theme::select_theme(&dirs, settings.theme.clone())
-        .map_err(|error| CliError::Participant(format!("cli theme failed to load:\n{error}")))?;
-    let prompt = crate::theme::active_prompt_marker(&theme, &settings.prompt_symbol, None);
-    let cwd = std::env::current_dir()?;
-    let home_dir = dirs::home_dir();
-    let right_prompt =
-        crate::theme::right_prompt_context(&theme, &cwd, home_dir.as_deref(), session_id.as_str());
-    let completions = settings
-        .completions
-        .iter()
-        .map(|(prefix, spec)| {
-            tau_cli_term::CompletionRule::parse(prefix.clone(), spec).ok_or_else(|| {
-                CliError::Participant(format!("invalid completion rule `{prefix}: {spec}`"))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let completion_rules = tau_cli_term::CompletionRules::new(completions);
-    let bindings = settings
-        .bind
-        .iter()
-        .map(|(key, action)| (key.clone(), encode_binding_action(action)));
-    let cli_state =
-        path_tau_config_settings::CliState::load_with_default(&dirs, settings.default_state());
-    let prompt_history = PromptHistoryStore::new(&dirs);
-    let input_history = match prompt_history.load() {
-        Ok(history) => history,
-        Err(error) => {
-            tracing::warn!(target: "tau_cli::ui", %error, "failed to load persistent prompt history");
-            Vec::new()
-        }
-    };
-    let terminal_options = terminal_options_from_settings(&settings);
-    let (mut term, handle, completion_data) = HighTerm::new_with_completion_rules(
-        prompt,
-        commands,
-        theme.clone(),
-        bindings,
-        input_history,
-        completion_rules,
-        terminal_options,
-    )?;
-    *input_shutdown_handle.lock().expect(MUTEX_POISONED) = Some(handle.clone());
-    if remote_disconnected.load(Ordering::Acquire) {
-        handle.request_input_shutdown();
-    }
-    handle.set_right_prompt(right_prompt);
-    handle.set_prompt_scroll_indicator(cli_state.show_prompt_scroll_indicator);
-    handle.set_redraw_history_size(cli_state.redraw_history_size);
-    // Show logo if enabled.
-    if settings.show_logo {
-        handle.print_output(
-            "banner",
-            tau_cli_term::StyledBlock::new(build_banner(&theme)),
-        );
-    }
-    if tau_proto::NoticeLevel::Info.visible_at(cli_state.notice_level) {
-        handle.print_output("ui-dir", ui_dir_block(&theme, ui_logging.dir()));
-    }
-
-    handle.redraw();
-    let draft_handle: DraftHandle = Arc::new((
-        Mutex::new(DraftSlot {
-            send_content: settings.send_prompt_draft_content,
-            ..DraftSlot::default()
-        }),
-        Condvar::new(),
-    ));
-    let active_session_state = Arc::new(Mutex::new(session_id.to_owned()));
-
-    // Event renderer thread — drains the channel and renders via
-    // the thread-safe TermHandle.
-    let renderer_handle = handle.clone();
-    let renderer_rx = event_rx;
-    // Pre-build the renderer so we can grab its shared state handles
-    // for the input loop. CLI config provides the default UI toggle values;
-    // persisted `cli.json` state overrides them so `:set show-*` changes
-    // survive restarts.
-    let mut renderer = EventRenderer::new_with_state(
-        renderer_handle,
-        completion_data.clone(),
-        theme.clone(),
-        cli_state,
-        dirs.clone(),
-        settings.prompt_symbol.clone(),
-        settings.submitted_prompt_symbol,
-    );
-    renderer.set_startup_profile_selection(startup_profile);
-    renderer.set_osc8_links(settings.osc8_links);
-    renderer.set_draft_retargeter(draft_handle.clone(), active_session_state.clone());
-    renderer.set_right_prompt_paths(cwd.clone(), home_dir.clone());
-    renderer.set_action_state(action_state.clone());
-    completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new(":skill"),
-        renderer.skill_arg_completer(),
-    );
-    let tool_timer = ToolTimerNotifier::new();
-    renderer.set_tool_timer(tool_timer.clone());
-    let timer_tx = event_tx.clone();
-    let timer_state = tool_timer.inner();
-    let timer_thread = std::thread::spawn(move || tool_timer_loop(timer_state, timer_tx));
-    // Register `:set`'s context-aware arg completer. The first-arg
-    // menu shows each setting's *current* value (read through the
-    // renderer's shared mirror), and the second-arg menu shows
-    // value-with-meaning for the selected setting.
-    completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new(":set"),
-        build_set_arg_completer(renderer.cli_state_mirror()),
-    );
-    let agent_in_progress = renderer.agent_in_progress_state();
-    let fast_service_tier_state = renderer.fast_service_tier_state();
-    let current_role_state = renderer.current_role_state();
-    let current_agent_state = renderer.current_agent_state();
-    let known_agents = renderer.known_agents();
-    let agent_display_names = renderer.agent_display_names();
-    let agent_navigation = renderer.agent_navigation();
-    let ephemeral_agents = renderer.ephemeral_agents();
-    let agent_estimated_api_costs = renderer.agent_estimated_api_costs();
-    let input_routing = InputRoutingState::new(
-        current_agent_state.clone(),
-        known_agents.clone(),
-        agent_navigation,
-        ephemeral_agents.clone(),
-    );
-    completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new(":agent"),
-        build_agent_arg_completer(input_routing.clone(), agent_display_names.clone()),
-    );
-    completion_data
-        .set_agent_mention_completer(build_agent_mention_completer(input_routing.clone()));
-    completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new(":session"),
-        build_session_arg_completer(),
-    );
-    completion_data.set_arg_completer(
-        tau_cli_term::CommandName::new(":theme"),
-        build_theme_arg_completer(dirs.clone()),
-    );
-    let roles_available = renderer.roles_available();
-    let custom_prompts = renderer.custom_prompts();
-    let role_groups_available = renderer.role_groups_available();
-    let role_group_memory = renderer.role_group_memory();
-    let editor_context = renderer.editor_context();
-    term.set_editor_context_handle(editor_context.clone());
-    let renderer_ui_io_meter = ui_io_meter.clone();
-    let renderer_thread = std::thread::spawn(move || {
-        let mut renderer = renderer;
-        let mut ui_io_tracker = UiIoTracker::new(renderer_ui_io_meter);
-        let mut scheduler = RendererCommandScheduler::new(
-            remote_rx,
-            renderer_rx,
-            remote_admitted,
-            renderer_arbiter,
-            renderer_wake_rx,
-            delivery_memory.clone(),
-        );
-        loop {
-            let cmd = scheduler.recv_timeout(ui_io_tracker.recv_timeout());
-            match cmd {
-                Ok(cmd) => {
-                    match cmd {
-                        RendererCmd::Remote {
-                            event,
-                            presentation,
-                            abandoned_shell_starts,
-                            recorded_at,
-                            delivery_id,
-                            queue_bytes,
-                            enqueued_at,
-                            folded_frames,
-                        } => {
-                            let folded_delivery_ids = begin_remote_memory_handler(
-                                delivery_memory.as_deref(),
-                                delivery_id,
-                                &folded_frames,
-                            );
-                            release_remote_queue_frames(
-                                RendererQueueFrame {
-                                    delivery_id,
-                                    queue_bytes,
-                                    enqueued_at,
-                                },
-                                folded_frames,
-                                &queued_remote_items,
-                                &renderer_byte_budget,
-                                |_| {},
-                            );
-                            renderer.abandon_shell_starts(&abandoned_shell_starts);
-                            match presentation {
-                                cold_attach_stager::RendererPresentation::Ordinary => {
-                                    renderer.handle_socket_delivery(
-                                        &event,
-                                        recorded_at,
-                                        delivery_id,
-                                    );
-                                }
-                                cold_attach_stager::RendererPresentation::StandaloneShellTerminal => {
-                                    let Event::ShellCommandFinished(finished) = &*event else {
-                                        unreachable!(
-                                            "standalone shell presentation requires a shell terminal"
-                                        );
-                                    };
-                                    renderer.handle_standalone_socket_shell_finished(
-                                        finished,
-                                        recorded_at,
-                                        delivery_id,
-                                    );
-                                }
-                                cold_attach_stager::RendererPresentation::ReconstructedToolStart {
-                                    owner,
-                                } => {
-                                    assert!(
-                                        matches!(&*event, Event::ToolStarted(started) if started.agent_id == owner),
-                                        "reconstructed start presentation requires its validated owner"
-                                    );
-                                    renderer.handle_reconstructed_tool_start_socket_delivery(
-                                        &event,
-                                        &owner,
-                                        recorded_at,
-                                        delivery_id,
-                                    );
-                                }
-                            }
-                            finish_remote_memory_handler(
-                                delivery_memory.as_deref(),
-                                delivery_id,
-                                folded_delivery_ids,
-                            );
-                        }
-                        RendererCmd::RemoteDisconnect {
-                            reason,
-                            delivery_id,
-                            queue_bytes,
-                            enqueued_at,
-                        } => {
-                            begin_disconnect_memory(delivery_memory.as_deref(), delivery_id);
-                            let queue_items =
-                                queued_remote_items.fetch_sub(1, Ordering::AcqRel) - 1;
-                            let remaining_bytes = renderer_byte_budget.release(queue_bytes);
-                            tracing::trace!(
-                                target: "tau_cli::frontend_progress",
-                                delivery_id = delivery_id.get(),
-                                queue_age_ms = enqueued_at.elapsed().as_millis(),
-                                queue_items,
-                                queue_bytes = remaining_bytes,
-                                "remote disconnect dequeued"
-                            );
-                            renderer.handle_disconnect(reason);
-                            finish_disconnect_memory(delivery_memory.as_deref(), delivery_id);
-                        }
-                        RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
-                        RendererCmd::ToggleVerboseMode => renderer.toggle_verbose_mode(),
-                        RendererCmd::SwitchAgent { agent_id } => renderer.switch_agent(agent_id),
-                        RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
-                        RendererCmd::SetTheme { theme } => renderer.apply_theme(theme),
-                        RendererCmd::ShowSessionStats => renderer.show_session_token_stats(),
-                        RendererCmd::ActionInvoked {
-                            invocation_id,
-                            owner_agent_id,
-                        } => renderer.record_action_invocation(invocation_id, owner_agent_id),
-                        RendererCmd::ToolTimerTick => renderer.handle_tool_timer_tick(),
-                    }
-                    ui_io_tracker.sample_if_due(&mut renderer);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => ui_io_tracker.sample_now(&mut renderer),
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-    });
-
-    // Spawn the prompt-draft debounce thread. The input loop signals
-    // it on every `BufferChanged` event with the latest buffer
-    // contents; the thread coalesces a typing burst into one
-    // `UiPromptDraft` per `DRAFT_DEBOUNCE` window and sends it on the
-    // shared writer.
-    let debounce_thread = {
-        let handle = draft_handle.clone();
-        let writer = writer.clone();
-        std::thread::spawn(move || debounce_loop(handle, writer))
-    };
-
-    // Terminal input loop — shares the writer with the debounce
-    // thread via `WriterHandle`. Theme clone is for printing local
-    // validation errors (e.g. `:role engineer effort foo`) through the same
-    // TermHandle as remote events, so they don't garble the TUI like
-    // `eprintln!` would.
-    let mut active_session_id = session_id.to_owned();
-    tracing::info!(target: "tau_cli::ui", "terminal UI input ready");
-    let input_result = terminal_input_loop(
-        &mut term,
-        &writer,
-        &mut active_session_id,
-        TerminalInputLoopCtx {
-            fast_service_tier_state,
-            current_role_state,
-            routing: input_routing,
-            roles_available,
-            role_groups_available,
-            role_group_memory,
-            theme,
-            dirs: dirs.clone(),
-            cwd,
-            home_dir,
-            prompt_symbol: settings.prompt_symbol,
-            agent_in_progress,
-            remote_disconnected,
-            renderer_tx: event_tx,
-            active_session_state,
-            editor_context,
-            action_state,
-            draft_handle: draft_handle.clone(),
-            prompt_history,
-            custom_prompts,
-            ui_io_meter: ui_io_meter.clone(),
-            harness_socket_path,
-            agent_estimated_api_costs,
-        },
-    );
-    let (exit, attachment_error) = match input_result {
-        Ok(exit) => (exit, None),
-        Err(CliError::ForegroundOwnershipUnconfirmed(message)) => {
-            (InputLoopExit::ForegroundOwnershipUnconfirmed, Some(message))
-        }
-        Err(CliError::TerminalOutputFailed(message)) => {
-            (InputLoopExit::TerminalOutputFailed, Some(message))
-        }
-        Err(error) => return Err(error),
-    };
-
-    tool_timer.stop();
-    let _ = timer_thread.join();
-
-    // Tell the debounce thread to exit and wait for it so we don't
-    // race with the disconnect below (the thread might otherwise
-    // emit one final draft on the closing socket and trip an `EPIPE`).
-    {
-        let (mtx, cv) = &*draft_handle;
-        let mut g = locked(mtx);
-        g.done = true;
-        cv.notify_all();
-    }
-    let _ = debounce_thread.join();
-
-    let reason = shutdown_ui_connection(
-        writer,
-        shutdown,
-        socket_reader,
-        renderer_thread,
-        exit,
-        local_disconnect_started,
-    );
-    finish_daemon_for_exit(exit, daemon);
-
-    tracing::info!(target: "tau_cli::ui", reason, "terminal UI exiting");
-
-    match (exit, attachment_error) {
-        (InputLoopExit::ForegroundOwnershipUnconfirmed, Some(message)) => {
-            Err(CliError::ForegroundOwnershipUnconfirmed(message))
-        }
-        (InputLoopExit::TerminalOutputFailed, Some(message)) => {
-            Err(CliError::TerminalOutputFailed(message))
-        }
-        (_, None) => Ok(()),
-        _ => Ok(()),
-    }
-}
-
-/// Translates static CLI settings into the immutable raw-terminal policy.
-pub(crate) fn terminal_options_from_settings(
-    settings: &path_tau_config_settings::CliSettings,
-) -> tau_cli_term::TerminalOptions {
-    tau_cli_term::TerminalOptions {
-        cursor_shape: if settings.bar_cursor {
-            tau_cli_term::CursorShape::Bar
-        } else {
-            tau_cli_term::CursorShape::Block
-        },
-        mouse: settings.mouse,
-    }
-}
-
-/// Starts or attaches the daemon and establishes process-local UI logging.
-fn start_chat_daemon(
-    session_id: &tau_proto::SessionId,
-    attach: bool,
-    session_status: SessionLaunchStatus,
-    startup_role: Option<&str>,
-    cli_overrides: DaemonCliOverrides<'_>,
-    ephemeral: bool,
-) -> Result<
-    (
-        Option<tau_config::settings::ProfileSelection>,
-        ui_logging::UiLogging,
-        DaemonHandle,
-        Instant,
-    ),
-    CliError,
-> {
-    let startup_profile = (!attach).then(|| cli_overrides.profile.cloned()).flatten();
-    let state_dir = tau_session_inspect::default_state_dir();
-    let ui_logging = if ephemeral {
-        ui_logging::init_ephemeral()
-    } else {
-        ui_logging::init(&state_dir)?
-    };
-    tracing::info!(
-        target: "tau_cli::ui",
-        ui_id = ui_logging.ui_id(),
-        ui_dir = %ui_logging.dir().display(),
-        log_path = %ui_logging.log_path().display(),
-        session_id = %session_id,
-        attach,
-        "terminal UI starting"
-    );
-    let startup_started_at = Instant::now();
-    let storage_mode = storage_mode_from_ephemeral(ephemeral);
-    let daemon_output = (!attach)
-        .then(|| daemon_output_for_chat_session(session_id.as_str(), storage_mode, session_status))
-        .transpose()?;
-    let daemon = resolve_daemon(
-        attach,
-        session_id.as_str(),
-        session_status,
-        daemon_output,
-        startup_role,
-        cli_overrides,
-        storage_mode,
-    )?;
-    Ok((startup_profile, ui_logging, daemon, startup_started_at))
+    })
 }
 
 /// Performs the blocking admission read on an owned thread, retaining its

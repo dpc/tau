@@ -2523,18 +2523,31 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
     peer_prompt.agent_prompt_id = "peer-3"
         .parse::<tau_proto::AgentPromptId>()
         .expect("peer prompt id");
-    input.push(encode_frames(&[
-        live_event(11, Event::AgentPromptCreated(compact_prompt)),
-        live_event(12, Event::AgentPromptCreated(peer_prompt)),
-    ]));
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(compact_prompt),
+    )]));
     let compaction_attempts = Arc::new(AtomicUsize::new(0));
     let peer_attempts = Arc::new(AtomicUsize::new(0));
     let (peer_finished_tx, peer_finished_rx) = mpsc::sync_channel(1);
+    let (compact_started_tx, compact_started_rx) = mpsc::sync_channel(1);
+    let (release_compact_tx, release_compact_rx) = mpsc::sync_channel(0);
+    let release_compact_rx = Mutex::new(release_compact_rx);
     let executor_compaction_attempts = Arc::clone(&compaction_attempts);
     let executor_peer_attempts = Arc::clone(&peer_attempts);
     let executor: PromptExecutor = Arc::new(move |execution| {
         if execution.job.agent_prompt_id.as_str() == "compact-4290" {
             executor_compaction_attempts.fetch_add(1, Ordering::SeqCst);
+            if execution.job.retry_state.attempts == 0 {
+                compact_started_tx
+                    .send(())
+                    .expect("report first compaction attempt");
+                release_compact_rx
+                    .lock()
+                    .expect("lock first compaction release")
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("release first compaction retry");
+            }
             send_worker_message(
                 &execution.output_tx,
                 &execution.output_waker,
@@ -2601,6 +2614,31 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
         .expect("run shared-cooldown provider");
     });
 
+    compact_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first compaction attempt starts");
+    input.push(encode_frames(&[live_event(
+        12,
+        Event::AgentPromptCreated(peer_prompt),
+    )]));
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdatedReported(update))
+                    if update.agent_prompt_id.as_str() == "peer-3"
+                        && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+            )
+        })
+    });
+    assert_eq!(
+        peer_attempts.load(Ordering::SeqCst),
+        1,
+        "peer executes before the first compaction retry installs shared cooldown"
+    );
+    release_compact_tx
+        .send(())
+        .expect("release first compaction retry");
     wait_for_runtime_frames(&output, |frames| {
         ["compact-4290", "peer-3"].into_iter().all(|id| {
             frames.iter().any(|frame| {

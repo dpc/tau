@@ -2776,6 +2776,7 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
         )
         .expect("seed compact success without harness reaction");
     drop(h);
+    wait_for_session_unlock(&state, "s1");
 
     let resumed =
         echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)

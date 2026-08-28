@@ -718,6 +718,42 @@ pub(super) fn assert_snapshot_suffix(
     Ok(())
 }
 
+/// Validates that presentation-only Boot B activity persisted only each
+/// restored agent's expected initialization replacement after clean shutdown.
+pub(super) fn assert_presentation_snapshot_suffix(
+    before: &DurableSessionSnapshot,
+    after: &DurableSessionSnapshot,
+    identities: &Identities,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if after.session_events != before.session_events
+        || after.restore_events != before.restore_events
+    {
+        return Err("S8 presentation resume changed membership or restore state".into());
+    }
+    for agent_id in identities.all() {
+        let before_events = &before.agent_events[agent_id];
+        let after_events = &after.agent_events[agent_id];
+        let [initialization] = &after_events[before_events.len()..] else {
+            return Err(format!(
+                "S8 presentation resume did not append exactly one initialization replacement for {agent_id}"
+            )
+            .into());
+        };
+        if !matches!(
+            &initialization.event,
+            Event::AgentInitializationContextSet(context)
+                if context.agent_id == *agent_id
+                    && context.session_id == after.session_id
+        ) {
+            return Err(format!(
+                "S8 presentation resume appended the wrong durable event for {agent_id}"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Validates exact dispatch/start/prompt/finish ownership for complete outer
 /// turns and returns their shared harness-runtime identity.
 fn assert_lifecycle_pairs(

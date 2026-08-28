@@ -2050,7 +2050,82 @@ impl FakeState {
         self.require_user_text(0, prompt, expected)
     }
 
+    /// Validates one closed version-two action without coupling unrelated
+    /// grammar families.
     fn validate_v2_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
+            ScenarioActionV2::OutputLengthContinuation { .. } => {
+                self.validate_v2_output_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::DummyToolCall { .. }
+            | ScenarioActionV2::TypedImageToolCall { .. } => {
+                self.validate_v2_tool_call_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::DummyToolResult { .. }
+            | ScenarioActionV2::DummyToolResultWithUsage { .. } => {
+                self.validate_v2_tool_result_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::ProviderContextRawMessageCall { .. } => {
+                self.validate_v2_raw_call_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::ProviderContextRawMessageResult { .. } => {
+                self.validate_v2_raw_result_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::TypedImageToolResult { .. }
+            | ScenarioActionV2::TypedImageReplay { .. } => {
+                self.validate_v2_typed_image_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::DummyToolRepair { .. } => {
+                self.validate_v2_dummy_repair_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::MessageCall { .. }
+            | ScenarioActionV2::MessageSenderResult { .. }
+            | ScenarioActionV2::MessageInbound { .. }
+            | ScenarioActionV2::MessageInboundAfterHeld { .. }
+            | ScenarioActionV2::MessageAndRawInboundAfterHeld { .. }
+            | ScenarioActionV2::MessageAndRawInboundAfterParallelTools { .. } => {
+                self.validate_v2_message_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::StandaloneCompaction { .. }
+            | ScenarioActionV2::StandaloneOpaqueCompaction
+            | ScenarioActionV2::StandaloneCompactionError { .. }
+            | ScenarioActionV2::StandaloneCompactionHold { .. }
+            | ScenarioActionV2::ReactiveOpaqueCompaction { .. }
+            | ScenarioActionV2::CompactedText { .. }
+            | ScenarioActionV2::CompactedOpaqueText { .. }
+            | ScenarioActionV2::CompactedOpaqueCheckpoint { .. }
+            | ScenarioActionV2::ReactiveCompactedOpaqueText { .. } => {
+                self.validate_v2_compaction_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::AgentStartCall { .. }
+            | ScenarioActionV2::AgentStartResult { .. }
+            | ScenarioActionV2::AgentWatchCall { .. }
+            | ScenarioActionV2::AgentWatchResult { .. } => {
+                self.validate_v2_agent_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::WatchNotifications { .. }
+            | ScenarioActionV2::WatchNotificationChains { .. } => {
+                self.validate_v2_watch_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::CoreShellWorkdirCall { .. }
+            | ScenarioActionV2::CoreShellResumeEditCall { .. }
+            | ScenarioActionV2::CoreShellWorkdirResult { .. }
+            | ScenarioActionV2::CoreShellCreateResult { .. }
+            | ScenarioActionV2::CoreShellResumeEditResult { .. } => {
+                self.validate_v2_core_action(cursor, prompt, action)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Validates the output prompt shape for one closed action.
+    #[allow(clippy::single_match, clippy::collapsible_match)]
+    fn validate_v2_output_action(
         &mut self,
         cursor: usize,
         prompt: &tau_proto::AgentPromptCreated,
@@ -2065,6 +2140,19 @@ impl FakeState {
                 validate_output_length_continuation_context(prompt, user_text, reasoning)
                     .map_err(|message| self.mismatch(cursor, message))?;
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the tool call prompt shape for one closed action.
+    fn validate_v2_tool_call_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::DummyToolCall { .. }
             | ScenarioActionV2::TypedImageToolCall { .. } => {
                 let tool_name = if matches!(action, ScenarioActionV2::TypedImageToolCall { .. }) {
@@ -2085,6 +2173,19 @@ impl FakeState {
                     return Err(self.mismatch(cursor, "dummy tool snapshot mismatch"));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the tool result prompt shape for one closed action.
+    fn validate_v2_tool_result_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::DummyToolResult { call_id, .. }
             | ScenarioActionV2::DummyToolResultWithUsage { call_id, .. } => {
                 let results = prompt
@@ -2128,6 +2229,20 @@ impl FakeState {
                     return Err(self.mismatch(cursor, "dummy tool result continuity mismatch"));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the raw call prompt shape for one closed action.
+    #[allow(clippy::single_match, clippy::collapsible_match)]
+    fn validate_v2_raw_call_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::ProviderContextRawMessageCall { .. } => {
                 let names = prompt
                     .tools
@@ -2143,6 +2258,20 @@ impl FakeState {
                     return Err(self.mismatch(cursor, "raw message tool snapshot mismatch"));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the raw result prompt shape for one closed action.
+    #[allow(clippy::single_match, clippy::collapsible_match)]
+    fn validate_v2_raw_result_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::ProviderContextRawMessageResult { call_id, .. } => {
                 let matches = prompt
                     .context
@@ -2161,11 +2290,38 @@ impl FakeState {
                     return Err(self.mismatch(cursor, "raw message tool result mismatch"));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the typed image prompt shape for one closed action.
+    fn validate_v2_typed_image_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::TypedImageToolResult { call_id, .. }
             | ScenarioActionV2::TypedImageReplay { call_id, .. } => {
                 require_typed_image_tool_result(prompt, call_id)
                     .map_err(|detail| self.mismatch(cursor, detail))?;
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the dummy repair prompt shape for one closed action.
+    #[allow(clippy::single_match, clippy::collapsible_match)]
+    fn validate_v2_dummy_repair_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::DummyToolRepair {
                 call_id,
                 diagnostic,
@@ -2174,6 +2330,44 @@ impl FakeState {
                 require_repaired_dummy_result(prompt, call_id, diagnostic)
                     .map_err(|detail| self.mismatch(cursor, detail))?;
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Routes closed message actions to the narrow prompt-shape validators.
+    fn validate_v2_message_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
+            ScenarioActionV2::MessageCall { .. } => {
+                self.validate_v2_message_call_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::MessageSenderResult { .. } => {
+                self.validate_v2_message_sender_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::MessageInbound { .. }
+            | ScenarioActionV2::MessageInboundAfterHeld { .. }
+            | ScenarioActionV2::MessageAndRawInboundAfterHeld { .. }
+            | ScenarioActionV2::MessageAndRawInboundAfterParallelTools { .. } => {
+                self.validate_v2_message_inbound_action(cursor, prompt, action)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Validates the message call prompt shape for one closed action.
+    #[allow(clippy::single_match, clippy::collapsible_match)]
+    fn validate_v2_message_call_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::MessageCall { .. } => {
                 let message = prompt
                     .tools
@@ -2188,6 +2382,20 @@ impl FakeState {
                     return Err(self.mismatch(cursor, "message tool snapshot mismatch"));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the message sender prompt shape for one closed action.
+    #[allow(clippy::single_match, clippy::collapsible_match)]
+    fn validate_v2_message_sender_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::MessageSenderResult {
                 call_id, message, ..
             } => {
@@ -2232,6 +2440,20 @@ impl FakeState {
                     ));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the message inbound prompt shape for one closed action.
+    #[allow(clippy::single_match, clippy::collapsible_match)]
+    fn validate_v2_message_inbound_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             action @ (ScenarioActionV2::MessageInbound {
                 call_id, message, ..
             }
@@ -2291,9 +2513,9 @@ impl FakeState {
                     } => {
                         let raw = format!(
                             "<message event=\"created\" publisher=\"e2e-test-dummy\" \
-                              message_ref=\"provider-context-raw-message\" \
-                              sender_ref=\"provider-context-raw-sender\" \
-                              content_trust=\"external\">{raw_text}</message>"
+              message_ref=\"provider-context-raw-message\" \
+              sender_ref=\"provider-context-raw-sender\" \
+              content_trust=\"external\">{raw_text}</message>"
                         );
                         texts
                             == vec![
@@ -2323,6 +2545,51 @@ impl FakeState {
                         .map_err(|message| self.mismatch(cursor, message))?;
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Routes closed compaction actions to the matching context validator.
+    fn validate_v2_compaction_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
+            ScenarioActionV2::StandaloneCompaction { .. }
+            | ScenarioActionV2::StandaloneOpaqueCompaction
+            | ScenarioActionV2::StandaloneCompactionError { .. }
+            | ScenarioActionV2::StandaloneCompactionHold { .. } => {
+                self.validate_v2_standalone_compaction_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::ReactiveOpaqueCompaction { .. } => {
+                self.validate_v2_reactive_compaction_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::CompactedText { .. } => {
+                self.validate_v2_compacted_text_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::CompactedOpaqueText { .. }
+            | ScenarioActionV2::CompactedOpaqueCheckpoint { .. } => {
+                self.validate_v2_opaque_compaction_action(cursor, prompt, action)
+            }
+            ScenarioActionV2::ReactiveCompactedOpaqueText { .. } => {
+                self.validate_v2_reactive_opaque_action(cursor, prompt, action)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Validates the standalone compaction prompt shape for one closed action.
+    #[allow(clippy::collapsible_match)]
+    fn validate_v2_standalone_compaction_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::StandaloneCompaction { narrative: _ }
             | ScenarioActionV2::StandaloneOpaqueCompaction
             | ScenarioActionV2::StandaloneCompactionError {
@@ -2340,6 +2607,20 @@ impl FakeState {
                     ));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the reactive compaction prompt shape for one closed action.
+    #[allow(clippy::single_match, clippy::collapsible_match)]
+    fn validate_v2_reactive_compaction_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::ReactiveOpaqueCompaction {
                 removed_user_text,
                 removed_assistant_text,
@@ -2356,6 +2637,20 @@ impl FakeState {
                     ));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the compacted text prompt shape for one closed action.
+    #[allow(clippy::single_match, clippy::collapsible_match)]
+    fn validate_v2_compacted_text_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::CompactedText {
                 user_text: _,
                 checkpoint,
@@ -2371,6 +2666,19 @@ impl FakeState {
                     ));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the opaque compaction prompt shape for one closed action.
+    fn validate_v2_opaque_compaction_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::CompactedOpaqueText {
                 user_text: _,
                 removed_user_text,
@@ -2412,6 +2720,20 @@ impl FakeState {
                     ));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the reactive opaque prompt shape for one closed action.
+    #[allow(clippy::single_match, clippy::collapsible_match)]
+    fn validate_v2_reactive_opaque_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::ReactiveCompactedOpaqueText {
                 removed_user_text,
                 removed_assistant_text,
@@ -2441,6 +2763,19 @@ impl FakeState {
                     ));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the agent prompt shape for one closed action.
+    fn validate_v2_agent_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::AgentStartCall { .. } => {
                 let expects_agent_watch = self.v2()?.lanes.iter().any(|lane| {
                     lane.actions
@@ -2578,7 +2913,7 @@ impl FakeState {
                     AgentWatchResultExpectationV2::DispatchUncertainUnknown => {
                         format!(
                             "Watching agent `{child_agent_id}`; current status: \
-                             dispatch uncertain (unknown)"
+                     dispatch uncertain (unknown)"
                         )
                     }
                 };
@@ -2610,10 +2945,36 @@ impl FakeState {
                     ));
                 }
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the watch prompt shape for one closed action.
+    fn validate_v2_watch_action(
+        &mut self,
+        cursor: usize,
+        _prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::WatchNotifications { .. }
             | ScenarioActionV2::WatchNotificationChains { .. } => {
                 return Err(self.mismatch(cursor, "watch batch bypassed bounded release"));
             }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Validates the core prompt shape for one closed action.
+    fn validate_v2_core_action(
+        &mut self,
+        cursor: usize,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<()> {
+        match action {
             ScenarioActionV2::CoreShellWorkdirCall { .. }
             | ScenarioActionV2::CoreShellResumeEditCall { .. } => {
                 let mut names = prompt
