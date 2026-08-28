@@ -1121,7 +1121,7 @@ fn journal_snapshot_rejects_lock_held_checkpoint_sequence_mismatch() {
         .expect("creation");
     let checkpoint_path = temp.path().join(agent_id.as_str()).join("meta.json");
     let mut checkpoint = read_checkpoint(&checkpoint_path).expect("checkpoint");
-    checkpoint.journal.next_seq += 1;
+    checkpoint.journal.next_seq = checkpoint.journal.next_seq.next();
     fs::write(
         &checkpoint_path,
         serde_json::to_vec(&checkpoint).expect("encode checkpoint"),

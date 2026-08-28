@@ -1044,7 +1044,10 @@ fn agent_checkpoint_is_published_before_clean_release() {
     )
     .expect("decode checkpoint");
     assert_eq!(checkpoint.agent_id, agent_id);
-    assert_eq!(checkpoint.journal.next_seq, 1);
+    assert_eq!(
+        checkpoint.journal.next_seq,
+        crate::PersistedAgentEventSeq::new(1)
+    );
     assert!(checkpoint.journal.covered_bytes > 8);
 }
 

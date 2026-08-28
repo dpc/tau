@@ -799,6 +799,29 @@ fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
+/// Old schema-v2 checkpoint JSON keeps its numeric `next_seq` scalar while
+/// deserializing into the semantic sequence and advancing only within that
+/// domain.
+#[test]
+fn agent_checkpoint_sequence_decodes_legacy_scalar_and_advances_semantically() {
+    let checkpoint: crate::AgentJournalCheckpoint = serde_json::from_value(serde_json::json!({
+        "device": 1,
+        "inode": 2,
+        "covered_bytes": 0,
+        "next_seq": 0,
+        "boundary_window_len": 0,
+        "boundary_blake3_128": "",
+    }))
+    .expect("legacy schema-v2 checkpoint decodes");
+
+    assert_eq!(checkpoint.next_seq, PersistedAgentEventSeq::new(0));
+    assert_eq!(checkpoint.next_seq.next(), PersistedAgentEventSeq::new(1));
+    assert_eq!(
+        serde_json::to_value(checkpoint).expect("checkpoint serializes")["next_seq"],
+        0
+    );
+}
+
 /// A valid checkpoint must make fresh listing independent of journal payload
 /// size and a post-checkpoint append must repair only its validated suffix.
 #[test]
@@ -840,7 +863,7 @@ fn agent_checkpoint_lists_fresh_and_repairs_a_suffix() {
     let checkpoint: crate::AgentCheckpoint =
         serde_json::from_slice(&std::fs::read(&checkpoint_path).expect("repaired checkpoint"))
             .expect("decode checkpoint");
-    assert_eq!(checkpoint.journal.next_seq, 3);
+    assert_eq!(checkpoint.journal.next_seq, PersistedAgentEventSeq::new(3));
     assert_eq!(
         checkpoint.journal.covered_bytes,
         std::fs::metadata(agents_dir.join("agent-1/events.cbor"))

@@ -83,7 +83,7 @@ pub struct AgentJournalCheckpoint {
     /// Exact offset immediately after the last folded frame.
     pub covered_bytes: u64,
     /// Sequence expected for the first suffix record.
-    pub next_seq: u64,
+    pub next_seq: PersistedAgentEventSeq,
     /// Number of bytes used by the boundary witness.
     pub boundary_window_len: u8,
     /// Lowercase BLAKE3-128 digest of the covered prefix boundary.
@@ -176,7 +176,7 @@ impl AgentCheckpoint {
                 device: position.device,
                 inode: position.inode,
                 covered_bytes: position.end_offset,
-                next_seq: next_seq.get(),
+                next_seq,
                 boundary_window_len: u8::try_from(position.boundary.len())
                     .expect("boundary is at most 64 bytes"),
                 boundary_blake3_128: boundary_digest(&position.boundary),
@@ -437,8 +437,10 @@ fn checkpoint_is_structurally_valid(checkpoint: &AgentCheckpoint) -> bool {
             .boundary_blake3_128
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        && ((checkpoint.journal.covered_bytes == 0 && checkpoint.journal.next_seq == 0)
-            || (checkpoint.journal.covered_bytes >= 8 && checkpoint.journal.next_seq != 0))
+        && ((checkpoint.journal.covered_bytes == 0
+            && checkpoint.journal.next_seq == PersistedAgentEventSeq::new(0))
+            || (checkpoint.journal.covered_bytes >= 8
+                && checkpoint.journal.next_seq != PersistedAgentEventSeq::new(0)))
 }
 
 fn try_bounded_suffix_repair(
@@ -513,7 +515,7 @@ fn try_bounded_suffix_repair(
                 &mut journal,
                 remaining_file_bytes.min(MAX_REPAIR_BYTES_PER_AGENT),
             )?;
-            let expected = PersistedAgentEventSeq::new(checkpoint.journal.next_seq);
+            let expected = checkpoint.journal.next_seq;
             if record.seq != expected {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -521,7 +523,7 @@ fn try_bounded_suffix_repair(
                 ));
             }
             checkpoint.summary.apply(&record);
-            checkpoint.journal.next_seq += 1;
+            checkpoint.journal.next_seq = checkpoint.journal.next_seq.next();
             records += 1;
         }
         let position = journal_position(&mut journal)?;
