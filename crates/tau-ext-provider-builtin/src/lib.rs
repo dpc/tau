@@ -3733,6 +3733,7 @@ where
                     decision,
                     live_detail,
                     canonical_unauthorized,
+                    terminal_backend,
                 }) => {
                     if self.input_closed
                         || job.cancel_generation != self.cancel_generation
@@ -3807,6 +3808,7 @@ where
                             "provider retry budget exhausted during standalone compaction",
                         );
                         finished.provider_attempt = attempt;
+                        finished.backend = terminal_backend;
                         handle.send(HarnessInputMessage::emit_transient(
                             Event::ProviderResponseFinishedReported(finished),
                         ))?;
@@ -5072,6 +5074,9 @@ enum WorkerMessage {
         /// Whether an exact canonical 401 authorizes forced credential
         /// recovery.
         canonical_unauthorized: bool,
+        /// Backend reached by the failed attempt, retained if finite retry
+        /// policy synthesizes a terminal.
+        terminal_backend: Option<ProviderBackend>,
     },
     /// A delayed logical prompt whose retry deadline has arrived.
     RetryDue(PromptJob),
@@ -5494,6 +5499,7 @@ fn production_prompt_executor() -> PromptExecutor {
                         decision: retry.decision,
                         live_detail: retry.live_detail,
                         canonical_unauthorized: retry.canonical_unauthorized,
+                        terminal_backend: retry.terminal_backend,
                     },
                 );
             }
@@ -6461,6 +6467,7 @@ where
             decision: RetryDecision::new(RetryClass::Auth),
             live_detail: None,
             canonical_unauthorized: false,
+            terminal_backend: None,
         })),
         PromptBackend::Responses(config) => handle_prompt(
             agent_prompt_id,
@@ -6506,8 +6513,14 @@ where
     R: TurnAbort,
 {
     if TurnAbort::is_aborted(retry_ctx) {
-        finish_canceled(agent_prompt_id, prompt, writer)?;
-        return Ok(None);
+        return finish_canceled_attempt(
+            agent_prompt_id,
+            prompt,
+            writer,
+            false,
+            None,
+            context.logical_attempt.provider_attempt(),
+        );
     }
     let outcome = run_prompt_attempt(
         agent_prompt_id,
@@ -6518,6 +6531,7 @@ where
         writer,
         &mut || TurnAbort::is_aborted(retry_ctx),
         context.runtime.network(),
+        context.logical_attempt.provider_attempt(),
     );
     match outcome {
         ChatCompletionsAttemptOutcome::Finished(finished) => finish_backend_attempt(
@@ -6527,7 +6541,10 @@ where
             retry_ctx,
             *finished,
             true,
-            "request canceled; discarding tentative provider output",
+            CancellationFinishPolicy {
+                detail: "request canceled; discarding tentative provider output",
+                retain_correlation: true,
+            },
         ),
         ChatCompletionsAttemptOutcome::Terminal { finished, progress } => finish_terminal_attempt(
             agent_prompt_id,
@@ -6536,19 +6553,38 @@ where
             *finished,
             progress == tau_provider_chat_completions::SemanticProgress::Parsed,
         ),
-        ChatCompletionsAttemptOutcome::Retry { decision, progress } => finish_retry_attempt(
+        ChatCompletionsAttemptOutcome::Retry {
+            decision,
+            progress,
+            backend_reached,
+        } => finish_retry_attempt(
             agent_prompt_id,
             prompt,
             writer,
             decision,
             progress == tau_provider_chat_completions::SemanticProgress::Parsed,
+            backend_reached.then(|| chat_completions_backend(provider)),
         ),
-        ChatCompletionsAttemptOutcome::Canceled { progress } => finish_canceled_attempt(
+        ChatCompletionsAttemptOutcome::Canceled { progress, facts } => finish_canceled_attempt(
             agent_prompt_id,
             prompt,
             writer,
             progress == tau_provider_chat_completions::SemanticProgress::Parsed,
+            facts
+                .backend_reached
+                .then(|| chat_completions_backend(provider)),
+            facts.provider_attempt,
         ),
+    }
+}
+
+/// Build terminal routing metadata for a reached Chat Completions backend.
+fn chat_completions_backend(provider: &ChatCompletionsProvider) -> ProviderBackend {
+    ProviderBackend {
+        kind: ProviderBackendKind::ChatCompletions,
+        base_url: provider.base_url.clone(),
+        transport: ProviderBackendTransport::HttpSse,
+        stale_chain_fallback: false,
     }
 }
 
@@ -6586,7 +6622,10 @@ where
             retry_ctx,
             *finished,
             true,
-            "request canceled; discarding tentative provider output",
+            CancellationFinishPolicy {
+                detail: "request canceled; discarding tentative provider output",
+                retain_correlation: false,
+            },
         ),
         ResponsesAttemptOutcome::Terminal { finished, progress } => finish_terminal_attempt(
             agent_prompt_id,
@@ -6601,14 +6640,25 @@ where
             writer,
             decision,
             progress.has_timed_semantic_output,
+            None,
         ),
         ResponsesAttemptOutcome::Canceled { progress } => finish_canceled_attempt(
             agent_prompt_id,
             prompt,
             writer,
             progress.has_timed_semantic_output,
+            None,
+            tau_proto::ProviderAttempt::ONE,
         ),
     }
+}
+
+/// Emits a successful final response unless a concurrent cancellation won.
+struct CancellationFinishPolicy {
+    /// Transient detail emitted when tentative output must be cleared.
+    detail: &'static str,
+    /// Whether the cancellation terminal retains backend/attempt correlation.
+    retain_correlation: bool,
 }
 
 /// Emits a successful final response unless a concurrent cancellation won.
@@ -6619,7 +6669,7 @@ fn finish_backend_attempt<R, W: Write>(
     retry_ctx: &mut R,
     finished: ProviderResponseFinished,
     has_partial_output: bool,
-    cancellation_detail: &str,
+    cancellation: CancellationFinishPolicy,
 ) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
 where
     R: TurnAbort,
@@ -6630,9 +6680,19 @@ where
             prompt,
             writer,
             has_partial_output,
-            cancellation_detail,
+            cancellation.detail,
         )?;
-        finish_canceled(agent_prompt_id, prompt, writer)?;
+        if cancellation.retain_correlation {
+            emit_canceled_correlated(
+                agent_prompt_id,
+                prompt,
+                writer,
+                finished.backend,
+                finished.provider_attempt,
+            )?;
+        } else {
+            finish_canceled(agent_prompt_id, prompt, writer)?;
+        }
         return Ok(None);
     }
     emit_finished_backend_response(writer, finished)?;
@@ -6666,6 +6726,7 @@ fn finish_retry_attempt<W: Write>(
     writer: &mut PeerOutputWriter<W>,
     decision: RetryDecision,
     has_partial_output: bool,
+    terminal_backend: Option<ProviderBackend>,
 ) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>> {
     clear_partial_backend_response(
         agent_prompt_id,
@@ -6678,6 +6739,7 @@ fn finish_retry_attempt<W: Write>(
         decision,
         live_detail: None,
         canonical_unauthorized: false,
+        terminal_backend,
     }))
 }
 
@@ -6687,6 +6749,8 @@ fn finish_canceled_attempt<W: Write>(
     prompt: &tau_proto::AgentPromptCreated,
     writer: &mut PeerOutputWriter<W>,
     has_partial_output: bool,
+    backend: Option<ProviderBackend>,
+    provider_attempt: tau_proto::ProviderAttempt,
 ) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>> {
     clear_partial_backend_response(
         agent_prompt_id,
@@ -6695,8 +6759,28 @@ fn finish_canceled_attempt<W: Write>(
         has_partial_output,
         "request canceled; discarding partial provider output",
     )?;
-    finish_canceled(agent_prompt_id, prompt, writer)?;
+    emit_canceled_correlated(agent_prompt_id, prompt, writer, backend, provider_attempt)?;
     Ok(None)
+}
+
+/// Emit one cancellation terminal while retaining attempt correlation.
+fn emit_canceled_correlated<W: Write>(
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    writer: &mut PeerOutputWriter<W>,
+    backend: Option<ProviderBackend>,
+    provider_attempt: tau_proto::ProviderAttempt,
+) -> Result<(), Box<dyn Error>> {
+    let mut finished = simple_finished(
+        agent_prompt_id.clone(),
+        prompt.agent_id.clone(),
+        prompt.originator.clone(),
+        "(cancelled by harness)",
+    );
+    finished.backend = backend;
+    finished.provider_attempt = provider_attempt;
+    emit_finished_backend_response(writer, finished)?;
+    Ok(())
 }
 
 /// Clears partial provider text only when the backend reported semantic output.
@@ -6772,6 +6856,8 @@ struct PromptAttemptRetry {
     /// Canonical provider 401 authority for exact-generation credential
     /// recovery.
     canonical_unauthorized: bool,
+    /// Backend reached by this attempt for a synthesized retry-budget terminal.
+    terminal_backend: Option<ProviderBackend>,
 }
 
 fn handle_compact_prompt<R, W: Write>(
@@ -6815,6 +6901,7 @@ where
             decision,
             live_detail: None,
             canonical_unauthorized: false,
+            terminal_backend: None,
         })),
         CompactOutcome::Canceled => {
             finish_canceled(agent_prompt_id, prompt, writer)?;
@@ -7057,6 +7144,7 @@ where
                 decision,
                 live_detail,
                 canonical_unauthorized,
+                terminal_backend: None,
             }));
         }
         CodexAttemptOutcome::Terminal {

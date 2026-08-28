@@ -3,8 +3,10 @@
 //! Component responsibilities and provider/replay trust boundaries are
 //! documented in `ARCH-tau-provider-chat-completions`.
 
+mod canonical_identifier;
 mod compact_stream;
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
 use std::io::Read;
@@ -13,6 +15,7 @@ use std::{cell as path_std_cell, io as path_std_io};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use canonical_identifier::CanonicalIdentifierFamily;
 use serde::Serialize;
 #[cfg(test)]
 use tau_proto::ToolResultStatus;
@@ -31,6 +34,33 @@ use tau_provider::{
 use tokio::runtime as path_tokio_runtime;
 
 const LOG_TARGET: &str = "provider-chat-completions";
+
+#[cfg(test)]
+thread_local! {
+    /// Attempt-path capture sink used only by focused transport tests.
+    static TEST_DEBUG_CAPTURES: std::cell::RefCell<Option<Vec<path_tau_provider_debug_capture_writer::ProviderDebugCapture>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Submit one private capture through production transport or the focused test
+/// sink.
+fn submit_provider_capture(capture: path_tau_provider_debug_capture_writer::ProviderDebugCapture) {
+    #[cfg(test)]
+    let mut capture = Some(capture);
+    #[cfg(test)]
+    if TEST_DEBUG_CAPTURES.with(|captures| {
+        let mut captures = captures.borrow_mut();
+        captures.as_mut().is_some_and(|sink| {
+            sink.push(capture.take().expect("capture is submitted once"));
+            true
+        })
+    }) {
+        return;
+    }
+    #[cfg(test)]
+    let capture = capture.expect("test sink did not consume capture");
+    tau_provider::debug_capture_writer::submit_provider_debug_capture(capture);
+}
 /// Default Chat Completions output-token cap Tau sends when no
 /// provider-specific override is set.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
@@ -243,26 +273,14 @@ enum ErrorClassification {
 
 impl ErrorClassification {
     fn from_http_error(status: u16, body: &str) -> Self {
-        Self::from_structured_identifiers(
-            canonical_error_identifiers(body).iter().map(String::as_str),
-        )
-        .unwrap_or_else(|| Self::from_numeric_status(status))
-    }
-
-    fn from_structured_identifiers<'identifier>(
-        identifiers: impl IntoIterator<Item = &'identifier str>,
-    ) -> Option<Self> {
-        let identifiers = identifiers.into_iter().collect::<Vec<_>>();
-        if identifiers.contains(&"context_length_exceeded") {
-            return Some(Self::Terminal(
-                tau_proto::ProviderFailureKind::ContextWindowExceeded,
-            ));
-        }
-        identifiers
-            .into_iter()
-            .map(classify_error_code)
-            .find(|class| *class != RetryClass::Unknown)
-            .map(Self::Retry)
+        serde_json::from_str(body)
+            .ok()
+            .and_then(|value| {
+                CanonicalIdentifierFamily::from_http_envelope(&value)
+                    .classified()
+                    .and_then(classify_structured_identifier)
+            })
+            .unwrap_or_else(|| Self::from_numeric_status(status))
     }
 
     fn from_numeric_status(status: u16) -> Self {
@@ -385,25 +403,22 @@ fn http_failure_kind(status: u16, body: &str) -> Option<tau_proto::ProviderFailu
     }
 }
 
-fn canonical_error_identifiers(body: &str) -> Vec<String> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
-        return Vec::new();
-    };
-    value
-        .get("error")
-        .into_iter()
-        .flat_map(|error| {
-            ["code", "type"]
-                .into_iter()
-                .filter_map(|field| error[field].as_str())
-        })
-        .map(ToOwned::to_owned)
-        .collect()
+fn classify_structured_identifier(identifier: &str) -> Option<ErrorClassification> {
+    if identifier == "context_length_exceeded" {
+        Some(ErrorClassification::Terminal(
+            tau_proto::ProviderFailureKind::ContextWindowExceeded,
+        ))
+    } else {
+        let class = classify_error_code(identifier);
+        (class != RetryClass::Unknown).then_some(ErrorClassification::Retry(class))
+    }
 }
 
 /// Successful parsed result of one finite backend attempt.
 #[derive(Debug)]
 pub struct AttemptSuccess {
+    /// Attempt correlation and backend reachability.
+    pub facts: AttemptFacts,
     /// Parsed semantic output items in provider order.
     pub output_items: Vec<ContextItem>,
     /// Provider stop reason.
@@ -428,6 +443,8 @@ pub struct AttemptOutputItem {
 /// Typed terminal backend failure.
 #[derive(Debug)]
 pub struct AttemptFailure {
+    /// Attempt correlation and backend reachability.
+    pub facts: AttemptFacts,
     /// Bounded safe diagnostic suitable for the final provider event.
     pub message: String,
     /// Durable closed failure category, when known.
@@ -448,6 +465,67 @@ pub enum SemanticProgress {
     Parsed,
 }
 
+/// Correlation and reachability facts for one finite Chat attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AttemptFacts {
+    /// One-based scheduler attempt owning this finite operation.
+    pub provider_attempt: tau_proto::ProviderAttempt,
+    /// Number of actual request dispatches within the logical attempt.
+    pub wire_dispatches: u64,
+    /// Whether a request crossed the provider egress boundary.
+    pub backend_reached: bool,
+}
+
+/// Typed lifecycle state owned by one finite Chat provider attempt.
+struct ProviderAttemptContext {
+    /// Operation whose policy consumes the normalized evidence.
+    operation: tau_proto::PromptOperation,
+    /// One-based scheduler attempt.
+    provider_attempt: tau_proto::ProviderAttempt,
+    /// Actual upstream request dispatches.
+    wire_dispatches: Cell<u64>,
+    /// Sticky parser-accepted semantic progress.
+    progress: Cell<SemanticProgress>,
+}
+
+impl ProviderAttemptContext {
+    /// Start one operation before provider egress.
+    fn new(
+        operation: tau_proto::PromptOperation,
+        provider_attempt: tau_proto::ProviderAttempt,
+    ) -> Self {
+        Self {
+            operation,
+            provider_attempt,
+            wire_dispatches: Cell::new(0),
+            progress: Cell::new(SemanticProgress::None),
+        }
+    }
+
+    /// Retain semantic progress monotonically.
+    fn observe(&self, progress: SemanticProgress) {
+        if progress == SemanticProgress::Parsed {
+            self.progress.set(SemanticProgress::Parsed);
+        }
+    }
+
+    /// Record one actual provider dispatch.
+    fn dispatched(&self) {
+        self.wire_dispatches
+            .set(self.wire_dispatches.get().saturating_add(1));
+    }
+
+    /// Close immutable correlation and reachability facts.
+    fn facts(&self) -> AttemptFacts {
+        let wire_dispatches = self.wire_dispatches.get();
+        AttemptFacts {
+            provider_attempt: self.provider_attempt,
+            wire_dispatches,
+            backend_reached: wire_dispatches != 0,
+        }
+    }
+}
+
 /// Result of exactly one Chat Completions backend attempt.
 #[derive(Debug)]
 pub enum AttemptOutcome {
@@ -459,11 +537,15 @@ pub enum AttemptOutcome {
         decision: RetryDecision,
         /// Semantic progress parsed before the failure.
         progress: SemanticProgress,
+        /// Attempt correlation and backend reachability.
+        facts: AttemptFacts,
     },
     /// The harness canceled the active attempt.
     Canceled {
         /// Semantic progress parsed before cancellation.
         progress: SemanticProgress,
+        /// Attempt correlation and backend reachability.
+        facts: AttemptFacts,
     },
     /// The provider deterministically rejected the request or stream.
     Terminal(AttemptFailure),
@@ -522,18 +604,45 @@ pub fn run_attempt(
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
-    let mut progress = SemanticProgress::None;
+    run_attempt_numbered(
+        tau_proto::ProviderAttempt::ONE,
+        prompt,
+        config,
+        model,
+        debug_provider_requests,
+        on_update,
+        is_canceled,
+        network,
+    )
+}
+
+/// Run one finite provider attempt with scheduler-owned correlation.
+#[allow(clippy::too_many_arguments)]
+pub fn run_attempt_numbered(
+    provider_attempt: tau_proto::ProviderAttempt,
+    prompt: &tau_proto::AgentPromptCreated,
+    config: &AttemptConfig,
+    model: &AttemptModel,
+    debug_provider_requests: bool,
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> AttemptOutcome {
+    let attempt = ProviderAttemptContext::new(prompt.operation, provider_attempt);
+    debug_assert_eq!(attempt.operation, prompt.operation);
     let result = {
         let on_attempt_update = path_std_cell::RefCell::new(on_update);
         let mut on_state_update = |state: &StreamState| {
             let snapshot = AttemptProgress { state };
-            progress = snapshot.semantic_progress();
+            attempt.observe(snapshot.semantic_progress());
             on_attempt_update.borrow_mut()(AttemptUpdate::Progress(snapshot));
         };
         let mut on_dispatched = |at| {
+            attempt.dispatched();
             on_attempt_update.borrow_mut()(AttemptUpdate::Dispatched(at));
         };
         chat_completions_stream(
+            provider_attempt,
             config,
             model,
             prompt,
@@ -544,25 +653,48 @@ pub fn run_attempt(
             network,
         )
     };
-    finish_attempt(result, progress)
+    finish_attempt_with_facts(result, attempt.progress.get(), attempt.facts())
 }
 
+#[cfg(test)]
 fn finish_attempt(
     result: Result<StreamState, LlmError>,
     progress: SemanticProgress,
 ) -> AttemptOutcome {
+    finish_attempt_with_facts(
+        result,
+        progress,
+        AttemptFacts {
+            provider_attempt: tau_proto::ProviderAttempt::ONE,
+            wire_dispatches: 0,
+            backend_reached: false,
+        },
+    )
+}
+
+fn finish_attempt_with_facts(
+    result: Result<StreamState, LlmError>,
+    progress: SemanticProgress,
+    facts: AttemptFacts,
+) -> AttemptOutcome {
     match result {
         Ok(state) => AttemptOutcome::Completed(AttemptSuccess {
+            facts,
             progress_items: state.indexed_output_items(),
             output_items: state.output_items(),
             stop_reason: state.stop_reason,
             usage: state.usage(),
             response_bytes_received: state.response_bytes_received(),
         }),
-        Err(LlmError::Canceled) => AttemptOutcome::Canceled { progress },
+        Err(LlmError::Canceled) => AttemptOutcome::Canceled { progress, facts },
         Err(error) => match error.retry_decision() {
-            Some(decision) => AttemptOutcome::Retryable { decision, progress },
+            Some(decision) => AttemptOutcome::Retryable {
+                decision,
+                progress,
+                facts,
+            },
             None => AttemptOutcome::Terminal(AttemptFailure {
+                facts,
                 message: bounded_provider_error(&format!("LLM error: {error}")),
                 failure_kind: error.failure_kind(),
                 stop_reason: if matches!(error, LlmError::RepetitionDetected(_)) {
@@ -1043,6 +1175,7 @@ fn apply_chat_stream_lines(
 
 #[allow(clippy::too_many_arguments)] // Dispatch and state callbacks have distinct timing ownership.
 fn chat_completions_stream(
+    provider_attempt: tau_proto::ProviderAttempt,
     provider: &AttemptConfig,
     model: &AttemptModel,
     prompt: &tau_proto::AgentPromptCreated,
@@ -1062,27 +1195,49 @@ fn chat_completions_stream(
     );
     let body = try_build_request(provider, model, prompt)?;
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
-    // The standalone compactor transaction deliberately persists only its
-    // accepted checkpoint. Never let opt-in debug capture retain its full input.
-    maybe_debug_submit_provider_request(prompt, model, debug_provider_requests, &body);
     let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(LlmError::Io)?;
-    let (mut state, raw_events) = runtime.block_on(chat_completions_stream_async(
+    let mut on_wire_dispatch = |at| {
+        // The standalone compactor transaction deliberately persists only its
+        // accepted checkpoint. Debug capture remains private observability.
+        maybe_debug_submit_provider_request(
+            prompt,
+            model,
+            debug_provider_requests,
+            &body,
+            provider_attempt,
+            1,
+        );
+        on_dispatched(at);
+    };
+    let result = runtime.block_on(chat_completions_stream_async(
         AsyncAttemptContext {
             url: &url,
             provider,
             body: &body_str,
             prompt,
-            model,
-            debug_provider_requests,
         },
         on_update,
-        on_dispatched,
+        &mut on_wire_dispatch,
         is_canceled,
         network,
-    ))?;
+    ));
+    let (mut state, raw_events) = match result {
+        Ok(success) => success,
+        Err(error) => {
+            finalize_provider_capture(
+                prompt,
+                model,
+                debug_provider_requests,
+                provider_attempt,
+                None,
+                &error,
+            );
+            return Err(error);
+        }
+    };
     flush_pending_content(&mut state, on_update)?;
     maybe_debug_submit_provider_response(
         prompt,
@@ -1090,6 +1245,8 @@ fn chat_completions_stream(
         debug_provider_requests,
         &state,
         &raw_events,
+        provider_attempt,
+        1,
     );
     ensure_non_empty_end_turn(state.validate_compaction()?)
 }
@@ -1110,10 +1267,6 @@ struct AsyncAttemptContext<'a> {
     body: &'a str,
     /// Logical prompt used for diagnostics.
     prompt: &'a tau_proto::AgentPromptCreated,
-    /// Selected model used for diagnostics.
-    model: &'a AttemptModel,
-    /// Whether durable-session private diagnostics are allowed.
-    debug_provider_requests: bool,
 }
 
 async fn chat_completions_stream_async(
@@ -1199,13 +1352,6 @@ async fn chat_completions_stream_async(
             }
         }
         let body = String::from_utf8_lossy(&bytes).into_owned();
-        maybe_debug_submit_provider_http_error(
-            context.prompt,
-            context.model,
-            context.debug_provider_requests,
-            code,
-            &body,
-        );
         return Err(match retry_after {
             Some(delay) => LlmError::HttpStatusHinted(code, body, delay),
             None => LlmError::HttpStatus(code, body),
@@ -1497,6 +1643,8 @@ fn build_request(
 fn debug_file_prefix(
     prompt: &tau_proto::AgentPromptCreated,
     model: &AttemptModel,
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: u64,
 ) -> serde_json::Value {
     serde_json::json!({
         "session_id": prompt.session_id,
@@ -1504,6 +1652,12 @@ fn debug_file_prefix(
         "transport": "http-sse",
         "backend": "chat_completions",
         "model": model.id,
+        "operation": match prompt.operation {
+            tau_proto::PromptOperation::Inference => "inference",
+            tau_proto::PromptOperation::StandaloneCompaction => "compact",
+        },
+        "logical_attempt": provider_attempt.get(),
+        "wire_dispatch_index": wire_dispatch_index,
     })
 }
 
@@ -1532,6 +1686,8 @@ fn provider_request_debug_metadata(
     prompt: &tau_proto::AgentPromptCreated,
     model: &AttemptModel,
     body: &ChatRequest,
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: u64,
 ) -> serde_json::Value {
     let mut body = serde_json::to_value(body).expect("Chat request serializes");
     redact_image_data_urls(&mut body);
@@ -1545,6 +1701,12 @@ fn provider_request_debug_metadata(
         "tool_count": prompt.tools.len(),
         "tool_choice": prompt.tool_choice,
         "body": body,
+        "operation": match prompt.operation {
+            tau_proto::PromptOperation::Inference => "inference",
+            tau_proto::PromptOperation::StandaloneCompaction => "compact",
+        },
+        "logical_attempt": provider_attempt.get(),
+        "wire_dispatch_index": wire_dispatch_index,
     })
 }
 
@@ -1575,13 +1737,17 @@ fn maybe_debug_submit_provider_request(
     model: &AttemptModel,
     debug_provider_requests: bool,
     body: &ChatRequest,
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: u64,
 ) {
     maybe_debug_submit_provider_request_with(
         prompt,
         model,
         debug_provider_requests,
         body,
-        tau_provider::debug_capture_writer::submit_provider_debug_capture,
+        provider_attempt,
+        wire_dispatch_index,
+        submit_provider_capture,
     );
 }
 
@@ -1590,9 +1756,12 @@ fn maybe_debug_submit_provider_request_with(
     model: &AttemptModel,
     debug_provider_requests: bool,
     body: &ChatRequest,
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: u64,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) {
-    let metadata = provider_request_debug_metadata(prompt, model, body);
+    let metadata =
+        provider_request_debug_metadata(prompt, model, body, provider_attempt, wire_dispatch_index);
     if let Err(error) = submit_debug_json_with(
         prompt,
         path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest,
@@ -1615,6 +1784,8 @@ fn maybe_debug_submit_provider_response(
     debug_provider_requests: bool,
     state: &StreamState,
     raw_events: &[serde_json::Value],
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: u64,
 ) {
     maybe_debug_submit_provider_response_with(
         prompt,
@@ -1622,19 +1793,31 @@ fn maybe_debug_submit_provider_response(
         debug_provider_requests,
         state,
         raw_events,
-        tau_provider::debug_capture_writer::submit_provider_debug_capture,
+        provider_attempt,
+        wire_dispatch_index,
+        submit_provider_capture,
     );
 }
 
+#[allow(clippy::too_many_arguments)] // Capture payload and injectable sink have distinct test ownership.
 fn maybe_debug_submit_provider_response_with(
     prompt: &tau_proto::AgentPromptCreated,
     model: &AttemptModel,
     debug_provider_requests: bool,
     state: &StreamState,
     raw_events: &[serde_json::Value],
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: u64,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) {
-    let metadata = provider_response_debug_metadata(prompt, model, state, raw_events);
+    let metadata = provider_response_debug_metadata(
+        prompt,
+        model,
+        state,
+        raw_events,
+        provider_attempt,
+        wire_dispatch_index,
+    );
     if let Err(error) = submit_debug_json_with(
         prompt,
         path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse,
@@ -1656,8 +1839,10 @@ fn provider_response_debug_metadata(
     model: &AttemptModel,
     state: &StreamState,
     raw_events: &[serde_json::Value],
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: u64,
 ) -> serde_json::Value {
-    let mut metadata = debug_file_prefix(prompt, model);
+    let mut metadata = debug_file_prefix(prompt, model, provider_attempt, wire_dispatch_index);
     if let serde_json::Value::Object(map) = &mut metadata {
         map.insert(
             "usage".to_owned(),
@@ -1685,6 +1870,8 @@ fn maybe_debug_submit_provider_http_error(
     debug_provider_requests: bool,
     status: u16,
     body: &str,
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: u64,
 ) {
     maybe_debug_submit_provider_http_error_with(
         prompt,
@@ -1692,19 +1879,65 @@ fn maybe_debug_submit_provider_http_error(
         debug_provider_requests,
         status,
         body,
-        tau_provider::debug_capture_writer::submit_provider_debug_capture,
+        provider_attempt,
+        wire_dispatch_index,
+        submit_provider_capture,
     );
 }
 
+/// Finalize the one failure-side provider capture for an attempt.
+fn finalize_provider_capture(
+    prompt: &tau_proto::AgentPromptCreated,
+    model: &AttemptModel,
+    debug_provider_requests: bool,
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: Option<u64>,
+    error: &LlmError,
+) {
+    let Some(wire_dispatch_index) = wire_dispatch_index.or_else(|| {
+        matches!(
+            error,
+            LlmError::HttpStatus(..) | LlmError::HttpStatusHinted(..)
+        )
+        .then_some(1)
+    }) else {
+        return;
+    };
+    match error {
+        LlmError::HttpStatus(status, body) | LlmError::HttpStatusHinted(status, body, _) => {
+            maybe_debug_submit_provider_http_error(
+                prompt,
+                model,
+                debug_provider_requests,
+                *status,
+                body,
+                provider_attempt,
+                wire_dispatch_index,
+            );
+        }
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // Capture payload and injectable sink have distinct test ownership.
 fn maybe_debug_submit_provider_http_error_with(
     prompt: &tau_proto::AgentPromptCreated,
     model: &AttemptModel,
     debug_provider_requests: bool,
     status: u16,
     body: &str,
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: u64,
     submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
 ) {
-    let metadata = provider_http_error_debug_metadata(prompt, model, status, body);
+    let metadata = provider_http_error_debug_metadata(
+        prompt,
+        model,
+        status,
+        body,
+        provider_attempt,
+        wire_dispatch_index,
+    );
     if let Err(error) = submit_debug_json_with(
         prompt,
         path_tau_provider_debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse,
@@ -1726,8 +1959,10 @@ fn provider_http_error_debug_metadata(
     model: &AttemptModel,
     status: u16,
     body: &str,
+    provider_attempt: tau_proto::ProviderAttempt,
+    wire_dispatch_index: u64,
 ) -> serde_json::Value {
-    let mut metadata = debug_file_prefix(prompt, model);
+    let mut metadata = debug_file_prefix(prompt, model, provider_attempt, wire_dispatch_index);
     if let serde_json::Value::Object(map) = &mut metadata {
         map.insert("http_status".to_owned(), serde_json::json!(status));
         map.insert("body".to_owned(), serde_json::json!(body));
@@ -2031,27 +2266,19 @@ fn apply_stream_error(event: &serde_json::Value) -> Result<(), LlmError> {
 }
 
 fn classify_stream_error(error: &serde_json::Map<String, serde_json::Value>) -> StreamFailure {
-    let identifiers = [
-        error.get("code").and_then(serde_json::Value::as_str),
-        error.get("type").and_then(serde_json::Value::as_str),
-        error
-            .get("metadata")
-            .and_then(serde_json::Value::as_object)
-            .and_then(|metadata| metadata.get("error_type"))
-            .and_then(serde_json::Value::as_str),
-    ];
-    let classification =
-        ErrorClassification::from_structured_identifiers(identifiers.into_iter().flatten())
-            .unwrap_or_else(|| {
-                error
-                    .get("code")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|status| u16::try_from(status).ok())
-                    .map_or(
-                        ErrorClassification::Retry(RetryClass::Unknown),
-                        ErrorClassification::from_numeric_status,
-                    )
-            });
+    let classification = CanonicalIdentifierFamily::from_stream_error(error)
+        .classified()
+        .and_then(classify_structured_identifier)
+        .unwrap_or_else(|| {
+            error
+                .get("code")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|status| u16::try_from(status).ok())
+                .map_or(
+                    ErrorClassification::Retry(RetryClass::Unknown),
+                    ErrorClassification::from_numeric_status,
+                )
+        });
     match classification {
         ErrorClassification::Terminal(failure_kind) => StreamFailure {
             retry: None,

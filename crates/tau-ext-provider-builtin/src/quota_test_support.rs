@@ -55,6 +55,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
                     decision,
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("park fixture probe");

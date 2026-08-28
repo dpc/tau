@@ -487,10 +487,14 @@ fn run_prompt_attempt_terminalizes_truncated_local_summary() {
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
         "data: [DONE]\n\n"
     ));
-    assert!(matches!(
-        outcome,
-        super::attempt::PromptAttemptOutcome::Terminal { .. }
-    ));
+    let PromptAttemptOutcome::Terminal { finished, .. } = outcome else {
+        panic!("truncated compact output must terminalize");
+    };
+    assert_eq!(
+        finished.provider_attempt,
+        tau_proto::ProviderAttempt::new(3).expect("attempt")
+    );
+    assert!(finished.backend.is_some());
 }
 
 /// Ensures semantic output followed by a retryable provider failure terminates
@@ -586,6 +590,7 @@ fn run_scripted_local_summary_attempt(
         &mut writer,
         &mut || false,
         &tau_provider::OutboundNetworkPolicy::from_environment(BTreeMap::new(), None),
+        tau_proto::ProviderAttempt::new(3).expect("attempt"),
     );
     server.join().expect("join fixture");
     outcome

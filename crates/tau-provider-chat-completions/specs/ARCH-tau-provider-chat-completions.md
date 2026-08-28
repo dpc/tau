@@ -169,9 +169,23 @@ canonical image data URL.
 
 ## Terminal request rejection
 
-Canonical OpenAI-style `error.code`/`error.type` context-window rejections are returned as typed
-terminal failures before retry scheduling. Deterministic request 4xx responses are terminal,
-while explicit transport, throttle, authentication-repair, and server failures remain retryable.
+Canonical OpenAI-compatible identifiers are extracted in explicit root,
+`error`, then `response.error` code/type order for HTTP envelopes. Streamed
+errors retain their provider-specific `error.code`, `error.type`, and exact
+`error.metadata.error_type` spellings. Across either family, context exhaustion
+outranks transient identifiers, known transient identifiers outrank opaque
+ones, and provider prose or recursively nested metadata never classifies a
+failure. Operation-specific policy then maps this normalized evidence:
+context-window rejections are typed terminal failures, deterministic request
+4xx responses are terminal, and explicit transport, throttle,
+authentication-repair, and server failures remain retryable.
+
+Each finite operation carries its real one-based scheduler attempt, actual wire
+dispatch count, backend reachability, and sticky semantic progress. Terminal
+reports omit backend metadata when local request construction or route
+resolution fails before egress. Private request, response, and HTTP-error
+captures include operation plus logical/wire correlation, and failure capture
+is finalized once after transport returns.
 
 Retryable classifications feed the shared scheduler's closed structured status;
 the harness, not this adapter, owns watcher correlation and fanout.
@@ -204,14 +218,13 @@ provider/tool replay surface once the tool call is complete.
 
 ## Provider error authority
 
-Terminal context classification accepts the exact
-`context_length_exceeded` identifier only from canonical OpenAI-style
-`error.code` and `error.type` fields. Streamed error classification additionally
-accepts that same context-window identifier and the bounded retry-class
-identifier set in `tau_provider::retry_policy::classify_error_code` from the
-well-known `error.metadata.error_type` field. This nested path supports typed
-context-window recovery and retry classes from providers that put the stream
-error identifier there.
+HTTP classification accepts exact identifiers from root `code`, root `type`,
+`error.code`, `error.type`, `response.error.code`, and
+`response.error.type`, in that envelope order. Streamed error classification
+accepts `error.code`, `error.type`, and the well-known
+`error.metadata.error_type` provider spelling. These paths accept the exact
+`context_length_exceeded` identifier and the bounded retry-class identifier set
+in `tau_provider::retry_policy::classify_error_code`.
 
 New structured paths for terminal context or streamed identifier classification
 may participate only after review documents their exact field path and bounded

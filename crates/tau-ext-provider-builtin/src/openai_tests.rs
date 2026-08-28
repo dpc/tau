@@ -801,6 +801,7 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
                         .with_retry_after(Some(Duration::from_secs(86_400))),
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("park old-profile prompt");
@@ -936,6 +937,7 @@ fn stale_old_identity_retry_cannot_park_new_profile_work() {
                     decision: RetryDecision::new(RetryClass::UsageWindow),
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("return stale shared evidence");
@@ -2241,6 +2243,7 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
                     decision: RetryDecision::new(RetryClass::Transport),
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("return retry outcome");
@@ -2386,6 +2389,12 @@ fn standalone_compaction_retry_policy_terminalizes_after_five_attempts() {
                 decision: RetryDecision::new(RetryClass::Transport),
                 live_detail: None,
                 canonical_unauthorized: false,
+                terminal_backend: Some(ProviderBackend {
+                    kind: ProviderBackendKind::ChatCompletions,
+                    base_url: "https://chat.example/v1".to_owned(),
+                    transport: ProviderBackendTransport::HttpSse,
+                    stale_chain_fallback: false,
+                }),
             },
         )
         .expect("return retry outcome");
@@ -2435,6 +2444,10 @@ fn standalone_compaction_retry_policy_terminalizes_after_five_attempts() {
                 Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.stop_reason == ProviderStopReason::Error
                         && finished.provider_attempt.get() == 5
+                        && finished.backend.as_ref().is_some_and(|backend| {
+                            backend.kind == ProviderBackendKind::ChatCompletions
+                                && backend.base_url == "https://chat.example/v1"
+                        })
             )
         })
     });
@@ -2451,6 +2464,32 @@ fn standalone_compaction_retry_policy_terminalizes_after_five_attempts() {
     );
     input.close();
     runtime.join().expect("standalone retry runtime joins");
+}
+
+/// Pre-egress Chat cancellation retains the scheduler ordinal while correctly
+/// omitting backend metadata.
+#[test]
+fn pre_egress_chat_cancellation_retains_attempt_without_backend() {
+    let prompt = prompt();
+    let mut bytes = Vec::new();
+    {
+        let mut writer = PeerOutputWriter::new(&mut bytes);
+        finish_canceled_attempt(
+            &prompt.agent_prompt_id,
+            &prompt,
+            &mut writer,
+            false,
+            None,
+            tau_proto::ProviderAttempt::new(3).expect("attempt"),
+        )
+        .expect("finish cancellation");
+    }
+    let frames = decode_frames(&bytes);
+    assert!(matches!(
+        input_event(&frames[0]),
+        Some(Event::ProviderResponseFinishedReported(finished))
+            if finished.provider_attempt.get() == 3 && finished.backend.is_none()
+    ));
 }
 
 /// The fifth transient compaction failure terminalizes that prompt but still
@@ -2488,6 +2527,7 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
                     decision: RetryDecision::new(RetryClass::Throttle),
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("return compaction retry");
@@ -2503,6 +2543,7 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
                     decision: RetryDecision::new(RetryClass::Throttle),
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("park peer retry");
@@ -2636,6 +2677,7 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
                     decision: RetryDecision::new(RetryClass::Transport),
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("park first attempt");
@@ -2758,6 +2800,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
                     decision,
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("install generated usage-window cooldown");
@@ -3209,6 +3252,7 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
                     .with_retry_after(Some(Duration::from_secs(86_400))),
                 live_detail: None,
                 canonical_unauthorized: false,
+                terminal_backend: None,
             },
         )
         .expect("park usage failure");
@@ -3325,6 +3369,7 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
                 decision: RetryDecision::new(RetryClass::Transport),
                 live_detail: None,
                 canonical_unauthorized: false,
+                terminal_backend: None,
             },
         )
         .expect("park attempt");
@@ -3444,6 +3489,7 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
                     decision: RetryDecision::new(RetryClass::Transport),
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("return retry");
@@ -3693,6 +3739,7 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
                         .with_retry_after(Some(Duration::from_secs(86_400))),
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("park limited prompt");
@@ -3865,6 +3912,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
                 decision: RetryDecision::new(RetryClass::Transport),
                 live_detail: None,
                 canonical_unauthorized: false,
+                terminal_backend: None,
             },
         )
         .expect("schedule profile reload");
@@ -3961,6 +4009,7 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
                     decision: RetryDecision::new(RetryClass::Transport),
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("schedule retry after partial output");
@@ -4167,6 +4216,7 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
                     decision: RetryDecision::new(class),
                     live_detail: None,
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("schedule family retry");
@@ -4312,6 +4362,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                             .with_retry_after(Some(Duration::from_secs(86_400))),
                         live_detail: None,
                         canonical_unauthorized: false,
+                        terminal_backend: None,
                     },
                 )
                 .expect("park delayed prompt");
@@ -4760,6 +4811,7 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
                     }),
                     live_detail: Some(live_detail.clone()),
                     canonical_unauthorized: false,
+                    terminal_backend: None,
                 },
             )
             .expect("schedule status fixture retry");
@@ -5165,6 +5217,7 @@ fn late_retry_after_targeted_cancel_is_not_rescheduled() {
                 decision: RetryDecision::new(RetryClass::Transport),
                 live_detail: None,
                 canonical_unauthorized: false,
+                terminal_backend: None,
             },
         )
         .expect("return late retry");

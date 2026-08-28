@@ -385,7 +385,8 @@ fn assert_reqwest_stall_is_canceled(after_headers: bool) {
         let model = configured.models[0].clone();
         let prompt = prompt();
         let resolved = resolved_provider(&configured);
-        let outcome = run_attempt(
+        let outcome = run_attempt_numbered(
+            tau_proto::ProviderAttempt::new(3).expect("attempt"),
             &prompt,
             &resolved,
             &model,
@@ -403,12 +404,18 @@ fn assert_reqwest_stall_is_canceled(after_headers: bool) {
         .recv_timeout(Duration::from_secs(2))
         .expect("reqwest request did not reach local peer");
     canceled.store(true, path_std_sync_atomic::Ordering::SeqCst);
-    assert!(matches!(
-        result_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("canceled reqwest attempt stayed blocked"),
-        AttemptOutcome::Canceled { .. }
-    ));
+    let AttemptOutcome::Canceled { facts, .. } = result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("canceled reqwest attempt stayed blocked")
+    else {
+        panic!("active cancellation must close the finite attempt");
+    };
+    assert_eq!(
+        facts.provider_attempt,
+        tau_proto::ProviderAttempt::new(3).expect("attempt")
+    );
+    assert!(facts.backend_reached);
+    assert_eq!(facts.wire_dispatches, 1);
     dropped_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("canceled reqwest future retained its TCP connection");
@@ -492,7 +499,9 @@ fn attempt_dispatch_precedes_backend_send_and_occurs_once() {
     let model = configured.models[0].clone();
     let resolved = resolved_provider(&configured);
     let mut dispatch_count = 0;
-    let outcome = run_attempt(
+    let provider_attempt = tau_proto::ProviderAttempt::new(3).expect("attempt");
+    let outcome = run_attempt_numbered(
+        provider_attempt,
         &prompt(),
         &resolved,
         &model,
@@ -511,7 +520,122 @@ fn attempt_dispatch_precedes_backend_send_and_occurs_once() {
     );
     server.finish();
     assert_eq!(dispatch_count, 1);
-    assert!(matches!(outcome, AttemptOutcome::Retryable { .. }));
+    let AttemptOutcome::Retryable { facts, .. } = outcome else {
+        panic!("closed peer must produce a retryable transport failure");
+    };
+    assert_eq!(facts.provider_attempt, provider_attempt);
+    assert_eq!(facts.wire_dispatches, 1);
+    assert!(facts.backend_reached);
+}
+
+/// Local route resolution failures retain the real logical attempt but report
+/// that no backend request crossed egress.
+#[test]
+fn pre_egress_failure_reports_backend_absence() {
+    let mut configured = provider();
+    configured.base_url = "not a URL".to_owned();
+    let model = configured.models[0].clone();
+    let provider_attempt = tau_proto::ProviderAttempt::new(4).expect("attempt");
+    let outcome = run_attempt_numbered(
+        provider_attempt,
+        &prompt(),
+        &resolved_provider(&configured),
+        &model,
+        false,
+        &mut |_| {},
+        &mut || false,
+        &tau_provider::OutboundNetworkPolicy::from_environment(
+            path_std_collections::BTreeMap::new(),
+            None,
+        ),
+    );
+    let AttemptOutcome::Retryable { facts, .. } = outcome else {
+        panic!("invalid local route must return a retryable auth-class failure");
+    };
+    assert_eq!(facts.provider_attempt, provider_attempt);
+    assert_eq!(facts.wire_dispatches, 0);
+    assert!(!facts.backend_reached);
+}
+
+/// The real attempt path submits no pre-egress captures, then exactly one
+/// request and one final HTTP-error capture after dispatch with matching
+/// logical/wire correlation.
+#[test]
+fn attempt_path_finalizes_correlated_http_capture_once() {
+    TEST_DEBUG_CAPTURES.with(|captures| *captures.borrow_mut() = Some(Vec::new()));
+    let mut configured = provider();
+    configured.base_url = "not a URL".to_owned();
+    let model = configured.models[0].clone();
+    let prompt = prompt();
+    let attempt = tau_proto::ProviderAttempt::new(7).expect("attempt");
+    let network = tau_provider::OutboundNetworkPolicy::from_environment(
+        path_std_collections::BTreeMap::new(),
+        None,
+    );
+    let _ = run_attempt_numbered(
+        attempt,
+        &prompt,
+        &resolved_provider(&configured),
+        &model,
+        true,
+        &mut |_| {},
+        &mut || false,
+        &network,
+    );
+    assert!(TEST_DEBUG_CAPTURES.with(|captures| {
+        captures
+            .borrow()
+            .as_ref()
+            .expect("test capture sink installed")
+            .is_empty()
+    }));
+
+    let server = ScriptedTcpServer::spawn(|mut socket| {
+        let mut request = [0_u8; 4096];
+        let _ = path_std_io::Read::read(&mut socket, &mut request).expect("read request");
+        path_std_io::Write::write_all(
+            &mut socket,
+            b"HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\ncontent-length: 31\r\nconnection: close\r\n\r\n{\"error\":{\"code\":\"rate_limit\"}}",
+        )
+        .expect("write response");
+    });
+    configured.base_url = format!("http://{}/v1", server.address());
+    let _ = run_attempt_numbered(
+        attempt,
+        &prompt,
+        &resolved_provider(&configured),
+        &model,
+        true,
+        &mut |_| {},
+        &mut || false,
+        &network,
+    );
+    server.finish();
+    let captures = TEST_DEBUG_CAPTURES.with(|captures| {
+        captures
+            .borrow_mut()
+            .take()
+            .expect("test capture sink installed")
+    });
+    assert_eq!(captures.len(), 2);
+    let metadata = captures
+        .iter()
+        .map(|capture| {
+            serde_json::from_slice::<serde_json::Value>(capture.json()).expect("capture JSON")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        metadata.iter().all(|capture| {
+            capture["logical_attempt"] == 7 && capture["wire_dispatch_index"] == 1
+        })
+    );
+    assert_eq!(
+        metadata
+            .iter()
+            .filter(|capture| capture.get("http_status") == Some(&serde_json::json!(429)))
+            .count(),
+        1
+    );
 }
 
 /// First-output timing uses accepted semantic state rather than replay-safety
@@ -660,7 +784,10 @@ fn malformed_sse_data_after_delta_rejects_partial_stream() {
     );
     server.finish();
 
-    let AttemptOutcome::Retryable { decision, progress } = outcome else {
+    let AttemptOutcome::Retryable {
+        decision, progress, ..
+    } = outcome
+    else {
         panic!("malformed data must remain retryable");
     };
     assert_eq!(decision.class, RetryClass::Unknown);
@@ -931,13 +1058,23 @@ fn debug_capture_producers_submit_typed_http_sse_jobs() {
         ));
     };
 
-    maybe_debug_submit_provider_request_with(&prompt, model, true, &request, &mut record);
+    maybe_debug_submit_provider_request_with(
+        &prompt,
+        model,
+        true,
+        &request,
+        tau_proto::ProviderAttempt::ONE,
+        1,
+        &mut record,
+    );
     maybe_debug_submit_provider_response_with(
         &prompt,
         model,
         true,
         &state,
         std::slice::from_ref(&raw_event),
+        tau_proto::ProviderAttempt::ONE,
+        1,
         &mut record,
     );
     maybe_debug_submit_provider_http_error_with(
@@ -946,6 +1083,8 @@ fn debug_capture_producers_submit_typed_http_sse_jobs() {
         true,
         429,
         "bounded error",
+        tau_proto::ProviderAttempt::ONE,
+        1,
         &mut record,
     );
 
@@ -955,6 +1094,8 @@ fn debug_capture_producers_submit_typed_http_sse_jobs() {
         tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseRequest
     );
     assert_eq!(submitted[0].1["body"]["model"], "test-model");
+    assert_eq!(submitted[0].1["logical_attempt"], 1);
+    assert_eq!(submitted[0].1["wire_dispatch_index"], 1);
     assert_eq!(
         submitted[1].0,
         tau_provider::debug_capture_writer::ProviderDebugCaptureClass::HttpSseResponse
@@ -1250,7 +1391,13 @@ fn image_tool_result_debug_metadata_redacts_data_urls() {
     model.supports_image_tool_results = true;
     let request = try_build_request(&config, &model, &created).expect("vision request");
 
-    let debug = provider_request_debug_metadata(&created, &model, &request);
+    let debug = provider_request_debug_metadata(
+        &created,
+        &model,
+        &request,
+        tau_proto::ProviderAttempt::ONE,
+        1,
+    );
     let debug = serde_json::to_string(&debug).expect("debug metadata");
     assert!(debug.contains("[image data omitted]"));
     assert!(!debug.contains("data:image"));
@@ -2940,8 +3087,9 @@ fn streamed_allowlisted_metadata_retry_error_is_typed_retryable() {
 
     assert!(state.output_items().is_empty());
     assert!(!error.to_string().contains("secret-bearing"));
-    let AttemptOutcome::Retryable { decision, progress } =
-        finish_attempt(Err(error), SemanticProgress::Parsed)
+    let AttemptOutcome::Retryable {
+        decision, progress, ..
+    } = finish_attempt(Err(error), SemanticProgress::Parsed)
     else {
         panic!("allowlisted streamed metadata must be retryable");
     };

@@ -83,6 +83,7 @@ pub fn run_prompt_attempt<W: std::io::Write>(
     writer: &mut tau_proto::PeerOutputWriter<W>,
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
+    provider_attempt: tau_proto::ProviderAttempt,
 ) -> PromptAttemptOutcome {
     let compat = model.compat.unwrap_or(provider.compat);
     let config = tau_provider_chat_completions::AttemptConfig {
@@ -106,7 +107,8 @@ pub fn run_prompt_attempt<W: std::io::Write>(
                 .contains(&tau_proto::InputModality::Image),
     };
     let mut sampler = ResponseSampler::new();
-    let outcome = tau_provider_chat_completions::run_attempt(
+    let outcome = tau_provider_chat_completions::run_attempt_numbered(
+        provider_attempt,
         prompt,
         &config,
         &wire_model,
@@ -136,6 +138,8 @@ pub fn run_prompt_attempt<W: std::io::Write>(
                             Some("summary compactor did not complete its output".to_owned()),
                             Some(tau_proto::ProviderFailureKind::RequestRejected),
                             success.usage,
+                            success.facts.backend_reached,
+                            success.facts.provider_attempt,
                         )),
                         progress: tau_provider_chat_completions::SemanticProgress::Parsed,
                     };
@@ -160,6 +164,8 @@ pub fn run_prompt_attempt<W: std::io::Write>(
                                 Some(error),
                                 Some(tau_proto::ProviderFailureKind::RequestRejected),
                                 success.usage,
+                                success.facts.backend_reached,
+                                success.facts.provider_attempt,
                             )),
                             progress: tau_provider_chat_completions::SemanticProgress::Parsed,
                         };
@@ -178,11 +184,14 @@ pub fn run_prompt_attempt<W: std::io::Write>(
                 None,
                 None,
                 success.usage,
+                success.facts.backend_reached,
+                success.facts.provider_attempt,
             )))
         }
         tau_provider_chat_completions::AttemptOutcome::Retryable {
             decision: _,
             progress,
+            facts,
         } if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
             && progress == tau_provider_chat_completions::SemanticProgress::Parsed =>
         {
@@ -196,15 +205,23 @@ pub fn run_prompt_attempt<W: std::io::Write>(
                     Some("summary compactor failed after semantic output".to_owned()),
                     Some(tau_proto::ProviderFailureKind::Unknown),
                     None,
+                    facts.backend_reached,
+                    facts.provider_attempt,
                 )),
                 progress,
             }
         }
-        tau_provider_chat_completions::AttemptOutcome::Retryable { decision, progress } => {
-            PromptAttemptOutcome::Retry { decision, progress }
-        }
-        tau_provider_chat_completions::AttemptOutcome::Canceled { progress } => {
-            PromptAttemptOutcome::Canceled { progress }
+        tau_provider_chat_completions::AttemptOutcome::Retryable {
+            decision,
+            progress,
+            facts,
+        } => PromptAttemptOutcome::Retry {
+            decision,
+            progress,
+            backend_reached: facts.backend_reached,
+        },
+        tau_provider_chat_completions::AttemptOutcome::Canceled { progress, facts } => {
+            PromptAttemptOutcome::Canceled { progress, facts }
         }
         tau_provider_chat_completions::AttemptOutcome::Terminal(failure) => {
             PromptAttemptOutcome::Terminal {
@@ -217,6 +234,8 @@ pub fn run_prompt_attempt<W: std::io::Write>(
                     Some(failure.message),
                     failure.failure_kind,
                     None,
+                    failure.facts.backend_reached,
+                    failure.facts.provider_attempt,
                 )),
                 progress: failure.progress,
             }
@@ -364,11 +383,15 @@ pub enum PromptAttemptOutcome {
         decision: tau_provider::retry_policy::RetryDecision,
         /// Semantic output parsed before the retryable failure.
         progress: tau_provider_chat_completions::SemanticProgress,
+        /// Whether this attempt crossed provider egress.
+        backend_reached: bool,
     },
     /// The active attempt observed cancellation.
     Canceled {
         /// Semantic output parsed before cancellation.
         progress: tau_provider_chat_completions::SemanticProgress,
+        /// Attempt correlation and backend reachability.
+        facts: tau_provider_chat_completions::AttemptFacts,
     },
 }
 
@@ -382,6 +405,8 @@ fn finished(
     error: Option<String>,
     failure_kind: Option<tau_proto::ProviderFailureKind>,
     usage: Option<tau_proto::ProviderTokenUsage>,
+    backend_reached: bool,
+    provider_attempt: tau_proto::ProviderAttempt,
 ) -> tau_proto::ProviderResponseFinished {
     tau_proto::ProviderResponseFinished {
         automatic_compaction_decision: None,
@@ -401,13 +426,13 @@ fn finished(
         usage,
         compaction_original_input_tokens: None,
         compaction_output_tokens: None,
-        backend: Some(tau_proto::ProviderBackend {
+        backend: backend_reached.then_some(tau_proto::ProviderBackend {
             kind: tau_proto::ProviderBackendKind::ChatCompletions,
             base_url: base_url.to_owned(),
             transport: tau_proto::ProviderBackendTransport::HttpSse,
             stale_chain_fallback: false,
         }),
-        provider_attempt: Default::default(),
+        provider_attempt,
         provider_response_id: None,
         ws_pool_delta: None,
     }
