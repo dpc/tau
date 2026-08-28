@@ -645,7 +645,9 @@ pub(super) fn connect_socket_ui(
     )
 }
 
-fn read_notice<R: std::io::Read>(reader: &mut HarnessOutputReader<R>) -> tau_proto::HarnessNotice {
+pub(super) fn read_notice<R: std::io::Read>(
+    reader: &mut HarnessOutputReader<R>,
+) -> tau_proto::HarnessNotice {
     let message = reader
         .read_message()
         .expect("read notice")

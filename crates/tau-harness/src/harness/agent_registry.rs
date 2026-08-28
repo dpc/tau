@@ -1642,10 +1642,7 @@ impl Harness {
             .prompt_runtime
             .pending_publish_completions
             .remove(cid);
-        self.reject_pending_ui_compaction(
-            cid,
-            "compaction canceled because the target agent unloaded",
-        );
+        self.reject_pending_ui_compaction(cid);
         self.runtime_io
             .publication
             .idle_dispatches
@@ -1704,17 +1701,18 @@ impl Harness {
             self.peer_messaging
                 .uncommitted_peer_auto_starts
                 .remove(&unloading_agent_id_proto);
-            let requests: Vec<_> = self
-                .prompt_coordination
-                .compaction_runtime
-                .accepted_manual_tools
-                .values()
-                .filter(|accepted| {
-                    accepted.request.caller_agent_id.as_str() == unloading_agent_id
-                        || accepted.request.target_agent_id.as_str() == unloading_agent_id
-                })
-                .map(|accepted| accepted.request.clone())
-                .collect();
+            let requests: Vec<_> =
+                self.prompt_coordination
+                    .compaction_runtime
+                    .accepted_manual_tools
+                    .values()
+                    .filter(|accepted| {
+                        accepted.request.tool_source().is_some_and(|source| {
+                            source.caller_agent_id.as_str() == unloading_agent_id
+                        }) || accepted.request.target_agent_id.as_str() == unloading_agent_id
+                    })
+                    .map(|accepted| accepted.request.clone())
+                    .collect();
             for request in requests {
                 if let Some(target_cid) =
                     self.runtime_agent_id_for_target_agent(Some(request.target_agent_id.as_str()))

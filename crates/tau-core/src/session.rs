@@ -651,10 +651,21 @@ enum CompactionTransactionOutcome {
 struct ManualCompactionRequestFold {
     /// Immutable harness-owned acceptance fact.
     requested: tau_proto::AgentManualCompactionRequested,
-    /// Transaction that uniquely claimed this request, if started.
-    transaction_id: Option<tau_proto::CompactionTransactionId>,
-    /// Terminal pre-start failure, if starting became impossible.
-    failed: Option<tau_proto::AgentManualCompactionRequestFailed>,
+    /// Exactly one legal lifecycle state.
+    state: ManualCompactionRequestState,
+}
+
+/// Durable lifecycle of one accepted manual compaction request.
+#[derive(Clone, Debug, PartialEq)]
+enum ManualCompactionRequestState {
+    /// Accepted but not yet claimed.
+    Waiting,
+    /// Claimed by exactly one standalone transaction.
+    Started(tau_proto::CompactionTransactionId),
+    /// Consumed by one categorical pre-start failure.
+    Failed(tau_proto::AgentManualCompactionRequestFailed),
+    /// Consumed by the eligible automatic transaction.
+    Satisfied(tau_proto::CompactionTransactionId),
 }
 
 /// Folded authority for one committed self-compaction terminal delivery.
@@ -1048,13 +1059,13 @@ impl AgentTree {
             .iter()
             .filter_map(|id| {
                 let request = self.manual_compaction_requests.get(id)?;
-                if let Some(failed) = &request.failed {
+                if let ManualCompactionRequestState::Failed(failed) = &request.state {
                     return Some(ManualCompactionRecovery::Failed {
                         requested: request.requested.clone(),
                         failed: failed.clone(),
                     });
                 }
-                if let Some(transaction_id) = &request.transaction_id {
+                if let ManualCompactionRequestState::Started(transaction_id) = &request.state {
                     let transaction = self.compaction_transactions.get(transaction_id)?;
                     return Some(ManualCompactionRecovery::Started {
                         requested: request.requested.clone(),
@@ -1071,9 +1082,17 @@ impl AgentTree {
                         }),
                     });
                 }
-                Some(ManualCompactionRecovery::Waiting(request.requested.clone()))
+                matches!(request.state, ManualCompactionRequestState::Waiting)
+                    .then(|| ManualCompactionRecovery::Waiting(request.requested.clone()))
             })
             .collect()
+    }
+
+    /// Returns every durable manual request, including already satisfied UI
+    /// intents, for collision-free request-id allocation.
+    #[must_use]
+    pub fn manual_compaction_request_count(&self) -> usize {
+        self.manual_compaction_request_order.len()
     }
 
     /// Return the typed terminal already delivered for an accepted
@@ -2323,14 +2342,22 @@ impl AgentTree {
                     requested.request_id.clone(),
                     ManualCompactionRequestFold {
                         requested: requested.clone(),
-                        transaction_id: None,
-                        failed: None,
+                        state: ManualCompactionRequestState::Waiting,
                     },
                 );
             }
             Event::AgentManualCompactionRequestFailed(failed) => {
                 if let Some(request) = self.manual_compaction_requests.get_mut(&failed.request_id) {
-                    request.failed = Some(failed.clone());
+                    request.state = ManualCompactionRequestState::Failed(failed.clone());
+                }
+            }
+            Event::AgentManualCompactionRequestSatisfied(satisfied) => {
+                if let Some(request) = self
+                    .manual_compaction_requests
+                    .get_mut(&satisfied.request_id)
+                {
+                    request.state =
+                        ManualCompactionRequestState::Satisfied(satisfied.transaction_id.clone());
                 }
             }
             Event::AgentStandaloneCompactionStarted(started) => {
@@ -2366,7 +2393,15 @@ impl AgentTree {
                 } = &started.trigger
                     && let Some(request) = self.manual_compaction_requests.get_mut(request_id)
                 {
-                    request.transaction_id = Some(started.transaction_id.clone());
+                    request.state =
+                        ManualCompactionRequestState::Started(started.transaction_id.clone());
+                }
+                if let tau_proto::StandaloneCompactionTrigger::ManualUi { request_id } =
+                    &started.trigger
+                    && let Some(request) = self.manual_compaction_requests.get_mut(request_id)
+                {
+                    request.state =
+                        ManualCompactionRequestState::Started(started.transaction_id.clone());
                 }
             }
             Event::AgentStandaloneCompactionFailed(failed) => {
@@ -3344,6 +3379,11 @@ impl AgentTree {
             {
                 Some(self.validate_manual_compaction_request_failed(failed))
             }
+            Event::AgentManualCompactionRequestSatisfied(satisfied)
+                if satisfied.target_agent_id == self.agent_id =>
+            {
+                Some(self.validate_manual_compaction_request_satisfied(satisfied))
+            }
             Event::AgentStandaloneCompactionFailed(failed) if failed.agent_id == self.agent_id => {
                 Some(self.validate_compaction_failed(failed))
             }
@@ -3568,11 +3608,15 @@ impl AgentTree {
                     "manual-agent transaction references unknown request",
                 ));
             };
-            if request.failed.is_some()
-                || request.transaction_id.is_some()
+            let tau_proto::ManualCompactionSource::Tool(source) = &request.requested.source else {
+                return Err(AgentEventValidationError::new(
+                    "manual-agent transaction references a non-tool request",
+                ));
+            };
+            if !matches!(request.state, ManualCompactionRequestState::Waiting)
                 || request.requested.target_agent_id != started.agent_id
-                || request.requested.caller_agent_id != *caller_agent_id
-                || request.requested.initiating_tool_call_id != *initiating_tool_call_id
+                || source.caller_agent_id != *caller_agent_id
+                || source.initiating_tool_call_id != *initiating_tool_call_id
                 || request.requested.model != started.model
             {
                 return Err(AgentEventValidationError::new(
@@ -3580,7 +3624,7 @@ impl AgentTree {
                 ));
             }
             let accepted = &request.requested;
-            let valid_cut = match accepted.initiating_tool_name {
+            let valid_cut = match source.initiating_tool_name {
                 tau_proto::ManualCompactionTool::Compact => {
                     started.resume_through.is_some_and(|resume| {
                         let valid_boundary = if started.supersedes.is_some() {
@@ -3594,7 +3638,7 @@ impl AgentTree {
                             && self.is_ancestor_head(accepted.requested_target_head, resume)
                             && self.has_complete_tool_round_for(
                                 resume.as_option(),
-                                &accepted.initiating_tool_call_id,
+                                &source.initiating_tool_call_id,
                             )
                     })
                 }
@@ -3613,6 +3657,58 @@ impl AgentTree {
             if !valid_cut {
                 return Err(AgentEventValidationError::new(
                     "manual-agent transaction does not honor its accepted target boundary",
+                ));
+            }
+        }
+        if let tau_proto::StandaloneCompactionTrigger::ManualUi { request_id } = &started.trigger {
+            let Some(request) = self.manual_compaction_requests.get(request_id) else {
+                return Err(AgentEventValidationError::new(
+                    "manual UI transaction references unknown request",
+                ));
+            };
+            let accepted = &request.requested;
+            let valid_cut = if started.supersedes.is_some() {
+                self.is_ancestor_head(started.cut, accepted.requested_target_head)
+                    && started
+                        .resume_through
+                        .is_none_or(|resume| resume == accepted.requested_target_head)
+            } else {
+                self.is_ancestor_head(accepted.requested_target_head, started.cut)
+                    && started
+                        .resume_through
+                        .is_none_or(|resume| resume == started.cut)
+            };
+            let eligible_automatic_finished = accepted
+                .ui_source()
+                .and_then(|source| source.eligible_automatic_transaction_id.as_ref())
+                .is_none_or(|id| {
+                    self.compaction_transactions.get(id).map_or_else(
+                        || {
+                            self.automatic_compaction_decisions
+                                .get(id)
+                                .is_some_and(|decision| decision.closed)
+                        },
+                        |transaction| {
+                            matches!(
+                                transaction.outcome,
+                                Some(CompactionTransactionOutcome::Failed(_))
+                            )
+                        },
+                    )
+                });
+            if !matches!(request.state, ManualCompactionRequestState::Waiting)
+                || !matches!(
+                    accepted.source,
+                    tau_proto::ManualCompactionSource::UiCompact { .. }
+                )
+                || accepted.target_agent_id != started.agent_id
+                || accepted.model != started.model
+                || accepted.target_generation != self.ordinary_inference_generation
+                || !eligible_automatic_finished
+                || !valid_cut
+            {
+                return Err(AgentEventValidationError::new(
+                    "manual UI transaction does not uniquely match its queued request",
                 ));
             }
         }
@@ -3811,6 +3907,7 @@ impl AgentTree {
                     started.trigger,
                     tau_proto::StandaloneCompactionTrigger::Manual
                         | tau_proto::StandaloneCompactionTrigger::ManualAgentTool { .. }
+                        | tau_proto::StandaloneCompactionTrigger::ManualUi { .. }
                 )
             {
                 return Err(AgentEventValidationError::new(
@@ -4412,6 +4509,54 @@ impl AgentTree {
         &self,
         requested: &tau_proto::AgentManualCompactionRequested,
     ) -> Result<(), AgentEventValidationError> {
+        let ui_request = matches!(
+            requested.source,
+            tau_proto::ManualCompactionSource::UiCompact { .. }
+        );
+        if let Some(source) = requested.ui_source() {
+            if source.target_role.is_empty() {
+                return Err(AgentEventValidationError::new(
+                    "UI compaction request has no effective role identity",
+                ));
+            }
+            let eligible_transaction = source.eligible_automatic_transaction_id.as_ref();
+            let active_transaction =
+                eligible_transaction.is_some_and(|id| {
+                    self.compaction_transactions.get(id).is_some_and(|transaction| {
+                    transaction.outcome.is_none()
+                        && !matches!(
+                            transaction.started.trigger,
+                            tau_proto::StandaloneCompactionTrigger::Manual
+                                | tau_proto::StandaloneCompactionTrigger::ManualAgentTool { .. }
+                                | tau_proto::StandaloneCompactionTrigger::ManualUi { .. }
+                        )
+                })
+                });
+            let active_decision = eligible_transaction.is_some_and(|id| {
+                self.automatic_compaction_decisions
+                    .get(id)
+                    .is_some_and(|decision| !decision.claimed && !decision.closed)
+            });
+            let any_active_automatic = self.compaction_transactions.values().any(|transaction| {
+                transaction.outcome.is_none()
+                    && !matches!(
+                        transaction.started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::Manual
+                            | tau_proto::StandaloneCompactionTrigger::ManualAgentTool { .. }
+                            | tau_proto::StandaloneCompactionTrigger::ManualUi { .. }
+                    )
+            }) || self
+                .automatic_compaction_decisions
+                .values()
+                .any(|decision| !decision.claimed && !decision.closed);
+            if eligible_transaction.is_some() != (active_transaction || active_decision)
+                || eligible_transaction.is_none() && any_active_automatic
+            {
+                return Err(AgentEventValidationError::new(
+                    "UI compaction request has invalid automatic precedence authority",
+                ));
+            }
+        }
         if self
             .manual_compaction_requests
             .contains_key(&requested.request_id)
@@ -4423,31 +4568,37 @@ impl AgentTree {
         if self
             .manual_compaction_requests
             .values()
-            .any(|request| request.failed.is_none() && request.transaction_id.is_none())
-            || self
-                .compaction_transactions
-                .values()
-                .any(|transaction| transaction.outcome.is_none())
+            .any(|request| matches!(request.state, ManualCompactionRequestState::Waiting))
+            || self.compaction_transactions.values().any(|transaction| {
+                transaction.outcome.is_none()
+                    && (!ui_request
+                        || matches!(
+                            transaction.started.trigger,
+                            tau_proto::StandaloneCompactionTrigger::Manual
+                                | tau_proto::StandaloneCompactionTrigger::ManualAgentTool { .. }
+                                | tau_proto::StandaloneCompactionTrigger::ManualUi { .. }
+                        ))
+            })
         {
             return Err(AgentEventValidationError::new(
                 "another compaction request or transaction is pending",
             ));
         }
-        if requested.initiating_tool_name == tau_proto::ManualCompactionTool::Compact
-            && (requested.caller_agent_id != requested.target_agent_id
-                || !requested.resume_inference)
-        {
-            return Err(AgentEventValidationError::new(
-                "self compaction request has different caller and target",
-            ));
-        }
-        if requested.initiating_tool_name == tau_proto::ManualCompactionTool::AgentCompact
-            && (requested.caller_agent_id == requested.target_agent_id
-                || requested.resume_inference)
-        {
-            return Err(AgentEventValidationError::new(
-                "cross-agent compaction request targets its caller",
-            ));
+        if let tau_proto::ManualCompactionSource::Tool(source) = &requested.source {
+            if source.initiating_tool_name == tau_proto::ManualCompactionTool::Compact
+                && (source.caller_agent_id != requested.target_agent_id || !source.resume_inference)
+            {
+                return Err(AgentEventValidationError::new(
+                    "self compaction request has different caller and target",
+                ));
+            }
+            if source.initiating_tool_name == tau_proto::ManualCompactionTool::AgentCompact
+                && (source.caller_agent_id == requested.target_agent_id || source.resume_inference)
+            {
+                return Err(AgentEventValidationError::new(
+                    "cross-agent compaction request targets its caller",
+                ));
+            }
         }
         if !self.is_ancestor_head(
             requested.requested_target_head,
@@ -4485,9 +4636,14 @@ impl AgentTree {
                 "self-compaction delivery references unknown request",
             ));
         };
-        if !request.requested.resume_inference
-            || request.requested.caller_agent_id != request.requested.target_agent_id
-            || request.requested.initiating_tool_call_id != terminal.tool_call_id
+        let tau_proto::ManualCompactionSource::Tool(source) = &request.requested.source else {
+            return Err(AgentEventValidationError::new(
+                "self-compaction delivery references a non-tool request",
+            ));
+        };
+        if !source.resume_inference
+            || source.caller_agent_id != request.requested.target_agent_id
+            || source.initiating_tool_call_id != terminal.tool_call_id
             || !steered.inference_activation
             || !steered.message_class.is_internal()
         {
@@ -4495,13 +4651,12 @@ impl AgentTree {
                 "self-compaction delivery correlation does not match request",
             ));
         }
-        let matches_outcome = match (&terminal.outcome, &request.failed, &request.transaction_id) {
+        let matches_outcome = match (&terminal.outcome, &request.state) {
             (
                 tau_proto::SelfCompactionTerminalOutcome::RequestFailed { reason },
-                Some(failed),
-                None,
+                ManualCompactionRequestState::Failed(failed),
             ) => terminal.transaction_id.is_none() && *reason == failed.reason,
-            (_, _, Some(transaction_id))
+            (_, ManualCompactionRequestState::Started(transaction_id))
                 if terminal.transaction_id.as_ref() == Some(transaction_id) =>
             {
                 self.compaction_transactions
@@ -4570,11 +4725,53 @@ impl AgentTree {
             ));
         };
         if request.requested.target_agent_id != failed.target_agent_id
-            || request.failed.is_some()
-            || request.transaction_id.is_some()
+            || !matches!(request.state, ManualCompactionRequestState::Waiting)
         {
             return Err(AgentEventValidationError::new(
                 "manual compaction request already has a terminal pre-start outcome",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_manual_compaction_request_satisfied(
+        &self,
+        satisfied: &tau_proto::AgentManualCompactionRequestSatisfied,
+    ) -> Result<(), AgentEventValidationError> {
+        let Some(request) = self.manual_compaction_requests.get(&satisfied.request_id) else {
+            return Err(AgentEventValidationError::new(
+                "manual compaction satisfaction references unknown request",
+            ));
+        };
+        let successful_automatic = self
+            .compaction_transactions
+            .get(&satisfied.transaction_id)
+            .is_some_and(|transaction| {
+                matches!(
+                    transaction.outcome,
+                    Some(CompactionTransactionOutcome::Succeeded(_))
+                ) && !matches!(
+                    transaction.started.trigger,
+                    tau_proto::StandaloneCompactionTrigger::Manual
+                        | tau_proto::StandaloneCompactionTrigger::ManualAgentTool { .. }
+                        | tau_proto::StandaloneCompactionTrigger::ManualUi { .. }
+                )
+            });
+        if request.requested.target_agent_id != satisfied.target_agent_id
+            || !matches!(
+                request.requested.source,
+                tau_proto::ManualCompactionSource::UiCompact { .. }
+            )
+            || request
+                .requested
+                .ui_source()
+                .and_then(|source| source.eligible_automatic_transaction_id.as_ref())
+                != Some(&satisfied.transaction_id)
+            || !matches!(request.state, ManualCompactionRequestState::Waiting)
+            || !successful_automatic
+        {
+            return Err(AgentEventValidationError::new(
+                "queued UI compaction is not satisfiable by this transaction",
             ));
         }
         Ok(())

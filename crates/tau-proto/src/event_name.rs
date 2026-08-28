@@ -480,6 +480,8 @@ impl EventName {
         Self::from_static(EventCategory::Agent, "manual_compaction_requested");
     pub const AGENT_MANUAL_COMPACTION_REQUEST_FAILED: Self =
         Self::from_static(EventCategory::Agent, "manual_compaction_request_failed");
+    pub const AGENT_MANUAL_COMPACTION_REQUEST_SATISFIED: Self =
+        Self::from_static(EventCategory::Agent, "manual_compaction_request_satisfied");
     pub const AGENT_STANDALONE_COMPACTION_FAILED: Self =
         Self::from_static(EventCategory::Agent, "standalone_compaction_failed");
     pub const AGENT_INFERENCE_DISPATCH_STARTED: Self =

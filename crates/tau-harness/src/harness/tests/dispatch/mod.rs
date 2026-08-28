@@ -2280,7 +2280,7 @@ fn assert_manual_cross_compaction_error(h: &Harness, call: &AgentToolCall, expec
     assert!(!event_log_contains_any_source(h, |event| matches!(
         event,
         Event::AgentManualCompactionRequested(requested)
-            if requested.initiating_tool_call_id == call.id
+            if requested.required_tool_source().initiating_tool_call_id == call.id
     )));
 }
 

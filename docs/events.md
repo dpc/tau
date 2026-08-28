@@ -826,9 +826,11 @@ intent.
   explicit root target before the first prompt.
 - **`ui.compact_request`** — User typed `:compact`: request provider-side
   compaction for the selected or targeted agent before the next prompt. A busy
-  target remains rejected except when its sole remaining foreground call is the
-  same still-installed harness-owned wait; the harness commits that wait's
-  cancellation and closes its complete tool round before starting compaction.
+  target now receives `compaction queued` after the target journal records the
+  pinned durable intent. The harness claims it at the first provider-closed
+  boundary before later ordinary inference. Repeated requests coalesce. A sole
+  installed harness-owned wait is still cancelled eagerly so its complete round
+  closes before compaction.
 - **`ui.cancel_prompt`** — User requests cancellation of a prompt by session,
   optional target agent, and optional prompt id; applies to active or queued
   prompt work when still present.
@@ -1026,14 +1028,17 @@ only a visible notice. This synthetic failure applies only before the reserved
 successor prompt-start commits. After prompt-start, the dispatched owner supplies
 the sole terminal even if selection moves elsewhere.
 - **`agent.manual_compaction_requested`** — harness-owned durable acceptance of
-  a model-callable `compact` or `agent_compact` request, including bounded
+  UI `:compact` or a model-callable `compact`/`agent_compact` request, including bounded
   request/caller/target/prompt/tool-call/model correlation.
 - **`agent.manual_compaction_request_failed`** — exactly one categorical
   terminal outcome when an accepted request cannot reach standalone transaction
   start.
+- **`agent.manual_compaction_request_satisfied`** — a successful automatic
+  transaction consumed a queued UI intent, avoiding a redundant manual provider
+  call.
 - **`agent.standalone_compaction_started`** — standalone transaction start; a
-  `manual_agent_tool` trigger carries the request id, caller id, and original
-  tool call id used for background completion.
+  `manual_agent_tool` trigger carries model-tool correlation, while `manual_ui`
+  carries the durable queued UI request id.
 - **`ui.retry_prompt`** — Correlated request for the harness to resolve the
   selected agent's exact in-flight prompt and direct a manual delayed-retry
   control to its owning provider.

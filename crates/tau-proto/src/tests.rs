@@ -750,16 +750,18 @@ fn compaction_request_id_validation() {
 fn manual_compaction_request_events_round_trip() {
     let requested = Event::AgentManualCompactionRequested(AgentManualCompactionRequested {
         request_id: CompactionRequestId::parse("cr-wire").expect("request id"),
-        caller_agent_id: AgentId::parse("caller").expect("caller"),
         target_agent_id: AgentId::parse("target").expect("target"),
-        initiating_agent_prompt_id: test_agent_prompt_id("ap-origin"),
-        initiating_tool_call_id: "call-origin".into(),
-        initiating_tool_name: ManualCompactionTool::AgentCompact,
-        visible_tool_name: ToolName::new("compact_other"),
+        source: ManualCompactionSource::Tool(ManualToolCompactionSource {
+            caller_agent_id: AgentId::parse("caller").expect("caller"),
+            initiating_agent_prompt_id: test_agent_prompt_id("ap-origin"),
+            initiating_tool_call_id: "call-origin".into(),
+            initiating_tool_name: ManualCompactionTool::AgentCompact,
+            visible_tool_name: ToolName::new("compact_other"),
+            resume_inference: false,
+        }),
         requested_target_head: AgentHead::Root,
         target_generation: 7,
         model: "provider/model".into(),
-        resume_inference: false,
     });
     let bytes = encode_message_to_vec(&requested).expect("encode request");
     assert_eq!(

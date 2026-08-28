@@ -1871,8 +1871,6 @@ struct PendingUiCompactionAfterWait {
     agent_id: tau_proto::AgentId,
     /// Wait call whose terminal must close the foreground round.
     wait_call_id: ToolCallId,
-    /// UI that must receive any deferred action response.
-    requester_client_id: tau_proto::ConnectionId,
 }
 
 impl Harness {

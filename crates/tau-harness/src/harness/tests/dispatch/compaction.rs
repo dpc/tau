@@ -1544,7 +1544,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
         .iter()
         .filter_map(|record| match &record.event {
             Event::AgentManualCompactionRequested(request)
-                if request.initiating_tool_call_id == first_call_id =>
+                if request.required_tool_source().initiating_tool_call_id == first_call_id =>
             {
                 Some(request.clone())
             }
@@ -1553,10 +1553,15 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
         .collect::<Vec<_>>();
     assert_eq!(first_requests.len(), 1);
     let first_request = &first_requests[0];
-    assert_eq!(first_request.caller_agent_id, caller_id);
+    assert_eq!(
+        first_request.required_tool_source().caller_agent_id,
+        caller_id
+    );
     assert_eq!(first_request.target_agent_id, caller_id);
     assert_eq!(
-        first_request.initiating_agent_prompt_id,
+        first_request
+            .required_tool_source()
+            .initiating_agent_prompt_id,
         first_inference.agent_prompt_id
     );
     let first_starts = first_records
@@ -1769,7 +1774,7 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
         .iter()
         .filter_map(|record| match &record.event {
             Event::AgentManualCompactionRequested(request)
-                if request.initiating_tool_call_id == second_call_id =>
+                if request.required_tool_source().initiating_tool_call_id == second_call_id =>
             {
                 Some(request)
             }
@@ -1778,10 +1783,15 @@ fn scheduler_self_compaction_remains_eligible_after_cold_ordinary_turn() {
         .collect::<Vec<_>>();
     assert_eq!(second_requests.len(), 1);
     let second_request = second_requests[0];
-    assert_eq!(second_request.caller_agent_id, caller_id);
+    assert_eq!(
+        second_request.required_tool_source().caller_agent_id,
+        caller_id
+    );
     assert_eq!(second_request.target_agent_id, caller_id);
     assert_eq!(
-        second_request.initiating_agent_prompt_id,
+        second_request
+            .required_tool_source()
+            .initiating_agent_prompt_id,
         second_inference.agent_prompt_id
     );
     assert!(second_request.target_generation > durable_ordinary);
@@ -3044,19 +3054,21 @@ fn manual_self_compaction_background_terminal_prefix_checkpoints_once() {
         .expect("tool-calling assistant head");
     let requested = tau_proto::AgentManualCompactionRequested {
         request_id: request_id.clone(),
-        caller_agent_id: agent_id.clone(),
         target_agent_id: agent_id.clone(),
-        initiating_agent_prompt_id: initiating_prompt_id.clone(),
-        initiating_tool_call_id: call_id.clone(),
-        initiating_tool_name: tau_proto::ManualCompactionTool::Compact,
-        visible_tool_name: tool_name.clone(),
+        source: tau_proto::ManualCompactionSource::Tool(tau_proto::ManualToolCompactionSource {
+            caller_agent_id: agent_id.clone(),
+            initiating_agent_prompt_id: initiating_prompt_id.clone(),
+            initiating_tool_call_id: call_id.clone(),
+            initiating_tool_name: tau_proto::ManualCompactionTool::Compact,
+            visible_tool_name: tool_name.clone(),
+            resume_inference: true,
+        }),
         requested_target_head,
         target_generation: store
             .agent(agent_id.as_str())
             .expect("request target tree")
             .ordinary_inference_generation(),
         model: model.clone(),
-        resume_inference: true,
     };
     store
         .append_agent_event_at(
@@ -3778,16 +3790,18 @@ fn manual_cross_compaction_started_prefix_is_interrupted_once_without_redispatch
         .expect("append background placeholder");
     let requested = tau_proto::AgentManualCompactionRequested {
         request_id: request_id.clone(),
-        caller_agent_id: caller_id.clone(),
         target_agent_id: target_id.clone(),
-        initiating_agent_prompt_id: initiating_prompt_id.clone(),
-        initiating_tool_call_id: call_id.clone(),
-        initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
-        visible_tool_name: tool_name.clone(),
+        source: tau_proto::ManualCompactionSource::Tool(tau_proto::ManualToolCompactionSource {
+            caller_agent_id: caller_id.clone(),
+            initiating_agent_prompt_id: initiating_prompt_id.clone(),
+            initiating_tool_call_id: call_id.clone(),
+            initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+            visible_tool_name: tool_name.clone(),
+            resume_inference: false,
+        }),
         requested_target_head: tau_proto::AgentHead::Root,
         target_generation: 0,
         model: "strict/model".into(),
-        resume_inference: false,
     };
     store
         .append_agent_event_at(
@@ -4167,16 +4181,18 @@ fn manual_self_compaction_retries_matching_failed_transaction() {
     let historical = tau_proto::AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse("cr-self-historical")
             .expect("request id"),
-        caller_agent_id: agent_id.clone(),
         target_agent_id: agent_id.clone(),
-        initiating_agent_prompt_id: test_agent_prompt_id("ap-self-historical"),
-        initiating_tool_call_id: "call-self-historical".into(),
-        initiating_tool_name: tau_proto::ManualCompactionTool::Compact,
-        visible_tool_name: ToolName::new("compact"),
+        source: tau_proto::ManualCompactionSource::Tool(tau_proto::ManualToolCompactionSource {
+            caller_agent_id: agent_id.clone(),
+            initiating_agent_prompt_id: test_agent_prompt_id("ap-self-historical"),
+            initiating_tool_call_id: "call-self-historical".into(),
+            initiating_tool_name: tau_proto::ManualCompactionTool::Compact,
+            visible_tool_name: ToolName::new("compact"),
+            resume_inference: true,
+        }),
         requested_target_head: current_head,
         target_generation: 0,
         model: "echo/model".into(),
-        resume_inference: true,
     };
     h.publish_for_agent(
         &cid,
@@ -4365,16 +4381,18 @@ fn manual_compaction_accepts_later_inference_generation() {
     let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
     let historical = tau_proto::AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse("cr-historical").expect("request id"),
-        caller_agent_id: durable_agent_id_for_conversation(&h, &caller),
         target_agent_id: target_id.clone(),
-        initiating_agent_prompt_id: test_agent_prompt_id("ap-older-caller-turn"),
-        initiating_tool_call_id: "call-historical".into(),
-        initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
-        visible_tool_name: ToolName::new("agent_compact"),
+        source: tau_proto::ManualCompactionSource::Tool(tau_proto::ManualToolCompactionSource {
+            caller_agent_id: durable_agent_id_for_conversation(&h, &caller),
+            initiating_agent_prompt_id: test_agent_prompt_id("ap-older-caller-turn"),
+            initiating_tool_call_id: "call-historical".into(),
+            initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+            visible_tool_name: ToolName::new("agent_compact"),
+            resume_inference: false,
+        }),
         requested_target_head: tau_proto::AgentHead::Root,
         target_generation: 0,
         model: "echo/model".into(),
-        resume_inference: false,
     };
     h.publish_for_agent(
         &target,
@@ -4423,7 +4441,7 @@ fn manual_compaction_accepts_later_inference_generation() {
     assert!(event_log_events(&h).into_iter().any(|event| matches!(
         event,
         Event::AgentManualCompactionRequested(request)
-            if request.initiating_tool_call_id == call.id && request.target_generation == 1
+            if request.required_tool_source().initiating_tool_call_id == call.id && request.target_generation == 1
     )));
     assert!(event_log_events(&h).into_iter().any(|event| matches!(
         event,
@@ -4860,22 +4878,24 @@ fn manual_cross_compaction_rejects_repeat_guard() {
     let (_td, mut h, caller, target, call, target_id) = setup_manual_cross_compaction_test();
     let historical = tau_proto::AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse("cr-historical").expect("request id"),
-        caller_agent_id: crate::parse_agent_id(
-            h.agent_runtime.agent_registry.agents[&caller]
-                .identity
-                .agent_id
-                .as_deref()
-                .expect("caller public id"),
-        ),
         target_agent_id: target_id.clone(),
-        initiating_agent_prompt_id: test_agent_prompt_id("ap-older-caller-turn"),
-        initiating_tool_call_id: "call-historical".into(),
-        initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
-        visible_tool_name: ToolName::new("agent_compact"),
+        source: tau_proto::ManualCompactionSource::Tool(tau_proto::ManualToolCompactionSource {
+            caller_agent_id: crate::parse_agent_id(
+                h.agent_runtime.agent_registry.agents[&caller]
+                    .identity
+                    .agent_id
+                    .as_deref()
+                    .expect("caller public id"),
+            ),
+            initiating_agent_prompt_id: test_agent_prompt_id("ap-older-caller-turn"),
+            initiating_tool_call_id: "call-historical".into(),
+            initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+            visible_tool_name: ToolName::new("agent_compact"),
+            resume_inference: false,
+        }),
         requested_target_head: tau_proto::AgentHead::Root,
         target_generation: 0,
         model: "echo/model".into(),
-        resume_inference: false,
     };
     h.publish_for_agent(
         &target,
@@ -4896,6 +4916,63 @@ fn manual_cross_compaction_rejects_repeat_guard() {
         Some(&target_id),
     );
     assert_manual_cross_compaction_error(&h, &call, "not_needed");
+}
+
+/// A UI request made during provider inference is durable, coalesces, and
+/// claims exactly one standalone start once the target reaches a closed idle
+/// boundary.
+#[test]
+fn busy_ui_compaction_queues_and_claims_once_at_idle_boundary() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    seed_agent_thinking(&mut h, &cid, "ap-busy-ui-compact");
+
+    for _ in 0..2 {
+        h.handle_compact_request(
+            crate::harness::harness_connection_id(),
+            test_session_id("s1"),
+            Some(agent_id.as_str()),
+        );
+    }
+
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentManualCompactionRequested(_)))
+            .count(),
+        1
+    );
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+    );
+
+    h.set_agent_turn_state(&cid, AgentTurnState::Idle);
+    assert!(h.try_start_queued_ui_compaction(&cid));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if matches!(
+                        started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::ManualUi { .. }
+                    )
+            ))
+            .count(),
+        1
+    );
+    assert!(!h.try_start_queued_ui_compaction(&cid));
 }
 
 /// Manual compaction may claim the sole installed input wait, but it must first

@@ -17,6 +17,27 @@ pub(super) enum RollingCompactionPass {
 }
 
 impl Harness {
+    /// Claim a queued UI request at a provider-closed boundary before ordinary
+    /// inference can advance.
+    pub(super) fn try_start_queued_ui_compaction(&mut self, cid: &AgentId) -> bool {
+        let request_id = self
+            .prompt_coordination
+            .compaction_runtime
+            .accepted_manual_tools
+            .iter()
+            .find_map(|(request_id, accepted)| {
+                (accepted.request.is_ui_request()
+                    && self
+                        .runtime_agent_id_for_target_agent(Some(
+                            accepted.request.target_agent_id.as_str(),
+                        ))
+                        .as_ref()
+                        == Some(cid))
+                .then(|| request_id.clone())
+            });
+        request_id.is_some_and(|request_id| self.start_accepted_manual_compaction(cid, &request_id))
+    }
+
     pub(super) fn handle_compact_request(
         &mut self,
         client_id: &tau_proto::ConnectionId,
@@ -41,12 +62,7 @@ impl Harness {
             self.send_ui_error_response(client_id, "target user agent is missing");
             return;
         };
-        if agent.dispatch.terminating
-            || !matches!(
-                agent.dispatch.activation_dispatch,
-                crate::agent::ActivationDispatchState::None
-            )
-        {
+        if agent.dispatch.terminating {
             self.send_ui_error_response(
                 client_id,
                 "cannot compact while a prompt or tool turn is in flight",
@@ -66,36 +82,194 @@ impl Harness {
             self.send_ui_error_response(client_id, "nothing to compact yet");
             return;
         };
-        if matches!(agent.turn.turn_state, AgentTurnState::Idle) {
-            self.start_admitted_manual_compaction(&cid);
+        let turn_state = agent.turn.turn_state.clone();
+        let activation_dispatch = agent.dispatch.activation_dispatch.clone();
+        if let Some(request_id) = self
+            .prompt_coordination
+            .compaction_runtime
+            .accepted_manual_tools
+            .iter()
+            .find_map(|(request_id, accepted)| {
+                (accepted.request.target_agent_id == agent_id && accepted.request.is_ui_request())
+                    .then(|| request_id.clone())
+            })
+        {
+            if self
+                .prompt_coordination
+                .compaction_runtime
+                .pending_ui_acceptances
+                .contains_key(&request_id)
+            {
+                self.prompt_coordination
+                    .compaction_runtime
+                    .pending_ui_acknowledgements
+                    .entry(request_id)
+                    .or_default()
+                    .push(client_id.clone());
+            } else {
+                self.send_ui_response(client_id, "compaction already queued");
+                self.continue_committed_ui_compaction(&cid, agent_id.clone());
+            }
             return;
         }
-        let AgentTurnState::ToolsRunning { remaining_calls } = &agent.turn.turn_state else {
-            self.send_ui_error_response(
-                client_id,
-                "cannot compact while a prompt or tool turn is in flight",
-            );
+        if self
+            .prompt_coordination
+            .compaction_runtime
+            .active_ui_transactions
+            .values()
+            .any(|(_, target)| target == &agent_id)
+        {
+            self.send_ui_response(client_id, "compaction already queued");
+            return;
+        }
+        if let Some(request_id) = self
+            .prompt_coordination
+            .compaction_runtime
+            .pending_ui_acceptances
+            .iter()
+            .find_map(|(id, accepted)| {
+                (accepted.request.target_agent_id == agent_id).then(|| id.clone())
+            })
+        {
+            self.prompt_coordination
+                .compaction_runtime
+                .pending_ui_acknowledgements
+                .entry(request_id)
+                .or_default()
+                .push(client_id.clone());
+            return;
+        }
+        let standalone = self.model_for_agent_role(agent).filter(|model| {
+            self.provider_runtime
+                .model_info
+                .get(model)
+                .is_some_and(|info| info.supports_standalone_compaction)
+                && self.provider_runtime.model_routes.contains_key(model)
+        });
+        if standalone.is_none() {
+            if matches!(turn_state, AgentTurnState::Idle)
+                && matches!(
+                    activation_dispatch,
+                    crate::agent::ActivationDispatchState::None
+                )
+            {
+                self.start_admitted_manual_compaction(&cid);
+            } else if self.try_start_inline_compaction_after_wait(&cid, &turn_state) {
+                // The legacy inline compactor has no standalone transaction.
+                // Preserve its sole-live-wait optimization as an immediate,
+                // closed-round operation rather than pretending it is queued.
+            } else {
+                self.send_ui_error_response(
+                    client_id,
+                    "selected model cannot queue standalone compaction",
+                );
+            }
+            return;
+        }
+        self.accept_ui_manual_compaction(
+            &cid,
+            agent_id,
+            standalone.expect("checked"),
+            client_id.clone(),
+        );
+        self.drain_publish_idle_dispatches();
+    }
+
+    /// Preserve inline compaction's legacy sole-wait preemption when the model
+    /// has no standalone transaction support.
+    fn try_start_inline_compaction_after_wait(
+        &mut self,
+        cid: &AgentId,
+        turn_state: &AgentTurnState,
+    ) -> bool {
+        let AgentTurnState::ToolsRunning { remaining_calls } = turn_state else {
+            return false;
+        };
+        let [wait_call_id] = remaining_calls.as_slice() else {
+            return false;
+        };
+        if self
+            .tool_routing
+            .tool_runtime
+            .pending_terminal_observations
+            .contains_key(wait_call_id)
+        {
+            return false;
+        }
+        let Some(tool) = self
+            .tool_routing
+            .tool_runtime
+            .pending_tools
+            .get(wait_call_id)
+            .cloned()
+        else {
+            return false;
+        };
+        if tool.name.as_str() != path_crate_harness::subagents_tool::WAIT_TOOL_NAME
+            || !self.claim_wait_for_manual_compaction(cid, wait_call_id)
+        {
+            return false;
+        }
+        self.observe_tool_terminal(cid, wait_call_id, tau_proto::ToolTerminalCause::Unknown);
+        self.publish_for_agent(
+            cid,
+            Event::ToolCancelled(ToolCancelled {
+                presentation: Default::default(),
+                call_id: wait_call_id.clone(),
+                tool_name: tool.name,
+                tool_type: tool.tool_type,
+                display: None,
+            }),
+        );
+        self.start_admitted_manual_compaction(cid);
+        true
+    }
+
+    /// Continue a UI request only after its durable acceptance has committed.
+    pub(super) fn continue_committed_ui_compaction(
+        &mut self,
+        cid: &AgentId,
+        agent_id: tau_proto::AgentId,
+    ) {
+        let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
+            return;
+        };
+        let turn_state = agent.turn.turn_state.clone();
+        let activation_dispatch = agent.dispatch.activation_dispatch.clone();
+        let request_id = self
+            .prompt_coordination
+            .compaction_runtime
+            .accepted_manual_tools
+            .iter()
+            .find_map(|(id, accepted)| {
+                (accepted.request.target_agent_id == agent_id && accepted.request.is_ui_request())
+                    .then(|| id.clone())
+            })
+            .expect("committed UI request is installed");
+        if matches!(turn_state, AgentTurnState::Idle) {
+            self.start_accepted_manual_compaction(cid, &request_id);
+            return;
+        }
+        if !matches!(
+            activation_dispatch,
+            crate::agent::ActivationDispatchState::None
+        ) {
+            return;
+        }
+        let AgentTurnState::ToolsRunning { remaining_calls } = &turn_state else {
             return;
         };
         let [wait_call_id] = remaining_calls.as_slice() else {
-            self.send_ui_error_response(
-                client_id,
-                "cannot compact while a prompt or tool turn is in flight",
-            );
             return;
         };
         if let Some(pending) = self
             .prompt_coordination
             .compaction_runtime
             .pending_ui_after_wait
-            .get(&cid)
+            .get(cid)
             && pending.wait_call_id == *wait_call_id
-            && self.wait_claimed_for_manual_compaction(&cid, wait_call_id)
+            && self.wait_claimed_for_manual_compaction(cid, wait_call_id)
         {
-            self.send_ui_error_response(
-                client_id,
-                "compaction already pending after wait cancellation",
-            );
             return;
         }
         if self
@@ -104,10 +278,6 @@ impl Harness {
             .pending_terminal_observations
             .contains_key(wait_call_id)
         {
-            self.send_ui_error_response(
-                client_id,
-                "cannot compact while a prompt or tool turn is in flight",
-            );
             return;
         }
         let wait_call_id = wait_call_id.clone();
@@ -118,19 +288,11 @@ impl Harness {
             .get(&wait_call_id)
             .cloned()
         else {
-            self.send_ui_error_response(
-                client_id,
-                "cannot compact while a prompt or tool turn is in flight",
-            );
             return;
         };
         if tool.name.as_str() != path_crate_harness::subagents_tool::WAIT_TOOL_NAME
-            || !self.claim_wait_for_manual_compaction(&cid, &wait_call_id)
+            || !self.claim_wait_for_manual_compaction(cid, &wait_call_id)
         {
-            self.send_ui_error_response(
-                client_id,
-                "cannot compact while a prompt or tool turn is in flight",
-            );
             return;
         }
         self.prompt_coordination
@@ -142,12 +304,11 @@ impl Harness {
                     session_generation: self.session_runtime.current_session_generation,
                     agent_id,
                     wait_call_id: wait_call_id.clone(),
-                    requester_client_id: client_id.clone(),
                 },
             );
-        self.observe_tool_terminal(&cid, &wait_call_id, tau_proto::ToolTerminalCause::Unknown);
+        self.observe_tool_terminal(cid, &wait_call_id, tau_proto::ToolTerminalCause::Unknown);
         self.publish_for_agent(
-            &cid,
+            cid,
             Event::ToolCancelled(ToolCancelled {
                 presentation: Default::default(),
                 call_id: wait_call_id,
@@ -156,6 +317,120 @@ impl Harness {
                 display: None,
             }),
         );
+    }
+
+    /// Durably accept one UI compaction intent before acknowledging it.
+    fn accept_ui_manual_compaction(
+        &mut self,
+        cid: &AgentId,
+        agent_id: tau_proto::AgentId,
+        model: ModelId,
+        requester_client_id: tau_proto::ConnectionId,
+    ) {
+        let agent = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .expect("accepted UI compaction has a loaded target");
+        let requested_target_head = agent
+            .identity
+            .head
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        let target_generation = self
+            .session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .map_or(0, tau_core::AgentTree::ordinary_inference_generation);
+        let target_role = self.role_name_for_agent(agent);
+        let ordinal = self
+            .session_runtime
+            .agent_store
+            .agent(agent_id.as_str())
+            .map_or(0, tau_core::AgentTree::manual_compaction_request_count);
+        let request_id = tau_proto::CompactionRequestId::parse(format!(
+            "cr-ui-{}-{ordinal}",
+            agent.dispatch.next_prompt_index
+        ))
+        .expect("generated UI compaction request id");
+        let request = tau_proto::AgentManualCompactionRequested {
+            request_id: request_id.clone(),
+            target_agent_id: agent_id,
+            source: tau_proto::ManualCompactionSource::UiCompact {
+                ui_compact: tau_proto::UiManualCompactionSource {
+                    eligible_automatic_transaction_id: agent
+                        .turn
+                        .pending_automatic_compaction_start
+                        .clone()
+                        .or_else(|| agent.turn.pending_automatic_compaction_decision.clone())
+                        .or_else(|| match &agent.dispatch.activation_dispatch {
+                            ActivationDispatchState::Running { id, .. } => Some(id.clone()),
+                            _ => None,
+                        }),
+                    target_role,
+                },
+            },
+            requested_target_head,
+            target_generation,
+            model,
+        };
+        self.prompt_coordination
+            .compaction_runtime
+            .pending_ui_acceptances
+            .insert(
+                request_id.clone(),
+                AcceptedManualCompactionTool {
+                    request: request.clone(),
+                    visible_tool_name: ToolName::new("compact"),
+                },
+            );
+        self.prompt_coordination
+            .compaction_runtime
+            .pending_ui_acknowledgements
+            .insert(request_id.clone(), vec![requester_client_id]);
+        self.publish_for_agent(cid, Event::AgentManualCompactionRequested(request));
+    }
+
+    /// Clear one UI admission that failed before its durable acceptance.
+    pub(super) fn rollback_rejected_ui_compaction_acceptance(&mut self, event: &Event) {
+        let Event::AgentManualCompactionRequested(requested) = event else {
+            return;
+        };
+        if !requested.is_ui_request() {
+            return;
+        }
+        self.prompt_coordination
+            .compaction_runtime
+            .pending_ui_acceptances
+            .remove(&requested.request_id);
+        if let Some(requesters) = self
+            .prompt_coordination
+            .compaction_runtime
+            .pending_ui_acknowledgements
+            .remove(&requested.request_id)
+        {
+            for requester in requesters {
+                self.send_ui_error_response(&requester, "compaction could not be queued durably");
+            }
+        }
+    }
+
+    /// Retain an append-rejected UI claim for exact retry without deriving a
+    /// second transaction or dispatching provider work.
+    pub(super) fn retain_rejected_ui_compaction_start(&mut self, event: &Event) {
+        if let Event::AgentStandaloneCompactionStarted(started) = event
+            && matches!(
+                started.trigger,
+                tau_proto::StandaloneCompactionTrigger::ManualUi { .. }
+            )
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
+        {
+            self.prompt_coordination
+                .compaction_runtime
+                .rejected_ui_starts
+                .insert(cid, event.clone());
+        }
     }
 
     /// Start the existing manual compaction flow after all admission checks
@@ -359,7 +634,7 @@ impl Harness {
         );
         let already_pending = matches!(
             target.dispatch.activation_dispatch,
-            crate::agent::ActivationDispatchState::Running { .. }
+            ActivationDispatchState::Running { .. }
                 | crate::agent::ActivationDispatchState::ContextRecoveryPending { .. }
                 | crate::agent::ActivationDispatchState::ContextRecoveryClaimPending { .. }
         );
@@ -424,7 +699,12 @@ impl Harness {
             .compaction_runtime
             .accepted_manual_tools
             .values()
-            .filter(|entry| entry.request.caller_agent_id.as_str() == caller_public_id)
+            .filter(|entry| {
+                entry
+                    .request
+                    .tool_source()
+                    .is_some_and(|source| source.caller_agent_id.as_str() == caller_public_id)
+            })
             .count()
             + self
                 .prompt_coordination
@@ -510,20 +790,24 @@ impl Harness {
         .expect("generated request id");
         let request = tau_proto::AgentManualCompactionRequested {
             request_id: request_id.clone(),
-            caller_agent_id: crate::parse_agent_id(&caller_public_id),
             target_agent_id: crate::parse_agent_id(&target_public_id),
-            initiating_agent_prompt_id,
-            initiating_tool_call_id: call.id.clone(),
-            initiating_tool_name: if self_request {
-                tau_proto::ManualCompactionTool::Compact
-            } else {
-                tau_proto::ManualCompactionTool::AgentCompact
-            },
-            visible_tool_name: visible_tool_name.clone(),
+            source: tau_proto::ManualCompactionSource::Tool(
+                tau_proto::ManualToolCompactionSource {
+                    caller_agent_id: crate::parse_agent_id(&caller_public_id),
+                    initiating_agent_prompt_id,
+                    initiating_tool_call_id: call.id.clone(),
+                    initiating_tool_name: if self_request {
+                        tau_proto::ManualCompactionTool::Compact
+                    } else {
+                        tau_proto::ManualCompactionTool::AgentCompact
+                    },
+                    visible_tool_name: visible_tool_name.clone(),
+                    resume_inference: self_request,
+                },
+            ),
             requested_target_head: target_head,
             target_generation,
             model,
-            resume_inference: self_request,
         };
         self.publish_for_agent(
             &target_cid,
@@ -578,6 +862,14 @@ impl Harness {
         target_cid: &AgentId,
         request_id: &tau_proto::CompactionRequestId,
     ) -> bool {
+        if self
+            .prompt_coordination
+            .compaction_runtime
+            .rejected_ui_starts
+            .contains_key(target_cid)
+        {
+            return true;
+        }
         let Some(accepted) = self
             .prompt_coordination
             .compaction_runtime
@@ -633,6 +925,10 @@ impl Harness {
             .identity
             .head
             .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+        let ui_request = accepted.request.is_ui_request();
+        let ui_resume_inference = ui_request
+            && (!matches!(target.turn.turn_state, AgentTurnState::Idle)
+                || !target.dispatch.pending_prompts.is_empty());
         let blocked_recovery = self
             .matching_durable_failed_recovery(
                 accepted.request.target_agent_id.as_str(),
@@ -662,13 +958,24 @@ impl Harness {
             .agent_store
             .agent(accepted.request.target_agent_id.as_str())
             .is_some_and(|tree| {
-                if accepted.request.resume_inference {
+                if ui_request {
+                    tree.contains_head_ancestry(
+                        accepted.request.requested_target_head,
+                        current_head,
+                    ) && (blocked_recovery.is_some() && normalized_blocked_cut.is_some()
+                        || tree.closed_provider_prefix_at_or_before(current_head) == current_head)
+                        && tree.ordinary_inference_generation()
+                            == accepted.request.target_generation
+                } else if accepted.request.required_tool_source().resume_inference {
                     tree.contains_head_ancestry(
                         accepted.request.requested_target_head,
                         current_head,
                     ) && tree.has_complete_tool_round_for(
                         current_head.as_option(),
-                        &accepted.request.initiating_tool_call_id,
+                        &accepted
+                            .request
+                            .required_tool_source()
+                            .initiating_tool_call_id,
                     )
                 } else {
                     blocked_recovery.as_ref().map_or_else(
@@ -689,7 +996,12 @@ impl Harness {
             || {
                 (
                     current_head,
-                    accepted.request.resume_inference.then_some(current_head),
+                    (accepted
+                        .request
+                        .tool_source()
+                        .is_some_and(|source| source.resume_inference)
+                        || ui_resume_inference)
+                        .then_some(current_head),
                     None,
                 )
             },
@@ -713,23 +1025,58 @@ impl Harness {
         if let Some(target) = self.agent_runtime.agent_registry.agents.get_mut(target_cid) {
             target.dispatch.next_prompt_index = target.dispatch.next_prompt_index.saturating_add(1);
         }
-        self.prompt_coordination
-            .compaction_runtime
-            .accepted_manual_tools
-            .remove(request_id);
-        self.prompt_coordination
-            .compaction_runtime
-            .pending_manual_tools
-            .insert(
-                transaction_id.clone(),
-                PendingManualCompactionTool {
-                    request_id: request_id.clone(),
-                    caller_agent_id: accepted.request.caller_agent_id.clone(),
-                    call_id: accepted.request.initiating_tool_call_id.clone(),
-                    tool_name: accepted.request.visible_tool_name.clone(),
-                    target_agent_id: accepted.request.target_agent_id.clone(),
-                },
-            );
+        if !ui_request {
+            self.prompt_coordination
+                .compaction_runtime
+                .accepted_manual_tools
+                .remove(request_id);
+        }
+        if !ui_request {
+            self.prompt_coordination
+                .compaction_runtime
+                .pending_manual_tools
+                .insert(
+                    transaction_id.clone(),
+                    PendingManualCompactionTool {
+                        request_id: request_id.clone(),
+                        caller_agent_id: accepted
+                            .request
+                            .required_tool_source()
+                            .caller_agent_id
+                            .clone(),
+                        call_id: accepted
+                            .request
+                            .required_tool_source()
+                            .initiating_tool_call_id
+                            .clone(),
+                        tool_name: accepted
+                            .request
+                            .required_tool_source()
+                            .visible_tool_name
+                            .clone(),
+                        target_agent_id: accepted.request.target_agent_id.clone(),
+                    },
+                );
+        }
+        let trigger = if ui_request {
+            tau_proto::StandaloneCompactionTrigger::ManualUi {
+                request_id: request_id.clone(),
+            }
+        } else {
+            tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
+                request_id: request_id.clone(),
+                caller_agent_id: accepted
+                    .request
+                    .required_tool_source()
+                    .caller_agent_id
+                    .clone(),
+                initiating_tool_call_id: accepted
+                    .request
+                    .required_tool_source()
+                    .initiating_tool_call_id
+                    .clone(),
+            }
+        };
         self.publish_for_agent(
             target_cid,
             Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
@@ -742,11 +1089,7 @@ impl Harness {
                 model: accepted.request.model.clone(),
                 originator,
                 supersedes,
-                trigger: tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
-                    request_id: request_id.clone(),
-                    caller_agent_id: accepted.request.caller_agent_id,
-                    initiating_tool_call_id: accepted.request.initiating_tool_call_id,
-                },
+                trigger,
             }),
         );
         true
@@ -1181,6 +1524,23 @@ impl Harness {
         ) {
             return true;
         }
+        if self
+            .prompt_coordination
+            .compaction_runtime
+            .accepted_manual_tools
+            .values()
+            .any(|accepted| {
+                accepted.request.is_ui_request()
+                    && self
+                        .runtime_agent_id_for_target_agent(Some(
+                            accepted.request.target_agent_id.as_str(),
+                        ))
+                        .as_ref()
+                        == Some(cid)
+            })
+        {
+            return self.try_start_queued_ui_compaction(cid);
+        }
         self.schedule_standalone_auto_compaction_at(
             cid,
             committed_activation,
@@ -1200,6 +1560,19 @@ impl Harness {
         policies: &BTreeMap<String, tau_config::settings::CompactionPolicy>,
     ) -> Option<tau_proto::AutomaticCompactionDecision> {
         let conv = self.agent_runtime.agent_registry.agents.get(cid)?;
+        if self
+            .prompt_coordination
+            .compaction_runtime
+            .accepted_manual_tools
+            .values()
+            .any(|accepted| {
+                accepted.request.is_ui_request()
+                    && accepted.request.target_agent_id.as_str()
+                        == conv.identity.agent_id.as_deref().unwrap_or_default()
+            })
+        {
+            return None;
+        }
         let reported_input = reported_input?;
         let historical_evidence = provider_prompt_id.is_none();
         let provider_prompt_id =
@@ -1703,13 +2076,17 @@ impl Harness {
             .filter_map(|recovery| match recovery {
                 tau_core::ManualCompactionRecovery::Waiting(_) => None,
                 tau_core::ManualCompactionRecovery::Started { requested, .. }
-                | tau_core::ManualCompactionRecovery::Failed { requested, .. } => self
-                    .session_runtime
-                    .agent_store
-                    .agent(requested.caller_agent_id.as_str())
-                    .and_then(|tree| {
+                | tau_core::ManualCompactionRecovery::Failed { requested, .. } => requested
+                    .tool_source()
+                    .and_then(|source| {
+                        self.session_runtime
+                            .agent_store
+                            .agent(source.caller_agent_id.as_str())
+                            .map(|tree| (source, tree))
+                    })
+                    .and_then(|(source, tree)| {
                         tree.self_compaction_delivery(&requested.request_id)
-                            .map(|_| requested.initiating_tool_call_id)
+                            .map(|_| source.initiating_tool_call_id.clone())
                     }),
             })
             .collect::<Vec<_>>();
@@ -1778,7 +2155,10 @@ impl Harness {
         for (target_cid, recovery) in recoveries {
             let (request, started) = match recovery {
                 tau_core::ManualCompactionRecovery::Waiting(request) => {
-                    let tool_name = request.visible_tool_name.clone();
+                    let tool_name = request.tool_source().map_or_else(
+                        || ToolName::new("compact"),
+                        |source| source.visible_tool_name.clone(),
+                    );
                     self.prompt_coordination
                         .compaction_runtime
                         .accepted_manual_tools
@@ -1789,18 +2169,23 @@ impl Harness {
                                 visible_tool_name: tool_name,
                             },
                         );
-                    if let Some(caller_cid) = self
-                        .runtime_agent_id_for_target_agent(Some(request.caller_agent_id.as_str()))
-                        && !self
-                            .restored_background_tool_states_for_agent(&caller_cid)
-                            .into_iter()
-                            .any(|state| {
-                                state.placeholder.call_id == request.initiating_tool_call_id
-                            })
+                    if request.is_ui_request() {
+                        waiting.push((target_cid, request.request_id));
+                        continue;
+                    }
+                    if let Some(caller_cid) = self.runtime_agent_id_for_target_agent(Some(
+                        request.required_tool_source().caller_agent_id.as_str(),
+                    )) && !self
+                        .restored_background_tool_states_for_agent(&caller_cid)
+                        .into_iter()
+                        .any(|state| {
+                            state.placeholder.call_id
+                                == request.required_tool_source().initiating_tool_call_id
+                        })
                     {
                         self.restore_manual_tool_runtime(&caller_cid, &request);
                         self.publish_internal_background_placeholder(
-                            &request.initiating_tool_call_id,
+                            &request.required_tool_source().initiating_tool_call_id,
                             tau_proto::CborValue::Map(vec![
                                 (
                                     tau_proto::CborValue::Text("status".into()),
@@ -1816,7 +2201,9 @@ impl Harness {
                                 ),
                                 (
                                     tau_proto::CborValue::Text("deferred".into()),
-                                    tau_proto::CborValue::Bool(request.resume_inference),
+                                    tau_proto::CborValue::Bool(
+                                        request.required_tool_source().resume_inference,
+                                    ),
                                 ),
                             ]),
                         );
@@ -1829,11 +2216,27 @@ impl Harness {
                     started,
                     outcome,
                 } => {
+                    if requested.is_ui_request() {
+                        self.prompt_coordination
+                            .compaction_runtime
+                            .active_ui_transactions
+                            .insert(
+                                started.transaction_id.clone(),
+                                (
+                                    requested.request_id.clone(),
+                                    requested.target_agent_id.clone(),
+                                ),
+                            );
+                        continue;
+                    }
                     let pending = PendingManualCompactionTool {
                         request_id: requested.request_id.clone(),
-                        caller_agent_id: requested.caller_agent_id.clone(),
-                        call_id: requested.initiating_tool_call_id.clone(),
-                        tool_name: requested.visible_tool_name.clone(),
+                        caller_agent_id: requested.required_tool_source().caller_agent_id.clone(),
+                        call_id: requested
+                            .required_tool_source()
+                            .initiating_tool_call_id
+                            .clone(),
+                        tool_name: requested.required_tool_source().visible_tool_name.clone(),
                         target_agent_id: requested.target_agent_id.clone(),
                     };
                     self.prompt_coordination
@@ -1843,39 +2246,50 @@ impl Harness {
                     (requested, Some((started, outcome)))
                 }
                 tau_core::ManualCompactionRecovery::Failed { requested, failed } => {
+                    if requested.is_ui_request() {
+                        continue;
+                    }
                     let Some(caller_cid) = self.runtime_agent_id_for_target_agent(Some(
-                        requested.caller_agent_id.as_str(),
+                        requested.required_tool_source().caller_agent_id.as_str(),
                     )) else {
                         continue;
                     };
                     let completed = self.manual_tool_background_completion_exists(
                         &caller_cid,
-                        &requested.initiating_tool_call_id,
+                        &requested.required_tool_source().initiating_tool_call_id,
                     );
                     if !completed {
                         self.restore_manual_tool_runtime(&caller_cid, &requested);
                         self.finish_prebuilt_internal_tool_error_with_mode(
                             ToolError {
                                 presentation: Default::default(),
-                                call_id: requested.initiating_tool_call_id.clone(),
-                                tool_name: requested.visible_tool_name.clone(),
+                                call_id: requested
+                                    .required_tool_source()
+                                    .initiating_tool_call_id
+                                    .clone(),
+                                tool_name: requested
+                                    .required_tool_source()
+                                    .visible_tool_name
+                                    .clone(),
                                 tool_type: tau_proto::ToolType::Function,
                                 message: manual_request_failure_message(failed.reason).to_owned(),
                                 details: None,
                                 display: None,
                                 originator: PromptOriginator::User,
                             },
-                            if requested.resume_inference {
+                            if requested.required_tool_source().resume_inference {
                                 BackgroundCompletionPromptMode::DoNotQueue
                             } else {
                                 BackgroundCompletionPromptMode::QueueAndAdvance
                             },
                         );
                     }
-                    if requested.resume_inference
+                    if requested.required_tool_source().resume_inference
                         && !self.self_compaction_terminal_delivered(&requested)
                     {
-                        self.consume_wait_background_completion(&requested.initiating_tool_call_id);
+                        self.consume_wait_background_completion(
+                            &requested.required_tool_source().initiating_tool_call_id,
+                        );
                         if let Some(agent) = self
                             .agent_runtime
                             .agent_registry
@@ -1888,7 +2302,10 @@ impl Harness {
                                 .push_back(self_compaction_terminal_pending_prompt(
                                 tau_proto::SelfCompactionTerminal {
                                     request_id: requested.request_id.clone(),
-                                    tool_call_id: requested.initiating_tool_call_id.clone(),
+                                    tool_call_id: requested
+                                        .required_tool_source()
+                                        .initiating_tool_call_id
+                                        .clone(),
                                     transaction_id: None,
                                     outcome:
                                         tau_proto::SelfCompactionTerminalOutcome::RequestFailed {
@@ -1905,26 +2322,33 @@ impl Harness {
             let Some((started, outcome)) = started else {
                 continue;
             };
-            let Some(caller_cid) =
-                self.runtime_agent_id_for_target_agent(Some(request.caller_agent_id.as_str()))
-            else {
+            let Some(caller_cid) = self.runtime_agent_id_for_target_agent(Some(
+                request.required_tool_source().caller_agent_id.as_str(),
+            )) else {
                 continue;
             };
             if self.manual_tool_background_completion_exists(
                 &caller_cid,
-                &request.initiating_tool_call_id,
+                &request.required_tool_source().initiating_tool_call_id,
             ) {
                 self.prompt_coordination
                     .compaction_runtime
                     .pending_manual_tools
                     .remove(&started.transaction_id);
-                if request.resume_inference && !self.self_compaction_terminal_delivered(&request) {
-                    self.consume_wait_background_completion(&request.initiating_tool_call_id);
+                if request.required_tool_source().resume_inference
+                    && !self.self_compaction_terminal_delivered(&request)
+                {
+                    self.consume_wait_background_completion(
+                        &request.required_tool_source().initiating_tool_call_id,
+                    );
                     let terminal = match outcome.as_deref() {
                         Some(tau_core::ManualCompactionOutcome::Succeeded(_)) => {
                             tau_proto::SelfCompactionTerminal {
                                 request_id: request.request_id.clone(),
-                                tool_call_id: request.initiating_tool_call_id.clone(),
+                                tool_call_id: request
+                                    .required_tool_source()
+                                    .initiating_tool_call_id
+                                    .clone(),
                                 transaction_id: Some(started.transaction_id.clone()),
                                 outcome: tau_proto::SelfCompactionTerminalOutcome::Compacted,
                             }
@@ -1932,7 +2356,10 @@ impl Harness {
                         Some(tau_core::ManualCompactionOutcome::Failed(failed)) => {
                             tau_proto::SelfCompactionTerminal {
                                 request_id: request.request_id.clone(),
-                                tool_call_id: request.initiating_tool_call_id.clone(),
+                                tool_call_id: request
+                                    .required_tool_source()
+                                    .initiating_tool_call_id
+                                    .clone(),
                                 transaction_id: Some(started.transaction_id.clone()),
                                 outcome: tau_proto::SelfCompactionTerminalOutcome::Failed {
                                     reason: failed.reason,
@@ -1968,8 +2395,11 @@ impl Harness {
                     self.finish_prebuilt_internal_tool_result_with_mode(
                         ToolResult {
                             presentation: Default::default(),
-                            call_id: request.initiating_tool_call_id.clone(),
-                            tool_name: request.visible_tool_name.clone(),
+                            call_id: request
+                                .required_tool_source()
+                                .initiating_tool_call_id
+                                .clone(),
+                            tool_name: request.required_tool_source().visible_tool_name.clone(),
                             tool_type: tau_proto::ToolType::Function,
                             result: tau_proto::CborValue::Map(vec![
                                 (
@@ -1994,7 +2424,7 @@ impl Harness {
                             display: None,
                             originator: PromptOriginator::User,
                         },
-                        if request.resume_inference {
+                        if request.required_tool_source().resume_inference {
                             BackgroundCompletionPromptMode::DoNotQueue
                         } else {
                             BackgroundCompletionPromptMode::QueueOnly
@@ -2004,8 +2434,10 @@ impl Harness {
                         .compaction_runtime
                         .pending_manual_tools
                         .remove(&started.transaction_id);
-                    if request.resume_inference {
-                        self.consume_wait_background_completion(&request.initiating_tool_call_id);
+                    if request.required_tool_source().resume_inference {
+                        self.consume_wait_background_completion(
+                            &request.required_tool_source().initiating_tool_call_id,
+                        );
                         if let Some(agent) = self
                             .agent_runtime
                             .agent_registry
@@ -2016,7 +2448,10 @@ impl Harness {
                                 self_compaction_terminal_pending_prompt(
                                     tau_proto::SelfCompactionTerminal {
                                         request_id: request.request_id.clone(),
-                                        tool_call_id: request.initiating_tool_call_id.clone(),
+                                        tool_call_id: request
+                                            .required_tool_source()
+                                            .initiating_tool_call_id
+                                            .clone(),
                                         transaction_id: Some(started.transaction_id.clone()),
                                         outcome:
                                             tau_proto::SelfCompactionTerminalOutcome::Compacted,
@@ -2029,12 +2464,15 @@ impl Harness {
                     }
                 }
                 Some(tau_core::ManualCompactionOutcome::Failed(failed)) => {
-                    let call_id = request.initiating_tool_call_id.clone();
+                    let call_id = request
+                        .required_tool_source()
+                        .initiating_tool_call_id
+                        .clone();
                     self.finish_prebuilt_internal_tool_error_with_mode(
                         ToolError {
                             presentation: Default::default(),
                             call_id: call_id.clone(),
-                            tool_name: request.visible_tool_name.clone(),
+                            tool_name: request.required_tool_source().visible_tool_name.clone(),
                             tool_type: tau_proto::ToolType::Function,
                             message: standalone_compaction_failure_message(failed.reason)
                                 .to_owned(),
@@ -2042,7 +2480,7 @@ impl Harness {
                             display: None,
                             originator: PromptOriginator::User,
                         },
-                        if request.resume_inference {
+                        if request.required_tool_source().resume_inference {
                             BackgroundCompletionPromptMode::DoNotQueue
                         } else {
                             BackgroundCompletionPromptMode::QueueAndAdvance
@@ -2052,7 +2490,7 @@ impl Harness {
                         .compaction_runtime
                         .pending_manual_tools
                         .remove(&started.transaction_id);
-                    if request.resume_inference {
+                    if request.required_tool_source().resume_inference {
                         self.consume_wait_background_completion(&call_id);
                         if let Some(agent) = self
                             .agent_runtime
@@ -2085,7 +2523,12 @@ impl Harness {
                 .compaction_runtime
                 .accepted_manual_tools
                 .get(&request_id)
-                .is_some_and(|accepted| accepted.request.resume_inference);
+                .is_some_and(|accepted| {
+                    accepted
+                        .request
+                        .tool_source()
+                        .is_some_and(|source| source.resume_inference)
+                });
             if !self_request || self.manual_request_has_complete_tool_round(&request_id) {
                 self.start_accepted_manual_compaction(&target_cid, &request_id);
             }
@@ -2097,15 +2540,23 @@ impl Harness {
         caller_cid: &AgentId,
         request: &tau_proto::AgentManualCompactionRequested,
     ) {
-        self.tool_routing
-            .tool_runtime
-            .tool_agents
-            .insert(request.initiating_tool_call_id.clone(), caller_cid.clone());
+        self.tool_routing.tool_runtime.tool_agents.insert(
+            request
+                .required_tool_source()
+                .initiating_tool_call_id
+                .clone(),
+            caller_cid.clone(),
+        );
         self.tool_routing.tool_runtime.pending_tools.insert(
-            request.initiating_tool_call_id.clone(),
+            request
+                .required_tool_source()
+                .initiating_tool_call_id
+                .clone(),
             PendingTool {
-                name: request.visible_tool_name.clone(),
-                internal_name: manual_compaction_tool_name(request.initiating_tool_name),
+                name: request.required_tool_source().visible_tool_name.clone(),
+                internal_name: manual_compaction_tool_name(
+                    request.required_tool_source().initiating_tool_name,
+                ),
                 tool_type: tau_proto::ToolType::Function,
                 allows_provider_image: false,
             },
@@ -2113,7 +2564,13 @@ impl Harness {
         self.tool_routing
             .tool_runtime
             .tool_turn
-            .restore_backgrounded(caller_cid.clone(), request.initiating_tool_call_id.clone());
+            .restore_backgrounded(
+                caller_cid.clone(),
+                request
+                    .required_tool_source()
+                    .initiating_tool_call_id
+                    .clone(),
+            );
     }
 
     pub(super) fn manual_tool_background_completion_exists(
@@ -2132,7 +2589,7 @@ impl Harness {
     ) -> bool {
         self.session_runtime
             .agent_store
-            .agent(request.caller_agent_id.as_str())
+            .agent(request.required_tool_source().caller_agent_id.as_str())
             .is_some_and(|tree| tree.self_compaction_delivery(&request.request_id).is_some())
     }
 
@@ -2188,7 +2645,12 @@ impl Harness {
             .compaction_runtime
             .accepted_manual_tools
             .values()
-            .any(|accepted| accepted.request.initiating_tool_call_id == *call_id)
+            .any(|accepted| {
+                accepted
+                    .request
+                    .tool_source()
+                    .is_some_and(|source| source.initiating_tool_call_id == *call_id)
+            })
             || self
                 .prompt_coordination
                 .compaction_runtime
@@ -2209,9 +2671,13 @@ impl Harness {
         else {
             return false;
         };
-        let Some(caller_cid) =
-            self.runtime_agent_id_for_target_agent(Some(accepted.request.caller_agent_id.as_str()))
-        else {
+        let Some(caller_cid) = self.runtime_agent_id_for_target_agent(Some(
+            accepted
+                .request
+                .required_tool_source()
+                .caller_agent_id
+                .as_str(),
+        )) else {
             return false;
         };
         self.agent_runtime
@@ -2227,7 +2693,10 @@ impl Harness {
                     .map(|tree| {
                         tree.has_complete_tool_round_for(
                             agent.identity.head,
-                            &accepted.request.initiating_tool_call_id,
+                            &accepted
+                                .request
+                                .required_tool_source()
+                                .initiating_tool_call_id,
                         )
                     })
             })

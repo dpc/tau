@@ -1,6 +1,6 @@
 //! Tests for prompt lifecycle behavior.
 
-use super::super::lifecycle::{assert_no_message, connect_socket_ui};
+use super::super::lifecycle::{assert_no_message, connect_socket_ui, read_notice};
 use super::*;
 
 /// Provider-owned prompt fanout must preserve exact/prefix observer equality,
@@ -2021,6 +2021,7 @@ fn successful_wait_preemption_installs_replacement_before_queued_activation() {
         test_session_id("s1"),
         Some(agent_id.as_str()),
     );
+    assert_eq!(read_notice(&mut requesting_ui).message, "compaction queued");
     let compact_prompt = read_nth_prompt_created(&h, 0);
 
     assert_eq!(

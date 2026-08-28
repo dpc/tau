@@ -4406,7 +4406,7 @@ pub struct AgentStandaloneCompactionStarted {
     pub trigger: StandaloneCompactionTrigger,
 }
 
-/// Model-callable tool that initiated a durable manual compaction request.
+/// Model tool that initiated a durable manual compaction request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManualCompactionTool {
@@ -4416,15 +4416,37 @@ pub enum ManualCompactionTool {
     AgentCompact,
 }
 
-/// Harness-owned durable acceptance fact for a model-requested compaction.
+/// Authority-specific durable manual-compaction correlation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AgentManualCompactionRequested {
-    /// Stable identifier for this accepted request.
-    pub request_id: CompactionRequestId,
+#[serde(untagged)]
+pub enum ManualCompactionSource {
+    /// The human UI requested `:compact`.
+    UiCompact {
+        /// UI-only scheduling and automatic-chain correlation.
+        ui_compact: UiManualCompactionSource,
+    },
+    /// A model tool requested self or cross-agent compaction.
+    Tool(ManualToolCompactionSource),
+}
+
+/// UI-only durable manual-compaction correlation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiManualCompactionSource {
+    /// Automatic transaction active when the request was accepted, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible_automatic_transaction_id: Option<CompactionTransactionId>,
+    /// Role identity used to resolve the captured model at acceptance.
+    ///
+    /// This is replay correlation, not an independent stale-role policy: a
+    /// role change that still resolves to the captured model remains valid.
+    pub target_role: String,
+}
+
+/// Model-tool-only durable manual-compaction correlation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ManualToolCompactionSource {
     /// Public id of the tool-call owner.
     pub caller_agent_id: AgentId,
-    /// Public id of the agent whose transcript will be compacted.
-    pub target_agent_id: AgentId,
     /// Prompt snapshot that authorized the tool call.
     pub initiating_agent_prompt_id: AgentPromptId,
     /// Original tool call completed when compaction terminates.
@@ -4433,14 +4455,73 @@ pub struct AgentManualCompactionRequested {
     pub initiating_tool_name: ManualCompactionTool,
     /// Prompt-visible name retained for terminal background correlation.
     pub visible_tool_name: ToolName,
+    /// Whether successful compaction owes continuation inference.
+    pub resume_inference: bool,
+}
+
+/// Harness-owned durable acceptance fact for a manual compaction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentManualCompactionRequested {
+    /// Stable identifier for this accepted request.
+    pub request_id: CompactionRequestId,
+    /// Public id of the agent whose transcript will be compacted.
+    pub target_agent_id: AgentId,
+    /// Human or model-tool authority and its variant-specific correlation.
+    #[serde(flatten)]
+    pub source: ManualCompactionSource,
     /// Target branch head observed at acceptance.
     pub requested_target_head: AgentHead,
     /// Target-owned materialized prompt generation observed at acceptance.
     pub target_generation: u64,
     /// Provider-qualified model observed at acceptance.
     pub model: ModelId,
-    /// Whether successful compaction owes continuation inference.
-    pub resume_inference: bool,
+}
+
+impl AgentManualCompactionRequested {
+    /// Returns whether this request came from the human UI.
+    #[must_use]
+    pub fn is_ui_request(&self) -> bool {
+        matches!(self.source, ManualCompactionSource::UiCompact { .. })
+    }
+
+    /// Returns model-tool correlation for a tool-originated request.
+    #[must_use]
+    pub fn tool_source(&self) -> Option<&ManualToolCompactionSource> {
+        match &self.source {
+            ManualCompactionSource::Tool(source) => Some(source),
+            ManualCompactionSource::UiCompact { .. } => None,
+        }
+    }
+
+    /// Returns UI scheduling correlation for a UI-originated request.
+    #[must_use]
+    pub fn ui_source(&self) -> Option<&UiManualCompactionSource> {
+        match &self.source {
+            ManualCompactionSource::UiCompact { ui_compact } => Some(ui_compact),
+            ManualCompactionSource::Tool(_) => None,
+        }
+    }
+
+    /// Returns tool correlation and panics when called for a UI request.
+    ///
+    /// Harness internals use this after discriminating the durable source.
+    #[must_use]
+    pub fn required_tool_source(&self) -> &ManualToolCompactionSource {
+        self.tool_source()
+            .expect("manual compaction request must be tool-originated")
+    }
+
+    /// Returns mutable tool correlation and panics when called for a UI
+    /// request.
+    #[must_use]
+    pub fn required_tool_source_mut(&mut self) -> &mut ManualToolCompactionSource {
+        match &mut self.source {
+            ManualCompactionSource::Tool(source) => source,
+            ManualCompactionSource::UiCompact { .. } => {
+                panic!("manual compaction request must be tool-originated")
+            }
+        }
+    }
 }
 
 /// Safe categorical reason an accepted request could not start.
@@ -4470,6 +4551,18 @@ pub struct AgentManualCompactionRequestFailed {
     pub target_agent_id: AgentId,
     /// Safe bounded failure category.
     pub reason: ManualCompactionRequestFailureReason,
+}
+
+/// Durable terminal showing that automatic compaction satisfied a queued UI
+/// request without redundant provider work.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentManualCompactionRequestSatisfied {
+    /// Queued UI request that was consumed.
+    pub request_id: CompactionRequestId,
+    /// Target agent that owned the queued request.
+    pub target_agent_id: AgentId,
+    /// Successful automatic transaction that satisfied the intent.
+    pub transaction_id: CompactionTransactionId,
 }
 
 /// Durable cause of a standalone compaction transaction.
@@ -4533,6 +4626,11 @@ pub enum StandaloneCompactionTrigger {
         caller_agent_id: AgentId,
         /// Tool call completed when this transaction reaches a terminal state.
         initiating_tool_call_id: ToolCallId,
+    },
+    /// Explicit compaction queued by the human UI.
+    ManualUi {
+        /// Durable UI request uniquely claimed by this transaction.
+        request_id: CompactionRequestId,
     },
     /// Automatic recovery of one canonically rejected ordinary inference.
     ReactiveContextOverflow {
@@ -6392,6 +6490,8 @@ pub enum Event {
     AgentManualCompactionRequested(AgentManualCompactionRequested),
     #[serde(rename = "agent.manual_compaction_request_failed")]
     AgentManualCompactionRequestFailed(AgentManualCompactionRequestFailed),
+    #[serde(rename = "agent.manual_compaction_request_satisfied")]
+    AgentManualCompactionRequestSatisfied(AgentManualCompactionRequestSatisfied),
     #[serde(rename = "agent.standalone_compaction_failed")]
     AgentStandaloneCompactionFailed(AgentStandaloneCompactionFailed),
     #[serde(rename = "agent.inference_dispatch_started")]
@@ -6838,6 +6938,9 @@ impl Event {
             Self::AgentManualCompactionRequested(_) => EventName::AGENT_MANUAL_COMPACTION_REQUESTED,
             Self::AgentManualCompactionRequestFailed(_) => {
                 EventName::AGENT_MANUAL_COMPACTION_REQUEST_FAILED
+            }
+            Self::AgentManualCompactionRequestSatisfied(_) => {
+                EventName::AGENT_MANUAL_COMPACTION_REQUEST_SATISFIED
             }
             Self::AgentStandaloneCompactionFailed(_) => {
                 EventName::AGENT_STANDALONE_COMPACTION_FAILED

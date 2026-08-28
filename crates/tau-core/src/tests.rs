@@ -382,18 +382,20 @@ fn background_error(call_id: &str) -> Event {
 fn manual_compaction_request(agent_id: &str, request_id: &str) -> Event {
     Event::AgentManualCompactionRequested(tau_proto::AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse(request_id).expect("request id"),
-        caller_agent_id: tau_proto::AgentId::parse("caller").expect("caller id"),
         target_agent_id: tau_proto::AgentId::parse(agent_id).expect("target id"),
-        initiating_agent_prompt_id: "ap-origin"
-            .parse::<tau_proto::AgentPromptId>()
-            .expect("known-safe AgentPromptId must be valid"),
-        initiating_tool_call_id: "call-origin".into(),
-        initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
-        visible_tool_name: ToolName::new("agent_compact"),
+        source: tau_proto::ManualCompactionSource::Tool(tau_proto::ManualToolCompactionSource {
+            caller_agent_id: tau_proto::AgentId::parse("caller").expect("caller id"),
+            initiating_agent_prompt_id: "ap-origin"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+            initiating_tool_call_id: "call-origin".into(),
+            initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+            visible_tool_name: ToolName::new("agent_compact"),
+            resume_inference: false,
+        }),
         requested_target_head: tau_proto::AgentHead::Root,
         target_generation: 0,
         model: "provider/model".into(),
-        resume_inference: false,
     })
 }
 

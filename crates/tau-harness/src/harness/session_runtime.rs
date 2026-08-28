@@ -1064,22 +1064,36 @@ impl Harness {
             .compaction_runtime
             .pending_manual_tools
             .clear();
+        let queued_ui_compactions = self
+            .prompt_coordination
+            .compaction_runtime
+            .accepted_manual_tools
+            .values()
+            .filter(|accepted| accepted.request.is_ui_request())
+            .filter_map(|accepted| {
+                self.runtime_agent_id_for_target_agent(Some(
+                    accepted.request.target_agent_id.as_str(),
+                ))
+                .map(|cid| (cid, accepted.request.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (cid, request) in queued_ui_compactions {
+            self.fail_accepted_manual_compaction(
+                &cid,
+                &request,
+                tau_proto::ManualCompactionRequestFailureReason::TargetUnloaded,
+            );
+        }
         self.prompt_coordination
             .compaction_runtime
             .accepted_manual_tools
             .clear();
-        let pending_compactions = std::mem::take(
+        let _pending_compactions = std::mem::take(
             &mut self
                 .prompt_coordination
                 .compaction_runtime
                 .pending_ui_after_wait,
         );
-        for pending in pending_compactions.into_values() {
-            self.send_ui_error_response(
-                &pending.requester_client_id,
-                "compaction canceled because the session changed",
-            );
-        }
         // Specialized cancellation paths above resolved accepted old-session
         // work. Suspend any responder whose publication is destructively
         // canceled, cancel transaction-owned checkpoints, and commit the queued
@@ -1830,7 +1844,10 @@ impl Harness {
             .accepted_manual_tools
             .iter()
             .filter_map(|(request_id, accepted)| {
-                (accepted.request.resume_inference
+                (accepted
+                    .request
+                    .tool_source()
+                    .is_some_and(|source| source.resume_inference)
                     && self.manual_request_has_complete_tool_round(request_id))
                 .then(|| {
                     self.runtime_agent_id_for_target_agent(Some(
@@ -2654,7 +2671,9 @@ impl Harness {
                             requested,
                             outcome: Some(ref outcome),
                             ..
-                        } if requested.resume_inference
+                        } if requested
+                            .tool_source()
+                            .is_some_and(|source| source.resume_inference)
                             && matches!(
                                 outcome.as_ref(),
                                 tau_core::ManualCompactionOutcome::Succeeded(_)

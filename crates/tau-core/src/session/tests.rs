@@ -533,18 +533,20 @@ fn validation_error(tree: &AgentTree, event: Event) -> String {
 fn manual_request(id: &str) -> tau_proto::AgentManualCompactionRequested {
     tau_proto::AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse(id).expect("valid request id"),
-        caller_agent_id: other_agent_id(),
         target_agent_id: agent_id(),
-        initiating_agent_prompt_id: "ap-tool-round"
-            .parse::<tau_proto::AgentPromptId>()
-            .expect("known-safe AgentPromptId must be valid"),
-        initiating_tool_call_id: "call-compact".into(),
-        initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
-        visible_tool_name: ToolName::new("agent_compact"),
+        source: tau_proto::ManualCompactionSource::Tool(tau_proto::ManualToolCompactionSource {
+            caller_agent_id: other_agent_id(),
+            initiating_agent_prompt_id: "ap-tool-round"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+            initiating_tool_call_id: "call-compact".into(),
+            initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+            visible_tool_name: ToolName::new("agent_compact"),
+            resume_inference: false,
+        }),
         requested_target_head: AgentHead::Root,
         target_generation: 0,
         model: "provider/model".into(),
-        resume_inference: false,
     }
 }
 
@@ -4175,8 +4177,11 @@ fn manual_compaction_request_is_durable_and_uniquely_claimed() {
     started.resume_through = None;
     started.trigger = tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
         request_id: request.request_id.clone(),
-        caller_agent_id: request.caller_agent_id.clone(),
-        initiating_tool_call_id: request.initiating_tool_call_id.clone(),
+        caller_agent_id: request.required_tool_source().caller_agent_id.clone(),
+        initiating_tool_call_id: request
+            .required_tool_source()
+            .initiating_tool_call_id
+            .clone(),
     };
     tree.validate_event(&Event::AgentStandaloneCompactionStarted(started.clone()))
         .expect("matching transaction claim is valid");
@@ -4193,6 +4198,44 @@ fn manual_compaction_request_is_durable_and_uniquely_claimed() {
     let mut duplicate = started;
     duplicate.transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-manual-tool-2").expect("valid id");
+    assert!(
+        validation_error(&tree, Event::AgentStandaloneCompactionStarted(duplicate))
+            .contains("uniquely match")
+    );
+}
+
+/// A queued UI intent uses the same durable exactly-once claim projection
+/// without inventing model-tool completion authority.
+#[test]
+fn queued_ui_compaction_is_durable_and_uniquely_claimed() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let mut request = manual_request("cr-ui");
+    request.source = tau_proto::ManualCompactionSource::UiCompact {
+        ui_compact: tau_proto::UiManualCompactionSource {
+            eligible_automatic_transaction_id: None,
+            target_role: "default".to_owned(),
+        },
+    };
+    tree.validate_event(&Event::AgentManualCompactionRequested(request.clone()))
+        .expect("queued UI request is valid");
+    tree.apply_event(&Event::AgentManualCompactionRequested(request.clone()));
+
+    let mut started = compaction_start("ct-ui");
+    started.trigger = tau_proto::StandaloneCompactionTrigger::ManualUi {
+        request_id: request.request_id.clone(),
+    };
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(started.clone()))
+        .expect("first UI claim is valid");
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
+    assert!(matches!(
+        tree.manual_compaction_recoveries().as_slice(),
+        [ManualCompactionRecovery::Started { started: claimed, .. }]
+            if **claimed == started
+    ));
+
+    let mut duplicate = started;
+    duplicate.transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-ui-duplicate").expect("transaction id");
     assert!(
         validation_error(&tree, Event::AgentStandaloneCompactionStarted(duplicate))
             .contains("uniquely match")
@@ -4231,9 +4274,12 @@ fn manual_compaction_pre_start_failure_is_exactly_once() {
     let mut started = compaction_start("ct-too-late");
     started.resume_through = None;
     started.trigger = tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
-        request_id: request.request_id,
-        caller_agent_id: request.caller_agent_id,
-        initiating_tool_call_id: request.initiating_tool_call_id,
+        request_id: request.request_id.clone(),
+        caller_agent_id: request.required_tool_source().caller_agent_id.clone(),
+        initiating_tool_call_id: request
+            .required_tool_source()
+            .initiating_tool_call_id
+            .clone(),
     };
     assert!(
         validation_error(&tree, Event::AgentStandaloneCompactionStarted(started))
@@ -4247,10 +4293,12 @@ fn manual_compaction_pre_start_failure_is_exactly_once() {
 fn self_compaction_terminal_delivery_is_correlated_and_exactly_once() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     let mut request = manual_request("cr-delivery");
-    request.caller_agent_id = request.target_agent_id.clone();
-    request.initiating_tool_name = tau_proto::ManualCompactionTool::Compact;
-    request.visible_tool_name = ToolName::new("compact");
-    request.resume_inference = true;
+    let target = request.target_agent_id.clone();
+    let source = request.required_tool_source_mut();
+    source.caller_agent_id = target;
+    source.initiating_tool_name = tau_proto::ManualCompactionTool::Compact;
+    source.visible_tool_name = ToolName::new("compact");
+    source.resume_inference = true;
     tree.validate_event(&Event::AgentManualCompactionRequested(request.clone()))
         .expect("request");
     tree.apply_event(&Event::AgentManualCompactionRequested(request.clone()));
@@ -4264,7 +4312,10 @@ fn self_compaction_terminal_delivery_is_correlated_and_exactly_once() {
     tree.apply_event(&Event::AgentManualCompactionRequestFailed(failed));
     let terminal = tau_proto::SelfCompactionTerminal {
         request_id: request.request_id.clone(),
-        tool_call_id: request.initiating_tool_call_id,
+        tool_call_id: request
+            .required_tool_source()
+            .initiating_tool_call_id
+            .clone(),
         transaction_id: None,
         outcome: tau_proto::SelfCompactionTerminalOutcome::RequestFailed {
             reason: tau_proto::ManualCompactionRequestFailureReason::Cancelled,
@@ -5945,8 +5996,11 @@ fn manual_compaction_claim_rejects_correlation_mismatches() {
         started.resume_through = None;
         started.trigger = tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
             request_id: request.request_id.clone(),
-            caller_agent_id: request.caller_agent_id.clone(),
-            initiating_tool_call_id: request.initiating_tool_call_id.clone(),
+            caller_agent_id: request.required_tool_source().caller_agent_id.clone(),
+            initiating_tool_call_id: request
+                .required_tool_source()
+                .initiating_tool_call_id
+                .clone(),
         };
         started
     };

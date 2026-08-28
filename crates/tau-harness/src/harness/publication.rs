@@ -819,6 +819,10 @@ impl Harness {
                 AgentPublishCompletion::GatedFinal { .. }
                     | AgentPublishCompletion::InitialPromptSubmission { .. }
             )
+        ) || matches!(
+            &event,
+            Event::AgentManualCompactionRequested(request)
+                if request.is_ui_request()
         );
         let suppress_activation_dispatch = completion.as_ref().is_some_and(|completion| {
             !matches!(
@@ -1809,6 +1813,8 @@ impl Harness {
                     timing.finish(PromptAcceptanceTerminal::SemanticAdmissionRejected);
                 }
                 self.rollback_rejected_activation_successor(&event);
+                self.rollback_rejected_ui_compaction_acceptance(&event);
+                self.retain_rejected_ui_compaction_start(&event);
                 self.clear_rejected_eager_compaction_start(&event);
                 self.rollback_failed_wait_compaction_terminal(&event);
                 self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);

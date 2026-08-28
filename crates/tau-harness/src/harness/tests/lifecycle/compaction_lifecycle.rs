@@ -640,13 +640,13 @@ fn output_length_reactive_post_compaction_checkpoint_cut_is_cancellable() {
     restored.shutdown().expect("shutdown");
 }
 
-/// Deferred compaction cleanup reports its terminal rejection only to the
-/// retained requester and never publishes or replays that response.
+/// Deferred wait-claim cleanup is runtime-only: the durable compaction intent
+/// remains authoritative and no disconnected-client response is required.
 #[test]
-fn deferred_compaction_rejection_is_requester_only_and_not_logged() {
+fn deferred_compaction_wait_claim_cleanup_is_silent_and_not_logged() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("harness");
-    let (requesting_ui_id, mut requesting_ui) = connect_socket_ui(&mut h);
+    let (_requesting_ui_id, mut requesting_ui) = connect_socket_ui(&mut h);
     let (_observer_id, mut observer) = connect_socket_ui(&mut h);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
@@ -660,7 +660,6 @@ fn deferred_compaction_rejection_is_requester_only_and_not_logged() {
                 session_generation: h.session_runtime.current_session_generation,
                 agent_id: agent_id.clone(),
                 wait_call_id: wait_call_id.clone(),
-                requester_client_id: requesting_ui_id.clone(),
             },
         );
     h.tool_routing
@@ -677,9 +676,6 @@ fn deferred_compaction_rejection_is_requester_only_and_not_logged() {
         display: None,
     }));
 
-    let notice = read_notice(&mut requesting_ui);
-    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
-    assert!(notice.message.contains("could not be committed"));
     assert_no_message(&mut requesting_ui);
     assert_no_message(&mut observer);
     assert_eq!(h.runtime_io.event_log.next_seq(), baseline_seq);
@@ -693,14 +689,11 @@ fn deferred_compaction_rejection_is_requester_only_and_not_logged() {
                 session_generation: h.session_runtime.current_session_generation,
                 agent_id,
                 wait_call_id: ToolCallId::from("wait-unload"),
-                requester_client_id: requesting_ui_id,
             },
         );
     let logged_before_unload = event_log_events(&h).len();
     h.remove_agent_after_prompt_closure(&cid);
-    let notice = read_notice(&mut requesting_ui);
-    assert_eq!(notice.purpose, tau_proto::NoticePurpose::Response);
-    assert!(notice.message.contains("target agent unloaded"));
+    assert_no_message(&mut requesting_ui);
     assert_no_message(&mut observer);
     assert!(
         event_log_events(&h)[logged_before_unload..]

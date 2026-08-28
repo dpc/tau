@@ -178,10 +178,7 @@ impl Harness {
         if pending.wait_call_id != cancelled.call_id {
             return;
         }
-        self.reject_pending_ui_compaction(
-            &cid,
-            "compaction canceled because wait cancellation could not be committed",
-        );
+        self.reject_pending_ui_compaction(&cid);
         self.tool_routing
             .tool_runtime
             .pending_terminal_observations
@@ -190,16 +187,13 @@ impl Harness {
         self.process_input_wait_deadlines(Instant::now());
     }
 
-    /// Removes one deferred UI compaction and reports why it cannot continue.
-    pub(super) fn reject_pending_ui_compaction(&mut self, cid: &AgentId, message: &'static str) {
-        if let Some(pending) = self
-            .prompt_coordination
+    /// Releases a transient wait claim while leaving the durable UI intent
+    /// owed.
+    pub(super) fn reject_pending_ui_compaction(&mut self, cid: &AgentId) {
+        self.prompt_coordination
             .compaction_runtime
             .pending_ui_after_wait
-            .remove(cid)
-        {
-            self.send_ui_error_response(&pending.requester_client_id, message);
-        }
+            .remove(cid);
     }
 
     /// Require an exact live `AwaitingCheckpoint` owner for every delayed
@@ -981,6 +975,15 @@ impl Harness {
     /// Retry retained append-rejected publications when ordinary runtime input
     /// proves that the harness is making progress again.
     pub(super) fn retry_pending_agent_publications(&mut self) {
+        let rejected_ui_starts = std::mem::take(
+            &mut self
+                .prompt_coordination
+                .compaction_runtime
+                .rejected_ui_starts,
+        );
+        for (cid, event) in rejected_ui_starts {
+            self.publish_for_agent(&cid, event);
+        }
         let pending = self
             .prompt_coordination
             .prompt_runtime
@@ -2251,6 +2254,40 @@ impl Harness {
         append_outcome: Option<&tau_core::AgentAppendOutcome>,
     ) {
         self.react_to_committed_tool_terminal(source, event, append_outcome);
+        if let Event::AgentManualCompactionRequested(requested) = event
+            && requested.is_ui_request()
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(requested.target_agent_id.as_str()))
+        {
+            if let Some(accepted) = self
+                .prompt_coordination
+                .compaction_runtime
+                .pending_ui_acceptances
+                .remove(&requested.request_id)
+            {
+                self.prompt_coordination
+                    .compaction_runtime
+                    .accepted_manual_tools
+                    .insert(requested.request_id.clone(), accepted);
+            }
+            let requesters = self
+                .prompt_coordination
+                .compaction_runtime
+                .pending_ui_acknowledgements
+                .remove(&requested.request_id)
+                .unwrap_or_default();
+            for (index, requester) in requesters.iter().enumerate() {
+                self.send_ui_response(
+                    requester,
+                    if index == 0 {
+                        "compaction queued"
+                    } else {
+                        "compaction already queued"
+                    },
+                );
+            }
+            self.continue_committed_ui_compaction(&cid, requested.target_agent_id.clone());
+        }
         if let Event::ProviderResponseFinished(response) = event
             && let Some(decision) = &response.automatic_compaction_decision
             && let Some(cid) =
@@ -2301,6 +2338,8 @@ impl Harness {
             }) = eager
             {
                 self.start_eager_automatic_compaction(&cid, decision, cut);
+            } else {
+                self.try_start_queued_ui_compaction(&cid);
             }
         }
         if let Event::AgentStandaloneCompactionStarted(started) = event {
@@ -2338,6 +2377,21 @@ impl Harness {
                         ),
                         target_agent_id: started.agent_id.clone(),
                     });
+            }
+            if let tau_proto::StandaloneCompactionTrigger::ManualUi { request_id } =
+                &started.trigger
+            {
+                self.prompt_coordination
+                    .compaction_runtime
+                    .accepted_manual_tools
+                    .remove(request_id);
+                self.prompt_coordination
+                    .compaction_runtime
+                    .active_ui_transactions
+                    .insert(
+                        started.transaction_id.clone(),
+                        (request_id.clone(), started.agent_id.clone()),
+                    );
             }
             let suppression_key = (started.agent_id.clone(), started.transaction_id.clone());
             let durable_preflight_reason = match &started.trigger {
@@ -2527,8 +2581,23 @@ impl Harness {
                 .accepted_manual_tools
                 .remove(&failed.request_id)
         {
-            if pending.request.resume_inference {
-                let call_id = pending.request.initiating_tool_call_id.clone();
+            if let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(failed.target_agent_id.as_str()))
+            {
+                self.prompt_coordination
+                    .compaction_runtime
+                    .rejected_ui_starts
+                    .remove(&cid);
+            }
+            if pending.request.is_ui_request() {
+                // The durable request terminal is the complete UI-visible
+                // result.
+            } else if pending.request.required_tool_source().resume_inference {
+                let call_id = pending
+                    .request
+                    .required_tool_source()
+                    .initiating_tool_call_id
+                    .clone();
                 let prompt =
                     self_compaction_terminal_pending_prompt(tau_proto::SelfCompactionTerminal {
                         request_id: pending.request.request_id.clone(),
@@ -2553,21 +2622,47 @@ impl Harness {
                 );
                 self.consume_wait_background_completion(&call_id);
                 if let Some(cid) = self.runtime_agent_id_for_target_agent(Some(
-                    pending.request.caller_agent_id.as_str(),
+                    pending
+                        .request
+                        .required_tool_source()
+                        .caller_agent_id
+                        .as_str(),
                 )) && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
                 {
                     agent.dispatch.pending_prompts.push_back(prompt);
                 }
             } else {
                 self.finish_manual_compaction_tool_with_error(
-                    pending.request.initiating_tool_call_id,
+                    pending
+                        .request
+                        .required_tool_source()
+                        .initiating_tool_call_id
+                        .clone(),
                     pending.visible_tool_name,
                     manual_request_failure_message(failed.reason),
                     false,
                 );
             }
         }
+        if let Event::AgentManualCompactionRequestSatisfied(satisfied) = event {
+            if let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(satisfied.target_agent_id.as_str()))
+            {
+                self.prompt_coordination
+                    .compaction_runtime
+                    .rejected_ui_starts
+                    .remove(&cid);
+            }
+            self.prompt_coordination
+                .compaction_runtime
+                .accepted_manual_tools
+                .remove(&satisfied.request_id);
+        }
         if let Event::AgentStandaloneCompactionFailed(failed) = event {
+            self.prompt_coordination
+                .compaction_runtime
+                .active_ui_transactions
+                .remove(&failed.transaction_id);
             if let Some(pending) = self
                 .prompt_coordination
                 .compaction_runtime
@@ -2690,13 +2785,47 @@ impl Harness {
                 self.fold_pending_prompts_as_steered(&cid);
                 self.dispatch_prompt_after_publish_idle(&cid);
             }
+            self.try_start_queued_ui_compaction(&cid);
             self.try_advance_queue();
         }
         if let Event::AgentCompacted(compacted) = event
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(compacted.agent_id.as_str()))
         {
+            if let Some(transaction_id) = compacted.transaction_id.as_ref() {
+                self.prompt_coordination
+                    .compaction_runtime
+                    .active_ui_transactions
+                    .remove(transaction_id);
+            }
             self.clear_agent_context_usage(&cid);
+            if let Some(transaction_id) = compacted.transaction_id.as_ref()
+                && let Some(request) = self
+                    .prompt_coordination
+                    .compaction_runtime
+                    .accepted_manual_tools
+                    .values()
+                    .find(|accepted| {
+                        accepted.request.is_ui_request()
+                            && accepted.request.target_agent_id == compacted.agent_id
+                            && accepted.request.ui_source().is_some_and(|source| {
+                                source.eligible_automatic_transaction_id.as_ref()
+                                    == Some(transaction_id)
+                            })
+                    })
+                    .map(|accepted| accepted.request.clone())
+            {
+                self.publish_for_agent(
+                    &cid,
+                    Event::AgentManualCompactionRequestSatisfied(
+                        tau_proto::AgentManualCompactionRequestSatisfied {
+                            request_id: request.request_id,
+                            target_agent_id: request.target_agent_id,
+                            transaction_id: transaction_id.clone(),
+                        },
+                    ),
+                );
+            }
         }
         if let Event::AgentCompacted(compacted) = event
             && let Some(transaction_id) = compacted.transaction_id.as_ref()
@@ -4119,6 +4248,9 @@ impl Harness {
             }
             Event::AgentManualCompactionRequestFailed(failed) => {
                 Some(failed.target_agent_id.clone())
+            }
+            Event::AgentManualCompactionRequestSatisfied(satisfied) => {
+                Some(satisfied.target_agent_id.clone())
             }
             Event::AgentStandaloneCompactionFailed(failed) => Some(failed.agent_id.clone()),
             Event::AgentInferenceDispatchStarted(started) => Some(started.agent_id.clone()),

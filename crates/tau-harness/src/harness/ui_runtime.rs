@@ -987,10 +987,7 @@ impl Harness {
                 self.try_advance_queue();
             }
             AgentTurnState::ToolsRunning { remaining_calls } => {
-                self.reject_pending_ui_compaction(
-                    cid,
-                    "compaction canceled by a competing turn cancellation",
-                );
+                self.reject_pending_ui_compaction(cid);
                 let mut cancelled_calls = remaining_calls;
                 cancelled_calls.extend(
                     self.tool_routing
@@ -1426,7 +1423,12 @@ impl Harness {
             .compaction_runtime
             .accepted_manual_tools
             .values()
-            .find(|accepted| accepted.request.initiating_tool_call_id == target.call_id)
+            .find(|accepted| {
+                accepted
+                    .request
+                    .tool_source()
+                    .is_some_and(|source| source.initiating_tool_call_id == target.call_id)
+            })
             .cloned()
             && let Some(target_cid) = self
                 .runtime_agent_id_for_target_agent(Some(accepted.request.target_agent_id.as_str()))

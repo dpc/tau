@@ -602,6 +602,7 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::AGENT_COMPACTION_TRIGGERED,
     EventName::AGENT_MANUAL_COMPACTION_REQUESTED,
     EventName::AGENT_MANUAL_COMPACTION_REQUEST_FAILED,
+    EventName::AGENT_MANUAL_COMPACTION_REQUEST_SATISFIED,
     EventName::AGENT_STANDALONE_COMPACTION_STARTED,
     EventName::AGENT_STANDALONE_COMPACTION_FAILED,
     EventName::AGENT_INFERENCE_DISPATCH_STARTED,
@@ -801,6 +802,9 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::AgentStatsUpdated(_)
             | Event::AgentCompactionTriggered(_)
             | Event::AgentCompacted(_)
+            | Event::AgentManualCompactionRequested(_)
+            | Event::AgentManualCompactionRequestFailed(_)
+            | Event::AgentManualCompactionRequestSatisfied(_)
             | Event::AgentStandaloneCompactionStarted(_)
             | Event::AgentStandaloneCompactionFailed(_)
             | Event::AgentInferenceDispatchStarted(_)
@@ -1535,6 +1539,9 @@ impl Harness {
         }
         if !self.agent_context_ready_for(cid) {
             self.defer_prompt_dispatch(cid.clone());
+            return;
+        }
+        if self.try_start_queued_ui_compaction(cid) {
             return;
         }
         self.checkpoint_or_send_prompt(cid, None);

@@ -6963,21 +6963,24 @@ impl EventRenderer {
         &mut self,
         requested: &tau_proto::AgentManualCompactionRequested,
     ) {
-        if requested.caller_agent_id != requested.target_agent_id
+        let Some(source) = requested.tool_source() else {
+            return;
+        };
+        if source.caller_agent_id != requested.target_agent_id
             || !matches!(
-                requested.initiating_tool_name,
+                source.initiating_tool_name,
                 tau_proto::ManualCompactionTool::Compact
             )
-            || requested.visible_tool_name.as_str() != "compact"
+            || source.visible_tool_name.as_str() != "compact"
         {
             return;
         }
-        let call_id = requested.initiating_tool_call_id.to_string();
+        let call_id = source.initiating_tool_call_id.to_string();
         if self
             .event_owners
             .tool_agents
             .get(call_id.as_str())
-            .is_some_and(|owner| owner != requested.caller_agent_id.as_str())
+            .is_some_and(|owner| owner != source.caller_agent_id.as_str())
         {
             return;
         }
@@ -9047,11 +9050,15 @@ impl EventRenderer {
             }
             Event::AgentManualCompactionRequested(requested) => {
                 self.register_self_compaction_tool(requested);
+                let authority = requested.tool_source().map_or_else(
+                    || format!("UI for agent {}", requested.target_agent_id),
+                    |source| format!("Agent {}", source.caller_agent_id),
+                );
                 let notice = tau_proto::HarnessNotice::diagnostic(
                     tau_proto::notice_kind::HARNESS_NOTICE,
                     format!(
-                        "Agent {} accepted compaction request for {} ({})",
-                        requested.caller_agent_id, requested.target_agent_id, requested.request_id
+                        "{authority} accepted compaction request for {} ({})",
+                        requested.target_agent_id, requested.request_id
                     ),
                     tau_proto::NoticeLevel::Info,
                 );

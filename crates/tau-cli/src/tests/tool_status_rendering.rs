@@ -222,16 +222,20 @@ fn manual_compaction_lifecycle_status_follows_target_agent_selection() {
     renderer.handle(&Event::AgentManualCompactionRequested(
         AgentManualCompactionRequested {
             request_id: tau_proto::CompactionRequestId::parse("cr-48-0").expect("request id"),
-            caller_agent_id: agent_id("manager"),
             target_agent_id: agent_id("reviewer-KH50"),
-            initiating_agent_prompt_id: test_agent_prompt_id("ap-manager-48"),
-            initiating_tool_call_id: "call-48".into(),
-            initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
-            visible_tool_name: tau_proto::ToolName::new("agent_compact"),
+            source: tau_proto::ManualCompactionSource::Tool(
+                tau_proto::ManualToolCompactionSource {
+                    caller_agent_id: agent_id("manager"),
+                    initiating_agent_prompt_id: test_agent_prompt_id("ap-manager-48"),
+                    initiating_tool_call_id: "call-48".into(),
+                    initiating_tool_name: tau_proto::ManualCompactionTool::AgentCompact,
+                    visible_tool_name: tau_proto::ToolName::new("agent_compact"),
+                    resume_inference: false,
+                },
+            ),
             requested_target_head: tau_proto::AgentHead::Root,
             target_generation: 0,
             model: "test/model".parse().expect("model id"),
-            resume_inference: false,
         },
     ));
     renderer.handle(&Event::AgentStandaloneCompactionStarted(

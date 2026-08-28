@@ -470,16 +470,18 @@ fn self_compaction_requested(request_id: &str, call_id: &str) -> AgentManualComp
     AgentManualCompactionRequested {
         request_id: tau_proto::CompactionRequestId::parse(request_id)
             .expect("known-safe request id"),
-        caller_agent_id: agent_id("main"),
         target_agent_id: agent_id("main"),
-        initiating_agent_prompt_id: test_agent_prompt_id("ap-main-request"),
-        initiating_tool_call_id: call_id.into(),
-        initiating_tool_name: tau_proto::ManualCompactionTool::Compact,
-        visible_tool_name: tau_proto::ToolName::new("compact"),
+        source: tau_proto::ManualCompactionSource::Tool(tau_proto::ManualToolCompactionSource {
+            caller_agent_id: agent_id("main"),
+            initiating_agent_prompt_id: test_agent_prompt_id("ap-main-request"),
+            initiating_tool_call_id: call_id.into(),
+            initiating_tool_name: tau_proto::ManualCompactionTool::Compact,
+            visible_tool_name: tau_proto::ToolName::new("compact"),
+            resume_inference: true,
+        }),
         requested_target_head: tau_proto::AgentHead::Root,
         target_generation: 0,
         model: "test/model".parse().expect("model id"),
-        resume_inference: true,
     }
 }
 

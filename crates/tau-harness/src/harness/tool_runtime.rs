@@ -882,17 +882,10 @@ impl Harness {
                                 && matches!(agent.turn.turn_state, AgentTurnState::Idle)
                         });
                 if remains_valid {
-                    self.handle_compact_request(
-                        &pending.requester_client_id,
-                        self.session_runtime.current_session_id.clone(),
-                        Some(pending.agent_id.as_str()),
-                    );
+                    self.try_start_queued_ui_compaction(cid);
                     return;
                 }
-                self.send_ui_error_response(
-                    &pending.requester_client_id,
-                    "compaction canceled because deferred continuation became stale",
-                );
+                self.try_start_queued_ui_compaction(cid);
             }
             let deferred_request = self
                 .agent_runtime
@@ -906,9 +899,13 @@ impl Harness {
                         .accepted_manual_tools
                         .iter()
                         .find_map(|(request_id, accepted)| {
-                            (accepted.request.resume_inference
-                                && accepted.request.target_agent_id.as_str() == agent_id)
-                                .then_some(request_id.clone())
+                            accepted
+                                .request
+                                .tool_source()
+                                .is_some_and(|source| source.resume_inference)
+                                .then_some(())
+                                .filter(|_| accepted.request.target_agent_id.as_str() == agent_id)
+                                .map(|_| request_id.clone())
                         })
                 });
             if let Some(request_id) = deferred_request

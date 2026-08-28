@@ -29,6 +29,19 @@ pub(crate) struct CompactionRuntimeState {
         HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
     /// UI compactions waiting for a claimed wait cancellation to commit.
     pub(super) pending_ui_after_wait: HashMap<AgentId, PendingUiCompactionAfterWait>,
+    /// Requesting UIs awaiting the durable acceptance commit.
+    pub(super) pending_ui_acknowledgements:
+        HashMap<tau_proto::CompactionRequestId, Vec<tau_proto::ConnectionId>>,
+    /// UI requests staged until their acceptance fact commits.
+    pub(super) pending_ui_acceptances:
+        HashMap<tau_proto::CompactionRequestId, AcceptedManualCompactionTool>,
+    /// Committed UI starts retained through their one transaction terminal.
+    pub(super) active_ui_transactions: HashMap<
+        tau_proto::CompactionTransactionId,
+        (tau_proto::CompactionRequestId, tau_proto::AgentId),
+    >,
+    /// Exact UI start publications retained after an append rejection.
+    pub(super) rejected_ui_starts: HashMap<AgentId, Event>,
     /// Standalone inference checkpoints currently queued through publication.
     pub(super) enqueued_inference_checkpoints:
         HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,

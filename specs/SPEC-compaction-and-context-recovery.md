@@ -92,6 +92,25 @@ Compaction dispatch and continuation reuse the existing durable transaction mach
 
 ## Manual compaction
 
+UI `:compact` durably accepts one target-scoped manual intent before replying
+`compaction queued`. A second request coalesces without another durable fact.
+The request pins the selected agent, branch ancestry, ordinary generation, and
+provider-qualified model. While an ordinary prompt or tool round is active, the
+harness claims the request at the first provider-closed boundary: a complete
+normal or cancelled turn, or a complete call/result round before post-tool
+continuation inference. Already queued ordinary activation remains behind the
+compaction. Model or role drift and sibling/rewound branch selection close the
+request with a categorical pre-start failure; requester disconnect does not.
+Cold replay restores an unclaimed request and permits exactly one durable start
+or pre-start failure.
+
+An already committed automatic recovery chain retains priority. New proactive
+work is suppressed behind a queued UI intent. Automatic success satisfies the
+manual intent without redundant provider work; an automatic failure or block
+permits the pending explicit request to make one existing manual recovery
+attempt. Provider and context-window failure consume that attempt, and explicit
+manual context rejection never enters automatic strict-predecessor retreat.
+
 UI `:compact` may preempt a busy target only when its sole remaining foreground
 call is the same still-installed harness-owned exact, bare, or activating-input
 `wait`. The harness exclusively claims that waiter, commits one canonical
@@ -102,11 +121,11 @@ inference sees the replacement window rather than an unresolved structural
 wait.
 
 Event-loop order chooses races. A wait result, activating input, timeout, or
-ordinary cancellation that settles first retains the normal busy rejection. A
+ordinary cancellation that settles first leaves the durable intent queued. A
 compaction claim that wins excludes those wait terminals, coalesces repeated
 requests, and runs before queued activation dispatch. Cancellation append
-failure restores ordinary wait arbitration and never starts compaction.
-Teardown clears the transient request and never starts compaction. Once
+failure restores ordinary wait arbitration while the durable request remains
+owed. Teardown clears only the transient waiter claim. Once
 cancellation commits, provider failure, route failure, transaction
 cancellation, or blocked recovery never resurrects the wait.
 
