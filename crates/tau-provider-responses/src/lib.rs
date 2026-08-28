@@ -1697,6 +1697,9 @@ async fn stream_sse(
         }
         pending.append(&chunk);
         let control = process_complete_sse_lines(&mut pending, |line| {
+            if is_canceled() {
+                return Err(Error::Canceled);
+            }
             if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
                 if data == "[DONE]" {
                     state.terminalize()?;

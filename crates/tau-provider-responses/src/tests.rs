@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -2717,6 +2718,66 @@ fn sse_later_lossy_over_limit_line_preserves_earlier_progress() {
     assert_eq!(update_count, 1);
     let progress = state.progress();
     assert!(progress.has_timed_semantic_output);
+    assert!(matches!(
+        progress.output_items.as_slice(),
+        [AttemptOutputItem {
+            item: ContextItem::Message(message),
+            ..
+        }] if message.content == vec![ContentPart::Text {
+            text: "accepted".to_owned(),
+        }]
+    ));
+}
+
+/// Cancellation that arrives while one decoded SSE chunk is being parsed must
+/// stop before the next complete line mutates semantic state.
+#[test]
+fn sse_chunk_processing_observes_cancellation_between_complete_lines() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE server");
+    let address = listener.local_addr().expect("SSE server address");
+    let body = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"accepted\"}\n",
+        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"rejected\"}\n",
+        "data: [DONE]\n",
+    );
+    let body_len = body.len() as u64;
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept request");
+        let _ = read_http_request(&mut socket);
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write response");
+    });
+    let update_count = Cell::new(0);
+    let outcome = run_attempt(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        &mut |_| update_count.set(update_count.get() + 1),
+        &mut || update_count.get() == 1,
+        &test_network(),
+    );
+    server.join().expect("join SSE server");
+
+    let AttemptOutcome::Canceled { progress } = outcome else {
+        panic!("cancellation between complete SSE lines must win");
+    };
+    assert_eq!(update_count.get(), 1);
+    assert_eq!(
+        progress.response_bytes_received, body_len,
+        "cancellation must occur while parsing one fully accounted response chunk"
+    );
     assert!(matches!(
         progress.output_items.as_slice(),
         [AttemptOutputItem {
