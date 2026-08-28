@@ -108,6 +108,27 @@ struct TrackedPrompt {
     model: ProviderModelInfo,
 }
 
+/// Authorization identity for one cache-read observation of an exact prefix.
+///
+/// This process-local value starts at zero and advances saturatingly for each
+/// later qualifying read, so a scheduled refresh can only run with current
+/// evidence.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CacheObservationGeneration(
+    /// Monotonic process-local observation counter.
+    u64,
+);
+
+impl CacheObservationGeneration {
+    /// Initial authorization before any qualifying read.
+    const INITIAL: Self = Self(0);
+
+    /// Advance to the next authorization while preserving prior saturation.
+    fn advance(&mut self) {
+        self.0 = self.0.saturating_add(1);
+    }
+}
+
 /// Bounded observation state for one exact prefix generation.
 struct Evidence {
     /// Number of qualifying cache reads since the latest observed write.
@@ -115,7 +136,7 @@ struct Evidence {
     /// Whether this key has an observed write in the current generation.
     saw_write: bool,
     /// Monotonic observation generation; each later read may reschedule.
-    generation: u64,
+    generation: CacheObservationGeneration,
 }
 
 /// One observation generation awaiting finite-window admission.
@@ -123,7 +144,7 @@ struct Scheduled {
     /// Exact sensitive prefix request retained only in process memory.
     request: tau_proto::AgentPromptPrewarmRequested,
     /// Observation generation that authorized this attempt.
-    generation: u64,
+    generation: CacheObservationGeneration,
     /// Monotonic dispatch deadline.
     due: Instant,
     /// Exact economic/idle stop.
@@ -314,14 +335,14 @@ impl<C: CacheClock, J: CacheJitter> ProviderCacheResidency<C, J> {
             .or_insert(Evidence {
                 reads_after_write: 0,
                 saw_write: false,
-                generation: 0,
+                generation: CacheObservationGeneration::INITIAL,
             });
         if write {
             evidence.saw_write = true;
             evidence.reads_after_write = 0;
         } else if read && evidence.saw_write {
             evidence.reads_after_write = evidence.reads_after_write.saturating_add(1);
-            evidence.generation = evidence.generation.saturating_add(1);
+            evidence.generation.advance();
         }
         let reads_after_write = evidence.reads_after_write;
         let generation = evidence.generation;

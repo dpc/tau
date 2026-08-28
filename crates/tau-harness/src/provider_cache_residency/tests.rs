@@ -507,6 +507,80 @@ fn deterministic_clock_jitter_and_break_even() {
     );
 }
 
+/// Observation authorizations retain their zero origin, increment, and
+/// saturation behavior without exposing a raw runtime counter.
+#[test]
+fn observation_generation_preserves_counter_behavior() {
+    let mut generation = CacheObservationGeneration::INITIAL;
+    assert_eq!(generation.0, 0);
+
+    generation.advance();
+    assert_eq!(generation.0, 1);
+
+    generation.0 = u64::MAX;
+    generation.advance();
+    assert_eq!(generation.0, u64::MAX);
+}
+
+/// A write starts at the initial authorization, later reads advance it, and a
+/// scheduled attempt holding the superseded authorization cannot dispatch.
+#[test]
+fn stale_observation_authorization_cannot_dispatch() {
+    let (clock, mut scheduler) = owner();
+    let route = tau_proto::ConnectionId::parse("one-connection").expect("route");
+    let model = model("one");
+    let write = prompt("one", "observation-write");
+    scheduler.track_prompt(route.clone(), &write, Some(&model));
+    scheduler.finish_prompt(&write.agent_prompt_id, true, Some(&usage(0, 10)));
+    let evidence = scheduler
+        .evidence
+        .values()
+        .next()
+        .expect("write records evidence");
+    assert_eq!(evidence.generation, CacheObservationGeneration::INITIAL);
+
+    let first_read = prompt("one", "observation-first-read");
+    scheduler.track_prompt(route.clone(), &first_read, Some(&model));
+    scheduler.finish_prompt(&first_read.agent_prompt_id, true, Some(&usage(10, 0)));
+    let stale_generation = scheduler
+        .scheduled
+        .values()
+        .next()
+        .expect("first qualifying read schedules a refresh")
+        .generation;
+    assert!(
+        CacheObservationGeneration::INITIAL < stale_generation,
+        "the first qualifying read advances the allocated authorization"
+    );
+
+    let second_read = prompt("one", "observation-second-read");
+    scheduler.track_prompt(route, &second_read, Some(&model));
+    scheduler.finish_prompt(&second_read.agent_prompt_id, true, Some(&usage(10, 0)));
+    assert!(
+        scheduler
+            .evidence
+            .values()
+            .next()
+            .expect("second qualifying read retains evidence")
+            .generation
+            > stale_generation,
+        "every later qualifying read allocates a newer authorization"
+    );
+    scheduler
+        .scheduled
+        .values_mut()
+        .next()
+        .expect("second qualifying read replaces the schedule")
+        .generation = stale_generation;
+
+    scheduler.open_tool_window();
+    clock.0.set(clock.0.get() + Duration::from_secs(90));
+    assert!(
+        scheduler.admit().is_empty(),
+        "a stale scheduled authorization must not dispatch"
+    );
+}
+
 /// The owner deduplicates equal prefixes and enforces global/Provider limits.
 #[test]
 fn dedup_and_concurrency_are_bounded() {
