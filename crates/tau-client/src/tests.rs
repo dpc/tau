@@ -4011,23 +4011,13 @@ fn detached_fifo_item_limit_and_blocked_writer_recovery() {
         entered: mpsc::Sender<()>,
         /// Releases the blocked flush.
         release: mpsc::Receiver<()>,
-        /// Reports that the writer popped the first detached frame.
-        detached_started: Option<mpsc::Sender<()>>,
-        /// Number of frame writes started.
-        writes: usize,
+        /// Reports the first detached frame reaching its flush boundary.
+        detached_flushing: Option<mpsc::Sender<()>>,
         /// Whether the first flush has already blocked.
         blocked: bool,
     }
     impl Write for FirstFlushBlocks {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if self.writes == 1 {
-                self.detached_started
-                    .take()
-                    .expect("detached-start sender")
-                    .send(())
-                    .expect("report detached write");
-            }
-            self.writes += 1;
             self.output.write(bytes)
         }
 
@@ -4036,6 +4026,8 @@ fn detached_fifo_item_limit_and_blocked_writer_recovery() {
                 self.blocked = true;
                 self.entered.send(()).expect("report blocked flush");
                 self.release.recv().expect("release blocked flush");
+            } else if let Some(detached_flushing) = self.detached_flushing.take() {
+                detached_flushing.send(()).expect("report detached flush");
             }
             self.output.flush()
         }
@@ -4046,7 +4038,7 @@ fn detached_fifo_item_limit_and_blocked_writer_recovery() {
     let written = SharedWriter::default();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let (detached_started_tx, detached_started_rx) = mpsc::channel();
+    let (detached_flushing_tx, detached_flushing_rx) = mpsc::channel();
     let (sender, receiver) = crate::writer_thread::writer_channel();
     let handle = ClientHandle::new(sender);
     let writer_output = written.clone();
@@ -4056,8 +4048,7 @@ fn detached_fifo_item_limit_and_blocked_writer_recovery() {
                 output: writer_output,
                 entered: entered_tx,
                 release: release_rx,
-                detached_started: Some(detached_started_tx),
-                writes: 0,
+                detached_flushing: Some(detached_flushing_tx),
                 blocked: false,
             },
             receiver,
@@ -4089,7 +4080,7 @@ fn detached_fifo_item_limit_and_blocked_writer_recovery() {
         .join()
         .expect("blocking sender")
         .expect("send");
-    detached_started_rx
+    detached_flushing_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("writer released one FIFO slot");
     handle
