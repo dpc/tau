@@ -3,6 +3,11 @@
 //! This boundary preserves system-template gating and the committed compaction
 //! window authority described by `SPEC-compaction-and-context-recovery`.
 
+#[cfg(test)]
+use super::prompt_materialization_timing::note_count_work;
+use super::prompt_materialization_timing::{
+    MaterializationCounts, MaterializationStage, PromptMaterializationTiming, stage_start,
+};
 use super::*;
 
 #[cfg(test)]
@@ -31,6 +36,27 @@ pub(super) enum PromptSurfaceError {
     DuplicateToolName(String),
     /// Strict Handlebars rendering failure.
     Render(handlebars::RenderError),
+}
+
+/// Count serialized JSON bytes without retaining schema content.
+fn serialized_json_len(value: &serde_json::Value) -> usize {
+    #[cfg(test)]
+    note_count_work();
+    struct ByteCounter(usize);
+
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, value).map_or(0, |()| counter.0)
 }
 
 impl Harness {
@@ -203,6 +229,16 @@ impl Harness {
     /// `system_prompt`, `tools`, or earlier messages busts the cache.
     /// See `linear_agent_prompts_strictly_extend_previous_messages`.
     pub(crate) fn send_prompt_to_agent_for(&mut self, cid: &AgentId) -> Option<AgentPromptId> {
+        self.send_prompt_to_agent_for_with_timing(cid, None)
+    }
+
+    /// Materialize one inference using timing started by the exact durable
+    /// checkpoint callback.
+    pub(super) fn send_prompt_to_agent_for_with_timing(
+        &mut self,
+        cid: &AgentId,
+        timing: Option<PromptMaterializationTiming>,
+    ) -> Option<AgentPromptId> {
         if self.agent_has_open_foreground_tool_round(cid) {
             return None;
         }
@@ -293,7 +329,7 @@ impl Harness {
             );
             return None;
         }
-        let prompt = self.prepare_agent_prompt_for_dispatch(cid)?;
+        let prompt = self.prepare_agent_prompt_for_dispatch_timed(cid, timing.as_ref())?;
         self.ensure_outer_turn_started(cid);
         if prompt.operation == tau_proto::PromptOperation::Inference
             && self
@@ -355,6 +391,7 @@ impl Harness {
                             started,
                             provider_connection_id,
                             runtime_incarnation,
+                            materialization_timing: timing,
                         },
                         prompt: path_std_sync::Arc::new(prompt),
                     },
@@ -720,6 +757,16 @@ impl Harness {
         &mut self,
         cid: &AgentId,
     ) -> Option<AgentPromptCreated> {
+        self.prepare_agent_prompt_for_dispatch_timed(cid, None)
+    }
+
+    /// Builds a provider prompt while optionally recording content-free local
+    /// materialization diagnostics.
+    fn prepare_agent_prompt_for_dispatch_timed(
+        &mut self,
+        cid: &AgentId,
+        timing: Option<&PromptMaterializationTiming>,
+    ) -> Option<AgentPromptCreated> {
         let _ = self.ensure_agent_id_for_agent(cid);
         let conv = self
             .agent_runtime
@@ -840,6 +887,7 @@ impl Harness {
             self.terminalize_owned_dispatch_error(cid, message);
             return None;
         }
+        let stage_started = stage_start(timing);
         let prompt_context = tree
             .and_then(|tree| {
                 standalone_window.map_or_else(
@@ -872,16 +920,26 @@ impl Harness {
                 },
             ));
         }
+        if let Some(timing) = timing {
+            timing.record(
+                MaterializationStage::BranchContext,
+                stage_started
+                    .expect("enabled timing has a stage start")
+                    .elapsed(),
+            );
+        }
         let operation = owned_operation;
         let durable_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
-        let (tool_specs, tools, system_prompt) = match self.prepare_prompt_surface_for_dispatch(
-            &role_name,
-            durable_agent_id.as_ref(),
-            durable_agent_id.as_ref(),
-            &model,
-            is_non_tool_ext_query,
-            contains_payload_envelope_provenance_projection,
-        ) {
+        let (tool_specs, tools, system_prompt) = match self
+            .prepare_prompt_surface_for_dispatch_timed(
+                &role_name,
+                durable_agent_id.as_ref(),
+                durable_agent_id.as_ref(),
+                &model,
+                is_non_tool_ext_query,
+                contains_payload_envelope_provenance_projection,
+                timing,
+            ) {
             Ok(surface) => surface,
             Err(PromptSurfaceError::DuplicateToolName(name)) => {
                 let message = format!(
@@ -937,6 +995,7 @@ impl Harness {
             },
         );
 
+        let stage_started = stage_start(timing);
         self.session_runtime
             .current_session_state
             .token_usage
@@ -998,6 +1057,37 @@ impl Harness {
                 .expect("agent has durable id"),
         );
         let compaction = self.compaction_context_for_agent(cid, &model);
+        if let Some(timing) = timing {
+            timing.record(
+                MaterializationStage::Accounting,
+                stage_started
+                    .expect("enabled timing has a stage start")
+                    .elapsed(),
+            );
+            #[cfg(test)]
+            note_count_work();
+            let context_items = context.flatten_iter().count();
+            let images = context
+                .flatten_iter()
+                .filter_map(|item| match item {
+                    ContextItem::ToolResult(result) => Some(result.provider_content.len()),
+                    _ => None,
+                })
+                .fold(0_usize, usize::saturating_add);
+            let schema_bytes = tools
+                .iter()
+                .filter_map(|tool| tool.parameters.as_ref())
+                .map(serialized_json_len)
+                .fold(0_usize, usize::saturating_add);
+            timing.set_counts(MaterializationCounts {
+                tools: tools.len(),
+                schema_bytes,
+                context_blocks: context.blocks.len(),
+                context_items,
+                images,
+                recipients: 0,
+            });
+        }
         Some(AgentPromptCreated {
             agent_prompt_id,
             agent_id,
@@ -1217,6 +1307,7 @@ impl Harness {
     /// Resolve and render one provider-visible prompt surface from a single
     /// sorted provider snapshot.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(super) fn prepare_prompt_surface_for_dispatch(
         &self,
         role_name: &str,
@@ -1226,6 +1317,31 @@ impl Harness {
         hide_tool_capabilities: bool,
         contains_payload_envelope_provenance_projection: bool,
     ) -> Result<(Vec<tau_proto::ToolSpec>, Vec<ToolDefinition>, String), PromptSurfaceError> {
+        self.prepare_prompt_surface_for_dispatch_timed(
+            role_name,
+            agent_id,
+            context_agent_id,
+            model,
+            hide_tool_capabilities,
+            contains_payload_envelope_provenance_projection,
+            None,
+        )
+    }
+
+    /// Timed form of prompt-surface preparation used only by live provider
+    /// materialization.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_prompt_surface_for_dispatch_timed(
+        &self,
+        role_name: &str,
+        agent_id: Option<&tau_proto::AgentId>,
+        context_agent_id: Option<&tau_proto::AgentId>,
+        model: &ModelId,
+        hide_tool_capabilities: bool,
+        contains_payload_envelope_provenance_projection: bool,
+        timing: Option<&PromptMaterializationTiming>,
+    ) -> Result<(Vec<tau_proto::ToolSpec>, Vec<ToolDefinition>, String), PromptSurfaceError> {
+        let stage_started = stage_start(timing);
         let providers = self.sorted_prompt_tool_providers();
         let specs = self.gather_effective_tool_specs_for_role_model_from_providers(
             role_name,
@@ -1244,8 +1360,17 @@ impl Harness {
             .iter()
             .map(|spec| spec.name.clone())
             .collect::<HashSet<_>>();
+        let tools = self.tool_definitions_from_specs(&specs);
+        if let Some(timing) = timing {
+            timing.record(
+                MaterializationStage::ToolsSchema,
+                stage_started
+                    .expect("enabled timing has a stage start")
+                    .elapsed(),
+            );
+        }
         let prompt = self
-            .try_build_system_prompt_for_role_and_agent_with_snapshot(
+            .try_build_system_prompt_for_role_and_agent_with_snapshot_timed(
                 role_name,
                 agent_id,
                 context_agent_id,
@@ -1254,9 +1379,9 @@ impl Harness {
                 contains_payload_envelope_provenance_projection,
                 &providers,
                 &effective_tool_names,
+                timing,
             )
             .map_err(PromptSurfaceError::Render)?;
-        let tools = self.tool_definitions_from_specs(&specs);
         Ok((specs, tools, prompt))
     }
 
@@ -1300,6 +1425,34 @@ impl Harness {
         providers: &[&tau_core::ToolProvider],
         effective_tool_names: &HashSet<ToolName>,
     ) -> Result<String, handlebars::RenderError> {
+        self.try_build_system_prompt_for_role_and_agent_with_snapshot_timed(
+            role_name,
+            agent_id,
+            context_agent_id,
+            tool_specs,
+            model,
+            contains_payload_envelope_provenance_projection,
+            providers,
+            effective_tool_names,
+            None,
+        )
+    }
+
+    /// Timed form that separates prompt-input projection from Handlebars work.
+    #[allow(clippy::too_many_arguments)]
+    fn try_build_system_prompt_for_role_and_agent_with_snapshot_timed(
+        &self,
+        role_name: &str,
+        agent_id: Option<&tau_proto::AgentId>,
+        context_agent_id: Option<&tau_proto::AgentId>,
+        tool_specs: &[tau_proto::ToolSpec],
+        model: Option<&ModelId>,
+        contains_payload_envelope_provenance_projection: bool,
+        providers: &[&tau_core::ToolProvider],
+        effective_tool_names: &HashSet<ToolName>,
+        timing: Option<&PromptMaterializationTiming>,
+    ) -> Result<String, handlebars::RenderError> {
+        let stage_started = stage_start(timing);
         if let Some(name) = duplicate_model_visible_tool_name(tool_specs) {
             return Err(handlebars::RenderError::from(
                 handlebars::RenderErrorReason::Other(format!(
@@ -1349,7 +1502,45 @@ impl Harness {
             contains_payload_envelope_provenance_projection
                 .then_some(PAYLOAD_ENVELOPE_PROVENANCE_NOTICE),
         );
-        try_build_system_prompt_with_engine(
+        let agent_context = self
+            .prompt_coordination
+            .context_discovery
+            .agent_context
+            .template_value_filtered(context_agent_id, |key, contributor| {
+                key.as_ref() != "workdir" || visible_workdir_contributors.contains(contributor)
+            });
+        let capabilities = path_crate_prompt::PromptCapabilities::new(
+            tool_specs
+                .iter()
+                .map(|spec| self.tool_model_visible_name(spec).to_string()),
+            self.extensions.enabled_names.iter().cloned().chain(
+                self.extensions
+                    .entries
+                    .values()
+                    .map(|entry| entry.name.to_string()),
+            ),
+            self.extensions
+                .entries
+                .values()
+                .filter(|entry| entry.state == path_crate_extension::ExtensionState::Ready)
+                .map(|entry| entry.name.to_string()),
+        )
+        .with_parallel_tool_calls(
+            !tool_specs.is_empty()
+                && model
+                    .and_then(|model| self.provider_runtime.model_info.get(model))
+                    .is_none_or(|info| info.supports_parallel_tool_calls),
+        );
+        if let Some(timing) = timing {
+            timing.record(
+                MaterializationStage::FragmentsSkillsContext,
+                stage_started
+                    .expect("enabled timing has a stage start")
+                    .elapsed(),
+            );
+        }
+        let stage_started = stage_start(timing);
+        let rendered = try_build_system_prompt_with_engine(
             &self
                 .prompt_coordination
                 .context_discovery
@@ -1358,36 +1549,19 @@ impl Harness {
             skills,
             &prompt_fragments,
             &tool_prompt_fragments,
-            self.prompt_coordination
-                .context_discovery
-                .agent_context
-                .template_value_filtered(context_agent_id, |key, contributor| {
-                    key.as_ref() != "workdir" || visible_workdir_contributors.contains(contributor)
-                }),
+            agent_context,
             template_context,
-            path_crate_prompt::PromptCapabilities::new(
-                tool_specs
-                    .iter()
-                    .map(|spec| self.tool_model_visible_name(spec).to_string()),
-                self.extensions.enabled_names.iter().cloned().chain(
-                    self.extensions
-                        .entries
-                        .values()
-                        .map(|entry| entry.name.to_string()),
-                ),
-                self.extensions
-                    .entries
-                    .values()
-                    .filter(|entry| entry.state == path_crate_extension::ExtensionState::Ready)
-                    .map(|entry| entry.name.to_string()),
-            )
-            .with_parallel_tool_calls(
-                !tool_specs.is_empty()
-                    && model
-                        .and_then(|model| self.provider_runtime.model_info.get(model))
-                        .is_none_or(|info| info.supports_parallel_tool_calls),
-            ),
-        )
+            capabilities,
+        );
+        if let Some(timing) = timing {
+            timing.record(
+                MaterializationStage::HandlebarsRender,
+                stage_started
+                    .expect("enabled timing has a stage start")
+                    .elapsed(),
+            );
+        }
+        rendered
     }
 
     pub(super) fn system_template_for_role(

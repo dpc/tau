@@ -1099,6 +1099,10 @@ impl Harness {
         else {
             return;
         };
+        self.prompt_coordination
+            .prompt_runtime
+            .pending_materialization_timings
+            .remove(&canceled_prompt_id);
         let marked_owner = self
             .agent_runtime
             .agent_registry

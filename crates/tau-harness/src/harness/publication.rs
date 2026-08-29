@@ -6,6 +6,7 @@
 use tau_proto::ToolResultStatus;
 
 use super::prompt_acceptance_timing::{PromptAcceptanceTerminal, PromptAcceptanceTiming};
+use super::prompt_materialization_timing::MaterializationStage;
 use super::*;
 
 impl Harness {
@@ -1364,6 +1365,9 @@ impl Harness {
         };
         let prompt_id = continuation.started.agent_prompt_id.clone();
         let provider_connection_id = continuation.provider_connection_id.clone();
+        if let Some(timing) = &continuation.materialization_timing {
+            timing.finish_failure();
+        }
         self.prompt_coordination
             .prompt_runtime
             .pending_dispatches
@@ -2150,6 +2154,14 @@ impl Harness {
                 (cid, completion, through)
             });
         let bus_enqueue_started = Instant::now();
+        let mut prompt_materialization_timing = matches!(event, Event::AgentPromptCreated(_))
+            .then(|| {
+                sync_head_for
+                    .as_ref()
+                    .and_then(ConversationHeadSync::prompt_dispatch)
+                    .and_then(|authority| authority.materialization_timing.clone())
+            })
+            .flatten();
         let mut eligible_delivery_count = tau_core::DeliveryOutcomeCount::default();
         let prompt_provider_route = matches!(event, Event::AgentPromptCreated(_))
             .then(|| {
@@ -2200,15 +2212,26 @@ impl Harness {
                         )
                     },
                 );
-            match self
-                .runtime_io
-                .bus
-                .send_to(&provider_connection_id, source, provider_frame)
-            {
+            let delivery =
+                self.runtime_io
+                    .bus
+                    .send_to(&provider_connection_id, source, provider_frame);
+            let prompt_copy_fanout = bus_enqueue_started.elapsed();
+            match delivery {
                 Ok(report) if !report.delivered_to.is_empty() => {
+                    if let Some(timing) = prompt_materialization_timing.take() {
+                        timing.record(MaterializationStage::CopyFanout, prompt_copy_fanout);
+                        timing.set_recipients(1);
+                        timing.finish_success();
+                    }
                     self.track_provider_prompt_request(&event, provider_connection_id);
                 }
                 Ok(report) => {
+                    if let Some(timing) = prompt_materialization_timing.take() {
+                        timing.record(MaterializationStage::CopyFanout, prompt_copy_fanout);
+                        timing.set_recipients(0);
+                        timing.finish_failure();
+                    }
                     tracing::warn!(
                         target: "tau_harness",
                         event = %event.name(),
@@ -2223,6 +2246,11 @@ impl Harness {
                     );
                 }
                 Err(error) => {
+                    if let Some(timing) = prompt_materialization_timing.take() {
+                        timing.record(MaterializationStage::CopyFanout, prompt_copy_fanout);
+                        timing.set_recipients(0);
+                        timing.finish_failure();
+                    }
                     tracing::warn!(
                         target: "tau_harness",
                         event = %event.name(),
@@ -2258,6 +2286,12 @@ impl Harness {
                         )
                     },
                 );
+            let prompt_copy_fanout = bus_enqueue_started.elapsed();
+            if let Some(timing) = prompt_materialization_timing.take() {
+                timing.record(MaterializationStage::CopyFanout, prompt_copy_fanout);
+                timing.set_recipients(0);
+                timing.finish_failure();
+            }
             let unavailable_route = tau_proto::ConnectionId::parse("unavailable-model-route")
                 .expect("fixed unavailable route must satisfy the connection identifier grammar");
             self.recover_failed_provider_prompt_route(

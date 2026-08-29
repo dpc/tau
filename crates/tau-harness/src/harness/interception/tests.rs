@@ -167,6 +167,7 @@ fn unique_prompt_handoff_moves_constituent_allocations() {
             provider_connection_id: tau_proto::ConnectionId::parse("provider-move-owned")
                 .expect("provider connection"),
             runtime_incarnation: 7,
+            materialization_timing: None,
         },
         prompt: Arc::new(prompt),
     };

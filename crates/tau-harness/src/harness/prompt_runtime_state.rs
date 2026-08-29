@@ -3,11 +3,15 @@
 //! Provider connection routing and compaction transaction ownership remain in
 //! their dedicated runtime owners.
 
+use super::prompt_materialization_timing::PrecheckpointMaterializationTiming;
 use super::*;
 
 /// Runtime-only state associated with provider prompts and their continuations.
 #[derive(Default)]
 pub(crate) struct PromptRuntimeState {
+    /// Content-free pre-checkpoint timing awaiting its exact committed owner.
+    pub(super) pending_materialization_timings:
+        HashMap<AgentPromptId, PrecheckpointMaterializationTiming>,
     /// Owning transcript agent for every in-flight provider prompt.
     pub(super) agents: HashMap<AgentPromptId, AgentId>,
     /// Ephemeral-agent prompts retained for late provider report filtering.

@@ -2,6 +2,211 @@
 
 use super::super::lifecycle::{assert_no_message, connect_socket_ui, read_notice};
 use super::*;
+use crate::harness::prompt_materialization_timing::{diagnostic_work, reset_diagnostic_work};
+
+#[derive(Clone)]
+struct MaterializationTraceWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for MaterializationTraceWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("trace lock").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn register_sensitive_timing_fixture(h: &mut Harness) {
+    h.tool_routing.registry.register(
+        &crate::test_connection_id("provider-identifier-canary"),
+        ToolSpec {
+            name: ToolName::new("schema_canary_tool"),
+            model_visible_name: None,
+            description: Some("SCHEMA_DESCRIPTION_CANARY".to_owned()),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"RAW_ARGS_CANARY": {"type": "string"}}
+            })),
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            tags: Vec::new(),
+            enabled_by_default: true,
+            background_support: None,
+            examples: Vec::new(),
+        },
+    );
+}
+
+fn seed_sensitive_tool_context(h: &mut Harness, cid: &AgentId) {
+    let agent_id = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get(cid)
+        .and_then(|agent| agent.identity.agent_id.clone())
+        .expect("durable agent id");
+    let prompt_id = test_agent_prompt_id("privacy-canary-prompt");
+    let call_id: ToolCallId = "privacy-canary-call".into();
+    let response = ProviderResponseFinished {
+        automatic_compaction_decision: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: prompt_id,
+        agent_id: crate::parse_agent_id(&agent_id),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: call_id.clone(),
+            name: ToolName::new("schema_canary_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Text("RAW_TOOL_ARGUMENT_CANARY".to_owned()),
+            raw_arguments_json: Some(r#"{"secret":"RAW_JSON_ARGUMENT_CANARY"}"#.to_owned()),
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_output_tokens: None,
+        backend: None,
+        provider_attempt: Default::default(),
+        provider_response_id: Some("PROVIDER_RESPONSE_ID_CANARY".to_owned()),
+        ws_pool_delta: None,
+    };
+    h.session_runtime
+        .agent_store
+        .append_agent_event(&agent_id, None, Event::ProviderResponseFinished(response))
+        .expect("append sensitive tool call");
+    let result = ToolResult {
+        presentation: Default::default(),
+        call_id,
+        tool_name: ToolName::new("schema_canary_tool"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("TOOL_RESULT_CANARY".to_owned()),
+        provider_content: vec![tau_proto::ToolResultContentPart::Image(
+            tau_proto::ImageContent {
+                media_type: tau_proto::ImageMediaType::Png,
+                data: Arc::from(
+                    [
+                        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1,
+                        0, 0, 0, 1, 8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84,
+                        120, 218, 99, 100, 248, 15, 0, 1, 5, 1, 1, 39, 24, 227, 102, 0, 0, 0, 0,
+                        73, 69, 78, 68, 174, 66, 96, 130,
+                    ]
+                    .as_slice(),
+                ),
+                width: 1,
+                height: 1,
+                detail: tau_proto::ImageDetail::High,
+            },
+        )],
+        kind: tau_proto::ToolResultKind::Final,
+        originator: tau_proto::PromptOriginator::User,
+        display: Some(tau_proto::ToolUseState {
+            args: "IMAGE_PATH_METADATA_CANARY".to_owned(),
+            ..Default::default()
+        }),
+    };
+    let outcome = h
+        .session_runtime
+        .agent_store
+        .append_agent_event(&agent_id, None, Event::ProviderToolResult(result))
+        .expect("append sensitive tool result");
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(cid)
+        .expect("agent")
+        .identity
+        .head = outcome.selected_head_id.or(outcome.folded_node_id);
+}
+
+/// A real disabled dispatch performs no diagnostic clock, count, or schema
+/// traversal work.
+#[test]
+fn disabled_provider_materialization_performs_zero_diagnostic_work() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    register_sensitive_timing_fixture(&mut h);
+    seed_sensitive_tool_context(&mut h, &cid);
+    reset_diagnostic_work();
+    append_user_message_via_event(&mut h, "s1", "disabled privacy canary");
+    let _ = h.send_prompt_to_agent("s1");
+    assert_eq!(diagnostic_work(), 0);
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_materialization_timings
+            .is_empty()
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// The disabled production path creates no pending timing owner, while an
+/// enabled real prompt keeps sensitive transcript and identifier bytes out of
+/// the fixed local trace.
+#[test]
+fn provider_materialization_trace_is_lazy_and_content_free_on_live_dispatch() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    register_sensitive_timing_fixture(&mut h);
+    seed_sensitive_tool_context(&mut h, &cid);
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_materialization_timings
+            .is_empty()
+    );
+
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let writer = Arc::clone(&trace);
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || MaterializationTraceWriter(Arc::clone(&writer)))
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        append_user_message_via_event(&mut h, "s1", "PROMPT_CANARY SECRET_CANARY /PATH/CANARY");
+        let _ = h.send_prompt_to_agent("s1");
+    });
+
+    let trace = String::from_utf8(trace.lock().expect("trace lock").clone()).expect("UTF-8 trace");
+    assert!(trace.contains("tau_harness::prompt_materialization"));
+    for canary in [
+        "PROMPT_CANARY",
+        "SECRET_CANARY",
+        "/PATH/CANARY",
+        "s1",
+        "SCHEMA_DESCRIPTION_CANARY",
+        "RAW_ARGS_CANARY",
+        "provider-identifier-canary",
+        "schema_canary_tool",
+        "test/model",
+        "RAW_TOOL_ARGUMENT_CANARY",
+        "RAW_JSON_ARGUMENT_CANARY",
+        "PROVIDER_RESPONSE_ID_CANARY",
+        "TOOL_RESULT_CANARY",
+        "IHDR",
+        "IMAGE_PATH_METADATA_CANARY",
+    ] {
+        assert!(!trace.contains(canary), "leaked {canary}");
+    }
+    assert!(
+        h.prompt_coordination
+            .prompt_runtime
+            .pending_materialization_timings
+            .is_empty()
+    );
+    h.shutdown().expect("shutdown");
+}
 
 /// One provider dispatch sorts the live registry exactly once and reuses that
 /// snapshot for tools, fragments, capabilities, and workdir filtering.
@@ -40,7 +245,7 @@ fn benchmark_prompt_surface_dispatch_scaling() {
                 .expect("prepare dispatch surface");
         }
         eprintln!(
-            "dispatches={dispatches} elapsed={:?} provider_sorts={} template_parses={} template_renders={}",
+            "scenario=warm_inference text_context=default tool_surface=echo image_items=0 fanout=provider_plus_observers dispatches={dispatches} elapsed={:?} provider_sorts={} template_parses={} template_renders={}",
             started.elapsed(),
             dispatch_provider_sort_count(),
             prompt_template_parse_count(),

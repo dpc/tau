@@ -1388,6 +1388,9 @@ mod peer_reports;
 mod prompt_acceptance_timing;
 mod prompt_coordination_state;
 mod prompt_materialization;
+mod prompt_materialization_timing;
+#[cfg(test)]
+mod prompt_materialization_timing_tests;
 mod prompt_runtime_state;
 mod provider_response;
 mod provider_terminal_plan;

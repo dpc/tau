@@ -29,6 +29,7 @@ use tau_proto::{
 };
 
 use super::gated_final::GatedFinalDisposition;
+use super::prompt_materialization_timing::PromptMaterializationTiming;
 use crate::harness::compaction_runtime_state::ManualCompactionRequestKey;
 use crate::harness::prompt_acceptance_timing::PromptAcceptanceTiming;
 use crate::harness::{InferenceDispatchSelectionError, SessionGeneration};
@@ -54,6 +55,8 @@ pub(crate) struct PromptDispatchAuthority {
     pub(crate) provider_connection_id: tau_proto::ConnectionId,
     /// Loaded runtime instance that materialized the request.
     pub(crate) runtime_incarnation: u64,
+    /// Optional process-local, content-free materialization diagnostic.
+    pub(crate) materialization_timing: Option<PromptMaterializationTiming>,
 }
 
 impl PromptDispatchContinuation {

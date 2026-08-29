@@ -22,6 +22,7 @@ use std::time::Instant;
 
 use tau_proto::{AgentId, Event, SessionId};
 
+use super::prompt_materialization_timing::PrecheckpointMaterializationTiming;
 use crate::agent as path_crate_agent;
 use crate::agent::{AgentTurnState, InitialPromptCorrelation, PendingPrompt};
 use crate::error::HarnessError;
@@ -413,9 +414,16 @@ impl Harness {
                 self.reject_runnable_activations_without_provider_models(allowed);
                 return;
             }
+            let mut materialization_timing = PrecheckpointMaterializationTiming::enabled();
+            let selection_started = materialization_timing.as_ref().map(|_| Instant::now());
             let Some(selected) = self.next_runnable_agent(allowed) else {
                 break;
             };
+            if let (Some(timing), Some(started)) =
+                (materialization_timing.as_mut(), selection_started)
+            {
+                timing.set_runnable_selection(started.elapsed());
+            }
             let agent_id = selected.agent_id;
             let session_id = self
                 .agent_runtime
@@ -480,10 +488,16 @@ impl Harness {
                 {
                     continue;
                 }
-                if !output_length_owner_ready
-                    && !self.validate_prompt_render_for_dispatch(&agent_id)
-                {
-                    return;
+                if !output_length_owner_ready {
+                    let preflight_started = materialization_timing.as_ref().map(|_| Instant::now());
+                    if !self.validate_prompt_render_for_dispatch(&agent_id) {
+                        return;
+                    }
+                    if let (Some(timing), Some(started)) =
+                        (materialization_timing.as_mut(), preflight_started)
+                    {
+                        timing.set_preflight(started.elapsed());
+                    }
                 }
                 if let Some(activation_class) = selected_wakes
                     .as_ref()
@@ -542,6 +556,14 @@ impl Harness {
                 let Some(checkpoint) = self.claim_inference_checkpoint(&agent_id, selection) else {
                     continue;
                 };
+                if checkpoint.selection.operation == tau_proto::PromptOperation::Inference
+                    && let Some(timing) = materialization_timing.take()
+                {
+                    self.prompt_coordination
+                        .prompt_runtime
+                        .pending_materialization_timings
+                        .insert(checkpoint.agent_prompt_id.clone(), timing);
+                }
                 self.publish_for_agent(
                     &agent_id,
                     tau_proto::Event::AgentInferenceDispatchStarted(

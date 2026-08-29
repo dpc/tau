@@ -7,6 +7,7 @@
 use super::compaction_runtime::RollingCompactionPass;
 use super::compaction_runtime_state::SuppressedStart;
 use super::interception::{OwnedPublication, OwnedPublicationBranch, OwnedPublicationRetryPolicy};
+use super::prompt_materialization_timing::PromptMaterializationTiming;
 use super::*;
 
 impl Harness {
@@ -1500,6 +1501,10 @@ impl Harness {
         let Event::AgentInferenceDispatchStarted(started) = event else {
             return;
         };
+        self.prompt_coordination
+            .prompt_runtime
+            .pending_materialization_timings
+            .remove(&started.agent_prompt_id);
         if let Some(transaction_id) = started.transaction_id.as_ref() {
             self.prompt_coordination
                 .compaction_runtime
@@ -3280,6 +3285,17 @@ impl Harness {
                     )
                 });
             if checkpoint_matches {
+                let materialization_timing = (started.operation
+                    == Some(tau_proto::PromptOperation::Inference))
+                .then(|| {
+                    PromptMaterializationTiming::after_checkpoint(
+                        self.prompt_coordination
+                            .prompt_runtime
+                            .pending_materialization_timings
+                            .remove(&started.agent_prompt_id),
+                    )
+                })
+                .flatten();
                 let capacity_owner_matches = self
                     .runtime_io
                     .publication
@@ -3361,7 +3377,7 @@ impl Harness {
                     self.finalize_canceled_in_flight_prompt(&cid);
                     return;
                 }
-                let _ = self.send_prompt_to_agent_for(&cid);
+                let _ = self.send_prompt_to_agent_for_with_timing(&cid, materialization_timing);
             }
         }
         if let Event::ProviderResponseFinished(response) = event
