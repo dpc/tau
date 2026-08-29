@@ -60,6 +60,15 @@ owns token-capacity admission and authorizes strict-predecessor retreat.
 Native compact completion preserves provider usage, including cached-read and
 cache-write counters, in the ordinary `ProviderResponseFinished.usage` path.
 Each durable pass is accounted independently.
+Transient native compact failures retain transparent repair and logical retry
+only while the attempt has accepted no semantic compact output. Once the parser
+accepts a compact item, any later failure discards the tentative item and
+terminalizes that logical request without another paid dispatch. An error event
+is processed before any item-shaped fields in that event, so such an error is
+non-progress and remains retry-eligible. A later explicit compaction request is
+a distinct paid operation. Ordinary inference retry policy is unchanged.
+This boundary implements
+[SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md).
 The writer sends a 25-second `websocket_control_ping` WebSocket control frame
 only to keep an idle transport path alive. It is not a Responses envelope, never
 starts inference, and cannot refresh a prompt cache.

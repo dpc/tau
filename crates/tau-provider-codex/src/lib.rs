@@ -1053,8 +1053,8 @@ impl CodexRuntime {
                 if let Some(probe) = probe {
                     probe.complete(CompactRouteState::Available);
                 }
-                return match error.retry_decision() {
-                    Some(decision) => {
+                return match (error.retry_decision(), attempt.progress()) {
+                    (Some(decision), SemanticProgress::None) => {
                         attempt.finalize_retry_failure(RetryFailureInput {
                             agent_prompt_id,
                             request,
@@ -1065,7 +1065,7 @@ impl CodexRuntime {
                         });
                         CompactOutcome::Retry(decision)
                     }
-                    None => CompactOutcome::Terminal {
+                    _ => CompactOutcome::Terminal {
                         error: CodexError(error),
                         backend_reached: attempt.backend_reached(),
                     },

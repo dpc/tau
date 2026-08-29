@@ -78,6 +78,15 @@ repair, while tentative semantic output causes the error to surface without an
 automatic replay. The extension clears that transient output before scheduling
 later required work.
 
+Native standalone compaction likewise permits transparent repair and outer
+logical retry only before accepting semantic compact output. Error handling
+precedes item-shaped fields in the same event, so an error-first event is
+non-progress and remains retryable. After accepting a compact item, any later
+failure discards that uncommitted item and terminalizes without another paid
+dispatch; only a distinct explicit request may recover. Revisit this boundary
+when changing compact parser precedence, semantic-progress correlation, pool
+repair, or extension scheduler mapping.
+
 Ordinary response ids are socket-local and carry no independent proof that
 concurrently committed canonical input exists in their upstream history. Tau
 reuses one only when a type-preserving fingerprint proves the current canonical

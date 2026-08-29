@@ -10,6 +10,8 @@ and successor semantics added for ticket `9dvw`, satisfying
 The user separately approved the bounded, durable rolling recovery semantics
 for ticket `b1yw`, including provider-rejection authority, per-pass progress,
 replay, and typed no-progress termination, satisfying the same gate.
+The user also approved the native Codex semantic-progress retry and cost
+boundary for ticket `gtdq`, satisfying the same gate.
 
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and
@@ -164,9 +166,13 @@ The model-callable path accepts work only when the exact captured
 provider-qualified model supports standalone compaction and its route exists.
 It has no inline fallback. Provider terminal errors, including context-window
 rejection during standalone compaction, produce one terminal transaction
-failure and are not retried indefinitely. Standalone compaction uses the shared
-transient-failure classifier and jittered Fibonacci scheduler with a named
-five-attempt policy, including the first attempt. Deterministic failures,
+failure and are not retried indefinitely. Before any semantic compact output is
+accepted, standalone compaction uses the shared transient-failure classifier
+and jittered Fibonacci scheduler with a named five-attempt policy, including the
+first attempt. A same-event error processed before content is accepted remains
+pre-progress. After semantic compact output is accepted, a later failure
+discards the uncommitted output and terminalizes without automatic retry;
+recovery requires a distinct explicit request. Deterministic failures,
 including context-window exhaustion, are terminal immediately. Ordinary
 inference deliberately retains its unbounded transient-retry policy.
 The Codex adapter serializes the first v2 compaction probe for a route/account

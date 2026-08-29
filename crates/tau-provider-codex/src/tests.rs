@@ -306,7 +306,7 @@ struct TransportCounts {
 }
 
 /// Bounded loopback peer used to prove WebSocket routing never falls back.
-struct WsFailureServer {
+struct WsLoopbackServer {
     /// Provider base URL targeting the loopback listener.
     base_url: String,
     /// Captured transport attempt counts.
@@ -319,7 +319,7 @@ struct WsFailureServer {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
-impl WsFailureServer {
+impl WsLoopbackServer {
     /// Returns the synthetic provider base URL.
     fn base_url(&self) -> String {
         self.base_url.clone()
@@ -331,7 +331,7 @@ impl WsFailureServer {
     }
 }
 
-impl Drop for WsFailureServer {
+impl Drop for WsLoopbackServer {
     fn drop(&mut self) {
         self.shutdown
             .store(true, path_std_sync_atomic::Ordering::SeqCst);
@@ -346,35 +346,39 @@ impl Drop for WsFailureServer {
 }
 
 #[derive(Clone, Copy)]
-enum WsFailureMode {
+enum LoopbackResponseMode {
     Upgrade426,
     CloseWithoutResponse,
     ContextWindowExceeded,
     DirectContextWindowExceeded,
     SemanticThenClose,
+    CompactErrorWithEmbeddedItem,
+    CompactItemThenClose,
+    CompactExactSuccess,
+    CompactItemThenCloseThenSuccess,
 }
 
-fn spawn_ws_426_server() -> WsFailureServer {
-    spawn_ws_failure_server(WsFailureMode::Upgrade426)
+fn spawn_ws_426_server() -> WsLoopbackServer {
+    spawn_loopback_server(LoopbackResponseMode::Upgrade426)
 }
 
-fn spawn_ws_disconnect_server() -> WsFailureServer {
-    spawn_ws_failure_server(WsFailureMode::CloseWithoutResponse)
+fn spawn_ws_disconnect_server() -> WsLoopbackServer {
+    spawn_loopback_server(LoopbackResponseMode::CloseWithoutResponse)
 }
 
-fn spawn_ws_context_error_server() -> WsFailureServer {
-    spawn_ws_failure_server(WsFailureMode::ContextWindowExceeded)
+fn spawn_ws_context_error_server() -> WsLoopbackServer {
+    spawn_loopback_server(LoopbackResponseMode::ContextWindowExceeded)
 }
 
-fn spawn_direct_ws_context_error_server() -> WsFailureServer {
-    spawn_ws_failure_server(WsFailureMode::DirectContextWindowExceeded)
+fn spawn_direct_ws_context_error_server() -> WsLoopbackServer {
+    spawn_loopback_server(LoopbackResponseMode::DirectContextWindowExceeded)
 }
 
-fn spawn_ws_semantic_close_server() -> WsFailureServer {
-    spawn_ws_failure_server(WsFailureMode::SemanticThenClose)
+fn spawn_ws_semantic_close_server() -> WsLoopbackServer {
+    spawn_loopback_server(LoopbackResponseMode::SemanticThenClose)
 }
 
-fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
+fn spawn_loopback_server(mode: LoopbackResponseMode) -> WsLoopbackServer {
     let listener = path_std_net::TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
     let addr = listener.local_addr().expect("fake provider addr");
     let counts = path_std_sync::Arc::new(TransportCounts::default());
@@ -391,9 +395,13 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
             let _ = stream.set_read_timeout(Some(path_std_time::Duration::from_secs(2)));
             if matches!(
                 mode,
-                WsFailureMode::ContextWindowExceeded
-                    | WsFailureMode::DirectContextWindowExceeded
-                    | WsFailureMode::SemanticThenClose
+                LoopbackResponseMode::ContextWindowExceeded
+                    | LoopbackResponseMode::DirectContextWindowExceeded
+                    | LoopbackResponseMode::SemanticThenClose
+                    | LoopbackResponseMode::CompactErrorWithEmbeddedItem
+                    | LoopbackResponseMode::CompactItemThenClose
+                    | LoopbackResponseMode::CompactExactSuccess
+                    | LoopbackResponseMode::CompactItemThenCloseThenSuccess
             ) {
                 let Ok(mut socket) = tungstenite::accept(stream) else {
                     continue;
@@ -402,7 +410,7 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                     .ws_upgrade_requests
                     .fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
                 let _ = socket.read();
-                if matches!(mode, WsFailureMode::DirectContextWindowExceeded) {
+                if matches!(mode, LoopbackResponseMode::DirectContextWindowExceeded) {
                     let _ = socket.send(tungstenite::Message::Text(
                         serde_json::json!({
                             "type": "error",
@@ -414,7 +422,7 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                     ));
                     continue;
                 }
-                if matches!(mode, WsFailureMode::SemanticThenClose) {
+                if matches!(mode, LoopbackResponseMode::SemanticThenClose) {
                     let _ = socket.send(tungstenite::Message::Text(
                         serde_json::json!({
                             "type": "response.output_text.delta",
@@ -424,6 +432,80 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                         .into(),
                     ));
                     let _ = socket.close(None);
+                    continue;
+                }
+                if matches!(mode, LoopbackResponseMode::CompactErrorWithEmbeddedItem) {
+                    let _ = socket.send(tungstenite::Message::Text(
+                        serde_json::json!({
+                            "type": "error",
+                            "code": "overloaded_error",
+                            "message": "busy",
+                            "output_index": 0,
+                            "item": {
+                                "type": "compaction",
+                                "id": "cmp_ignored",
+                                "encrypted_content": "must-not-be-accepted"
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ));
+                    continue;
+                }
+                if matches!(
+                    mode,
+                    LoopbackResponseMode::CompactItemThenClose
+                        | LoopbackResponseMode::CompactItemThenCloseThenSuccess
+                ) && !(matches!(mode, LoopbackResponseMode::CompactItemThenCloseThenSuccess)
+                    && 0 < request_index)
+                {
+                    let _ = socket.send(tungstenite::Message::Text(
+                        serde_json::json!({
+                            "type": "response.output_item.done",
+                            "output_index": 0,
+                            "item": {
+                                "type": "compaction",
+                                "id": "cmp_uncommitted",
+                                "encrypted_content": "discard-me"
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ));
+                    let _ = socket.close(None);
+                    continue;
+                }
+                if matches!(
+                    mode,
+                    LoopbackResponseMode::CompactExactSuccess
+                        | LoopbackResponseMode::CompactItemThenCloseThenSuccess
+                ) {
+                    let _ = socket.send(tungstenite::Message::Text(
+                        serde_json::json!({
+                            "type": "response.output_item.done",
+                            "output_index": 0,
+                            "item": {
+                                "type": "compaction",
+                                "id": "cmp_committed",
+                                "encrypted_content": "opaque"
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ));
+                    let _ = socket.send(tungstenite::Message::Text(
+                        serde_json::json!({
+                            "type": "response.completed",
+                            "response": {
+                                "usage": {
+                                    "input_tokens": 3,
+                                    "output_tokens": 1
+                                }
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ));
                     continue;
                 }
                 let _ = socket.send(tungstenite::Message::Text(
@@ -482,7 +564,7 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                 panic!("unexpected fake-provider request: {request_line}");
             }
             match mode {
-                WsFailureMode::Upgrade426 => {
+                LoopbackResponseMode::Upgrade426 => {
                     let response = concat!(
                         "HTTP/1.1 426 Upgrade Required\r\n",
                         "Retry-After: 999999\r\n",
@@ -493,10 +575,16 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
                     );
                     let _ = path_std_io::Write::write_all(&mut stream, response.as_bytes());
                 }
-                WsFailureMode::CloseWithoutResponse => {}
-                WsFailureMode::ContextWindowExceeded
-                | WsFailureMode::DirectContextWindowExceeded => unreachable!("handled above"),
-                WsFailureMode::SemanticThenClose => unreachable!("handled above"),
+                LoopbackResponseMode::CloseWithoutResponse => {}
+                LoopbackResponseMode::ContextWindowExceeded
+                | LoopbackResponseMode::DirectContextWindowExceeded
+                | LoopbackResponseMode::SemanticThenClose
+                | LoopbackResponseMode::CompactErrorWithEmbeddedItem
+                | LoopbackResponseMode::CompactItemThenClose
+                | LoopbackResponseMode::CompactExactSuccess
+                | LoopbackResponseMode::CompactItemThenCloseThenSuccess => {
+                    unreachable!("handled above")
+                }
             }
             assert!(
                 request_index + 1 < MAX_REQUESTS,
@@ -504,7 +592,7 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> WsFailureServer {
             );
         }
     });
-    WsFailureServer {
+    WsLoopbackServer {
         base_url: format!("http://{addr}/backend-api"),
         counts,
         shutdown,
@@ -632,6 +720,198 @@ fn context_with_historical_prefix_bytes(target: tau_proto::ByteCount) -> tau_pro
         Some(target)
     );
     context
+}
+
+/// Builds the smallest valid standalone-compaction context for production-path
+/// retry and completion tests.
+fn compact_trigger_context() -> tau_proto::PromptContext {
+    tau_proto::PromptContext {
+        blocks: vec![tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::CompactionTrigger],
+            },
+        )],
+    }
+}
+
+/// A retryable transport failure before any compact item remains eligible for
+/// the outer logical-request scheduler after the one transparent repair.
+#[test]
+fn compact_pre_progress_failure_remains_retryable() {
+    let server = spawn_ws_disconnect_server();
+    let config = ResolvedConfig {
+        inner: test_config(server.base_url()),
+    };
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let session_id = tau_proto::SessionId::parse("session-compact-pre-progress").expect("session");
+    let agent_id = tau_proto::AgentId::parse("agent-compact-pre-progress").expect("agent");
+    let context = compact_trigger_context();
+    let request = test_prompt_payload(&session_id, &agent_id, &context);
+
+    assert!(matches!(
+        runtime.compact(
+            "ap-compact-pre-progress",
+            &config,
+            &request,
+            &mut NeverAbort
+        ),
+        CompactOutcome::Retry(_)
+    ));
+    assert!(
+        server
+            .counts()
+            .ws_upgrade_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 1,
+        "the retryable outcome follows real provider egress"
+    );
+}
+
+/// An error event wins before item-shaped fields in that same event can become
+/// semantic progress, so the failed logical request remains retryable.
+#[test]
+fn compact_same_event_error_first_remains_retryable() {
+    let server = spawn_loopback_server(LoopbackResponseMode::CompactErrorWithEmbeddedItem);
+    let config = ResolvedConfig {
+        inner: test_config(server.base_url()),
+    };
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let session_id = tau_proto::SessionId::parse("session-compact-error-first").expect("session");
+    let agent_id = tau_proto::AgentId::parse("agent-compact-error-first").expect("agent");
+    let context = compact_trigger_context();
+    let request = test_prompt_payload(&session_id, &agent_id, &context);
+
+    let CompactOutcome::Retry(decision) =
+        runtime.compact("ap-compact-error-first", &config, &request, &mut NeverAbort)
+    else {
+        panic!("error-first event must remain retryable");
+    };
+    assert_eq!(
+        decision.class,
+        tau_provider::retry_policy::RetryClass::Overload,
+        "the embedded overloaded frame, not a later socket close, owns retry"
+    );
+}
+
+/// Once the parser accepts a canonical compact item, a later retryable
+/// transport failure terminalizes this paid request instead of scheduling it
+/// again.
+#[test]
+fn compact_post_progress_failure_is_terminal() {
+    let server = spawn_loopback_server(LoopbackResponseMode::CompactItemThenClose);
+    let config = ResolvedConfig {
+        inner: test_config(server.base_url()),
+    };
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let session_id = tau_proto::SessionId::parse("session-compact-post-progress").expect("session");
+    let agent_id = tau_proto::AgentId::parse("agent-compact-post-progress").expect("agent");
+    let context = compact_trigger_context();
+    let request = test_prompt_payload(&session_id, &agent_id, &context);
+
+    let CompactOutcome::Terminal {
+        error,
+        backend_reached: true,
+    } = runtime.compact(
+        "ap-compact-post-progress",
+        &config,
+        &request,
+        &mut NeverAbort,
+    )
+    else {
+        panic!("post-progress transport failure must terminalize");
+    };
+    assert_eq!(
+        error
+            .retry_decision()
+            .expect("underlying failure remains retry-classified")
+            .class,
+        tau_provider::retry_policy::RetryClass::Transport
+    );
+    assert_eq!(
+        server
+            .counts()
+            .ws_upgrade_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "semantic progress prohibits both transparent repair and logical retry"
+    );
+}
+
+/// Native compact success remains exactly one canonical compaction item
+/// followed by `response.completed`.
+#[test]
+fn compact_exact_success_returns_one_item() {
+    let server = spawn_loopback_server(LoopbackResponseMode::CompactExactSuccess);
+    let config = ResolvedConfig {
+        inner: test_config(server.base_url()),
+    };
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let session_id = tau_proto::SessionId::parse("session-compact-exact-success").expect("session");
+    let agent_id = tau_proto::AgentId::parse("agent-compact-exact-success").expect("agent");
+    let context = compact_trigger_context();
+    let request = test_prompt_payload(&session_id, &agent_id, &context);
+
+    let CompactOutcome::Finished {
+        output_items,
+        usage,
+    } = runtime.compact(
+        "ap-compact-exact-success",
+        &config,
+        &request,
+        &mut NeverAbort,
+    )
+    else {
+        panic!("exact native compact response must finish");
+    };
+    assert!(matches!(
+        output_items.as_slice(),
+        [tau_proto::ContextItem::Compaction(_)]
+    ));
+    assert!(usage.is_some(), "provider usage survives exact success");
+}
+
+/// Terminalizing one post-progress failure does not poison explicit recovery:
+/// a later user-owned request pays for and dispatches a distinct successful
+/// compact operation.
+#[test]
+fn compact_explicit_new_request_dispatches_after_post_progress_failure() {
+    let server = spawn_loopback_server(LoopbackResponseMode::CompactItemThenCloseThenSuccess);
+    let config = ResolvedConfig {
+        inner: test_config(server.base_url()),
+    };
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let session_id =
+        tau_proto::SessionId::parse("session-compact-explicit-retry").expect("session");
+    let agent_id = tau_proto::AgentId::parse("agent-compact-explicit-retry").expect("agent");
+    let context = compact_trigger_context();
+    let request = test_prompt_payload(&session_id, &agent_id, &context);
+
+    assert!(matches!(
+        runtime.compact(
+            "ap-compact-explicit-first",
+            &config,
+            &request,
+            &mut NeverAbort
+        ),
+        CompactOutcome::Terminal { .. }
+    ));
+    assert!(matches!(
+        runtime.compact(
+            "ap-compact-explicit-second",
+            &config,
+            &request,
+            &mut NeverAbort
+        ),
+        CompactOutcome::Finished { .. }
+    ));
+    assert_eq!(
+        server
+            .counts()
+            .ws_upgrade_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "explicit recovery owns a distinct second paid request"
+    );
 }
 
 /// Large fixed system material may make the actual wire frame numerically

@@ -945,14 +945,18 @@ retried. Zulip-specific review triggers are recorded in
 
 Standalone compaction and its continuation are harness-owned durable work. Every
 new provider cut must be a closed transcript prefix; a tool-calling assistant
-response and its complete terminal results node are indivisible. Transient
-standalone provider failures use the shared scheduler for at most five total
-attempts; deterministic failures terminalize immediately. After terminal
-continuation or background completion, ordinary input proceeds, while durable
-failure history suppresses automatic threshold, policy, continuation, and
-reactive recovery for the same provider-qualified model and branch. Model or
-branch drift permits fresh independent work; returning restores suppression
-until a successful matching explicit successor clears the failed chain.
+response and its complete terminal results node are indivisible. Native Codex
+transient standalone failures use the shared scheduler for at most five total
+attempts only before semantic compact output is accepted. An error processed
+first in an event accepts no content and remains retryable. Once compact output
+is accepted, any later failure discards that uncommitted output and terminalizes
+without automatic retry; recovery requires a distinct explicit request.
+Deterministic failures terminalize immediately. After terminal continuation or
+background completion, ordinary input proceeds, while durable failure history
+suppresses automatic threshold, policy, continuation, and reactive recovery for
+the same provider-qualified model and branch. Model or branch drift permits
+fresh independent work; returning restores suppression until a successful
+matching explicit successor clears the failed chain.
 
 An explicit successor may retreat its cut to retain more exact suffix, but it
 must preserve same-branch coverage of any resume watermark and cannot replace
@@ -960,9 +964,17 @@ that watermark with an ancestor or sibling selected by later head navigation.
 Ordinary input and `:cancel` do not clear durable failure authority. Core
 validation and warm/cold exact-once replay regressions prevent duplicate provider
 dispatch, terminal delivery, and continuation checkpoints.
+The production-path safeguards
+`compact_pre_progress_failure_remains_retryable`,
+`compact_same_event_error_first_remains_retryable`,
+`compact_post_progress_failure_is_terminal`,
+`compact_exact_success_returns_one_item`, and
+`compact_explicit_new_request_dispatches_after_post_progress_failure` preserve
+the native Codex retry/cost boundary.
 Revisit them when adding any explicit abandon/rewind operation or changing
-compaction replay ownership, retry limits, failure classification, or automatic
-suppression qualification.
+compaction replay ownership, retry limits, failure classification, parser
+precedence, semantic-progress correlation, pool repair, compact scheduler
+mapping, or automatic suppression qualification.
 
 Exact committed publication envelopes create or transfer activation ownership.
 A retained completion envelope or standalone `AwaitingCheckpoint` tuple represents
