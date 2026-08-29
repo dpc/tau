@@ -1172,6 +1172,8 @@ pub struct TermHandle {
     input_tx: path_std_sync::mpsc::Sender<InputMessage>,
     /// Number of transcript-sized output snapshot clones requested.
     output_snapshot_count: Arc<path_std_sync::atomic::AtomicU64>,
+    /// Number of transcript-sized output snapshots transferred by ownership.
+    output_snapshot_take_count: Arc<path_std_sync::atomic::AtomicU64>,
     /// Number of asynchronous redraw requests made through this handle in
     /// redraw-count tests.
     #[cfg(feature = "redraw-test-counter")]
@@ -1481,6 +1483,39 @@ impl TermHandle {
     /// regressions.
     pub fn output_snapshot_count(&self) -> u64 {
         self.output_snapshot_count
+            .load(path_std_sync_atomic::Ordering::Relaxed)
+    }
+
+    /// Transfers all output blocks and zones out of the visible terminal.
+    ///
+    /// The returned snapshot owns the exact map and zone allocations formerly
+    /// installed in the terminal. Prompt input and prompt history remain in the
+    /// terminal. Callers must install another snapshot before allowing visible
+    /// output mutations.
+    pub fn take_output_snapshot(&self) -> OutputSnapshot {
+        self.output_snapshot_take_count
+            .fetch_add(1, path_std_sync_atomic::Ordering::Relaxed);
+        let _transaction = self.output_transaction_barrier();
+        let mut st = self.lock();
+        OutputSnapshot {
+            blocks: std::mem::take(&mut st.layout.blocks),
+            block_debug_ids: std::mem::take(&mut st.layout.block_debug_ids),
+            next_id: st.layout.next_id,
+            history: std::mem::take(&mut st.layout.history),
+            above_active: std::mem::take(&mut st.layout.above_active),
+            above_sticky: std::mem::take(&mut st.layout.above_sticky),
+            suggestions: std::mem::take(&mut st.layout.suggestions),
+            below: std::mem::take(&mut st.layout.below),
+        }
+    }
+
+    /// Returns how many output snapshots this handle has transferred by
+    /// ownership rather than cloned.
+    ///
+    /// This content-free counter distinguishes selection handoffs from
+    /// transcript-sized clone requests in frontend progress diagnostics.
+    pub fn output_snapshot_take_count(&self) -> u64 {
+        self.output_snapshot_take_count
             .load(path_std_sync_atomic::Ordering::Relaxed)
     }
 
@@ -2195,6 +2230,7 @@ impl Term {
             redraw: redraw_tx,
             input_tx,
             output_snapshot_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
+            output_snapshot_take_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
             #[cfg(feature = "redraw-test-counter")]
             redraw_request_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         };
@@ -2270,6 +2306,7 @@ impl Term {
             redraw: redraw_tx,
             input_tx,
             output_snapshot_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
+            output_snapshot_take_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
             #[cfg(feature = "redraw-test-counter")]
             redraw_request_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         };

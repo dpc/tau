@@ -5,6 +5,9 @@
 //! renderer and detached agent snapshots so switching transcripts moves one
 //! complete ownership unit.
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use super::*;
 
 /// Terminal renderer and its logically coherent runtime state.
@@ -363,6 +366,10 @@ pub(super) struct EditorPublicationState {
     pub(super) editor_context: Arc<Mutex<tau_cli_term::EditorContext>>,
     /// Whether hidden folding suppresses publication.
     pub(super) suppress_editor_context_publish: bool,
+    /// Number of response bytes copied into the externally visible editor
+    /// context by test builds.
+    #[cfg(test)]
+    pub(super) response_copy_bytes: Cell<u64>,
 }
 
 /// Renderer-global activity notifications.

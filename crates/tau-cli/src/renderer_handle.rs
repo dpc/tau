@@ -73,12 +73,12 @@ impl RendererHandle {
             .expect(MUTEX_POISONED)
     }
 
-    /// Clones the current target's output model.
-    pub(crate) fn output_snapshot(&self) -> tau_cli_term::OutputSnapshot {
-        if let Some(output) = &self.detached {
-            output.lock().expect(MUTEX_POISONED).clone()
+    /// Transfers the current target's output model by ownership.
+    pub(crate) fn take_output_snapshot(&mut self) -> tau_cli_term::OutputSnapshot {
+        if let Some(output) = self.detached.take() {
+            output.into_inner().expect(MUTEX_POISONED)
         } else {
-            self.terminal.output_snapshot()
+            self.terminal.take_output_snapshot()
         }
     }
 

@@ -6,7 +6,7 @@
 //! `SPEC-tau-cli-provider-stream-rendering`.
 
 #[cfg(test)]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1822,6 +1822,8 @@ impl EventRenderer {
             editor: renderer_state::EditorPublicationState {
                 editor_context: Arc::new(Mutex::new(tau_cli_term::EditorContext::default())),
                 suppress_editor_context_publish: false,
+                #[cfg(test)]
+                response_copy_bytes: Cell::new(0),
             },
             activity: renderer_state::RendererActivityState {
                 tool_timer: None,
@@ -2029,32 +2031,34 @@ impl EventRenderer {
     fn clear_selected_agent_after_display_update(&mut self, after_display_update: impl FnOnce()) {
         let handle = self.resources.handle.terminal_handle();
         handle.with_redraw_suppressed(|| {
-            let target_changed = self.selection.current_agent_id.is_some();
-            let display_changed = self.selection.displayed_agent_id.is_some();
-            if target_changed || display_changed {
-                // Only a clear that actually leaves an agent creates the explicit
-                // no-agent boundary. A delayed clear command that arrives after
-                // `:session new` while the UI is already on the fresh initial
-                // screen must stay a no-op, otherwise the first new-session agent
-                // would incorrectly clear startup history instead of adopting it.
-                self.selection.awaiting_new_agent_selection = true;
-            }
+            handle.with_output_transaction(|| {
+                let target_changed = self.selection.current_agent_id.is_some();
+                let display_changed = self.selection.displayed_agent_id.is_some();
+                if target_changed || display_changed {
+                    // Only a clear that actually leaves an agent creates the explicit
+                    // no-agent boundary. A delayed clear command that arrives after
+                    // `:session new` while the UI is already on the fresh initial
+                    // screen must stay a no-op, otherwise the first new-session agent
+                    // would incorrectly clear startup history instead of adopting it.
+                    self.selection.awaiting_new_agent_selection = true;
+                }
 
-            if display_changed {
-                self.store_visible_agent_state();
-                let state = std::mem::take(&mut self.selection.no_agent_ui_state);
-                self.restore_visible_agent_state(state);
-                self.rerender_visible_for_current_settings();
-                self.selection.displayed_agent_id = None;
-            }
-            after_display_update();
+                if display_changed {
+                    self.store_visible_agent_state();
+                    let state = std::mem::take(&mut self.selection.no_agent_ui_state);
+                    self.restore_visible_agent_state(state);
+                    self.rerender_visible_for_current_settings();
+                    self.selection.displayed_agent_id = None;
+                }
+                after_display_update();
 
-            if target_changed {
-                self.set_current_agent_id(None, false);
-                self.render_model_status();
-                self.refresh_prompt_placeholder();
-                handle.redraw();
-            }
+                if target_changed {
+                    self.set_current_agent_id(None, false);
+                    self.render_model_status();
+                    self.refresh_prompt_placeholder();
+                    handle.redraw();
+                }
+            });
         });
     }
 
@@ -2068,6 +2072,12 @@ impl EventRenderer {
     }
 
     fn show_agent_transcript(&mut self, agent_id: String) {
+        let handle = self.resources.handle.terminal_handle();
+        handle.with_output_transaction(|| self.show_agent_transcript_inner(agent_id));
+    }
+
+    /// Swaps the visible transcript under the caller's output transaction.
+    fn show_agent_transcript_inner(&mut self, agent_id: String) {
         let needs_snapshot_swap = self.selection.displayed_agent_id.is_some()
             || self.selection.agents_ui_state.contains_key(&agent_id)
             || self.visible_no_agent_snapshot_needs_preservation();
@@ -2627,7 +2637,7 @@ impl EventRenderer {
     }
 
     fn take_visible_agent_state(&mut self) -> AgentUiState {
-        let output = self.resources.handle.output_snapshot();
+        let output = self.resources.handle.take_output_snapshot();
         self.take_visible_agent_state_with_output(output)
     }
 
@@ -2829,18 +2839,29 @@ impl EventRenderer {
             return;
         }
         if let Ok(mut context) = self.editor.editor_context.lock() {
-            context.current_response = self
-                .transcript
-                .runtime
-                .editor_conversation_context
-                .current_response
-                .clone();
-            context.last_response = self
-                .transcript
-                .runtime
-                .editor_conversation_context
-                .last_response
-                .clone();
+            let responses = &self.transcript.runtime.editor_conversation_context;
+            if context.current_response != responses.current_response {
+                #[cfg(test)]
+                self.editor.response_copy_bytes.set(
+                    self.editor.response_copy_bytes.get()
+                        + responses
+                            .current_response
+                            .as_ref()
+                            .map_or(0, |text| text.len() as u64),
+                );
+                context.current_response = responses.current_response.clone();
+            }
+            if context.last_response != responses.last_response {
+                #[cfg(test)]
+                self.editor.response_copy_bytes.set(
+                    self.editor.response_copy_bytes.get()
+                        + responses
+                            .last_response
+                            .as_ref()
+                            .map_or(0, |text| text.len() as u64),
+                );
+                context.last_response = responses.last_response.clone();
+            }
         }
     }
 
@@ -2870,6 +2891,13 @@ impl EventRenderer {
     #[cfg(test)]
     pub(crate) fn main_agent_turn_active_for_test(&self) -> bool {
         self.transcript.status.main_agent_turn_active
+    }
+
+    /// Returns response bytes copied into the shared editor context by test
+    /// builds.
+    #[cfg(test)]
+    pub(crate) fn editor_response_copy_bytes_for_test(&self) -> u64 {
+        self.editor.response_copy_bytes.get()
     }
 
     /// Reports whether generic prompt fallback still marks an agent active.

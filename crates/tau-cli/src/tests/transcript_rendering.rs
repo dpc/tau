@@ -1,6 +1,7 @@
 //! Tests for transcript rendering behavior.
 
 use std::sync::Barrier;
+use std::time::Instant;
 
 use super::super::markdown_render::markdown_block;
 use super::*;
@@ -592,6 +593,112 @@ fn agent_switch_first_frame_has_matching_transcript_and_placeholder() {
             .iter()
             .any(|row| row.contains("Write a message to worker-2"))
     );
+    assert!(
+        frame.iter().any(|row| row.contains("@worker-1")),
+        "the status identity must change in the same redraw-suppressed frame: {frame:?}"
+    );
+}
+
+/// Repeated selection must transfer, rather than clone, each retained
+/// transcript while preserving the reference transcript for every visible
+/// agent.
+#[test]
+fn randomized_agent_switching_preserves_transcripts_without_snapshot_clones() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let agents = ["alpha", "bravo", "charlie"];
+    let mut latest = [String::new(), String::new(), String::new()];
+    let mut seed = 0x71d3_9a4bu64;
+
+    for step in 0..96 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let index = (seed as usize) % agents.len();
+        let agent = agents[index];
+        renderer.switch_agent(agent.to_owned());
+        let text = format!("switch-reference-{agent}-{step}");
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            literal: false,
+            session_id: test_session_id("switch-reference"),
+            text: text.clone(),
+            agent_id: agent_id(agent),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }));
+        latest[index] = text;
+
+        if step % 8 == 0 {
+            sync(&handle);
+            assert!(
+                vt.screen_contains(100, &latest[index]),
+                "selected agent {agent} must match the reference transcript"
+            );
+        }
+    }
+
+    for (index, agent) in agents.into_iter().enumerate() {
+        renderer.switch_agent(agent.to_owned());
+        sync(&handle);
+        assert!(
+            vt.screen_contains(100, &latest[index]),
+            "final transcript for {agent} must match the reference"
+        );
+    }
+    assert_eq!(
+        handle.output_snapshot_count(),
+        0,
+        "selection must not clone terminal output snapshots"
+    );
+    assert!(
+        handle.output_snapshot_take_count() > 0,
+        "selection must take snapshots by ownership"
+    );
+}
+
+/// This manual benchmark reports ownership handoffs across growing transcript
+/// block maps without treating elapsed time as a correctness threshold.
+#[test]
+#[ignore = "manual selection ownership benchmark"]
+fn benchmark_selection_snapshot_ownership_by_transcript_size() {
+    for block_count in [0, 1, 16, 128] {
+        let (_term, handle, _vt) = setup(100, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            cli_test_theme(),
+        );
+        renderer.switch_agent("source".to_owned());
+        for block in 0..block_count {
+            renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+                literal: false,
+                session_id: test_session_id("selection-benchmark"),
+                text: format!("selection-benchmark-source-block-{block}"),
+                agent_id: agent_id("source"),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            }));
+        }
+        renderer.switch_agent("destination".to_owned());
+        let clones_before = handle.output_snapshot_count();
+        let takes_before = handle.output_snapshot_take_count();
+        let started = Instant::now();
+        for _ in 0..100 {
+            renderer.switch_agent("source".to_owned());
+            renderer.switch_agent("destination".to_owned());
+        }
+        std::hint::black_box(&renderer);
+        eprintln!(
+            "selection ownership benchmark: submitted_prompts={block_count} iterations=200 snapshot_clones={} snapshot_takes={} elapsed={:?}; no timing threshold",
+            handle.output_snapshot_count() - clones_before,
+            handle.output_snapshot_take_count() - takes_before,
+            started.elapsed(),
+        );
+    }
 }
 
 /// Agent-specific discovery must remain in its owning transcript across

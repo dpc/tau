@@ -1089,6 +1089,18 @@ fn hidden_agent_response_does_not_replace_visible_editor_context() {
             "worker one response",
         ),
     ));
+    let (visible_response_pointer, visible_copy_bytes) = {
+        let editor_context = renderer.editor_context();
+        let editor_context = editor_context.lock().expect("editor context");
+        (
+            editor_context
+                .last_response
+                .as_ref()
+                .expect("visible response")
+                .as_ptr(),
+            renderer.editor_response_copy_bytes_for_test(),
+        )
+    };
     {
         let editor_context = renderer.editor_context();
         let mut editor_context = editor_context.lock().expect("editor context");
@@ -1108,7 +1120,7 @@ fn hidden_agent_response_does_not_replace_visible_editor_context() {
     ));
 
     let visible_context = renderer.editor_context();
-    let visible_context = visible_context.lock().expect("editor context").clone();
+    let visible_context = visible_context.lock().expect("editor context");
     assert_eq!(
         visible_context.last_response.as_deref(),
         Some("worker one response")
@@ -1122,11 +1134,56 @@ fn hidden_agent_response_does_not_replace_visible_editor_context() {
         visible_context.edited_trailer_recovery.as_deref(),
         Some("visible recovery")
     );
+    assert_eq!(
+        visible_context
+            .last_response
+            .as_ref()
+            .expect("visible response")
+            .as_ptr(),
+        visible_response_pointer,
+        "a hidden fold must retain the visible editor response allocation"
+    );
+    drop(visible_context);
+    assert_eq!(
+        renderer.editor_response_copy_bytes_for_test(),
+        visible_copy_bytes,
+        "an unchanged visible editor context must not be republished"
+    );
+
+    {
+        let editor_context = renderer.editor_context();
+        editor_context.lock().expect("editor context").last_response =
+            Some("externally changed response".to_owned());
+    }
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage(
+            "worker-3-sp-0",
+            "worker-3",
+            20_000,
+            0,
+            0,
+            "worker three response",
+        ),
+    ));
+    let editor_context = renderer.editor_context();
+    let editor_context = editor_context.lock().expect("editor context");
+    assert_eq!(
+        editor_context.last_response.as_deref(),
+        Some("worker one response"),
+        "a changed observer-visible response must be restored after hidden folding"
+    );
+    drop(editor_context);
+    let visible_republish_bytes = visible_copy_bytes + "worker one response".len() as u64;
+    assert_eq!(
+        renderer.editor_response_copy_bytes_for_test(),
+        visible_republish_bytes,
+        "the hidden fold must republish only when its visible editor response changed"
+    );
 
     renderer.switch_agent("worker-2".to_owned());
 
     let worker_two_context = renderer.editor_context();
-    let worker_two_context = worker_two_context.lock().expect("editor context").clone();
+    let worker_two_context = worker_two_context.lock().expect("editor context");
     assert_eq!(
         worker_two_context.last_response.as_deref(),
         Some("worker two response")
@@ -1138,6 +1195,12 @@ fn hidden_agent_response_does_not_replace_visible_editor_context() {
     assert_eq!(
         worker_two_context.edited_trailer_recovery.as_deref(),
         Some("visible recovery")
+    );
+    drop(worker_two_context);
+    assert_eq!(
+        renderer.editor_response_copy_bytes_for_test(),
+        visible_republish_bytes + "worker two response".len() as u64,
+        "selecting a changed transcript must publish its response context"
     );
 }
 

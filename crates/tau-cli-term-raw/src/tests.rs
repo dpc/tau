@@ -1377,6 +1377,61 @@ fn output_transaction_blocks_concurrent_local_output_until_visible_snapshot_rest
     drop(term);
 }
 
+/// Taking a visible snapshot must move its block map and zones intact, so
+/// transcript selection does not duplicate styled blocks before restoring them.
+#[test]
+fn take_output_snapshot_transfers_visible_allocations_without_cloning() {
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(std::io::sink()), CursorShape::Bar);
+    let block_id = handle.new_block("visible", plain_block("visible transcript"));
+    handle.push_history(block_id);
+    let (block_pointer, history_pointer) = {
+        let state = handle.lock();
+        (
+            std::ptr::from_ref(
+                state
+                    .layout
+                    .blocks
+                    .get(&block_id)
+                    .expect("visible block must be installed"),
+            ),
+            state.layout.history.as_ptr(),
+        )
+    };
+    let cloned_before = handle.output_snapshot_count();
+    let taken_before = handle.output_snapshot_take_count();
+
+    let snapshot = handle.take_output_snapshot();
+
+    assert_eq!(handle.output_snapshot_count(), cloned_before);
+    assert_eq!(handle.output_snapshot_take_count(), taken_before + 1);
+    assert_eq!(
+        std::ptr::from_ref(
+            snapshot
+                .blocks
+                .get(&block_id)
+                .expect("taken snapshot must retain the visible block"),
+        ),
+        block_pointer
+    );
+    assert_eq!(snapshot.history.as_ptr(), history_pointer);
+    assert!(handle.lock().layout.blocks.is_empty());
+
+    handle.replace_output_snapshot(snapshot);
+    let state = handle.lock();
+    assert_eq!(
+        std::ptr::from_ref(
+            state
+                .layout
+                .blocks
+                .get(&block_id)
+                .expect("restored block must be installed"),
+        ),
+        block_pointer
+    );
+    assert_eq!(state.layout.history.as_ptr(), history_pointer);
+}
+
 /// Detached snapshot mutation must preserve the same block identities, content,
 /// and zone semantics as applying the equivalent operations through a terminal
 /// handle. The CLI relies on this parity before materializing on selection.
