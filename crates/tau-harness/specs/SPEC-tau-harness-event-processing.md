@@ -330,8 +330,9 @@ Historical catch-up also includes replay-marked current-state snapshots (for
 example loaded-agent, metadata, and session-dir facts), with live events buffered
 until the non-replay replay-complete boundary. Ephemeral session stores keep
 restore facts only in same-daemon memory. A journal-backed writer recovers
-restore facts under the session lock by truncating the first invalid record and
-its complete suffix before append; read-only historical replay remains strict.
+restore facts under the session lock by truncating only an incomplete EOF frame;
+a complete invalid frame fails closed unchanged before append. Read-only
+historical replay remains strict.
 
 ## Interceptor confidentiality
 

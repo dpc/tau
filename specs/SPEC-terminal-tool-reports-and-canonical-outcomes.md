@@ -103,7 +103,8 @@ reject that terminal operation before renderer projection or terminal-dependent
 state. After acceptance, clean open, lock, and exact-rollback write failures retain
 the authoritative FIFO head for deadline retry; an unprovable rollback poisons only
 its generation. Later write or sync failure never retracts the accepted live fact.
-Reopen or restart rebuilds the longest valid prefix; cold
+Reopen or restart repairs only an incomplete EOF crash tail and fails closed on
+complete invalid frames; cold
 recovery never automatically resends an uncertain tool, provider, or compaction
 effect.
 The writeback and recovery boundary is governed by

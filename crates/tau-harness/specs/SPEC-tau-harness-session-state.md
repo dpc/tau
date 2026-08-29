@@ -106,9 +106,10 @@ stores for live and same-daemon replay while creating no reserved state
 directories, sidecars, locks, or event files. Journal `events.cbor` replay
 validates framing, monotonic durable sequence numbers, path-safe store IDs, and
 the same semantic event/parent invariants as live append. Read-only inspection
-remains strict. Recovery under the writer lock retains the longest valid prefix
-and truncates the first corrupt, truncated, spliced, or semantically invalid
-frame and every later byte, even if a later frame looks valid.
+remains strict. Recovery under the writer lock truncates only an incomplete
+frame header or payload at EOF. A complete frame that fails framing limits,
+typed decoding, source-shape, sequence, or semantic validation fails closed
+without changing that frame or any following bytes.
 
 Journal-backed agent, ordinary-session, and session-restore facts use bounded
 nonblocking admission before canonical acceptance. The live path advances
