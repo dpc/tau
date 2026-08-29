@@ -923,10 +923,10 @@ fn direct_proactive_evidence_requires_newest_ancestral_observation_and_valid_sou
     );
 }
 
-/// Same-head ancestry must avoid materializing an arbitrarily long selected
-/// branch, while sibling and unknown heads retain their existing answers.
+/// Every ancestry query must walk parent links without materializing the
+/// selected branch, while sibling and unknown heads retain their answers.
 #[test]
-fn same_current_head_ancestry_skips_branch_materialization() {
+fn ancestry_queries_skip_branch_materialization() {
     let mut tree = AgentTree::from_events(agent_id(), &[]);
     let branch_point = append_user_input(&mut tree, "branch point");
     let original_branch = append_user_input(&mut tree, "original branch");
@@ -942,16 +942,146 @@ fn same_current_head_ancestry_skips_branch_materialization() {
 
     BRANCH_PATH_MATERIALIZATIONS.set(0);
     assert!(tree.is_ancestor_head(current, current));
-    assert_eq!(
-        BRANCH_PATH_MATERIALIZATIONS.get(),
-        0,
-        "same-head ancestry must not materialize the selected branch"
-    );
-
     assert!(!tree.is_ancestor_head(original_branch, current));
     assert!(tree.is_ancestor_head(sibling, current));
     let unknown = AgentHead::Node(NodeId::new(usize::MAX as u64));
     assert!(!tree.is_ancestor_head(unknown, unknown));
+    assert_eq!(
+        BRANCH_PATH_MATERIALIZATIONS.get(),
+        0,
+        "ancestry queries must not materialize the selected branch"
+    );
+}
+
+/// Fixed-seed branched histories require the direct parent walk to remain
+/// exactly equivalent to the allocating reference after every live append and
+/// after cold replay.
+#[test]
+fn randomized_live_and_cold_ancestry_matches_allocating_reference_at_every_head() {
+    fn reference(tree: &AgentTree, ancestor: AgentHead, descendant: AgentHead) -> bool {
+        match ancestor {
+            AgentHead::Root => true,
+            AgentHead::Node(ancestor) => tree
+                .branch_node_ids_from(descendant.as_option())
+                .contains(&ancestor),
+        }
+    }
+
+    let agent_id = AgentId::parse("ancestry-differential-agent").expect("agent id");
+    let mut live = AgentTree::from_events(agent_id.clone(), &[]);
+    let mut records = Vec::new();
+    let mut heads = vec![AgentHead::Root];
+    let mut random = 0xd1b5_4a32_d192_ed03_u64;
+
+    for step in 0_u64..96 {
+        random = random
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let parent = if heads.len() == 1 || random.is_multiple_of(4) {
+            AgentEventParent::Root
+        } else {
+            let index = 1 + (random as usize % (heads.len() - 1));
+            AgentEventParent::from_head(heads[index])
+        };
+        let record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes(
+                random.to_le_bytes().repeat(2).try_into().expect("16 bytes"),
+            ),
+            seq: live.next_event_seq(),
+            source: None,
+            event: Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: format!("ancestry-{step}-{random}"),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+            parent,
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: UnixMicros::new(step),
+        };
+        let validated = live
+            .prevalidate_persisted_record(&record)
+            .expect("valid randomized branch append");
+        let (next_live, node_id) =
+            AgentTree::apply_prevalidated(validated).expect("valid live fold");
+        live = next_live;
+        records.push(record);
+        heads.push(AgentHead::Node(node_id.expect("input materializes a node")));
+
+        let cold = AgentTree::try_from_events(agent_id.clone(), &records)
+            .expect("randomized history replays");
+        let unknown = AgentHead::Node(NodeId::new(records.len() as u64 + 10_000));
+        for &ancestor in heads.iter().chain(std::iter::once(&unknown)) {
+            for &descendant in heads.iter().chain(std::iter::once(&unknown)) {
+                let expected = reference(&live, ancestor, descendant);
+                assert_eq!(
+                    live.is_ancestor_head(ancestor, descendant),
+                    expected,
+                    "live step={step} ancestor={ancestor:?} descendant={descendant:?}"
+                );
+                assert_eq!(
+                    cold.is_ancestor_head(ancestor, descendant),
+                    expected,
+                    "cold step={step} ancestor={ancestor:?} descendant={descendant:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Manual asymptotic benchmark contrasts direct ancestry walks with the
+/// allocating reference and reports the eliminated path-vector storage.
+#[test]
+#[ignore = "manual ancestry-query asymptotic benchmark"]
+fn benchmark_direct_ancestry_walk_scaling() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    fn allocating_reference(tree: &AgentTree, ancestor: AgentHead, descendant: AgentHead) -> bool {
+        let AgentHead::Node(ancestor) = ancestor else {
+            return true;
+        };
+        let mut path = Vec::new();
+        let mut current = descendant.as_option();
+        while let Some(node_id) = current {
+            let Some(node) = tree.node(node_id) else {
+                break;
+            };
+            path.push(node_id);
+            current = node.parent_id;
+        }
+        path.reverse();
+        path.contains(&ancestor)
+    }
+
+    const DEPTHS: [usize; 4] = [16, 256, 4_096, 65_536];
+    const QUERIES: usize = 1_024;
+
+    println!("depth,direct_ns_per_query,reference_ns_per_query,reference_path_bytes");
+    for depth in DEPTHS {
+        let mut tree = AgentTree::from_events(agent_id(), &[]);
+        let first = append_user_input(&mut tree, "first");
+        for index in 1..depth {
+            append_user_input(&mut tree, &format!("node-{index}"));
+        }
+        let descendant = AgentHead::Node(tree.head().expect("linear history head"));
+
+        let started = Instant::now();
+        for _ in 0..QUERIES {
+            black_box(tree.is_ancestor_head(first, descendant));
+        }
+        let direct = started.elapsed().as_nanos() / QUERIES as u128;
+
+        let started = Instant::now();
+        for _ in 0..QUERIES {
+            black_box(allocating_reference(&tree, first, descendant));
+        }
+        let reference = started.elapsed().as_nanos() / QUERIES as u128;
+        println!(
+            "{depth},{direct},{reference},{}",
+            depth * std::mem::size_of::<NodeId>()
+        );
+    }
 }
 
 fn fail_compaction(tree: &mut AgentTree, started: &tau_proto::AgentStandaloneCompactionStarted) {

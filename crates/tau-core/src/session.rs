@@ -1746,8 +1746,17 @@ impl AgentTree {
                 if descendant == tau_proto::AgentHead::Node(ancestor) {
                     return self.node(ancestor).is_some();
                 }
-                self.branch_node_ids_from(descendant.as_option())
-                    .contains(&ancestor)
+                let mut current = descendant.as_option();
+                while let Some(node_id) = current {
+                    let Some(node) = self.node(node_id) else {
+                        return false;
+                    };
+                    if node_id == ancestor {
+                        return true;
+                    }
+                    current = node.parent_id;
+                }
+                false
             }
         }
     }
