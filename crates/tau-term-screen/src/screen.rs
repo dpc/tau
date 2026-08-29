@@ -18,7 +18,9 @@
 //! <https://github.com/fish-shell/fish-shell/blob/master/src/screen.rs>
 //!
 //! Key design choices:
-//! - Simple line model (`Vec<Vec<Cell>>`) — no soft-wrap tracking.
+//! - Shared immutable line model (`Vec<CellRow>`) — no soft-wrap tracking.
+//!   Legacy `Vec<Vec<Cell>>` methods normalize caller-constructed cells before
+//!   forwarding to the shared-row renderer.
 //! - Relative cursor movement only (`MoveUp`, `\r`, `\n`, `MoveToColumn`).
 //! - `\n` for downward movement (scrolls at bottom edge, unlike `MoveDown`).
 
@@ -29,16 +31,16 @@ use crossterm::cursor::{MoveToColumn, MoveUp};
 use crossterm::style::{Attribute, Print, SetAttribute, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{self, ClearType};
 
-use crate::style as path_crate_style;
 use crate::style::{
     Align, Cell, Style, StyledBlock, StyledText, is_line_break_grapheme, push_grapheme_cells,
     sanitize_hyperlink_target, visit_styled_graphemes,
 };
+use crate::{CellRow, style as path_crate_style};
 
-fn normalize_cell_lines(lines: &[Vec<Cell>]) -> Vec<Vec<Cell>> {
+fn normalize_cell_lines(lines: &[Vec<Cell>]) -> Vec<CellRow> {
     lines
         .iter()
-        .map(|line| line.iter().map(Cell::normalized).collect())
+        .map(|line| CellRow::copy_normalized(line))
         .collect()
 }
 
@@ -83,7 +85,7 @@ fn repaint_prefix_for_cluster_boundary(
 /// Virtual screen state with diff-based updates.
 pub struct Screen {
     /// What we believe is currently displayed on the terminal.
-    lines: Vec<Vec<Cell>>,
+    lines: Vec<CellRow>,
     /// Current terminal cursor row (relative to prompt start).
     cursor_row: usize,
     /// Current terminal cursor column.
@@ -144,8 +146,17 @@ impl Screen {
         desired_cursor: (usize, usize),
     ) -> io::Result<()> {
         let normalized_desired_lines = normalize_cell_lines(desired_lines);
-        let desired_lines = normalized_desired_lines.as_slice();
+        self.update_rows(w, &normalized_desired_lines, desired_cursor)
+    }
 
+    /// Diffs normalized shared rows and retains their buffers without copying
+    /// cells.
+    pub fn update_rows(
+        &mut self,
+        w: &mut impl Write,
+        desired_lines: &[CellRow],
+        desired_cursor: (usize, usize),
+    ) -> io::Result<()> {
         // Handle empty desired.
         if desired_lines.is_empty() {
             if !self.lines.is_empty() {
@@ -162,8 +173,8 @@ impl Screen {
 
         for (row, desired_line) in desired_lines.iter().enumerate() {
             let actual_line = self.lines.get(row);
-            let actual_slice = actual_line.map(|l| l.as_slice()).unwrap_or(&[]);
-            let desired_slice = desired_line.as_slice();
+            let actual_slice = actual_line.map(|line| line.as_ref()).unwrap_or(&[]);
+            let desired_slice = desired_line.as_ref();
 
             // Find the first cell index where actual and desired differ.
             let common_prefix = actual_slice
@@ -275,7 +286,24 @@ impl Screen {
         desired_cursor: (usize, usize),
     ) -> io::Result<()> {
         let normalized_all_lines = normalize_cell_lines(all_lines);
-        let all_lines = normalized_all_lines.as_slice();
+        self.render_scrolling_rows(
+            w,
+            &normalized_all_lines,
+            prev_viewport_top,
+            height,
+            desired_cursor,
+        )
+    }
+
+    /// Renders normalized shared rows while retaining only shared row pointers.
+    pub fn render_scrolling_rows(
+        &mut self,
+        w: &mut impl Write,
+        all_lines: &[CellRow],
+        prev_viewport_top: usize,
+        height: usize,
+        desired_cursor: (usize, usize),
+    ) -> io::Result<()> {
         let total = all_lines.len();
         let new_viewport_top = total.saturating_sub(height);
 
@@ -322,7 +350,7 @@ impl Screen {
 
     fn scrolling_changed_range(
         &self,
-        all_lines: &[Vec<Cell>],
+        all_lines: &[CellRow],
         prev_viewport_top: usize,
     ) -> Option<ChangedLineRange> {
         // Find first and last changed line across the part of the content that
@@ -339,8 +367,8 @@ impl Screen {
             let old = self
                 .lines
                 .get(line_idx - prev_viewport_top)
-                .map(|line| line.as_slice());
-            let new = all_lines.get(line_idx).map(|line| line.as_slice());
+                .map(|line| line.as_ref());
+            let new = all_lines.get(line_idx).map(|line| line.as_ref());
             if old != new {
                 changed_range = Some(match changed_range {
                     Some(range) => ChangedLineRange {
@@ -382,7 +410,7 @@ impl Screen {
     fn render_changed_scrolling_lines(
         &mut self,
         w: &mut impl Write,
-        all_lines: &[Vec<Cell>],
+        all_lines: &[CellRow],
         render_start: usize,
         render_last_line: usize,
         viewport_top: &mut usize,
@@ -456,11 +484,25 @@ impl Screen {
         self.lines.len()
     }
 
+    /// Reports whether one tracked row uses the same immutable buffer as `row`.
+    pub fn shares_row_buffer(&self, index: usize, row: &CellRow) -> bool {
+        self.lines
+            .get(index)
+            .is_some_and(|tracked| tracked.shares_buffer_with(row))
+    }
+
     /// Overwrites the internal state to match what is currently on the
     /// terminal. Call after a full render to prepare for future
     /// differential updates.
     pub fn reset_to(&mut self, lines: Vec<Vec<Cell>>, cursor_row: usize, cursor_col: usize) {
         self.lines = normalize_cell_lines(&lines);
+        self.cursor_row = cursor_row;
+        self.cursor_col = cursor_col;
+    }
+
+    /// Resets the cache to normalized shared rows without copying cell buffers.
+    pub fn reset_to_rows(&mut self, lines: Vec<CellRow>, cursor_row: usize, cursor_col: usize) {
+        self.lines = lines;
         self.cursor_row = cursor_row;
         self.cursor_col = cursor_col;
     }

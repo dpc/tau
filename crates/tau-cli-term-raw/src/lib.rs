@@ -97,9 +97,9 @@ use prompt_editor_state::PromptEditorState;
 use redraw_sync_generation::RedrawSyncGeneration;
 pub use renderer_delivery_id::RendererDeliveryId;
 pub use tau_term_screen::{
-    Align, BlockId, Cell, Color, PriorityLine, PriorityLineAlignment, PriorityLinePriority,
-    PriorityLineTruncation, Span, Style, StyledBlock, StyledText, TwoLineElision,
-    sanitize_hyperlink_target,
+    Align, BlockId, Cell, CellRow, Color, PriorityLine, PriorityLineAlignment,
+    PriorityLinePriority, PriorityLineTruncation, Span, Style, StyledBlock, StyledText,
+    TwoLineElision, sanitize_hyperlink_target,
 };
 use tau_term_screen::{
     Screen, display_width, emit_styled_cells, layout_block, layout_lines, next_grapheme_boundary,
@@ -3549,7 +3549,7 @@ fn layout_id_list(
     blocks: &HashMap<BlockId, StyledBlock>,
     block_debug_ids: &HashMap<BlockId, String>,
     width: usize,
-    out: &mut Vec<Vec<Cell>>,
+    out: &mut Vec<CellRow>,
     sources: &mut Vec<LineSource>,
 ) {
     for id in ids {
@@ -3567,7 +3567,7 @@ fn layout_id_list(
                         .unwrap_or_else(|| "<unknown>".to_owned()),
                     wrapped_row,
                 });
-                out.push(line);
+                out.push(line.into());
             }
         }
     }
@@ -3586,7 +3586,7 @@ struct HistoryLayoutCache {
     /// Start line for each cached history entry plus one final end offset.
     entry_line_offsets: Vec<usize>,
     /// Rendered persistent-history lines.
-    lines: Vec<Vec<Cell>>,
+    lines: Vec<CellRow>,
     /// Source metadata parallel to `lines`.
     sources: Vec<LineSource>,
 }
@@ -3680,7 +3680,7 @@ impl HistoryLayoutCache {
 /// Layout for everything after persistent history.
 struct TailLayout {
     /// Lines for above-active plus fixed prompt/status/suggestions rows.
-    lines: Vec<Vec<Cell>>,
+    lines: Vec<CellRow>,
     /// Source block/zone for each tail line.
     sources: Vec<LineSource>,
     /// Number of leading `lines` entries that belong to above-active.
@@ -3700,7 +3700,7 @@ impl TailLayout {
 /// Result of laying out all content.
 struct LayoutAll {
     /// All rendered lines without rubber (log + fixed area).
-    all_lines: Vec<Vec<Cell>>,
+    all_lines: Vec<CellRow>,
     /// Source block/zone for each rendered line.
     line_sources: Vec<LineSource>,
     /// Index in `all_lines` where the fixed area starts.
@@ -3726,7 +3726,7 @@ struct ViewPlan {
     /// Top row of the physical terminal viewport within `render_lines`.
     viewport_start: usize,
     rubber_height: usize,
-    render_lines: Vec<Vec<Cell>>,
+    render_lines: Vec<CellRow>,
     cursor_row: usize,
 }
 
@@ -3735,7 +3735,7 @@ impl ViewPlan {
         self.viewport_start.min(self.render_lines.len())
     }
 
-    fn visible_lines(&self, height: usize) -> &[Vec<Cell>] {
+    fn visible_lines(&self, height: usize) -> &[CellRow] {
         let start = self.visible_start(height);
         let end = (start + height).min(self.render_lines.len());
         &self.render_lines[start..end]
@@ -3776,7 +3776,7 @@ struct TerminalModel {
     /// Mutable active rows following persistent history in `known_lines`.
     active_height: usize,
     /// Complete represented log rows, including hidden scrollback.
-    known_lines: Vec<Vec<Cell>>,
+    known_lines: Vec<CellRow>,
     /// Source metadata parallel to `known_lines`.
     known_sources: Vec<LineSource>,
 }
@@ -3822,7 +3822,8 @@ impl TerminalModel {
     fn build_plan(layout: &LayoutAll, viewport_start: usize, rubber_height: usize) -> ViewPlan {
         let mut render_lines = Vec::with_capacity(layout.all_lines.len() + rubber_height);
         render_lines.extend_from_slice(&layout.all_lines[..layout.log_end]);
-        render_lines.extend(std::iter::repeat_with(Vec::new).take(rubber_height));
+        render_lines
+            .extend(std::iter::repeat_with(|| CellRow::new(Vec::new())).take(rubber_height));
         render_lines.extend_from_slice(&layout.all_lines[layout.log_end..]);
 
         let cursor_row = if layout.log_end <= layout.cursor_row {
@@ -4017,7 +4018,7 @@ fn prompt_scroll_indicator_text(
 
 fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
     let width = st.terminal.width;
-    let mut lines: Vec<Vec<Cell>> = Vec::new();
+    let mut lines: Vec<CellRow> = Vec::new();
     let mut sources: Vec<LineSource> = Vec::new();
 
     layout_id_list(
@@ -4112,7 +4113,7 @@ fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
             width,
         );
         sources.push(LineSource::InputScrollIndicator);
-        lines.push(StyledText::from(indicator).to_cells());
+        lines.push(StyledText::from(indicator).to_cells().into());
     }
 
     let viewport_end = (viewport_start + visible_input_rows).min(input_lines.len());
@@ -4123,7 +4124,7 @@ fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
         .take(viewport_end.saturating_sub(viewport_start))
     {
         sources.push(LineSource::Input { wrapped_row });
-        lines.push(line);
+        lines.push(line.into());
     }
     layout_id_list(
         &st.layout.suggestions,
@@ -4183,20 +4184,20 @@ fn layout_all(st: &SharedState) -> LayoutAll {
 }
 
 fn visible_lines_from_parts(
-    history_lines: &[Vec<Cell>],
+    history_lines: &[CellRow],
     tail: &TailLayout,
     metrics: &PlanMetrics,
-) -> Vec<Vec<Cell>> {
+) -> Vec<CellRow> {
     render_rows_from(history_lines, tail, metrics, metrics.viewport_start)
 }
 
 /// Materializes rendered rows from `start` through the current plan end.
 fn render_rows_from(
-    history_lines: &[Vec<Cell>],
+    history_lines: &[CellRow],
     tail: &TailLayout,
     metrics: &PlanMetrics,
     start: usize,
-) -> Vec<Vec<Cell>> {
+) -> Vec<CellRow> {
     let history_height = history_lines.len();
     let log_height = history_height + tail.active_height;
     let fixed_start = log_height + metrics.rubber_height;
@@ -4218,7 +4219,7 @@ fn render_rows_from(
                     .clone(),
             );
         } else if idx < fixed_start {
-            rows.push(Vec::new());
+            rows.push(CellRow::new(Vec::new()));
         } else {
             rows.push(
                 tail.lines
@@ -4234,11 +4235,11 @@ fn render_rows_from(
 
 /// Builds the bounded scrolling input rebased at the prior viewport.
 fn scrolling_suffix(
-    history_lines: &[Vec<Cell>],
+    history_lines: &[CellRow],
     tail: &TailLayout,
     metrics: &PlanMetrics,
     terminal_model: &TerminalModel,
-) -> Vec<Vec<Cell>> {
+) -> Vec<CellRow> {
     render_rows_from(history_lines, tail, metrics, terminal_model.viewport_start)
 }
 
@@ -4425,7 +4426,7 @@ fn render_shutdown_if_requested(
     drop(st);
 
     screen.set_width(prev_width);
-    let _ = screen.update(writer, visible, (cursor_in_visible, layout.cursor_col));
+    let _ = screen.update_rows(writer, visible, (cursor_in_visible, layout.cursor_col));
     let below = plan.render_lines.len().saturating_sub(plan.cursor_row + 1);
     for _ in 0..=below {
         let _ = writer.queue(crossterm::style::Print("\r\n"));
@@ -4693,7 +4694,7 @@ fn render_fast_frame(
         // terminal scrollback.
         let suffix = scrolling_suffix(&history_cache.lines, tail, metrics, terminal_model);
         let cursor_row = metrics.cursor_row.saturating_sub(previous_viewport_start);
-        screen.render_scrolling(
+        screen.render_scrolling_rows(
             writer,
             &suffix,
             0,
@@ -4703,7 +4704,7 @@ fn render_fast_frame(
     } else {
         let visible = visible_lines_from_parts(&history_cache.lines, tail, metrics);
         let cursor_in_visible = metrics.cursor_row.saturating_sub(metrics.viewport_start);
-        screen.update(writer, &visible, (cursor_in_visible, tail.cursor_col))?;
+        screen.update_rows(writer, &visible, (cursor_in_visible, tail.cursor_col))?;
     }
     terminal_model.apply_fast_plan(history_cache, tail, metrics);
     Ok(())
@@ -4883,7 +4884,7 @@ fn render_scrolling_frame(
     // Content pushed log rows off the top. Use the scrolling renderer
     // (Pi-style). Rubber is part of the virtual tail, so it shrinks before any
     // extra log row enters scrollback.
-    screen.render_scrolling(
+    screen.render_scrolling_rows(
         writer,
         &plan.render_lines,
         terminal_model.viewport_start,
@@ -4906,7 +4907,7 @@ fn render_diff_frame(
     // shrinkage: rubber grows instead of moving the viewport upward.
     let visible = plan.visible_lines(pass.height);
     let cursor_in_visible = plan.cursor_in_visible(pass.height);
-    screen.update(writer, visible, (cursor_in_visible, layout.cursor_col))?;
+    screen.update_rows(writer, visible, (cursor_in_visible, layout.cursor_col))?;
     terminal_model.reset_to_layout(layout, plan.viewport_start, plan.rubber_height);
     Ok(())
 }
@@ -4962,8 +4963,8 @@ fn fail_terminal_output(
 }
 
 fn changed_line_in_range(
-    prev_all_lines: &[Vec<Cell>],
-    all_lines: &[Vec<Cell>],
+    prev_all_lines: &[CellRow],
+    all_lines: &[CellRow],
     range: std::ops::Range<usize>,
 ) -> Option<usize> {
     range
@@ -5044,8 +5045,8 @@ fn viewport_start_with_cursor(
 }
 
 fn hidden_lines_changed(
-    prev_all_lines: &[Vec<Cell>],
-    all_lines: &[Vec<Cell>],
+    prev_all_lines: &[CellRow],
+    all_lines: &[CellRow],
     prev_visible_start: usize,
 ) -> bool {
     (0..prev_visible_start).any(|idx| prev_all_lines.get(idx) != all_lines.get(idx))
@@ -5143,7 +5144,7 @@ fn full_render(
     let visible_end = (effective_viewport_start + height).min(plan.render_lines.len());
     let visible_lines = plan.render_lines[effective_viewport_start..visible_end].to_vec();
     let cursor_in_visible = plan.cursor_row.saturating_sub(effective_viewport_start);
-    screen.reset_to(visible_lines, cursor_in_visible, layout.cursor_col);
+    screen.reset_to_rows(visible_lines, cursor_in_visible, layout.cursor_col);
 
     Ok(())
 }

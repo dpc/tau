@@ -4,6 +4,8 @@
 //! text may still contain tabs, newlines, and other controls; layout and cell
 //! emission sanitize those values before terminal output.
 
+/// Immutable physical terminal row storage.
+mod cell_row;
 /// Priority-based single-line layout.
 mod priority_line;
 /// Screen state tracker and terminal renderer.
@@ -13,6 +15,7 @@ pub mod style;
 /// Width-adaptive two-row excerpt layout.
 mod two_line_elision;
 
+pub use cell_row::{CellRow, CellRowMetrics};
 pub use priority_line::{
     PriorityLine, PriorityLineAlignment, PriorityLinePriority, PriorityLineTruncation,
 };

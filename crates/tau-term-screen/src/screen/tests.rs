@@ -1,6 +1,7 @@
 use std::sync as path_std_sync;
 
 use super::*;
+use crate::CellRowMetrics;
 use crate::style::{Color, Span, display_width};
 
 // Security and cache regressions here cover the safeguards summarized by
@@ -76,6 +77,87 @@ fn plain_cell_lines(lines: &[&str]) -> Vec<Vec<Cell>> {
         .iter()
         .map(|line| line.chars().map(Cell::plain).collect())
         .collect()
+}
+
+/// Shared-row updates must remain byte-for-byte equivalent to the legacy owned
+/// row API across varied Unicode content, widths, row counts, and mutations.
+#[test]
+fn shared_row_updates_match_owned_reference_across_generated_frames() {
+    let mut seed = 0x4d59_5df4_d0f3_3173_u64;
+    let mut owned_screen = Screen::new(17);
+    let mut shared_screen = Screen::new(17);
+
+    for frame in 0..256 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let row_count = 1 + (seed as usize % 12);
+        let mut owned_rows = Vec::with_capacity(row_count);
+        for row in 0..row_count {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let width = 1 + (seed as usize % 17);
+            let alphabet = ['a', '界', 'é', '\u{301}', '🙂', '\t', '\u{1b}'];
+            let cells = (0..width)
+                .map(|column| {
+                    let index = (seed as usize + frame + row + column) % alphabet.len();
+                    Cell::plain(alphabet[index])
+                })
+                .collect::<Vec<_>>();
+            owned_rows.push(cells);
+        }
+        let shared_rows = owned_rows
+            .iter()
+            .cloned()
+            .map(CellRow::new)
+            .collect::<Vec<_>>();
+        let cursor = (row_count - 1, frame % 17);
+        let mut owned_output = Vec::new();
+        let mut shared_output = Vec::new();
+
+        owned_screen
+            .update(&mut owned_output, &owned_rows, cursor)
+            .expect("owned reference update should render");
+        shared_screen
+            .update_rows(&mut shared_output, &shared_rows, cursor)
+            .expect("shared update should render");
+
+        assert_eq!(shared_output, owned_output, "generated frame {frame}");
+        assert_eq!(
+            shared_screen.actual_line_count(),
+            owned_screen.actual_line_count(),
+            "generated frame {frame}"
+        );
+    }
+}
+
+/// Ownership counters must distinguish legacy cell copies from shared pointer
+/// retention and must not mistake separate empty allocations for one buffer.
+#[test]
+fn row_buffer_metrics_and_identity_cover_legacy_and_empty_rows() {
+    let owned = plain_cell_lines(&["abc"]);
+    let mut screen = Screen::new(10);
+    CellRow::reset_metrics();
+    screen
+        .update(&mut Vec::new(), &owned, (0, 0))
+        .expect("legacy update should render");
+    if let Some(metrics) = CellRow::metrics() {
+        assert_eq!(
+            metrics,
+            CellRowMetrics {
+                allocations: 1,
+                pointer_clones: 1,
+                cell_copies: 3,
+            }
+        );
+    }
+
+    CellRow::reset_metrics();
+    let first_empty = CellRow::new(Vec::new());
+    let second_empty = CellRow::new(Vec::new());
+    if let Some(metrics) = CellRow::metrics() {
+        assert_eq!(metrics.allocations, 0);
+    }
+    screen.reset_to_rows(vec![first_empty.clone()], 0, 0);
+    assert!(screen.shares_row_buffer(0, &first_empty));
+    assert!(screen.shares_row_buffer(0, &second_empty));
 }
 
 // --- layout tests ---

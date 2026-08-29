@@ -70,6 +70,13 @@ the terminal width, the caller must invalidate or reset this cache before the ne
 differential update. Use `Screen::invalidate`, `Screen::erase_all`,
 `Screen::reset_to`, and `Screen::set_width` according to the external operation.
 
+`CellRow` owns one normalized immutable physical row. Nonempty rows retain their
+cell buffer behind a shared pointer; empty rows use a canonical allocation-free
+representation. Layout owners and `Screen` may pass `CellRow` values through
+`update_rows`, `render_scrolling_rows`, and `reset_to_rows` without copying cell
+buffers. The older owned-row methods remain normalization boundaries for callers
+that construct public `Cell` values directly.
+
 Scrolling rendering depends on the caller passing the previous viewport top and a
 current terminal height. Resize/full-redraw paths should rebuild the visible model
 rather than trusting stale row positions.

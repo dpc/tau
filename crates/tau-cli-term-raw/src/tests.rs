@@ -23,10 +23,10 @@ fn opaque_fact(label: &'static str, key: u8, invalidates: &[u8]) -> OpaquePresen
 }
 
 /// Helper: builds Cell lines from plain strings.
-fn plain_lines(texts: &[&str]) -> Vec<Vec<Cell>> {
+fn plain_lines(texts: &[&str]) -> Vec<CellRow> {
     texts
         .iter()
-        .map(|s| s.chars().map(Cell::plain).collect())
+        .map(|s| CellRow::new(s.chars().map(Cell::plain).collect()))
         .collect()
 }
 
@@ -47,7 +47,7 @@ const TEST_HISTORY_MAX_BYTES: usize = 64 * 1024;
 fn run_full_render(
     rows: u16,
     cols: u16,
-    all_lines: Vec<Vec<Cell>>,
+    all_lines: Vec<CellRow>,
     history_lines: usize,
     cursor_row: usize,
     cursor_col: usize,
@@ -84,6 +84,113 @@ fn run_full_render(
 
     term.process(&buf);
     (term, screen)
+}
+
+/// A full redraw must move only shared row pointers through layout, planning,
+/// replay, terminal-model retention, and the differential screen cache.
+#[test]
+fn full_redraw_shares_row_buffers_without_cell_copies() {
+    let mut state = SharedState::new(20, 3, "> ".into());
+    append_history_for_cache_test(&mut state, "history α".to_owned());
+    append_history_for_cache_test(&mut state, "emoji 👩‍💻".to_owned());
+    let mut cache = HistoryLayoutCache::default();
+    cache.refresh(&mut state);
+    let tail = layout_tail(&state, cache.lines.len());
+
+    CellRow::reset_metrics();
+    let layout = layout_all_from_cached_history(&cache, tail);
+    let plan = TerminalModel::full_redraw_plan(&layout, 3);
+    assert!(layout.all_lines[0].shares_buffer_with(&cache.lines[0]));
+    assert!(plan.render_lines[0].shares_buffer_with(&cache.lines[0]));
+
+    let mut output = Vec::new();
+    let mut screen = Screen::new(20);
+    full_render(&mut output, &mut screen, &layout, &plan, 20, 3, usize::MAX)
+        .expect("shared full redraw should render");
+    let mut model = TerminalModel::default();
+    model.reset_to_layout(&layout, plan.viewport_start, plan.rubber_height);
+
+    if let Some(metrics) = CellRow::metrics() {
+        assert_eq!(
+            metrics.allocations, 0,
+            "redraw must not allocate row buffers"
+        );
+        assert_eq!(metrics.cell_copies, 0, "redraw must not copy cell buffers");
+        assert!(
+            3 <= metrics.pointer_clones,
+            "layout, plan, model, and screen should share pointers"
+        );
+    }
+    assert!(screen.shares_row_buffer(0, &layout.all_lines[0]));
+    assert!(model.known_lines[0].shares_buffer_with(&layout.all_lines[0]));
+}
+
+/// This manual benchmark reports immutable row-buffer work as transcript rows
+/// and terminal columns scale through the complete cache-to-screen path; it
+/// deliberately has no timing threshold.
+#[test]
+#[ignore = "manual full-redraw row ownership scaling benchmark"]
+fn benchmark_full_redraw_row_buffer_scaling() {
+    for rows in [64, 512, 4096] {
+        for columns in [40, 120, 240] {
+            let text = "x".repeat(columns);
+            let mut state = SharedState::new(columns, 24, "> ".into());
+            for _ in 0..rows {
+                append_history_for_cache_test(&mut state, text.clone());
+            }
+            let mut cache = HistoryLayoutCache::default();
+            cache.refresh(&mut state);
+            let tail = layout_tail(&state, cache.lines.len());
+
+            CellRow::reset_metrics();
+            let started = path_std_time::Instant::now();
+            let layout = layout_all_from_cached_history(&cache, tail);
+            let plan = TerminalModel::full_redraw_plan(&layout, 24);
+            let mut output = Vec::new();
+            let mut screen = Screen::new(columns);
+            full_render(&mut output, &mut screen, &layout, &plan, columns, 24, 200)
+                .expect("scaling redraw should render");
+            let mut model = TerminalModel::default();
+            model.reset_to_layout(&layout, plan.viewport_start, plan.rubber_height);
+            let elapsed = started.elapsed();
+            let rows_per_second = rows as f64 / elapsed.as_secs_f64();
+            let metrics = CellRow::metrics();
+            eprintln!(
+                "full redraw row-buffer benchmark: rows={rows} columns={columns} \
+                 metrics={metrics:?} output_bytes={} \
+                 elapsed={elapsed:?} rows_per_second={rows_per_second:.0}; \
+                 no timing threshold",
+                output.len(),
+            );
+        }
+    }
+}
+
+/// Rubber rows are canonical allocation-free empty values, so viewport
+/// stabilization does not allocate one cell buffer per blank row.
+#[test]
+fn rubber_rows_do_not_allocate_row_buffers() {
+    let all_lines = plain_lines(&["history", "prompt"]);
+    let layout = LayoutAll {
+        line_sources: vec![
+            LineSource::Input { wrapped_row: 0 },
+            LineSource::Input { wrapped_row: 1 },
+        ],
+        all_lines,
+        log_end: 1,
+        history_generation: TerminalHistoryGeneration::default(),
+        history_width: 20,
+        history_height: 1,
+        cursor_row: 1,
+        cursor_col: 6,
+    };
+
+    CellRow::reset_metrics();
+    let plan = TerminalModel::build_plan(&layout, 0, 10_000);
+    assert_eq!(plan.render_lines.len(), 10_002);
+    if let Some(metrics) = CellRow::metrics() {
+        assert_eq!(metrics.allocations, 0);
+    }
 }
 
 /// Helper: visible rows as trimmed strings.
