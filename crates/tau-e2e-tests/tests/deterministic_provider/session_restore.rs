@@ -463,10 +463,16 @@ fn run_gated_live_provider_context_placement(
                             call_id: raw_call_id.clone(),
                             raw_text: RAW.to_owned(),
                         },
-                        ScenarioActionV2::ProviderContextRawMessageResult {
+                        ScenarioActionV2::ProviderContextRawMessageResultOrBarrier {
                             call_id: raw_call_id,
                             raw_text: RAW.to_owned(),
+                            prior_user_text: "publish raw input while target remains held"
+                                .to_owned(),
                             response: "raw input committed".to_owned(),
+                            release_user_text: RELEASE.to_owned(),
+                            barrier: "provider-context-release".to_owned(),
+                            participants: 2,
+                            barrier_response: "sender released target".to_owned(),
                         },
                         ScenarioActionV2::BarrierText {
                             user_text: RELEASE.to_owned(),

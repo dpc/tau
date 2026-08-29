@@ -299,6 +299,26 @@ pub enum ScenarioActionV2 {
         /// Complete sender response.
         response: String,
     },
+    /// Accept the raw-message tool result, then either complete normally or
+    /// join the immediately steered release barrier in the same prompt.
+    ProviderContextRawMessageResultOrBarrier {
+        /// Exact provider-authored call identity.
+        call_id: ToolCallId,
+        /// Exact activating raw delivered-message body.
+        raw_text: String,
+        /// Latest user text when the release has not been steered yet.
+        prior_user_text: String,
+        /// Complete sender response when the release arrives later.
+        response: String,
+        /// Exact user text which may be steered into this continuation.
+        release_user_text: String,
+        /// Barrier joined when the release text is already present.
+        barrier: String,
+        /// Exact number of barrier participants.
+        participants: usize,
+        /// Complete sender response after the coalesced barrier releases.
+        barrier_response: String,
+    },
     /// Accept one typed inbound wrapper and one raw delivered-message
     /// projection after a known held user prompt.
     MessageAndRawInboundAfterHeld {

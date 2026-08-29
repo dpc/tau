@@ -276,6 +276,22 @@ struct BarrierParticipant {
     output: BarrierOutput,
 }
 
+/// Provider output selected after consuming the optional raw-result barrier.
+enum OptionalBarrierEmission {
+    /// Complete the raw tool-result continuation without joining the barrier.
+    RawResult(String),
+    /// Emit every participant released by the coalesced barrier join.
+    Barrier(Vec<BarrierParticipant>),
+}
+
+/// Result of staging one participant in a named barrier.
+enum BarrierJoin {
+    /// More participants must arrive before any output is emitted.
+    Pending,
+    /// Every participant arrived and these outputs may now be emitted.
+    Complete(Vec<BarrierParticipant>),
+}
+
 /// Closed provider output released for one barrier participant.
 enum BarrierOutput {
     /// One ordinary assistant text response.
@@ -1354,6 +1370,26 @@ impl FakeState {
         if !action.matches_operation(prompt.operation) {
             return Err(self.mismatch(cursor, "prompt operation mismatch"));
         }
+        if matches!(
+            action,
+            ScenarioActionV2::ProviderContextRawMessageResultOrBarrier { .. }
+        ) {
+            let emission = self.consume_optional_raw_result_barrier(
+                lane_index,
+                cursor,
+                action_count,
+                &lane_id,
+                prompt,
+                &action,
+            )?;
+            handle.emit_transient(Event::ProviderPromptSubmittedReported(
+                ProviderPromptSubmitted {
+                    agent_prompt_id: prompt.agent_prompt_id.clone(),
+                    originator: prompt.originator.clone(),
+                },
+            ))?;
+            return self.emit_optional_barrier(emission, prompt, handle);
+        }
         let action = match action {
             ScenarioActionV2::WatchNotifications {
                 notifications,
@@ -1432,6 +1468,128 @@ impl FakeState {
         ))?;
 
         self.emit_v2_action(prompt, handle, action)
+    }
+
+    /// Consume one raw-result action and its optional adjacent release barrier.
+    fn consume_optional_raw_result_barrier(
+        &mut self,
+        lane_index: usize,
+        cursor: usize,
+        action_count: usize,
+        lane_id: &str,
+        prompt: &tau_proto::AgentPromptCreated,
+        action: &ScenarioActionV2,
+    ) -> ClientResult<OptionalBarrierEmission> {
+        if !action.matches_operation(prompt.operation) {
+            return Err(self.mismatch(cursor, "prompt operation mismatch"));
+        }
+        let ScenarioActionV2::ProviderContextRawMessageResultOrBarrier {
+            prior_user_text,
+            response,
+            release_user_text,
+            barrier,
+            participants,
+            barrier_response,
+            ..
+        } = action
+        else {
+            return Err(ClientError::handler(
+                "optional barrier consumer requires its closed action",
+            ));
+        };
+        let coalesced = optional_barrier_is_coalesced(prompt, prior_user_text, release_user_text)
+            .map_err(|detail| self.mismatch(cursor, detail))?;
+        self.validate_v2_raw_result_action(cursor, prompt, action)?;
+        let advance = if coalesced { 2 } else { 1 };
+        if coalesced
+            && !self.v2()?.lanes[lane_index]
+                .actions
+                .get(cursor + 1)
+                .is_some_and(|next| {
+                    matches!(
+                        next,
+                        ScenarioActionV2::BarrierText {
+                            user_text,
+                            barrier: next_barrier,
+                            participants: next_participants,
+                            response: next_response,
+                        } if user_text == release_user_text
+                            && next_barrier == barrier
+                            && next_participants == participants
+                            && next_response == barrier_response
+                    )
+                })
+        {
+            return Err(self.mismatch(
+                cursor,
+                "coalesced release does not match the adjacent barrier action",
+            ));
+        }
+        if coalesced
+            && self.barriers.get(barrier).map(Vec::len).unwrap_or_default()
+                != participants.saturating_sub(1)
+        {
+            return Err(self.mismatch(
+                cursor,
+                "coalesced release requires every other barrier participant to be waiting",
+            ));
+        }
+        self.agent_lanes
+            .entry(prompt.agent_id.clone())
+            .or_insert(lane_index);
+        self.lane_cursors[lane_index] += advance;
+        self.persist_cursors()?;
+        if coalesced {
+            self.trace(&format!(
+                "lane={lane_id} actions={cursor},{} prompt_id={} coalesced",
+                cursor + 1,
+                prompt.agent_prompt_id
+            ))?;
+        } else {
+            self.trace(&format!(
+                "lane={lane_id} action={cursor} prompt_id={}",
+                prompt.agent_prompt_id
+            ))?;
+        }
+        for action_index in cursor..cursor + advance {
+            self.trace(&format!(
+                "lane={lane_id} action={action_index} matched remaining={}",
+                action_count - action_index - 1
+            ))?;
+        }
+        if coalesced {
+            let joined = self.join_barrier(
+                prompt,
+                barrier.clone(),
+                *participants,
+                BarrierOutput::Text(barrier_response.clone()),
+            )?;
+            let BarrierJoin::Complete(completed) = joined else {
+                return Err(ClientError::handler(
+                    "validated coalesced barrier did not complete",
+                ));
+            };
+            Ok(OptionalBarrierEmission::Barrier(completed))
+        } else {
+            Ok(OptionalBarrierEmission::RawResult(response.clone()))
+        }
+    }
+
+    /// Emit the already-committed output selected by the optional barrier.
+    fn emit_optional_barrier(
+        &mut self,
+        emission: OptionalBarrierEmission,
+        prompt: &tau_proto::AgentPromptCreated,
+        handle: &tau_client::ClientHandle,
+    ) -> ClientResult<()> {
+        match emission {
+            OptionalBarrierEmission::RawResult(response) => {
+                emit_text_response(prompt, handle, response)
+            }
+            OptionalBarrierEmission::Barrier(completed) => {
+                self.emit_completed_barrier(completed, handle)
+            }
+        }
     }
 
     fn select_v2_lane(&self, prompt: &tau_proto::AgentPromptCreated) -> ClientResult<usize> {
@@ -1734,6 +1892,9 @@ impl FakeState {
                 participants,
                 BarrierOutput::ParallelDummyTools(tool_call_ids),
             ),
+            ScenarioActionV2::ProviderContextRawMessageResultOrBarrier { .. } => Err(
+                ClientError::handler("unlowered optional raw-result barrier action"),
+            ),
         }
     }
 
@@ -1766,6 +1927,20 @@ impl FakeState {
         participants: usize,
         output: BarrierOutput,
     ) -> ClientResult<()> {
+        match self.join_barrier(prompt, barrier, participants, output)? {
+            BarrierJoin::Pending => Ok(()),
+            BarrierJoin::Complete(completed) => self.emit_completed_barrier(completed, handle),
+        }
+    }
+
+    /// Stage one barrier participant and return the complete released batch.
+    fn join_barrier(
+        &mut self,
+        prompt: &tau_proto::AgentPromptCreated,
+        barrier: String,
+        participants: usize,
+        output: BarrierOutput,
+    ) -> ClientResult<BarrierJoin> {
         let pending = self.barriers.entry(barrier.clone()).or_default();
         pending.push(BarrierParticipant {
             prompt: prompt.clone(),
@@ -1775,15 +1950,26 @@ impl FakeState {
             return Err(ClientError::handler("barrier over-subscribed"));
         }
         if pending.len() == participants {
-            let completed = self.barriers.remove(&barrier).unwrap_or_default();
-            for participant in completed {
-                match participant.output {
-                    BarrierOutput::Text(response) => {
-                        emit_text_response(&participant.prompt, handle, response)?;
-                    }
-                    BarrierOutput::ParallelDummyTools(call_ids) => {
-                        emit_parallel_dummy_tool_calls(&participant.prompt, handle, call_ids)?;
-                    }
+            return Ok(BarrierJoin::Complete(
+                self.barriers.remove(&barrier).unwrap_or_default(),
+            ));
+        }
+        Ok(BarrierJoin::Pending)
+    }
+
+    /// Emit one complete barrier batch in participant arrival order.
+    fn emit_completed_barrier(
+        &mut self,
+        completed: Vec<BarrierParticipant>,
+        handle: &tau_client::ClientHandle,
+    ) -> ClientResult<()> {
+        for participant in completed {
+            match participant.output {
+                BarrierOutput::Text(response) => {
+                    emit_text_response(&participant.prompt, handle, response)?;
+                }
+                BarrierOutput::ParallelDummyTools(call_ids) => {
+                    emit_parallel_dummy_tool_calls(&participant.prompt, handle, call_ids)?;
                 }
             }
         }
@@ -2074,7 +2260,8 @@ impl FakeState {
             ScenarioActionV2::ProviderContextRawMessageCall { .. } => {
                 self.validate_v2_raw_call_action(cursor, prompt, action)
             }
-            ScenarioActionV2::ProviderContextRawMessageResult { .. } => {
+            ScenarioActionV2::ProviderContextRawMessageResult { .. }
+            | ScenarioActionV2::ProviderContextRawMessageResultOrBarrier { .. } => {
                 self.validate_v2_raw_result_action(cursor, prompt, action)
             }
             ScenarioActionV2::TypedImageToolResult { .. }
@@ -2273,21 +2460,22 @@ impl FakeState {
         action: &ScenarioActionV2,
     ) -> ClientResult<()> {
         match action {
-            ScenarioActionV2::ProviderContextRawMessageResult { call_id, .. } => {
-                let matches = prompt
-                    .context
-                    .flatten_iter()
-                    .filter(|item| {
-                        matches!(
-                            item,
-                            ContextItem::ToolResult(result)
-                                if result.call_id == *call_id
-                                    && result.status == tau_proto::ToolResultStatus::Success
-                                    && result.output.body == "raw message emitted"
-                        )
-                    })
-                    .count();
-                if matches != 1 {
+            ScenarioActionV2::ProviderContextRawMessageResult { call_id, .. }
+            | ScenarioActionV2::ProviderContextRawMessageResultOrBarrier { call_id, .. } => {
+                let latest_results = prompt.context.blocks.iter().rev().find_map(|block| {
+                    let tau_proto::ContextBlock::ToolResults(results) = block else {
+                        return None;
+                    };
+                    Some(results)
+                });
+                if !matches!(
+                    latest_results.map(|results| results.items.as_slice()),
+                    Some([result])
+                        if result.call_id == *call_id
+                            && result.tool_type == ToolType::Function
+                            && result.status == tau_proto::ToolResultStatus::Success
+                            && result.output.body == "raw message emitted"
+                ) {
                     return Err(self.mismatch(cursor, "raw message tool result mismatch"));
                 }
             }
@@ -3540,6 +3728,7 @@ impl ScenarioActionV2 {
             | Self::MessageInbound { .. }
             | Self::MessageInboundAfterHeld { .. }
             | Self::ProviderContextRawMessageResult { .. }
+            | Self::ProviderContextRawMessageResultOrBarrier { .. }
             | Self::MessageAndRawInboundAfterHeld { .. }
             | Self::MessageAndRawInboundAfterParallelTools { .. }
             | Self::WatchNotifications { .. }
@@ -3675,6 +3864,34 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// Classify the two legal scheduler shapes for an optional coalesced barrier.
+fn optional_barrier_is_coalesced(
+    prompt: &tau_proto::AgentPromptCreated,
+    prior_user_text: &str,
+    release_user_text: &str,
+) -> Result<bool, &'static str> {
+    let texts = provider_user_texts(prompt);
+    let release_count = texts
+        .iter()
+        .filter(|text| fixture_user_text_matches(text, release_user_text))
+        .count();
+    let latest = texts.last().map(String::as_str);
+    if release_count == 0
+        && latest.is_some_and(|text| fixture_user_text_matches(text, prior_user_text))
+    {
+        return Ok(false);
+    }
+    let suffix_matches = &texts[texts.len().saturating_sub(2)..];
+    if release_count == 1
+        && matches!(suffix_matches, [prior, release]
+            if fixture_user_text_matches(prior, prior_user_text)
+                && fixture_user_text_matches(release, release_user_text))
+    {
+        return Ok(true);
+    }
+    Err("optional barrier requires either the prior input or one unique latest release")
 }
 
 /// Validate the exact retained transcript consumed by the one authorized

@@ -1,4 +1,6 @@
+use std::fs::File;
 use std::num::{NonZeroU32, NonZeroU64};
+use std::sync::{Arc, Mutex};
 
 use tau_proto::ProviderFailureKind;
 
@@ -1763,6 +1765,315 @@ fn prompt_for(
     }
 }
 
+/// The optional release accepts exactly the late and coalesced scheduler
+/// shapes, while duplicate, reordered, and unrelated inputs fail closed.
+#[test]
+fn optional_barrier_classification_is_exact() {
+    fn append_user(prompt: &mut tau_proto::AgentPromptCreated, text: &str) {
+        prompt
+            .context
+            .blocks
+            .push(tau_proto::ContextBlock::UserInput(
+                tau_proto::UserInputBlock {
+                    items: vec![ContextItem::Message(MessageItem {
+                        role: ContextRole::User,
+                        content: vec![ContentPart::Text {
+                            text: text.to_owned(),
+                        }],
+                        phase: None,
+                        responses_raw_json: None,
+                    })],
+                },
+            ));
+    }
+
+    let agent_id = tau_proto::AgentId::parse("main").expect("test agent id");
+    let late = prompt_for(&agent_id, "raw call", Some("sender"));
+    assert_eq!(
+        optional_barrier_is_coalesced(&late, "raw call", "release"),
+        Ok(false)
+    );
+
+    let mut coalesced = late.clone();
+    append_user(&mut coalesced, "release");
+    assert_eq!(
+        optional_barrier_is_coalesced(&coalesced, "raw call", "release"),
+        Ok(true)
+    );
+
+    let mut duplicate = coalesced.clone();
+    append_user(&mut duplicate, "release");
+    assert!(optional_barrier_is_coalesced(&duplicate, "raw call", "release").is_err());
+
+    let mut reordered = coalesced;
+    append_user(&mut reordered, "unexpected");
+    assert!(optional_barrier_is_coalesced(&reordered, "raw call", "release").is_err());
+
+    let unexpected = prompt_for(&agent_id, "unexpected", Some("sender"));
+    assert!(optional_barrier_is_coalesced(&unexpected, "raw call", "release").is_err());
+
+    let release_without_prior = prompt_for(&agent_id, "release", Some("sender"));
+    assert!(optional_barrier_is_coalesced(&release_without_prior, "raw call", "release").is_err());
+
+    let mut interposed = late;
+    append_user(&mut interposed, "unexpected");
+    append_user(&mut interposed, "release");
+    assert!(optional_barrier_is_coalesced(&interposed, "raw call", "release").is_err());
+}
+
+/// Both scheduler branches consume and checkpoint the exact action span, while
+/// the coalesced branch releases the already-waiting barrier outputs in order.
+#[test]
+fn optional_barrier_consumes_exact_late_and_coalesced_spans() {
+    fn scenario() -> ScenarioV2 {
+        ScenarioV2::new(
+            "optional-barrier-unit",
+            vec![ScenarioLaneV2 {
+                ctx_id: "sender".to_owned(),
+                actions: vec![
+                    ScenarioActionV2::ProviderContextRawMessageResultOrBarrier {
+                        call_id: "raw-id".into(),
+                        raw_text: "raw body".to_owned(),
+                        prior_user_text: "raw call".to_owned(),
+                        response: "raw complete".to_owned(),
+                        release_user_text: "release".to_owned(),
+                        barrier: "release-barrier".to_owned(),
+                        participants: 2,
+                        barrier_response: "sender released".to_owned(),
+                    },
+                    ScenarioActionV2::BarrierText {
+                        user_text: "release".to_owned(),
+                        barrier: "release-barrier".to_owned(),
+                        participants: 2,
+                        response: "sender released".to_owned(),
+                    },
+                ],
+            }],
+        )
+    }
+
+    fn prompt(include_release: bool) -> tau_proto::AgentPromptCreated {
+        let agent_id = tau_proto::AgentId::parse("main").expect("test agent id");
+        let mut prompt = prompt_for(&agent_id, "raw call", Some("sender"));
+        prompt
+            .context
+            .blocks
+            .push(tau_proto::ContextBlock::ToolResults(
+                tau_proto::ToolResultsBlock {
+                    items: vec![tool_result("raw-id", "raw message emitted")],
+                },
+            ));
+        if include_release {
+            prompt
+                .context
+                .blocks
+                .push(tau_proto::ContextBlock::UserInput(
+                    tau_proto::UserInputBlock {
+                        items: vec![ContextItem::Message(MessageItem {
+                            role: ContextRole::User,
+                            content: vec![ContentPart::Text {
+                                text: "release".to_owned(),
+                            }],
+                            phase: None,
+                            responses_raw_json: None,
+                        })],
+                    },
+                ));
+        }
+        prompt
+    }
+
+    fn state(
+        tempdir: &tempfile::TempDir,
+        suffix: &str,
+    ) -> (FakeState, std::path::PathBuf, std::path::PathBuf) {
+        let checkpoint = tempdir.path().join(format!("{suffix}-cursor.json"));
+        let trace_path = tempdir.path().join(format!("{suffix}-trace"));
+        let mut state = FakeState::default();
+        state.scenario = Some(ScenarioConfig::V2(scenario()));
+        state.lane_cursors = vec![0];
+        state.checkpoint = Some(checkpoint.clone());
+        state.trace = Some(Arc::new(Mutex::new(
+            File::create(&trace_path).expect("create trace"),
+        )));
+        (state, checkpoint, trace_path)
+    }
+
+    fn checkpoint_cursor(path: &std::path::Path) -> usize {
+        let checkpoint: CursorCheckpoint =
+            serde_json::from_slice(&std::fs::read(path).expect("read checkpoint"))
+                .expect("decode checkpoint");
+        checkpoint.cursors[0]
+    }
+
+    fn trace(state: &FakeState, path: &std::path::Path) -> String {
+        state
+            .trace
+            .as_ref()
+            .expect("trace")
+            .lock()
+            .expect("trace lock")
+            .flush()
+            .expect("flush trace");
+        std::fs::read_to_string(path).expect("read trace")
+    }
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let action = scenario().lanes[0].actions[0].clone();
+    let late_prompt = prompt(false);
+    let (mut late, late_checkpoint, late_trace) = state(&tempdir, "late");
+    let late_emission = late
+        .consume_optional_raw_result_barrier(0, 0, 2, "sender", &late_prompt, &action)
+        .expect("late raw result");
+    assert!(
+        matches!(late_emission, OptionalBarrierEmission::RawResult(response) if response == "raw complete")
+    );
+    assert_eq!(late.lane_cursors, [1]);
+    assert_eq!(checkpoint_cursor(&late_checkpoint), 1);
+    assert_eq!(trace(&late, &late_trace).matches(" matched ").count(), 1);
+    assert!(late.barriers.is_empty());
+
+    let coalesced_prompt = prompt(true);
+    let (mut not_ready, not_ready_checkpoint, not_ready_trace) = state(&tempdir, "not-ready");
+    assert!(
+        not_ready
+            .consume_optional_raw_result_barrier(0, 0, 2, "sender", &coalesced_prompt, &action)
+            .is_err()
+    );
+    assert_eq!(not_ready.lane_cursors, [0]);
+    assert!(not_ready.agent_lanes.is_empty());
+    assert!(!not_ready_checkpoint.exists());
+    let not_ready_trace = trace(&not_ready, &not_ready_trace);
+    assert!(not_ready_trace.contains("every other barrier participant"));
+    assert_eq!(not_ready_trace.matches(" matched ").count(), 0);
+    assert!(not_ready.barriers.is_empty());
+
+    let (mut coalesced, coalesced_checkpoint, coalesced_trace) = state(&tempdir, "coalesced");
+    let target = prompt_for(
+        &tau_proto::AgentId::parse("target").expect("target id"),
+        "held",
+        Some("target"),
+    );
+    assert!(matches!(
+        coalesced
+            .join_barrier(
+                &target,
+                "release-barrier".to_owned(),
+                2,
+                BarrierOutput::ParallelDummyTools(vec!["tool-a".into(), "tool-b".into()]),
+            )
+            .expect("stage target"),
+        BarrierJoin::Pending
+    ));
+    let mut coalesced_prompt_with_history = coalesced_prompt.clone();
+    coalesced_prompt_with_history.context.blocks.insert(
+        1,
+        tau_proto::ContextBlock::ToolResults(tau_proto::ToolResultsBlock {
+            items: vec![tool_result("older-id", "older result")],
+        }),
+    );
+    let coalesced_emission = coalesced
+        .consume_optional_raw_result_barrier(
+            0,
+            0,
+            2,
+            "sender",
+            &coalesced_prompt_with_history,
+            &action,
+        )
+        .expect("coalesced raw result and barrier");
+    let OptionalBarrierEmission::Barrier(completed) = coalesced_emission else {
+        panic!("coalesced release must emit the completed barrier");
+    };
+    assert_eq!(completed.len(), 2);
+    assert!(matches!(
+        &completed[0].output,
+        BarrierOutput::ParallelDummyTools(ids)
+            if ids == &vec![
+                tau_proto::ToolCallId::new("tool-a"),
+                tau_proto::ToolCallId::new("tool-b")
+            ]
+    ));
+    assert!(
+        matches!(&completed[1].output, BarrierOutput::Text(response) if response == "sender released")
+    );
+    assert_eq!(coalesced.lane_cursors, [2]);
+    assert_eq!(checkpoint_cursor(&coalesced_checkpoint), 2);
+    let coalesced_trace = trace(&coalesced, &coalesced_trace);
+    assert!(coalesced_trace.contains("actions=0,1"));
+    assert_eq!(coalesced_trace.matches(" matched ").count(), 2);
+    assert!(coalesced.barriers.is_empty());
+
+    let (mut wrong_operation, checkpoint, trace_path) = state(&tempdir, "operation");
+    let mut wrong_prompt = coalesced_prompt.clone();
+    wrong_prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    assert!(
+        wrong_operation
+            .consume_optional_raw_result_barrier(0, 0, 2, "sender", &wrong_prompt, &action,)
+            .is_err()
+    );
+    assert_eq!(wrong_operation.lane_cursors, [0]);
+    assert!(wrong_operation.agent_lanes.is_empty());
+    assert!(!checkpoint.exists());
+    assert!(trace(&wrong_operation, &trace_path).contains("prompt operation mismatch"));
+    assert!(wrong_operation.barriers.is_empty());
+
+    for (suffix, extra) in [
+        ("same-call-duplicate", tool_result("raw-id", "inconsistent")),
+        ("unrelated-result", tool_result("other-id", "other result")),
+    ] {
+        let (mut invalid, checkpoint, trace_path) = state(&tempdir, suffix);
+        let mut invalid_prompt = prompt(true);
+        let Some(tau_proto::ContextBlock::ToolResults(results)) = invalid_prompt
+            .context
+            .blocks
+            .iter_mut()
+            .find(|block| matches!(block, tau_proto::ContextBlock::ToolResults(_)))
+        else {
+            unreachable!("prompt contains one tool-result block")
+        };
+        results.items.push(extra);
+        assert!(
+            invalid
+                .consume_optional_raw_result_barrier(0, 0, 2, "sender", &invalid_prompt, &action,)
+                .is_err()
+        );
+        assert_eq!(invalid.lane_cursors, [0]);
+        assert!(invalid.agent_lanes.is_empty());
+        assert!(!checkpoint.exists());
+        assert!(trace(&invalid, &trace_path).contains("raw message tool result mismatch"));
+        assert!(invalid.barriers.is_empty());
+    }
+
+    let (mut newest_conflict, checkpoint, trace_path) = state(&tempdir, "newest-block-conflict");
+    let mut newest_conflict_prompt = coalesced_prompt;
+    newest_conflict_prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::ToolResults(
+            tau_proto::ToolResultsBlock {
+                items: vec![tool_result("other-id", "newest conflicting result")],
+            },
+        ));
+    assert!(
+        newest_conflict
+            .consume_optional_raw_result_barrier(
+                0,
+                0,
+                2,
+                "sender",
+                &newest_conflict_prompt,
+                &action,
+            )
+            .is_err()
+    );
+    assert_eq!(newest_conflict.lane_cursors, [0]);
+    assert!(newest_conflict.agent_lanes.is_empty());
+    assert!(!checkpoint.exists());
+    assert!(trace(&newest_conflict, &trace_path).contains("raw message tool result mismatch"));
+    assert!(newest_conflict.barriers.is_empty());
+}
+
 fn start_result(
     call_id: &str,
     parent: &tau_proto::AgentId,
@@ -2052,10 +2363,15 @@ fn v2_provider_context_placement_accepts_only_two_cross_bound_shapes() {
                 call_id: "raw-id".into(),
                 raw_text: "raw body".to_owned(),
             },
-            ScenarioActionV2::ProviderContextRawMessageResult {
+            ScenarioActionV2::ProviderContextRawMessageResultOrBarrier {
                 call_id: "raw-id".into(),
                 raw_text: "raw body".to_owned(),
+                prior_user_text: "raw call".to_owned(),
                 response: "raw sent".to_owned(),
+                release_user_text: "release".to_owned(),
+                barrier: "release".to_owned(),
+                participants: 2,
+                barrier_response: "released".to_owned(),
             },
             ScenarioActionV2::BarrierText {
                 user_text: "release".to_owned(),
@@ -2097,6 +2413,16 @@ fn v2_provider_context_placement_accepts_only_two_cross_bound_shapes() {
     };
     *raw_text = "other raw body".to_owned();
     assert!(validate_v2(&mismatched).is_err());
+
+    let mut mismatched_release = valid.clone();
+    let ScenarioActionV2::ProviderContextRawMessageResultOrBarrier {
+        barrier_response, ..
+    } = &mut mismatched_release.lanes[0].actions[3]
+    else {
+        unreachable!("known optional barrier action")
+    };
+    *barrier_response = "other release".to_owned();
+    assert!(validate_v2(&mismatched_release).is_err());
 
     let mut swapped = valid.clone();
     swapped.lanes[1].actions[1] = ScenarioActionV2::MessageAndRawInboundAfterParallelTools {

@@ -45,8 +45,15 @@ The gated provider-context placement exception holds one target response while
 the production `message` tool commits a typed receipt and the configured
 test-dummy raw-message tool commits one activating canonical message fact.
 Only then does a named barrier release either ordinary text or parallel dummy
-calls. The target must observe the response, and for tool calls the complete
-aggregate, before both deferred inputs in exactly one successor prompt.
+calls. The sender-side release has two legitimate scheduler shapes: it may
+arrive as the next prompt after the raw tool-result continuation, or it may be
+steered into that continuation while the tool still completes. The latter shape
+requires the exact retained `prior raw-call input, release input` suffix, one
+release overall, the exact successful raw tool result, and the adjacent matching
+barrier action; absent, duplicated, interposed, reordered, or non-inference
+content fails before cursor mutation. The target must observe the response, and
+for tool calls the complete aggregate, before both deferred inputs in exactly
+one successor prompt.
 
 The fixture uses fresh private config, state, session, process-runtime, and
 artifact directories. Its embedded harness socket and discovery catalog remain
@@ -216,9 +223,17 @@ nonempty subscription ID distinct from Boot A. Its one fresh direct worker turn
 then yields exactly one prompt notification and one final-response notification
 in that order. The initial snapshot consumes no provider action.
 
-A barrier is the lane's sole action, appears once per distinct
+A barrier is normally the lane's sole action, appears once per distinct
 participant lane, and has one consistent bounded participant count, preventing
-same-lane and cyclic barrier plans. Initial `ctx_id` binds an agent to one lane.
+same-lane and cyclic barrier plans. The provider-context placement sender is the
+sole exception: its closed raw-result action may consume itself and its adjacent
+matching barrier from one coalesced prompt. That transition advances and
+checkpoints both actions atomically before joining the already-waiting barrier;
+the later-prompt shape advances only the raw-result action and leaves the
+barrier pending. Every other declared participant must already be staged before
+the coalesced transition; missing or insufficient readiness rejects before lane
+binding, cursor advance, or checkpoint mutation. Both consumed actions retain
+distinct trace records. Initial `ctx_id` binds an agent to one lane.
 The public terminal UI supplies no initial `ctx_id`, so an unbound first prompt
 may select the sole configured lane. S1's production-started worker also has no
 initial `ctx_id`; neither do S4's two production-started workers. Their exact

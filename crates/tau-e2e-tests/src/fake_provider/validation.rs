@@ -174,6 +174,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
                         | ScenarioActionV2::MessageSenderResult { .. }
                         | ScenarioActionV2::ProviderContextRawMessageCall { .. }
                         | ScenarioActionV2::ProviderContextRawMessageResult { .. }
+                        | ScenarioActionV2::ProviderContextRawMessageResultOrBarrier { .. }
                         | ScenarioActionV2::MessageInbound { .. }
                         | ScenarioActionV2::MessageInboundAfterHeld { .. }
                         | ScenarioActionV2::MessageAndRawInboundAfterHeld { .. }
@@ -656,11 +657,18 @@ fn validate_v2_message_action(
             || 4 * 1024 < raw_text.len()
             || !matches!(
                 lane.actions.get(action_index + 1),
-                Some(ScenarioActionV2::ProviderContextRawMessageResult {
-                    call_id: result_id,
-                    raw_text: result_text,
-                    ..
-                }) if result_id == call_id && result_text == raw_text
+                Some(
+                    ScenarioActionV2::ProviderContextRawMessageResult {
+                        call_id: result_id,
+                        raw_text: result_text,
+                        ..
+                    }
+                    | ScenarioActionV2::ProviderContextRawMessageResultOrBarrier {
+                        call_id: result_id,
+                        raw_text: result_text,
+                        ..
+                    },
+                ) if result_id == call_id && result_text == raw_text
             ) =>
         {
             return Err(ClientError::handler(
@@ -1109,24 +1117,37 @@ fn exact_provider_context_placement_shape(
                 ..
             },
             ScenarioActionV2::ProviderContextRawMessageCall {
+                user_text: raw_user_text,
                 call_id: raw_call_id,
                 raw_text,
                 ..
             },
-            ScenarioActionV2::ProviderContextRawMessageResult {
+            ScenarioActionV2::ProviderContextRawMessageResultOrBarrier {
                 call_id: raw_result_id,
                 raw_text: result_raw_text,
+                prior_user_text,
+                release_user_text,
+                barrier: coalesced_barrier,
+                participants: coalesced_participants,
+                barrier_response,
                 ..
             },
             ScenarioActionV2::BarrierText {
+                user_text: release_text,
                 barrier,
                 participants,
+                response: release_response,
                 ..
             },
         ] if call_id == result_id
             && message == result_message
             && raw_call_id == raw_result_id
             && raw_text == result_raw_text
+            && raw_user_text == prior_user_text
+            && release_user_text == release_text
+            && coalesced_barrier == barrier
+            && coalesced_participants == participants
+            && barrier_response == release_response
             && *participants == 2 =>
         {
             (call_id, message, raw_text, barrier)
