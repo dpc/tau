@@ -2,6 +2,253 @@ use std::io as path_std_io;
 
 use super::*;
 
+/// Randomized live prevalidation/apply and fully checked cold replay accept the
+/// same records and report the same first diagnostic for every record-level
+/// invalidity class.
+#[test]
+fn randomized_prevalidated_live_fold_matches_cold_replay() {
+    #[derive(Clone, Copy, Debug)]
+    enum InvalidClass {
+        Sequence,
+        Parent,
+        LifecycleSource,
+        FoldShape,
+        InvalidCheckpointMarker,
+        RawMessageParent,
+        RawMessageWithoutTarget,
+        RawMessageOwner,
+        SemanticOwner,
+    }
+
+    const INVALID_CLASSES: [InvalidClass; 9] = [
+        InvalidClass::Sequence,
+        InvalidClass::Parent,
+        InvalidClass::LifecycleSource,
+        InvalidClass::FoldShape,
+        InvalidClass::InvalidCheckpointMarker,
+        InvalidClass::RawMessageParent,
+        InvalidClass::RawMessageWithoutTarget,
+        InvalidClass::RawMessageOwner,
+        InvalidClass::SemanticOwner,
+    ];
+
+    let agent_id = AgentId::parse("differential-agent").expect("agent id");
+    let other_agent_id = AgentId::parse("other-agent").expect("agent id");
+    let mut live = AgentTree::from_events(agent_id.clone(), &[]);
+    let mut accepted = Vec::new();
+    let mut random = 0x9e37_79b9_7f4a_7c15_u64;
+
+    for step in 0_u64..32 {
+        random = random
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let valid_parent = match random % 3 {
+            0 => AgentEventParent::InheritHead,
+            1 => AgentEventParent::Root,
+            _ if accepted.is_empty() => AgentEventParent::Root,
+            _ => AgentEventParent::Under(NodeId::new(random % accepted.len() as u64)),
+        };
+        let valid_record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes(
+                random.to_le_bytes().repeat(2).try_into().expect("16 bytes"),
+            ),
+            seq: live.next_event_seq(),
+            source: None,
+            event: Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: format!("randomized-{random}"),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+            parent: valid_parent,
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: UnixMicros::new(step),
+        };
+        let validated = live
+            .prevalidate_persisted_record(&valid_record)
+            .expect("randomized valid record");
+        let (next_live, node) =
+            AgentTree::apply_prevalidated(validated).expect("prevalidated live fold");
+        let mut cold_records = accepted.clone();
+        cold_records.push(valid_record.clone());
+        let replayed =
+            AgentTree::try_from_events(agent_id.clone(), &cold_records).expect("cold valid replay");
+        assert_eq!(next_live, replayed, "accepted step={step}");
+        assert_eq!(
+            node,
+            next_live.head(),
+            "accepted input appends selected node"
+        );
+        live = next_live;
+        accepted.push(valid_record);
+
+        let rotation = (random as usize) % INVALID_CLASSES.len();
+        for offset in 0..INVALID_CLASSES.len() {
+            let invalid_class = INVALID_CLASSES[(rotation + offset) % INVALID_CLASSES.len()];
+            let mut record = PersistedAgentEvent {
+                observation_id: tau_proto::ObservationId::from_bytes([step as u8; 16]),
+                seq: live.next_event_seq(),
+                source: None,
+                event: Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                    agent_id: agent_id.clone(),
+                    text: format!("candidate-{random}-{offset}"),
+                    inference_activation: false,
+                    message_class: Default::default(),
+                }),
+                parent: valid_parent,
+                fold_semantics: AgentJournalFoldSemantics::Legacy,
+                recorded_at: UnixMicros::new(step + 100),
+            };
+            match invalid_class {
+                InvalidClass::Sequence => record.seq = record.seq.next(),
+                InvalidClass::Parent => {
+                    record.parent = AgentEventParent::Under(NodeId::new(u64::MAX));
+                }
+                InvalidClass::LifecycleSource => {
+                    record.source = Some(PersistedEventSource::Connection(
+                        tau_proto::ConnectionId::parse("invalid-source").expect("connection id"),
+                    ));
+                    record.event =
+                        Event::AgentOuterTurnFinished(tau_proto::AgentOuterTurnFinished {
+                            automatic_compaction_decision: None,
+                            agent_id: agent_id.clone(),
+                            session_id: tau_proto::SessionId::parse("differential-session")
+                                .expect("session id"),
+                            outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(
+                                &tau_proto::AgentPromptId::parse("differential-prompt")
+                                    .expect("prompt id"),
+                            ),
+                            disposition: tau_proto::AgentOuterTurnDisposition::Settled,
+                        });
+                }
+                InvalidClass::FoldShape => {
+                    record.fold_semantics = AgentJournalFoldSemantics::InferenceDeferredInputV1;
+                }
+                InvalidClass::InvalidCheckpointMarker => {
+                    record.event = Event::AgentInferenceDispatchStarted(
+                        tau_proto::AgentInferenceDispatchStarted {
+                            agent_id: agent_id.clone(),
+                            transaction_id: None,
+                            agent_prompt_id: tau_proto::AgentPromptId::parse("invalid-checkpoint")
+                                .expect("prompt id"),
+                            through: tau_proto::AgentHead::Root,
+                            model: None,
+                            operation: None,
+                            activation_cut: None,
+                            output_length_continuation: None,
+                        },
+                    );
+                    record.fold_semantics = AgentJournalFoldSemantics::InferenceDeferredInputV1;
+                }
+                InvalidClass::RawMessageParent | InvalidClass::RawMessageOwner => {
+                    record.parent = AgentEventParent::InheritHead;
+                    record.event = Event::MessageDelivered(tau_proto::MessageDelivered::new(
+                        tau_proto::MessagePublisherId::parse("differential-publisher")
+                            .expect("publisher id"),
+                        tau_proto::MessageAgentTarget::new(
+                            if matches!(invalid_class, InvalidClass::RawMessageOwner) {
+                                other_agent_id.as_str()
+                            } else {
+                                agent_id.as_str()
+                            },
+                        ),
+                        tau_proto::MessageFactId::new(format!("fact-{step}")),
+                        tau_proto::MessageParty {
+                            stable_id: "sender".to_owned(),
+                            display_name: None,
+                            sender_auth: None,
+                        },
+                        None,
+                        "message",
+                    ));
+                    if matches!(invalid_class, InvalidClass::RawMessageParent) {
+                        record.parent = AgentEventParent::Root;
+                    }
+                }
+                InvalidClass::RawMessageWithoutTarget => {
+                    record.parent = AgentEventParent::InheritHead;
+                    record.event = Event::MessageDeliveredReported(
+                        tau_proto::MessageDelivered::new(
+                            tau_proto::MessagePublisherId::parse("differential-publisher")
+                                .expect("publisher id"),
+                            tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+                            tau_proto::MessageFactId::new(format!("reported-{step}")),
+                            tau_proto::MessageParty {
+                                stable_id: "sender".to_owned(),
+                                display_name: None,
+                                sender_auth: None,
+                            },
+                            None,
+                            "reported",
+                        )
+                        .with_publisher(tau_proto::RawMessagePublisherId::new("raw-claim")),
+                    );
+                }
+                InvalidClass::SemanticOwner => {
+                    record.event =
+                        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                            agent_id: other_agent_id.clone(),
+                            text: "wrong owner".to_owned(),
+                            inference_activation: false,
+                            message_class: Default::default(),
+                        });
+                }
+            }
+            let mut cold_records = accepted.clone();
+            cold_records.push(record.clone());
+            let cold_error = AgentTree::try_from_events(agent_id.clone(), &cold_records)
+                .expect_err("cold replay rejects invalid record");
+            let live_error = match live.prevalidate_persisted_record(&record) {
+                Ok(_) => panic!("live validation accepted invalid record"),
+                Err(error) => error,
+            };
+            let expected = match invalid_class {
+                InvalidClass::Sequence => format!(
+                    "agent event sequence mismatch: expected {}, got {}",
+                    live.next_event_seq().get(),
+                    live.next_event_seq().next().get()
+                ),
+                InvalidClass::Parent => {
+                    "agent event parent referenced unknown node_id: 18446744073709551615".to_owned()
+                }
+                InvalidClass::LifecycleSource => {
+                    "agent accounting lifecycle facts must be harness-authored source-free records"
+                        .to_owned()
+                }
+                InvalidClass::FoldShape => {
+                    "non-checkpoint record carries inference-deferred fold semantics".to_owned()
+                }
+                InvalidClass::InvalidCheckpointMarker => {
+                    "inference-deferred fold semantics require one marked ordinary inference"
+                        .to_owned()
+                }
+                InvalidClass::RawMessageParent => {
+                    "raw message fact record has a noncanonical fold parent".to_owned()
+                }
+                InvalidClass::RawMessageWithoutTarget => {
+                    "message category record has no agent target".to_owned()
+                }
+                InvalidClass::RawMessageOwner => {
+                    "raw message fact target does not match agent journal owner".to_owned()
+                }
+                InvalidClass::SemanticOwner => {
+                    "agent event agent_id did not match target agent".to_owned()
+                }
+            };
+            assert_eq!(
+                live_error.to_string(),
+                expected,
+                "precedence step={step} class={invalid_class:?}"
+            );
+            assert_eq!(
+                live_error.to_string(),
+                cold_error.to_string(),
+                "step={step} class={invalid_class:?}"
+            );
+        }
+    }
+}
+
 /// Stable extension provenance never becomes a run-local route, including when
 /// its spelling collides with a live connection identifier.
 #[test]

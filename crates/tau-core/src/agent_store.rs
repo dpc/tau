@@ -415,8 +415,8 @@ pub struct AgentStore {
     persistence_owner: Option<Arc<SemanticPersistenceOwner>>,
     /// Exact prepared generation capability for each durable live stream.
     persistence_leases: HashMap<AgentId, PersistenceLease>,
-    /// Atomic per-agent fold, summary, and creation projection for managed
-    /// streams.
+    /// Atomic per-agent fold, summary, records, and encoded-charge projection
+    /// for managed streams.
     managed_projections: HashMap<AgentId, ManagedAgentProjection>,
 }
 
@@ -440,11 +440,61 @@ struct ManagedAgentProjection {
     tree: AgentTree,
     /// Journal-derived list/checkpoint summary.
     summary: AgentSummary,
-    /// Whether sequence zero is the matching immutable creation fact.
-    created: bool,
+    /// Non-persisted, replay-reconstructed saturating bounded encoded-size sum
+    /// of `events`, synchronized only by this type's constructors and append
+    /// API.
+    encoded_event_bytes: usize,
     /// Accepted same-daemon replay records, including an asynchronously durable
     /// suffix.
     events: Vec<PersistedAgentEvent>,
+}
+
+impl ManagedAgentProjection {
+    /// Constructs an empty prepared projection with no retained charge.
+    fn empty(agent_id: AgentId) -> Self {
+        Self {
+            tree: AgentTree::from_events(agent_id, &[]),
+            summary: AgentSummary::default(),
+            encoded_event_bytes: 0,
+            events: Vec::new(),
+        }
+    }
+
+    /// Constructs a replay projection and derives its saturating encoded
+    /// charge.
+    fn from_replay(
+        tree: AgentTree,
+        summary: AgentSummary,
+        events: Vec<PersistedAgentEvent>,
+    ) -> Self {
+        let encoded_event_bytes = managed_agent_encoded_event_bytes(&events);
+        Self {
+            tree,
+            summary,
+            encoded_event_bytes,
+            events,
+        }
+    }
+
+    /// Clones this projection around one prevalidated fold and atomically
+    /// advances the retained record and encoded-charge pair.
+    fn with_appended_record(
+        &self,
+        tree: AgentTree,
+        record: PersistedAgentEvent,
+        measured_bytes: usize,
+    ) -> Self {
+        let mut summary = self.summary.clone();
+        summary.apply(&record);
+        let mut events = self.events.clone();
+        events.push(record);
+        Self {
+            tree,
+            summary,
+            encoded_event_bytes: self.encoded_event_bytes.saturating_add(measured_bytes),
+            events,
+        }
+    }
 }
 
 impl AgentStore {
@@ -765,15 +815,8 @@ impl AgentStore {
             .map_err(AgentStoreError::Persistence)?;
         self.persistence_leases
             .insert(agent_id.clone(), lease.clone());
-        self.managed_projections.insert(
-            agent_id.clone(),
-            ManagedAgentProjection {
-                tree: AgentTree::from_events(agent_id, &[]),
-                summary: AgentSummary::default(),
-                created: false,
-                events: Vec::new(),
-            },
-        );
+        self.managed_projections
+            .insert(agent_id.clone(), ManagedAgentProjection::empty(agent_id));
         Ok(lease)
     }
 
@@ -811,12 +854,7 @@ impl AgentStore {
             .insert(agent_id.clone(), prepared.lease);
         self.managed_projections.insert(
             agent_id.clone(),
-            ManagedAgentProjection {
-                tree,
-                summary,
-                created: records_begin_with_creation(&agent_id, &prepared.events),
-                events: prepared.events,
-            },
+            ManagedAgentProjection::from_replay(tree, summary, prepared.events),
         );
         Ok(())
     }
@@ -943,7 +981,7 @@ impl AgentStore {
     #[must_use]
     pub fn agent_has_committed_identity(&self, agent_id: &AgentId) -> bool {
         if let Some(projection) = self.managed_projections.get(agent_id) {
-            return projection.created;
+            return records_begin_with_creation(agent_id, &projection.events);
         }
         if self.created_agents.contains(agent_id) {
             return true;
@@ -1472,19 +1510,6 @@ impl AgentStore {
                 ),
             });
         }
-        if matches!(
-            &event,
-            Event::AgentPromptStarted(_)
-                | Event::AgentOuterTurnStarted(_)
-                | Event::AgentOuterTurnFinished(_)
-        ) && source.is_some()
-        {
-            return Err(AgentStoreError::InvalidEvent {
-                source: AgentEventValidationError::new(
-                    "agent accounting lifecycle facts must be harness-authored source-free records",
-                ),
-            });
-        }
         let next_seq = projection.tree.next_event_seq();
         let record = PersistedAgentEvent {
             observation_id,
@@ -1495,9 +1520,9 @@ impl AgentStore {
             parent,
             recorded_at,
         };
-        projection
+        let validated = projection
             .tree
-            .validate_persisted_event(&record)
+            .prevalidate_persisted_record(&record)
             .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         let measured = encoded_size_with_limit(&record, MAX_RECORD_BYTES).ok_or_else(|| {
             AgentStoreError::RecordTooLarge {
@@ -1520,16 +1545,10 @@ impl AgentStore {
             path: self.agent_dir(agent_id.as_str()).join("events.cbor"),
             source,
         })?;
-        let mut replacement = projection.clone();
-        let folded_node_id = replacement
-            .tree
-            .apply_persisted_record(&record)
-            .expect("validated managed record");
-        replacement.summary.apply(&record);
-        replacement.events.push(record.clone());
-        if matches!(record.event, Event::AgentStarted(_)) {
-            replacement.created = true;
-        }
+        let (replacement_tree, folded_node_id) =
+            AgentTree::apply_prevalidated(validated).expect("validated managed record");
+        let replacement =
+            projection.with_appended_record(replacement_tree, record.clone(), measured);
         let selected_head_id = replacement.tree.head();
         let checkpoint = AgentCheckpointCandidate {
             agent_id: agent_id.clone(),
@@ -1711,6 +1730,10 @@ impl AgentStore {
             fold_semantics: AgentJournalFoldSemantics::Legacy,
             recorded_at,
         };
+        let validated = projection
+            .tree
+            .prevalidate_persisted_record(&record)
+            .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         let measured = encoded_size_with_limit(&record, MAX_RECORD_BYTES).ok_or_else(|| {
             AgentStoreError::RecordTooLarge {
                 path: self.agent_dir(agent_id.as_str()).join("events.cbor"),
@@ -1731,13 +1754,10 @@ impl AgentStore {
             path: self.agent_dir(agent_id.as_str()).join("events.cbor"),
             source,
         })?;
-        let mut replacement = projection.clone();
-        let folded_node_id = replacement
-            .tree
-            .apply_persisted_record(&record)
+        let (replacement_tree, folded_node_id) = AgentTree::apply_prevalidated(validated)
             .expect("raw message fact matches owner and sequence");
-        replacement.summary.apply(&record);
-        replacement.events.push(record.clone());
+        let replacement =
+            projection.with_appended_record(replacement_tree, record.clone(), measured);
         let selected_head_id = replacement.tree.head();
         let checkpoint = AgentCheckpointCandidate {
             agent_id: agent_id.clone(),
@@ -2349,17 +2369,19 @@ fn managed_agent_projection_charge(
     new_record_bytes: usize,
 ) -> usize {
     let retained = projection
-        .events
-        .iter()
-        .fold(new_record_bytes, |total, record| {
-            total.saturating_add(
-                encoded_size_with_limit(record, MAX_RECORD_BYTES).unwrap_or(MAX_RECORD_BYTES)
-                    as usize,
-            )
-        });
+        .encoded_event_bytes
+        .saturating_add(new_record_bytes);
     retained
         .saturating_mul(4)
         .saturating_add(std::mem::size_of::<ManagedAgentProjection>())
+}
+
+fn managed_agent_encoded_event_bytes(events: &[PersistedAgentEvent]) -> usize {
+    events.iter().fold(0_usize, |total, record| {
+        total.saturating_add(
+            encoded_size_with_limit(record, MAX_RECORD_BYTES).unwrap_or(MAX_RECORD_BYTES) as usize,
+        )
+    })
 }
 
 fn read_cbor_records<T, F>(path: &Path, mut handle: F) -> Result<(), AgentStoreError>

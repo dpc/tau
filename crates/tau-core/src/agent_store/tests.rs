@@ -1,8 +1,78 @@
+use std::time::Instant;
 use std::{sync as path_std_sync, time as path_std_time};
 
 use super::*;
 use crate::journal_sync::SyncTargetKind;
 use crate::record_log::AppendFault;
+
+fn managed_charge_projection(event_count: usize) -> ManagedAgentProjection {
+    let agent_id = AgentId::parse("charge-benchmark-agent").expect("agent id");
+    let events: Vec<_> = (0..event_count)
+        .map(|index| PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([index as u8; 16]),
+            seq: PersistedAgentEventSeq::new(index as u64),
+            source: None,
+            event: Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id.clone(),
+                text: format!("record-{index}"),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+            parent: AgentEventParent::InheritHead,
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: UnixMicros::new(index as u64),
+        })
+        .collect();
+    let tree = AgentTree::try_from_events(agent_id, &events).expect("valid benchmark records");
+    let mut summary = AgentSummary::default();
+    for event in &events {
+        summary.apply(event);
+    }
+    ManagedAgentProjection::from_replay(tree, summary, events)
+}
+
+/// The replay-derived aggregate produces the same saturating admission charge
+/// as an explicit record scan, including arithmetic overflow.
+#[test]
+fn managed_projection_cached_charge_matches_full_measurement() {
+    for event_count in [0, 1, 17, 257] {
+        let projection = managed_charge_projection(event_count);
+        let new_record_bytes = usize::MAX / 8;
+        let explicit = managed_agent_encoded_event_bytes(&projection.events)
+            .saturating_add(new_record_bytes)
+            .saturating_mul(4)
+            .saturating_add(std::mem::size_of::<ManagedAgentProjection>());
+        assert_eq!(
+            managed_agent_projection_charge(&projection, new_record_bytes),
+            explicit,
+            "event_count={event_count}"
+        );
+    }
+}
+
+/// Manual asymptotic benchmark reports cached-charge latency across histories
+/// from empty to large; it deliberately compares scaling instead of enforcing
+/// a flaky wall-clock threshold.
+#[test]
+#[ignore = "manual managed-charge asymptotic benchmark"]
+fn benchmark_managed_projection_cached_charge_scaling() {
+    const SAMPLES: usize = 1_000_000;
+    for event_count in [0, 16, 1_024, 65_536] {
+        let projection = managed_charge_projection(event_count);
+        let started = Instant::now();
+        let mut checksum = 0;
+        for sample in 0..SAMPLES {
+            checksum ^= std::hint::black_box(managed_agent_projection_charge(
+                std::hint::black_box(&projection),
+                sample,
+            ));
+        }
+        eprintln!(
+            "managed_charge events={event_count} samples={SAMPLES} elapsed={:?} checksum={checksum}",
+            started.elapsed()
+        );
+    }
+}
 
 /// Normal-build inspection state rejects lock/repair mutation without
 /// artifacts.

@@ -2020,6 +2020,16 @@ impl AgentTree {
         &mut self,
         record: &PersistedAgentEvent,
     ) -> Result<Option<NodeId>, AgentEventValidationError> {
+        self.prevalidate_persisted_record(record)?;
+        self.apply_validated_record(record)
+    }
+
+    /// Validates one exact durable record and returns a crate-private
+    /// capability bound to that same borrowed value and exact tree state.
+    pub(crate) fn prevalidate_persisted_record<'tree, 'record>(
+        &'tree self,
+        record: &'record PersistedAgentEvent,
+    ) -> Result<PrevalidatedPersistedRecord<'tree, 'record>, AgentEventValidationError> {
         if record.seq != self.next_event_seq {
             return Err(AgentEventValidationError::new(format!(
                 "agent event sequence mismatch: expected {}, got {}",
@@ -2045,7 +2055,7 @@ impl AgentTree {
                 "non-checkpoint record carries inference-deferred fold semantics",
             ));
         }
-        let node_id = if record.event.name().category() == &tau_proto::EventCategory::Message {
+        if record.event.name().category() == &tau_proto::EventCategory::Message {
             if record.parent != AgentEventParent::InheritHead {
                 return Err(AgentEventValidationError::new(
                     "raw message fact record has a noncanonical fold parent",
@@ -2059,6 +2069,41 @@ impl AgentTree {
                     "raw message fact target does not match agent journal owner",
                 ));
             }
+        } else {
+            self.validate_persisted_event(record)?;
+        }
+        Ok(PrevalidatedPersistedRecord { tree: self, record })
+    }
+
+    /// Applies the exact record proven by a crate-private prevalidation token.
+    ///
+    /// Token construction enforces sequence, source, parent, fold-shape, and
+    /// current-tree semantic invariants. Application clones and advances the
+    /// token's bound tree, so a caller cannot substitute another tree or
+    /// record; a token never authorizes a later or merely
+    /// sequence-equivalent state.
+    pub(crate) fn apply_prevalidated(
+        validated: PrevalidatedPersistedRecord<'_, '_>,
+    ) -> Result<(Self, Option<NodeId>), AgentEventValidationError> {
+        let mut tree = validated.tree.clone();
+        let record = validated.record;
+        let node_id = tree.apply_validated_record(record)?;
+        Ok((tree, node_id))
+    }
+
+    /// Applies one record after validation against this exact tree state.
+    fn apply_validated_record(
+        &mut self,
+        record: &PersistedAgentEvent,
+    ) -> Result<Option<NodeId>, AgentEventValidationError> {
+        if record.seq != self.next_event_seq {
+            return Err(AgentEventValidationError::new(format!(
+                "agent event sequence mismatch: expected {}, got {}",
+                self.next_event_seq.get(),
+                record.seq.get()
+            )));
+        }
+        let node_id = if record.event.name().category() == &tau_proto::EventCategory::Message {
             // Message facts are canonical raw journal records. Their transcript
             // projection is a post-commit consumer and cannot veto the fact.
             tau_proto::project_message_fact(&record.event)
@@ -2067,7 +2112,6 @@ impl AgentTree {
                     self.record_message_fact(self.head, Box::new(projection.item), record.seq)
                 })
         } else {
-            self.validate_persisted_event(record)?;
             self.apply_persisted_event_at(
                 record.parent,
                 &record.event,
@@ -6069,6 +6113,14 @@ pub struct PersistedAgentEvent {
     /// semantics.
     #[serde(default)]
     pub recorded_at: UnixMicros,
+}
+
+/// Crate-private proof that one exact borrowed record passed live validation.
+pub(crate) struct PrevalidatedPersistedRecord<'tree, 'record> {
+    /// Exact tree state against which the record was validated.
+    tree: &'tree AgentTree,
+    /// Exact record whose immutable fields were validated.
+    record: &'record PersistedAgentEvent,
 }
 
 impl AgentJournalFoldSemantics {
