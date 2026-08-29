@@ -1286,9 +1286,9 @@ pub(crate) fn assistant_text_from_output_items(output_items: &[ContextItem]) -> 
                 content
                     .iter()
                     .map(|part| match part {
-                        ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
-                            text.as_str()
-                        }
+                        ContentPart::Text { text }
+                        | ContentPart::SyntheticCompactionSummary { text }
+                        | ContentPart::HarnessInternalText { text } => text.as_str(),
                     })
                     .collect::<String>(),
             ),
@@ -1763,6 +1763,7 @@ where
                         ContextItem::Message(message) if message.role == ContextRole::User => {
                             message.content.first().map(|part| match part {
                                 ContentPart::Text { text }
+                                | ContentPart::SyntheticCompactionSummary { text }
                                 | ContentPart::HarnessInternalText { text } => text.clone(),
                             })
                         }

@@ -1511,9 +1511,9 @@ fn assistant_text_from_context_item(item: &ContextItem) -> Option<String> {
             content
                 .iter()
                 .map(|part| match part {
-                    ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
-                        text.as_str()
-                    }
+                    ContentPart::Text { text }
+                    | ContentPart::SyntheticCompactionSummary { text }
+                    | ContentPart::HarnessInternalText { text } => text.as_str(),
                 })
                 .collect::<String>(),
         ),
@@ -1529,7 +1529,9 @@ fn assistant_text_from_message_item(message: &MessageItem) -> Option<String> {
         .content
         .iter()
         .map(|part| match part {
-            ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => text.as_str(),
+            ContentPart::Text { text }
+            | ContentPart::SyntheticCompactionSummary { text }
+            | ContentPart::HarnessInternalText { text } => text.as_str(),
         })
         .collect::<String>();
     (!text.is_empty()).then_some(text)

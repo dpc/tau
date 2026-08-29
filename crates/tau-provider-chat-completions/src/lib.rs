@@ -2518,7 +2518,9 @@ fn message_text(message: &tau_proto::MessageItem) -> String {
     let mut text = String::new();
     for part in &message.content {
         match part {
-            ContentPart::Text { text: part } | ContentPart::HarnessInternalText { text: part } => {
+            ContentPart::Text { text: part }
+            | ContentPart::SyntheticCompactionSummary { text: part }
+            | ContentPart::HarnessInternalText { text: part } => {
                 text.push_str(part);
             }
         }

@@ -589,7 +589,7 @@ fn deterministic_standalone_compaction_replaces_transcript_and_continues()
         compacted.replacement_window,
         vec![ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::User,
-            content: vec![tau_proto::ContentPart::Text {
+            content: vec![tau_proto::ContentPart::SyntheticCompactionSummary {
                 text: checkpoint.clone(),
             }],
             phase: None,
@@ -1015,9 +1015,13 @@ fn assert_durable_compaction(
                     _ => None,
                 })
                 .flatten()
-                .any(
-                    |part| matches!(part, tau_proto::ContentPart::Text { text } if text == expected_checkpoint),
-                )
+                .any(|part| {
+                    matches!(
+                        part,
+                        tau_proto::ContentPart::SyntheticCompactionSummary { text }
+                            if text == expected_checkpoint
+                    )
+                })
     }) {
         return Err("durable replacement window changed".into());
     }

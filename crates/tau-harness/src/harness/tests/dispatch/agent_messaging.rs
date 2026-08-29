@@ -1963,7 +1963,9 @@ fn nested_message_and_input_wait_drain_both_publish_idle_dispatches() {
                     ..
                 }) if content.iter().any(|part| matches!(
                     part,
-                    ContentPart::Text { text } | ContentPart::HarnessInternalText { text }
+                    ContentPart::Text { text }
+            | ContentPart::SyntheticCompactionSummary { text }
+            | ContentPart::HarnessInternalText { text }
                         if text.contains(BODY)
                 ))
             )

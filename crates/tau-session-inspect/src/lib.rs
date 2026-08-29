@@ -241,6 +241,7 @@ pub fn format_session_entry(entry: &AgentEntry) -> String {
             .iter()
             .map(|part| match part {
                 tau_proto::ContentPart::Text { text }
+                | tau_proto::ContentPart::SyntheticCompactionSummary { text }
                 | tau_proto::ContentPart::HarnessInternalText { text } => text.as_str(),
             })
             .collect::<Vec<_>>()
@@ -306,6 +307,7 @@ fn first_message_text(items: &[ContextItem]) -> Option<String> {
             let mut text = String::new();
             for part in &message.content {
                 let (ContentPart::Text { text: part }
+                | ContentPart::SyntheticCompactionSummary { text: part }
                 | ContentPart::HarnessInternalText { text: part }) = part;
                 text.push_str(part);
             }

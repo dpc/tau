@@ -1975,6 +1975,7 @@ fn assistant_text(items: &[tau_proto::ContextItem]) -> String {
             .iter()
             .map(|part| match part {
                 tau_proto::ContentPart::Text { text }
+                | tau_proto::ContentPart::SyntheticCompactionSummary { text }
                 | tau_proto::ContentPart::HarnessInternalText { text } => text.as_str(),
             })
             .collect(),

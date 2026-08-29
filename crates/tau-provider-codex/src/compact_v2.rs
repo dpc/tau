@@ -88,7 +88,9 @@ fn message_bytes(message: &MessageItem) -> usize {
 
 fn content_text(part: &ContentPart) -> Option<&str> {
     match part {
-        ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => Some(text),
+        ContentPart::Text { text }
+        | ContentPart::SyntheticCompactionSummary { text }
+        | ContentPart::HarnessInternalText { text } => Some(text),
     }
 }
 
@@ -97,7 +99,9 @@ fn truncate_message(mut message: MessageItem, max_bytes: usize) -> Option<Messag
     let mut content = Vec::new();
     for mut part in message.content {
         let text = match &mut part {
-            ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => text,
+            ContentPart::Text { text }
+            | ContentPart::SyntheticCompactionSummary { text }
+            | ContentPart::HarnessInternalText { text } => text,
         };
         if remaining == 0 {
             continue;

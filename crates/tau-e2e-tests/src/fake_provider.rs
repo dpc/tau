@@ -2618,6 +2618,7 @@ impl FakeState {
                             ContextItem::Message(message_item)
                                 if message_item.content.iter().any(|part| match part {
                                     ContentPart::Text { text }
+                                    | ContentPart::SyntheticCompactionSummary { text }
                                     | ContentPart::HarnessInternalText { text } => text.contains(message),
                                 })
                         )
@@ -3617,9 +3618,9 @@ fn prompt_text_occurrences(prompt: &tau_proto::AgentPromptCreated, expected: &st
                 .content
                 .iter()
                 .filter(|part| match part {
-                    ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
-                        text.contains(expected)
-                    }
+                    ContentPart::Text { text }
+                    | ContentPart::SyntheticCompactionSummary { text }
+                    | ContentPart::HarnessInternalText { text } => text.contains(expected),
                 })
                 .count(),
             _ => 0,
@@ -3855,9 +3856,9 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
                     .content
                     .into_iter()
                     .map(|part| match part {
-                        ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
-                            text
-                        }
+                        ContentPart::Text { text }
+                        | ContentPart::SyntheticCompactionSummary { text }
+                        | ContentPart::HarnessInternalText { text } => text,
                     })
                     .collect::<String>(),
             ),
@@ -3909,6 +3910,7 @@ fn validate_output_length_continuation_context(
                 if message.role == ContextRole::User
                     && message.content.iter().map(|part| match part {
                         ContentPart::Text { text }
+                        | ContentPart::SyntheticCompactionSummary { text }
                         | ContentPart::HarnessInternalText { text } => text.as_str(),
                     }).collect::<String>()
                         == project_fixture_human_ui_user_prompt(user_text)
@@ -3931,6 +3933,7 @@ fn validate_output_length_continuation_context(
                 if message.role == ContextRole::User
                     && message.content.iter().map(|part| match part {
                         ContentPart::Text { text }
+                        | ContentPart::SyntheticCompactionSummary { text }
                         | ContentPart::HarnessInternalText { text } => text.as_str(),
                     }).collect::<String>() == instruction_text
         )
@@ -3991,9 +3994,9 @@ fn context_has_text(
             .content
             .iter()
             .map(|part| match part {
-                ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
-                    text.as_str()
-                }
+                ContentPart::Text { text }
+                | ContentPart::SyntheticCompactionSummary { text }
+                | ContentPart::HarnessInternalText { text } => text.as_str(),
             })
             .collect::<String>();
         if role == ContextRole::User {

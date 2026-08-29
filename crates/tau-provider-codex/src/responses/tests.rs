@@ -55,6 +55,39 @@ fn local_compaction_narrative_is_not_provider_lowerable() {
     assert!(lowered.is_empty());
 }
 
+/// Codex Responses must lower a typed synthetic compaction summary as the
+/// exact accepted bytes under the existing provider-facing user role.
+#[test]
+fn synthetic_compaction_summary_lowers_as_exact_user_message() {
+    let item = ContextItem::Message(MessageItem {
+        role: ContextRole::User,
+        content: vec![ContentPart::SyntheticCompactionSummary {
+            text: "exact <summary> bytes".to_owned(),
+        }],
+        phase: None,
+        responses_raw_json: None,
+    });
+    let mut budget = ImageRequestBudget {
+        supported: false,
+        responses_lite: false,
+        image_bytes: 0,
+        data_url_bytes: 0,
+    };
+    let mut lowered = Vec::new();
+    convert_context_item(&item, true, &mut budget, &mut lowered);
+
+    assert_eq!(
+        serde_json::to_value(lowered).expect("wire JSON"),
+        serde_json::json!([{
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": "exact <summary> bytes",
+            }],
+        }])
+    );
+}
+
 /// Private Responses terminal usage keeps provider-reported cache writes
 /// separate from cached reads for equivalent-API accounting.
 #[test]

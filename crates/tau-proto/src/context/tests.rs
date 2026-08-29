@@ -29,3 +29,24 @@ fn message_phases_have_only_provider_supported_wire_values() {
     assert_eq!(MessagePhase::Commentary.as_openai_wire(), "commentary");
     assert_eq!(MessagePhase::FinalAnswer.as_openai_wire(), "final_answer");
 }
+
+/// Synthetic compaction-summary origin must survive protocol serialization
+/// independently of the exact narrative bytes.
+#[test]
+fn synthetic_compaction_summary_origin_round_trips() {
+    let part = ContentPart::SyntheticCompactionSummary {
+        text: "<summary>& exact bytes".to_owned(),
+    };
+    let encoded = serde_json::to_value(&part).expect("serialize typed origin");
+    assert_eq!(
+        encoded,
+        serde_json::json!({
+            "type": "synthetic_compaction_summary",
+            "text": "<summary>& exact bytes",
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ContentPart>(encoded).expect("deserialize typed origin"),
+        part
+    );
+}

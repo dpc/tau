@@ -41,6 +41,15 @@ pub enum ContentPart {
         /// Text body for this content part.
         text: String,
     },
+    /// Exact local-compactor narrative retained with its harness-authenticated
+    /// synthetic-summary provenance.
+    ///
+    /// Provider projection treats this as ordinary text. The discriminator is
+    /// durable prompt-assembly authority and is never inferred from `text`.
+    SyntheticCompactionSummary {
+        /// Raw accepted local-compactor narrative.
+        text: String,
+    },
     /// Harness-authenticated internal text. Provider projection alone frames
     /// this variant; text spelling never establishes this authority.
     HarnessInternalText {

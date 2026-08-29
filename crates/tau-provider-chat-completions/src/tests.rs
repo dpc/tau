@@ -3794,3 +3794,34 @@ fn partial_buffer_and_tool_metadata_are_semantic_progress() {
     assert_eq!(tool.semantic_progress, SemanticProgress::Parsed);
     assert!(tool.output_items().is_empty());
 }
+
+/// Chat Completions must lower a typed synthetic compaction summary as the
+/// exact accepted bytes under the existing provider-facing user role.
+#[test]
+fn synthetic_compaction_summary_lowers_as_exact_user_message() {
+    let block = tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+        items: vec![ContextItem::Message(tau_proto::MessageItem {
+            role: ContextRole::User,
+            content: vec![ContentPart::SyntheticCompactionSummary {
+                text: "exact <summary> bytes".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+    });
+    let mut messages = Vec::new();
+    append_context_block(
+        &block,
+        ReasoningReplay::default(),
+        &mut ImageRequestBudget::new(false),
+        &mut messages,
+    );
+
+    assert_eq!(
+        messages,
+        [serde_json::json!({
+            "role": "user",
+            "content": "exact <summary> bytes",
+        })]
+    );
+}

@@ -11,6 +11,14 @@ provider request, remain provider-content authority. An inference dispatch
 checkpoint or standalone-compaction start is the sole durable recovery and
 no-resend owner; its terminal outcome is completion authority.
 
+Tau-owned local compaction summaries retain a typed
+`SyntheticCompactionSummary` origin in their canonical replacement message.
+Prompt assembly uses only that origin, never the narrative spelling, to select
+synthetic-summary provenance guidance. Provider materialization still emits the
+accepted narrative bytes unchanged under the existing user role. A complete
+canonical reserved Tau provenance envelope is rejected before the replacement
+fact commits; substrings and lexical near-matches do not trigger rejection.
+
 Harness-authored `agent.prompt_started` is the content-free durable fact that one
 full request was materialized and admitted for dispatch. It must match exactly
 one unresolved owner by agent, prompt, model, and operation. The content-bearing

@@ -17,6 +17,9 @@ and absolute request deadlines for ticket `boo4`, satisfying the same gate.
 The user separately approved public Responses max-output incompletion,
 continuation, truncated-tool, accounting, retry, and standalone-compaction
 semantics for ticket `8ds8`, satisfying the same gate.
+The user separately approved synthetic local-summary provenance and exact
+reserved-envelope rejection semantics for ticket `8qm2`, satisfying the same
+gate.
 
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and
@@ -53,8 +56,14 @@ nonempty bounded final assistant text is accepted. Provider reasoning may be
 separately bounded and discarded; attempted tool calls, reasoning, and opaque
 replay items do not become semantic history. The accepted text becomes exactly
 one synthetic user-role replacement message, with no wrapper, escaping,
-deterministic supplement, or second rewrite. The private local narrative
-envelope carries that validated text only across the extension-to-harness seam.
+deterministic supplement, or second rewrite. Its typed
+`SyntheticCompactionSummary` origin is durable prompt-assembly provenance and
+does not change its provider-facing role or narrative bytes. Prompt assembly
+never infers that provenance from narrative text. A narrative rejects as an
+invalid compaction window only when its complete value is one canonical
+reserved Tau provenance envelope; substrings and lexical near-matches remain
+accepted unchanged. The private local narrative envelope carries that validated
+text only across the extension-to-harness seam.
 Before validation, local-summary sampling exposes only the existing bounded
 content-free byte/timing statistics and status/activity signals at their existing cadence;
 assistant text, reasoning, tool, and opaque output remain private. Invalid and

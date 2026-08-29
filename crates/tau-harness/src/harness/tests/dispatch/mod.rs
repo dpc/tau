@@ -385,7 +385,9 @@ fn routed_ui_shell_command(
 fn text_part(item: &ContextItem) -> Option<&str> {
     match item {
         ContextItem::Message(message) => message.content.first().map(|part| match part {
-            ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => text.as_str(),
+            ContentPart::Text { text }
+            | ContentPart::SyntheticCompactionSummary { text }
+            | ContentPart::HarnessInternalText { text } => text.as_str(),
         }),
         ContextItem::ToolResult(result) => match &result.output.raw {
             CborValue::Text(text) => Some(text.as_str()),

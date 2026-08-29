@@ -1322,6 +1322,7 @@ impl AgentTree {
                                 if message.content.iter().any(|part| matches!(
                                     part,
                                     ContentPart::Text { text: item_text }
+                                        | ContentPart::SyntheticCompactionSummary { text: item_text }
                                         | ContentPart::HarnessInternalText { text: item_text }
                                         if item_text == text
                                 ))

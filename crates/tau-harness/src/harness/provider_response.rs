@@ -77,10 +77,17 @@ impl Harness {
                 .is_some_and(|operation| {
                     operation.0 == tau_proto::PromptOperation::StandaloneCompaction
                 });
-        let contains_private_compaction_output = response
-            .output_items
-            .iter()
-            .any(|item| matches!(item, ContextItem::LocalCompactionNarrative(_)));
+        let contains_private_compaction_output =
+            response.output_items.iter().any(|item| match item {
+                ContextItem::LocalCompactionNarrative(_) => true,
+                ContextItem::Message(message) => message.content.iter().any(|part| {
+                    matches!(
+                        part,
+                        tau_proto::ContentPart::SyntheticCompactionSummary { .. }
+                    )
+                }),
+                _ => false,
+            });
         if contains_private_compaction_output && !active_compaction_response {
             self.emit_harness_failure(
                 "rejecting private local-compaction output outside its active standalone transaction",

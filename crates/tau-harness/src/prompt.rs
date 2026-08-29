@@ -1036,10 +1036,12 @@ fn is_payload_envelope_provenance_projection(text: &str) -> bool {
 
 fn context_items_contain_payload_envelope_provenance_projection(items: &[ContextItem]) -> bool {
     items.iter().any(|item| match item {
-        ContextItem::Message(message) => message.content.iter().any(|part| {
-            let (tau_proto::ContentPart::Text { text }
-            | tau_proto::ContentPart::HarnessInternalText { text }) = part;
-            is_payload_envelope_provenance_projection(text)
+        ContextItem::Message(message) => message.content.iter().any(|part| match part {
+            tau_proto::ContentPart::SyntheticCompactionSummary { .. } => true,
+            tau_proto::ContentPart::Text { text }
+            | tau_proto::ContentPart::HarnessInternalText { text } => {
+                is_payload_envelope_provenance_projection(text)
+            }
         }),
         ContextItem::ToolResult(result) => {
             result.presentation == tau_proto::ToolResultPresentation::HarnessDedupPointer
@@ -1563,6 +1565,7 @@ fn project_user_prompt_items(
                             text: crate::internal_envelope::frame(text),
                         };
                     }
+                    tau_proto::ContentPart::SyntheticCompactionSummary { .. } => {}
                     tau_proto::ContentPart::Text { text } => {
                         let body = tau_proto::escape_exact_sentinel_close(
                             text,

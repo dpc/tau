@@ -894,6 +894,7 @@ fn prompt_created_debug_summary(prompt: &tau_proto::AgentPromptCreated) -> serde
             tau_proto::ContextItem::Message(message) => {
                 for part in &message.content {
                     let (tau_proto::ContentPart::Text { text }
+                    | tau_proto::ContentPart::SyntheticCompactionSummary { text }
                     | tau_proto::ContentPart::HarnessInternalText { text }) = part;
                     counts.text_bytes = counts
                         .text_bytes

@@ -1038,6 +1038,7 @@ fn agent_message_fact_replay_rebuilds_uncovered_wake() {
         panic!("replayed message fact");
     };
     let (tau_proto::ContentPart::Text { text }
+    | tau_proto::ContentPart::SyntheticCompactionSummary { text }
     | tau_proto::ContentPart::HarnessInternalText { text }) = &item.content[0];
     assert_eq!(
         text,

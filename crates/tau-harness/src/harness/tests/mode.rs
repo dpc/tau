@@ -1166,9 +1166,9 @@ fn daemon_mode_accepts_later_clients() {
             AgentEntry::UserInput { items, .. } => items.iter().find_map(|item| match item {
                 ContextItem::Message(message) if message.role == ContextRole::User => {
                     message.content.first().map(|part| match part {
-                        ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
-                            text.as_str()
-                        }
+                        ContentPart::Text { text }
+                        | ContentPart::SyntheticCompactionSummary { text }
+                        | ContentPart::HarnessInternalText { text } => text.as_str(),
                     })
                 }
                 _ => None,

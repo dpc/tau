@@ -3344,3 +3344,31 @@ fn prompt_with_replayed_user_text() -> tau_proto::AgentPromptCreated {
 fn test_network() -> tau_provider::OutboundNetworkPolicy {
     tau_provider::OutboundNetworkPolicy::from_environment(BTreeMap::new(), None)
 }
+
+/// Public Responses must lower a typed synthetic compaction summary as the
+/// exact accepted bytes under the existing provider-facing user role.
+#[test]
+fn synthetic_compaction_summary_lowers_as_exact_user_message() {
+    let item = ContextItem::Message(MessageItem {
+        role: ContextRole::User,
+        content: vec![ContentPart::SyntheticCompactionSummary {
+            text: "exact <summary> bytes".to_owned(),
+        }],
+        phase: None,
+        responses_raw_json: None,
+    });
+    let lowered = lower_item(&item)
+        .expect("summary is supported")
+        .expect("summary is nonempty");
+
+    assert_eq!(
+        serde_json::to_value(lowered).expect("wire JSON"),
+        serde_json::json!({
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": "exact <summary> bytes",
+            }],
+        })
+    );
+}

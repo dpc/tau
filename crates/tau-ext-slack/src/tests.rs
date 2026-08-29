@@ -865,8 +865,9 @@ fn dynamic_dm_message_facts_omit_synthesized_conversation_alias() {
     let projection = tau_proto::project_message_fact(&fact)
         .expect("message fact")
         .expect("valid projection");
-    let (ContentPart::Text { text } | ContentPart::HarnessInternalText { text }) =
-        &projection.item.content[0];
+    let (ContentPart::Text { text }
+    | ContentPart::SyntheticCompactionSummary { text }
+    | ContentPart::HarnessInternalText { text }) = &projection.item.content[0];
     assert!(!text.contains(" conversation="), "{text}");
     assert!(!text.contains(DYNAMIC_DM_LABEL), "{text}");
 
@@ -886,8 +887,9 @@ fn dynamic_dm_message_facts_omit_synthesized_conversation_alias() {
     let projection = tau_proto::project_message_fact(&sent)
         .expect("message fact")
         .expect("valid projection");
-    let (ContentPart::Text { text } | ContentPart::HarnessInternalText { text }) =
-        &projection.item.content[0];
+    let (ContentPart::Text { text }
+    | ContentPart::SyntheticCompactionSummary { text }
+    | ContentPart::HarnessInternalText { text }) = &projection.item.content[0];
     assert!(!text.contains(" conversation="), "{text}");
     assert!(!text.contains(DYNAMIC_DM_LABEL), "{text}");
 }
@@ -3350,8 +3352,9 @@ fn successful_send_uses_local_reply_selector() {
     let projection = tau_proto::project_message_fact(&canonical)
         .expect("canonical message fact")
         .expect("valid projection");
-    let (ContentPart::Text { text } | ContentPart::HarnessInternalText { text }) =
-        &projection.item.content[0];
+    let (ContentPart::Text { text }
+    | ContentPart::SyntheticCompactionSummary { text }
+    | ContentPart::HarnessInternalText { text }) = &projection.item.content[0];
     assert!(text.contains(" recipient_ref=\"slack-sender:"), "{text}");
     assert!(text.contains(" conversation=\"team\""), "{text}");
     assert!(!text.contains(" sender_ref="), "{text}");

@@ -7725,7 +7725,8 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
                     if content.iter().any(|part| matches!(
                         part,
                         ContentPart::Text { text }
-                            | ContentPart::HarnessInternalText { text }
+                        | ContentPart::SyntheticCompactionSummary { text }
+                        | ContentPart::HarnessInternalText { text }
                             if text == "final steer after compaction"
                     ))
             ))

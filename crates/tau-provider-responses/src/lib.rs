@@ -1936,6 +1936,11 @@ fn append_text(message: &mut MessageItem, text: &str) {
     match message.content.last_mut() {
         Some(ContentPart::Text { text: existing })
         | Some(ContentPart::HarnessInternalText { text: existing }) => existing.push_str(text),
+        Some(ContentPart::SyntheticCompactionSummary { .. }) => {
+            message.content.push(ContentPart::Text {
+                text: text.to_owned(),
+            });
+        }
         None => message.content.push(ContentPart::Text {
             text: text.to_owned(),
         }),
@@ -2153,9 +2158,9 @@ fn lower_item(item: &ContextItem) -> Result<Option<ResponsesInputItem>, Error> {
                 .content
                 .iter()
                 .map(|part| match part {
-                    ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => {
-                        text.as_str()
-                    }
+                    ContentPart::Text { text }
+                    | ContentPart::SyntheticCompactionSummary { text }
+                    | ContentPart::HarnessInternalText { text } => text.as_str(),
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -2248,7 +2253,9 @@ fn rebase_assistant_message(value: &mut Value, message: &MessageItem) {
         .content
         .iter()
         .map(|part| match part {
-            ContentPart::Text { text } | ContentPart::HarnessInternalText { text } => text.as_str(),
+            ContentPart::Text { text }
+            | ContentPart::SyntheticCompactionSummary { text }
+            | ContentPart::HarnessInternalText { text } => text.as_str(),
         })
         .collect::<Vec<_>>()
         .join("\n");
