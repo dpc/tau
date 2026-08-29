@@ -1959,8 +1959,10 @@ impl Harness {
                 .agent_store
                 .agent(&agent_id)
                 .is_some_and(|tree| {
-                    let window = tree.active_provider_window(provisional_cut.as_option());
-                    window.replacement.is_some() && window.transcript.is_empty()
+                    tree.active_provider_window_replacement(provisional_cut.as_option())
+                        .is_some()
+                        && tree.active_provider_window_transcript_count(provisional_cut.as_option())
+                            == 0
                 })
         {
             // A replacement-only window has no progress-making automatic cut.

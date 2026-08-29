@@ -2,6 +2,58 @@ use std::io as path_std_io;
 
 use super::*;
 
+fn reference_active_provider_window(
+    tree: &AgentTree,
+    head: Option<NodeId>,
+) -> ActiveProviderWindow<'_> {
+    let mut window = ActiveProviderWindow {
+        replacement: None,
+        replacement_boundary: None,
+        transcript: Vec::new(),
+    };
+    for node_id in tree.branch_node_ids_from(head) {
+        let Some(node) = tree.node(node_id) else {
+            continue;
+        };
+        let AgentEntry::Compaction {
+            replacement_window,
+            transaction_id,
+            cut,
+            suffix_end,
+        } = &node.entry
+        else {
+            window.transcript.push((node_id, &node.entry));
+            continue;
+        };
+
+        if transaction_id.is_some() && suffix_end.is_some() {
+            match cut {
+                Some(AgentHead::Root) => {}
+                Some(AgentHead::Node(cut)) if window.replacement_boundary == Some(*cut) => {
+                    window.transcript.clear();
+                }
+                Some(AgentHead::Node(cut)) => {
+                    if let Some(index) = window
+                        .transcript
+                        .iter()
+                        .position(|(node_id, _)| node_id == cut)
+                    {
+                        window.transcript.drain(..=index);
+                    } else {
+                        window.transcript.clear();
+                    }
+                }
+                None => window.transcript.clear(),
+            }
+        } else {
+            window.transcript.clear();
+        }
+        window.replacement = Some(replacement_window);
+        window.replacement_boundary = Some(node_id);
+    }
+    window
+}
+
 /// Randomized live prevalidation/apply and fully checked cold replay accept the
 /// same records and report the same first diagnostic for every record-level
 /// invalidity class.
@@ -1080,6 +1132,74 @@ fn benchmark_direct_ancestry_walk_scaling() {
         println!(
             "{depth},{direct},{reference},{}",
             depth * std::mem::size_of::<NodeId>()
+        );
+    }
+}
+
+/// Manual asymptotic benchmark compares indexed surviving-suffix
+/// reconstruction with the allocating physical-ancestry reference and reports
+/// persistent-index and per-query payload memory.
+#[test]
+#[ignore = "manual provider-window asymptotic benchmark"]
+fn benchmark_indexed_active_provider_window_scaling() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    const DEPTHS: [usize; 4] = [64, 1_024, 16_384, 65_536];
+    const SUFFIX: usize = 16;
+
+    println!(
+        "depth,queries,indexed_ns,reference_ns,position_index_payload_bytes,\
+         boundary_anchor_payload_bytes,indexed_query_payload_bytes,\
+         reference_query_payload_bytes"
+    );
+    for depth in DEPTHS {
+        let mut tree = AgentTree::from_events(agent_id(), &[]);
+        for index in 0..depth {
+            append_user_input(&mut tree, &format!("window-node-{index}"));
+        }
+        let cut = NodeId::new((depth - SUFFIX - 1) as u64);
+        let suffix_end = AgentHead::Node(tree.head().expect("linear history head"));
+        let boundary = tree.append_node_at(
+            tree.head(),
+            AgentEntry::Compaction {
+                replacement_window: vec![ContextItem::Message(MessageItem {
+                    role: ContextRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: "summary".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+                transaction_id: Some(
+                    tau_proto::CompactionTransactionId::parse("ct-window-benchmark")
+                        .expect("transaction id"),
+                ),
+                cut: Some(AgentHead::Node(cut)),
+                suffix_end: Some(suffix_end),
+            },
+        );
+        let queries = (1_048_576 / depth).max(32);
+
+        let started = Instant::now();
+        for _ in 0..queries {
+            black_box(tree.active_provider_window(Some(boundary)));
+        }
+        let indexed = started.elapsed().as_nanos() / queries as u128;
+
+        let started = Instant::now();
+        for _ in 0..queries {
+            black_box(reference_active_provider_window(&tree, Some(boundary)));
+        }
+        let reference = started.elapsed().as_nanos() / queries as u128;
+
+        println!(
+            "{depth},{queries},{indexed},{reference},{},{},{},{}",
+            (depth + 1) * std::mem::size_of::<ProviderWindowPosition>(),
+            std::mem::size_of::<ProviderWindowBoundaryAnchor>(),
+            SUFFIX * std::mem::size_of::<(NodeId, &AgentEntry)>(),
+            (depth + 1)
+                * (std::mem::size_of::<NodeId>() + std::mem::size_of::<(NodeId, &AgentEntry)>()),
         );
     }
 }
@@ -2603,6 +2723,433 @@ fn automatic_compaction_continuation_chain_matches_live_and_cold_replay() {
     assert_eq!(
         replay.standalone_compaction_recovery(),
         Some(StandaloneCompactionRecovery::DispatchUncertain(checkpoint))
+    );
+}
+
+/// Replay-derived provider-window positions must match the allocating reference
+/// at every head through randomized branches, nested rolling boundaries, live
+/// append, and cold replay.
+#[test]
+fn randomized_branched_rolling_provider_windows_match_reference_live_and_cold() {
+    fn append(
+        tree: &mut AgentTree,
+        records: &mut Vec<PersistedAgentEvent>,
+        parent: AgentEventParent,
+        event: Event,
+    ) -> Option<NodeId> {
+        let seq = tree.next_event_seq();
+        let record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes(
+                seq.get()
+                    .to_le_bytes()
+                    .repeat(2)
+                    .try_into()
+                    .expect("16 bytes"),
+            ),
+            seq,
+            source: None,
+            event,
+            parent,
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: UnixMicros::new(seq.get()),
+        };
+        let node = tree
+            .apply_persisted_record(&record)
+            .expect("generated history must append");
+        records.push(record);
+        node
+    }
+
+    fn assert_every_head(live: &AgentTree, records: &[PersistedAgentEvent], step: usize) {
+        let cold =
+            AgentTree::try_from_events(agent_id(), records).expect("generated history must replay");
+        assert_eq!(live, &cold, "complete live/cold projection step={step}");
+        let unknown = NodeId::new(live.nodes().len() as u64 + 10_000);
+        let heads = std::iter::once(None)
+            .chain(live.nodes().iter().map(|node| Some(node.id)))
+            .chain(std::iter::once(Some(unknown)));
+        for head in heads {
+            let expected = reference_active_provider_window(live, head);
+            for (label, tree) in [("live", live), ("cold", &cold)] {
+                let actual = tree.active_provider_window(head);
+                assert_eq!(
+                    actual.replacement, expected.replacement,
+                    "{label} replacement step={step} head={head:?}"
+                );
+                assert_eq!(
+                    actual.replacement_boundary, expected.replacement_boundary,
+                    "{label} boundary step={step} head={head:?}"
+                );
+                assert_eq!(
+                    actual.transcript, expected.transcript,
+                    "{label} transcript step={step} head={head:?}"
+                );
+                assert_eq!(
+                    tree.active_provider_window_latest(head),
+                    expected.transcript.last().copied(),
+                    "{label} latest step={step} head={head:?}"
+                );
+                assert_eq!(
+                    tree.active_provider_window_transcript_count(head),
+                    expected.transcript.len(),
+                    "{label} count step={step} head={head:?}"
+                );
+                assert_eq!(
+                    tree.active_provider_window_replacement(head),
+                    expected.replacement_boundary.zip(expected.replacement),
+                    "{label} borrowed replacement step={step} head={head:?}"
+                );
+                for cut in std::iter::once(AgentHead::Root)
+                    .chain(live.nodes().iter().map(|node| AgentHead::Node(node.id)))
+                    .chain(std::iter::once(AgentHead::Node(unknown)))
+                {
+                    let expected_contains = match cut {
+                        AgentHead::Root => expected.replacement.is_none(),
+                        AgentHead::Node(node_id) => {
+                            expected.replacement_boundary == Some(node_id)
+                                || expected
+                                    .transcript
+                                    .iter()
+                                    .any(|(candidate, _)| *candidate == node_id)
+                        }
+                    };
+                    assert_eq!(
+                        tree.active_provider_window_contains(
+                            head.map_or(AgentHead::Root, AgentHead::Node),
+                            cut,
+                        ),
+                        expected_contains,
+                        "{label} contains step={step} head={head:?} cut={cut:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    let user = |text: String| {
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id(),
+            text,
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        })
+    };
+    let replacement = |started: &tau_proto::AgentStandaloneCompactionStarted,
+                       suffix_end: AgentHead,
+                       summary: &str| {
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            original_input_tokens: None,
+            compaction_output_tokens: None,
+            agent_id: agent_id(),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: summary.to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            transaction_id: Some(started.transaction_id.clone()),
+            cut: Some(started.cut),
+            suffix_end: Some(suffix_end),
+            compact_prompt_id: Some(started.compact_prompt_id.clone()),
+            model: Some(started.model.clone()),
+            operation: Some(started.operation),
+        })
+    };
+
+    let mut live = AgentTree::from_events(agent_id(), &[]);
+    let mut records = Vec::new();
+    let mut main = Vec::new();
+    for index in 0..32 {
+        let node = append(
+            &mut live,
+            &mut records,
+            AgentEventParent::InheritHead,
+            user(format!("main-{index}")),
+        )
+        .expect("user input node");
+        main.push(node);
+        assert_every_head(&live, &records, records.len());
+    }
+
+    let mut random = 0x94d0_49bb_1331_11eb_u64;
+    for index in 0_usize..24 {
+        random = random
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        append(
+            &mut live,
+            &mut records,
+            AgentEventParent::Under(main[random as usize % main.len()]),
+            user(format!("branch-{index}-{random}")),
+        );
+        assert_every_head(&live, &records, records.len());
+    }
+    let suffix = append(
+        &mut live,
+        &mut records,
+        AgentEventParent::Under(*main.last().expect("main history")),
+        user("main-resume".to_owned()),
+    )
+    .expect("resumed main node");
+    assert_every_head(&live, &records, records.len());
+
+    let mut first = compaction_start("ct-indexed-window-first");
+    first.compact_prompt_id = "ap-indexed-window-first".parse().expect("prompt id");
+    first.cut = AgentHead::Node(main[8]);
+    first.resume_through = Some(AgentHead::Node(suffix));
+    first.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticThreshold;
+    append(
+        &mut live,
+        &mut records,
+        AgentEventParent::InheritHead,
+        Event::AgentStandaloneCompactionStarted(first.clone()),
+    );
+    assert_every_head(&live, &records, records.len());
+    let first_boundary = append(
+        &mut live,
+        &mut records,
+        AgentEventParent::InheritHead,
+        replacement(&first, AgentHead::Node(suffix), "summary-one"),
+    )
+    .expect("first boundary");
+    assert_every_head(&live, &records, records.len());
+
+    let mut second = compaction_start("ct-indexed-window-second");
+    second.compact_prompt_id = "ap-indexed-window-second".parse().expect("prompt id");
+    second.cut = AgentHead::Node(suffix);
+    second.resume_through = Some(AgentHead::Node(first_boundary));
+    second.trigger = tau_proto::StandaloneCompactionTrigger::AutomaticContinuation {
+        previous_transaction_id: first.transaction_id,
+    };
+    append(
+        &mut live,
+        &mut records,
+        AgentEventParent::InheritHead,
+        Event::AgentStandaloneCompactionStarted(second.clone()),
+    );
+    assert_every_head(&live, &records, records.len());
+    let second_boundary = append(
+        &mut live,
+        &mut records,
+        AgentEventParent::InheritHead,
+        replacement(&second, AgentHead::Node(first_boundary), "summary-two"),
+    )
+    .expect("second boundary");
+    assert_every_head(&live, &records, records.len());
+
+    for index in 0_usize..24 {
+        random = random
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let parent = if index.is_multiple_of(3) {
+            second_boundary
+        } else {
+            NodeId::new(random % live.nodes().len() as u64)
+        };
+        append(
+            &mut live,
+            &mut records,
+            AgentEventParent::Under(parent),
+            user(format!("post-roll-{index}-{random}")),
+        );
+        assert_every_head(&live, &records, records.len());
+    }
+}
+
+/// Synthetic explicit-parent folding bypasses validation, so a dangling parent
+/// must terminate every indexed query exactly where physical branch
+/// reconstruction stops.
+#[test]
+fn provider_window_indexes_stop_before_dangling_synthetic_parent() {
+    assert_eq!(std::mem::size_of::<ProviderWindowNodeId>(), 8);
+    assert_eq!(std::mem::size_of::<ProviderWindowPosition>(), 16);
+    assert_eq!(std::mem::size_of::<ProviderWindowBoundaryAnchor>(), 8);
+
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let unknown = NodeId::new(99);
+    let node = tree
+        .apply_event_at(
+            AgentEventParent::Under(unknown),
+            &Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                agent_id: agent_id(),
+                text: "dangling parent".to_owned(),
+                inference_activation: false,
+                message_class: Default::default(),
+            }),
+        )
+        .expect("synthetic input node");
+    let reference = reference_active_provider_window(&tree, Some(node));
+
+    assert_eq!(
+        tree.active_provider_window(Some(node)).transcript,
+        reference.transcript
+    );
+    assert_eq!(
+        tree.active_provider_window_transcript_count(Some(node)),
+        reference.transcript.len()
+    );
+    assert!(!tree.active_provider_window_contains(AgentHead::Node(node), AgentHead::Node(unknown)));
+}
+
+/// Every provider-window index transition must remain reference-equivalent,
+/// including root retention and fail-closed shapes that durable validation
+/// rejects before folding.
+#[test]
+fn provider_window_index_transition_arms_match_allocating_reference() {
+    fn user_entry(text: &str) -> AgentEntry {
+        AgentEntry::UserInput {
+            items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                content: vec![ContentPart::Text {
+                    text: text.to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            submission_source: None,
+            inference_activation: false,
+        }
+    }
+
+    fn boundary_entry(
+        transaction: bool,
+        cut: Option<AgentHead>,
+        suffix_end: Option<AgentHead>,
+        summary: &str,
+    ) -> AgentEntry {
+        AgentEntry::Compaction {
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: summary.to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            transaction_id: transaction.then(|| {
+                tau_proto::CompactionTransactionId::parse(format!("ct-{summary}"))
+                    .expect("transaction id")
+            }),
+            cut,
+            suffix_end,
+        }
+    }
+
+    fn assert_queries(tree: &AgentTree, head: NodeId, label: &str) {
+        let expected = reference_active_provider_window(tree, Some(head));
+        let actual = tree.active_provider_window(Some(head));
+        assert_eq!(actual.replacement, expected.replacement, "{label}");
+        assert_eq!(
+            actual.replacement_boundary, expected.replacement_boundary,
+            "{label}"
+        );
+        assert_eq!(actual.transcript, expected.transcript, "{label}");
+        assert_eq!(
+            tree.active_provider_window_latest(Some(head)),
+            expected.transcript.last().copied(),
+            "{label}"
+        );
+        assert_eq!(
+            tree.active_provider_window_transcript_count(Some(head)),
+            expected.transcript.len(),
+            "{label}"
+        );
+        assert_eq!(
+            tree.active_provider_window_replacement(Some(head)),
+            expected.replacement_boundary.zip(expected.replacement),
+            "{label}"
+        );
+        for cut in std::iter::once(AgentHead::Root)
+            .chain(tree.nodes().iter().map(|node| AgentHead::Node(node.id)))
+            .chain(std::iter::once(AgentHead::Node(NodeId::new(10_000))))
+        {
+            let contains = match cut {
+                AgentHead::Root => expected.replacement.is_none(),
+                AgentHead::Node(node_id) => {
+                    expected.replacement_boundary == Some(node_id)
+                        || expected
+                            .transcript
+                            .iter()
+                            .any(|(candidate, _)| *candidate == node_id)
+                }
+            };
+            assert_eq!(
+                tree.active_provider_window_contains(AgentHead::Node(head), cut),
+                contains,
+                "{label} cut={cut:?}"
+            );
+        }
+    }
+
+    let mut base = AgentTree::from_events(agent_id(), &[]);
+    let prefix = base.append_node_at(None, user_entry("prefix"));
+    let suffix_a = base.append_node_at(Some(prefix), user_entry("suffix-a"));
+    let suffix_b = base.append_node_at(Some(suffix_a), user_entry("suffix-b"));
+    let sibling = base.append_node_at(Some(prefix), user_entry("sibling"));
+    let first_boundary = base.append_node_at(
+        Some(suffix_b),
+        boundary_entry(
+            true,
+            Some(AgentHead::Node(prefix)),
+            Some(AgentHead::Node(suffix_b)),
+            "first",
+        ),
+    );
+    assert_queries(&base, first_boundary, "initial suffix boundary");
+
+    let mut root = base.clone();
+    let root_boundary = root.append_node_at(
+        Some(first_boundary),
+        boundary_entry(
+            true,
+            Some(AgentHead::Root),
+            Some(AgentHead::Node(first_boundary)),
+            "root",
+        ),
+    );
+    assert_queries(&root, root_boundary, "root retains prior anchored suffix");
+
+    let mut equal = base.clone();
+    let equal_boundary = equal.append_node_at(
+        Some(first_boundary),
+        boundary_entry(
+            true,
+            Some(AgentHead::Node(first_boundary)),
+            Some(AgentHead::Node(first_boundary)),
+            "equal",
+        ),
+    );
+    assert_queries(&equal, equal_boundary, "replacement-boundary cut clears");
+
+    let mut legacy = base.clone();
+    let legacy_boundary = legacy.append_node_at(
+        Some(first_boundary),
+        boundary_entry(false, None, None, "legacy"),
+    );
+    assert_queries(&legacy, legacy_boundary, "legacy boundary clears");
+
+    let mut missing = base;
+    let missing_boundary = missing.append_node_at(
+        Some(first_boundary),
+        boundary_entry(
+            true,
+            Some(AgentHead::Node(sibling)),
+            Some(AgentHead::Node(first_boundary)),
+            "missing",
+        ),
+    );
+    assert_queries(
+        &missing,
+        missing_boundary,
+        "qualified missing cut fails closed",
     );
 }
 

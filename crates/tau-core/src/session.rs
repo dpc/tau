@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io as path_std_io;
+use std::num::NonZeroU64;
 
 #[cfg(test)]
 thread_local! {
@@ -280,6 +281,60 @@ pub struct ActiveProviderWindow<'a> {
     pub transcript: Vec<(NodeId, &'a AgentEntry)>,
 }
 
+/// Replay-derived logical position for one materialized transcript node.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ProviderWindowPosition {
+    /// Previous surviving transcript node in provider-visible order.
+    predecessor: ProviderWindowNodeId,
+    /// Latest compaction boundary governing this node's logical window.
+    replacement_boundary: ProviderWindowNodeId,
+}
+
+/// Replay-derived start anchor for one compacted replacement window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ProviderWindowBoundaryAnchor {
+    /// First consumed transcript node immediately before the surviving suffix.
+    start_exclusive: ProviderWindowNodeId,
+}
+
+/// Complete non-persisted provider-window query index rebuilt by replay.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ProviderWindowIndex {
+    /// Logical position corresponding to every materialized transcript node.
+    positions: Vec<ProviderWindowPosition>,
+    /// Surviving-suffix start keyed by each replacement boundary node.
+    boundary_anchors: HashMap<NodeId, ProviderWindowBoundaryAnchor>,
+}
+
+/// Complete non-persisted query indexes rebuilt by agent-journal replay.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct AgentTreeIndexes {
+    /// Materialized provider-context input nodes keyed by journal occurrence.
+    context_nodes_by_event_seq: HashMap<PersistedAgentEventSeq, NodeId>,
+    /// Logical active provider-window positions and boundary anchors.
+    provider_window: ProviderWindowIndex,
+}
+
+/// Niche-optimized optional materialized node id for replay-only indexes.
+///
+/// The stored nonzero value is one greater than the node id. `u64::MAX` cannot
+/// identify a materialized vector entry and therefore collapses to `None`, just
+/// like every other dangling synthetic parent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ProviderWindowNodeId(Option<NonZeroU64>);
+
+impl ProviderWindowNodeId {
+    /// Encode one optional materialized-node candidate in eight bytes.
+    fn new(node_id: Option<NodeId>) -> Self {
+        Self(node_id.and_then(|node_id| node_id.get().checked_add(1).and_then(NonZeroU64::new)))
+    }
+
+    /// Decode the optional materialized-node candidate.
+    fn get(self) -> Option<NodeId> {
+        self.0.map(|encoded| NodeId::new(encoded.get() - 1))
+    }
+}
+
 /// One committed context input whose exact marked inference owns placement.
 #[derive(Clone, Debug, PartialEq)]
 struct PendingInferenceInput {
@@ -426,8 +481,8 @@ pub struct AgentTree {
     pub(crate) agent_id: AgentId,
     pub(crate) metadata: BTreeMap<tau_proto::AgentMetadataKey, AgentMetadataEntry>,
     pub(crate) nodes: Vec<AgentNode>,
-    /// Materialized provider-context input nodes keyed by journal occurrence.
-    context_nodes_by_event_seq: HashMap<PersistedAgentEventSeq, NodeId>,
+    /// Complete replay-derived in-memory query indexes.
+    indexes: AgentTreeIndexes,
     pub(crate) head: Option<NodeId>,
     pub(crate) display_name: Option<String>,
     /// Latest durable initialization bootstrap and frozen discovery
@@ -956,15 +1011,12 @@ impl AgentTree {
             .checkpoint
             .activation_cut?;
         let activation_cut = self.closed_provider_prefix_at_or_before(activation_cut);
-        let activation_window = self.active_provider_window(activation_cut.as_option());
         Some(
-            activation_window
-                .transcript
-                .last()
-                .map(|(node_id, _)| tau_proto::AgentHead::Node(*node_id))
+            self.active_provider_window_latest(activation_cut.as_option())
+                .map(|(node_id, _)| tau_proto::AgentHead::Node(node_id))
                 .or_else(|| {
-                    activation_window
-                        .replacement_boundary
+                    self.active_provider_window_replacement(activation_cut.as_option())
+                        .map(|(boundary, _)| boundary)
                         .map(tau_proto::AgentHead::Node)
                 })
                 .unwrap_or(tau_proto::AgentHead::Root),
@@ -1217,55 +1269,102 @@ impl AgentTree {
     /// than slicing physical ancestry directly.
     #[must_use]
     pub fn active_provider_window(&self, head: Option<NodeId>) -> ActiveProviderWindow<'_> {
-        let mut window = ActiveProviderWindow {
-            replacement: None,
-            replacement_boundary: None,
-            transcript: Vec::new(),
+        let Some(position) = head.and_then(|node_id| self.provider_window_position(node_id)) else {
+            return ActiveProviderWindow {
+                replacement: None,
+                replacement_boundary: None,
+                transcript: Vec::new(),
+            };
         };
-        for node_id in self.branch_node_ids_from(head) {
-            let Some(node) = self.node(node_id) else {
-                continue;
-            };
-            let AgentEntry::Compaction {
-                replacement_window,
-                transaction_id,
-                cut,
-                suffix_end,
-            } = &node.entry
-            else {
-                window.transcript.push((node_id, &node.entry));
-                continue;
-            };
-
-            if transaction_id.is_some() && suffix_end.is_some() {
-                match cut {
-                    Some(AgentHead::Root) => {}
-                    Some(AgentHead::Node(cut)) if window.replacement_boundary == Some(*cut) => {
-                        window.transcript.clear();
-                    }
-                    Some(AgentHead::Node(cut)) => {
-                        if let Some(index) = window
-                            .transcript
-                            .iter()
-                            .position(|(node_id, _)| node_id == cut)
-                        {
-                            window.transcript.drain(..=index);
-                        } else {
-                            // Validation rejects this shape. Clear rather than
-                            // resurrecting pre-boundary history if a caller is
-                            // inspecting a partially loaded invalid journal.
-                            window.transcript.clear();
-                        }
-                    }
-                    None => window.transcript.clear(),
-                }
-            } else {
-                window.transcript.clear();
+        let replacement = self
+            .active_provider_window_replacement(head)
+            .map(|(_, replacement)| replacement);
+        let mut transcript = Vec::new();
+        let mut current = self.provider_window_tail(head);
+        let replacement_boundary = position.replacement_boundary.get();
+        let start_exclusive = self.provider_window_start_exclusive(replacement_boundary);
+        while let Some(node_id) = current {
+            if Some(node_id) == start_exclusive {
+                break;
             }
-            window.replacement = Some(replacement_window);
-            window.replacement_boundary = Some(node_id);
+            let Some(node) = self.node(node_id) else {
+                break;
+            };
+            transcript.push((node_id, &node.entry));
+            current = self
+                .provider_window_position(node_id)
+                .and_then(|item| item.predecessor.get());
         }
-        window
+        transcript.reverse();
+        ActiveProviderWindow {
+            replacement,
+            replacement_boundary,
+            transcript,
+        }
+    }
+
+    /// Return the latest surviving transcript occurrence without materializing
+    /// the complete active provider window.
+    #[must_use]
+    pub fn active_provider_window_latest(
+        &self,
+        head: Option<NodeId>,
+    ) -> Option<(NodeId, &AgentEntry)> {
+        let node_id = self.provider_window_tail(head)?;
+        if Some(node_id)
+            == self.provider_window_start_exclusive(
+                self.provider_window_position(head?)?
+                    .replacement_boundary
+                    .get(),
+            )
+        {
+            return None;
+        }
+        self.node(node_id).map(|node| (node_id, &node.entry))
+    }
+
+    /// Return the latest compacted replacement and its boundary without
+    /// materializing the surviving transcript.
+    #[must_use]
+    pub fn active_provider_window_replacement(
+        &self,
+        head: Option<NodeId>,
+    ) -> Option<(NodeId, &[ContextItem])> {
+        let boundary = self
+            .provider_window_position(head?)?
+            .replacement_boundary
+            .get()?;
+        let AgentEntry::Compaction {
+            replacement_window, ..
+        } = &self.node(boundary)?.entry
+        else {
+            return None;
+        };
+        Some((boundary, replacement_window))
+    }
+
+    /// Count surviving transcript occurrences without materializing the active
+    /// provider window.
+    #[must_use]
+    pub fn active_provider_window_transcript_count(&self, head: Option<NodeId>) -> usize {
+        let Some(position) = head.and_then(|node_id| self.provider_window_position(node_id)) else {
+            return 0;
+        };
+        let start_exclusive =
+            self.provider_window_start_exclusive(position.replacement_boundary.get());
+        let mut count = 0;
+        let mut current = self.provider_window_tail(head);
+        while let Some(node_id) = current {
+            if Some(node_id) == start_exclusive {
+                break;
+            }
+            let Some(position) = self.provider_window_position(node_id) else {
+                break;
+            };
+            count += 1;
+            current = position.predecessor.get();
+        }
+        count
     }
 
     /// Return the successful compaction that owns the active replacement
@@ -1275,7 +1374,9 @@ impl AgentTree {
         &self,
         head: Option<NodeId>,
     ) -> Option<&tau_proto::AgentCompacted> {
-        let boundary = self.active_provider_window(head).replacement_boundary?;
+        let boundary = self
+            .provider_window_position(head?)
+            .and_then(|position| position.replacement_boundary.get())?;
         let AgentEntry::Compaction {
             transaction_id: Some(transaction_id),
             ..
@@ -1294,15 +1395,13 @@ impl AgentTree {
     /// ending at `through`.
     #[must_use]
     pub fn active_provider_window_contains(&self, through: AgentHead, cut: AgentHead) -> bool {
-        let window = self.active_provider_window(through.as_option());
         match cut {
-            AgentHead::Root => window.replacement.is_none(),
+            AgentHead::Root => through.as_option().is_none_or(|head| {
+                self.provider_window_position(head)
+                    .is_none_or(|position| position.replacement_boundary.get().is_none())
+            }),
             AgentHead::Node(node_id) => {
-                window.replacement_boundary == Some(node_id)
-                    || window
-                        .transcript
-                        .iter()
-                        .any(|(candidate, _)| *candidate == node_id)
+                self.provider_window_contains_node(through.as_option(), node_id)
             }
         }
     }
@@ -1786,13 +1885,145 @@ impl AgentTree {
             .collect()
     }
 
+    fn provider_window_position(&self, node_id: NodeId) -> Option<ProviderWindowPosition> {
+        self.indexes
+            .provider_window
+            .positions
+            .get(node_id.get() as usize)
+            .copied()
+    }
+
+    fn provider_window_tail(&self, head: Option<NodeId>) -> Option<NodeId> {
+        let head = head?;
+        let position = self.provider_window_position(head)?;
+        if matches!(
+            self.node(head).map(|node| &node.entry),
+            Some(AgentEntry::Compaction { .. })
+        ) {
+            position.predecessor.get()
+        } else {
+            Some(head)
+        }
+    }
+
+    fn provider_window_start_exclusive(
+        &self,
+        replacement_boundary: Option<NodeId>,
+    ) -> Option<NodeId> {
+        replacement_boundary
+            .and_then(|boundary| self.indexes.provider_window.boundary_anchors.get(&boundary))
+            .and_then(|anchor| anchor.start_exclusive.get())
+    }
+
+    fn provider_window_chain_contains(
+        &self,
+        mut current: Option<NodeId>,
+        start_exclusive: Option<NodeId>,
+        candidate: NodeId,
+    ) -> bool {
+        while let Some(node_id) = current {
+            if Some(node_id) == start_exclusive {
+                return false;
+            }
+            let Some(position) = self.provider_window_position(node_id) else {
+                return false;
+            };
+            if node_id == candidate {
+                return true;
+            }
+            current = position.predecessor.get();
+        }
+        false
+    }
+
+    fn provider_window_contains_node(&self, head: Option<NodeId>, candidate: NodeId) -> bool {
+        let Some(position) = head.and_then(|node_id| self.provider_window_position(node_id)) else {
+            return false;
+        };
+        position.replacement_boundary.get() == Some(candidate)
+            || self.provider_window_chain_contains(
+                self.provider_window_tail(head),
+                self.provider_window_start_exclusive(position.replacement_boundary.get()),
+                candidate,
+            )
+    }
+
     fn append_node_at(&mut self, parent: Option<NodeId>, entry: AgentEntry) -> NodeId {
         let id = NodeId::new(self.nodes.len() as u64);
+        let parent_position = parent.and_then(|node_id| self.provider_window_position(node_id));
+        let mut predecessor = parent.and_then(|parent| {
+            if matches!(
+                self.node(parent).map(|node| &node.entry),
+                Some(AgentEntry::Compaction { .. })
+            ) {
+                parent_position.and_then(|position| position.predecessor.get())
+            } else {
+                Some(parent)
+            }
+        });
+        let mut replacement_boundary =
+            parent_position.and_then(|position| position.replacement_boundary.get());
+        let mut boundary_anchor = None;
+        if let AgentEntry::Compaction {
+            transaction_id,
+            cut,
+            suffix_end,
+            ..
+        } = &entry
+        {
+            let previous_start = self.provider_window_start_exclusive(replacement_boundary);
+            let start_exclusive = if transaction_id.is_some() && suffix_end.is_some() {
+                match cut {
+                    Some(AgentHead::Root) => previous_start,
+                    Some(AgentHead::Node(cut)) if replacement_boundary == Some(*cut) => {
+                        predecessor = None;
+                        None
+                    }
+                    Some(AgentHead::Node(cut))
+                        if self.provider_window_chain_contains(
+                            predecessor,
+                            previous_start,
+                            *cut,
+                        ) =>
+                    {
+                        Some(*cut)
+                    }
+                    Some(AgentHead::Node(_)) | None => {
+                        predecessor = None;
+                        None
+                    }
+                }
+            } else {
+                predecessor = None;
+                None
+            };
+            replacement_boundary = Some(id);
+            boundary_anchor = Some(ProviderWindowBoundaryAnchor {
+                start_exclusive: ProviderWindowNodeId::new(start_exclusive),
+            });
+        }
         self.nodes.push(AgentNode {
             id,
             parent_id: parent,
             entry,
         });
+        self.indexes
+            .provider_window
+            .positions
+            .push(ProviderWindowPosition {
+                predecessor: ProviderWindowNodeId::new(predecessor),
+                replacement_boundary: ProviderWindowNodeId::new(replacement_boundary),
+            });
+        if let Some(anchor) = boundary_anchor {
+            assert!(
+                self.indexes
+                    .provider_window
+                    .boundary_anchors
+                    .insert(id, anchor)
+                    .is_none(),
+                "provider-window boundary indexed more than once"
+            );
+        }
         self.head = Some(id);
         id
     }
@@ -1805,7 +2036,8 @@ impl AgentTree {
     ) -> NodeId {
         let node = self.append_node_at(parent, entry);
         assert!(
-            self.context_nodes_by_event_seq
+            self.indexes
+                .context_nodes_by_event_seq
                 .insert(durable_event_seq, node)
                 .is_none(),
             "context occurrence materialized more than once"
@@ -1819,7 +2051,8 @@ impl AgentTree {
         &self,
         durable_event_seq: PersistedAgentEventSeq,
     ) -> Option<NodeId> {
-        self.context_nodes_by_event_seq
+        self.indexes
+            .context_nodes_by_event_seq
             .get(&durable_event_seq)
             .copied()
     }
@@ -1874,7 +2107,7 @@ impl AgentTree {
             agent_id,
             metadata: BTreeMap::new(),
             nodes: Vec::new(),
-            context_nodes_by_event_seq: HashMap::new(),
+            indexes: AgentTreeIndexes::default(),
             head: None,
             display_name: None,
             initialization_context: None,
@@ -3917,12 +4150,11 @@ impl AgentTree {
             let current = self
                 .head
                 .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-            let current_window = self.active_provider_window(current.as_option());
-            let previous_boundary = current_window
-                .replacement_boundary
-                .map(tau_proto::AgentHead::Node);
-            let previous_boundary_matches = current_window
-                .replacement_boundary
+            let previous_boundary = self
+                .active_provider_window_replacement(current.as_option())
+                .map(|(node_id, _)| tau_proto::AgentHead::Node(node_id));
+            let previous_boundary_matches = previous_boundary
+                .and_then(AgentHead::as_option)
                 .and_then(|node_id| self.node(node_id))
                 .is_some_and(|node| {
                     matches!(
