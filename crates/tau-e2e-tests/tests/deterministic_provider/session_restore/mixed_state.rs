@@ -289,14 +289,28 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
     }
 
     let durable_deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_snapshot = None;
+    let mut last_load_error = None;
     let snapshot_c = loop {
-        let snapshot = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
-        if super::assert_initialization_only_refresh(&snapshot_b, &snapshot).is_ok() {
-            break snapshot;
+        match DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id) {
+            Ok(snapshot) => {
+                if super::assert_initialization_only_refresh(&snapshot_b, &snapshot).is_ok() {
+                    break snapshot;
+                }
+                last_snapshot = Some(snapshot);
+            }
+            Err(error) => last_load_error = Some(error.to_string()),
         }
         if durable_deadline < Instant::now() {
-            super::assert_initialization_only_refresh(&snapshot_b, &snapshot)?;
-            unreachable!("failed refresh assertion returns above");
+            if let Some(snapshot) = last_snapshot {
+                super::assert_initialization_only_refresh(&snapshot_b, &snapshot)?;
+                unreachable!("failed refresh assertion returns above");
+            }
+            return Err(format!(
+                "S7 Boot C durable snapshot remained unreadable: {}",
+                last_load_error.as_deref().unwrap_or("no load completed")
+            )
+            .into());
         }
         std::thread::yield_now();
     };

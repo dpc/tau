@@ -265,8 +265,13 @@ pub(super) fn wait_for_tool_readiness(
     }
 }
 
-/// Waits until the authoritative restore stream contains the exact interrupted
-/// worker request/start pair.
+/// Waits until the authoritative stores contain both the interrupted worker's
+/// durable ownership journal and its exact restore request/start pair.
+///
+/// The membership and restore journals are distinct production persistence
+/// streams. A live read can observe the later restore append after loading an
+/// earlier membership prefix, so the oracle must reject that mixed snapshot
+/// and retry until both sides of the ownership relationship are present.
 pub(super) fn wait_for_interrupted_tool_snapshot(
     fixture: &DeterministicFixture,
     session_id: &SessionId,
@@ -276,6 +281,14 @@ pub(super) fn wait_for_interrupted_tool_snapshot(
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Ok(snapshot) = DurableSessionSnapshot::load(fixture.harness_state_dir(), session_id)
+            && snapshot.agent_events.get(worker).is_some_and(|events| {
+                events.iter().any(|record| {
+                    matches!(
+                        &record.event,
+                        Event::AgentStarted(started) if &started.agent_id == worker
+                    )
+                })
+            })
             && interrupted_restore_records(&snapshot, worker, call_id).len() == 2
         {
             return Ok(snapshot);
@@ -342,7 +355,10 @@ pub(super) fn assert_no_terminal_tool_event(
     worker: &AgentId,
     call_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if snapshot.agent_events[worker].iter().any(|record| {
+    let events = snapshot.agent_events.get(worker).ok_or_else(|| {
+        format!("interrupted call owner `{worker}` lacks a durable agent journal")
+    })?;
+    if events.iter().any(|record| {
         matches!(
             &record.event,
             Event::ToolResult(result) | Event::ProviderToolResult(result)

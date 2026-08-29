@@ -26,14 +26,13 @@ use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Cursor, Read, Write};
 use std::marker::PhantomData;
+#[cfg(test)]
+use std::sync::TryLockError;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-#[cfg(test)]
-use std::sync::TryLockError;
 
 pub use cache_contract::ProviderCacheContract;
 pub use chat_completions::{
