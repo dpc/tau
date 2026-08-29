@@ -150,7 +150,7 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
         input.clone(),
         RetryInjectingWriter::new(writer, input, Arc::clone(&observation)),
         profiles,
-        move || reload_profiles.clone(),
+        move |_| reload_profiles.clone(),
         2,
         executor,
     )

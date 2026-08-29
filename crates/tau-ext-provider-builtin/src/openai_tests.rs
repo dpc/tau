@@ -548,7 +548,7 @@ fn silent_duplicate_prewarm_does_not_block_real_prompt() {
             runtime_input,
             runtime_output,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             prompt_executor,
             prewarm_executor,
@@ -618,7 +618,7 @@ fn cache_refresh_reports_correlated_terminal() {
             runtime_input,
             runtime_output,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             prompt_executor,
             prewarm_executor,
@@ -690,7 +690,7 @@ fn cache_refresh_cancel_precedes_real_prompt() {
             runtime_input,
             runtime_output,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             prompt_executor,
             prewarm_executor,
@@ -765,7 +765,7 @@ fn session_shutdown_cancels_and_joins_silent_prewarm() {
             runtime_input,
             output,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             production_prompt_executor(),
             prewarm_executor,
@@ -837,7 +837,7 @@ fn profile_rotation_cancels_active_prewarm() {
             runtime_input,
             output,
             startup_profiles,
-            move || load_profiles.lock().expect("profiles").clone(),
+            move |_| load_profiles.lock().expect("profiles").clone(),
             1,
             prompt_executor,
             prewarm_executor,
@@ -933,7 +933,7 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
             runtime_input,
             runtime_output,
             startup_profiles,
-            move || load_profiles.lock().expect("profiles").clone(),
+            move |_| load_profiles.lock().expect("profiles").clone(),
             2,
             RuntimeExecutors {
                 prompt: executor,
@@ -1064,7 +1064,7 @@ fn stale_old_identity_retry_cannot_park_new_profile_work() {
             runtime_input,
             runtime_output,
             startup_profiles,
-            move || load_profiles.lock().expect("profiles").clone(),
+            move |_| load_profiles.lock().expect("profiles").clone(),
             3,
             RuntimeExecutors {
                 prompt: executor,
@@ -2528,7 +2528,7 @@ fn canceled_oversized_worker_report_reaches_real_client_boundary_as_small_termin
             runtime_input,
             runtime_output,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             executor,
         )
@@ -2789,7 +2789,7 @@ fn prompt_workers_start_concurrently() {
         Cursor::new(input),
         writer,
         profiles,
-        move || prompt_profiles.clone(),
+        move |_| prompt_profiles.clone(),
         2,
         executor,
     )
@@ -2875,7 +2875,7 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             RuntimeExecutors {
                 prompt: executor,
@@ -3012,7 +3012,7 @@ fn standalone_compaction_retry_policy_terminalizes_after_five_attempts() {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             RuntimeExecutors {
                 prompt: executor,
@@ -3256,7 +3256,7 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             3,
             RuntimeExecutors {
                 prompt: executor,
@@ -3457,7 +3457,7 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
             runtime_input,
             runtime_output,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             RuntimeExecutors {
                 prompt: executor,
@@ -3660,7 +3660,7 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
             runtime_input,
             runtime_output,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             2,
             RuntimeExecutors {
                 prompt: executor,
@@ -4043,7 +4043,7 @@ fn quota_telemetry_does_not_release_shared_inference_cooldown() {
             runtime_input,
             runtime_output,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             2,
             RuntimeExecutors {
                 prompt: executor,
@@ -4133,7 +4133,7 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
             runtime_input,
             runtime_output,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             executor,
         )
@@ -4266,7 +4266,7 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
             runtime_input,
             runtime_output,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             executor,
         )
@@ -4381,7 +4381,7 @@ fn context_window_rejection_finishes_once_without_retry_status() {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             executor,
         )
@@ -4515,7 +4515,7 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             4,
             executor,
         )
@@ -4670,7 +4670,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
             runtime_input,
             writer,
             startup_profiles,
-            move || profiles_for_loader.lock().expect("profile loader").clone(),
+            move |_| profiles_for_loader.lock().expect("profile loader").clone(),
             1,
             executor,
         )
@@ -4793,7 +4793,7 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             executor,
         )
@@ -4986,7 +4986,7 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
             runtime_input,
             writer,
             startup_profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             3,
             executor,
         )
@@ -5153,7 +5153,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             2,
             RuntimeExecutors {
                 prompt: executor,
@@ -5351,7 +5351,7 @@ fn cold_restart_discards_old_work_and_cooldown() {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             executor,
         );
@@ -5460,7 +5460,7 @@ fn real_repetition_failure_finishes_once_without_scheduler_retry() {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             production_prompt_executor(),
         )
@@ -5579,7 +5579,7 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             executor,
         )
@@ -5836,7 +5836,7 @@ fn queued_targeted_cancel_allows_prompt_id_reuse() {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             executor,
         )
@@ -5970,7 +5970,7 @@ fn late_retry_after_targeted_cancel_is_not_rescheduled() {
             runtime_input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             executor,
         )
@@ -6093,7 +6093,7 @@ fn worker_output_wakes_loop_before_prompt_done() {
             input,
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             executor,
         )
@@ -6167,7 +6167,7 @@ fn replayed_prompt_creation_does_not_start_executor_or_emit_prompt_events() {
         Cursor::new(input),
         writer,
         profiles,
-        move || prompt_profiles.clone(),
+        move |_| prompt_profiles.clone(),
         1,
         executor,
     )
@@ -6217,7 +6217,7 @@ fn replayed_session_dir_controls_live_prompt_debug_policy() {
             Cursor::new(input),
             writer,
             profiles,
-            move || prompt_profiles.clone(),
+            move |_| prompt_profiles.clone(),
             1,
             executor,
         )

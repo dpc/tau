@@ -1531,6 +1531,138 @@ fn credential_hydration_requires_local_usability_not_remote_authentication() {
     );
 }
 
+/// Proves a prompt-boundary lookup over a large validated snapshot clones and
+/// Secret-reads only the selected profile, without exposing selected or
+/// unselected secret canaries through debug formatting.
+#[test]
+fn large_profile_prompt_selection_clones_and_reads_only_selected_credential() {
+    const PROFILE_COUNT: usize = 2_048;
+    let target = ProviderName::new("provider-1024");
+    let files = (0..PROFILE_COUNT)
+        .map(|index| {
+            let provider = ProviderName::new(format!("provider-{index:04}"));
+            let settings = serde_json::to_vec(&serde_json::json!({
+                "kind": "chat_completions",
+                "base_url": format!("https://profile-{index}.example.invalid/v1"),
+                "models": [{"id": format!("model-{index}")}],
+                "credential": {
+                    "kind": "api_key",
+                    "identity": format!("{index:032x}")
+                }
+            }))
+            .expect("large-profile settings");
+            (provider, settings)
+        })
+        .collect::<Vec<_>>();
+    let snapshot = try_load_settings_profiles(files).expect("validated large snapshot");
+    let cloned_profiles = Cell::new(0_usize);
+    let load = |selected: Option<&ProviderName>| {
+        let profiles =
+            selected.map_or_else(|| snapshot.clone(), |provider| snapshot.selected(provider));
+        cloned_profiles.set(cloned_profiles.get() + profiles.providers.len());
+        profiles
+    };
+
+    let mut selected = load(Some(&target));
+    let selected_secret = "selected-api-key-privacy-canary";
+    let credential_record = serde_json::to_vec(&credential_record::ApiKeyCredential::new(
+        selected_secret.to_owned(),
+    ))
+    .expect("selected credential record");
+    let mut secret_reads = 0_usize;
+    let observations = hydrate_profile_credentials_with(&mut selected, |path| {
+        secret_reads += 1;
+        assert_eq!(
+            path.as_str(),
+            "providers/00000000000000000000000000000400/api-key.json"
+        );
+        Ok(tau_proto::ExtensionDataValue::ReadFile {
+            contents: credential_record.clone(),
+        })
+    });
+
+    assert_eq!(cloned_profiles.get(), 1);
+    assert_eq!(secret_reads, 1);
+    assert_eq!(selected.providers.len(), 1);
+    assert_eq!(selected.credentials.len(), 1);
+    assert_eq!(observations.len(), 1);
+    let public_projection = format!("{observations:?} {:?}", models_for_profiles(&selected));
+    assert!(!public_projection.contains(selected_secret));
+    assert!(!public_projection.contains("profile-2047.example.invalid"));
+}
+
+/// Describes full-snapshot versus selected-profile clone and Secret-read
+/// scaling as the validated profile count grows.
+#[test]
+#[ignore = "descriptive performance benchmark"]
+fn benchmark_selected_profile_credential_resolution_scaling() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    eprintln!(
+        "profiles,iterations,full_clone_ns,selected_clone_ns,full_secret_reads,selected_secret_reads"
+    );
+    for profile_count in [1_usize, 64, 1_024, 4_096] {
+        let files = (0..profile_count)
+            .map(|index| {
+                let provider = ProviderName::new(format!("provider-{index:04}"));
+                let settings = serde_json::to_vec(&serde_json::json!({
+                    "kind": "chat_completions",
+                    "models": [{"id": format!("model-{index}")}],
+                    "credential": {
+                        "kind": "api_key",
+                        "identity": format!("{index:032x}")
+                    }
+                }))
+                .expect("benchmark settings");
+                (provider, settings)
+            })
+            .collect();
+        let snapshot =
+            try_load_settings_profiles(files).expect("validated benchmark profile snapshot");
+        let target = ProviderName::new(format!("provider-{:04}", profile_count - 1));
+        let iterations = 128;
+
+        let full_started = Instant::now();
+        for _ in 0..iterations {
+            black_box(snapshot.clone());
+        }
+        let full_elapsed = full_started.elapsed();
+        let selected_started = Instant::now();
+        for _ in 0..iterations {
+            black_box(snapshot.selected(&target));
+        }
+        let selected_elapsed = selected_started.elapsed();
+
+        let record = serde_json::to_vec(&credential_record::ApiKeyCredential::new(
+            "benchmark-key".to_owned(),
+        ))
+        .expect("benchmark credential");
+        let mut full = snapshot.clone();
+        let mut full_secret_reads = 0_usize;
+        hydrate_profile_credentials_with(&mut full, |_| {
+            full_secret_reads += 1;
+            Ok(tau_proto::ExtensionDataValue::ReadFile {
+                contents: record.clone(),
+            })
+        });
+        let mut selected = snapshot.selected(&target);
+        let mut selected_secret_reads = 0_usize;
+        hydrate_profile_credentials_with(&mut selected, |_| {
+            selected_secret_reads += 1;
+            Ok(tau_proto::ExtensionDataValue::ReadFile {
+                contents: record.clone(),
+            })
+        });
+
+        eprintln!(
+            "{profile_count},{iterations},{},{},{full_secret_reads},{selected_secret_reads}",
+            full_elapsed.as_nanos(),
+            selected_elapsed.as_nanos()
+        );
+    }
+}
+
 /// Proves a changed usable credential generation republishes a replacement even
 /// when the locally usable model list remains identical.
 #[test]
@@ -1558,6 +1690,47 @@ fn credential_replacement_requires_replacement_declaration() {
         &models,
         &replacement,
     ));
+}
+
+/// Proves a selected ChatGPT identity rotation rebuilds a complete declaration
+/// without dropping a sibling provider's models.
+#[test]
+fn selected_identity_rotation_declaration_preserves_sibling_models() {
+    let chatgpt = ProviderName::new("chatgpt");
+    let sibling = ProviderName::new("sibling");
+    let profiles = try_load_settings_profiles(vec![
+        (
+            chatgpt.clone(),
+            serde_json::to_vec(&serde_json::json!({
+                "kind": "chatgpt",
+                "credential": {
+                    "kind": "oauth",
+                    "identity": "0123456789abcdef0123456789abcdef"
+                }
+            }))
+            .expect("ChatGPT settings"),
+        ),
+        (
+            sibling.clone(),
+            serde_json::to_vec(&serde_json::json!({
+                "kind": "chat_completions",
+                "models": [{"id": "sibling-model"}],
+                "credential": {"kind": "none"}
+            }))
+            .expect("sibling settings"),
+        ),
+    ])
+    .expect("two-provider settings");
+    let complete = models_for_profiles(&profiles);
+    let selected = profiles.selected(&chatgpt);
+
+    let replacement = replace_provider_models(&complete, &chatgpt, &selected);
+
+    assert_eq!(replacement, complete);
+    assert!(
+        replacement.iter().any(|model| model.id.provider == sibling),
+        "a selected identity replacement must retain sibling routes"
+    );
 }
 
 /// Proves the centralized post-OAuth-resolution boundary always performs the
