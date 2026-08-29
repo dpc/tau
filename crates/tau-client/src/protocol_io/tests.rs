@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::time::Instant;
+
 use tau_proto::{
     CborValue, Event, HarnessInputMessage, HarnessOutputMessage, PromptOriginator, ToolName,
     ToolType, UnixMicros,
@@ -138,6 +141,157 @@ fn protocol_io_meter_attributes_supplied_decoded_frame_size() {
     assert!(meter.format_diagnostics().contains("bytes=12345 count=1"));
 }
 
+/// The first detailed delivery must allocate only the retained event key and
+/// the three bounded accounting entries that own it.
+#[test]
+fn protocol_io_cold_detailed_delivery_allocates_retained_keys() {
+    let meter = ProtocolIoMeter::with_diagnostics();
+    let message = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        Event::TermBell(tau_proto::TermBell {}),
+    );
+
+    assert_eq!(take_protocol_io_key_allocations(), 0);
+    meter.record_downlink_frame_bytes(
+        &message,
+        tau_proto::ProtocolMessageBytes::new(17).expect("nonzero fixture size"),
+    );
+
+    assert_eq!(take_protocol_io_key_allocations(), 4);
+    assert_eq!(
+        meter.cumulative_stats().downlink["term.bell"],
+        ProtocolIoFrameStats {
+            count: 1,
+            bytes: 17,
+        }
+    );
+    assert_eq!(
+        meter.format_diagnostics(),
+        concat!(
+            "Downlink attach phase x delivery kind (exact encoded frame bytes)\n",
+            "cold-attach.replay: bytes=0 count=0\n",
+            "cold-attach.non-replay: bytes=17 count=1\n",
+            "  term.bell: bytes=17 count=1\n",
+            "steady.replay: bytes=0 count=0\n",
+            "steady.non-replay: bytes=0 count=0"
+        )
+    );
+}
+
+/// Warm cumulative accounting must update both retained maps without creating
+/// another event-name string.
+#[test]
+fn protocol_io_warm_cumulative_delivery_borrows_retained_event_key() {
+    let meter = ProtocolIoMeter::default();
+    let message = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        Event::TermBell(tau_proto::TermBell {}),
+    );
+    let bytes = tau_proto::ProtocolMessageBytes::new(17).expect("nonzero fixture size");
+    meter.record_downlink_frame_bytes(&message, bytes);
+
+    assert_eq!(take_protocol_io_key_allocations(), 3);
+    meter.record_downlink_frame_bytes(&message, bytes);
+
+    assert_eq!(take_protocol_io_key_allocations(), 0);
+    assert_eq!(
+        meter.cumulative_stats().downlink["term.bell"],
+        ProtocolIoFrameStats {
+            count: 2,
+            bytes: 34,
+        }
+    );
+}
+
+/// Warm detailed accounting must borrow the shared event key for cumulative,
+/// rolling, and diagnostic maps rather than recreating four equal strings.
+#[test]
+fn protocol_io_warm_detailed_delivery_borrows_all_event_keys() {
+    let meter = ProtocolIoMeter::with_diagnostics();
+    let message = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        Event::TermBell(tau_proto::TermBell {}),
+    );
+    let bytes = tau_proto::ProtocolMessageBytes::new(17).expect("nonzero fixture size");
+    meter.record_downlink_frame_bytes(&message, bytes);
+
+    assert_eq!(take_protocol_io_key_allocations(), 4);
+    meter.record_downlink_frame_bytes(&message, bytes);
+
+    assert_eq!(take_protocol_io_key_allocations(), 0);
+    assert_eq!(
+        meter.cumulative_stats().downlink["term.bell"],
+        ProtocolIoFrameStats {
+            count: 2,
+            bytes: 34,
+        }
+    );
+    assert!(
+        meter
+            .format_diagnostics()
+            .contains("  term.bell: bytes=34 count=2")
+    );
+
+    let sample = meter.take_sample();
+    assert_eq!(sample.downlink_breakdown["term.bell"], 34);
+    meter.record_downlink_frame_bytes(&message, bytes);
+
+    assert_eq!(take_protocol_io_key_allocations(), 1);
+    assert_eq!(
+        meter.take_sample().downlink_breakdown,
+        BTreeMap::from([("term.bell".to_owned(), 17)])
+    );
+    assert_eq!(
+        meter.cumulative_stats().downlink["term.bell"],
+        ProtocolIoFrameStats {
+            count: 3,
+            bytes: 51,
+        }
+    );
+    assert!(
+        meter
+            .format_diagnostics()
+            .contains("  term.bell: bytes=51 count=3")
+    );
+}
+
+/// Warm extension-owned deliveries must borrow their stored `EventName` rather
+/// than cloning its dynamically owned segments before the cache lookup.
+#[test]
+fn protocol_io_warm_detailed_custom_delivery_borrows_event_name() {
+    let meter = ProtocolIoMeter::with_diagnostics();
+    let message = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        Event::ExtensionEvent(
+            tau_proto::CustomEvent::try_new(
+                "custom.bell"
+                    .parse()
+                    .expect("custom event name must be valid"),
+                None,
+                CborValue::Null,
+            )
+            .expect("custom event name must use an extension-owned category"),
+        ),
+    );
+    let bytes = tau_proto::ProtocolMessageBytes::new(17).expect("nonzero fixture size");
+    assert_eq!(take_protocol_io_owned_event_names(), 0);
+    meter.record_downlink_frame_bytes(&message, bytes);
+
+    assert_eq!(take_protocol_io_key_allocations(), 4);
+    assert_eq!(take_protocol_io_owned_event_names(), 0);
+    meter.record_downlink_frame_bytes(&message, bytes);
+
+    assert_eq!(take_protocol_io_key_allocations(), 0);
+    assert_eq!(take_protocol_io_owned_event_names(), 0);
+    assert_eq!(
+        meter.cumulative_stats().downlink["custom.bell"],
+        ProtocolIoFrameStats {
+            count: 2,
+            bytes: 34,
+        }
+    );
+}
+
 /// The opt-in meter wires exact frame sizes, attach/replay axes, selected
 /// payload attribution, and stable cumulative totals into one public report.
 #[test]
@@ -252,6 +406,148 @@ fn protocol_io_meter_buckets_overflow_after_key_cap() {
     }
 }
 
+/// A full direction must select its existing `other` bucket while preserving
+/// the cap, exact cumulative counters, and stable formatted labels.
+#[test]
+fn protocol_io_meter_overflow_selection_allocates_only_new_retained_keys() {
+    let meter = ProtocolIoMeter::default();
+    for index in 0..PROTOCOL_IO_MAX_KEYS_PER_DIRECTION.saturating_sub(1) {
+        meter.record_bytes(
+            ProtocolIoDirection::Downlink,
+            format!("custom.event_{index}"),
+            Some(1),
+        );
+    }
+    let overflow = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        Event::TermBell(tau_proto::TermBell {}),
+    );
+
+    assert_eq!(
+        take_protocol_io_key_allocations(),
+        PROTOCOL_IO_MAX_KEYS_PER_DIRECTION.saturating_sub(1) * 2
+    );
+    meter.record_downlink_frame_bytes(
+        &overflow,
+        tau_proto::ProtocolMessageBytes::new(7).expect("nonzero fixture size"),
+    );
+
+    assert_eq!(take_protocol_io_key_allocations(), 3);
+    let cumulative = meter.cumulative_stats();
+    assert_eq!(
+        cumulative.downlink.len(),
+        PROTOCOL_IO_MAX_KEYS_PER_DIRECTION
+    );
+    assert_eq!(
+        cumulative.downlink[PROTOCOL_IO_OVERFLOW_KEY],
+        ProtocolIoFrameStats { count: 1, bytes: 7 }
+    );
+    assert!(
+        format_protocol_io_cumulative_stats(
+            "Protocol I/O",
+            "uplink",
+            "downlink",
+            "none",
+            &cumulative,
+        )
+        .contains("\n  other: 7B count=1")
+    );
+}
+
+/// Delivered events that overflow cumulative storage must retain only accepted
+/// cache keys while each drained rolling bucket admits its own bounded keys.
+#[test]
+fn protocol_io_delivered_overflow_keeps_cache_bounded_across_sample_drains() {
+    let meter = ProtocolIoMeter::with_diagnostics();
+    for index in 0..PROTOCOL_IO_MAX_KEYS_PER_DIRECTION.saturating_sub(1) {
+        meter.record_downlink_frame_bytes(
+            &custom_delivery(index),
+            tau_proto::ProtocolMessageBytes::new(1).expect("nonzero fixture size"),
+        );
+    }
+    assert_eq!(
+        meter.cached_event_key_count(),
+        PROTOCOL_IO_MAX_KEYS_PER_DIRECTION.saturating_sub(1)
+    );
+    assert_eq!(
+        meter.take_sample().downlink_breakdown.len(),
+        PROTOCOL_IO_MAX_KEYS_PER_DIRECTION.saturating_sub(1)
+    );
+    take_protocol_io_key_allocations();
+
+    meter.record_downlink_frame_bytes(
+        &custom_delivery(PROTOCOL_IO_MAX_KEYS_PER_DIRECTION),
+        tau_proto::ProtocolMessageBytes::new(7).expect("nonzero fixture size"),
+    );
+
+    assert_eq!(take_protocol_io_key_allocations(), 4);
+    assert_eq!(
+        meter.cached_event_key_count(),
+        PROTOCOL_IO_MAX_KEYS_PER_DIRECTION.saturating_sub(1)
+    );
+    assert_eq!(
+        meter.take_sample().downlink_breakdown,
+        BTreeMap::from([("custom.event_128".to_owned(), 7)])
+    );
+    assert_eq!(
+        meter.cumulative_stats().downlink[PROTOCOL_IO_OVERFLOW_KEY],
+        ProtocolIoFrameStats { count: 1, bytes: 7 }
+    );
+    assert!(
+        meter
+            .format_diagnostics()
+            .contains("  other: bytes=7 count=1")
+    );
+
+    meter.record_downlink_frame_bytes(
+        &custom_delivery(PROTOCOL_IO_MAX_KEYS_PER_DIRECTION + 1),
+        tau_proto::ProtocolMessageBytes::new(7).expect("nonzero fixture size"),
+    );
+
+    assert_eq!(take_protocol_io_key_allocations(), 2);
+    assert_eq!(
+        meter.cached_event_key_count(),
+        PROTOCOL_IO_MAX_KEYS_PER_DIRECTION.saturating_sub(1)
+    );
+    assert_eq!(
+        meter.cumulative_stats().downlink[PROTOCOL_IO_OVERFLOW_KEY],
+        ProtocolIoFrameStats {
+            count: 2,
+            bytes: 14,
+        }
+    );
+    assert!(
+        meter
+            .format_diagnostics()
+            .contains("  other: bytes=14 count=2")
+    );
+}
+
+/// This manual benchmark reports cold and warm event-key allocation counts and
+/// elapsed warm-delivery time without making timing a correctness oracle.
+#[test]
+#[ignore = "manual protocol-I/O event-key allocation benchmark"]
+fn benchmark_protocol_io_event_key_allocations() {
+    let meter = ProtocolIoMeter::with_diagnostics();
+    let message = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        Event::TermBell(tau_proto::TermBell {}),
+    );
+    let bytes = tau_proto::ProtocolMessageBytes::new(17).expect("nonzero fixture size");
+
+    meter.record_downlink_frame_bytes(&message, bytes);
+    let cold_allocations = take_protocol_io_key_allocations();
+    let started = Instant::now();
+    for _ in 0..10_000 {
+        meter.record_downlink_frame_bytes(&message, bytes);
+    }
+    let elapsed = started.elapsed();
+    let warm_allocations = take_protocol_io_key_allocations();
+    eprintln!(
+        "protocol I/O event-key benchmark: cold_allocations={cold_allocations} warm_allocations={warm_allocations} warm_deliveries=10000 elapsed={elapsed:?}"
+    );
+}
+
 /// Human-readable protocol I/O stats should use stable labels supplied by the
 /// caller so UI and extension debug dumps can share accounting without sharing
 /// perspective-specific wording.
@@ -304,4 +600,21 @@ harness -> peer: 12K in 5 frame(s)
 fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
     tau_proto::ExtensionName::parse(value.as_ref())
         .expect("test extension name must satisfy the identifier grammar")
+}
+
+/// Build one extension-owned delivery with a distinct custom event name.
+fn custom_delivery(index: usize) -> HarnessOutputMessage {
+    HarnessOutputMessage::deliver_live(
+        UnixMicros::new(index as u64),
+        Event::ExtensionEvent(
+            tau_proto::CustomEvent::try_new(
+                format!("custom.event_{index}")
+                    .parse()
+                    .expect("custom event name must be valid"),
+                None,
+                CborValue::Null,
+            )
+            .expect("custom event name must use an extension-owned category"),
+        ),
+    )
 }

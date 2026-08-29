@@ -4,6 +4,7 @@ mod diagnostics;
 #[cfg(test)]
 mod tests;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -12,7 +13,7 @@ use diagnostics::{
     DeliveryKind as ProtocolIoDeliveryKind, State as ProtocolIoDiagnosticsState,
     collect_measurements,
 };
-use tau_proto::{HarnessInputMessage, HarnessOutputMessage};
+use tau_proto::{EventName, HarnessInputMessage, HarnessOutputMessage};
 
 /// Number of one-second samples retained for rolling protocol-I/O status.
 pub const PROTOCOL_IO_SAMPLE_WINDOW_SECS: usize = 30;
@@ -72,6 +73,12 @@ struct ProtocolIoBuckets {
 struct ProtocolIoState {
     buckets: ProtocolIoBuckets,
     cumulative: ProtocolIoCumulativeStats,
+    /// Stable strings for event names that have entered a bounded meter bucket.
+    ///
+    /// The cache is bounded by the downlink cumulative-key cap. It lets
+    /// repeated delivered events borrow their existing key while every
+    /// accounting map performs its own bounded-key selection.
+    event_keys: BTreeMap<EventName, String>,
     /// Present only for explicitly opted-in UI meters.
     diagnostics: Option<ProtocolIoDiagnosticsState>,
 }
@@ -144,26 +151,29 @@ impl ProtocolIoMeter {
         message: &HarnessOutputMessage,
         bytes: tau_proto::ProtocolMessageBytes,
     ) {
-        let key = output_message_key(message);
         let measurements = self
             .detailed
             .then(|| collect_measurements(message, bytes.get()));
         let mut state = self.state.lock().expect("protocol io meter mutex");
-        state.record_bytes(ProtocolIoDirection::Downlink, &key, bytes.get());
-        if let (Some(diagnostics), HarnessOutputMessage::Deliver(delivery)) =
-            (&mut state.diagnostics, message)
-        {
+        if let HarnessOutputMessage::Deliver(delivery) = message {
+            let event_name = delivered_event_name(delivery.event());
             let delivery_kind = if delivery.is_replay() {
                 ProtocolIoDeliveryKind::Replay
             } else {
                 ProtocolIoDeliveryKind::NonReplay
             };
-            diagnostics.record_delivery(
+            state.record_downlink_delivery(
                 delivery_kind,
                 delivery.event(),
-                &key,
+                &event_name,
                 bytes.get(),
                 measurements.unwrap_or_default(),
+            );
+        } else {
+            state.record_bytes(
+                ProtocolIoDirection::Downlink,
+                &output_message_key(message),
+                bytes.get(),
             );
         }
     }
@@ -207,22 +217,106 @@ impl ProtocolIoMeter {
             .map(ProtocolIoDiagnosticsState::format)
             .unwrap_or_default()
     }
+
+    #[cfg(test)]
+    fn cached_event_key_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("protocol io meter mutex")
+            .event_keys
+            .len()
+    }
 }
 
 impl ProtocolIoState {
     fn record_bytes(&mut self, direction: ProtocolIoDirection, key: &str, bytes: u64) {
-        let (bucket_entries, cumulative_entries): (
-            &mut BTreeMap<String, u64>,
-            &mut BTreeMap<String, ProtocolIoFrameStats>,
-        ) = match direction {
-            ProtocolIoDirection::Uplink => (&mut self.buckets.uplink, &mut self.cumulative.uplink),
-            ProtocolIoDirection::Downlink => {
-                (&mut self.buckets.downlink, &mut self.cumulative.downlink)
-            }
-        };
-        record_bytes_bounded(bucket_entries, key, bytes);
-        record_frame_bounded(cumulative_entries, key, bytes);
+        record_protocol_io_maps(
+            &mut self.buckets,
+            &mut self.cumulative,
+            direction,
+            key,
+            bytes,
+        );
     }
+
+    fn record_downlink_delivery(
+        &mut self,
+        delivery_kind: ProtocolIoDeliveryKind,
+        event: &tau_proto::Event,
+        event_name: &EventName,
+        frame_bytes: u64,
+        measurements: Vec<diagnostics::MeasurementSample>,
+    ) {
+        if let Some(key) = self.event_keys.get(event_name) {
+            let (buckets, cumulative, diagnostics) = (
+                &mut self.buckets,
+                &mut self.cumulative,
+                &mut self.diagnostics,
+            );
+            record_protocol_io_maps(
+                buckets,
+                cumulative,
+                ProtocolIoDirection::Downlink,
+                key,
+                frame_bytes,
+            );
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.record_delivery(delivery_kind, event, key, frame_bytes, measurements);
+            }
+            return;
+        }
+
+        let key = owned_event_key(event_name);
+        {
+            let (buckets, cumulative, diagnostics) = (
+                &mut self.buckets,
+                &mut self.cumulative,
+                &mut self.diagnostics,
+            );
+            record_protocol_io_maps(
+                buckets,
+                cumulative,
+                ProtocolIoDirection::Downlink,
+                &key,
+                frame_bytes,
+            );
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.record_delivery(delivery_kind, event, &key, frame_bytes, measurements);
+            }
+        }
+        if self.cumulative.downlink.contains_key(&key) {
+            self.event_keys.insert(event_name.clone(), key);
+        }
+    }
+}
+
+fn delivered_event_name(event: &tau_proto::Event) -> Cow<'_, EventName> {
+    match event {
+        tau_proto::Event::ExtensionEvent(event) => Cow::Borrowed(event.name()),
+        _ => {
+            #[cfg(test)]
+            PROTOCOL_IO_OWNED_EVENT_NAMES.with(|names| names.set(names.get() + 1));
+            Cow::Owned(event.name())
+        }
+    }
+}
+
+fn record_protocol_io_maps(
+    buckets: &mut ProtocolIoBuckets,
+    cumulative: &mut ProtocolIoCumulativeStats,
+    direction: ProtocolIoDirection,
+    key: &str,
+    bytes: u64,
+) {
+    let (bucket_entries, cumulative_entries): (
+        &mut BTreeMap<String, u64>,
+        &mut BTreeMap<String, ProtocolIoFrameStats>,
+    ) = match direction {
+        ProtocolIoDirection::Uplink => (&mut buckets.uplink, &mut cumulative.uplink),
+        ProtocolIoDirection::Downlink => (&mut buckets.downlink, &mut cumulative.downlink),
+    };
+    record_bytes_bounded(bucket_entries, key, bytes);
+    record_frame_bounded(cumulative_entries, key, bytes);
 }
 
 fn bounded_key<'a, T>(stats: &BTreeMap<String, T>, key: &'a str) -> &'a str {
@@ -237,13 +331,64 @@ fn bounded_key<'a, T>(stats: &BTreeMap<String, T>, key: &'a str) -> &'a str {
 }
 
 fn record_bytes_bounded(stats: &mut BTreeMap<String, u64>, key: &str, bytes: u64) {
-    let key = bounded_key(stats, key).to_owned();
-    *stats.entry(key).or_insert(0) += bytes;
+    if let Some(total) = stats.get_mut(key) {
+        *total += bytes;
+        return;
+    }
+    let key = bounded_key(stats, key);
+    if let Some(total) = stats.get_mut(key) {
+        *total += bytes;
+    } else {
+        stats.insert(owned_protocol_io_key(key), bytes);
+    }
 }
 
 fn record_frame_bounded(stats: &mut BTreeMap<String, ProtocolIoFrameStats>, key: &str, bytes: u64) {
-    let key = bounded_key(stats, key).to_owned();
-    stats.entry(key).or_default().record_bytes(bytes);
+    if let Some(frame) = stats.get_mut(key) {
+        frame.record_bytes(bytes);
+        return;
+    }
+    let key = bounded_key(stats, key);
+    if let Some(frame) = stats.get_mut(key) {
+        frame.record_bytes(bytes);
+    } else {
+        let mut frame = ProtocolIoFrameStats::default();
+        frame.record_bytes(bytes);
+        stats.insert(owned_protocol_io_key(key), frame);
+    }
+}
+
+fn owned_protocol_io_key(key: &str) -> String {
+    count_protocol_io_key_allocation();
+    key.to_owned()
+}
+
+fn owned_event_key(event_name: &EventName) -> String {
+    count_protocol_io_key_allocation();
+    event_name.to_string()
+}
+
+fn count_protocol_io_key_allocation() {
+    #[cfg(test)]
+    PROTOCOL_IO_KEY_ALLOCATIONS.with(|allocations| {
+        allocations.set(allocations.get() + 1);
+    });
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PROTOCOL_IO_KEY_ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PROTOCOL_IO_OWNED_EVENT_NAMES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_protocol_io_key_allocations() -> usize {
+    PROTOCOL_IO_KEY_ALLOCATIONS.with(|allocations| allocations.replace(0))
+}
+
+#[cfg(test)]
+fn take_protocol_io_owned_event_names() -> usize {
+    PROTOCOL_IO_OWNED_EVENT_NAMES.with(|names| names.replace(0))
 }
 
 /// One drained protocol-I/O sample bucket.
