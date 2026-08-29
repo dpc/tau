@@ -1044,13 +1044,13 @@ impl Harness {
                         if let AgentPublishCompletion::StandaloneContinuation {
                             retry_prompts: suffix,
                             complete_on_commit,
-                            approved_retry_event,
+                            owned_publication,
                             ..
                         } = &mut completion
                         {
                             *suffix = retry_prompts[index..].to_vec();
                             *complete_on_commit = index + 1 == prompt_count;
-                            *approved_retry_event = None;
+                            *owned_publication = None;
                         }
                         completion
                     })

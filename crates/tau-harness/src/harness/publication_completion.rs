@@ -6,6 +6,7 @@
 
 use super::compaction_runtime::RollingCompactionPass;
 use super::compaction_runtime_state::SuppressedStart;
+use super::interception::{OwnedPublication, OwnedPublicationBranch, OwnedPublicationRetryPolicy};
 use super::*;
 
 impl Harness {
@@ -176,7 +177,7 @@ impl Harness {
             event,
             Some(AgentPublishCompletion::OwedCompactionFact {
                 batch_parent,
-                retry_event: None,
+                owned_publication: None,
             }),
             false,
         );
@@ -381,7 +382,7 @@ impl Harness {
                         response: Box::new(response.clone()),
                         assistant_text: None,
                     },
-                    retry_event: None,
+                    owned_publication: None,
                 },
             )));
         }
@@ -699,7 +700,7 @@ impl Harness {
                     response: response.clone(),
                     assistant_text: None,
                 },
-                retry_event: None,
+                owned_publication: None,
             });
             self.publish_finished_response_for_agent(cid, None, &response, completion, false);
             return;
@@ -757,7 +758,7 @@ impl Harness {
                     Event::AgentStandaloneCompactionFailed(*failure),
                     Some(AgentPublishCompletion::OwedCompactionFact {
                         batch_parent: through,
-                        retry_event: None,
+                        owned_publication: None,
                     }),
                     false,
                 );
@@ -919,6 +920,7 @@ impl Harness {
         &mut self,
         sync: Option<&ConversationHeadSync>,
         event: &Event,
+        semantic_parent: tau_core::AgentEventParent,
     ) {
         let Some((cid, mut completion)) = sync.and_then(|sync| {
             sync.completion()
@@ -943,48 +945,17 @@ impl Harness {
             );
             return;
         }
-        match &mut completion {
-            AgentPublishCompletion::ToolTerminal { retry_event, .. } => {
-                *retry_event = Some(Box::new(event.clone()));
-            }
-            AgentPublishCompletion::StandaloneContinuation {
-                approved_retry_event,
-                ..
-            } => *approved_retry_event = Some(Box::new(event.clone())),
-            AgentPublishCompletion::GatedFinal { retry_event, .. } => {
-                *retry_event = Some(Box::new(event.clone()));
-            }
-            AgentPublishCompletion::OutputLengthContinuation { retry_event, .. } => {
-                *retry_event = Some(Box::new(event.clone()));
-            }
-            AgentPublishCompletion::OutputLengthSteer { retry_event, .. } => {
-                *retry_event = Some(Box::new(event.clone()));
-            }
-            AgentPublishCompletion::OutputLengthPreDeliveryFailure { retry_event, .. } => {
-                *retry_event = Some(Box::new(event.clone()));
-            }
-            AgentPublishCompletion::OutputLengthDormantRepair { retry_event, .. } => {
-                *retry_event = Some(Box::new(event.clone()));
-            }
-            AgentPublishCompletion::ReactiveContextRecovery { retry_event, .. } => {
-                *retry_event = Some(Box::new(event.clone()));
-            }
-            AgentPublishCompletion::ReactiveContextRecoveryStart { retry_event, .. } => {
-                *retry_event = Some(Box::new(event.clone()));
-            }
-            AgentPublishCompletion::StandaloneContextRejection { retry_event, .. } => {
-                *retry_event = Some(Box::new(event.clone()));
-            }
-            AgentPublishCompletion::OwedCompactionFact { retry_event, .. } => {
-                *retry_event = Some(Box::new(event.clone()));
-            }
-            AgentPublishCompletion::RollingCompactionStart { retry_event } => {
-                *retry_event = Some(Box::new(event.clone()));
-            }
-            AgentPublishCompletion::InitialPromptSubmission { .. } => {
-                unreachable!("initial submission returned above")
-            }
-        }
+        let owning_branch = completion
+            .owned_publication_branch()
+            .expect("only initial prompt submissions lack owned publication");
+        *completion
+            .owned_publication_mut()
+            .expect("owed completion must expose publication ownership") = Some(OwnedPublication {
+            approved_event: Box::new(event.clone()),
+            semantic_parent,
+            owning_branch,
+            retry_policy: OwnedPublicationRetryPolicy::ApprovedEventWithoutInterception,
+        });
         if matches!(
             completion,
             AgentPublishCompletion::StandaloneContinuation { .. }
@@ -1084,236 +1055,89 @@ impl Harness {
                 return;
             }
         }
-        if matches!(
-            completion,
-            AgentPublishCompletion::ToolTerminal { .. }
-                | AgentPublishCompletion::GatedFinal { .. }
-                | AgentPublishCompletion::OutputLengthContinuation { .. }
-                | AgentPublishCompletion::OutputLengthSteer { .. }
-                | AgentPublishCompletion::OutputLengthPreDeliveryFailure { .. }
-                | AgentPublishCompletion::OutputLengthDormantRepair { .. }
-                | AgentPublishCompletion::ReactiveContextRecovery { .. }
-                | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
-                | AgentPublishCompletion::StandaloneContextRejection { .. }
-                | AgentPublishCompletion::OwedCompactionFact { .. }
-                | AgentPublishCompletion::RollingCompactionStart { .. }
-        ) {
-            if matches!(
-                completion,
-                AgentPublishCompletion::ToolTerminal { .. }
-                    | AgentPublishCompletion::OutputLengthDormantRepair { .. }
-                    | AgentPublishCompletion::ReactiveContextRecovery { .. }
-                    | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
-                    | AgentPublishCompletion::StandaloneContextRejection { .. }
-                    | AgentPublishCompletion::OwedCompactionFact { .. }
-                    | AgentPublishCompletion::RollingCompactionStart { .. }
-            ) {
-                let retry_event = match &completion {
-                    AgentPublishCompletion::ToolTerminal { retry_event, .. }
-                    | AgentPublishCompletion::OutputLengthDormantRepair { retry_event, .. }
-                    | AgentPublishCompletion::ReactiveContextRecovery { retry_event, .. }
-                    | AgentPublishCompletion::ReactiveContextRecoveryStart {
-                        retry_event, ..
-                    }
-                    | AgentPublishCompletion::StandaloneContextRejection { retry_event, .. }
-                    | AgentPublishCompletion::OwedCompactionFact { retry_event, .. }
-                    | AgentPublishCompletion::RollingCompactionStart { retry_event } => retry_event,
-                    _ => unreachable!("matched direct retry"),
-                };
-                let Some(event) = retry_event.clone() else {
-                    return;
-                };
-                let mut approved = completion;
-                match &mut approved {
-                    AgentPublishCompletion::ToolTerminal { retry_event, .. }
-                    | AgentPublishCompletion::OutputLengthDormantRepair { retry_event, .. }
-                    | AgentPublishCompletion::ReactiveContextRecovery { retry_event, .. }
-                    | AgentPublishCompletion::ReactiveContextRecoveryStart {
-                        retry_event, ..
-                    }
-                    | AgentPublishCompletion::StandaloneContextRejection { retry_event, .. }
-                    | AgentPublishCompletion::OwedCompactionFact { retry_event, .. }
-                    | AgentPublishCompletion::RollingCompactionStart { retry_event } => {
-                        *retry_event = None;
-                    }
-                    _ => unreachable!("matched direct retry"),
-                };
-                self.commit_approved_agent_retry(cid, *event, approved);
-                return;
-            }
-            let (batch_parent, retry_event) = match &completion {
-                AgentPublishCompletion::GatedFinal {
-                    batch_parent,
-                    retry_event,
-                    ..
-                }
-                | AgentPublishCompletion::OutputLengthContinuation {
-                    batch_parent,
-                    retry_event,
-                    ..
-                }
-                | AgentPublishCompletion::OutputLengthSteer {
-                    batch_parent,
-                    retry_event,
-                }
-                | AgentPublishCompletion::OutputLengthPreDeliveryFailure {
-                    batch_parent,
-                    retry_event,
-                    ..
-                } => (*batch_parent, retry_event.clone()),
-                AgentPublishCompletion::OutputLengthDormantRepair { .. } => {
-                    unreachable!("dormant repair returned above")
-                }
-                AgentPublishCompletion::ReactiveContextRecovery { .. } => {
-                    unreachable!("reactive recovery returned above")
-                }
-                AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => {
-                    unreachable!("reactive start returned above")
-                }
-                _ => unreachable!(),
+        let retained = completion.owned_publication().cloned();
+        if let Some(publication) = retained.as_ref() {
+            let selected = self
+                .selected_head_for_agent(cid)
+                .unwrap_or(tau_proto::AgentHead::Root);
+            let branch_matches = match publication.owning_branch {
+                OwnedPublicationBranch::SemanticParent => true,
+                OwnedPublicationBranch::Exact(owner) => selected == owner,
+                OwnedPublicationBranch::DescendantOf(owner) => self
+                    .agent_runtime
+                    .agent_registry
+                    .agents
+                    .get(cid)
+                    .and_then(|agent| agent.identity.agent_id.as_deref())
+                    .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
+                    .is_some_and(|tree| tree.is_ancestor_head(owner, selected)),
             };
-            if self.selected_head_for_agent(cid) != Some(batch_parent) {
+            if !branch_matches {
                 self.prompt_coordination
                     .prompt_runtime
                     .pending_publish_completions
                     .insert(cid.clone(), completion);
                 return;
             }
-            let Some(event) = retry_event else {
-                return;
-            };
-            let mut approved = completion;
-            match &mut approved {
-                AgentPublishCompletion::GatedFinal { retry_event, .. }
-                | AgentPublishCompletion::OutputLengthContinuation { retry_event, .. }
-                | AgentPublishCompletion::OutputLengthSteer { retry_event, .. }
-                | AgentPublishCompletion::OutputLengthPreDeliveryFailure { retry_event, .. } => {
-                    *retry_event = None;
-                }
-                AgentPublishCompletion::OutputLengthDormantRepair { .. } => {
-                    unreachable!("dormant repair returned above")
-                }
-                AgentPublishCompletion::ReactiveContextRecovery { .. } => {
-                    unreachable!("reactive recovery returned above")
-                }
-                AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => {
-                    unreachable!("reactive start returned above")
-                }
-                _ => unreachable!(),
-            }
-            self.commit_approved_agent_retry(cid, *event, approved);
-            return;
         }
-        let (batch_parent, retry_prompts, approved_retry_event) = match &completion {
-            AgentPublishCompletion::ToolTerminal { .. } => {
-                unreachable!("tool terminal returned above")
+
+        let retry_prompts = match &completion {
+            AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => {
+                Some(retry_prompts.clone())
             }
-            AgentPublishCompletion::StandaloneContinuation {
-                batch_parent,
-                retry_prompts,
-                approved_retry_event,
-                ..
-            } => (
-                *batch_parent,
-                retry_prompts.clone(),
-                approved_retry_event.clone(),
-            ),
-            AgentPublishCompletion::GatedFinal { .. } => unreachable!("returned above"),
-            AgentPublishCompletion::OutputLengthContinuation { .. } => {
-                unreachable!("returned above")
-            }
-            AgentPublishCompletion::OutputLengthSteer { .. } => unreachable!("returned above"),
-            AgentPublishCompletion::OutputLengthPreDeliveryFailure { .. } => {
-                unreachable!("returned above")
-            }
-            AgentPublishCompletion::OutputLengthDormantRepair { .. } => {
-                unreachable!("returned above")
-            }
-            AgentPublishCompletion::ReactiveContextRecovery { .. } => {
-                unreachable!("returned above")
-            }
-            AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => {
-                unreachable!("returned above")
-            }
-            AgentPublishCompletion::StandaloneContextRejection { .. } => {
-                unreachable!("returned above")
-            }
-            AgentPublishCompletion::OwedCompactionFact { .. } => {
-                unreachable!("returned above")
-            }
-            AgentPublishCompletion::RollingCompactionStart { .. } => {
-                unreachable!("returned above")
-            }
-            AgentPublishCompletion::InitialPromptSubmission { .. } => {
-                unreachable!("initial submissions are never retained for retry")
-            }
+            _ => None,
         };
-        if retry_prompts.is_empty() {
-            return;
-        };
-        let selected = self
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get(cid)
-            .and_then(|agent| agent.identity.head)
-            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-        let on_owning_branch = self
-            .agent_runtime
-            .agent_registry
-            .agents
-            .get(cid)
-            .and_then(|agent| agent.identity.agent_id.as_deref())
-            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
-            .is_some_and(|tree| tree.is_ancestor_head(batch_parent, selected));
-        if !on_owning_branch {
-            self.prompt_coordination
-                .prompt_runtime
-                .pending_publish_completions
-                .insert(cid.clone(), completion);
-            return;
-        }
-        if let Some(approved_event) = approved_retry_event {
-            let mut approved_completion = completion.clone();
-            let AgentPublishCompletion::StandaloneContinuation {
-                approved_retry_event,
-                complete_on_commit,
-                ..
-            } = &mut approved_completion
-            else {
-                return;
-            };
-            *approved_retry_event = None;
-            *complete_on_commit = retry_prompts.len() == 1;
-            self.commit_approved_agent_retry(cid, *approved_event, approved_completion);
+        let retried_approved_publication = retained.is_some();
+        if let Some(publication) = retained {
+            match publication.retry_policy {
+                OwnedPublicationRetryPolicy::ApprovedEventWithoutInterception => {}
+            }
+            let mut approved = completion.clone();
+            *approved
+                .owned_publication_mut()
+                .expect("retained completion must expose publication ownership") = None;
+            if let AgentPublishCompletion::StandaloneContinuation {
+                complete_on_commit, ..
+            } = &mut approved
+            {
+                *complete_on_commit = retry_prompts
+                    .as_ref()
+                    .is_some_and(|prompts| prompts.len() == 1);
+            }
+            self.commit_approved_agent_retry(
+                cid,
+                *publication.approved_event,
+                approved,
+                publication.semantic_parent,
+            );
             if self
                 .prompt_coordination
                 .prompt_runtime
                 .pending_publish_completions
                 .contains_key(cid)
+                || retry_prompts
+                    .as_ref()
+                    .is_none_or(|prompts| prompts.len() <= 1)
             {
                 return;
             }
-            if retry_prompts.len() == 1 {
-                return;
-            }
-            let mut remaining_completion = completion;
-            let AgentPublishCompletion::StandaloneContinuation {
-                approved_retry_event,
-                ..
-            } = &mut remaining_completion
-            else {
-                return;
-            };
-            *approved_retry_event = None;
-            self.publish_prompts_as_steered(
-                cid,
-                retry_prompts[1..].to_vec(),
-                Some(remaining_completion),
-            );
+        }
+
+        let Some(retry_prompts) = retry_prompts else {
+            return;
+        };
+        if retry_prompts.is_empty() {
             return;
         }
-        self.publish_prompts_as_steered(cid, retry_prompts, Some(completion));
+        if retried_approved_publication {
+            let mut remaining = completion;
+            *remaining
+                .owned_publication_mut()
+                .expect("standalone continuation owns publication") = None;
+            self.publish_prompts_as_steered(cid, retry_prompts[1..].to_vec(), Some(remaining));
+        } else {
+            self.publish_prompts_as_steered(cid, retry_prompts, Some(completion));
+        }
     }
 
     /// Retry retained append-rejected publications when ordinary runtime input
@@ -1539,7 +1363,7 @@ impl Harness {
                 continuation: Some(PostCommitContinuation::AgentPublish(Box::new(
                     AgentPublishCompletion::OutputLengthDormantRepair {
                         step,
-                        retry_event: None,
+                        owned_publication: None,
                     },
                 ))),
                 notify_watchers: false,
@@ -2885,7 +2709,7 @@ impl Harness {
                             ),
                             Some(AgentPublishCompletion::OwedCompactionFact {
                                 batch_parent,
-                                retry_event: None,
+                                owned_publication: None,
                             }),
                             false,
                         );
@@ -2910,7 +2734,7 @@ impl Harness {
                                 batch_parent: append_outcome
                                     .and_then(|outcome| outcome.folded_node_id)
                                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                                retry_event: None,
+                                owned_publication: None,
                             }),
                             false,
                         );
@@ -3399,7 +3223,7 @@ impl Harness {
                     source: source.cloned(),
                     retry_prompts: Vec::new(),
                     complete_on_commit: true,
-                    approved_retry_event: None,
+                    owned_publication: None,
                 };
                 if !self
                     .fold_pending_prompts_as_steered_with_completion(&cid, Some(completion.clone()))

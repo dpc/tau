@@ -2316,7 +2316,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
                 source: None,
                 retry_prompts: vec![PendingPrompt::user("stale retry".to_owned())],
                 complete_on_commit: true,
-                approved_retry_event: None,
+                owned_publication: None,
             },
         );
     h.prompt_coordination

@@ -404,6 +404,37 @@ impl DormantOutputLengthCompletion {
     }
 }
 
+/// Exact interceptor-approved publication retained for one already-owed fact.
+#[derive(Clone)]
+pub(crate) struct OwnedPublication {
+    /// Exact event after the interceptor chain approved any replacement.
+    pub(crate) approved_event: Box<Event>,
+    /// Exact semantic parent used by the publication's first admission attempt.
+    pub(crate) semantic_parent: tau_core::AgentEventParent,
+    /// Branch selection contract that gates retry without changing ownership.
+    pub(crate) owning_branch: OwnedPublicationBranch,
+    /// Explicit retry contract for this already-owed publication.
+    pub(crate) retry_policy: OwnedPublicationRetryPolicy,
+}
+
+/// Existing branch-selection guards for an already-owed publication.
+#[derive(Clone, Copy)]
+pub(crate) enum OwnedPublicationBranch {
+    /// Retry does not depend on the currently selected branch.
+    SemanticParent,
+    /// Retry only while this exact head is selected.
+    Exact(tau_proto::AgentHead),
+    /// Retry while the selected head descends from this owning head.
+    DescendantOf(tau_proto::AgentHead),
+}
+
+/// Existing retry behavior for an already-owed publication.
+#[derive(Clone, Copy)]
+pub(crate) enum OwnedPublicationRetryPolicy {
+    /// Retry the exact approved event without running interception again.
+    ApprovedEventWithoutInterception,
+}
+
 /// Harness-owned continuation bound to one exact agent publication envelope.
 #[derive(Clone)]
 pub(crate) enum AgentPublishCompletion {
@@ -413,7 +444,7 @@ pub(crate) enum AgentPublishCompletion {
         /// Exact call whose terminal already won runtime arbitration.
         call_id: tau_proto::ToolCallId,
         /// Exact interceptor-approved terminal retained after append rejection.
-        retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
     /// Report a correlated initial-prompt failure if its canonical submission
     /// cannot commit.
@@ -429,7 +460,7 @@ pub(crate) enum AgentPublishCompletion {
         /// Exact post-commit terminal or continuation behavior.
         disposition: super::gated_final::GatedFinalDisposition,
         /// Exact interceptor-approved event retained after append rejection.
-        retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
     /// Start the single output-length successor only after the planned source
     /// response has committed on its owning branch.
@@ -439,7 +470,7 @@ pub(crate) enum AgentPublishCompletion {
         /// Typed post-commit transition for the committed response.
         reducer: super::output_length_continuation_reducer::CommittedOutputLengthContinuation,
         /// Exact interceptor-approved event retained after append rejection.
-        retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
     /// Retain the exact planned continuation steer until its plan branch
     /// accepts the durable append.
@@ -447,7 +478,7 @@ pub(crate) enum AgentPublishCompletion {
         /// Exact planned-response node that this steer must extend.
         batch_parent: tau_proto::AgentHead,
         /// Exact interceptor-approved steer retained after append rejection.
-        retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
     /// Publish one reserved successor failure only after its synthetic
     /// prompt-start authority commits.
@@ -457,7 +488,7 @@ pub(crate) enum AgentPublishCompletion {
         /// Harness-synthesized terminal retained across append rejection.
         response: Box<tau_proto::ProviderResponseFinished>,
         /// Exact interceptor-approved prompt-start retained after rejection.
-        retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
     /// Advance one explicit-parent dormant output-length repair only after its
     /// exact durable append commits.
@@ -465,7 +496,7 @@ pub(crate) enum AgentPublishCompletion {
         /// Semantically valid next action after commit.
         step: DormantOutputLengthCompletion,
         /// Exact interceptor-approved repair fact retained after rejection.
-        retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
     /// Start reactive compaction only after its exact rejection response
     /// commits.
@@ -474,7 +505,7 @@ pub(crate) enum AgentPublishCompletion {
         reducer: super::reactive_context_recovery_reducer::CommittedReactiveContextRecovery,
         /// Exact interceptor-approved rejection retained after append
         /// rejection.
-        retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
     /// Retain the exact reactive transaction claim until its start commits.
     ReactiveContextRecoveryStart {
@@ -484,7 +515,7 @@ pub(crate) enum AgentPublishCompletion {
         failure_after_commit: Option<Box<tau_proto::AgentStandaloneCompactionFailed>>,
         /// Exact interceptor-approved transaction start retained after
         /// rejection.
-        retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
     /// Commit one canonical standalone context rejection before deriving and
     /// appending its typed failure and retreat plan.
@@ -492,7 +523,7 @@ pub(crate) enum AgentPublishCompletion {
         /// Typed post-commit transition for the committed provider rejection.
         reducer: super::standalone_compaction_terminal_reducer::CommittedStandaloneContextRejection,
         /// Exact interceptor-approved response retained after append rejection.
-        retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
     /// Retain one documented owed compaction fact until its semantic append
     /// commits.
@@ -500,14 +531,14 @@ pub(crate) enum AgentPublishCompletion {
         /// Exact semantic parent captured when the owed fact was derived.
         batch_parent: tau_proto::AgentHead,
         /// Exact interceptor-approved fact retained after rejection.
-        retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
     /// Retain a successful pass's exact rolling successor until its durable
     /// start append commits.
     RollingCompactionStart {
         /// Exact interceptor-approved successor start retained after append
         /// rejection.
-        retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
     /// Resume the successful standalone compaction after the final steer in its
     /// completion batch commits.
@@ -528,11 +559,117 @@ pub(crate) enum AgentPublishCompletion {
         complete_on_commit: bool,
         /// Exact interceptor-approved steer retained after persistence
         /// rejection.
-        approved_retry_event: Option<Box<Event>>,
+        owned_publication: Option<OwnedPublication>,
     },
 }
 
 impl AgentPublishCompletion {
+    /// Return the retained owned publication, when admission has rejected it.
+    pub(super) fn owned_publication(&self) -> Option<&OwnedPublication> {
+        match self {
+            Self::ToolTerminal {
+                owned_publication, ..
+            }
+            | Self::GatedFinal {
+                owned_publication, ..
+            }
+            | Self::OutputLengthContinuation {
+                owned_publication, ..
+            }
+            | Self::OutputLengthSteer {
+                owned_publication, ..
+            }
+            | Self::OutputLengthPreDeliveryFailure {
+                owned_publication, ..
+            }
+            | Self::OutputLengthDormantRepair {
+                owned_publication, ..
+            }
+            | Self::ReactiveContextRecovery {
+                owned_publication, ..
+            }
+            | Self::ReactiveContextRecoveryStart {
+                owned_publication, ..
+            }
+            | Self::StandaloneContextRejection {
+                owned_publication, ..
+            }
+            | Self::OwedCompactionFact {
+                owned_publication, ..
+            }
+            | Self::RollingCompactionStart { owned_publication }
+            | Self::StandaloneContinuation {
+                owned_publication, ..
+            } => owned_publication.as_ref(),
+            Self::InitialPromptSubmission { .. } => None,
+        }
+    }
+
+    /// Return the single owned-publication slot for event families whose
+    /// existing contract retains an approved publication through rejection.
+    pub(super) fn owned_publication_mut(&mut self) -> Option<&mut Option<OwnedPublication>> {
+        match self {
+            Self::ToolTerminal {
+                owned_publication, ..
+            }
+            | Self::GatedFinal {
+                owned_publication, ..
+            }
+            | Self::OutputLengthContinuation {
+                owned_publication, ..
+            }
+            | Self::OutputLengthSteer {
+                owned_publication, ..
+            }
+            | Self::OutputLengthPreDeliveryFailure {
+                owned_publication, ..
+            }
+            | Self::OutputLengthDormantRepair {
+                owned_publication, ..
+            }
+            | Self::ReactiveContextRecovery {
+                owned_publication, ..
+            }
+            | Self::ReactiveContextRecoveryStart {
+                owned_publication, ..
+            }
+            | Self::StandaloneContextRejection {
+                owned_publication, ..
+            }
+            | Self::OwedCompactionFact {
+                owned_publication, ..
+            }
+            | Self::RollingCompactionStart { owned_publication }
+            | Self::StandaloneContinuation {
+                owned_publication, ..
+            } => Some(owned_publication),
+            Self::InitialPromptSubmission { .. } => None,
+        }
+    }
+
+    /// Preserve each retained family's existing branch-selection retry guard.
+    pub(super) const fn owned_publication_branch(&self) -> Option<OwnedPublicationBranch> {
+        match self {
+            Self::GatedFinal { batch_parent, .. }
+            | Self::OutputLengthContinuation { batch_parent, .. }
+            | Self::OutputLengthSteer { batch_parent, .. }
+            | Self::OutputLengthPreDeliveryFailure { batch_parent, .. } => {
+                Some(OwnedPublicationBranch::Exact(*batch_parent))
+            }
+            Self::StandaloneContinuation { batch_parent, .. } => {
+                Some(OwnedPublicationBranch::DescendantOf(*batch_parent))
+            }
+            Self::ToolTerminal { .. }
+            | Self::OutputLengthDormantRepair { .. }
+            | Self::ReactiveContextRecovery { .. }
+            | Self::ReactiveContextRecoveryStart { .. }
+            | Self::StandaloneContextRejection { .. }
+            | Self::OwedCompactionFact { .. }
+            | Self::RollingCompactionStart { .. } => Some(OwnedPublicationBranch::SemanticParent),
+            Self::InitialPromptSubmission { .. } => None,
+        }
+    }
+
     /// Return the exact provider terminal prompt retained by this completion.
     pub(super) fn provider_terminal_prompt_id(&self) -> Option<&tau_proto::AgentPromptId> {
         let response = match self {
@@ -543,9 +680,9 @@ impl AgentPublishCompletion {
             Self::OutputLengthContinuation { reducer, .. } => Some(reducer.response.as_ref()),
             Self::OutputLengthPreDeliveryFailure { response, .. } => Some(response.as_ref()),
             Self::GatedFinal {
-                retry_event: Some(event),
+                owned_publication: Some(publication),
                 ..
-            } => match event.as_ref() {
+            } => match publication.approved_event.as_ref() {
                 Event::ProviderResponseFinished(response) => Some(response),
                 _ => None,
             },
@@ -572,9 +709,9 @@ impl AgentPublishCompletion {
             Self::OutputLengthContinuation { reducer, .. } => Some(reducer.response.as_ref()),
             Self::OutputLengthPreDeliveryFailure { response, .. } => Some(response.as_ref()),
             Self::GatedFinal {
-                retry_event: Some(event),
+                owned_publication: Some(publication),
                 ..
-            } => match event.as_ref() {
+            } => match publication.approved_event.as_ref() {
                 Event::ProviderResponseFinished(response) => Some(response),
                 _ => None,
             },
@@ -1292,9 +1429,9 @@ impl Harness {
                 !matches!(
                     completion,
                     AgentPublishCompletion::OwedCompactionFact {
-                        retry_event: Some(event),
+                        owned_publication: Some(publication),
                         ..
-                    } if matches_request(event)
+                    } if matches_request(&publication.approved_event)
                 )
             });
         if removed_pending {
@@ -1393,6 +1530,7 @@ impl Harness {
         cid: &AgentId,
         event: Event,
         completion: AgentPublishCompletion,
+        semantic_parent: tau_core::AgentEventParent,
     ) {
         let notify_watchers = match &completion {
             AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => retry_prompts
@@ -1411,24 +1549,6 @@ impl Harness {
             AgentPublishCompletion::RollingCompactionStart { .. } => false,
             AgentPublishCompletion::InitialPromptSubmission { .. } => false,
         };
-        let fold_parent = match &completion {
-            AgentPublishCompletion::OutputLengthDormantRepair { step, .. } => {
-                Some(step.fold_parent())
-            }
-            AgentPublishCompletion::OutputLengthSteer { batch_parent, .. } => {
-                Some(tau_core::AgentEventParent::from_head(*batch_parent))
-            }
-            AgentPublishCompletion::ReactiveContextRecovery { reducer, .. } => Some(
-                tau_core::AgentEventParent::from_head(reducer.checkpoint.through),
-            ),
-            AgentPublishCompletion::ReactiveContextRecoveryStart { checkpoint, .. } => {
-                Some(tau_core::AgentEventParent::from_head(checkpoint.through))
-            }
-            AgentPublishCompletion::OwedCompactionFact { batch_parent, .. } => {
-                Some(tau_core::AgentEventParent::from_head(*batch_parent))
-            }
-            _ => None,
-        };
         let agent_id = self.agent_id_for_event(&event).or_else(|| {
             self.agent_runtime
                 .agent_registry
@@ -1446,7 +1566,7 @@ impl Harness {
                 cid: cid.clone(),
                 agent_id,
                 session_generation: self.session_runtime.current_session_generation,
-                fold_parent,
+                fold_parent: Some(semantic_parent),
                 suppress_activation_dispatch: true,
                 continuation: Some(PostCommitContinuation::AgentPublish(Box::new(completion))),
                 notify_watchers,

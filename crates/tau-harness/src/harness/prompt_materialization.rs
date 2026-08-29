@@ -429,7 +429,7 @@ impl Harness {
                         response: Box::new(response.clone()),
                         assistant_text: None,
                     },
-                    retry_event: None,
+                    owned_publication: None,
                 });
                 self.publish_finished_response_for_agent(cid, None, &response, completion, false);
             }
@@ -453,7 +453,7 @@ impl Harness {
                     AgentPublishCompletion::OutputLengthPreDeliveryFailure {
                         batch_parent,
                         response: Box::new(response),
-                        retry_event: None,
+                        owned_publication: None,
                     },
                 ))),
                 notify_watchers: false,
@@ -576,7 +576,7 @@ impl Harness {
                     response: Box::new(response.clone()),
                     assistant_text: None,
                 },
-                retry_event: None,
+                owned_publication: None,
             });
             self.publish_finished_response_for_agent(cid, None, response, completion, false);
             return;

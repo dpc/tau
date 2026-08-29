@@ -3231,7 +3231,7 @@ fn earlier_gated_terminal_cannot_claim_later_prompt_cancellation() {
                     reducer: CommittedGatedFinalReducer::Shared,
                 }),
             },
-            retry_event: None,
+            owned_publication: None,
         };
         let sync = ConversationHeadSync {
             cid: cid.clone(),

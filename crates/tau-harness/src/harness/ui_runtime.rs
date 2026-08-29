@@ -1257,7 +1257,7 @@ impl Harness {
                     response: Box::new(response.clone()),
                     assistant_text: None,
                 },
-                retry_event: None,
+                owned_publication: None,
             });
             self.publish_finished_response_for_agent(cid, None, &response, completion, false);
             return;
@@ -1404,7 +1404,7 @@ impl Harness {
                     batch_parent: self
                         .selected_head_for_agent(cid)
                         .unwrap_or(tau_proto::AgentHead::Root),
-                    retry_event: None,
+                    owned_publication: None,
                 }),
                 false,
             );

@@ -310,7 +310,7 @@ fn side_agent_pending_message_wake_defers_automatic_decision_until_final_respons
             .expect("decision-free terminal continuation remains retryable");
         let AgentPublishCompletion::GatedFinal {
             disposition: GatedFinalDisposition::Accept { terminal },
-            retry_event: Some(retry_event),
+            owned_publication: Some(publication),
             ..
         } = retained
         else {
@@ -319,7 +319,7 @@ fn side_agent_pending_message_wake_defers_automatic_decision_until_final_respons
         assert_eq!(terminal.response.agent_prompt_id, first_prompt_id);
         assert!(terminal.response.automatic_compaction_decision.is_none());
         assert!(matches!(
-            retry_event.as_ref(),
+            publication.approved_event.as_ref(),
             Event::ProviderResponseFinished(response)
                 if response.agent_prompt_id == first_prompt_id
                     && response.automatic_compaction_decision.is_none()

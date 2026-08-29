@@ -22,7 +22,9 @@ mod ui_liveness;
 use super::dispatch::{context_overflow_response, provider_text_response};
 use super::*;
 use crate::harness::gated_final::GatedFinalDisposition;
-use crate::harness::interception::AgentPublishCompletion;
+use crate::harness::interception::{
+    AgentPublishCompletion, OwnedPublication, OwnedPublicationBranch, OwnedPublicationRetryPolicy,
+};
 use crate::harness::{PendingTool, assistant_text_from_output_items};
 
 /// Construct one authenticated-provenance report for ordinary extension
@@ -699,11 +701,21 @@ fn challenged_working_final_append_failure_retains_retry_owner() {
                 GatedFinalDisposition::Challenge {
                     challenge: path_crate_agent::FinalStatusChallenge::Working { title },
                 },
-            retry_event: Some(retry),
+            owned_publication: Some(publication),
         } if *batch_parent == owning_head
             && title == "append retry"
+            && publication.semantic_parent
+                == tau_core::AgentEventParent::from_head(owning_head)
             && matches!(
-                retry.as_ref(),
+                publication.owning_branch,
+                OwnedPublicationBranch::Exact(owner) if owner == owning_head
+            )
+            && matches!(
+                publication.retry_policy,
+                OwnedPublicationRetryPolicy::ApprovedEventWithoutInterception
+            )
+            && matches!(
+                publication.approved_event.as_ref(),
                 Event::ProviderResponseFinished(response)
                     if response.agent_prompt_id == prompt_id
                         && assistant_text_from_output_items(&response.output_items).as_deref()
@@ -934,14 +946,17 @@ fn retained_working_final_rejects_root_and_descendant_head_drift() {
                 title: "exact parent".to_owned(),
             },
         },
-        retry_event: Some(Box::new(Event::ProviderResponseFinished(
-            provider_text_response(
+        owned_publication: Some(OwnedPublication {
+            approved_event: Box::new(Event::ProviderResponseFinished(provider_text_response(
                 &tau_proto::AgentPromptId::parse(format!("retry-{suffix}"))
                     .expect("known-safe prompt id"),
                 agent_id.clone(),
                 "candidate",
-            ),
-        ))),
+            ))),
+            semantic_parent: tau_core::AgentEventParent::from_head(batch_parent),
+            owning_branch: OwnedPublicationBranch::Exact(batch_parent),
+            retry_policy: OwnedPublicationRetryPolicy::ApprovedEventWithoutInterception,
+        }),
     };
     let publish_child = |h: &mut Harness, suffix: &str| {
         h.publish_for_agent(
@@ -3487,7 +3502,7 @@ fn rejected_compaction_completion_steer_retries_after_recovery() {
         source: None,
         retry_prompts: vec![retry_prompt.clone(), final_retry_prompt],
         complete_on_commit: false,
-        approved_retry_event: None,
+        owned_publication: None,
     };
     let interceptor = connect_test_tool(&mut h, "retry-replacement-owner");
     h.handle_extension_event(
@@ -3661,7 +3676,7 @@ fn completion_steer_cannot_steal_queued_activation_ownership() {
             source: None,
             retry_prompts: vec![completion_prompt],
             complete_on_commit: true,
-            approved_retry_event: None,
+            owned_publication: None,
         }),
         false,
     );
@@ -3758,7 +3773,7 @@ fn completion_batch_purge_is_scoped_by_agent_and_transaction() {
         source: None,
         retry_prompts: vec![PendingPrompt::user(text.to_owned())],
         complete_on_commit: true,
-        approved_retry_event: None,
+        owned_publication: None,
     };
     let completion_a = completion("agent A completion");
     for (cid, agent_id, text, owned_completion) in [

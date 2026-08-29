@@ -1794,7 +1794,7 @@ fn agent_unload_discards_registered_input_wait() {
                 source: None,
                 retry_prompts: vec![PendingPrompt::user("stale unload retry".to_owned())],
                 complete_on_commit: true,
-                approved_retry_event: None,
+                owned_publication: None,
             },
         );
     h.prompt_coordination

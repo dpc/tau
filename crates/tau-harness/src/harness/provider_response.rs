@@ -505,7 +505,7 @@ impl Harness {
                     .and_then(|agent| agent.identity.head)
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
                 disposition: GatedFinalDisposition::Challenge { challenge },
-                retry_event: None,
+                owned_publication: None,
             }),
             ProviderTerminalPlan::FinalStatusGated(FinalStatusGatedPlan::Accept) => {
                 Some(AgentPublishCompletion::GatedFinal {
@@ -528,7 +528,7 @@ impl Harness {
                             reducer: CommittedGatedFinalReducer::Shared,
                         }),
                     },
-                    retry_event: None,
+                    owned_publication: None,
                 })
             }
             ProviderTerminalPlan::StandaloneCompaction(_) => {
@@ -600,7 +600,7 @@ impl Harness {
                             CommittedGatedFinalReducer::AutomaticCompactionOrPendingMessageWake,
                     }),
                 },
-                retry_event: None,
+                owned_publication: None,
             }),
             ProviderTerminalPlan::Other => completion,
             ProviderTerminalPlan::StandaloneCompaction(_)
@@ -636,7 +636,7 @@ impl Harness {
                     .and_then(|agent| agent.identity.head)
                     .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
                 reducer,
-                retry_event: None,
+                owned_publication: None,
             }),
             ProviderTerminalPlan::Other => completion,
             ProviderTerminalPlan::StandaloneCompaction(_)
@@ -689,7 +689,7 @@ impl Harness {
                         reducer,
                     }),
                 },
-                retry_event: None,
+                owned_publication: None,
             }),
             ProviderTerminalPlan::Other => completion,
             ProviderTerminalPlan::StandaloneCompaction(_)
@@ -1120,7 +1120,7 @@ impl Harness {
                     checkpoint,
                     source: source.clone(),
                 },
-                retry_event: None,
+                owned_publication: None,
             }),
             false,
         );
@@ -1298,7 +1298,7 @@ impl Harness {
             Some(AgentPublishCompletion::ReactiveContextRecoveryStart {
                 checkpoint: checkpoint.clone(),
                 failure_after_commit: Some(Box::new(failure)),
-                retry_event: None,
+                owned_publication: None,
             }),
             false,
         );
@@ -1405,7 +1405,7 @@ impl Harness {
             Some(AgentPublishCompletion::ReactiveContextRecoveryStart {
                 checkpoint: checkpoint.clone(),
                 failure_after_commit: None,
-                retry_event: None,
+                owned_publication: None,
             }),
             false,
         );
@@ -1441,7 +1441,9 @@ impl Harness {
             cid,
             None,
             event,
-            Some(AgentPublishCompletion::RollingCompactionStart { retry_event: None }),
+            Some(AgentPublishCompletion::RollingCompactionStart {
+                owned_publication: None,
+            }),
             false,
         );
     }
@@ -1682,7 +1684,7 @@ impl Harness {
                         unreachable!("standalone boundary always captures an explicit parent")
                     }
                 },
-                retry_event: None,
+                owned_publication: None,
             }),
             false,
         );
@@ -1797,7 +1799,7 @@ impl Harness {
                         response: Box::new(response.clone()),
                         source: source.cloned(),
                     },
-                    retry_event: None,
+                    owned_publication: None,
                 }),
                 false,
             );
@@ -2015,7 +2017,7 @@ impl Harness {
             }),
             Some(AgentPublishCompletion::OwedCompactionFact {
                 batch_parent,
-                retry_event: None,
+                owned_publication: None,
             }),
             false,
         );
@@ -3435,7 +3437,7 @@ impl Harness {
                 batch_parent: self
                     .selected_head_for_agent(cid)
                     .unwrap_or(tau_proto::AgentHead::Root),
-                retry_event: None,
+                owned_publication: None,
             };
             self.fold_pending_prompts_as_steered_with_completion(cid, Some(completion));
             self.dispatch_activation_after_publish_idle(cid);

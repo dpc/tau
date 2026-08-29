@@ -526,7 +526,7 @@ impl Harness {
                         Event::ProviderToolResult(result),
                         Some(AgentPublishCompletion::ToolTerminal {
                             call_id,
-                            retry_event: None,
+                            owned_publication: None,
                         }),
                         false,
                     );
@@ -628,7 +628,7 @@ impl Harness {
                         Event::ProviderToolError(error),
                         Some(AgentPublishCompletion::ToolTerminal {
                             call_id,
-                            retry_event: None,
+                            owned_publication: None,
                         }),
                         false,
                     );
@@ -1813,7 +1813,11 @@ impl Harness {
             })
             && self.selected_head_for_agent(&sync.cid) != Some(batch_parent)
         {
-            self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
+            self.retain_rejected_agent_publish(
+                sync_head_for.as_ref(),
+                &event,
+                tau_core::AgentEventParent::from_head(batch_parent),
+            );
             self.emit_info("retaining branch-owned publication until its exact parent is selected");
             return;
         }
@@ -1923,7 +1927,7 @@ impl Harness {
                 self.retain_rejected_ui_compaction_start(&event);
                 self.clear_rejected_eager_compaction_start(&event);
                 self.rollback_failed_wait_compaction_terminal(&event);
-                self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event);
+                self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event, parent_for_fold);
                 if !matches!(
                     sync_head_for
                         .as_ref()

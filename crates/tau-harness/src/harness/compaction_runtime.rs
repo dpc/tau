@@ -1410,7 +1410,9 @@ impl Harness {
                 supersedes: None,
                 trigger,
             }),
-            Some(AgentPublishCompletion::RollingCompactionStart { retry_event: None }),
+            Some(AgentPublishCompletion::RollingCompactionStart {
+                owned_publication: None,
+            }),
             false,
         );
         if fitting.is_some() {
