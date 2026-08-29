@@ -150,6 +150,21 @@ fn shared_egress_ownership_is_deduplicated_across_attachments() {
     log.acknowledge_egress(first, &pending);
 }
 
+/// A normal log must not allocate measurement state when its trace is disabled.
+#[test]
+fn disabled_live_suffix_measurement_allocates_no_observation_state() {
+    let log = EventLog::new();
+    let consumer = log.register_consumer();
+    let _ = log.append_egress(
+        routed_notice("disabled"),
+        &[tau_core::SharedDeliveryTarget::new(log.group(), consumer)],
+    );
+    assert!(
+        log.inner.lock().expect("log").delivery_memory.is_none(),
+        "disabled tracing must retain no measurement state"
+    );
+}
+
 /// The real enabled event-log seams must cache each recursive estimate once,
 /// retain attachment/strong-reference high water, and publish a final zero
 /// current state after acknowledgement.
@@ -167,6 +182,7 @@ fn enabled_live_suffix_measurement_tracks_and_releases_real_ownership() {
         .finish();
     tracing::subscriber::with_default(subscriber, || {
         let log = EventLog::new();
+        log.force_delivery_memory_for_test();
         let first = log.register_consumer();
         let second = log.register_consumer();
         let targets = [

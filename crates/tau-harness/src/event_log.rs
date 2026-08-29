@@ -77,6 +77,14 @@ struct EventLogInner {
     next_consumer: u64,
     /// Guarded content-free measurement state, absent by default.
     delivery_memory: Option<Box<DeliveryMemoryState>>,
+    /// Test-only per-log guard override for parallel measurement assertions.
+    ///
+    /// Thread-local subscribers still share tracing's callsite-interest cache,
+    /// so unrelated tests may change the cached guard result. This flag
+    /// bypasses only that guard; the local subscriber still owns trace
+    /// publication.
+    #[cfg(test)]
+    force_delivery_memory: bool,
 }
 
 /// Enabled-only estimates and high-water aggregates for the live suffix.
@@ -186,6 +194,8 @@ impl EventLog {
                 consumers: HashMap::new(),
                 next_consumer: 1,
                 delivery_memory: None,
+                #[cfg(test)]
+                force_delivery_memory: false,
             }),
             changed: Condvar::new(),
         })
@@ -492,10 +502,16 @@ impl EventLog {
     /// Recursively measures the canonical shared live suffix behind its
     /// explicit trace guard and emits no payload or process-local identity.
     fn observe_delivery_memory_locked(inner: &mut EventLogInner) {
-        if !tracing::enabled!(
+        let tracing_enabled = tracing::enabled!(
             target: "tau_harness::delivery_memory",
             tracing::Level::TRACE
-        ) {
+        );
+        #[cfg(not(test))]
+        if !tracing_enabled {
+            return;
+        }
+        #[cfg(test)]
+        if !inner.force_delivery_memory && !tracing_enabled {
             return;
         }
         let mut measurement = inner
@@ -583,6 +599,15 @@ impl EventLog {
             "decoded delivery memory ownership"
         );
         inner.delivery_memory = Some(measurement);
+    }
+
+    /// Forces measurement past shared callsite interest for this test log.
+    #[cfg(test)]
+    fn force_delivery_memory_for_test(&self) {
+        self.inner
+            .lock()
+            .expect("event log mutex poisoned")
+            .force_delivery_memory = true;
     }
 
     /// Reserves the next harness runtime event-log sequence.
