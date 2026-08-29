@@ -1,4 +1,8 @@
-use std::time::Duration;
+use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Barrier};
+use std::{io, thread};
+
+use socket2::{Domain, Socket, Type};
 
 use super::*;
 
@@ -108,11 +112,10 @@ fn runtime_embedded_echoes_message() {
 #[test]
 fn runtime_daemon_echoes_one_client_and_joins() {
     let runtime = TestRuntime::new().expect("runtime should be created");
-    let daemon = runtime.spawn_daemon("daemon-session", Some(1));
+    let daemon = runtime
+        .spawn_daemon("daemon-session", Some(1))
+        .expect("daemon listener should bind");
 
-    runtime
-        .wait_until_ready(Duration::from_secs(2))
-        .expect("daemon socket should appear");
     let response = runtime
         .send_daemon_message("daemon-session", "daemon hello")
         .expect("daemon echo should succeed");
@@ -123,23 +126,88 @@ fn runtime_daemon_echoes_one_client_and_joins() {
         .expect("one-client daemon should exit cleanly");
 }
 
-/// Readiness waiting succeeds immediately for an existing path and reports the
-/// zero-duration timeout branch without adding a scheduler-dependent sleep.
+/// Filesystem socket publication is not listener readiness: under concurrent
+/// startup, every worker holds a stream socket after `bind` but before
+/// `listen`, where the former path-existence predicate would pass and every
+/// client gets `ConnectionRefused`. Each worker then starts a pre-bound test
+/// daemon and proves the new ownership boundary accepts its exact single client
+/// and joins.
 #[test]
-fn wait_for_path_handles_existing_and_zero_timeout_paths() {
-    let tempdir = tempfile::TempDir::new().expect("tempdir should be created");
-    let existing_path = tempdir.path().join("existing");
-    std::fs::write(&existing_path, "").expect("existing path should be created");
-    let missing_path = tempdir.path().join("missing");
+fn daemon_listener_readiness_survives_forced_pre_listen_contention() {
+    const WORKERS: usize = 16;
 
-    wait_for_path(&existing_path, Duration::ZERO).expect("existing path should be ready");
-    let error =
-        wait_for_path(&missing_path, Duration::ZERO).expect_err("missing path should time out");
-    assert!(matches!(
-        error,
-        WaitError::Timeout { path, timeout }
-            if path == missing_path && timeout == Duration::ZERO
-    ));
+    let pre_listen_sockets = (0..WORKERS)
+        .map(|worker| {
+            let tempdir =
+                tempfile::TempDir::new().expect("temporary socket root should be created");
+            let path = tempdir.path().join(format!("pre-listen-{worker}.sock"));
+            let socket = Socket::new(Domain::UNIX, Type::STREAM, None)
+                .expect("stream socket should be created");
+            socket
+                .bind(&socket2::SockAddr::unix(&path).expect("socket path should be valid"))
+                .expect("stream socket should bind without listening");
+            (tempdir, path, socket)
+        })
+        .collect::<Vec<_>>();
+    let pre_listen_start = Arc::new(Barrier::new(WORKERS));
+    let pre_listen_workers = pre_listen_sockets
+        .into_iter()
+        .map(|(tempdir, path, socket)| {
+            let pre_listen_start = Arc::clone(&pre_listen_start);
+            thread::spawn(move || {
+                pre_listen_start.wait();
+                assert!(
+                    path.exists(),
+                    "bound socket path was not published: {}",
+                    path.display()
+                );
+                let error = UnixStream::connect(&path)
+                    .expect_err("a bound but unlistening socket must refuse a stream client");
+                assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+                drop(socket);
+                std::fs::remove_file(&path).expect("unlistening socket path should be removed");
+                drop(tempdir);
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in pre_listen_workers {
+        worker
+            .join()
+            .expect("pre-listen contention worker should not panic");
+    }
+
+    let daemons = (0..WORKERS)
+        .map(|worker| {
+            let session_id = format!("daemon-{worker}");
+            let runtime = TestRuntime::new().expect("runtime should be created");
+            let daemon = runtime
+                .spawn_daemon(&session_id, Some(1))
+                .expect("daemon listener should bind");
+            (runtime, daemon, session_id)
+        })
+        .collect::<Vec<_>>();
+    let daemon_start = Arc::new(Barrier::new(WORKERS));
+    let daemon_workers = daemons
+        .into_iter()
+        .map(|(runtime, daemon, session_id)| {
+            let daemon_start = Arc::clone(&daemon_start);
+            thread::spawn(move || {
+                daemon_start.wait();
+                let response = runtime
+                    .send_daemon_message(&session_id, "daemon hello")
+                    .expect("daemon echo should succeed");
+                assert_eq!(response, "daemon hello");
+                daemon
+                    .join()
+                    .expect("one-client daemon should exit cleanly");
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in daemon_workers {
+        worker
+            .join()
+            .expect("daemon contention worker should not panic");
+    }
 }
 
 /// Ensures panic payload formatting keeps useful string payloads instead of

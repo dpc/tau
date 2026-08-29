@@ -24,4 +24,8 @@ tau-ext-provider-builtin = { workspace = true, features = [
 tau-harness = { workspace = true, features = ["provider-test-support"] }
 tau-proto.workspace = true
 tau-session-inspect.workspace = true
+tau-socket.workspace = true
 tempfile.workspace = true
+
+[dev-dependencies]
+socket2.workspace = true

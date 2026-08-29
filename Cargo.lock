@@ -6417,12 +6417,14 @@ name = "tau-test-support"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "socket2",
  "tau-config",
  "tau-core",
  "tau-ext-provider-builtin",
  "tau-harness",
  "tau-proto",
  "tau-session-inspect",
+ "tau-socket",
  "tempfile",
 ]
 

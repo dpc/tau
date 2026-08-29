@@ -99,7 +99,9 @@ pub use crate::daemon::{
     send_daemon_message, send_daemon_message_with_trace,
 };
 #[cfg(any(test, feature = "echo-agent"))]
-pub use crate::daemon::{run_daemon_with_echo, run_embedded_message_with_echo};
+pub use crate::daemon::{
+    run_daemon_with_echo, run_daemon_with_echo_on_listener, run_embedded_message_with_echo,
+};
 pub use crate::error::{ExtensionSpawnError, HarnessError};
 pub use crate::extension::{harness_log_path, session_logs_dir};
 pub use crate::format::{format_extension_event, format_tool_progress};

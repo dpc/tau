@@ -884,12 +884,47 @@ pub fn run_daemon_with_echo(
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
     validate_echo_serve_options(&options)?;
+    let socket_path = socket_path.into();
+    run_daemon_with_echo_on_listener_handle(
+        open_listener(&socket_path)?,
+        state_dir.into(),
+        eager_session_id,
+        options,
+    )
+}
+
+/// Runs an echo daemon using a listener already bound by the caller.
+///
+/// The caller transfers socket-path cleanup ownership with `listener`. This is
+/// useful for test fixtures that must establish the listener's bind/listen
+/// boundary before they publish the daemon to a client.
+#[cfg(any(test, feature = "echo-agent"))]
+pub fn run_daemon_with_echo_on_listener(
+    listener: SocketListener,
+    state_dir: impl Into<PathBuf>,
+    eager_session_id: &str,
+    options: ServeOptions,
+) -> Result<(), HarnessError> {
+    validate_echo_serve_options(&options)?;
+    run_daemon_with_echo_on_listener_handle(
+        ListenerHandle::Bound(listener),
+        state_dir.into(),
+        eager_session_id,
+        options,
+    )
+}
+
+/// Runs an echo daemon after one caller-selected listener has been acquired.
+#[cfg(any(test, feature = "echo-agent"))]
+fn run_daemon_with_echo_on_listener_handle(
+    listener_handle: ListenerHandle,
+    state_dir: PathBuf,
+    eager_session_id: &str,
+    options: ServeOptions,
+) -> Result<(), HarnessError> {
     fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         crate::harness::run_echo_provider(r, w).map_err(|e| e.to_string())
     }
-    let socket_path = socket_path.into();
-    let state_dir = state_dir.into();
-    let listener_handle = open_listener(&socket_path)?;
     let dirs = options
         .dirs
         .clone()

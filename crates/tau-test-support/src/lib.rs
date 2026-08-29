@@ -1,17 +1,17 @@
 //! Reusable end-to-end test utilities for `tau` crates.
 
 use std::os::unix as path_std_os_unix;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
 
 use tau_config::settings::TauDirs;
 use tau_core::{AgentStore, AgentStoreError, SessionStore};
 use tau_harness::{
-    HarnessError, InteractionOutcome, ServeOptions, run_daemon_with_echo,
+    HarnessError, InteractionOutcome, ServeOptions, run_daemon_with_echo_on_listener,
     run_embedded_message_with_echo, run_embedded_message_with_test_provider, send_daemon_message,
 };
 use tau_session_inspect::{InspectError, open_session_store};
+use tau_socket::SocketListener;
 use tempfile::TempDir;
 
 /// Completed causal quota fixture plus the exact harness-committed event trace.
@@ -233,16 +233,21 @@ impl TestRuntime {
         Ok(run_embedded_message_with_echo(&self.state_dir, session_id, message)?.response)
     }
 
-    /// Starts a foreground daemon in a background thread, eager-initing
-    /// the given session id (typically what test code will then send a
-    /// message to).
+    /// Binds then starts a foreground daemon in a background thread,
+    /// eager-initing the given session id (typically what test code will
+    /// then send a message to).
     ///
-    /// `max_clients` is passed through to [`ServeOptions::max_clients`]. Use
-    /// `Some(n)` for tests that later call [`DaemonHandle::join`], so the
-    /// daemon exits after a bounded number of clients; `None` leaves it
-    /// unbounded.
-    pub fn spawn_daemon(&self, eager_session_id: &str, max_clients: Option<usize>) -> DaemonHandle {
-        let socket_path = self.socket_path.clone();
+    /// This returns only after [`SocketListener::bind`] has completed, so its
+    /// socket has entered the kernel listen state. `max_clients` is passed
+    /// through to [`ServeOptions::max_clients`]. Use `Some(n)` for tests
+    /// that later call [`DaemonHandle::join`], so the daemon exits after a
+    /// bounded number of clients; `None` leaves it unbounded.
+    pub fn spawn_daemon(
+        &self,
+        eager_session_id: &str,
+        max_clients: Option<usize>,
+    ) -> Result<DaemonHandle, HarnessError> {
+        let listener = SocketListener::bind(&self.socket_path)?;
         let state_dir = self.state_dir.clone();
         let dirs = self.dirs.clone();
         let eager_session_id = eager_session_id.to_owned();
@@ -251,14 +256,9 @@ impl TestRuntime {
                 .dirs(dirs)
                 .maybe_max_clients(max_clients)
                 .build();
-            run_daemon_with_echo(socket_path, state_dir, &eager_session_id, options)
+            run_daemon_with_echo_on_listener(listener, state_dir, &eager_session_id, options)
         });
-        DaemonHandle { join_handle }
-    }
-
-    /// Waits until the daemon socket exists.
-    pub fn wait_until_ready(&self, timeout: Duration) -> Result<(), WaitError> {
-        wait_for_path(&self.socket_path, timeout)
+        Ok(DaemonHandle { join_handle })
     }
 
     /// Sends one message to a running daemon.
@@ -315,48 +315,6 @@ fn panic_payload_label<'a>(payload: &'a (dyn std::any::Any + Send + 'static)) ->
         "non-string panic payload"
     }
 }
-
-/// Waits until one filesystem path exists.
-pub fn wait_for_path(path: &Path, timeout: Duration) -> Result<(), WaitError> {
-    let started_at = Instant::now();
-    while !path.exists() {
-        if timeout <= started_at.elapsed() {
-            return Err(WaitError::Timeout {
-                path: path.to_path_buf(),
-                timeout,
-            });
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    Ok(())
-}
-
-/// Error returned when waiting for a test condition times out.
-#[derive(Debug)]
-pub enum WaitError {
-    /// The requested filesystem path did not appear before the configured
-    /// timeout elapsed.
-    Timeout {
-        /// Filesystem path that was being waited on.
-        path: PathBuf,
-        /// Maximum duration allowed for the path to appear.
-        timeout: Duration,
-    },
-}
-
-impl std::fmt::Display for WaitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Timeout { path, timeout } => write!(
-                f,
-                "timed out waiting for path {} after {timeout:?}",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for WaitError {}
 
 #[cfg(test)]
 mod tests;
