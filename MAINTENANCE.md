@@ -1,5 +1,27 @@
 # Maintenance
 
+## Weekly: opt-in live summary-quality trials
+
+Frequency: Weekly  
+Last completed: Never
+
+Optionally compare current summary quality with the versioned synthetic-public
+corpus in `crates/tau-summary-eval/`. Live trials are non-authoritative and
+non-blocking: deterministic protocol, prompt, replay, corpus-validation, and
+offline-scoring tests remain the CI gates. Do not run an external model or judge
+unless an operator has reviewed the exact disclosed corpus and unmistakably
+accepted provider cost and data-retention terms. Tau provides no automatic live
+runner or network fallback.
+
+Record a live candidate set and privacy-minimized result as described in
+`crates/tau-summary-eval/README.md`, including the exact provider, model,
+model version, generation/judge configuration, UTC date, corpus version, and
+required opt-in token. Keep generated text and results outside the repository
+unless separately reviewed as public-safe. Compare against prior private
+results, record material findings or follow-ups, and update the completion date
+only when an operator actually runs the optional trial. Skipping it incurs no
+maintenance or CI failure.
+
 ## Monthly: ChatGPT/Codex compatibility audit
 
 Frequency: Monthly  

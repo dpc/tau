@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "scorer": "tau-summary-eval/0.1.0",
+  "scoring_contract": "literal-normalized-facts-v1",
+  "corpus_id": "tau-summary-quality",
+  "corpus_version": 1,
+  "corpus_sha256": "cd7c142088af1e633782c2ef05b0886ebbf3cd7e5f913a2e639b2c745d8677ef",
+  "candidates_sha256": "697fae05738a2af95af49b8698c1757a079986b83c6be869ed6ea97c192a097e",
+  "origin": {
+    "kind": "offline",
+    "generator": "hand-authored-oracle/v1",
+    "configuration": "exact required facts; no external model or judge"
+  },
+  "matched_required_facts": 10,
+  "total_required_facts": 10,
+  "coverage_basis_points": 10000,
+  "passing_cases": 3,
+  "total_cases": 3,
+  "cases": [
+    {
+      "case_id": "retain-user-constraint",
+      "matched_fact_ids": [
+        "deterministic-tests",
+        "no-network-dependency",
+        "empty-object-work"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    },
+    {
+      "case_id": "retain-uncertainty",
+      "matched_fact_ids": [
+        "compiler-completed",
+        "test-outcome-unknown",
+        "inspect-log-next"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    },
+    {
+      "case_id": "retain-completed-and-pending",
+      "matched_fact_ids": [
+        "schema-approved",
+        "review-fix-complete",
+        "ci-pending",
+        "not-complete"
+      ],
+      "missing_fact_ids": [],
+      "matched_forbidden_claims": [],
+      "passed": true
+    }
+  ]
+}

@@ -36,6 +36,7 @@ members = [
   "crates/tau-session-inspect",
   "crates/tau-skills",
   "crates/tau-socket",
+  "crates/tau-summary-eval",
   "crates/tau-supervisor",
   "crates/tau-term-screen",
   "crates/tau-test-support",
@@ -108,6 +109,7 @@ tau-provider-responses = { path = "crates/tau-provider-responses" }
 tau-session-inspect = { path = "crates/tau-session-inspect" }
 tau-skills = { path = "crates/tau-skills" }
 tau-socket = { path = "crates/tau-socket" }
+tau-summary-eval = { path = "crates/tau-summary-eval" }
 tau-supervisor = { path = "crates/tau-supervisor" }
 tau-term-screen = { path = "crates/tau-term-screen" }
 tau-test-support = { path = "crates/tau-test-support" }

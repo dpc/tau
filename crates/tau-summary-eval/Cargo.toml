@@ -1,0 +1,24 @@
+[package]
+name = "tau-summary-eval"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

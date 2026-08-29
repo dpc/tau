@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "corpus_id": "tau-summary-quality",
+  "corpus_version": 1,
+  "privacy": "synthetic-public",
+  "cases": [
+    {
+      "id": "retain-user-constraint",
+      "input": "A developer asks for a parser change. They require deterministic tests and explicitly say not to add a network dependency. Investigation finds that the parser already accepts arrays but rejects an empty object. The remaining work is to accept the empty object and add a regression test.",
+      "required_facts": [
+        {
+          "id": "deterministic-tests",
+          "any_of": ["deterministic tests", "deterministic regression test"]
+        },
+        {
+          "id": "no-network-dependency",
+          "any_of": ["no network dependency", "not add a network dependency"]
+        },
+        {
+          "id": "empty-object-work",
+          "any_of": ["accept the empty object", "support for the empty object"]
+        }
+      ],
+      "forbidden_claims": ["arrays are rejected", "network access is required"]
+    },
+    {
+      "id": "retain-uncertainty",
+      "input": "A synthetic build fails after a timeout. The compiler phase completed, but the test phase did not print a terminal result. It is unknown whether the test process finished. The next step is to inspect the preserved test log rather than rerun with credentials.",
+      "required_facts": [
+        {
+          "id": "compiler-completed",
+          "any_of": ["compiler phase completed", "compilation completed"]
+        },
+        {
+          "id": "test-outcome-unknown",
+          "any_of": ["test outcome is unknown", "unknown whether the test process finished"]
+        },
+        {
+          "id": "inspect-log-next",
+          "any_of": ["inspect the preserved test log", "check the preserved test log"]
+        }
+      ],
+      "forbidden_claims": ["tests passed", "tests failed", "rerun with credentials"]
+    },
+    {
+      "id": "retain-completed-and-pending",
+      "input": "The maintainer approved schema version 2. The implementation and unit tests are complete. Independent review found one documentation typo, which has been fixed. Full workspace CI is still running, so the change must not be marked complete yet.",
+      "required_facts": [
+        {
+          "id": "schema-approved",
+          "any_of": ["schema version 2", "version 2 schema"]
+        },
+        {
+          "id": "review-fix-complete",
+          "any_of": ["documentation typo", "doc typo"]
+        },
+        {
+          "id": "ci-pending",
+          "any_of": ["workspace ci is still running", "full ci is still running"]
+        },
+        {
+          "id": "not-complete",
+          "any_of": ["must not be marked complete", "not mark the change complete"]
+        }
+      ],
+      "forbidden_claims": ["ci passed", "change is complete"]
+    }
+  ]
+}
+

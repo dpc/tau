@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "corpus_id": "tau-summary-quality",
+  "corpus_version": 1,
+  "origin": {
+    "kind": "offline",
+    "generator": "hand-authored-oracle/v1",
+    "configuration": "exact required facts; no external model or judge"
+  },
+  "candidates": [
+    {
+      "case_id": "retain-user-constraint",
+      "summary": "Accept the empty object and add deterministic tests. Do not add a network dependency."
+    },
+    {
+      "case_id": "retain-uncertainty",
+      "summary": "The compiler phase completed. It is unknown whether the test process finished; inspect the preserved test log next."
+    },
+    {
+      "case_id": "retain-completed-and-pending",
+      "summary": "Schema version 2 is approved and the documentation typo is fixed. Full workspace CI is still running, so the change must not be marked complete."
+    }
+  ]
+}
+
