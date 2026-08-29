@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::num::NonZeroU64;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{io as path_std_io, time as path_std_time};
 
 use super::sampling::{RESPONSE_UPDATE_INTERVAL, ResponseSampler};
@@ -482,7 +484,7 @@ fn openrouter_defaults_to_telemetry_without_cache_policy() {
 /// Ensures a provider output-token stop cannot commit a truncated checkpoint.
 #[test]
 fn run_prompt_attempt_terminalizes_truncated_local_summary() {
-    let outcome = run_scripted_local_summary_attempt(concat!(
+    let (outcome, updates) = run_scripted_local_summary_attempt_with_updates(concat!(
         "data: {\"choices\":[{\"delta\":{\"content\":\"Goal:\\ngoal\\nConstraints:\\nnone\\nDecisions:\\none\\nProgress:\\ndone\\nOpen Work:\\nnext\\nCritical Facts:\\nfact\"}}]}\n\n",
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
         "data: [DONE]\n\n"
@@ -495,6 +497,121 @@ fn run_prompt_attempt_terminalizes_truncated_local_summary() {
         tau_proto::ProviderAttempt::new(3).expect("attempt")
     );
     assert!(finished.backend.is_some());
+    assert!(updates.iter().all(|update| update.deltas.is_empty()));
+}
+
+/// A valid local summary remains absent from progress events and crosses the
+/// extension seam once in its validated private terminal envelope.
+#[test]
+fn run_prompt_attempt_releases_valid_local_summary_only_at_terminal() {
+    let narrative = "Goal:\ngoal\nConstraints:\nnone\nDecisions:\nnone\nProgress:\ndone\nOpen Work:\nnext\nCritical Facts:\nfact";
+    let events = format!(
+        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{}}},\"finish_reason\":\"stop\"}}]}}\n\n\
+         data: [DONE]\n\n",
+        serde_json::to_string(narrative).expect("encode narrative")
+    );
+    let (outcome, updates) = run_scripted_local_summary_attempt_with_updates(events);
+    assert!(updates.iter().all(|update| update.deltas.is_empty()));
+    let PromptAttemptOutcome::Finished(finished) = outcome else {
+        let detail = match outcome {
+            PromptAttemptOutcome::Terminal { finished, .. } => finished.error,
+            PromptAttemptOutcome::Retry { .. } => Some("retry".to_owned()),
+            PromptAttemptOutcome::Canceled { .. } => Some("canceled".to_owned()),
+            PromptAttemptOutcome::Finished(_) => unreachable!(),
+        };
+        panic!("valid summary must finish: {detail:?}");
+    };
+    assert_eq!(
+        finished.output_items,
+        vec![tau_proto::ContextItem::LocalCompactionNarrative(
+            tau_proto::LocalCompactionNarrativeItem {
+                narrative: narrative.to_owned(),
+            }
+        )]
+    );
+}
+
+/// Cancellation after semantic stream progress keeps that progress private and
+/// releases no terminal narrative.
+#[test]
+fn canceled_local_summary_releases_no_content() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+    let address = listener.local_addr().expect("fixture address");
+    let canceled = Arc::new(AtomicBool::new(false));
+    let server_canceled = Arc::clone(&canceled);
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept request");
+        let mut request = [0_u8; 16 * 1024];
+        let _ = socket.read(&mut request).expect("read request");
+        let semantic = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":",
+            "{\"content\":\"private partial narrative\",",
+            "\"reasoning_content\":\"private partial reasoning\"}}]}\n\n"
+        );
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 65536\r\nConnection: close\r\n\r\n{semantic}"
+        )
+        .expect("write partial response");
+        socket.flush().expect("flush semantic progress");
+        std::thread::sleep(path_std_time::Duration::from_millis(100));
+        server_canceled.store(true, Ordering::Release);
+        std::thread::sleep(path_std_time::Duration::from_secs(2));
+    });
+    let model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+        "id": "local",
+        "context_window": 8192
+    }))
+    .expect("local model");
+    let provider = ChatCompletionsProvider {
+        base_url: format!("http://{address}/v1"),
+        models: vec![model.clone()],
+        ..ChatCompletionsProvider::default()
+    };
+    let mut prompt = crate::openai_tests::prompt();
+    prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    prompt
+        .context
+        .blocks
+        .push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: vec![tau_proto::ContextItem::CompactionTrigger],
+            },
+        ));
+    let mut bytes = Vec::new();
+    let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+    let outcome = super::attempt::run_prompt_attempt(
+        &prompt.agent_prompt_id,
+        &prompt,
+        &provider,
+        &model,
+        false,
+        &mut writer,
+        &mut || canceled.load(Ordering::Acquire),
+        &tau_provider::OutboundNetworkPolicy::from_environment(BTreeMap::new(), None),
+        tau_proto::ProviderAttempt::ONE,
+    );
+    server.join().expect("join fixture");
+    assert!(matches!(outcome, PromptAttemptOutcome::Canceled { .. }));
+    let mut reader =
+        tau_proto::HarnessInputReader::new(path_std_io::BufReader::new(bytes.as_slice()));
+    let mut updates = Vec::new();
+    while let Some(message) = reader.read_message().expect("decode provider update") {
+        if let tau_proto::HarnessInputMessage::Emit(emit) = message
+            && let tau_proto::Event::ProviderResponseUpdatedReported(update) = *emit.event
+        {
+            updates.push(update);
+        }
+    }
+    assert!(
+        !updates.is_empty(),
+        "semantic progress must reach the sampler"
+    );
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.deltas.is_empty() && update.response_stats.is_some())
+    );
 }
 
 /// Ensures semantic output followed by a retryable provider failure terminates
@@ -514,6 +631,16 @@ fn run_prompt_attempt_terminalizes_parsed_retryable_local_summary() {
 fn run_scripted_local_summary_attempt(
     events: &'static str,
 ) -> super::attempt::PromptAttemptOutcome {
+    run_scripted_local_summary_attempt_with_updates(events).0
+}
+
+fn run_scripted_local_summary_attempt_with_updates(
+    events: impl Into<String>,
+) -> (
+    super::attempt::PromptAttemptOutcome,
+    Vec<tau_proto::ProviderResponseUpdated>,
+) {
+    let events = events.into();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
     let address = listener.local_addr().expect("fixture address");
     let server = std::thread::spawn(move || {
@@ -593,7 +720,17 @@ fn run_scripted_local_summary_attempt(
         tau_proto::ProviderAttempt::new(3).expect("attempt"),
     );
     server.join().expect("join fixture");
-    outcome
+    let mut reader =
+        tau_proto::HarnessInputReader::new(path_std_io::BufReader::new(bytes.as_slice()));
+    let mut updates = Vec::new();
+    while let Some(message) = reader.read_message().expect("decode provider update") {
+        if let tau_proto::HarnessInputMessage::Emit(emit) = message
+            && let tau_proto::Event::ProviderResponseUpdatedReported(update) = *emit.event
+        {
+            updates.push(update);
+        }
+    }
+    (outcome, updates)
 }
 
 /// Explicit compatible-model prices validate as fixed-point decimals and

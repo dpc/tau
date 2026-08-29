@@ -4,6 +4,58 @@ use std::{io as path_std_io, time as path_std_time};
 
 use super::{RESPONSE_UPDATE_INTERVAL, ResponseSampler};
 
+/// Standalone local summaries retain semantic parser state privately while
+/// publishing the existing content-free progress sample.
+#[test]
+fn standalone_summary_progress_is_stats_only() {
+    let mut prompt = crate::openai_tests::prompt();
+    prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    let mut sampler = ResponseSampler::new();
+    sampler.latest_items = vec![
+        tau_provider_chat_completions::AttemptOutputItem {
+            output_index: 0,
+            item: tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                role: tau_proto::ContextRole::Assistant,
+                content: vec![tau_proto::ContentPart::Text {
+                    text: "private narrative".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            }),
+        },
+        tau_provider_chat_completions::AttemptOutputItem {
+            output_index: 1,
+            item: tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                kind: tau_proto::ReasoningTextKind::Full,
+                text: "private reasoning".to_owned(),
+            }),
+        },
+    ];
+    sampler.latest_bytes = 42;
+    let mut bytes = Vec::new();
+    let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+    sampler.emit_at(
+        &prompt.agent_prompt_id,
+        &prompt,
+        &mut writer,
+        path_std_time::Instant::now(),
+        true,
+    );
+
+    let updates = decode_updates(&bytes);
+    assert_eq!(updates.len(), 1);
+    assert!(updates[0].deltas.is_empty());
+    assert_eq!(
+        updates[0]
+            .response_stats
+            .as_ref()
+            .expect("content-free stats")
+            .current
+            .response_bytes_received,
+        42
+    );
+}
+
 /// Semantic timing is captured before cadence filtering and remains immutable
 /// on every later sample, including terminal flush.
 #[test]

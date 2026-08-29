@@ -50,6 +50,12 @@ opaque or extra semantic fields, multiple choices, and post-terminal output
 reject the attempt. The compact-only state enforces each semantic channel's
 selected byte limit before appending a delta and rechecks the completed
 projection before release. Ordinary inference keeps its broader parser behavior.
+The extension sampler exposes only content-free response statistics and existing
+status/activity signals while this validation is pending. It never emits local-summary text or reasoning as a
+transient delta. The backend returns its validated ordinary output projection to
+the built-in extension, whose terminal validator alone wraps the accepted
+narrative in the private extension-to-harness envelope. Invalid and canceled
+attempts release no semantic output.
 
 ## Cache telemetry route capabilities
 

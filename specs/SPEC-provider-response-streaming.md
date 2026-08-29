@@ -14,6 +14,16 @@ field. The first non-empty progress sample may be emitted promptly. Later nonter
 output, status, and stats updates are sampled at most once per second per prompt, with
 one immediate terminal flush permitted before closure.
 
+Standalone local-summary attempts keep every semantic progress channel private
+until the built-in provider extension validates the complete terminal shape. Their sampled
+updates may carry the existing bounded content-free byte/timing statistics and
+status/activity signals at their existing cadence; they carry no assistant text,
+reasoning, tool, or opaque delta.
+Successful validation releases the narrative exactly once in the private
+`LocalCompactionNarrative` terminal envelope. Invalid and canceled attempts
+release no content-bearing update. Ordinary inference streaming and opted-in
+private provider debug capture are unchanged.
+
 Providers accumulate arbitrary upstream chunks, backend response bytes, visible
 text, compaction status, and non-visible semantic output independently of that
 public cadence. For content-coded HTTP responses, the shared network policy
@@ -22,7 +32,15 @@ accounting apply to decoded payload bytes. Tau does not measure or publish the
 encoded-body byte count. The rate-limited emitter, not the parser's chunk
 cadence, decides when to publish an update.
 
-`provider.response_finished.output_items` is the complete durable replacement and replay source. Consumers clear transient state when an attempt restarts or repetition is rejected, and replace rather than append that state when the terminal response arrives. A valid update observed after late subscription may create an ellipsis-prefixed transient block for an otherwise unknown live prompt. Stale, already-finished, or invalid prompt updates do not create transcript state.
+For ordinary inference, `provider.response_finished.output_items` is the complete
+durable replacement and replay source. Successful local-summary compaction
+instead consumes its private terminal envelope into the canonical
+`agent.compacted` replacement window without publishing a provider response.
+Consumers clear transient state when an attempt restarts or repetition is
+rejected, and replace rather than append that state when the terminal response
+arrives. A valid update observed after late subscription may create an
+ellipsis-prefixed transient block for an otherwise unknown live prompt. Stale,
+already-finished, or invalid prompt updates do not create transcript state.
 
 Transient delivery does not require a UI to draw every accepted intermediate
 sample. A renderer may immediately fold an already-delivered adjacent run for

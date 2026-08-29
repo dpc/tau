@@ -23,8 +23,11 @@ samples; absence means unsupported or not observed. The field remains transient
 and is not part of the finished response or replay contract.
 Fresh transport setup may emit a fixed content-free status with no retry facts;
 it must not expose endpoints, credentials, accounts, or raw transport errors.
-`provider.response_finished.output_items` remains the complete durable response
-and replay source.
+For ordinary inference, `provider.response_finished.output_items` remains the
+complete durable response and replay source. A successful standalone local
+summary instead consumes the private `LocalCompactionNarrative` report envelope
+into `AgentCompacted.replacement_window`; no canonical
+`provider.response_finished` is published for that terminal.
 
 The protocol preserves every canonical update and its order. A UI renderer may
 sample an already-delivered adjacent run into one projection without changing

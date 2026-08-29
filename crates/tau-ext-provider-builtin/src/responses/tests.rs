@@ -1,6 +1,69 @@
 use std::num::{NonZeroU32, NonZeroU64};
+use std::{io as path_std_io, time as path_std_time};
 
+use super::sampling::ResponsesResponseSampler;
 use super::*;
+
+/// Generic Responses local summaries expose byte/timing progress without
+/// exposing assistant or reasoning output before terminal validation.
+#[test]
+fn standalone_summary_progress_is_stats_only() {
+    let mut prompt = crate::openai_tests::prompt();
+    prompt.operation = tau_proto::PromptOperation::StandaloneCompaction;
+    let mut sampler = ResponsesResponseSampler::new();
+    sampler.latest_items = vec![
+        tau_provider_responses::AttemptOutputItem {
+            output_index: 0,
+            item: tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                role: tau_proto::ContextRole::Assistant,
+                content: vec![tau_proto::ContentPart::Text {
+                    text: "private narrative".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            }),
+        },
+        tau_provider_responses::AttemptOutputItem {
+            output_index: 1,
+            item: tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                kind: tau_proto::ReasoningTextKind::Full,
+                text: "private reasoning".to_owned(),
+            }),
+        },
+    ];
+    sampler.latest_bytes = 42;
+    let mut bytes = Vec::new();
+    let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+    sampler.emit_at(
+        &prompt.agent_prompt_id,
+        &prompt,
+        &mut writer,
+        path_std_time::Instant::now(),
+        true,
+    );
+
+    let mut reader =
+        tau_proto::HarnessInputReader::new(path_std_io::BufReader::new(bytes.as_slice()));
+    let message = reader
+        .read_message()
+        .expect("decode response update")
+        .expect("one response update");
+    let tau_proto::HarnessInputMessage::Emit(emit) = message else {
+        panic!("sampler must emit a transient event");
+    };
+    let tau_proto::Event::ProviderResponseUpdatedReported(update) = *emit.event else {
+        panic!("sampler must emit a provider update report");
+    };
+    assert!(update.deltas.is_empty());
+    assert_eq!(
+        update
+            .response_stats
+            .expect("content-free stats")
+            .current
+            .response_bytes_received,
+        42
+    );
+}
 
 fn summary_config() -> SummaryCompactionConfig {
     SummaryCompactionConfig::new(

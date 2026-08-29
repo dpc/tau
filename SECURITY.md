@@ -374,6 +374,13 @@ The extension rejects any tool call or other semantic output without execution,
 accepts exactly one nonempty bounded assistant final text, and discards reasoning
 and opaque replay items. The harness persists that text exactly once as one
 synthetic user-role checkpoint, with no deterministic supplement or wrapper.
+Before that terminal validation, standalone local-summary attempts publish only
+the existing bounded content-free response byte/timing statistics and
+status/activity signals at their existing cadence. Assistant text, reasoning, tool, and opaque output do
+not cross in transient updates; invalid and canceled attempts publish no
+content-bearing update. The validated narrative crosses once in the private
+terminal envelope. Ordinary inference streaming and opted-in private provider
+debug capture are unchanged.
 Events committed after the immutable cut remain suffix history. Ordinary
 opted-in provider debug captures apply to compaction; they are sensitive,
 best-effort observability artifacts and never journal, transcript, replay, or

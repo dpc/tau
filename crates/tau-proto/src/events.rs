@@ -5688,8 +5688,10 @@ pub struct ProviderPromptSubmitted {
 /// The provider has newly appended displayable response output for a prompt.
 ///
 /// Each update is a transient append-delta event. Providers send only newly
-/// appended assistant/reasoning text in `deltas`; the complete durable response
-/// remains [`ProviderResponseFinished::output_items`]. Some updates are
+/// appended assistant/reasoning text in `deltas`; ordinary inference retains
+/// its complete durable response in [`ProviderResponseFinished::output_items`].
+/// Successful local-summary compaction instead consumes its private terminal
+/// envelope into the canonical compaction replacement window. Some updates are
 /// status- or compaction-only and therefore have empty `deltas`.
 /// Provider extensions submit this payload as
 /// `provider.response_updated_reported`; the harness publishes the validated

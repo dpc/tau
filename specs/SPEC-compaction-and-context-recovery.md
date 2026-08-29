@@ -48,6 +48,11 @@ replay items do not become semantic history. The accepted text becomes exactly
 one synthetic user-role replacement message, with no wrapper, escaping,
 deterministic supplement, or second rewrite. The private local narrative
 envelope carries that validated text only across the extension-to-harness seam.
+Before validation, local-summary sampling exposes only the existing bounded
+content-free byte/timing statistics and status/activity signals at their existing cadence;
+assistant text, reasoning, tool, and opaque output remain private. Invalid and
+canceled attempts expose no content-bearing update. Ordinary inference streaming
+and opted-in private provider debug capture remain unchanged.
 The immutable cut, transaction, suffix preservation, exact-once commit, and
 live/cold replay contracts remain unchanged: a committed summary is replayed
 after restart without another model call. Ordinary opted-in provider debug

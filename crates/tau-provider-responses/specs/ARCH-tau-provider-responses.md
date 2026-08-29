@@ -4,6 +4,13 @@
 for the generic public Responses protocol. It is separate from both the generic Chat
 Completions backend and the private ChatGPT/Codex WebSocket backend.
 
+Standalone local-summary sampling exposes only bounded content-free response
+statistics and existing status/activity signals while the complete output shape remains unvalidated. The backend
+returns ordinary typed output to the built-in extension, whose terminal validator
+alone wraps one accepted narrative in the private extension-to-harness envelope.
+Invalid and canceled attempts release no semantic output. Ordinary inference
+streaming and opted-in private debug capture retain their existing behavior.
+
 The backend replays the complete typed Responses transcript on every request.
 It supports assistant text, plain `reasoning_text` reasoning, and Function
 tools. Plain reasoning produces full displayable reasoning under the existing

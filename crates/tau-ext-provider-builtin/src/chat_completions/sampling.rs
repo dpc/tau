@@ -109,7 +109,11 @@ impl ResponseSampler {
         if !self.is_due(now, current.response_bytes_received, terminal) {
             return;
         }
-        let deltas = self.deltas();
+        let deltas = if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
+            Vec::new()
+        } else {
+            self.deltas()
+        };
         if deltas.is_empty() && current == self.last_sample {
             return;
         }
