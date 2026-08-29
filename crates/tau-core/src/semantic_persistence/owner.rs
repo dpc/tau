@@ -679,6 +679,45 @@ impl SemanticPersistenceOwner {
         kind: PersistenceFailureKind,
         timeout: Duration,
     ) -> bool {
+        self.wait_for_matching_failure_for_test(timeout, |failure| failure.kind == kind)
+    }
+
+    /// Waits for one exact stream-local deterministic test failure without
+    /// consuming failures from other streams.
+    #[cfg(any(test, feature = "test-legacy-writer"))]
+    #[doc(hidden)]
+    pub fn wait_for_stream_failure_for_test(
+        &self,
+        stream: &StreamIdentity,
+        kind: PersistenceFailureKind,
+    ) {
+        self.shared
+            .operational_wake_pending
+            .store(false, Ordering::Release);
+        let matches =
+            |failure: &PersistenceFailure| failure.kind == kind && failure.stream() == Some(stream);
+        let state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self
+            .shared
+            .wake
+            .wait_while(state, |state| !state.failures.iter().any(&matches))
+            .unwrap_or_else(|e| e.into_inner());
+        let index = state
+            .failures
+            .iter()
+            .position(matches)
+            .expect("condition wait returned with a matching persistence failure");
+        state.failures.remove(index);
+    }
+
+    /// Waits for and removes the first deterministic failure matching one test
+    /// predicate.
+    #[cfg(test)]
+    fn wait_for_matching_failure_for_test(
+        &self,
+        timeout: Duration,
+        matches: impl Fn(&PersistenceFailure) -> bool,
+    ) -> bool {
         self.shared
             .operational_wake_pending
             .store(false, Ordering::Release);
@@ -686,15 +725,9 @@ impl SemanticPersistenceOwner {
         let (mut state, _) = self
             .shared
             .wake
-            .wait_timeout_while(state, timeout, |state| {
-                !state.failures.iter().any(|failure| failure.kind == kind)
-            })
+            .wait_timeout_while(state, timeout, |state| !state.failures.iter().any(&matches))
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(index) = state
-            .failures
-            .iter()
-            .position(|failure| failure.kind == kind)
-        {
+        if let Some(index) = state.failures.iter().position(matches) {
             state.failures.remove(index);
             true
         } else {

@@ -459,7 +459,9 @@ fn resume_rehydrates_default_agent_conversation_from_durable_routing() {
 }
 
 /// Resume acquires writer locks and truncates torn suffixes from all semantic
-/// journal classes before reconstructing runtime state.
+/// journal classes before reconstructing runtime state. The checkpoint obstacle
+/// holds a real resumed write at the journal-ahead cut so the active listing
+/// cannot race through to its equally valid fresh-checkpoint state.
 #[test]
 fn cold_resume_recovers_agent_session_and_restore_suffixes() {
     use std::io::Write;
@@ -482,6 +484,8 @@ fn cold_resume_recovers_agent_session_and_restore_suffixes() {
             .write_all(&[1, 2, 3])
             .expect("append torn header");
     }
+    let checkpoint_obstacle = state_dir.join("agents/main/meta.json.tmp");
+    std::fs::create_dir(&checkpoint_obstacle).expect("hold checkpoint publication");
 
     let mut harness =
         quiet_provider_harness_with_start_reason(&state_dir, tau_proto::SessionStartReason::Resume)
@@ -489,6 +493,15 @@ fn cold_resume_recovers_agent_session_and_restore_suffixes() {
 
     assert!(harness.session_runtime.agent_store.agent("main").is_some());
     let main_id = tau_proto::AgentId::parse("main").expect("agent id");
+    harness
+        .session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("durable harness has persistence owner")
+        .wait_for_stream_failure_for_test(
+            &tau_core::StreamIdentity::Agent(main_id.clone()),
+            tau_core::PersistenceFailureKind::Sync,
+        );
     let active_snapshot =
         tau_core::AgentJournalSnapshot::capture(&state_dir.join("agents"), [main_id.clone()]);
     assert!(matches!(
@@ -502,6 +515,7 @@ fn cold_resume_recovers_agent_session_and_restore_suffixes() {
         .find(|entry| entry.id == main_id)
         .expect("active main agent entry");
     assert_eq!(active_entry.status, tau_core::AgentListStatus::Busy);
+    std::fs::remove_dir(&checkpoint_obstacle).expect("release checkpoint publication");
     // Resume queues fresh initialization and restore suffixes on the managed
     // persistence worker. Release those writer leases before opening offline
     // strict readers, which intentionally have no live-writer snapshot authority.
