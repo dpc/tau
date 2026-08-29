@@ -107,7 +107,6 @@ impl Harness {
             agent.dispatch.next_ctx_id = prompt.ctx_id.clone();
         }
         let notify_watchers = prompt.should_notify_watchers();
-        let notification_text = notify_watchers.then(|| prompt.text.clone());
         let inference_activation = prompt.creates_inference_activation();
         let internal_kind = prompt.internal_kind();
         let completion = prompt
@@ -115,6 +114,10 @@ impl Harness {
             .clone()
             .map(|correlation| AgentPublishCompletion::InitialPromptSubmission { correlation });
         let defers_notification = completion.is_some();
+        let notification_text = (notify_watchers
+            && !defers_notification
+            && self.has_watchers_for_agent(target_agent_id.as_str()))
+        .then(|| self.clone_prompt_text_for_watch_notification(&prompt.text));
         let event = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
             inference_activation,
             agent_id: target_agent_id,

@@ -4,6 +4,14 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    /// Number of prompt-text copies made for watch fanout on this test thread.
+    static WATCH_PROMPT_TEXT_CLONE_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// Watch topology, delivery deduplication, and endpoint-retirement state.
 #[derive(Default)]
 pub(crate) struct AgentWatchState {
@@ -94,6 +102,42 @@ pub(super) fn watch_category_for_retry(
 }
 
 impl Harness {
+    /// Reports whether the runtime reverse index currently has a prompt
+    /// watcher.
+    ///
+    /// This is only an allocation-avoidance probe. Delivery still takes its
+    /// ordinary post-commit watcher snapshot, so it retains the established
+    /// publication ordering and topology semantics.
+    pub(super) fn has_watchers_for_agent(&self, agent_id: &str) -> bool {
+        self.agent_runtime
+            .agent_watch
+            .reverse
+            .get(agent_id)
+            .is_some_and(|watchers| !watchers.is_empty())
+    }
+
+    /// Copies prompt text only when the reverse watch index can fan it out.
+    pub(super) fn clone_prompt_text_for_watch_notification(&self, text: &str) -> String {
+        #[cfg(test)]
+        WATCH_PROMPT_TEXT_CLONE_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+
+        text.to_owned()
+    }
+
+    /// Resets the test-thread counter for prompt-text copies made by watch
+    /// fanout.
+    #[cfg(test)]
+    pub(super) fn reset_watch_prompt_text_clone_count_for_test(&self) {
+        WATCH_PROMPT_TEXT_CLONE_COUNT.with(|count| count.set(0));
+    }
+
+    /// Returns prompt-text copies made by watch fanout on the current test
+    /// thread.
+    #[cfg(test)]
+    pub(super) fn watch_prompt_text_clone_count_for_test(&self) -> usize {
+        WATCH_PROMPT_TEXT_CLONE_COUNT.with(|count| count.get())
+    }
+
     pub(super) fn notify_agent_watchers_about_user_prompt(&mut self, agent_id: &str, text: &str) {
         for watcher_id in self.watchers_for_agent(agent_id) {
             let Some(sender_cid) = self

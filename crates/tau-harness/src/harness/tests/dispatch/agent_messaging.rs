@@ -2761,6 +2761,50 @@ fn agent_watch_response_uses_distinct_canonical_projection() {
     h.shutdown().expect("shutdown");
 }
 
+/// An eligible user prompt without watchers must move its text into the durable
+/// submission without allocating a second copy for a fanout that cannot occur.
+#[test]
+fn user_prompt_without_watchers_does_not_clone_text_for_watch_fanout() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.config.selected_model = Some("test/model".into());
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watched_id = h.agent_runtime.agent_registry.agents[&watched_cid]
+        .identity
+        .agent_id
+        .clone()
+        .expect("watched agent id");
+
+    h.reset_watch_prompt_text_clone_count_for_test();
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: h.session_runtime.current_session_id.clone(),
+            text: "unwatched prompt".to_owned(),
+            agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
+    .expect("prompt submitted");
+
+    assert_eq!(
+        h.watch_prompt_text_clone_count_for_test(),
+        0,
+        "the empty reverse index must avoid the fanout-text allocation"
+    );
+    assert!(
+        !session_agent_message_received_events(&h)
+            .iter()
+            .any(|message| message.kind == tau_proto::AgentMessageKind::WatchPrompt),
+        "no reverse-index entry must produce no watch delivery"
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// A watcher must be told when the watched agent accepts a direct user prompt,
 /// otherwise the watched agent's next response can look like an unsolicited
 /// reply to the watcher instead of a response to fresh user input.
@@ -2806,6 +2850,7 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
 
+    h.reset_watch_prompt_text_clone_count_for_test();
     h.handle_authenticated_ui_prompt_submitted(
         crate::harness::harness_connection_id(),
         UiPromptSubmitted {
@@ -2820,6 +2865,11 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     )
     .expect("prompt submitted");
 
+    assert_eq!(
+        h.watch_prompt_text_clone_count_for_test(),
+        1,
+        "a nonempty reverse index copies the prompt exactly once before fanout"
+    );
     assert!(session_agent_message_sent_events(&h).is_empty());
     let received: Vec<_> = session_agent_message_received_events(&h)
         .into_iter()
@@ -2863,6 +2913,96 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     assert!(!text.contains("finished its turn"));
     assert!(!text.contains("<response>"));
 
+    h.shutdown().expect("shutdown");
+}
+
+/// Prompt fanout must retain sorted watcher order, exact payload identity, and
+/// error cleanup when a stale reverse-index entry shares a delivery batch.
+#[test]
+fn user_prompt_watch_fanout_orders_exact_payloads_and_prunes_failed_delivery() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.config.selected_model = Some("test/model".into());
+
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let second_watcher_cid = h.create_durable_user_agent(
+        h.session_runtime.current_session_id.clone(),
+        &h.config.selected_role.clone(),
+    );
+    let watched_id = h.agent_runtime.agent_registry.agents[&watched_cid]
+        .identity
+        .agent_id
+        .clone()
+        .expect("watched agent id");
+    let watcher_ids = [watcher_cid, second_watcher_cid].map(|cid| {
+        h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .agent_id
+            .clone()
+            .expect("watcher agent id")
+    });
+    for watcher_id in &watcher_ids {
+        h.set_agent_watch(
+            watcher_id,
+            &watched_id,
+            true,
+            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        );
+    }
+    h.set_agent_watch(
+        "missing-watcher",
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    let prompt_text = "exact <watch>& prompt".to_owned();
+    h.reset_watch_prompt_text_clone_count_for_test();
+    h.handle_authenticated_ui_prompt_submitted(
+        crate::harness::harness_connection_id(),
+        UiPromptSubmitted {
+            literal: false,
+            session_id: h.session_runtime.current_session_id.clone(),
+            text: prompt_text.clone(),
+            agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        },
+    )
+    .expect("prompt submitted");
+
+    assert_eq!(h.watch_prompt_text_clone_count_for_test(), 1);
+    let received: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchPrompt)
+        .collect();
+    let mut expected_recipients = watcher_ids.to_vec();
+    expected_recipients.sort();
+    assert_eq!(
+        received
+            .iter()
+            .map(|message| message.recipient_id.to_string())
+            .collect::<Vec<_>>(),
+        expected_recipients,
+        "the BTree reverse index preserves watcher delivery order"
+    );
+    for message in &received {
+        assert_eq!(message.sender_id, crate::parse_agent_id(&watched_id));
+        assert_eq!(message.message, prompt_text);
+    }
+    assert!(
+        !h.watchers_for_agent(&watched_id)
+            .iter()
+            .any(|watcher_id| watcher_id == "missing-watcher"),
+        "a failed delivery still prunes only its stale relation"
+    );
+    assert_eq!(h.watchers_for_agent(&watched_id), expected_recipients);
     h.shutdown().expect("shutdown");
 }
 
