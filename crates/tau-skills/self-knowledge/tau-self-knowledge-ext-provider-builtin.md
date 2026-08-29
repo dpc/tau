@@ -336,7 +336,10 @@ proxy-route transport failure rather than guessing authentication from error
 text. Plain HTTP/WS proxy 407 responses remain specifically classified.
 
 The harness assembles prompts and routes provider-owned turns to this extension.
-The extension publishes a transient `ProviderModelsDeclared`; after generic
+After Secret hydration, the extension publishes a transient
+`ProviderModelsDeclared` containing only locally credential-usable routes. Missing
+or malformed credentials omit routes, and later observed credential changes publish
+replacement declarations. This does not promise remote authentication. After generic
 commit and activation, the harness derives canonical `ProviderModelsUpdated`
 current state. The extension streams response updates and emits final response
 events with stop reasons and usage/cache diagnostics.

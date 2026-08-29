@@ -337,7 +337,10 @@ Agent-message and shared tool-round placement is specified by
 ## Provider model declarations and canonical state
 
 Only authenticated configured provider extensions may publish transient,
-interceptable `provider.models_declared` replacement declarations. The generic
+interceptable `provider.models_declared` replacement declarations. Providers
+declare routes only after local credential hydration and replace the declaration
+when a later credential observation changes; this state makes no
+remote-authentication guarantee. The generic
 publication envelope snapshots the configured connection and provider kind so
 parking, disconnect, or replacement cannot substitute publisher identity.
 Extension-supplied persistence requests are ignored categorically.

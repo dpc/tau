@@ -352,7 +352,10 @@ current model state. Provider backends emit execution events for work routed to
 their selected models.
 
 - **`provider.models_declared`** — Transient, mutable replacement declaration from
-  a configured provider extension. It enters ordinary exact/prefix interception;
+  a configured provider extension. It lists routes with valid local configuration
+  and locally usable credentials after hydration, and is replaced when later
+  credential observations change; it does not guarantee remote authentication.
+  It enters ordinary exact/prefix interception;
   an extension-supplied persistence request is ignored.
 - **`provider.models_updated`** — Transient, immutable harness-authored accepted
   current state derived after a model declaration commits. Its

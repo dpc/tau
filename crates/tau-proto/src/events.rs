@@ -3331,8 +3331,10 @@ impl ProviderModelInfo {
 /// Provider extension declaration of its currently available models.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderModelsDeclared {
-    /// Complete replacement declaration. An empty list means the provider
-    /// declares no currently servable models.
+    /// Complete replacement declaration of locally configured,
+    /// credential-usable routes. An empty list means the provider declares
+    /// no locally usable models; remote authentication success is not
+    /// guaranteed.
     pub models: Vec<ProviderModelInfo>,
 }
 

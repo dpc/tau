@@ -146,7 +146,11 @@ Configured provider extensions publish complete replacement snapshots as
 transient `provider.models_declared` events. The harness publishes accepted
 current state as a separate transient `provider.models_updated` event, then emits
 model and role availability projections. `ProviderModelsDeclared` contains the
-provider's proposed model list. `ProviderModelsUpdated` contains the accepted list
+provider's complete current list of routes with valid local configuration and
+locally usable credential material. A declaration does not promise that a
+remote service will authenticate those credentials. Providers publish a
+replacement declaration when a later credential observation changes.
+`ProviderModelsUpdated` contains the accepted list
 plus `publisher_extension_id`, the stable configured provider identity whose
 current state the snapshot replaces. Empty canonical lists therefore withdraw only
 that publisher's state and remain attributable during live delivery and replay.

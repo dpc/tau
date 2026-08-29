@@ -195,7 +195,7 @@ fn provider_list_shows_actionable_chatgpt_login_remediation() {
             auth: OpenAiAuth {
                 access_token: "fixture-access".to_owned(),
                 refresh_token: "fixture-refresh".to_owned(),
-                expires_at_ms: u64::MAX,
+                expires_at_ms: now_ms().saturating_add(86_400_000),
                 account_id: None,
             },
             responses_lite_compatibility: false,
@@ -899,6 +899,415 @@ fn run_provider_configure(
     (result, decode_frames(&output.bytes()))
 }
 
+/// Drives the production Configure and Secret-RPC transport, returning every
+/// credential request, declaration, and Ready marker in wire order.
+fn run_production_credential_scenario(
+    credential_rounds: Vec<(Vec<ProductionCredentialReply>, bool)>,
+) -> Vec<ProductionCredentialTrace> {
+    run_production_credential_scenario_with(
+        configured_chat_completions_settings("deepseek", serde_json::json!({})),
+        tau_proto::ModelId::new(
+            ProviderName::new("deepseek"),
+            tau_proto::ModelName::new("deepseek-chat"),
+        ),
+        "providers/0123456789abcdef0123456789abcdef/api-key.json",
+        credential_rounds,
+    )
+}
+
+/// Runs the production credential oracle with one configured profile and model.
+fn run_production_credential_scenario_with(
+    settings: Vec<u8>,
+    model: tau_proto::ModelId,
+    credential_path: &str,
+    credential_rounds: Vec<(Vec<ProductionCredentialReply>, bool)>,
+) -> Vec<ProductionCredentialTrace> {
+    use std::os::unix::net::UnixStream;
+
+    let (extension_socket, harness_socket) = UnixStream::pair().expect("provider socket pair");
+    let extension_reader = extension_socket.try_clone().expect("clone provider reader");
+    let provider = std::thread::spawn(move || {
+        run(extension_reader, extension_socket).map_err(|error| error.to_string())
+    });
+    let harness_reader = harness_socket.try_clone().expect("clone harness reader");
+    let harness_timeout = harness_reader
+        .try_clone()
+        .expect("clone harness timeout control");
+    harness_reader
+        .set_read_timeout(Some(path_std_time::Duration::from_secs(2)))
+        .expect("set harness read timeout");
+    let mut reader = tau_proto::HarnessInputReader::new(harness_reader);
+    let mut writer = tau_proto::HarnessOutputWriter::new(harness_socket);
+
+    assert!(matches!(
+        reader.read_message().expect("provider Hello"),
+        Some(HarnessInputMessage::Hello(_))
+    ));
+    let settings_file = format!("{}.json", model.provider);
+    writer
+        .write_message(&tau_proto::HarnessOutputMessage::Configure(
+            tau_proto::Configure {
+                tool_prefix: None,
+                config: tau_proto::CborValue::Map(Vec::new()),
+                instance_name: tau_proto::ExtensionName::parse("provider-builtin")
+                    .expect("extension name"),
+                state_dir: None,
+                secrets: BTreeMap::new(),
+                settings_files: BTreeMap::from([(settings_file, settings)]),
+            },
+        ))
+        .expect("write Configure");
+    writer.flush().expect("flush Configure");
+
+    let mut rounds = credential_rounds.into_iter();
+    let (startup_replies, _) = rounds.next().expect("startup credential round");
+    let mut startup_replies = VecDeque::from(startup_replies);
+    let mut trace = Vec::new();
+    let mut ready = false;
+    let mut requested = 0usize;
+    while !ready {
+        let message = reader
+            .read_message()
+            .expect("read provider startup output")
+            .expect("provider startup remains connected");
+        match message {
+            HarnessInputMessage::ExtensionDataRequest(request) => {
+                assert_production_credential_read(&request, credential_path);
+                requested += 1;
+                trace.push(ProductionCredentialTrace::SecretRequest);
+                let reply = startup_replies
+                    .pop_front()
+                    .expect("startup credential reply for request");
+                writer
+                    .write_message(&tau_proto::HarnessOutputMessage::ExtensionDataResult(
+                        Box::new(tau_proto::ExtensionDataResult {
+                            request_id: request.request_id,
+                            result: reply.into_payload(),
+                        }),
+                    ))
+                    .expect("write Secret result");
+                writer.flush().expect("flush Secret result");
+            }
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::ProviderModelsDeclared(declaration) = emit.event.as_ref() {
+                    trace.push(ProductionCredentialTrace::Declaration(
+                        declaration.models.clone(),
+                    ));
+                }
+            }
+            HarnessInputMessage::Ready(_) => {
+                trace.push(ProductionCredentialTrace::Ready);
+                ready = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(startup_replies.is_empty());
+    for (replies, expect_declaration) in rounds {
+        let mut replies = VecDeque::from(replies);
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::deliver_live(
+                tau_proto::UnixMicros::new(1),
+                Event::AgentPromptPrewarmRequested(tau_proto::AgentPromptPrewarmRequested {
+                    agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
+                    session_id: tau_proto::SessionId::parse("session").expect("session id"),
+                    system_prompt: String::new(),
+                    context: tau_proto::PromptContext::default(),
+                    tools: Vec::new(),
+                    model: Some(model.clone()),
+                    model_params: Default::default(),
+                    tool_choice: Default::default(),
+                    originator: tau_proto::PromptOriginator::User,
+                    share_user_cache_key: false,
+                }),
+            ))
+            .expect("write prewarm");
+        writer.flush().expect("flush prewarm");
+        let mut saw_request = false;
+        loop {
+            let message = reader.read_message().unwrap_or_else(|error| {
+                panic!(
+                    "read credential refresh output after {trace:?}, pending replies {}: {error}",
+                    replies.len()
+                )
+            }).expect("provider refresh remains connected");
+            match message {
+                HarnessInputMessage::ExtensionDataRequest(request) => {
+                    assert_production_credential_read(&request, credential_path);
+                    saw_request = true;
+                    requested += 1;
+                    trace.push(ProductionCredentialTrace::SecretRequest);
+                    writer
+                        .write_message(&tau_proto::HarnessOutputMessage::ExtensionDataResult(
+                            Box::new(tau_proto::ExtensionDataResult {
+                                request_id: request.request_id,
+                                result: replies
+                                    .pop_front()
+                                    .expect("credential reply for request")
+                                    .into_payload(),
+                            }),
+                        ))
+                        .expect("write replacement Secret result");
+                    writer.flush().expect("flush replacement Secret result");
+                    if !expect_declaration && replies.is_empty() {
+                        break;
+                    }
+                }
+                HarnessInputMessage::Emit(emit) => {
+                    if let Event::ProviderModelsDeclared(declaration) = emit.event.as_ref() {
+                        assert!(
+                            saw_request,
+                            "a declaration crossed the next Secret-request barrier"
+                        );
+                        trace.push(ProductionCredentialTrace::Declaration(
+                            declaration.models.clone(),
+                        ));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(replies.is_empty());
+    }
+    assert_eq!(
+        requested,
+        trace
+            .iter()
+            .filter(|item| matches!(item, ProductionCredentialTrace::SecretRequest))
+            .count()
+    );
+    drop(writer);
+    drop(reader);
+    drop(harness_timeout);
+    provider
+        .join()
+        .expect("join provider")
+        .expect("provider exits on harness EOF");
+    trace
+}
+
+/// Verifies the production provider asks only for its configured Secret record.
+fn assert_production_credential_read(
+    request: &tau_proto::ExtensionDataRequest,
+    credential_path: &str,
+) {
+    assert_eq!(request.scope, tau_proto::ExtensionDataScope::Secret);
+    assert!(request.expected_session_id.is_none());
+    assert!(matches!(
+        &request.op,
+        tau_proto::ExtensionDataRequestOp::ReadFile { path }
+            if path.as_str() == credential_path
+    ));
+}
+
+/// Ordered production transport observations relevant to credential
+/// declarations.
+#[derive(Debug)]
+enum ProductionCredentialTrace {
+    /// The provider requested its configured Secret record.
+    SecretRequest,
+    /// The provider emitted this complete replacement model declaration.
+    Declaration(Vec<ProviderModelInfo>),
+    /// The provider crossed its startup Ready boundary.
+    Ready,
+}
+
+/// Secret result supplied by the production transport oracle.
+#[derive(Clone, Debug)]
+enum ProductionCredentialReply {
+    /// Secret storage returned these exact bytes.
+    Contents(Vec<u8>),
+    /// Secret storage reported that the configured record does not exist.
+    Missing,
+}
+
+impl ProductionCredentialReply {
+    /// Converts the fixture reply into the real extension-data result payload.
+    fn into_payload(self) -> tau_proto::ExtensionDataResultPayload {
+        match self {
+            Self::Contents(contents) => tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::ReadFile { contents },
+            },
+            Self::Missing => tau_proto::ExtensionDataResultPayload::Error {
+                kind: tau_proto::ExtensionDataErrorKind::NotFound,
+                message: "fixture credential is absent".to_owned(),
+            },
+        }
+    }
+}
+
+/// Proves successful production Secret hydration precedes the initial
+/// declaration and Ready, then a changed usable generation publishes a full
+/// replacement with the same model list.
+#[test]
+fn production_credential_hydration_and_replacement_preserve_wire_order() {
+    let credential_record = |value: &str| {
+        serde_json::to_vec(&credential_record::ApiKeyCredential::new(value.to_owned()))
+            .expect("credential record")
+    };
+    let trace = run_production_credential_scenario(vec![
+        (
+            vec![ProductionCredentialReply::Contents(credential_record(
+                "locally-usable-not-remotely-verified-a",
+            ))],
+            true,
+        ),
+        (
+            vec![ProductionCredentialReply::Contents(credential_record(
+                "locally-usable-not-remotely-verified-b",
+            ))],
+            true,
+        ),
+    ]);
+
+    assert!(matches!(
+        trace.as_slice(),
+        [
+            ProductionCredentialTrace::SecretRequest,
+            ProductionCredentialTrace::Declaration(initial),
+            ProductionCredentialTrace::Ready,
+            ProductionCredentialTrace::SecretRequest,
+            ProductionCredentialTrace::Declaration(replacement),
+        ] if !initial.is_empty() && initial == replacement
+    ));
+}
+
+/// Proves a real ChatGPT resolver is followed by an authoritative Secret
+/// reread whose changed OAuth generation publishes a replacement declaration.
+#[test]
+fn production_oauth_resolution_publishes_authoritative_generation() {
+    let oauth_record = |account: &str| {
+        serde_json::to_vec(&credential_record::ChatGptOAuthCredential::from(
+            OpenAiAuth {
+                access_token: oauth_test_jwt(account),
+                refresh_token: format!("{account}-refresh"),
+                expires_at_ms: u64::MAX,
+                account_id: Some(account.to_owned()),
+            },
+        ))
+        .expect("OAuth credential record")
+    };
+    let initial = oauth_record("account-a");
+    let authoritative = oauth_record("account-b");
+    let settings = br#"{
+        "kind": "chatgpt",
+        "credential": {
+            "kind": "oauth",
+            "identity": "0123456789abcdef0123456789abcdef"
+        }
+    }"#
+    .to_vec();
+    let trace = run_production_credential_scenario_with(
+        settings,
+        tau_proto::ModelId::new(
+            ProviderName::new("chatgpt"),
+            tau_proto::ModelName::new("gpt-5.3-codex"),
+        ),
+        "providers/0123456789abcdef0123456789abcdef/oauth.json",
+        vec![
+            (
+                vec![ProductionCredentialReply::Contents(initial.clone())],
+                true,
+            ),
+            (
+                vec![
+                    ProductionCredentialReply::Contents(initial),
+                    ProductionCredentialReply::Contents(authoritative),
+                ],
+                true,
+            ),
+        ],
+    );
+
+    assert!(matches!(
+        trace.as_slice(),
+        [
+            ProductionCredentialTrace::SecretRequest,
+            ProductionCredentialTrace::Declaration(initial_models),
+            ProductionCredentialTrace::Ready,
+            ProductionCredentialTrace::SecretRequest,
+            ProductionCredentialTrace::SecretRequest,
+            ProductionCredentialTrace::Declaration(replacement_models),
+        ] if !initial_models.is_empty() && initial_models == replacement_models
+    ));
+}
+
+/// Proves a malformed production Secret reply yields an empty declaration
+/// after the request and before Ready.
+#[test]
+fn production_malformed_credential_is_excluded_before_ready() {
+    let trace = run_production_credential_scenario(vec![(
+        vec![ProductionCredentialReply::Contents(b"not-json".to_vec())],
+        true,
+    )]);
+
+    assert!(matches!(
+        trace.as_slice(),
+        [
+            ProductionCredentialTrace::SecretRequest,
+            ProductionCredentialTrace::Declaration(models),
+            ProductionCredentialTrace::Ready,
+        ] if models.is_empty()
+    ));
+}
+
+/// Proves an explicit production NotFound response yields an empty declaration
+/// after the Secret request and before Ready.
+#[test]
+fn production_missing_credential_is_excluded_before_ready() {
+    let trace =
+        run_production_credential_scenario(vec![(vec![ProductionCredentialReply::Missing], true)]);
+
+    assert!(matches!(
+        trace.as_slice(),
+        [
+            ProductionCredentialTrace::SecretRequest,
+            ProductionCredentialTrace::Declaration(models),
+            ProductionCredentialTrace::Ready,
+        ] if models.is_empty()
+    ));
+}
+
+/// Proves an unchanged production credential observation does not emit a
+/// redundant replacement declaration.
+#[test]
+fn production_unchanged_credential_observation_deduplicates_declaration() {
+    let record = serde_json::to_vec(&credential_record::ApiKeyCredential::new(
+        "same-generation".to_owned(),
+    ))
+    .expect("credential record");
+    let trace = run_production_credential_scenario(vec![
+        (
+            vec![ProductionCredentialReply::Contents(record.clone())],
+            true,
+        ),
+        (vec![ProductionCredentialReply::Contents(record)], false),
+        (
+            vec![ProductionCredentialReply::Contents(
+                serde_json::to_vec(&credential_record::ApiKeyCredential::new(
+                    "barrier-generation".to_owned(),
+                ))
+                .expect("barrier credential record"),
+            )],
+            true,
+        ),
+    ]);
+
+    assert!(matches!(
+        trace.as_slice(),
+        [
+            ProductionCredentialTrace::SecretRequest,
+            ProductionCredentialTrace::Declaration(_),
+            ProductionCredentialTrace::Ready,
+            ProductionCredentialTrace::SecretRequest,
+            ProductionCredentialTrace::SecretRequest,
+            ProductionCredentialTrace::Declaration(_),
+        ]
+    ));
+}
+
 /// Proves one invalid profile rejects the complete initial settings generation
 /// instead of retaining valid profiles parsed before the failure.
 #[test]
@@ -1021,10 +1430,10 @@ fn invalid_provider_configure_error_is_redacted() {
     assert!(!diagnostic.contains("/private/provider/path-sentinel"));
 }
 
-/// Proves a valid complete settings snapshot still publishes every configured
-/// model and reaches Ready after strict validation.
+/// Proves a stored-credential route is excluded when initial Secret hydration
+/// cannot obtain credential material before Ready.
 #[test]
-fn valid_provider_configure_publishes_models_and_ready() {
+fn initial_secret_hydration_excludes_missing_credential_before_ready() {
     let settings = configured_chat_completions_settings("deepseek", serde_json::json!({}));
     let (result, frames) =
         run_provider_configure(BTreeMap::from([("deepseek.json".to_owned(), settings)]));
@@ -1037,13 +1446,7 @@ fn valid_provider_configure_publishes_models_and_ready() {
                 if matches!(
                     emit.event.as_ref(),
                     Event::ProviderModelsDeclared(declaration)
-                        if declaration
-                            .models
-                            .iter()
-                            .any(|model| {
-                                model.id.provider.as_str() == "deepseek"
-                                    && model.id.model.as_str() == "deepseek-chat"
-                            })
+                        if declaration.models.is_empty()
                 )
         )
     }));
@@ -1057,6 +1460,171 @@ fn valid_provider_configure_publishes_models_and_ready() {
             .iter()
             .any(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
     );
+}
+
+/// Proves malformed credential records exclude their routes while a locally
+/// parseable record admits the route without making a remote-authentication
+/// claim.
+#[test]
+fn credential_hydration_requires_local_usability_not_remote_authentication() {
+    let provider = ProviderName::new("deepseek");
+    let settings = configured_chat_completions_settings("deepseek", serde_json::json!({}));
+    let configured = || {
+        try_load_settings_profiles(vec![(provider.clone(), settings.clone())])
+            .expect("valid credential-free settings")
+    };
+
+    let mut missing = configured();
+    let missing_observations = hydrate_profile_credentials_with(&mut missing, |_| {
+        Err(tau_client::ExtensionDataRpcError::Harness {
+            kind: tau_proto::ExtensionDataErrorKind::NotFound,
+            message: "fixture path is absent".to_owned(),
+        })
+    });
+    assert!(models_for_profiles(&missing).is_empty());
+    assert_eq!(
+        missing_observations.get(&provider),
+        Some(&CredentialObservation::Unavailable)
+    );
+
+    let mut malformed = configured();
+    let malformed_observations = hydrate_profile_credentials_with(&mut malformed, |_| {
+        Ok(tau_proto::ExtensionDataValue::ReadFile {
+            contents: b"not-json".to_vec(),
+        })
+    });
+    assert!(models_for_profiles(&malformed).is_empty());
+    assert!(matches!(
+        malformed_observations.get(&provider),
+        Some(CredentialObservation::Contents(_))
+    ));
+
+    let empty_record =
+        serde_json::to_vec(&credential_record::ApiKeyCredential::new(" \t".to_owned()))
+            .expect("empty credential record");
+    let mut empty = configured();
+    hydrate_profile_credentials_with(&mut empty, |_| {
+        Ok(tau_proto::ExtensionDataValue::ReadFile {
+            contents: empty_record.clone(),
+        })
+    });
+    assert!(
+        models_for_profiles(&empty).is_empty(),
+        "stored whitespace is not an implicit keyless credential"
+    );
+
+    let record = serde_json::to_vec(&credential_record::ApiKeyCredential::new(
+        "locally-parseable-but-not-remotely-verified".to_owned(),
+    ))
+    .expect("credential record");
+    let mut locally_usable = configured();
+    hydrate_profile_credentials_with(&mut locally_usable, |_| {
+        Ok(tau_proto::ExtensionDataValue::ReadFile {
+            contents: record.clone(),
+        })
+    });
+    assert!(
+        models_for_profiles(&locally_usable)
+            .iter()
+            .any(|model| model.id.provider == provider),
+        "local parsing admits the route without contacting the remote service"
+    );
+}
+
+/// Proves a changed usable credential generation republishes a replacement even
+/// when the locally usable model list remains identical.
+#[test]
+fn credential_replacement_requires_replacement_declaration() {
+    let provider = ProviderName::new("deepseek");
+    let models = Vec::<ProviderModelInfo>::new();
+    let previous = BTreeMap::from([(
+        provider.clone(),
+        CredentialObservation::Contents(blake3::hash(b"credential-a")),
+    )]);
+    let replacement = BTreeMap::from([(
+        provider,
+        CredentialObservation::Contents(blake3::hash(b"credential-b")),
+    )]);
+
+    assert!(declaration_needs_publication(
+        Some(&models),
+        Some(&previous),
+        &models,
+        &replacement,
+    ));
+    assert!(!declaration_needs_publication(
+        Some(&models),
+        Some(&replacement),
+        &models,
+        &replacement,
+    ));
+}
+
+/// Proves the centralized post-OAuth-resolution boundary always performs the
+/// authoritative rehydration that detects a refresh or adopted CAS winner.
+#[test]
+fn oauth_resolution_observes_authoritative_replacement_generation() {
+    let provider = ProviderName::new("chatgpt");
+    let models = Vec::<ProviderModelInfo>::new();
+    let previous = BTreeMap::from([(
+        provider.clone(),
+        CredentialObservation::Contents(blake3::hash(b"pre-refresh")),
+    )]);
+    let authoritative = BTreeMap::from([(
+        provider,
+        CredentialObservation::Contents(blake3::hash(b"cas-winner")),
+    )]);
+    let mut published = false;
+
+    observe_oauth_resolution_with(true, || {
+        published =
+            declaration_needs_publication(Some(&models), Some(&previous), &models, &authoritative);
+        Ok(())
+    })
+    .expect("post-resolution observation");
+
+    assert!(published, "authoritative OAuth generation republishes");
+}
+
+/// Proves rotating one alias does not clear compact-negative evidence still
+/// referenced by an unchanged provider with the same inference identity.
+#[test]
+fn credential_rotation_retains_shared_alias_compact_negative_evidence() {
+    let changed = ProviderName::new("changed");
+    let unchanged = ProviderName::new("unchanged");
+    let identity = InferenceProfileIdentity::from_test_value(7);
+    let previous = BTreeMap::from([
+        (
+            changed.clone(),
+            CredentialObservation::Contents(blake3::hash(b"old")),
+        ),
+        (
+            unchanged.clone(),
+            CredentialObservation::Contents(blake3::hash(b"shared")),
+        ),
+    ]);
+    let current = BTreeMap::from([
+        (
+            changed.clone(),
+            CredentialObservation::Contents(blake3::hash(b"new")),
+        ),
+        (
+            unchanged.clone(),
+            CredentialObservation::Contents(blake3::hash(b"shared")),
+        ),
+    ]);
+    let mut identities =
+        HashMap::from([(changed, identity.clone()), (unchanged, identity.clone())]);
+    let mut unavailable = HashSet::from([identity.clone()]);
+
+    reconcile_compact_state_after_credential_changes(
+        &previous,
+        &current,
+        &mut identities,
+        &mut unavailable,
+    );
+
+    assert!(unavailable.contains(&identity));
 }
 
 /// Cloneable in-memory sink used to inspect structured tracing output.

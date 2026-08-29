@@ -108,7 +108,11 @@ ModelId::new("chatgpt", "gpt-5.3-codex")
 ```
 
 The provider extension publishes transient `provider.models_declared` replacement
-declarations with the models it can currently serve. After ordinary interception
+declarations after Secret hydration. A snapshot includes only routes with valid
+local configuration and locally usable credential material; missing or malformed
+credentials omit their routes. Later observed credential changes publish a complete
+replacement snapshot. Local usability does not guarantee remote authentication.
+After ordinary interception
 and commit, the harness publishes protected canonical `provider.models_updated`
 current state and updates routing/availability projections. The declaration
 payload contains the proposed model list. The canonical payload adds

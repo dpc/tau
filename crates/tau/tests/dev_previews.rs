@@ -639,11 +639,10 @@ fn previews_use_configured_default_role_unless_overridden() {
     assert_eq!(tool_names(&explicit_tools), ["grep"]);
 }
 
-/// Proves model-aware tool previews use provider-published metadata and
-/// preserve explicit role grants for both Codex-style and ordinary shell
-/// models.
+/// Proves previews without Secret authority do not infer Codex tools from an
+/// unusable configured route, while preserving explicit role grants.
 #[test]
-fn print_tools_matches_model_defaults_and_explicit_role_grants() {
+fn print_tools_requires_usable_model_route_or_explicit_role_grants() {
     let home = TempDir::new().expect("temporary home");
     let config_dir = home.path().join(".config/tau");
     let settings_dir = home.path().join(".state/tau/providers/provider-builtin");
@@ -713,11 +712,10 @@ fn print_tools_matches_model_defaults_and_explicit_role_grants() {
             .collect::<Vec<_>>()
     };
     let codex_default = names("codex-default");
-    assert!(codex_default.contains(&"apply_patch".to_owned()));
-    assert!(codex_default.contains(&"shell_command".to_owned()));
-    assert!(!codex_default.contains(&"read".to_owned()));
-    assert!(!codex_default.contains(&"grep".to_owned()));
-    assert!(!codex_default.contains(&"ls".to_owned()));
+    assert!(!codex_default.contains(&"apply_patch".to_owned()));
+    assert!(!codex_default.contains(&"shell_command".to_owned()));
+    assert!(codex_default.contains(&"edit".to_owned()));
+    assert!(codex_default.contains(&"read".to_owned()));
     assert_eq!(names("codex-explicit"), ["grep", "ls", "read"]);
 
     let ordinary_default = names("ordinary-default");

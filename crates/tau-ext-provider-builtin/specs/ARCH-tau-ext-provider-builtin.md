@@ -1,7 +1,7 @@
 # ARCH-tau-ext-provider-builtin: tau-ext-provider-builtin architecture
 
 `tau-ext-provider-builtin` is Tau's built-in provider bridge. It resolves an
-immutable credential-free settings snapshot and runtime Secret RPC credentials, publishes available models, receives
+immutable credential-free settings snapshot and runtime Secret RPC credentials, publishes locally usable models, receives
 model-visible prompt and tool context from the harness, invokes external model
 services, and reports provider execution through Tau protocol events.
 
@@ -125,8 +125,14 @@ changes require restart. See
 
 ## Runtime and worker flow
 
-Protocol startup publishes provider kind and subscriptions, declares models,
-and then signals readiness. The harness derives canonical model state after
+Protocol startup publishes provider kind and subscriptions, hydrates configured
+profiles from Secret storage, declares only routes with locally usable
+credential material, and then signals readiness. Missing or malformed
+credentials omit their routes. Subsequent prompt, prewarm, and quota work
+rehydrates credentials; an observed credential-generation or usability change
+publishes a complete replacement declaration. Local usability means Tau can
+parse the configured credential and construct the route, not that the remote
+service will authenticate it. The harness derives canonical model state after
 activation. The normal `tau-client` writer is the only protocol serialization
 path.
 

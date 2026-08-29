@@ -2292,13 +2292,22 @@ fn parse_settings_profile(
 fn hydrate_profile_credentials(
     client: &ExtensionDataClient,
     profiles: &mut BuiltinProviderProfiles,
-) {
+) -> BTreeMap<ProviderName, CredentialObservation> {
     hydrate_profile_credentials_with(profiles, |path| {
         client.request(
             tau_proto::ExtensionDataScope::Secret,
             tau_proto::ExtensionDataRequestOp::ReadFile { path },
         )
-    });
+    })
+}
+
+/// Secret-free evidence used to detect a changed credential generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CredentialObservation {
+    /// Secret storage did not return credential bytes for this profile.
+    Unavailable,
+    /// Secret storage returned this opaque content generation.
+    Contents(blake3::Hash),
 }
 
 /// Hydrates prompt-time profiles with credential records returned by Secret
@@ -2311,7 +2320,8 @@ fn hydrate_profile_credentials_with(
         tau_proto::ExtensionDataValue,
         tau_client::ExtensionDataRpcError,
     >,
-) {
+) -> BTreeMap<ProviderName, CredentialObservation> {
+    let mut observations = BTreeMap::new();
     let names = profiles.providers.keys().cloned().collect::<Vec<_>>();
     for name in names {
         let Some(credential) = profiles.credentials.get(&name).cloned() else {
@@ -2322,11 +2332,11 @@ fn hydrate_profile_credentials_with(
             continue;
         };
         let path = reference.path().clone();
-        let requires_value = reference.named_source().is_some();
         let result = read_secret(path);
         let tau_proto::ExtensionDataValue::ReadFile { contents } = (match result {
             Ok(value) => value,
             Err(error) => {
+                observations.insert(name.clone(), CredentialObservation::Unavailable);
                 if credential_error_means_logged_out(
                     profiles.providers.get(&name),
                     &credential,
@@ -2343,6 +2353,7 @@ fn hydrate_profile_credentials_with(
                 continue;
             }
         }) else {
+            observations.insert(name.clone(), CredentialObservation::Unavailable);
             tracing::warn!(
                 target: LOG_TARGET,
                 "skipping provider after unexpected credential result"
@@ -2350,6 +2361,10 @@ fn hydrate_profile_credentials_with(
             profiles.providers.remove(&name);
             continue;
         };
+        observations.insert(
+            name.clone(),
+            CredentialObservation::Contents(blake3::hash(&contents)),
+        );
         let valid = match profiles.providers.get_mut(&name) {
             Some(BuiltinProviderProfile::Chatgpt(profile)) => {
                 serde_json::from_slice::<credential_record::ChatGptOAuthCredential>(&contents)
@@ -2361,33 +2376,21 @@ fn hydrate_profile_credentials_with(
                 serde_json::from_slice::<credential_record::ApiKeyCredential>(&contents)
                     .map_err(|_| ())
                     .map(credential_record::ApiKeyCredential::into_value)
-                    .and_then(|value| {
-                        (!requires_value || !value.trim().is_empty())
-                            .then_some(value)
-                            .ok_or(())
-                    })
+                    .and_then(|value| (!value.trim().is_empty()).then_some(value).ok_or(()))
                     .map(|value| profile.api_key = value)
             }
             Some(BuiltinProviderProfile::OpenRouter(profile)) => {
                 serde_json::from_slice::<credential_record::ApiKeyCredential>(&contents)
                     .map_err(|_| ())
                     .map(credential_record::ApiKeyCredential::into_value)
-                    .and_then(|value| {
-                        (!requires_value || !value.trim().is_empty())
-                            .then_some(value)
-                            .ok_or(())
-                    })
+                    .and_then(|value| (!value.trim().is_empty()).then_some(value).ok_or(()))
                     .map(|value| profile.api_key = value)
             }
             Some(BuiltinProviderProfile::Responses(profile)) => {
                 serde_json::from_slice::<credential_record::ApiKeyCredential>(&contents)
                     .map_err(|_| ())
                     .map(credential_record::ApiKeyCredential::into_value)
-                    .and_then(|value| {
-                        (!requires_value || !value.trim().is_empty())
-                            .then_some(value)
-                            .ok_or(())
-                    })
+                    .and_then(|value| (!value.trim().is_empty()).then_some(value).ok_or(()))
                     .map(|value| profile.api_key = value)
             }
             None => continue,
@@ -2400,6 +2403,7 @@ fn hydrate_profile_credentials_with(
             profiles.providers.remove(&name);
         }
     }
+    observations
 }
 
 /// Returns the closed diagnostic category for a failed Secret hydration read.
@@ -2753,6 +2757,8 @@ where
         unavailable_compact_identities: HashSet::new(),
         compact_profile_identities: HashMap::new(),
         extension_data_client: None,
+        declared_credential_observations: None,
+        declared_models: None,
     };
     let install_extension_data_client = startup.publish_models_after_configure;
     let mut runtime = TauExtensionRunner::new(ProviderExtension::<F>::new(
@@ -2837,9 +2843,8 @@ where
                     .lock()
                     .expect("lock provider settings snapshot") = profiles.clone();
                 let provider_count = profiles.providers.len();
-                let models = models_for_profiles(&profiles);
-                let model_count = models.len();
                 if !publish_models_after_configure {
+                    let model_count = models_for_profiles(&profiles).len();
                     tracing::info!(
                         target: LOG_TARGET,
                         providers = provider_count,
@@ -2850,9 +2855,8 @@ where
                 }
                 cx.state
                     .set_startup_responses_modes(profiles.startup_responses_modes());
-                cx.handle.emit_transient(Event::ProviderModelsDeclared(
-                    ProviderModelsDeclared { models },
-                ))?;
+                let usable_profiles = cx.state.load_profiles(&cx.handle)?;
+                let model_count = models_for_profiles(&usable_profiles).len();
                 tracing::info!(
                     target: LOG_TARGET,
                     providers = provider_count,
@@ -3034,19 +3038,73 @@ struct ProviderRuntime<F> {
     /// Runtime Secret-scope RPC client, installed after startup transport
     /// setup.
     extension_data_client: Option<ExtensionDataClient>,
+    /// Credential generations observed when publishing the latest model
+    /// snapshot.
+    declared_credential_observations: Option<BTreeMap<ProviderName, CredentialObservation>>,
+    /// Latest complete replacement model snapshot published by this runtime.
+    declared_models: Option<Vec<ProviderModelInfo>>,
 }
 
 impl<F> ProviderRuntime<F>
 where
     F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
-    fn load_profiles(&mut self) -> BuiltinProviderProfiles {
+    fn load_profiles(&mut self, handle: &ClientHandle) -> ClientResult<BuiltinProviderProfiles> {
         let mut profiles = (self.load_prompt_profiles)();
         profiles.apply_startup_responses_modes(&self.startup_responses_modes);
         if let Some(client) = &self.extension_data_client {
-            hydrate_profile_credentials(client, &mut profiles);
+            let observations = hydrate_profile_credentials(client, &mut profiles);
+            self.publish_models_if_changed(&profiles, observations, handle)?;
         }
-        profiles
+        Ok(profiles)
+    }
+
+    /// Publishes one replacement declaration after credential or route
+    /// usability changes.
+    fn publish_models_if_changed(
+        &mut self,
+        profiles: &BuiltinProviderProfiles,
+        observations: BTreeMap<ProviderName, CredentialObservation>,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        if let Some(previous) = &self.declared_credential_observations {
+            reconcile_compact_state_after_credential_changes(
+                previous,
+                &observations,
+                &mut self.compact_profile_identities,
+                &mut self.unavailable_compact_identities,
+            );
+        }
+        let mut models = models_for_profiles(profiles);
+        apply_compact_route_downgrades(
+            &mut models,
+            &self.compact_profile_identities,
+            &self.unavailable_compact_identities,
+        );
+        if !declaration_needs_publication(
+            self.declared_models.as_ref(),
+            self.declared_credential_observations.as_ref(),
+            &models,
+            &observations,
+        ) {
+            return Ok(());
+        }
+        self.emit_model_declaration(models, handle)?;
+        self.declared_credential_observations = Some(observations);
+        Ok(())
+    }
+
+    /// Emits and remembers one complete model declaration.
+    fn emit_model_declaration(
+        &mut self,
+        models: Vec<ProviderModelInfo>,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        handle.emit_transient(Event::ProviderModelsDeclared(ProviderModelsDeclared {
+            models: models.clone(),
+        }))?;
+        self.declared_models = Some(models);
+        Ok(())
     }
 
     /// Captures ChatGPT route modes from the profiles resolved at extension
@@ -3064,9 +3122,25 @@ where
         self.worker_waker = Some(waker);
     }
 
+    /// Rehydrates and republishes after a ChatGPT resolver may rotate
+    /// credentials.
+    fn observe_oauth_resolution(
+        &mut self,
+        observes_oauth_refresh: bool,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        observe_oauth_resolution_with(observes_oauth_refresh, || {
+            self.load_profiles(handle).map(|_| ())
+        })
+    }
+
     #[cfg(not(test))]
     fn initialize_quota(&mut self, handle: &ClientHandle) -> ClientResult<()> {
-        let mut profiles = self.load_profiles();
+        let mut profiles = self.load_profiles(handle)?;
+        let observes_oauth_refresh = profiles
+            .providers
+            .values()
+            .any(|profile| matches!(profile, BuiltinProviderProfile::Chatgpt(_)));
         let backends = profiles.resolve_initial_quota_backends(|model, profiles| {
             resolve_responses_backend(
                 model,
@@ -3076,6 +3150,7 @@ where
                 self.extension_data_client.as_ref(),
             )
         });
+        self.observe_oauth_resolution(observes_oauth_refresh, handle)?;
         for (provider, config) in backends {
             self.ensure_quota_profile(&provider, &config, handle)?;
         }
@@ -3144,6 +3219,9 @@ where
         profiles: &mut BuiltinProviderProfiles,
         handle: &ClientHandle,
     ) -> ClientResult<PromptBackend> {
+        let observes_oauth_refresh = profiles
+            .chatgpt_credential_reference(&model.provider)
+            .is_some();
         let backend = resolve_prompt_backend(
             model,
             profiles,
@@ -3156,6 +3234,9 @@ where
                 .missing_login(&model.provider)
                 .then(|| model.provider.clone()),
         });
+        // Resolution can refresh or adopt a winning OAuth credential generation.
+        // Rehydrate immediately so the declaration reflects that observed write.
+        self.observe_oauth_resolution(observes_oauth_refresh, handle)?;
         self.reconcile_provider_profile(&model.provider, backend_profile_identity(&backend));
         if let PromptBackend::Responses(config) = &backend {
             let identity = config.inference_identity();
@@ -3170,9 +3251,7 @@ where
                     &self.compact_profile_identities,
                     &self.unavailable_compact_identities,
                 );
-                handle.send(HarnessInputMessage::emit_transient(
-                    Event::ProviderModelsDeclared(ProviderModelsDeclared { models }),
-                ))?;
+                self.emit_model_declaration(models, handle)?;
             }
             let _ = self.ensure_quota_profile(&model.provider, config, handle)?;
         } else {
@@ -3250,7 +3329,7 @@ where
     fn handle_event(&mut self, event: Event, handle: &ClientHandle) -> ClientResult<()> {
         match event {
             Event::HarnessSessionDir(session_dir) => self.record_session_debug_policy(session_dir),
-            Event::AgentPromptPrewarmRequested(prewarm) => self.prewarm_backend(prewarm)?,
+            Event::AgentPromptPrewarmRequested(prewarm) => self.prewarm_backend(prewarm, handle)?,
             Event::AgentCacheRefreshRequested(refresh) => {
                 self.cache_refresh_backend(refresh, handle)?
             }
@@ -3276,16 +3355,22 @@ where
     fn prewarm_backend(
         &mut self,
         prewarm: tau_proto::AgentPromptPrewarmRequested,
+        handle: &ClientHandle,
     ) -> ClientResult<()> {
-        let mut profiles = self.load_profiles();
+        let mut profiles = self.load_profiles(handle)?;
         let requested_provider = prewarm.model.as_ref().map(|model| model.provider.clone());
-        let Some((model, config)) = resolve_prewarm_backend(
+        let observes_oauth_refresh = requested_provider
+            .as_ref()
+            .is_some_and(|provider| profiles.chatgpt_credential_reference(provider).is_some());
+        let resolved = resolve_prewarm_backend(
             &prewarm,
             &mut profiles,
             &mut self.oauth_refresh_rejections,
             self.codex_runtime.network(),
             self.extension_data_client.as_ref(),
-        ) else {
+        );
+        self.observe_oauth_resolution(observes_oauth_refresh, handle)?;
+        let Some((model, config)) = resolved else {
             if let Some(provider) = requested_provider {
                 self.clear_prewarm_profile(&provider);
             }
@@ -3354,14 +3439,21 @@ where
         handle: &ClientHandle,
     ) -> ClientResult<()> {
         let refresh_id = refresh.refresh_id.clone();
-        let mut profiles = self.load_profiles();
-        let Some((model, config)) = resolve_prewarm_backend(
+        let mut profiles = self.load_profiles(handle)?;
+        let observes_oauth_refresh = refresh.prompt.model.as_ref().is_some_and(|model| {
+            profiles
+                .chatgpt_credential_reference(&model.provider)
+                .is_some()
+        });
+        let resolved = resolve_prewarm_backend(
             &refresh.prompt,
             &mut profiles,
             &mut self.oauth_refresh_rejections,
             self.codex_runtime.network(),
             self.extension_data_client.as_ref(),
-        ) else {
+        );
+        self.observe_oauth_resolution(observes_oauth_refresh, handle)?;
+        let Some((model, config)) = resolved else {
             return send_cache_refresh_terminal(
                 handle,
                 refresh_id,
@@ -3567,7 +3659,7 @@ where
             agent_id: prompt.agent_id.clone(),
             refresh_id: None,
         });
-        let mut profiles = self.load_profiles();
+        let mut profiles = self.load_profiles(handle)?;
         let backend = self.resolve_backend_with_quota(&prompt.model, &mut profiles, handle)?;
         let profile_identity = backend_profile_identity(&backend);
         let pinned_chatgpt_identity = match &backend {
@@ -3714,7 +3806,11 @@ where
                     self.active_prompts = self.active_prompts.saturating_sub(1);
                 }
                 Ok(WorkerMessage::CompactRouteUnavailable { provider, identity }) => {
-                    let mut profiles = self.load_profiles();
+                    let mut profiles = self.load_profiles(handle)?;
+                    let observes_oauth_refresh = profiles
+                        .providers
+                        .values()
+                        .any(|profile| matches!(profile, BuiltinProviderProfile::Chatgpt(_)));
                     let provider_models = models_for_profiles(&profiles);
                     for model in provider_models {
                         if let Some(PromptBackend::Responses(config)) = resolve_prompt_backend(
@@ -3728,6 +3824,7 @@ where
                                 .insert(model.id.provider.clone(), config.inference_identity());
                         }
                     }
+                    self.observe_oauth_resolution(observes_oauth_refresh, handle)?;
                     if self.compact_profile_identities.get(&provider) == Some(&identity) {
                         let changed = self.unavailable_compact_identities.insert(identity);
                         if !changed {
@@ -3739,9 +3836,7 @@ where
                             &self.compact_profile_identities,
                             &self.unavailable_compact_identities,
                         );
-                        handle.send(HarnessInputMessage::emit_transient(
-                            Event::ProviderModelsDeclared(ProviderModelsDeclared { models }),
-                        ))?;
+                        self.emit_model_declaration(models, handle)?;
                     }
                 }
                 Ok(WorkerMessage::PrewarmDone {
@@ -3868,7 +3963,7 @@ where
                         self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
                         continue;
                     }
-                    let mut profiles = self.load_profiles();
+                    let mut profiles = self.load_profiles(handle)?;
                     let backend =
                         self.resolve_backend_with_quota(&job.prompt.model, &mut profiles, handle)?;
                     if !automatic_retry_identity_matches(
@@ -3904,7 +3999,7 @@ where
                             )?;
                             tau_proto::RetryPromptStatus::NotParked
                         } else {
-                            let mut profiles = self.load_profiles();
+                            let mut profiles = self.load_profiles(handle)?;
                             owned_job.backend = self.resolve_backend_with_quota(
                                 &owned_job.prompt.model,
                                 &mut profiles,
@@ -4010,7 +4105,9 @@ where
                         .quota
                         .refresh_is_current(&provider, &profile_epoch, refresh_generation)
                     {
-                        let mut profiles = self.load_profiles();
+                        let mut profiles = self.load_profiles(handle)?;
+                        let observes_oauth_refresh =
+                            profiles.chatgpt_credential_reference(&provider).is_some();
                         let config = models_for_profiles(&profiles)
                             .into_iter()
                             .find(|model| model.id.provider == provider)
@@ -4023,6 +4120,7 @@ where
                                     self.extension_data_client.as_ref(),
                                 )
                             });
+                        self.observe_oauth_resolution(observes_oauth_refresh, handle)?;
                         if let Some(config) = config {
                             let started = self.ensure_quota_profile(&provider, &config, handle)?;
                             if !started && let Some(epoch) = self.quota.profile_epoch(&provider) {
@@ -4096,6 +4194,48 @@ where
             codex_runtime: self.codex_runtime.clone(),
         }
     }
+}
+
+/// Drops stale compact evidence without restoring aliases that share an
+/// identity.
+fn reconcile_compact_state_after_credential_changes(
+    previous: &BTreeMap<ProviderName, CredentialObservation>,
+    current: &BTreeMap<ProviderName, CredentialObservation>,
+    identities: &mut HashMap<ProviderName, InferenceProfileIdentity>,
+    unavailable: &mut HashSet<InferenceProfileIdentity>,
+) {
+    for provider in previous.keys().chain(current.keys()) {
+        if previous.get(provider) != current.get(provider)
+            && let Some(identity) = identities.remove(provider)
+            && !identities.values().any(|current| current == &identity)
+        {
+            unavailable.remove(&identity);
+        }
+    }
+}
+
+/// Returns whether current local route or credential evidence replaces the last
+/// declaration.
+fn declaration_needs_publication(
+    declared_models: Option<&Vec<ProviderModelInfo>>,
+    declared_observations: Option<&BTreeMap<ProviderName, CredentialObservation>>,
+    models: &[ProviderModelInfo],
+    observations: &BTreeMap<ProviderName, CredentialObservation>,
+) -> bool {
+    declared_models.is_none_or(|declared| declared.as_slice() != models)
+        || declared_observations != Some(observations)
+}
+
+/// Runs the authoritative post-resolution observation only for OAuth-backed
+/// routes.
+fn observe_oauth_resolution_with(
+    observes_oauth_refresh: bool,
+    rehydrate_and_publish: impl FnOnce() -> ClientResult<()>,
+) -> ClientResult<()> {
+    if observes_oauth_refresh {
+        rehydrate_and_publish()?;
+    }
+    Ok(())
 }
 
 /// Reconciles one material inference identity and removes only that provider's
