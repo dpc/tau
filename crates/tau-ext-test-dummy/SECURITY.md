@@ -44,8 +44,11 @@ is capped at 4096 bytes including the delimiter and contains only `call_id` and
 `release_nonce`.
 Both values must exactly match the active invocation and configured
 caller-generated nonce. Bad, oversized, stale, duplicate, or mismatched frames
-are rejected without release. The worker accepts one active invocation, reports
-readiness before arming release, and uses one bounded overall lifecycle.
+are rejected without release. The worker accepts one active invocation and
+reports readiness before arming release. Readiness and each admitted frame
+assembly are bounded; no independent elapsed-time deadline can race
+authenticated release, correlated cancellation, or extension shutdown.
+Listener and client-configuration failures continue to settle fail closed.
 Cancellation and shutdown wake notification-driven waits. Teardown joins all
 owned threads and removes the socket without manufacturing a success result.
 

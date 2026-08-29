@@ -32,9 +32,10 @@ advertise: false
   arming release, and accepts 4096-byte-bounded newline-delimited JSON frames
   containing the exact active `call_id` and configured `release_nonce`. An exact
   match returns the normal `restart succeeded` result; bad frames do not release
-  it. One overall deadline bounds connection and frame assembly, while
-  cancellation/disconnect wakes and joins all worker threads without synthetic
-  success.
+  it. Readiness and each admitted frame read stay bounded, but no independent
+  elapsed-time deadline races authenticated release, correlated cancellation,
+  or disconnect/shutdown. Listener and client-configuration failures settle
+  fail closed, and teardown joins all worker threads without synthetic success.
 - `exit_once_then_success` requires one absolute marker below a caller-owned
   private `0700` fixture root. The first live call reports correlated progress,
   atomically creates that marker, and exits without a terminal. A replacement

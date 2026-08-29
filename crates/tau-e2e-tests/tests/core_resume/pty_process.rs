@@ -26,15 +26,6 @@ const ROWS: u16 = 40;
 const MAX_RAW_BYTES: usize = 256 * 1024;
 const MAX_FRAMES: usize = 512;
 
-/// How the PTY reader should stop while the child process is reaped.
-#[derive(Clone, Copy)]
-enum ReaderShutdown {
-    /// Keep reading through the slave-side close and natural EOF.
-    NaturalEof,
-    /// Stop promptly for cleanup paths that do not inspect complete capture.
-    StopEarly,
-}
-
 /// Named terminal cell dimensions shared by the kernel PTY and semantic VT.
 pub(super) struct TerminalSize {
     /// Visible terminal columns.
@@ -498,24 +489,40 @@ impl PtyProcess {
             .clone())
     }
 
-    /// Requests `:quit`, then reaps the whole owned process tree within bounds.
+    /// Requests `:quit`, then waits for the owned process tree's natural exit.
     pub(super) fn finish(mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.send_line(":quit")?;
-        self.reap_successfully()
+        self.reap_naturally()
     }
 
-    /// Reap a bounded one-shot process and return raw bytes after reader drain.
+    /// Reaps a one-shot process naturally and returns bytes after reader drain.
     pub(super) fn finish_exited(mut self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        self.reap_successfully()?;
+        self.reap_naturally()?;
         self.raw()
     }
 
-    /// Wait for successful process exit and natural PTY EOF before returning.
-    fn reap_successfully(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let status = self.reap(Duration::from_secs(3), ReaderShutdown::NaturalEof)?;
+    /// Waits for the explicitly requested exit, natural PTY EOF, and complete
+    /// process-group teardown without racing a fixture-local wall-clock
+    /// deadline.
+    fn reap_naturally(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let child = self.child.as_mut().ok_or("PTY child already reaped")?;
+        let pgid = Pid::from_raw(child.id() as i32);
+        let status = child.wait()?;
         if !status.success() {
             return Err(format!("Tau PTY process exited with {status}").into());
         }
+        self.writer.take();
+        self.reader_done
+            .recv()
+            .map_err(|_| "PTY reader stopped without natural EOF")?;
+        if let Some(reader) = self.reader.take() {
+            reader.join().map_err(|_| "PTY reader panicked")?;
+        }
+        while process_group::exists(pgid) {
+            thread::yield_now();
+        }
+        self.write_artifacts()?;
+        self.child.take();
         Ok(())
     }
 
@@ -523,11 +530,8 @@ impl PtyProcess {
     fn reap(
         &mut self,
         graceful: Duration,
-        reader_shutdown: ReaderShutdown,
     ) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
-        if matches!(reader_shutdown, ReaderShutdown::StopEarly) {
-            self.reader_stop.store(true, Ordering::Release);
-        }
+        self.reader_stop.store(true, Ordering::Release);
         let child = self.child.as_mut().ok_or("PTY child already reaped")?;
         let pgid = Pid::from_raw(child.id() as i32);
         let first_deadline = Instant::now() + graceful;
@@ -623,7 +627,7 @@ impl Drop for PtyProcess {
         if self.child.is_none() {
             return;
         }
-        let _ = self.reap(Duration::ZERO, ReaderShutdown::StopEarly);
+        let _ = self.reap(Duration::ZERO);
         let _ = self.write_artifacts();
     }
 }
@@ -979,7 +983,7 @@ fn complete_frame_wait_rejects_idle_only_generation() {
             .expect("flush selected status process release");
     });
     process
-        .reap(Duration::from_secs(1), ReaderShutdown::StopEarly)
+        .reap(Duration::from_secs(1))
         .expect("reap redraw process");
 }
 
@@ -1115,7 +1119,7 @@ fn cleanup_reaps_descendant_after_process_group_leader_exits() {
         .expect("descendant readiness");
     let started = Instant::now();
     let status = process
-        .reap(Duration::from_millis(20), ReaderShutdown::StopEarly)
+        .reap(Duration::from_millis(20))
         .expect("bounded group cleanup");
     assert!(status.success());
     assert!(started.elapsed() >= Duration::from_millis(900));

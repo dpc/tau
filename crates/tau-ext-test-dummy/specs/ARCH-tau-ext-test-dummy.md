@@ -46,7 +46,10 @@ most 4096 bytes (including the newline), with the exact closed shape
 `{"call_id":"…","release_nonce":"…"}`. Only an exact match for the active call
 and configured nonce reports the normal `restart succeeded` result. Malformed,
 oversized, duplicate, stale, and mismatched frames cannot release the hold.
-One bounded overall lifecycle covers readiness, connection, and frame assembly.
+Readiness and each admitted frame assembly remain bounded. No independent
+elapsed-time deadline can race authenticated release, correlated cancellation,
+or extension shutdown; listener and client-configuration failures continue to
+settle fail closed.
 Cancellation and shutdown wake the notification-driven worker. Cancellation,
 disconnect, and teardown join all owned threads and remove the socket without
 synthesizing success.
@@ -61,8 +64,8 @@ filesystem errors fail closed; the initially absent marker leaf is the intended
 first-use case. This mode has no timing, call-count, exit-code, or general
 event-scripting control.
 
-Both hold modes transfer their selected result, error, deadline, or cancellation
-outcome to the protocol loop over an unbounded internal channel. The loop keeps
+Both hold modes transfer their selected result, error, or cancellation outcome
+to the protocol loop over an unbounded internal channel. The loop keeps
 the active hold ownership until checked ordered terminal publication succeeds.
 Publication failure exits the extension so harness disconnect cleanup settles
 the retained call. Readiness progress remains optional detached output.

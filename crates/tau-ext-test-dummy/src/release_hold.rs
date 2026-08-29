@@ -8,13 +8,13 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{fs, thread};
 
 use tau_client::{ClientError, ClientResult};
 use tau_proto::{ToolError, ToolResult, ToolType};
 
-use super::{HOLD_READY_TIMEOUT, HOLD_TERMINAL_TIMEOUT, HOLD_TERMINAL_TIMEOUT_SECS};
+use super::HOLD_READY_TIMEOUT;
 
 /// Maximum accepted release frame, including its newline delimiter.
 const RELEASE_FRAME_MAX_BYTES: usize = 4096;
@@ -65,7 +65,7 @@ enum TerminalOwner {
     Release,
     /// Correlated cancellation won.
     Cancellation,
-    /// Worker timeout or listener failure won.
+    /// Listener or client configuration failure won.
     Worker,
     /// Extension shutdown won without synthetic output.
     Shutdown,
@@ -261,17 +261,10 @@ impl ReleaseWorker {
             return;
         }
 
-        let deadline = Instant::now() + HOLD_TERMINAL_TIMEOUT;
         let mut armed = false;
         let mut authenticated = false;
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let next = if remaining.is_zero() {
-                Err(mpsc::RecvTimeoutError::Timeout)
-            } else {
-                inputs.recv_timeout(remaining)
-            };
-            match next {
+            match inputs.recv() {
                 Ok(WorkerInput::Arm) => armed = true,
                 Ok(WorkerInput::Cancel) => {
                     if claim(&terminal, TerminalOwner::Cancellation) {
@@ -288,11 +281,10 @@ impl ReleaseWorker {
                     }
                     break;
                 }
-                Ok(WorkerInput::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Ok(WorkerInput::Shutdown) | Err(mpsc::RecvError) => break,
                 Ok(WorkerInput::Connection(mut stream)) => {
                     pending.fetch_sub(1, Ordering::AcqRel);
-                    let timeout = remaining.min(CLIENT_READ_TIMEOUT);
-                    if let Err(error) = configure_client_timeout(&stream, timeout) {
+                    if let Err(error) = configure_client_timeout(&stream, CLIENT_READ_TIMEOUT) {
                         if claim(&terminal, TerminalOwner::Worker) {
                             terminals.send(
                                 worker_error(
@@ -314,17 +306,6 @@ impl ReleaseWorker {
                             worker_error(&invoke, format!("release socket accept failed: {error}"))
                                 .into(),
                         );
-                    }
-                    break;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if claim(&terminal, TerminalOwner::Worker) {
-                        terminals.send(worker_error(
-                        &invoke,
-                        format!(
-                            "deterministic hold reached its {HOLD_TERMINAL_TIMEOUT_SECS} second deadline"
-                        ),
-                    ).into());
                     }
                     break;
                 }
