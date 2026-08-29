@@ -366,11 +366,16 @@ their selected models.
   an optional runtime-only cache contract with documented TTL shape, renewal,
   quota, prefix-version, and privacy facts. The contract contains no cache key,
   object id, prompt content, timestamp, history, or lifecycle state. It remains
-  transient current state and is never reconstructed by cold replay. The harness publishes
-  `harness.models_available` and related role/model availability events. Current
+  transient current state and is never reconstructed by cold replay. The harness
+  publishes `harness.models_available` and related role/model availability events. Current
   state catch-up synthesizes this canonical event for newly attached live
   subscribers; it is not journal persistence or replay and never regenerates the
   declaration.
+- **`provider.model_declaration_diagnostic`** — Transient, immutable
+  harness-authored rejection of one malformed entry from a committed provider
+  declaration. It identifies the stable publisher and model id and lists every
+  closed validation issue found in canonical order. Other valid entries from the
+  same declaration remain eligible for `provider.models_updated`.
 - **`provider.quota_replace_reported`**,
   **`provider.quota_patch_reported`**, and
   **`provider.quota_clear_reported`** — Transient provider-authored account-quota

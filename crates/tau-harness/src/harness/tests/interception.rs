@@ -1284,6 +1284,92 @@ fn provider_prefix_interception_protects_canonical_model_state() {
     assert!(h.provider_runtime.model_routes.contains_key(&replacement));
 }
 
+/// Provider declaration diagnostics are harness-authored protected facts, so a
+/// provider-prefix interceptor must not spoof their publisher, model, or
+/// issues.
+#[test]
+fn provider_prefix_interception_cannot_rewrite_declaration_diagnostic() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    clear_interception_fixture_models(&mut h);
+    connect_ready_configured_extension(
+        &mut h,
+        "model-provider",
+        "configured-provider",
+        tau_proto::ClientKind::Provider,
+    );
+    connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Prefix("provider".to_owned())],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.handle_extension_event_inner_with_persist(
+        &crate::test_connection_id("model-provider"),
+        provider_models_declaration("declared/invalid", 0),
+        Some(false),
+    )
+    .expect("declare invalid model");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit declaration");
+    assert!(matches!(
+        h.runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| &pending.event),
+        Some(Event::ProviderModelDeclarationDiagnostic(_))
+    ));
+
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(
+                Event::ProviderModelDeclarationDiagnostic(
+                    tau_proto::ProviderModelDeclarationDiagnostic {
+                        publisher_extension_id: tau_proto::ExtensionName::parse("spoofed-provider")
+                            .expect("extension name"),
+                        model: "spoofed/model".into(),
+                        issues: vec![
+                            tau_proto::ProviderModelDeclarationIssue::StandaloneMetadataUnsupported,
+                        ],
+                    },
+                ),
+            ))),
+        })),
+    )
+    .expect("reject diagnostic rewrite");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit empty canonical snapshot");
+
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::ProviderModelDeclarationDiagnostic(diagnostic)
+            if diagnostic.publisher_extension_id.as_str() == "configured-provider"
+                && diagnostic.model == "declared/invalid".into()
+                && diagnostic.issues
+                    == [tau_proto::ProviderModelDeclarationIssue::ContextWindowZero]
+    )));
+    assert!(!event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::ProviderModelDeclarationDiagnostic(diagnostic)
+            if diagnostic.publisher_extension_id.as_str() == "spoofed-provider"
+    )));
+}
+
 /// Disconnecting after a canonical update enters interception rewrites that
 /// must-pass snapshot to the provider's empty terminal state.
 #[test]

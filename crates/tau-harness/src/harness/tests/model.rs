@@ -353,6 +353,146 @@ fn provider_models_snapshot_updates_available_models() {
     assert!(saw_harness_roles);
 }
 
+/// A mixed provider declaration must reject and diagnose each malformed entry
+/// independently while publishing and routing an unrelated valid sibling
+/// through the normal canonical production path.
+#[test]
+fn provider_model_declaration_rejects_invalid_entries_independently() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+
+    let valid_id: ModelId = "openai/valid".parse().expect("model id");
+    let valid = provider_model(valid_id.clone(), 128_000);
+    let mut generation_negative = provider_model("openai/generation-negative".into(), 128_000);
+    generation_negative.standalone_compaction_generation_negative = true;
+    generation_negative.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(64_000));
+    generation_negative.standalone_compaction_prefix_budget =
+        Some(tau_proto::ByteCount::new(4_096));
+    let mut zero_context = provider_model("openai/zero-context".into(), 0);
+    zero_context.standalone_compaction_threshold = Some(tau_proto::TokenCount::ZERO);
+    zero_context.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::ZERO);
+    let mut unsupported_metadata = provider_model("openai/unsupported-metadata".into(), 1_000);
+    unsupported_metadata.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(500));
+    let mut zero_threshold = provider_model("openai/zero-threshold".into(), 1_000);
+    zero_threshold.supports_standalone_compaction = true;
+    zero_threshold.standalone_compaction_threshold = Some(tau_proto::TokenCount::ZERO);
+    let mut excessive_threshold = provider_model("openai/excessive-threshold".into(), 1_000);
+    excessive_threshold.supports_standalone_compaction = true;
+    excessive_threshold.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(1_001));
+    let mut zero_prefix_budget = provider_model("openai/zero-prefix-budget".into(), 1_000);
+    zero_prefix_budget.supports_standalone_compaction = true;
+    zero_prefix_budget.standalone_compaction_prefix_budget = Some(tau_proto::ByteCount::ZERO);
+
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
+            models: vec![
+                zero_context,
+                valid.clone(),
+                generation_negative.clone(),
+                unsupported_metadata,
+                zero_threshold,
+                excessive_threshold,
+                zero_prefix_budget,
+            ],
+        })),
+    )
+    .expect("handle mixed provider snapshot");
+
+    assert_eq!(
+        h.provider_runtime
+            .models_by_extension
+            .get("provider-ext")
+            .expect("provider snapshot")
+            .as_slice(),
+        [valid.clone(), generation_negative.clone()]
+    );
+    assert!(h.provider_runtime.available_models.contains(&valid_id));
+    assert_eq!(
+        h.provider_runtime
+            .model_routes
+            .get(&valid_id)
+            .map(tau_proto::ConnectionId::as_str),
+        Some("provider-ext")
+    );
+
+    let events = event_log_events(&h);
+    let declaration = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ProviderModelsDeclared(declaration) => declaration
+                .models
+                .iter()
+                .any(|model| model.id == "openai/valid".into())
+                .then_some(declaration),
+            _ => None,
+        })
+        .expect("committed raw declaration");
+    assert_eq!(declaration.models.len(), 7);
+    assert_eq!(
+        declaration
+            .models
+            .iter()
+            .find(|model| model.id == "openai/zero-prefix-budget".into())
+            .and_then(|model| model.standalone_compaction_prefix_budget),
+        Some(tau_proto::ByteCount::ZERO)
+    );
+    let update = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ProviderModelsUpdated(update)
+                if update.publisher_extension_id.as_str() == "provider-ext" =>
+            {
+                Some(update)
+            }
+            _ => None,
+        })
+        .expect("canonical accepted snapshot");
+    assert_eq!(update.models, [valid, generation_negative]);
+
+    let diagnostics = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ProviderModelDeclarationDiagnostic(diagnostic)
+                if diagnostic.publisher_extension_id.as_str() == "provider-ext" =>
+            {
+                Some((diagnostic.model.to_string(), diagnostic.issues.clone()))
+            }
+            _ => None,
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(diagnostics.len(), 5);
+    assert_eq!(
+        diagnostics["openai/zero-context"],
+        vec![
+            tau_proto::ProviderModelDeclarationIssue::ContextWindowZero,
+            tau_proto::ProviderModelDeclarationIssue::StandaloneMetadataUnsupported,
+            tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionThresholdZero,
+            tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionPrefixBudgetZero,
+        ]
+    );
+    assert_eq!(
+        diagnostics["openai/unsupported-metadata"],
+        vec![tau_proto::ProviderModelDeclarationIssue::StandaloneMetadataUnsupported]
+    );
+    assert_eq!(
+        diagnostics["openai/zero-threshold"],
+        vec![tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionThresholdZero]
+    );
+    assert_eq!(
+        diagnostics["openai/excessive-threshold"],
+        vec![
+            tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionThresholdExceedsContextWindow
+        ]
+    );
+    assert_eq!(
+        diagnostics["openai/zero-prefix-budget"],
+        vec![tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionPrefixBudgetZero]
+    );
+}
+
 /// Duplicate provider-qualified ids must be diagnosed with bounded detail while
 /// retaining the established sorted-source last-wins metadata and route.
 #[test]

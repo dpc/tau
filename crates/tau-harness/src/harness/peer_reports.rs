@@ -354,9 +354,13 @@ impl Harness {
             );
             return Ok(());
         }
-        if matches!(event, Event::ProviderModelsUpdated(_)) {
-            // Canonical provider state is harness-authored. Providers publish the
-            // mutable `provider.models_declared` input instead.
+        if matches!(
+            event,
+            Event::ProviderModelsUpdated(_) | Event::ProviderModelDeclarationDiagnostic(_)
+        ) {
+            // Canonical provider state and declaration diagnostics are
+            // harness-authored. Providers publish the mutable
+            // `provider.models_declared` input instead.
             return Ok(());
         }
         if matches!(
@@ -999,11 +1003,13 @@ impl Harness {
         if self.should_stage_extension_capabilities(source_id)
             && extension.activation_reservation.is_some()
         {
+            let declaration = self
+                .validate_provider_models_declaration(&publisher_extension_id, declaration.clone());
             self.stage_provider_models_update(
                 source_id,
                 tau_proto::ProviderModelsUpdated {
                     publisher_extension_id,
-                    models: declaration.models.clone(),
+                    models: declaration.models,
                 },
             );
         } else {

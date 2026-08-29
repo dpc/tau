@@ -347,6 +347,10 @@ Extension-supplied persistence requests are ignored categorically.
 Post-commit processing stages startup declarations until activation or publishes
 protected harness-authored `provider.models_updated` current state before applying
 the existing route, collision, availability, and restored-work reconciliation.
+At that boundary the harness validates declaration entries independently, emits
+one protected structured diagnostic for each rejected entry, and carries valid
+siblings into the canonical replacement snapshot unchanged. Invalid metadata is
+neither repaired nor allowed to suppress unrelated valid routes.
 Canonical model state cannot be dropped or rewritten; the existing availability
 projections retain their existing interception behavior. Each canonical snapshot
 also carries the stable configured provider publisher so replacement and empty

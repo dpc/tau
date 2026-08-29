@@ -1926,6 +1926,15 @@ fn representative_events() -> Vec<Event> {
                 est_cache_storage_cost_1m_token_hour_usd: Default::default(),
             }],
         }),
+        Event::ProviderModelDeclarationDiagnostic(ProviderModelDeclarationDiagnostic {
+            publisher_extension_id: crate::ExtensionName::parse("provider")
+                .expect("test extension name must satisfy the identifier grammar"),
+            model: "openai/invalid".parse().expect("model id"),
+            issues: vec![
+                ProviderModelDeclarationIssue::ContextWindowZero,
+                ProviderModelDeclarationIssue::StandaloneCompactionPrefixBudgetZero,
+            ],
+        }),
         Event::HarnessAgentContextInitialized(HarnessAgentContextInitialized {
             session_id: test_session_id("s1"),
             agent_id: agent_id("agent-1"),
@@ -2782,6 +2791,7 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::ToolBackgroundResultDisplay(_)
                 | Event::ProviderModelsDeclared(_)
                 | Event::ProviderModelsUpdated(_)
+                | Event::ProviderModelDeclarationDiagnostic(_)
                 | Event::ProviderPromptSubmittedReported(_)
                 | Event::ProviderResponseUpdatedReported(_)
                 | Event::ProviderResponseFinishedReported(_)
@@ -2924,6 +2934,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "message.sent_reported",
         "provider.cache_miss_diagnostic",
         "provider.cache_miss_diagnostic_reported",
+        "provider.model_declaration_diagnostic",
         "provider.models_declared",
         "provider.models_updated",
         "provider.prompt_submitted",
@@ -6082,10 +6093,10 @@ fn provider_model_supported_tool_types_json_roundtrip() {
     assert_eq!(encoded["supports_parallel_tool_calls"], false);
 }
 
-/// A published automatic-prefix capability must be positive; omission remains
-/// wire-compatible and distinct from an unusable zero budget.
+/// Raw provider declarations must preserve a zero prefix budget so the harness
+/// can reject only that entry without losing valid siblings in the same batch.
 #[test]
-fn provider_model_rejects_zero_standalone_compaction_prefix_budget() {
+fn provider_model_preserves_zero_standalone_compaction_prefix_budget() {
     let value = serde_json::json!({
         "id": "openai/model",
         "context_window": 1000,
@@ -6094,12 +6105,11 @@ fn provider_model_rejects_zero_standalone_compaction_prefix_budget() {
         "thinking_summaries": [],
         "standalone_compaction_prefix_budget": 0
     });
-    let error = serde_json::from_value::<ProviderModelInfo>(value)
-        .expect_err("zero prefix budget must fail");
-    assert!(
-        error
-            .to_string()
-            .contains("standalone_compaction_prefix_budget must be nonzero")
+    let model =
+        serde_json::from_value::<ProviderModelInfo>(value).expect("preserve invalid declaration");
+    assert_eq!(
+        model.standalone_compaction_prefix_budget,
+        Some(ByteCount::ZERO)
     );
 }
 

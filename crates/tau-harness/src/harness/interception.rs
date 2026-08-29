@@ -670,6 +670,7 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // Canonical provider model state is harness-owned current state. Declarations
     // remain mutable and interceptable before this protected projection.
     EventName::PROVIDER_MODELS_UPDATED,
+    EventName::PROVIDER_MODEL_DECLARATION_DIAGNOSTIC,
     EventName::AGENT_INITIALIZATION_CONTEXT_SET,
     EventName::HARNESS_AGENT_CONTEXT_INITIALIZED,
     EventName::HARNESS_SESSION_SKILLS_AVAILABLE,
@@ -823,6 +824,7 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::MessageReactionRemoved(_)
             | Event::MessageSent(_)
             | Event::ProviderModelsUpdated(_)
+            | Event::ProviderModelDeclarationDiagnostic(_)
             | Event::AgentInitializationContextSet(_)
             | Event::HarnessAgentContextInitialized(_)
             | Event::HarnessSessionSkillsAvailable(_)

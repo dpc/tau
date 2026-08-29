@@ -3180,6 +3180,10 @@ pub enum InputModality {
 }
 
 /// Metadata for one model currently served by a provider extension.
+///
+/// Raw [`ProviderModelsDeclared`] entries preserve numeric values that the
+/// harness may reject as malformed. Harness-authored [`ProviderModelsUpdated`]
+/// snapshots contain only entries that passed the canonical boundary checks.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderModelInfo {
     /// Fully-qualified model id. The provider segment is part of user-visible
@@ -3248,6 +3252,9 @@ pub struct ProviderModelInfo {
     pub standalone_compaction_generation_negative: bool,
     /// Provider-recommended token threshold for harness-scheduled standalone
     /// compaction. `None` means no provider default is published.
+    ///
+    /// Raw declarations may carry zero or internally inconsistent values so the
+    /// harness can reject only that entry; accepted canonical snapshots do not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standalone_compaction_threshold: Option<crate::TokenCount>,
     /// Exact maximum canonical historical-prefix bytes that one standalone
@@ -3256,11 +3263,9 @@ pub struct ProviderModelInfo {
     /// The trailing compaction trigger is excluded. Absence means no local byte
     /// admission check; automatic recovery remains supported and canonical
     /// typed context rejection may authorize strict-predecessor retreat.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_nonzero_byte_count"
-    )]
+    /// Raw declarations may carry zero for entrywise harness validation;
+    /// accepted canonical snapshots never do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standalone_compaction_prefix_budget: Option<crate::ByteCount>,
     /// Optional documented runtime cache contract for this exact route.
     ///
@@ -3283,21 +3288,6 @@ pub struct ProviderModelInfo {
     /// Estimated USD storage price per million token-hours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_cache_storage_cost_1m_token_hour_usd: Option<crate::EstimatedUsdPerMillionTokenHours>,
-}
-
-fn deserialize_optional_nonzero_byte_count<'de, D>(
-    deserializer: D,
-) -> Result<Option<crate::ByteCount>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<crate::ByteCount>::deserialize(deserializer)?;
-    if value == Some(crate::ByteCount::ZERO) {
-        return Err(path_serde_de::Error::custom(
-            "standalone_compaction_prefix_budget must be nonzero",
-        ));
-    }
-    Ok(value)
 }
 
 impl ProviderModelInfo {
@@ -3344,9 +3334,39 @@ pub struct ProviderModelsUpdated {
     /// Stable configured provider extension that owns this replacement
     /// snapshot.
     pub publisher_extension_id: ExtensionName,
-    /// Complete accepted replacement snapshot. An empty list means the provider
-    /// currently serves no models.
+    /// Complete validated replacement snapshot. An empty list means the
+    /// provider currently serves no models. Every entry has a nonzero
+    /// context window and satisfies the standalone metadata invariants
+    /// documented on [`ProviderModelInfo`].
     pub models: Vec<ProviderModelInfo>,
+}
+
+/// Harness-authored diagnostic for one rejected provider model declaration.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderModelDeclarationDiagnostic {
+    /// Stable configured provider extension that published the malformed entry.
+    pub publisher_extension_id: ExtensionName,
+    /// Provider-qualified model id of the rejected declaration entry.
+    pub model: ModelId,
+    /// Every validation issue found in the rejected entry, in canonical order.
+    pub issues: Vec<ProviderModelDeclarationIssue>,
+}
+
+/// Closed reason why a provider model declaration entry was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderModelDeclarationIssue {
+    /// The required total model context window is zero.
+    ContextWindowZero,
+    /// Standalone-only numeric metadata was supplied for a route that does not
+    /// support explicit standalone compaction.
+    StandaloneMetadataUnsupported,
+    /// The optional standalone automatic-compaction threshold is zero.
+    StandaloneCompactionThresholdZero,
+    /// The standalone threshold exceeds the route's total context window.
+    StandaloneCompactionThresholdExceedsContextWindow,
+    /// The optional standalone historical-prefix byte budget is zero.
+    StandaloneCompactionPrefixBudgetZero,
 }
 
 /// Extension-defined event payload.
@@ -6472,6 +6492,8 @@ pub enum Event {
     ProviderModelsDeclared(ProviderModelsDeclared),
     #[serde(rename = "provider.models_updated")]
     ProviderModelsUpdated(ProviderModelsUpdated),
+    #[serde(rename = "provider.model_declaration_diagnostic")]
+    ProviderModelDeclarationDiagnostic(ProviderModelDeclarationDiagnostic),
     /// Provider-authored full quota observation awaiting harness validation.
     #[serde(rename = "provider.quota_replace_reported")]
     ProviderQuotaReplaceReported(ProviderQuotaReplace),
@@ -6958,6 +6980,9 @@ impl Event {
         match self {
             Self::ProviderModelsDeclared(_) => EventName::PROVIDER_MODELS_DECLARED,
             Self::ProviderModelsUpdated(_) => EventName::PROVIDER_MODELS_UPDATED,
+            Self::ProviderModelDeclarationDiagnostic(_) => {
+                EventName::PROVIDER_MODEL_DECLARATION_DIAGNOSTIC
+            }
             Self::ProviderQuotaReplaceReported(_) => EventName::PROVIDER_QUOTA_REPLACE_REPORTED,
             Self::ProviderQuotaPatchReported(_) => EventName::PROVIDER_QUOTA_PATCH_REPORTED,
             Self::ProviderQuotaClearReported(_) => EventName::PROVIDER_QUOTA_CLEAR_REPORTED,
@@ -7167,6 +7192,7 @@ impl Event {
                 | Self::MessageSentReported(_)
                 | Self::ProviderModelsDeclared(_)
                 | Self::ProviderModelsUpdated(_)
+                | Self::ProviderModelDeclarationDiagnostic(_)
                 | Self::ProviderPromptSubmittedReported(_)
                 | Self::ProviderResponseUpdatedReported(_)
                 | Self::ProviderResponseFinishedReported(_)

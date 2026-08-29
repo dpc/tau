@@ -353,6 +353,8 @@ impl EventName {
         Self::from_static(EventCategory::Provider, "models_declared");
     pub const PROVIDER_MODELS_UPDATED: Self =
         Self::from_static(EventCategory::Provider, "models_updated");
+    pub const PROVIDER_MODEL_DECLARATION_DIAGNOSTIC: Self =
+        Self::from_static(EventCategory::Provider, "model_declaration_diagnostic");
     pub const PROVIDER_QUOTA_REPLACE_REPORTED: Self =
         Self::from_static(EventCategory::Provider, "quota_replace_reported");
     pub const PROVIDER_QUOTA_PATCH_REPORTED: Self =

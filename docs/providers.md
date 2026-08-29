@@ -121,6 +121,16 @@ state it replaces; an empty list withdraws that provider's models. Replay expose
 one canonical snapshot per active provider, including empty snapshots. Model lists
 carry metadata, not just IDs:
 
+The harness validates every proposed model independently. A malformed entry is
+omitted from the accepted snapshot and produces a structured
+`provider.model_declaration_diagnostic`; valid siblings remain unchanged. Tau
+rejects zero context windows, standalone-only metadata without effective
+standalone support, zero standalone thresholds or prefix budgets, and standalone
+thresholds larger than the route context window. Effective support is
+`supports_standalone_compaction || standalone_compaction_generation_negative`;
+generation-negative routes keep their standalone metadata. Tau does not strip or
+default invalid fields.
+
 ```rust
 struct ProviderModelInfo {
     id: ModelId,
@@ -137,6 +147,7 @@ struct ProviderModelInfo {
     thinking_summaries: Vec<ThinkingSummary>,
     supports_compaction: bool,
     supports_standalone_compaction: bool,
+    standalone_compaction_generation_negative: bool,
     standalone_compaction_threshold: Option<TokenCount>,
     standalone_compaction_prefix_budget: Option<ByteCount>,
     cache_policy: Option<ProviderCachePolicy>,

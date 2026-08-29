@@ -154,6 +154,16 @@ replacement declaration when a later credential observation changes.
 plus `publisher_extension_id`, the stable configured provider identity whose
 current state the snapshot replaces. Empty canonical lists therefore withdraw only
 that publisher's state and remain attributable during live delivery and replay.
+The harness validates each declared model independently. It rejects entries with
+a zero `context_window`, standalone-only numeric metadata without effective
+standalone support, a zero standalone threshold or prefix budget, or a standalone
+threshold larger than the model context window. Effective standalone support is
+`supports_standalone_compaction || standalone_compaction_generation_negative`, so
+generation-negative routes retain their standalone metadata. Every rejected entry produces one transient
+`provider.model_declaration_diagnostic` containing the publisher, model id, and
+all closed validation issues in canonical order. Valid siblings continue into the
+exact accepted replacement snapshot; the harness does not repair, default, or
+reinterpret rejected metadata.
 
 Declarations are mutable through same-name interception before commit. Canonical
 updates are harness-authored, immutable, and must-pass. Live delivery identifies

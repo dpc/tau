@@ -22,12 +22,69 @@ pub(super) struct ProviderQuotaTombstone {
 }
 
 impl Harness {
+    /// Reject malformed model entries independently and publish one structured
+    /// diagnostic for every rejected entry.
+    pub(super) fn validate_provider_models_declaration(
+        &mut self,
+        publisher_extension_id: &tau_proto::ExtensionName,
+        declaration: tau_proto::ProviderModelsDeclared,
+    ) -> tau_proto::ProviderModelsDeclared {
+        let mut accepted = Vec::with_capacity(declaration.models.len());
+        for model in declaration.models {
+            let mut issues = Vec::new();
+            if model.context_window == tau_proto::TokenCount::ZERO {
+                issues.push(tau_proto::ProviderModelDeclarationIssue::ContextWindowZero);
+            }
+            let has_standalone_metadata = model.standalone_compaction_threshold.is_some()
+                || model.standalone_compaction_prefix_budget.is_some();
+            if has_standalone_metadata && !model.supports_explicit_standalone_compaction() {
+                issues
+                    .push(tau_proto::ProviderModelDeclarationIssue::StandaloneMetadataUnsupported);
+            }
+            if model.standalone_compaction_threshold == Some(tau_proto::TokenCount::ZERO) {
+                issues.push(
+                    tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionThresholdZero,
+                );
+            }
+            if model
+                .standalone_compaction_threshold
+                .is_some_and(|threshold| threshold > model.context_window)
+            {
+                issues.push(
+                    tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionThresholdExceedsContextWindow,
+                );
+            }
+            if model.standalone_compaction_prefix_budget == Some(tau_proto::ByteCount::ZERO) {
+                issues.push(
+                    tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionPrefixBudgetZero,
+                );
+            }
+            if issues.is_empty() {
+                accepted.push(model);
+            } else {
+                self.publish_event(
+                    Some(crate::harness::harness_connection_id()),
+                    Event::ProviderModelDeclarationDiagnostic(
+                        tau_proto::ProviderModelDeclarationDiagnostic {
+                            publisher_extension_id: publisher_extension_id.clone(),
+                            model: model.id,
+                            issues,
+                        },
+                    ),
+                );
+            }
+        }
+        tau_proto::ProviderModelsDeclared { models: accepted }
+    }
+
     pub(super) fn publish_provider_models_update(
         &mut self,
         source_id: &tau_proto::ConnectionId,
         publisher_extension_id: tau_proto::ExtensionName,
         declaration: tau_proto::ProviderModelsDeclared,
     ) {
+        let declaration =
+            self.validate_provider_models_declaration(&publisher_extension_id, declaration);
         let update = tau_proto::ProviderModelsUpdated {
             publisher_extension_id,
             models: declaration.models,
