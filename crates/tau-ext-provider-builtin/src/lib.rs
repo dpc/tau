@@ -3511,14 +3511,21 @@ where
         if !self.input_closed {
             self.park_cooled_queued_prompts(handle)?;
         }
-        let prompt_worker_context = self.prompt_worker_context();
-        start_queued_prompts(
-            &mut self.prompt_queue,
-            &mut self.active_prompts,
+        if let Some(prompt_worker_context) = with_queued_prompt_start_capacity(
+            self.active_prompts,
             self.prompt_concurrency_limit,
-            &prompt_worker_context,
-            handle,
-        )
+            self.prompt_queue.len(),
+            || self.prompt_worker_context(),
+        ) {
+            start_queued_prompts(
+                &mut self.prompt_queue,
+                &mut self.active_prompts,
+                self.prompt_concurrency_limit,
+                &prompt_worker_context,
+                handle,
+            )?;
+        }
+        Ok(())
     }
 
     fn is_finished(&self) -> bool {
@@ -5070,33 +5077,20 @@ where
     }
 
     fn park_cooled_queued_prompts(&mut self, handle: &ClientHandle) -> ClientResult<()> {
-        let mut pending = std::mem::take(&mut self.prompt_queue);
-        let mut retained = VecDeque::with_capacity(pending.len());
-        while let Some(job) = pending.pop_front() {
-            if job.manual_cooldown_bypass {
-                retained.push_back(job);
-                continue;
-            }
-            let Some(cooldown) = self
-                .shared_cooldowns
-                .get(&job.prompt.model.provider)
-                .copied()
-                .filter(|cooldown| cooldown.not_before > self.retry_clock.now())
-            else {
-                retained.push_back(job);
-                continue;
-            };
-            let now = self.retry_clock.now();
-            let due = cooldown_due_for_job(cooldown.not_before, &job);
-            if let Err(error) = emit_retry_status(&job, cooldown.class, due, now, None, handle) {
-                retained.append(&mut pending);
-                self.prompt_queue = retained;
-                return Err(error);
-            }
-            self.retry_scheduler
-                .as_ref()
-                .expect("retry scheduler starts with the runtime waker")
-                .schedule(
+        let scheduler = self
+            .retry_scheduler
+            .as_ref()
+            .expect("retry scheduler starts with the runtime waker");
+        reconcile_cooled_queued_prompts(
+            &mut self.prompt_queue,
+            &*self.retry_clock,
+            &self.shared_cooldowns,
+            #[cfg(test)]
+            None,
+            |job, now, cooldown| {
+                let due = cooldown_due_for_job(cooldown.not_before, &job);
+                emit_retry_status(&job, cooldown.class, due, now, None, handle)?;
+                scheduler.schedule(
                     job,
                     now,
                     Some(CooldownConstraint {
@@ -5104,9 +5098,9 @@ where
                         boundary: cooldown.not_before,
                     }),
                 );
-        }
-        self.prompt_queue = retained;
-        Ok(())
+                Ok(())
+            },
+        )
     }
 
     fn prompt_worker_context(&self) -> PromptWorkerContext {
@@ -5122,6 +5116,16 @@ where
             codex_runtime: self.codex_runtime.clone(),
         }
     }
+}
+
+/// Builds a worker context only when queued work can consume an available slot.
+fn with_queued_prompt_start_capacity<T>(
+    active_prompts: usize,
+    prompt_concurrency_limit: usize,
+    queued_prompts: usize,
+    build_context: impl FnOnce() -> T,
+) -> Option<T> {
+    (active_prompts < prompt_concurrency_limit && queued_prompts != 0).then(build_context)
 }
 
 /// Reports whether one exact-generation refresh still has a prompt owner.
@@ -5583,6 +5587,94 @@ struct CooldownProbe {
     provider: ProviderName,
     /// Cooldown generation current when the scheduler transferred the job.
     generation: u64,
+}
+
+/// One immutable clock and cooldown view used while reconciling queued prompts.
+struct QueuedPromptReconciliation<'a> {
+    /// Single monotonic observation shared by this complete FIFO pass.
+    now: Instant,
+    /// Current provider-scoped cooldown evidence, owned by the main loop.
+    cooldowns: &'a BTreeMap<ProviderName, SharedCooldown>,
+}
+
+impl<'a> QueuedPromptReconciliation<'a> {
+    /// Samples time once before the caller starts walking the FIFO queue.
+    fn from_clock(
+        clock: &dyn RetryClock,
+        cooldowns: &'a BTreeMap<ProviderName, SharedCooldown>,
+    ) -> Self {
+        Self {
+            now: clock.now(),
+            cooldowns,
+        }
+    }
+
+    /// Classifies one FIFO job against this pass's coherent cooldown snapshot.
+    /// Manual retries retain their one-shot bypass regardless of evidence.
+    fn active_cooldown_for(&mut self, job: &PromptJob) -> Option<SharedCooldown> {
+        (!job.manual_cooldown_bypass)
+            .then(|| self.cooldowns.get(&job.prompt.model.provider).copied())
+            .flatten()
+            .filter(|cooldown| cooldown.not_before > self.now)
+    }
+}
+
+/// Test-only counters collected by the production queued-prompt reconciliation
+/// seam.
+#[cfg(test)]
+#[derive(Debug, Default, Eq, PartialEq)]
+struct QueuedPromptReconciliationMetrics {
+    /// Number of coherent clock snapshots taken.
+    clock_samples: usize,
+    /// Number of FIFO jobs classified against that snapshot.
+    classifications: usize,
+    /// Number of jobs transferred to delayed ownership.
+    parked: usize,
+}
+
+/// Partitions FIFO prompt work using one coherent cooldown snapshot, retaining
+/// immediately eligible jobs and transferring active cooldowns through `park`.
+fn reconcile_cooled_queued_prompts(
+    prompt_queue: &mut VecDeque<PromptJob>,
+    clock: &dyn RetryClock,
+    cooldowns: &BTreeMap<ProviderName, SharedCooldown>,
+    #[cfg(test)] mut metrics: Option<&mut QueuedPromptReconciliationMetrics>,
+    mut park: impl FnMut(PromptJob, Instant, SharedCooldown) -> ClientResult<()>,
+) -> ClientResult<()> {
+    if prompt_queue.is_empty() {
+        return Ok(());
+    }
+    // One pass owns one monotonic snapshot. Jobs at a shared-cooldown boundary
+    // therefore all make the same before/at/after decision.
+    let mut reconciliation = QueuedPromptReconciliation::from_clock(clock, cooldowns);
+    #[cfg(test)]
+    if let Some(metrics) = &mut metrics {
+        metrics.clock_samples += 1;
+    }
+    let mut pending = std::mem::take(prompt_queue);
+    let mut retained = VecDeque::with_capacity(pending.len());
+    while let Some(job) = pending.pop_front() {
+        let cooldown = reconciliation.active_cooldown_for(&job);
+        #[cfg(test)]
+        if let Some(metrics) = &mut metrics {
+            metrics.classifications += 1;
+        }
+        let Some(cooldown) = cooldown else {
+            retained.push_back(job);
+            continue;
+        };
+        if let Err(error) = park(job, reconciliation.now, cooldown) {
+            retained.append(&mut pending);
+            *prompt_queue = retained;
+            return Err(error);
+        }
+        #[cfg(test)]
+        if let Some(metrics) = &mut metrics {
+            metrics.parked += 1;
+        }
+    }
+    *prompt_queue = retained;
+    Ok(())
 }
 
 fn cooldown_due_for_job(not_before: Instant, job: &PromptJob) -> Instant {

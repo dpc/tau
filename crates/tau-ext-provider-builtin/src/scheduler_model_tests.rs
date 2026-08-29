@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::env as path_std_env;
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use proptest::prelude::*;
@@ -23,6 +24,36 @@ const PR_SEEDS: [u64; 8] = [
     0x5eed_0000_0006,
     0x5eed_0000_0007,
 ];
+
+/// Fake monotonic clock that records every reconciliation-time observation.
+struct CountingRetryClock {
+    /// Fixed virtual instant returned to the caller.
+    now: Instant,
+    /// Number of calls to [`RetryClock::now`].
+    samples: AtomicUsize,
+}
+
+impl CountingRetryClock {
+    /// Creates a fixed virtual clock with no observations yet.
+    fn new(now: Instant) -> Self {
+        Self {
+            now,
+            samples: AtomicUsize::new(0),
+        }
+    }
+
+    /// Returns the exact number of observed monotonic instants.
+    fn samples(&self) -> usize {
+        self.samples.load(Ordering::SeqCst)
+    }
+}
+
+impl RetryClock for CountingRetryClock {
+    fn now(&self) -> Instant {
+        self.samples.fetch_add(1, Ordering::SeqCst);
+        self.now
+    }
+}
 
 /// One generated command owned by the synchronous retry scheduler.
 #[derive(Clone, Debug)]
@@ -412,6 +443,243 @@ fn check_trace(seed: u64, trace: &[ModelCommand]) -> Result<(), TestCaseError> {
     Ok(())
 }
 
+/// Preserves one sampled cooldown classification across before, at, and after
+/// boundaries while keeping manual bypass and provider scope independent.
+#[test]
+fn queued_prompt_reconciliation_samples_once_and_classifies_each_job_once() {
+    let epoch = Instant::now();
+    let boundary = epoch + Duration::from_secs(10);
+    let limited = ProviderName::new("limited");
+    let healthy = ProviderName::new("healthy");
+    let cooldowns = BTreeMap::from([
+        (
+            limited.clone(),
+            SharedCooldown {
+                not_before: boundary,
+                class: RetryClass::UsageWindow,
+                generation: 7,
+            },
+        ),
+        (
+            healthy.clone(),
+            SharedCooldown {
+                not_before: boundary,
+                class: RetryClass::Transport,
+                generation: 9,
+            },
+        ),
+    ]);
+    let jobs = || {
+        let mut bypass = scheduled_job("limited-bypass", limited.as_str());
+        bypass.manual_cooldown_bypass = true;
+        VecDeque::from([
+            scheduled_job("limited-first", limited.as_str()),
+            scheduled_job("healthy-first", healthy.as_str()),
+            bypass,
+            scheduled_job("limited-tie", limited.as_str()),
+        ])
+    };
+
+    for (label, now, expected_generation) in [
+        ("before", boundary - Duration::from_nanos(1), Some(7)),
+        ("at", boundary, None),
+        ("after", boundary + Duration::from_nanos(1), None),
+    ] {
+        let clock = CountingRetryClock::new(now);
+        let mut prompt_queue = jobs();
+        let mut metrics = QueuedPromptReconciliationMetrics::default();
+        let mut parked = Vec::new();
+        reconcile_cooled_queued_prompts(
+            &mut prompt_queue,
+            &clock,
+            &cooldowns,
+            Some(&mut metrics),
+            |job, parked_at, cooldown| {
+                parked.push((job.agent_prompt_id, parked_at, cooldown.generation));
+                Ok(())
+            },
+        )
+        .expect("test parking callback succeeds");
+        let expected_parked = expected_generation.map_or_else(Vec::new, |_| {
+            vec![
+                (
+                    "limited-first"
+                        .parse::<tau_proto::AgentPromptId>()
+                        .expect("known-safe prompt ID"),
+                    now,
+                    7,
+                ),
+                (
+                    "healthy-first"
+                        .parse::<tau_proto::AgentPromptId>()
+                        .expect("known-safe prompt ID"),
+                    now,
+                    9,
+                ),
+                (
+                    "limited-tie"
+                        .parse::<tau_proto::AgentPromptId>()
+                        .expect("known-safe prompt ID"),
+                    now,
+                    7,
+                ),
+            ]
+        });
+        assert_eq!(parked, expected_parked, "{label} parked FIFO");
+        assert_eq!(
+            prompt_queue
+                .iter()
+                .map(|job| job.agent_prompt_id.as_str())
+                .collect::<Vec<_>>(),
+            if expected_generation.is_some() {
+                vec!["limited-bypass"]
+            } else {
+                vec![
+                    "limited-first",
+                    "healthy-first",
+                    "limited-bypass",
+                    "limited-tie",
+                ]
+            },
+            "{label} retained FIFO"
+        );
+        assert_eq!(clock.samples(), 1, "{label} samples the clock once");
+        assert_eq!(metrics.clock_samples, 1, "{label} records one sample");
+        assert_eq!(
+            metrics.classifications, 4,
+            "{label} classifies each job once"
+        );
+        assert_eq!(
+            metrics.parked,
+            expected_parked.len(),
+            "{label} transfers exact work"
+        );
+    }
+
+    let changed = BTreeMap::from([(
+        limited.clone(),
+        SharedCooldown {
+            not_before: boundary + Duration::from_secs(1),
+            class: RetryClass::UsageWindow,
+            generation: 8,
+        },
+    )]);
+    let clock = CountingRetryClock::new(boundary);
+    let mut prompt_queue = VecDeque::from([scheduled_job("limited-first", limited.as_str())]);
+    let mut metrics = QueuedPromptReconciliationMetrics::default();
+    let mut parked = Vec::new();
+    reconcile_cooled_queued_prompts(
+        &mut prompt_queue,
+        &clock,
+        &changed,
+        Some(&mut metrics),
+        |job, _, cooldown| {
+            parked.push((job.agent_prompt_id, cooldown.generation));
+            Ok(())
+        },
+    )
+    .expect("test parking callback succeeds");
+    assert_eq!(
+        parked,
+        vec![(
+            "limited-first"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe prompt ID"),
+            8,
+        )],
+        "new evidence affects the next complete reconciliation, not a prior sample"
+    );
+    assert_eq!(clock.samples(), 1);
+    assert_eq!(
+        metrics,
+        QueuedPromptReconciliationMetrics {
+            clock_samples: 1,
+            classifications: 1,
+            parked: 1,
+        }
+    );
+
+    let clock = CountingRetryClock::new(boundary);
+    let mut prompt_queue = VecDeque::new();
+    let mut metrics = QueuedPromptReconciliationMetrics::default();
+    reconcile_cooled_queued_prompts(
+        &mut prompt_queue,
+        &clock,
+        &changed,
+        Some(&mut metrics),
+        |_, _, _| panic!("empty reconciliation must not park work"),
+    )
+    .expect("empty queue is a no-op");
+    assert_eq!(clock.samples(), 0, "empty queue takes no clock sample");
+    assert_eq!(metrics, QueuedPromptReconciliationMetrics::default());
+}
+
+/// Builds worker context only for the capacity states that can start a queued
+/// prompt, so full and zero-capacity passes retain their shared worker handles.
+#[test]
+fn queued_prompt_start_capacity_preflight_counts_context_builds_exactly() {
+    let cases = [
+        ("empty", 0, 2, 0, 0),
+        ("zero-limit", 0, 0, 4, 0),
+        ("full", 2, 2, 4, 0),
+        ("partial", 1, 2, 4, 1),
+        ("idle", 0, 2, 4, 1),
+    ];
+    for (label, active, limit, queued, expected_context_builds) in cases {
+        let mut context_builds = 0;
+        let built = with_queued_prompt_start_capacity(active, limit, queued, || {
+            context_builds += 1;
+        });
+        assert_eq!(
+            context_builds, expected_context_builds,
+            "{label} capacity must build the clone-bearing worker context exactly as needed"
+        );
+        assert_eq!(
+            built.is_some(),
+            expected_context_builds == 1,
+            "{label} build result"
+        );
+    }
+}
+
+/// Keeps the queue reference oracle on a trace with equal deadlines, evidence
+/// replacement, exact-generation release, and cancellation ownership transfer.
+#[test]
+fn retry_scheduler_reference_covers_ties_cooldown_changes_release_and_cancellation() {
+    let trace = [
+        ModelCommand::Schedule {
+            prompt: 0,
+            provider: 0,
+            delay: 5,
+            cooldown: None,
+        },
+        ModelCommand::Schedule {
+            prompt: 1,
+            provider: 0,
+            delay: 5,
+            cooldown: None,
+        },
+        ModelCommand::Schedule {
+            prompt: 2,
+            provider: 1,
+            delay: 5,
+            cooldown: None,
+        },
+        ModelCommand::Extend {
+            provider: 0,
+            generation: 1,
+            delay: 10,
+        },
+        ModelCommand::Cancel { prompt: 1 },
+        ModelCommand::Release {
+            provider: 0,
+            generation: 1,
+        },
+        ModelCommand::Advance { ticks: 5 },
+    ];
+    check_trace(0x0a5, &trace).expect("production queue must match the reference trace");
+}
+
 /// Measures production queue visits across increasing queue sizes. The exact
 /// counter keeps this benchmark deterministic: extend, release, and a present
 /// cancel inspect every entry once, while an absent indexed cancel inspects
@@ -451,6 +719,61 @@ fn benchmark_retry_queue_bulk_mutation_scaling() {
         eprintln!("retry_queue_bulk queue={queue_size} visits={visits}");
         assert_eq!(visits, queue_size * 3);
         assert!(queue.membership_is_exact());
+    }
+}
+
+/// Measures the one-clock, one-classification reconciliation path across queue
+/// sizes without relying on a machine-specific wall-clock threshold.
+#[test]
+#[ignore = "descriptive performance benchmark"]
+fn benchmark_queued_prompt_reconciliation_scaling() {
+    let epoch = Instant::now();
+    let limited = ProviderName::new("limited");
+    let cooldowns = BTreeMap::from([(
+        limited.clone(),
+        SharedCooldown {
+            not_before: epoch + Duration::from_secs(60),
+            class: RetryClass::UsageWindow,
+            generation: 1,
+        },
+    )]);
+    for queue_size in [1_024_usize, 4_096, 16_384] {
+        let jobs = (0..queue_size)
+            .map(|index| {
+                scheduled_job(
+                    &format!("ap-reconcile-{index}"),
+                    if index % 2 == 0 {
+                        limited.as_str()
+                    } else {
+                        "healthy"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let clock = CountingRetryClock::new(epoch);
+        let mut prompt_queue = VecDeque::from(jobs);
+        let mut metrics = QueuedPromptReconciliationMetrics::default();
+        reconcile_cooled_queued_prompts(
+            &mut prompt_queue,
+            &clock,
+            &cooldowns,
+            Some(&mut metrics),
+            |_, _, _| Ok(()),
+        )
+        .expect("benchmark parking callback succeeds");
+
+        eprintln!(
+            "queued_prompt_reconciliation queue={queue_size} \
+             clock_samples={} classifications={} parked={parked}",
+            clock.samples(),
+            metrics.classifications,
+            parked = metrics.parked,
+        );
+        assert_eq!(clock.samples(), 1);
+        assert_eq!(metrics.clock_samples, 1);
+        assert_eq!(metrics.classifications, queue_size);
+        assert_eq!(metrics.parked, queue_size.div_ceil(2));
+        assert_eq!(prompt_queue.len(), queue_size / 2);
     }
 }
 
