@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::{borrow as path_std_borrow, collections as path_std_collections};
+use std::{borrow as path_std_borrow, collections as path_std_collections, time as path_std_time};
 
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem, ToolError,
@@ -69,6 +69,195 @@ fn payload_envelope_provenance_detection_covers_every_envelope_family() {
         "<prompt>x</response>",
     ] {
         assert!(!is_payload_envelope_provenance_projection(text), "{text}");
+    }
+}
+
+/// The canonical-entry preflight preserves exact typed provenance decisions for
+/// Human UI, harness-internal, tool-result, dedup, and lexical near-match
+/// cases.
+#[test]
+fn payload_envelope_preflight_matches_materialization_for_exact_typed_cases() {
+    let pointer = tau_proto::ToolResultItem {
+        presentation: tau_proto::ToolResultPresentation::HarnessDedupPointer,
+        call_id: "pointer".into(),
+        tool_type: tau_proto::ToolType::Function,
+        status: ToolResultStatus::Success,
+        output: tau_proto::ToolResponse::from_cbor(&CborValue::Text(
+            "same payload as call `original`".to_owned(),
+        )),
+        provider_content: Vec::new(),
+    };
+    let cases = [
+        (
+            sourced_user_prompt(
+                "literal text without sentinel-shaped content",
+                tau_proto::PromptSubmissionSource::HumanUi,
+            ),
+            true,
+        ),
+        (harness_internal_prompt("typed internal input"), true),
+        (
+            compacted_event(vec![web_tool_result(
+                "web",
+                "<tau_web_content adapter=\"fixture\">exact</tau_web_content>",
+            )]),
+            true,
+        ),
+        (
+            compacted_event(vec![ContextItem::ToolResult(pointer)]),
+            true,
+        ),
+        (
+            compacted_event(vec![materialized_message(
+                "prefix <tau_web_content adapter=\"fixture\">nested</tau_web_content> suffix",
+            )]),
+            false,
+        ),
+        (
+            sourced_user_prompt(
+                "<user>narrative near-match</user>",
+                tau_proto::PromptSubmissionSource::Extension {
+                    name: tau_proto::ExtensionName::parse("fixture").expect("extension name"),
+                },
+            ),
+            false,
+        ),
+    ];
+
+    for (event, expected) in cases {
+        let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+        tree.apply_event(&event);
+        let preflight = active_prompt_context_contains_payload_envelope_provenance_projection(
+            &tree,
+            tree.head(),
+        );
+        assert_eq!(preflight, expected, "{event:?}");
+        assert_eq!(
+            preflight,
+            assemble_prompt_context_from(&tree, tree.head())
+                .contains_payload_envelope_provenance_projection,
+            "{event:?}"
+        );
+    }
+}
+
+/// A deterministic branched history checks the canonical-entry preflight
+/// against full materialization at every possible selected head.
+#[test]
+fn randomized_branched_preflight_matches_materialization_at_every_head() {
+    let mut random = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+    let mut nodes = Vec::new();
+
+    for step in 0..96 {
+        random = random
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let parent = if nodes.is_empty() || random.is_multiple_of(5) {
+            tau_core::AgentEventParent::Root
+        } else {
+            tau_core::AgentEventParent::Under(nodes[random as usize % nodes.len()])
+        };
+        let event = match random % 8 {
+            0 => sourced_user_prompt(
+                &format!("human-{step}"),
+                tau_proto::PromptSubmissionSource::HumanUi,
+            ),
+            1 => harness_internal_prompt(&format!("internal-{step}")),
+            2 => sourced_user_prompt(
+                "<user>untyped narrative</user>",
+                tau_proto::PromptSubmissionSource::Extension {
+                    name: tau_proto::ExtensionName::parse("fixture").expect("extension name"),
+                },
+            ),
+            3 => compacted_event(vec![materialized_message(&format!("plain summary {step}"))]),
+            4 => compacted_event(vec![materialized_message(
+                "<response>exact replacement</response>",
+            )]),
+            5 => compacted_event(vec![web_tool_result(
+                "web",
+                "<tau_web_content adapter=\"fixture\">exact</tau_web_content>",
+            )]),
+            6 => compacted_event(vec![ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                content: vec![ContentPart::SyntheticCompactionSummary {
+                    text: format!("typed summary {step}"),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })]),
+            _ => user_prompt(&format!("ordinary-{step}")),
+        };
+        if let Some(node) = tree.apply_event_at(parent, &event) {
+            nodes.push(node);
+        }
+    }
+
+    for head in nodes.into_iter().map(Some).chain(std::iter::once(None)) {
+        assert_eq!(
+            active_prompt_context_contains_payload_envelope_provenance_projection(&tree, head),
+            assemble_prompt_context_from(&tree, head)
+                .contains_payload_envelope_provenance_projection,
+            "selected head {head:?}"
+        );
+    }
+}
+
+/// Preflight scans canonical entries but never constructs the complete
+/// `PromptContext` that the later authoritative materialization owns.
+#[test]
+fn payload_envelope_preflight_constructs_no_prompt_context() {
+    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+    for index in 0..64 {
+        tree.apply_event(&user_prompt(&format!("ordinary-{index}")));
+    }
+    tree.apply_event(&sourced_user_prompt(
+        "visible",
+        tau_proto::PromptSubmissionSource::HumanUi,
+    ));
+
+    reset_prompt_preflight_test_counters();
+    assert!(
+        active_prompt_context_contains_payload_envelope_provenance_projection(&tree, tree.head())
+    );
+    assert_eq!(prompt_context_construction_count(), 0);
+    assert_eq!(prompt_preflight_entry_visit_count(), 65);
+
+    let _reference = assemble_prompt_context_from(&tree, tree.head());
+    assert_eq!(prompt_context_construction_count(), 1);
+}
+
+/// Manual benchmark contrasts linear canonical-entry preflight with complete
+/// context construction as selected transcript size grows.
+#[test]
+#[ignore = "manual prompt-envelope preflight scaling benchmark"]
+fn benchmark_payload_envelope_preflight_scaling() {
+    for size in [100, 1_000, 10_000] {
+        let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+        for index in 0..size {
+            tree.apply_event(&user_prompt(&format!("ordinary-{index}")));
+        }
+
+        let iterations = 100;
+        let started = path_std_time::Instant::now();
+        for _ in 0..iterations {
+            std::hint::black_box(
+                active_prompt_context_contains_payload_envelope_provenance_projection(
+                    &tree,
+                    tree.head(),
+                ),
+            );
+        }
+        let preflight = started.elapsed();
+        let started = path_std_time::Instant::now();
+        for _ in 0..iterations {
+            std::hint::black_box(assemble_prompt_context_from(&tree, tree.head()));
+        }
+        let materialization = started.elapsed();
+        eprintln!(
+            "selected_entries={size} iterations={iterations} preflight={preflight:?} \
+             full_materialization={materialization:?}"
+        );
     }
 }
 
@@ -1887,6 +2076,45 @@ fn assembled_context_resets_message_fact_signal_at_compaction_boundary() {
     assert!(rendered.contains("summary without raw fact"));
 }
 
+/// Incremental persisted folding and cold replay expose the same raw message
+/// fact to both canonical-entry preflight and authoritative materialization.
+#[test]
+fn raw_message_fact_preflight_matches_live_and_cold_materialization() {
+    let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let record = tau_core::PersistedAgentEvent {
+        observation_id: tau_proto::ObservationId::from_bytes([7_u8; 16]),
+        seq: tau_core::PersistedAgentEventSeq::new(0),
+        source: None,
+        event: Event::MessageDelivered(tau_proto::MessageDelivered::new(
+            tau_proto::MessagePublisherId::parse("bridge")
+                .expect("canonical publisher id must satisfy the identifier grammar"),
+            tau_proto::MessageAgentTarget::new(agent_id.as_str()),
+            tau_proto::MessageFactId::new("m-live-cold"),
+            tau_proto::MessageParty {
+                stable_id: "u1".to_owned(),
+                display_name: None,
+                sender_auth: None,
+            },
+            None,
+            "raw message fact",
+        )),
+        parent: tau_core::AgentEventParent::InheritHead,
+        fold_semantics: tau_core::AgentJournalFoldSemantics::Legacy,
+        recorded_at: tau_proto::UnixMicros::new(1),
+    };
+    let mut live = tau_core::AgentTree::from_events(agent_id.clone(), &[]);
+    live.apply_persisted_record(&record)
+        .expect("incremental persisted message fact");
+    let cold = tau_core::AgentTree::from_events(agent_id, &[record]);
+
+    assert_preflight_matches_materialization(&live, true);
+    assert_preflight_matches_materialization(&cold, true);
+    assert_eq!(
+        assemble_prompt_context_from(&live, live.head()).context,
+        assemble_prompt_context_from(&cold, cold.head()).context
+    );
+}
+
 /// New standalone boundaries must retain every post-cut fact exactly once,
 /// including facts committed while the compact provider request was active.
 #[test]
@@ -2036,6 +2264,49 @@ pub(crate) fn assemble_conversation_from(
     assemble_prompt_context_from(tree, head).context.flatten()
 }
 
+fn assert_preflight_matches_materialization(tree: &tau_core::AgentTree, expected: bool) {
+    let preflight =
+        active_prompt_context_contains_payload_envelope_provenance_projection(tree, tree.head());
+    let reference = assemble_prompt_context_from(tree, tree.head())
+        .contains_payload_envelope_provenance_projection;
+    assert_eq!(preflight, expected);
+    assert_eq!(preflight, reference);
+}
+
+fn finished_tool_call(prompt_id: &str, call_id: &str) -> Event {
+    Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+        automatic_compaction_decision: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: prompt_id
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid"),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items: vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
+            call_id: call_id.into(),
+            name: tau_proto::ToolName::new("shell"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Null,
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_output_tokens: None,
+        backend: None,
+        provider_attempt: Default::default(),
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+}
+
 /// Tool errors must surface their `details` payload to the LLM,
 /// not just the bare `message`. The shell extension stuffs
 /// stdout/stderr/exit_code into `details` on failure; without
@@ -2046,40 +2317,7 @@ pub(crate) fn assemble_conversation_from(
 fn assemble_conversation_includes_tool_error_details() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("session-1"), &[]);
     tree.apply_event(&user_prompt("build firefox"));
-    tree.apply_event(&Event::ProviderResponseFinished(
-        tau_proto::ProviderResponseFinished {
-            automatic_compaction_decision: None,
-            estimated_api_cost_rates: None,
-            estimated_api_cost_increment: None,
-
-            agent_prompt_id: "sp-tools"
-                .parse::<tau_proto::AgentPromptId>()
-                .expect("known-safe AgentPromptId must be valid"),
-            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-            output_items: vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
-                call_id: "call-1".into(),
-                name: tau_proto::ToolName::new("shell"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: CborValue::Null,
-                raw_arguments_json: None,
-                responses_envelope: None,
-            })],
-            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-            error: None,
-            failure_kind: None,
-            context_limit_telemetry: None,
-            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-            output_length_disposition: tau_proto::OutputLengthDisposition::None,
-            originator: tau_proto::PromptOriginator::User,
-            usage: None,
-            compaction_original_input_tokens: None,
-            compaction_output_tokens: None,
-            backend: None,
-            provider_attempt: Default::default(),
-            provider_response_id: None,
-            ws_pool_delta: None,
-        },
-    ));
+    tree.apply_event(&finished_tool_call("sp-tools", "call-1"));
     let details = CborValue::Map(vec![
         (
             CborValue::Text("stdout".to_owned()),
@@ -2106,6 +2344,7 @@ fn assemble_conversation_includes_tool_error_details() {
         display: None,
     }));
 
+    assert_preflight_matches_materialization(&tree, false);
     let items = assemble_conversation_from(&tree, tree.head());
     let tool_result = items
         .iter()
@@ -2136,6 +2375,26 @@ fn assemble_conversation_includes_tool_error_details() {
         detail_text.contains("compiling"),
         "missing stdout: {detail_text}"
     );
+}
+
+/// A canonical harness-dedup tool terminal enables the provenance notice even
+/// when its pointer narrative has no envelope-shaped spelling.
+#[test]
+fn canonical_dedup_tool_result_preflight_matches_materialization() {
+    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+    tree.apply_event(&finished_tool_call("sp-dedup", "call-dedup"));
+    tree.apply_event(&Event::ProviderToolError(ToolError {
+        presentation: tau_proto::ToolResultPresentation::HarnessDedupPointer,
+        call_id: "call-dedup".into(),
+        tool_name: tau_proto::ToolName::new("shell"),
+        tool_type: tau_proto::ToolType::Function,
+        message: "same failure as call `original`".to_owned(),
+        details: None,
+        originator: tau_proto::PromptOriginator::User,
+        display: None,
+    }));
+
+    assert_preflight_matches_materialization(&tree, true);
 }
 
 /// `phase` captured on a prior assistant turn must show up on
@@ -2210,6 +2469,7 @@ fn assemble_conversation_omits_sent_messages_and_frames_received_messages() {
         kind: tau_proto::AgentMessageKind::Message,
         message: "CLANK2AE7_PROMPT_PROJECTION_CANARY".to_owned(),
     }));
+    assert_preflight_matches_materialization(&tree, false);
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
             message_id: tau_proto::AgentMessageId::parse("msg-agent")
@@ -2226,6 +2486,7 @@ fn assemble_conversation_omits_sent_messages_and_frames_received_messages() {
         },
     ));
 
+    assert_preflight_matches_materialization(&tree, true);
     let items = assemble_conversation_from(&tree, tree.head());
     assert_eq!(items.len(), 1);
     assert!(matches!(
@@ -2429,6 +2690,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
         },
     ));
 
+    assert_preflight_matches_materialization(&watcher_tree, true);
     let watcher_items = assemble_conversation_from(&watcher_tree, watcher_tree.head());
     assert_eq!(watcher_items.len(), 1);
     assert!(matches!(
@@ -2454,8 +2716,28 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
         message: "done".to_owned(),
     }));
 
+    assert_preflight_matches_materialization(&watched_tree, false);
     let watched_items = assemble_conversation_from(&watched_tree, watched_tree.head());
     assert!(watched_items.is_empty());
+
+    let mut prompt_watcher =
+        tau_core::AgentTree::from_events(crate::parse_agent_id("prompt-watcher"), &[]);
+    prompt_watcher.apply_event(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: tau_proto::AgentMessageId::parse("msg-watch-prompt")
+                .expect("test identifier must satisfy its grammar"),
+            sender_id: tau_proto::AgentId::parse("watched").expect("agent id"),
+            sender_session_id: None,
+            recipient_id: tau_proto::AgentId::parse("prompt-watcher").expect("agent id"),
+            kind: tau_proto::AgentMessageKind::WatchPrompt,
+            watch_provider_status: None,
+            watch_work_status: None,
+            watch_long_wait: None,
+            watch_lifecycle: None,
+            message: "new prompt".to_owned(),
+        },
+    ));
+    assert_preflight_matches_materialization(&prompt_watcher, true);
 }
 
 /// Encrypted-reasoning replay: when `ProviderResponseFinished` carries
@@ -2664,6 +2946,7 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
         tree.apply_event(&event);
         events.push(event);
     }
+    assert_preflight_matches_materialization(&tree, false);
     let context = assemble_conversation_from(&tree, tree.head());
     let replay_events = events
         .into_iter()
@@ -2679,6 +2962,7 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
         })
         .collect::<Vec<_>>();
     let replay_tree = tau_core::AgentTree::from_events(watcher, &replay_events);
+    assert_preflight_matches_materialization(&replay_tree, false);
     let replay = assemble_conversation_from(&replay_tree, replay_tree.head());
     let expected_text = [
         "<tau_internal>Watched agent watched status: working on trace restore</tau_internal>",

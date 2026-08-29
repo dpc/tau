@@ -7,6 +7,33 @@ use std::{cmp as path_std_cmp, collections as path_std_collections, time as path
 use tau_core::AgentEntry;
 use tau_proto::{ContextItem, PromptFragment, ToolName};
 
+#[cfg(test)]
+thread_local! {
+    static PROMPT_CONTEXT_CONSTRUCTION_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static PROMPT_PREFLIGHT_ENTRY_VISIT_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Reset test-only counters for prompt construction and preflight work.
+#[cfg(test)]
+pub(crate) fn reset_prompt_preflight_test_counters() {
+    PROMPT_CONTEXT_CONSTRUCTION_COUNT.set(0);
+    PROMPT_PREFLIGHT_ENTRY_VISIT_COUNT.set(0);
+}
+
+/// Return the test-only complete prompt-context construction count.
+#[cfg(test)]
+pub(crate) fn prompt_context_construction_count() -> usize {
+    PROMPT_CONTEXT_CONSTRUCTION_COUNT.get()
+}
+
+/// Return the test-only canonical-entry preflight visit count.
+#[cfg(test)]
+pub(crate) fn prompt_preflight_entry_visit_count() -> usize {
+    PROMPT_PREFLIGHT_ENTRY_VISIT_COUNT.get()
+}
+
 use crate::discovery as path_crate_discovery;
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 pub(crate) const BUILT_IN_SYSTEM_TEMPLATE_NAME: &str = "built-in";
@@ -1060,6 +1087,70 @@ fn tool_results_contain_payload_envelope_provenance_projection(
     })
 }
 
+/// Returns whether the selected provider window needs the model-visible
+/// exact-envelope provenance notice without materializing provider context.
+pub(crate) fn active_prompt_context_contains_payload_envelope_provenance_projection(
+    tree: &tau_core::AgentTree,
+    head: Option<tau_core::NodeId>,
+) -> bool {
+    let active_window = tree.active_provider_window(head);
+    let mut contains_projection = active_window
+        .replacement
+        .is_some_and(context_items_contain_payload_envelope_provenance_projection);
+
+    for (_, entry) in active_window.transcript {
+        #[cfg(test)]
+        PROMPT_PREFLIGHT_ENTRY_VISIT_COUNT
+            .set(PROMPT_PREFLIGHT_ENTRY_VISIT_COUNT.get().saturating_add(1));
+        match entry {
+            AgentEntry::Compaction {
+                replacement_window, ..
+            } => {
+                contains_projection = context_items_contain_payload_envelope_provenance_projection(
+                    replacement_window,
+                );
+            }
+            AgentEntry::UserInput {
+                items,
+                submission_source,
+                ..
+            } => {
+                contains_projection |= submission_source.as_ref()
+                    == Some(&tau_proto::PromptSubmissionSource::HumanUi)
+                    || items.iter().any(|item| {
+                        matches!(
+                            item,
+                            ContextItem::Message(message)
+                                if message.content.iter().any(|part| matches!(
+                                    part,
+                                    tau_proto::ContentPart::HarnessInternalText { .. }
+                                ))
+                        )
+                    });
+            }
+            AgentEntry::ToolResults { items } => {
+                contains_projection |=
+                    tool_results_contain_payload_envelope_provenance_projection(items);
+            }
+            AgentEntry::AgentMessage {
+                direction, kind, ..
+            } => {
+                contains_projection |= *direction == tau_core::AgentMessageDirection::Inbound
+                    && matches!(
+                        kind,
+                        tau_proto::AgentMessageKind::Message
+                            | tau_proto::AgentMessageKind::WatchResponse
+                            | tau_proto::AgentMessageKind::WatchPrompt
+                    );
+            }
+            AgentEntry::MessageFact { .. } => contains_projection = true,
+            AgentEntry::AssistantResponse { .. } | AgentEntry::CompactionTrigger { .. } => {}
+        }
+    }
+
+    contains_projection
+}
+
 /// Assembles provider context from the selected transcript branch.
 pub(crate) fn assemble_prompt_context_from(
     tree: &tau_core::AgentTree,
@@ -1163,6 +1254,9 @@ fn assemble_prompt_context_window(
     prefix_through: Option<tau_proto::AgentHead>,
     mut measurements: Option<&mut Vec<(tau_core::NodeId, tau_proto::ByteCount)>>,
 ) -> AssembledPromptContext {
+    #[cfg(test)]
+    PROMPT_CONTEXT_CONSTRUCTION_COUNT
+        .set(PROMPT_CONTEXT_CONSTRUCTION_COUNT.get().saturating_add(1));
     let mut blocks: Vec<tau_proto::ContextBlock> = Vec::new();
     let mut contains_payload_envelope_provenance_projection = false;
     let mut active_window = tree.active_provider_window(head);

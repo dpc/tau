@@ -1048,8 +1048,10 @@ impl Harness {
             .as_deref()
             .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))
             .map(|tree| {
-                assemble_prompt_context_from(tree, conv.selected_prompt_context_head())
-                    .contains_payload_envelope_provenance_projection
+                crate::prompt::active_prompt_context_contains_payload_envelope_provenance_projection(
+                    tree,
+                    conv.selected_prompt_context_head(),
+                )
             })
             .unwrap_or(false);
         match self.try_build_system_prompt_for_role_and_agent(

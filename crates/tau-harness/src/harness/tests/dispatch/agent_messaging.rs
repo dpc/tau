@@ -5331,9 +5331,15 @@ fn message_fact_payload_envelope_notice_failure_precedes_dispatch_checkpoint() {
         .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
         .count();
     let meta_path = stale_session_manifest(&h);
+    crate::prompt::reset_prompt_preflight_test_counters();
 
     h.try_advance_queue();
 
+    assert_eq!(
+        crate::prompt::prompt_context_construction_count(),
+        0,
+        "production render preflight must not construct provider context"
+    );
     assert_eq!(
         event_log_events(&h)
             .iter()
