@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 use super::identity::{PersistenceGeneration, StreamIdentity};
 use super::owner::{
     FrameAdmissionToken, PersistenceAdmissionError, PersistenceFailureKind, RetentionCharge,
-    Shared, StagedFrame, invalidate_worker, report_failure,
+    Shared, StagedFrame, invalidate_worker, report_failure, report_rollback_failure_and_poison,
 };
 use super::preparation::{PreparationResult, SessionPreparationMode, WorkerCommand};
 
@@ -955,17 +955,7 @@ fn append_job(
         return match restore_eof(shared, &mut stream.journal, start) {
             Ok(()) => AppendDisposition::Retry,
             Err(()) => {
-                report_failure(
-                    shared,
-                    Some(Arc::clone(&job.identity)),
-                    PersistenceFailureKind::Rollback,
-                );
-                set_lifecycle(
-                    shared,
-                    job.stream(),
-                    job.generation(),
-                    StreamLifecycle::Poisoned,
-                );
+                report_rollback_failure_and_poison(shared, Arc::clone(&job.identity));
                 streams.remove(job.stream());
                 AppendDisposition::Terminal
             }

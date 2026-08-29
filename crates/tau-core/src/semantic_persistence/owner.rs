@@ -483,6 +483,9 @@ pub(crate) struct AdmissionState {
     /// Bounded content-free worker outcomes for diagnostics and deterministic
     /// tests.
     pub(crate) failures: VecDeque<PersistenceFailure>,
+    /// Matching lifecycle at the exact rollback-failure insertion cut.
+    #[cfg(test)]
+    rollback_failure_lifecycle_at_publication: Option<StreamLifecycle>,
     /// Active edge-triggered capacity pressure.
     capacity_pressure: Option<PersistenceCapacityPressure>,
     /// Newly entered pressure edge awaiting observation.
@@ -595,6 +598,8 @@ impl SemanticPersistenceOwner {
                     ..ResourceLedger::default()
                 },
                 failures: VecDeque::with_capacity(capacity.max_frames),
+                #[cfg(test)]
+                rollback_failure_lifecycle_at_publication: None,
                 capacity_pressure: None,
                 capacity_full_pending: None,
                 capacity_recovered: None,
@@ -682,6 +687,41 @@ impl SemanticPersistenceOwner {
         self.wait_for_matching_failure_for_test(timeout, |failure| failure.kind == kind)
     }
 
+    /// Parks a deterministic test waiter before allowing the worker to publish
+    /// one exact failure.
+    #[cfg(test)]
+    pub(crate) fn wait_for_failure_after_ready_for_test(
+        &self,
+        kind: PersistenceFailureKind,
+        timeout: Duration,
+        ready: mpsc::SyncSender<()>,
+    ) -> bool {
+        self.shared
+            .operational_wake_pending
+            .store(false, Ordering::Release);
+        let state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        ready
+            .send(())
+            .expect("failure waiter readiness receiver remains");
+        let (mut state, _) = self
+            .shared
+            .wake
+            .wait_timeout_while(state, timeout, |state| {
+                !state.failures.iter().any(|failure| failure.kind == kind)
+            })
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(index) = state
+            .failures
+            .iter()
+            .position(|failure| failure.kind == kind)
+        {
+            state.failures.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Waits for one exact stream-local deterministic test failure without
     /// consuming failures from other streams.
     #[cfg(any(test, feature = "test-legacy-writer"))]
@@ -744,6 +784,18 @@ impl SemanticPersistenceOwner {
             state.ledger.bytes,
             state.ledger.streams,
         )
+    }
+
+    /// Returns the matching lifecycle captured at rollback-failure insertion.
+    #[cfg(test)]
+    pub(crate) fn rollback_failure_lifecycle_at_publication_for_test(
+        &self,
+    ) -> Option<StreamLifecycle> {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rollback_failure_lifecycle_at_publication
     }
 
     /// Makes every generation unavailable after an unrecoverable lifecycle cut.
@@ -1487,6 +1539,26 @@ pub(crate) fn report_failure(
     notify_operational(shared);
 }
 
+/// Publishes an unprovable rollback and poisons its matching generation at one
+/// admission-state cut.
+pub(crate) fn report_rollback_failure_and_poison(shared: &Shared, identity: Arc<LeaseIdentity>) {
+    let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(registered) = state.streams.get_mut(&identity.stream)
+        && registered.generation == identity.generation
+    {
+        registered.lifecycle = StreamLifecycle::Poisoned;
+    }
+    push_failure(
+        &mut state,
+        shared.capacity.max_frames,
+        Some(identity),
+        PersistenceFailureKind::Rollback,
+    );
+    drop(state);
+    shared.wake.notify_all();
+    notify_operational(shared);
+}
+
 /// Records the first full edge until worker progress makes capacity available.
 pub(crate) fn report_capacity_full(
     shared: &Shared,
@@ -1548,6 +1620,16 @@ fn push_failure(
 ) {
     if capacity == 0 {
         return;
+    }
+    #[cfg(test)]
+    if kind == PersistenceFailureKind::Rollback {
+        state.rollback_failure_lifecycle_at_publication = identity.as_ref().and_then(|identity| {
+            state
+                .streams
+                .get(&identity.stream)
+                .filter(|registered| registered.generation == identity.generation)
+                .map(|registered| registered.lifecycle)
+        });
     }
     if state.failures.len() == capacity {
         state.failures.pop_front();

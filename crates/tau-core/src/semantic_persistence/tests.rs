@@ -5,9 +5,11 @@ use std::io::{self, Write as _};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use super::backend::{FilesystemBackend, PersistenceBackend};
+use super::worker::StreamLifecycle;
 use super::{
     PersistenceCapacity, PersistenceFailureKind, RetentionCharge, SemanticPersistenceOwner,
     StagedFrame,
@@ -462,7 +464,8 @@ fn stream_capacity_pressure_reports_exact_registration_boundary() {
     assert_eq!(status.recovered.expect("registration rollback").streams, 0);
 }
 
-/// Unprovable rollback poisons only the affected generation in memory.
+/// A waiter parked before an unprovable rollback must observe its failure only
+/// after the matching generation is poisoned, so no later admission can pass.
 #[test]
 fn rollback_failure_poison_rejects_later_admission() {
     let root = tempfile::tempdir().expect("temporary root");
@@ -479,6 +482,7 @@ fn rollback_failure_poison_rejects_later_admission() {
     store
         .prepare_session("managed-session", SessionPreparationMode::New)
         .expect("prepare");
+    backend.hold_writes.store(true, Ordering::SeqCst);
     backend.fail_next_write.store(true, Ordering::SeqCst);
     backend.fail_next_truncate.store(true, Ordering::SeqCst);
     store
@@ -489,8 +493,28 @@ fn rollback_failure_poison_rejects_later_admission() {
             tau_proto::UnixMicros::new(7),
         )
         .expect("first live fact was accepted before worker poison");
+    backend.wait_until_write_held();
+    let (ready_send, ready_receive) = mpsc::sync_channel(0);
+    let waiter_owner = Arc::clone(&owner);
+    let waiter = thread::spawn(move || {
+        waiter_owner.wait_for_failure_after_ready_for_test(
+            PersistenceFailureKind::Rollback,
+            Duration::from_secs(2),
+            ready_send,
+        )
+    });
+    ready_receive
+        .recv_timeout(Duration::from_secs(2))
+        .expect("failure waiter parked before rollback");
+    backend.release_writes();
     assert!(
-        owner.wait_for_failure_for_test(PersistenceFailureKind::Rollback, Duration::from_secs(2),)
+        waiter.join().expect("failure waiter"),
+        "parked waiter observed exact rollback failure"
+    );
+    assert_eq!(
+        owner.rollback_failure_lifecycle_at_publication_for_test(),
+        Some(StreamLifecycle::Poisoned),
+        "failure insertion and poison transition share one state cut"
     );
     let error = store
         .append_session_event_at(
