@@ -1162,6 +1162,7 @@ pub(super) fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
         cancel_generation: 0,
         manual_cooldown_bypass: false,
         cooldown_probe: None,
+        receipt_observation: None,
     }
 }
 
@@ -5065,6 +5066,17 @@ const MIXED_STATE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Runs the mixed delayed/active/queued lifecycle fixture for broadcast cancel
 /// or input EOF, both of which must close every accepted prompt exactly once.
 fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
+    let receipt_trace = SharedTraceWriter::default();
+    let receipt_subscriber = tracing_subscriber::fmt()
+        .with_env_filter("provider-builtin.receipt=trace")
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let receipt_trace = receipt_trace.clone();
+            move || receipt_trace.clone()
+        })
+        .finish();
+    let receipt_dispatch = tracing::Dispatch::new(receipt_subscriber);
     let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
     let input = BlockingInput::default();
     let mut delayed = prompt();
@@ -5151,18 +5163,20 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
     let runtime_clock: Arc<dyn RetryClock> = clock;
     let (runtime_done_tx, runtime_done_rx) = mpsc::sync_channel(1);
     let runtime = thread::spawn(move || {
-        let result = run_inner_with_executors_and_clock(
-            runtime_input,
-            writer,
-            profiles,
-            move |_| prompt_profiles.clone(),
-            2,
-            RuntimeExecutors {
-                prompt: executor,
-                prewarm: production_prewarm_executor(),
-                retry_clock: runtime_clock,
-            },
-        );
+        let result = tracing::dispatcher::with_default(&receipt_dispatch, || {
+            run_inner_with_executors_and_clock(
+                runtime_input,
+                writer,
+                profiles,
+                move |_| prompt_profiles.clone(),
+                2,
+                RuntimeExecutors {
+                    prompt: executor,
+                    prewarm: production_prewarm_executor(),
+                    retry_clock: runtime_clock,
+                },
+            )
+        });
         runtime_done_tx
             .send(())
             .expect("report mixed runtime completion");
@@ -5291,6 +5305,35 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
             .collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from(["mixed-delayed".to_owned(), "mixed-active".to_owned()]),
         "queued work must close without provider execution"
+    );
+    let receipt_trace =
+        String::from_utf8(receipt_trace.bytes()).expect("receipt trace must be UTF-8");
+    let cooldown_lines = receipt_trace
+        .lines()
+        .filter(|line| {
+            line.contains("provider receipt observation") && !line.contains("cooldown_depth=0")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cooldown_lines.len(),
+        2,
+        "cooled peer and slot-to-cooldown transfer must both be observed: {receipt_trace}"
+    );
+    assert!(
+        cooldown_lines
+            .iter()
+            .all(|line| line.contains("outcome=\"canceled\""))
+    );
+    assert!(
+        cooldown_lines
+            .iter()
+            .any(|line| line.contains("slot_depth=1")),
+        "slot-to-cooldown transfer was not measured: {receipt_trace}"
+    );
+    assert!(
+        cooldown_lines
+            .iter()
+            .all(|line| !line.contains("mixed-cooldown-peer"))
     );
 }
 

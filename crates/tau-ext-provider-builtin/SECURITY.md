@@ -1,5 +1,22 @@
 # tau-ext-provider-builtin security boundaries
 
+## Private receipt diagnostics
+
+The dedicated disabled-by-default `provider-builtin.receipt` TRACE target measures provider input receipt through
+prompt-worker start. They carry only fixed-cardinality scalar durations, encoded
+frame and Secret-value byte counts, profile/RPC/queue counts, and closed class
+labels. APID correlation remains in process-owned Rust values: receipt-observation
+events never contain prompt, model, profile, Secret, path, account, cursor, error,
+credential, or protocol identity values. The diagnostics create no event, journal, capture,
+wire field, acknowledgement, or policy authority. Exact sizes and timings can
+still reveal workload metadata, so operators must treat enabled traces as
+private.
+With this target disabled, the plain reader and provider loop perform no
+observation-specific clock, allocation, byte sizing, hashing, I/O, trace
+construction/emission, dynamic stage traversal, or retained observation state.
+Fixed inert `Option::None` checks/moves inside ordinary provider ownership are
+not diagnostic authority or work.
+
 ## Quota lifecycle
 
 ChatGPT quota credentials remain in this in-process extension and never enter

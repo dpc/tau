@@ -1117,8 +1117,21 @@ fn production_prompt_secret_replies_preserve_admission_fifo() {
     let credential_path = "providers/0123456789abcdef0123456789abcdef/api-key.json";
     let (extension_socket, harness_socket) = UnixStream::pair().expect("provider socket pair");
     let extension_reader = extension_socket.try_clone().expect("clone provider reader");
+    let receipt_trace = SharedTraceWriter::default();
+    let receipt_subscriber = tracing_subscriber::fmt()
+        .with_env_filter("provider-builtin.receipt=trace")
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let receipt_trace = receipt_trace.clone();
+            move || receipt_trace.clone()
+        })
+        .finish();
+    let receipt_dispatch = tracing::Dispatch::new(receipt_subscriber);
     let provider = std::thread::spawn(move || {
-        run(extension_reader, extension_socket).map_err(|error| error.to_string())
+        tracing::dispatcher::with_default(&receipt_dispatch, || {
+            run(extension_reader, extension_socket).map_err(|error| error.to_string())
+        })
     });
     let harness_reader = harness_socket.try_clone().expect("clone harness reader");
     harness_reader
@@ -1199,11 +1212,12 @@ fn production_prompt_secret_replies_preserve_admission_fifo() {
         }
     }
     for request_id in requests.into_iter().rev() {
+        let malformed_secret = b"secret-value-canary".to_vec();
         writer
             .write_message(&tau_proto::HarnessOutputMessage::ExtensionDataResult(
                 Box::new(tau_proto::ExtensionDataResult {
                     request_id,
-                    result: ProductionCredentialReply::Missing.into_payload(),
+                    result: ProductionCredentialReply::Contents(malformed_secret).into_payload(),
                 }),
             ))
             .expect("write out-of-order credential result");
@@ -1232,6 +1246,18 @@ fn production_prompt_secret_replies_preserve_admission_fifo() {
             .map_or_else(|error| error.contains("Broken pipe"), |_| true),
         "provider exits after harness close: {result:?}"
     );
+    let receipt_trace = String::from_utf8(receipt_trace.bytes()).expect("receipt trace UTF-8");
+    let receipt_lines = receipt_trace
+        .lines()
+        .filter(|line| line.contains("provider receipt observation"))
+        .collect::<Vec<_>>();
+    assert_eq!(receipt_lines.len(), 2, "{receipt_trace}");
+    for receipt in receipt_lines {
+        assert!(receipt.contains("secret_rpc_count=1"), "{receipt}");
+        assert!(receipt.contains("secret_bytes=19"), "{receipt}");
+        assert!(!receipt.contains("secret-value-canary"), "{receipt}");
+        assert!(!receipt.contains("fifo-"), "{receipt}");
+    }
 }
 
 /// Ordered production transport observations relevant to credential
@@ -3347,6 +3373,44 @@ fn prompt_async_test_auth() -> OpenAiAuth {
     }
 }
 
+/// Builds an inert runtime owner for focused credential-admission transitions.
+fn observation_test_runtime()
+-> ProviderRuntime<impl FnMut(Option<&ProviderName>) -> BuiltinProviderProfiles> {
+    let (worker_tx, worker_rx) = mpsc::channel();
+    ProviderRuntime {
+        load_prompt_profiles: |_: Option<&ProviderName>| BuiltinProviderProfiles::default(),
+        startup_responses_modes: BTreeMap::new(),
+        prompt_concurrency_limit: 0,
+        prompt_executor: production_prompt_executor(),
+        prewarm_executor: production_prewarm_executor(),
+        worker_tx,
+        worker_rx,
+        worker_waker: None,
+        retry_scheduler: None,
+        credential_admission: PromptCredentialAdmissionState::default(),
+        retry_clock: Arc::new(SystemRetryClock),
+        shared_cooldowns: BTreeMap::new(),
+        shared_cooldown_generation: 0,
+        codex_runtime: Arc::new(CodexRuntime::new(Arc::new(test_network_policy()))),
+        prewarm_supervisor: PrewarmSupervisor::default(),
+        provider_profile_identities: BTreeMap::new(),
+        prewarm_profile_identities: BTreeMap::new(),
+        cancellation: Arc::new(CancellationState::default()),
+        prompt_queue: VecDeque::new(),
+        active_prompts: 0,
+        input_closed: false,
+        cancel_generation: 0,
+        quota: QuotaCoordinator::default(),
+        oauth_refresh_rejections: OAuthRefreshRejectionCache::default(),
+        unavailable_compact_identities: HashSet::new(),
+        compact_profile_identities: HashMap::new(),
+        extension_data_client: None,
+        declared_credential_observations: None,
+        declared_models: None,
+        diagnostics: ProviderDiagnosticsState::default(),
+    }
+}
+
 /// Ensures admission completion never re-enters synchronous OAuth refresh:
 /// a still-valid token that is already inside the proactive refresh window
 /// remains usable after the asynchronous refresh state machine fails.
@@ -3426,6 +3490,8 @@ fn prompt_oauth_refresh_key_coalesces_exactly_and_not_across_generations() {
         PromptOAuthRefresh {
             current: prompt_async_test_auth(),
             forced: false,
+            transport_finished: false,
+            secret_in_flight: false,
         },
     )]);
     assert!(refreshes.contains_key(&key));
@@ -3454,10 +3520,224 @@ fn prompt_oauth_refresh_key_coalesces_exactly_and_not_across_generations() {
             PromptOAuthRefresh {
                 current: prompt_async_test_auth(),
                 forced: false,
+                transport_finished: false,
+                secret_in_flight: false,
             },
         );
     }
     assert_eq!(refreshes.len(), 5);
+}
+
+/// The production OAuth failure owner must close a non-default timed class
+/// without rendering its key, credential, provider, path, or error inputs.
+#[test]
+fn production_prompt_oauth_failure_closes_private_observation() {
+    let mut runtime = observation_test_runtime();
+    runtime.diagnostics.receipt.suppress_oauth_worker = true;
+    let provider = ProviderName::new(CHATGPT_PROVIDER_NAME);
+    let auth = OpenAiAuth {
+        expires_at_ms: now_ms().saturating_add(60_000),
+        refresh_token: "refresh-token-canary".to_owned(),
+        ..prompt_async_test_auth()
+    };
+    let mut prompt = minimal_prompt();
+    prompt.model = ModelId::new(provider.clone(), ModelName::new("gpt-5.3-codex"));
+    let observation = ReceiptObservation::new(tau_client::LocalInputObservation {
+        frame_bytes: tau_proto::ProtocolMessageBytes::new(1).expect("nonzero frame"),
+        decode_elapsed: Duration::ZERO,
+        decoded_at: Instant::now(),
+    });
+    let generation = blake3::hash(b"oauth-generation-canary");
+    runtime
+        .credential_admission
+        .admissions
+        .push_back(PendingPromptAdmission {
+            kind: PendingPromptAdmissionKind::Initial {
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                prompt,
+            },
+            profiles: profiles_with_chatgpt_auth(auth.clone()),
+            request_id: Some("oauth-request-canary".to_owned()),
+            observations: Some(BTreeMap::from([(
+                provider,
+                CredentialObservation::Contents(generation),
+            )])),
+            oauth_refresh: None,
+            oauth_forced: false,
+            receipt_observation: Some(observation),
+        });
+    let trace = SharedTraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("provider-builtin.receipt=trace")
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        runtime.stage_prompt_oauth_refresh("oauth-request-canary");
+        let key = runtime
+            .credential_admission
+            .admissions
+            .front()
+            .and_then(|admission| admission.oauth_refresh.clone())
+            .expect("real OAuth start installed a flight");
+        std::thread::sleep(Duration::from_millis(1));
+        runtime.fail_prompt_oauth_refresh(&key, None);
+        let observation = runtime
+            .credential_admission
+            .admissions
+            .front_mut()
+            .expect("OAuth admission")
+            .receipt_observation
+            .take()
+            .expect("receipt observation");
+        observation.finished_before_worker(ReceiptOutcome::Canceled);
+
+        runtime.credential_admission.admissions.clear();
+        let mut prompt = minimal_prompt();
+        prompt.model = ModelId::new(
+            ProviderName::new(CHATGPT_PROVIDER_NAME),
+            ModelName::new("gpt-5.3-codex"),
+        );
+        runtime
+            .credential_admission
+            .admissions
+            .push_back(PendingPromptAdmission {
+                kind: PendingPromptAdmissionKind::Initial {
+                    agent_prompt_id: prompt.agent_prompt_id.clone(),
+                    prompt,
+                },
+                profiles: profiles_with_chatgpt_auth(auth.clone()),
+                request_id: Some("oauth-refresh-request-canary".to_owned()),
+                observations: Some(BTreeMap::from([(
+                    ProviderName::new(CHATGPT_PROVIDER_NAME),
+                    CredentialObservation::Contents(generation),
+                )])),
+                oauth_refresh: None,
+                oauth_forced: false,
+                receipt_observation: Some(ReceiptObservation::new(
+                    tau_client::LocalInputObservation {
+                        frame_bytes: tau_proto::ProtocolMessageBytes::new(1)
+                            .expect("nonzero frame"),
+                        decode_elapsed: Duration::ZERO,
+                        decoded_at: Instant::now(),
+                    },
+                )),
+            });
+        runtime.stage_prompt_oauth_refresh("oauth-refresh-request-canary");
+        let key = runtime
+            .credential_admission
+            .admissions
+            .front()
+            .and_then(|admission| admission.oauth_refresh.clone())
+            .expect("second real OAuth start installed a flight");
+        {
+            let refresh = runtime
+                .credential_admission
+                .oauth_refreshes
+                .get_mut(&key)
+                .expect("shared OAuth flight");
+            refresh.transport_finished = true;
+            refresh.secret_in_flight = true;
+        }
+        let late_profiles = runtime
+            .credential_admission
+            .admissions
+            .front()
+            .expect("shared OAuth admission")
+            .profiles
+            .clone();
+        let mut late_prompt = minimal_prompt();
+        late_prompt.model = ModelId::new(
+            ProviderName::new(CHATGPT_PROVIDER_NAME),
+            ModelName::new("gpt-5.3-codex"),
+        );
+        runtime
+            .credential_admission
+            .admissions
+            .push_back(PendingPromptAdmission {
+                kind: PendingPromptAdmissionKind::Initial {
+                    agent_prompt_id: late_prompt.agent_prompt_id.clone(),
+                    prompt: late_prompt,
+                },
+                profiles: late_profiles,
+                request_id: Some("oauth-late-join-canary".to_owned()),
+                observations: Some(BTreeMap::from([(
+                    ProviderName::new(CHATGPT_PROVIDER_NAME),
+                    CredentialObservation::Contents(generation),
+                )])),
+                oauth_refresh: None,
+                oauth_forced: false,
+                receipt_observation: Some(ReceiptObservation::new(
+                    tau_client::LocalInputObservation {
+                        frame_bytes: tau_proto::ProtocolMessageBytes::new(1)
+                            .expect("nonzero frame"),
+                        decode_elapsed: Duration::ZERO,
+                        decoded_at: Instant::now(),
+                    },
+                )),
+            });
+        runtime.stage_prompt_oauth_refresh("oauth-late-join-canary");
+        std::thread::sleep(Duration::from_millis(1));
+        let late_observation = runtime
+            .credential_admission
+            .admissions
+            .back_mut()
+            .expect("late OAuth admission")
+            .receipt_observation
+            .take()
+            .expect("late receipt observation");
+        late_observation.finished_before_worker(ReceiptOutcome::Canceled);
+        runtime.complete_prompt_oauth_refresh(&key, auth.clone());
+        let observation = runtime
+            .credential_admission
+            .admissions
+            .front_mut()
+            .expect("refreshed OAuth admission")
+            .receipt_observation
+            .take()
+            .expect("refreshed receipt observation");
+        observation.finished_before_worker(ReceiptOutcome::Canceled);
+    });
+    let trace = String::from_utf8(trace.bytes()).expect("UTF-8 trace");
+
+    assert!(trace.contains("oauth_class=\"failed\""), "{trace}");
+    assert!(trace.contains("oauth_class=\"refreshed\""), "{trace}");
+    assert!(
+        trace.lines().any(|line| {
+            line.contains("oauth_class=\"failed\"")
+                && !line.contains("oauth_us=0")
+                && line.contains("secret_rpc_count=0")
+        }),
+        "started OAuth failure was not timed: {trace}"
+    );
+    assert!(
+        trace.lines().any(|line| {
+            line.contains("oauth_class=\"refreshed\"") && !line.contains("oauth_us=0")
+        }),
+        "started OAuth refresh was not timed: {trace}"
+    );
+    assert!(
+        trace.lines().any(|line| {
+            line.contains("secret_rpc_count=1")
+                && !line.contains("secret_wait_us=0")
+                && line.contains("oauth_class=\"failed\"")
+        }),
+        "late CAS/reload join was not timed: {trace}"
+    );
+    for canary in [
+        "oauth-generation-canary",
+        "oauth-request-canary",
+        "oauth-refresh-request-canary",
+        "oauth-late-join-canary",
+        "refresh-token-canary",
+        "account-a",
+    ] {
+        assert!(!trace.contains(canary), "{canary} leaked: {trace}");
+    }
 }
 
 /// A second 401 waiter for an exact generation joins the forced flight even
@@ -3474,6 +3754,8 @@ fn prompt_oauth_exhausted_waiter_joins_matching_forced_flight() {
     let flight = PromptOAuthRefresh {
         current: prompt_async_test_auth(),
         forced: true,
+        transport_finished: false,
+        secret_in_flight: false,
     };
     let joined_forced = flight.forced || rejections.take_unauthorized(&provider, identity);
     assert!(
@@ -3528,6 +3810,7 @@ fn prompt_oauth_shared_refresh_survives_one_waiter_cancellation() {
             observations: Some(BTreeMap::new()),
             oauth_refresh: Some(key.clone()),
             oauth_forced: false,
+            receipt_observation: None,
         }
     };
     let mut admissions = VecDeque::from([admission("waiter-a"), admission("waiter-b")]);
@@ -3554,6 +3837,7 @@ fn prompt_credential_read_and_cas_timeouts_ignore_late_reentry() {
         observations: None,
         oauth_refresh: None,
         oauth_forced: false,
+        receipt_observation: None,
     }]);
     let mut oauth_rpcs = HashMap::new();
 
@@ -4062,7 +4346,7 @@ fn provider_prompt_trace_omits_model_visible_content() {
         })
         .finish();
     tracing::subscriber::with_default(subscriber, || {
-        let _ = run(path_std_io::Cursor::new(input), Vec::new());
+        let _ = run(path_std_io::Cursor::new(input.clone()), Vec::new());
     });
 
     let trace = String::from_utf8(trace.bytes()).expect("TRACE output is UTF-8");
@@ -4104,6 +4388,149 @@ fn provider_prompt_trace_omits_model_visible_content() {
         "TRACE fields changed or are not fixed: {}",
         prompt_trace_lines[0]
     );
+    let receipt_lines: Vec<_> = trace
+        .lines()
+        .filter(|line| line.contains("provider receipt observation"))
+        .collect();
+    assert_eq!(receipt_lines.len(), 1, "TRACE output: {trace}");
+    let receipt = receipt_lines[0];
+    for sentinel in sentinels
+        .iter()
+        .map(String::as_str)
+        .chain(["ap-test", "test", "default"])
+    {
+        assert!(
+            !receipt.contains(sentinel),
+            "{sentinel} leaked in receipt TRACE: {receipt}"
+        );
+    }
+    let keys = receipt
+        .split_whitespace()
+        .filter_map(|field| field.split_once('=').map(|(key, _)| key))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        [
+            "frame_bytes",
+            "frame_read_decode_us",
+            "reader_queue_us",
+            "handler_clone_us",
+            "handler_dispatch_us",
+            "settings_clone_us",
+            "profile_count",
+            "secret_rpc_count",
+            "secret_bytes",
+            "secret_wait_us",
+            "oauth_class",
+            "oauth_us",
+            "quota_us",
+            "cooldown_queue_us",
+            "cooldown_depth",
+            "slot_queue_us",
+            "slot_depth",
+            "spawn_us",
+            "stage_accounted_us",
+            "unattributed_us",
+            "receipt_to_worker_us",
+            "outcome",
+        ],
+        "receipt schema changed: {receipt}"
+    );
+    assert!(
+        !receipt.contains("frame_bytes=0"),
+        "real decoder size was not propagated: {receipt}"
+    );
+
+    let receipt_only = SharedTraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("provider-builtin.receipt=trace")
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let receipt_only = receipt_only.clone();
+            move || receipt_only.clone()
+        })
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let _ = run(path_std_io::Cursor::new(input), Vec::new());
+    });
+    let receipt_only =
+        String::from_utf8(receipt_only.bytes()).expect("receipt-only TRACE output is UTF-8");
+    let receipt_only_lines = receipt_only.lines().collect::<Vec<_>>();
+    assert_eq!(receipt_only_lines.len(), 1, "TRACE output: {receipt_only}");
+    assert!(receipt_only.contains("provider receipt observation"));
+    assert!(!receipt_only.contains("ap-test"));
+    assert!(!receipt_only.contains("provider prompt received"));
+}
+
+/// A real zero-capacity provider runtime must carry the receipt observation
+/// through slot admission and close the queued owner exactly once on
+/// disconnect.
+#[test]
+fn receipt_trace_observes_real_worker_slot_queue() {
+    let mut input = Vec::new();
+    {
+        let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::Configure(
+                tau_proto::Configure {
+                    tool_prefix: None,
+                    config: tau_proto::CborValue::Map(Vec::new()),
+                    instance_name: tau_proto::ExtensionName::parse("provider-builtin")
+                        .expect("extension name"),
+                    state_dir: None,
+                    secrets: BTreeMap::new(),
+                    settings_files: BTreeMap::new(),
+                },
+            ))
+            .expect("encode Configure");
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::deliver_live(
+                tau_proto::UnixMicros::new(1),
+                tau_proto::Event::AgentPromptCreated(minimal_prompt()),
+            ))
+            .expect("encode prompt");
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::Disconnect(
+                tau_proto::Disconnect {
+                    reason: Some("private-disconnect-canary".to_owned()),
+                },
+            ))
+            .expect("encode disconnect");
+        writer.flush().expect("flush input");
+    }
+    let trace = SharedTraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("provider-builtin.receipt=trace")
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        run_inner_with_executors(
+            path_std_io::Cursor::new(input),
+            Vec::new(),
+            BuiltinProviderProfiles::default(),
+            |_| BuiltinProviderProfiles::default(),
+            0,
+            Arc::new(|_| panic!("zero-capacity runtime started a worker")),
+            production_prewarm_executor(),
+        )
+        .expect("run queued provider");
+    });
+    let trace = String::from_utf8(trace.bytes()).expect("UTF-8 trace");
+    let receipt = trace
+        .lines()
+        .find(|line| line.contains("provider receipt observation"))
+        .expect("queued receipt trace");
+
+    assert!(receipt.contains("slot_depth=1"), "{receipt}");
+    assert!(receipt.contains("outcome=\"failed\""), "{receipt}");
+    assert!(!receipt.contains("private-disconnect-canary"), "{receipt}");
+    assert_eq!(trace.matches("provider receipt observation").count(), 1);
 }
 
 fn decode_frames(bytes: &[u8]) -> Vec<tau_proto::HarnessInputMessage> {

@@ -17,6 +17,7 @@ mod openai_prompt_cache;
 mod prewarm;
 #[cfg(feature = "quota-test-support")]
 mod quota_test_support;
+mod receipt_observation;
 mod report_sink;
 mod responses;
 mod setup_store;
@@ -58,6 +59,7 @@ pub use openai_prompt_cache::{OpenAiPromptCacheKey, OpenAiPromptCacheRetention};
 use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
 #[cfg(feature = "quota-test-support")]
 pub use quota_test_support::run_quota_recovery_fixture;
+use receipt_observation::{ReceiptObservation, ReceiptOutcome};
 use report_sink::ProviderReportSink;
 pub use responses::{
     OpenAiExplicitPromptCacheMode as ResponsesOpenAiExplicitPromptCacheMode,
@@ -2781,7 +2783,6 @@ where
         prewarm_profile_identities: BTreeMap::new(),
         cancellation: Arc::new(CancellationState::default()),
         prompt_queue: VecDeque::new(),
-        session_debug_allowed: BTreeMap::new(),
         active_prompts: 0,
         input_closed: false,
         cancel_generation: 0,
@@ -2792,6 +2793,7 @@ where
         extension_data_client: None,
         declared_credential_observations: None,
         declared_models: None,
+        diagnostics: ProviderDiagnosticsState::default(),
     };
     let install_extension_data_client = startup.publish_models_after_configure;
     let mut runtime = TauExtensionRunner::new(ProviderExtension::<F>::new(
@@ -2949,10 +2951,34 @@ fn handle_provider_delivery<F>(cx: RawEventContext<'_, ProviderRuntime<F>>) -> C
 where
     F: FnMut(Option<&ProviderName>) -> BuiltinProviderProfiles + 'static,
 {
-    cx.state.handle_event(cx.event().clone(), &cx.handle())
+    if matches!(cx.event(), Event::AgentPromptCreated(_))
+        && let Some(observation) = cx.state.diagnostics.receipt.current_input.as_mut()
+    {
+        observation.handler_started();
+    }
+    let event = cx.event().clone();
+    if matches!(event, Event::AgentPromptCreated(_))
+        && let Some(observation) = cx.state.diagnostics.receipt.current_input.as_mut()
+    {
+        observation.handler_materialized();
+    }
+    cx.state.handle_event(event, &cx.handle())
 }
 
 fn run_provider_loop<F>(
+    runtime: ManualExtensionRuntime<ProviderRuntime<F>>,
+) -> Result<(), Box<dyn Error>>
+where
+    F: FnMut(Option<&ProviderName>) -> BuiltinProviderProfiles + 'static,
+{
+    runtime.select_local_input_observation_path(
+        run_provider_loop_inner::<F, true>,
+        run_provider_loop_inner::<F, false>,
+    )
+}
+
+/// Runs the provider loop on the startup-selected observation path.
+fn run_provider_loop_inner<F, const OBSERVE_RECEIPT: bool>(
     mut runtime: ManualExtensionRuntime<ProviderRuntime<F>>,
 ) -> Result<(), Box<dyn Error>>
 where
@@ -2974,6 +3000,17 @@ where
                 match runtime.try_recv() {
                     Ok(ManualRuntimePoll::Message(frame)) => {
                         handled_input = true;
+                        if OBSERVE_RECEIPT
+                            && matches!(
+                                &frame,
+                                tau_proto::HarnessOutputMessage::Deliver(delivery)
+                                    if matches!(delivery.event(), Event::AgentPromptCreated(_))
+                            )
+                            && let Some(observation) = runtime.take_local_input_observation()
+                        {
+                            runtime.state_mut().diagnostics.receipt.current_input =
+                                Some(ReceiptObservation::new(observation));
+                        }
                         if let tau_proto::HarnessOutputMessage::ExtensionDataResult(result) = frame
                         {
                             runtime
@@ -3051,6 +3088,25 @@ struct PromptCredentialAdmissionState {
     initial_quota_started: bool,
 }
 
+/// Enabled-only receipt observation ownership and test network control.
+#[derive(Default)]
+struct ReceiptObservationState {
+    /// Observation currently crossing prompt event dispatch.
+    current_input: Option<ReceiptObservation>,
+    /// Prevents test fixtures from starting real OAuth network work.
+    #[cfg(test)]
+    suppress_oauth_worker: bool,
+}
+
+/// Provider-owned private diagnostics policy and ephemeral observation state.
+#[derive(Default)]
+struct ProviderDiagnosticsState {
+    /// Per-session provider request capture decision.
+    session_debug_allowed: BTreeMap<tau_proto::SessionId, bool>,
+    /// Private receipt observation owner.
+    receipt: ReceiptObservationState,
+}
+
 /// Live provider event loop state after the Tau extension handshake completes.
 struct ProviderRuntime<F> {
     /// Clones either the complete validated settings snapshot or one indexed
@@ -3094,8 +3150,6 @@ struct ProviderRuntime<F> {
     cancellation: Arc<CancellationState>,
     /// Prompt jobs accepted while all worker slots were occupied.
     prompt_queue: VecDeque<PromptJob>,
-    /// Per-session decision on whether provider debug captures may be written.
-    session_debug_allowed: BTreeMap<tau_proto::SessionId, bool>,
     /// Number of prompt workers currently running.
     active_prompts: usize,
     /// True after the harness input stream disconnects or reaches EOF.
@@ -3119,6 +3173,8 @@ struct ProviderRuntime<F> {
     declared_credential_observations: Option<BTreeMap<ProviderName, CredentialObservation>>,
     /// Latest complete replacement model snapshot published by this runtime.
     declared_models: Option<Vec<ProviderModelInfo>>,
+    /// Private diagnostics policy and observation state.
+    diagnostics: ProviderDiagnosticsState,
 }
 
 impl<F> ProviderRuntime<F>
@@ -3546,6 +3602,9 @@ where
         self.cancel_all_prewarms();
         self.cancellation.shutdown();
         // No late Secret reply may resurrect an admission after input shutdown.
+        for admission in &mut self.credential_admission.admissions {
+            finish_receipt_canceled(&mut admission.receipt_observation);
+        }
         self.credential_admission.admissions.clear();
         self.credential_admission.oauth_refreshes.clear();
         self.credential_admission.oauth_rpcs.clear();
@@ -3577,7 +3636,7 @@ where
     }
 
     fn record_session_debug_policy(&mut self, session_dir: tau_proto::HarnessSessionDir) {
-        self.session_debug_allowed.insert(
+        self.diagnostics.session_debug_allowed.insert(
             session_dir.session_id,
             !matches!(session_dir.status, tau_proto::SessionDirStatus::Ephemeral),
         );
@@ -3638,8 +3697,10 @@ where
             );
             return Ok(());
         };
-        let debug_provider_requests =
-            debug_provider_requests_for(&prewarm.session_id, &self.session_debug_allowed);
+        let debug_provider_requests = debug_provider_requests_for(
+            &prewarm.session_id,
+            &self.diagnostics.session_debug_allowed,
+        );
         let executor = self.prewarm_executor.clone();
         let runtime = self.codex_runtime.clone();
         let tx = self.worker_tx.clone();
@@ -3737,8 +3798,10 @@ where
             }
             deadline_abort.cancel();
         });
-        let debug_provider_requests =
-            debug_provider_requests_for(&refresh.prompt.session_id, &self.session_debug_allowed);
+        let debug_provider_requests = debug_provider_requests_for(
+            &refresh.prompt.session_id,
+            &self.diagnostics.session_debug_allowed,
+        );
         let executor = self.prewarm_executor.clone();
         let runtime = self.codex_runtime.clone();
         let tx = self.worker_tx.clone();
@@ -3927,10 +3990,26 @@ where
             agent_id: prompt.agent_id.clone(),
             refresh_id: None,
         });
+        let mut receipt_observation = self.diagnostics.receipt.current_input.take();
+        if let Some(observation) = receipt_observation.as_mut() {
+            observation.handler_dispatched();
+        }
+        let settings_started_at = receipt_observation.as_ref().map(|_| Instant::now());
         let mut profiles = (self.load_prompt_profiles)(Some(&prompt.model.provider));
         profiles.apply_startup_responses_modes(&self.startup_responses_modes);
+        if let (Some(observation), Some(started_at)) =
+            (receipt_observation.as_mut(), settings_started_at)
+        {
+            observation.settings_cloned(started_at.elapsed(), profiles.providers.len());
+        }
         if self.extension_data_client.is_none() {
-            return self.start_resolved_prompt(agent_prompt_id, prompt, &mut profiles, _handle);
+            return self.start_resolved_prompt(
+                agent_prompt_id,
+                prompt,
+                &mut profiles,
+                receipt_observation,
+                _handle,
+            );
         }
         let request_id = if let (Some(ProviderCredential::Stored(reference)), Some(client)) = (
             profiles.credentials.get(&prompt.model.provider),
@@ -3947,6 +4026,9 @@ where
         };
         let ready = request_id.is_empty();
         if !ready {
+            if let Some(observation) = receipt_observation.as_mut() {
+                observation.secret_started();
+            }
             self.arm_prompt_credential_timeout(request_id.clone());
         }
         self.credential_admission
@@ -3961,6 +4043,7 @@ where
                 observations: ready.then(BTreeMap::new),
                 oauth_refresh: None,
                 oauth_forced: false,
+                receipt_observation,
             });
         Ok(())
     }
@@ -3971,9 +4054,16 @@ where
         agent_prompt_id: tau_proto::AgentPromptId,
         prompt: tau_proto::AgentPromptCreated,
         profiles: &mut BuiltinProviderProfiles,
+        mut receipt_observation: Option<ReceiptObservation>,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
+        let quota_started_at = receipt_observation.as_ref().map(|_| Instant::now());
         let backend = self.resolve_admitted_backend_with_quota(&prompt.model, profiles, handle)?;
+        if let (Some(observation), Some(started_at)) =
+            (receipt_observation.as_mut(), quota_started_at)
+        {
+            observation.quota_resolved(started_at.elapsed());
+        }
         let profile_identity = backend_profile_identity(&backend);
         let pinned_chatgpt_identity = match &backend {
             PromptBackend::Responses(config) => Some(config.chatgpt_retry_identity()),
@@ -3982,11 +4072,11 @@ where
         let mut frame_writer = handle_report_sink(handle);
         write_prompt_submitted(&agent_prompt_id, &prompt.originator, &mut frame_writer)
             .map_err(|error| ClientError::handler(error.to_string()))?;
-        let job = PromptJob {
+        let mut job = PromptJob {
             agent_prompt_id,
             debug_provider_requests: debug_provider_requests_for(
                 &prompt.session_id,
-                &self.session_debug_allowed,
+                &self.diagnostics.session_debug_allowed,
             ),
             prompt,
             backend,
@@ -3996,6 +4086,7 @@ where
             cancel_generation: self.cancel_generation,
             manual_cooldown_bypass: false,
             cooldown_probe: None,
+            receipt_observation,
         };
         if let Some(cooldown) = self
             .shared_cooldowns
@@ -4006,6 +4097,16 @@ where
             let now = self.retry_clock.now();
             let due = cooldown_due_for_job(cooldown.not_before, &job);
             emit_retry_status(&job, cooldown.class, due, now, None, handle)?;
+            if let Some(observation) = job.receipt_observation.as_mut() {
+                let depth = self
+                    .retry_scheduler
+                    .as_ref()
+                    .expect("retry scheduler starts with the runtime waker")
+                    .delayed_count
+                    .load(AtomicOrdering::Relaxed)
+                    .saturating_add(1);
+                observation.cooldown_queued(depth);
+            }
             self.retry_scheduler
                 .as_ref()
                 .expect("retry scheduler starts with the runtime waker")
@@ -4028,7 +4129,7 @@ where
     /// credential generation.
     fn start_retry_credential_read(
         &mut self,
-        kind: PendingPromptAdmissionKind,
+        mut kind: PendingPromptAdmissionKind,
     ) -> ClientResult<Option<PendingPromptAdmissionKind>> {
         let provider = kind.prompt().model.provider.clone();
         let profiles = load_fresh_retry_profiles(
@@ -4039,6 +4140,7 @@ where
         let Some(client) = self.extension_data_client.as_ref() else {
             return Ok(Some(kind));
         };
+        let mut receipt_observation = kind.take_receipt_observation();
         let request_id = if let Some(ProviderCredential::Stored(reference)) =
             profiles.credentials.get(&provider)
         {
@@ -4053,6 +4155,9 @@ where
         };
         let ready = request_id.is_none();
         if let Some(request_id) = &request_id {
+            if let Some(observation) = receipt_observation.as_mut() {
+                observation.secret_started();
+            }
             self.arm_prompt_credential_timeout(request_id.clone());
         }
         self.credential_admission
@@ -4064,6 +4169,7 @@ where
                 observations: ready.then(BTreeMap::new),
                 oauth_refresh: None,
                 oauth_forced: false,
+                receipt_observation,
             });
         Ok(None)
     }
@@ -4079,6 +4185,10 @@ where
 
     fn enqueue_or_start_prompt(&mut self, job: PromptJob) {
         if self.active_prompts >= self.prompt_concurrency_limit {
+            let mut job = job;
+            if let Some(observation) = job.receipt_observation.as_mut() {
+                observation.queued(self.prompt_queue.len().saturating_add(1));
+            }
             self.prompt_queue.push_back(job);
             return;
         }
@@ -4114,6 +4224,15 @@ where
             return Ok(());
         };
         let payload = result.result;
+        if let Some(observation) = admission.receipt_observation.as_mut() {
+            let bytes = match &payload {
+                tau_proto::ExtensionDataResultPayload::Ok {
+                    value: tau_proto::ExtensionDataValue::ReadFile { contents },
+                } => u64::try_from(contents.len()).unwrap_or(u64::MAX),
+                _ => 0,
+            };
+            observation.secret_finished(bytes);
+        }
         let observations =
             hydrate_profile_credentials_with(&mut admission.profiles, |_| match payload.clone() {
                 tau_proto::ExtensionDataResultPayload::Ok { value } => Ok(value),
@@ -4143,6 +4262,29 @@ where
         result: tau_proto::ExtensionDataResultPayload,
         _handle: &ClientHandle,
     ) -> ClientResult<()> {
+        let continuation_key = match &continuation {
+            PromptOAuthRpc::CompareAndSwap { key } | PromptOAuthRpc::Reload { key } => key,
+        };
+        let response_bytes = match &result {
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::ReadFile { contents },
+            } => u64::try_from(contents.len()).unwrap_or(u64::MAX),
+            _ => 0,
+        };
+        for admission in &mut self.credential_admission.admissions {
+            if admission.oauth_refresh.as_ref() == Some(continuation_key)
+                && let Some(observation) = admission.receipt_observation.as_mut()
+            {
+                observation.secret_finished(response_bytes);
+            }
+        }
+        if let Some(refresh) = self
+            .credential_admission
+            .oauth_refreshes
+            .get_mut(continuation_key)
+        {
+            refresh.secret_in_flight = false;
+        }
         match continuation {
             PromptOAuthRpc::CompareAndSwap { key } => {
                 if prompt_oauth_cas_requires_reload(&result) {
@@ -4259,6 +4401,8 @@ where
             lite_compatibility: mode.is_lite_compatibility(),
         };
         if let Some(refresh) = self.credential_admission.oauth_refreshes.get(&key) {
+            let transport_finished = refresh.transport_finished;
+            let secret_in_flight = refresh.secret_in_flight;
             let forced = refresh.forced
                 || identity.is_some_and(|identity| {
                     self.oauth_refresh_rejections
@@ -4266,6 +4410,18 @@ where
                 });
             self.credential_admission.admissions[index].oauth_refresh = Some(key);
             self.credential_admission.admissions[index].oauth_forced = forced;
+            if let Some(observation) = self.credential_admission.admissions[index]
+                .receipt_observation
+                .as_mut()
+            {
+                observation.oauth_joined();
+                if transport_finished {
+                    observation.oauth_transport_finished();
+                }
+                if secret_in_flight {
+                    observation.secret_started();
+                }
+            }
             return;
         }
         if identity.is_some_and(|identity| {
@@ -4320,10 +4476,26 @@ where
         }
         self.credential_admission.admissions[index].oauth_refresh = Some(key.clone());
         self.credential_admission.admissions[index].oauth_forced = forced;
+        if let Some(observation) = self.credential_admission.admissions[index]
+            .receipt_observation
+            .as_mut()
+        {
+            observation.oauth_started();
+        }
         let refresh_token = current.refresh_token.clone();
-        self.credential_admission
-            .oauth_refreshes
-            .insert(key.clone(), PromptOAuthRefresh { current, forced });
+        self.credential_admission.oauth_refreshes.insert(
+            key.clone(),
+            PromptOAuthRefresh {
+                current,
+                forced,
+                transport_finished: false,
+                secret_in_flight: false,
+            },
+        );
+        #[cfg(test)]
+        if self.diagnostics.receipt.suppress_oauth_worker {
+            return;
+        }
         let tx = self.worker_tx.clone();
         let waker = self
             .worker_waker
@@ -4373,6 +4545,10 @@ where
                 }
             }
             admission.oauth_refresh = None;
+            if let Some(observation) = admission.receipt_observation.as_mut() {
+                observation.secret_finished(0);
+                observation.oauth_failed();
+            }
         }
     }
 
@@ -4388,6 +4564,7 @@ where
                 continue;
             }
             let provider = admission.kind.prompt().model.provider.clone();
+            let mut authoritative_valid = false;
             if let Some(BuiltinProviderProfile::Chatgpt(profile)) =
                 admission.profiles.providers.get_mut(&provider)
             {
@@ -4398,6 +4575,7 @@ where
                 )
                 .is_ok();
                 if valid {
+                    authoritative_valid = true;
                     profile.auth = authoritative.clone();
                     self.oauth_refresh_rejections
                         .clear_refresh_rejection(&provider);
@@ -4406,6 +4584,13 @@ where
                 }
             }
             admission.oauth_refresh = None;
+            if let Some(observation) = admission.receipt_observation.as_mut() {
+                if authoritative_valid {
+                    observation.oauth_refreshed();
+                } else {
+                    observation.oauth_failed();
+                }
+            }
         }
     }
 
@@ -4415,6 +4600,24 @@ where
         op: tau_proto::ExtensionDataRequestOp,
         continuation: PromptOAuthRpc,
     ) -> ClientResult<()> {
+        let continuation_key = match &continuation {
+            PromptOAuthRpc::CompareAndSwap { key } | PromptOAuthRpc::Reload { key } => key,
+        };
+        for admission in &mut self.credential_admission.admissions {
+            if admission.oauth_refresh.as_ref() == Some(continuation_key)
+                && let Some(observation) = admission.receipt_observation.as_mut()
+            {
+                observation.oauth_transport_finished();
+                observation.secret_started();
+            }
+        }
+        if let Some(refresh) = self
+            .credential_admission
+            .oauth_refreshes
+            .get_mut(continuation_key)
+        {
+            refresh.secret_in_flight = true;
+        }
         let client = self
             .extension_data_client
             .as_ref()
@@ -4466,7 +4669,7 @@ where
                 admission.observations.is_some() && admission.oauth_refresh.is_none()
             })
         {
-            let admission = self
+            let mut admission = self
                 .credential_admission
                 .admissions
                 .pop_front()
@@ -4476,6 +4679,9 @@ where
                     .cancellation
                     .take_canceled(admission.kind.agent_prompt_id())
             {
+                if let Some(observation) = admission.receipt_observation.take() {
+                    observation.finished_before_worker(ReceiptOutcome::Canceled);
+                }
                 self.finish_canceled_admission(&admission, handle)?;
                 continue;
             }
@@ -4502,21 +4708,38 @@ where
             PendingPromptAdmissionKind::Initial {
                 agent_prompt_id,
                 prompt,
-            } => {
-                self.start_resolved_prompt(agent_prompt_id, prompt, &mut admission.profiles, handle)
-            }
+            } => self.start_resolved_prompt(
+                agent_prompt_id,
+                prompt,
+                &mut admission.profiles,
+                admission.receipt_observation.take(),
+                handle,
+            ),
             PendingPromptAdmissionKind::RetryDue(mut job) => {
+                let quota_started_at = admission
+                    .receipt_observation
+                    .as_ref()
+                    .map(|_| Instant::now());
                 let backend = self.resolve_admitted_backend_with_quota(
                     &job.prompt.model,
                     &mut admission.profiles,
                     handle,
                 )?;
+                if let (Some(observation), Some(started_at)) =
+                    (admission.receipt_observation.as_mut(), quota_started_at)
+                {
+                    observation.quota_resolved(started_at.elapsed());
+                }
+                job.receipt_observation = admission.receipt_observation.take();
                 if !automatic_retry_identity_matches(job.pinned_chatgpt_identity.as_ref(), &backend)
                 {
                     return self.finish_identity_changed_prompt(&job, handle);
                 }
                 job.backend = backend;
                 job.profile_identity = backend_profile_identity(&job.backend);
+                if let Some(observation) = job.receipt_observation.as_mut() {
+                    observation.queued(self.prompt_queue.len().saturating_add(1));
+                }
                 self.prompt_queue.push_back(job);
                 Ok(())
             }
@@ -4524,11 +4747,21 @@ where
                 mut job,
                 request_id,
             } => {
+                let quota_started_at = admission
+                    .receipt_observation
+                    .as_ref()
+                    .map(|_| Instant::now());
                 job.backend = self.resolve_admitted_backend_with_quota(
                     &job.prompt.model,
                     &mut admission.profiles,
                     handle,
                 )?;
+                if let (Some(observation), Some(started_at)) =
+                    (admission.receipt_observation.as_mut(), quota_started_at)
+                {
+                    observation.quota_resolved(started_at.elapsed());
+                }
+                job.receipt_observation = admission.receipt_observation.take();
                 job.profile_identity = backend_profile_identity(&job.backend);
                 job.manual_cooldown_bypass = true;
                 job.cooldown_probe = self
@@ -4540,6 +4773,9 @@ where
                         generation: cooldown.generation,
                     });
                 let agent_prompt_id = job.agent_prompt_id.clone();
+                if let Some(observation) = job.receipt_observation.as_mut() {
+                    observation.queued(self.prompt_queue.len().saturating_add(1));
+                }
                 self.prompt_queue.push_back(job);
                 handle.emit_transient(Event::ProviderRetryPromptResultReported(
                     tau_proto::ProviderRetryPromptResult {
@@ -4564,16 +4800,18 @@ where
             if let Some(scheduler) = &self.retry_scheduler {
                 scheduler.cancel_all();
             }
-            while let Some(job) = self.prompt_queue.pop_front() {
+            while let Some(mut job) = self.prompt_queue.pop_front() {
+                finish_receipt_canceled(&mut job.receipt_observation);
                 self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
             }
-            while let Some(admission) = self.credential_admission.admissions.pop_front() {
+            while let Some(mut admission) = self.credential_admission.admissions.pop_front() {
                 if let (Some(deadlines), Some(request_id)) = (
                     &self.credential_admission.deadlines,
                     admission.request_id.as_ref(),
                 ) {
                     deadlines.cancel(request_id.clone());
                 }
+                finish_receipt_canceled(&mut admission.receipt_observation);
                 self.finish_canceled_admission(&admission, handle)?;
             }
             self.credential_admission.oauth_refreshes.clear();
@@ -4595,7 +4833,7 @@ where
             .admissions
             .iter()
             .position(|admission| admission.kind.agent_prompt_id() == &apid)
-            && let Some(admission) = self.credential_admission.admissions.remove(index)
+            && let Some(mut admission) = self.credential_admission.admissions.remove(index)
         {
             let oauth_refresh = admission.oauth_refresh.clone();
             if let (Some(deadlines), Some(request_id)) = (
@@ -4605,6 +4843,7 @@ where
                 deadlines.cancel(request_id.clone());
             }
             self.cancellation.take_canceled(&apid);
+            finish_receipt_canceled(&mut admission.receipt_observation);
             self.finish_canceled_admission(&admission, handle)?;
             if let Some(key) = oauth_refresh {
                 self.prune_unreferenced_prompt_oauth(&key);
@@ -4648,11 +4887,21 @@ where
         loop {
             match self.worker_rx.try_recv() {
                 Ok(WorkerMessage::PromptOAuthRefreshFinished { key, result }) => {
-                    let Some(refresh) = self.credential_admission.oauth_refreshes.get(&key) else {
+                    let Some(refresh) = self.credential_admission.oauth_refreshes.get_mut(&key)
+                    else {
                         continue;
                     };
+                    refresh.transport_finished = true;
+                    let current = refresh.current.clone();
+                    for admission in &mut self.credential_admission.admissions {
+                        if admission.oauth_refresh.as_ref() == Some(&key)
+                            && let Some(observation) = admission.receipt_observation.as_mut()
+                        {
+                            observation.oauth_transport_finished();
+                        }
+                    }
                     match result {
-                        Ok(tokens) => match merge_chatgpt_refresh(&refresh.current, tokens) {
+                        Ok(tokens) => match merge_chatgpt_refresh(&current, tokens) {
                             Ok(refreshed) => {
                                 let contents = serde_json::to_vec(
                                     &credential_record::ChatGptOAuthCredential::from(
@@ -4770,6 +5019,7 @@ where
                         || self.cancellation.is_canceled(&job.agent_prompt_id)
                     {
                         self.cancellation.take_canceled(&job.agent_prompt_id);
+                        finish_receipt_canceled(&mut job.receipt_observation);
                         self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
                         continue;
                     }
@@ -4859,7 +5109,10 @@ where
                         .expect("retry scheduler starts with the runtime waker")
                         .schedule(job, independent_due, cooldown_constraint);
                 }
-                Ok(WorkerMessage::RetryDue(job)) => {
+                Ok(WorkerMessage::RetryDue(mut job)) => {
+                    if let Some(observation) = job.receipt_observation.as_mut() {
+                        observation.cooldown_dequeued();
+                    }
                     if let Some(scheduler) = &self.retry_scheduler {
                         scheduler
                             .delayed_count
@@ -4869,6 +5122,7 @@ where
                         || job.cancel_generation != self.cancel_generation
                         || self.cancellation.take_canceled(&job.agent_prompt_id)
                     {
+                        finish_receipt_canceled(&mut job.receipt_observation);
                         self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
                         continue;
                     }
@@ -4890,6 +5144,9 @@ where
                     }
                     job.backend = backend;
                     job.profile_identity = backend_profile_identity(&job.backend);
+                    if let Some(observation) = job.receipt_observation.as_mut() {
+                        observation.queued(self.prompt_queue.len().saturating_add(1));
+                    }
                     self.prompt_queue.push_back(job);
                 }
                 Ok(WorkerMessage::ManualRetry {
@@ -4898,6 +5155,10 @@ where
                     agent_prompt_id,
                 }) => {
                     let status = if let Some(owned_job) = job.take() {
+                        let mut owned_job = owned_job;
+                        if let Some(observation) = owned_job.receipt_observation.as_mut() {
+                            observation.cooldown_dequeued();
+                        }
                         if let Some(scheduler) = &self.retry_scheduler {
                             scheduler
                                 .delayed_count
@@ -4907,6 +5168,7 @@ where
                             || owned_job.cancel_generation != self.cancel_generation
                             || self.cancellation.take_canceled(&owned_job.agent_prompt_id)
                         {
+                            finish_receipt_canceled(&mut owned_job.receipt_observation);
                             self.finish_canceled_prompt(
                                 &owned_job.agent_prompt_id,
                                 &owned_job.prompt,
@@ -4946,6 +5208,9 @@ where
                                     provider: owned_job.prompt.model.provider.clone(),
                                     generation: cooldown.generation,
                                 });
+                            if let Some(observation) = owned_job.receipt_observation.as_mut() {
+                                observation.queued(self.prompt_queue.len().saturating_add(1));
+                            }
                             self.prompt_queue.push_back(owned_job);
                             tau_proto::RetryPromptStatus::Accepted
                         }
@@ -4963,13 +5228,17 @@ where
                         ),
                     ))?;
                 }
-                Ok(WorkerMessage::DelayedCanceled { job, delayed_count }) => {
+                Ok(WorkerMessage::DelayedCanceled {
+                    mut job,
+                    delayed_count,
+                }) => {
                     if let Some(scheduler) = &self.retry_scheduler {
                         scheduler
                             .delayed_count
                             .fetch_sub(delayed_count, AtomicOrdering::Relaxed);
                     }
                     self.cancellation.take_canceled(&job.agent_prompt_id);
+                    finish_receipt_canceled(&mut job.receipt_observation);
                     self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
                 }
                 Ok(WorkerMessage::QuotaRolling {
@@ -5087,9 +5356,18 @@ where
             &self.shared_cooldowns,
             #[cfg(test)]
             None,
-            |job, now, cooldown| {
+            |mut job, now, cooldown| {
                 let due = cooldown_due_for_job(cooldown.not_before, &job);
                 emit_retry_status(&job, cooldown.class, due, now, None, handle)?;
+                if let Some(observation) = job.receipt_observation.as_mut() {
+                    observation.slot_dequeued();
+                    observation.cooldown_queued(
+                        scheduler
+                            .delayed_count
+                            .load(AtomicOrdering::Relaxed)
+                            .saturating_add(1),
+                    );
+                }
                 scheduler.schedule(
                     job,
                     now,
@@ -5190,6 +5468,9 @@ fn apply_prompt_credential_timeout(
     if let Some(admission) = admissions.iter_mut().find(|admission| {
         admission.request_id.as_deref() == Some(request_id) && admission.observations.is_none()
     }) {
+        if let Some(observation) = admission.receipt_observation.as_mut() {
+            observation.secret_finished(0);
+        }
         let observations = hydrate_profile_credentials_with(&mut admission.profiles, |_| {
             Err(tau_client::ExtensionDataRpcError::Timeout)
         });
@@ -5466,6 +5747,8 @@ struct PromptJob {
     manual_cooldown_bypass: bool,
     /// Shared cooldown generation this job was manually admitted to probe.
     cooldown_probe: Option<CooldownProbe>,
+    /// Enabled-only content-free receipt observation.
+    receipt_observation: Option<ReceiptObservation>,
 }
 
 /// One prompt held at the credential boundary before it is eligible for
@@ -5489,6 +5772,8 @@ struct PendingPromptAdmission {
     oauth_refresh: Option<PromptOAuthRefreshKey>,
     /// Whether this admission is recovering one canonical unauthorized result.
     oauth_forced: bool,
+    /// Enabled-only content-free receipt observation.
+    receipt_observation: Option<ReceiptObservation>,
 }
 
 /// Provider, startup mode, and exact Secret generation used to coalesce OAuth
@@ -5513,6 +5798,10 @@ struct PromptOAuthRefresh {
     /// Whether this flight consumed forced recovery authority for the
     /// generation.
     forced: bool,
+    /// Whether network OAuth ended and Secret publication has begun.
+    transport_finished: bool,
+    /// Whether a shared Secret CAS or authoritative reload is in flight.
+    secret_in_flight: bool,
 }
 
 /// Main-loop continuation for one prompt-owned Secret operation.
@@ -5550,6 +5839,14 @@ enum PendingPromptAdmissionKind {
 }
 
 impl PendingPromptAdmissionKind {
+    /// Moves the enabled-only receipt observation into admission ownership.
+    fn take_receipt_observation(&mut self) -> Option<ReceiptObservation> {
+        match self {
+            Self::Initial { .. } => None,
+            Self::RetryDue(job) | Self::Manual { job, .. } => job.receipt_observation.take(),
+        }
+    }
+
     /// Returns the prompt identity protected by this admission.
     fn agent_prompt_id(&self) -> &tau_proto::AgentPromptId {
         match self {
@@ -7328,8 +7625,11 @@ fn production_prewarm_executor() -> PrewarmExecutor {
 
 fn start_prompt_job(mut job: PromptJob, active_prompts: &mut usize, context: &PromptWorkerContext) {
     *active_prompts += 1;
+    if let Some(observation) = job.receipt_observation.as_mut() {
+        observation.spawning();
+    }
     let cooldown_probe = job.cooldown_probe.take();
-    let execution = PromptExecution {
+    let mut execution = PromptExecution {
         job,
         cooldown_probe,
         output_tx: context.worker_tx.clone(),
@@ -7340,10 +7640,24 @@ fn start_prompt_job(mut job: PromptJob, active_prompts: &mut usize, context: &Pr
     let executor = context.prompt_executor.clone();
     let done_tx = context.worker_tx.clone();
     let done_waker = context.worker_waker.clone();
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
     thread::spawn(move || {
-        executor(execution);
-        let _ = send_worker_message(&done_tx, &done_waker, WorkerMessage::PromptDone);
+        tracing::dispatcher::with_default(&dispatcher, || {
+            if let Some(observation) = execution.job.receipt_observation.take() {
+                observation.worker_started();
+            }
+            executor(execution);
+            let _ = send_worker_message(&done_tx, &done_waker, WorkerMessage::PromptDone);
+        });
     });
+}
+
+/// Closes and removes one enabled-only observation on a canceled ownership
+/// path.
+fn finish_receipt_canceled(observation: &mut Option<ReceiptObservation>) {
+    if let Some(observation) = observation.take() {
+        observation.finished_before_worker(ReceiptOutcome::Canceled);
+    }
 }
 
 fn send_worker_message(
@@ -7371,6 +7685,9 @@ fn start_queued_prompts(
             return Ok(());
         };
         if context.cancellation.take_canceled(&job.agent_prompt_id) {
+            if let Some(observation) = job.receipt_observation.take() {
+                observation.finished_before_worker(ReceiptOutcome::Canceled);
+            }
             let mut frame_writer = handle_report_sink(handle);
             finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)
                 .map_err(|error| ClientError::handler(error.to_string()))?;
@@ -7393,9 +7710,10 @@ fn finish_queued_canceled(
     else {
         return Ok(false);
     };
-    let Some(job) = prompt_queue.remove(index) else {
+    let Some(mut job) = prompt_queue.remove(index) else {
         return Ok(false);
     };
+    finish_receipt_canceled(&mut job.receipt_observation);
     let mut frame_writer = handle_report_sink(handle);
     finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)
         .map_err(|error| ClientError::handler(error.to_string()))?;

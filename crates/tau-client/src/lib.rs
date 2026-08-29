@@ -50,8 +50,8 @@ pub use extension_trait::{ExtensionPlugin, TauExtension};
 pub use intercept_decision::InterceptDecision;
 pub use logging::{DEFAULT_FILTER, ENV_VAR, init_logging, init_logging_for};
 pub use manual_runtime::{
-    DispatchOutcome, ExtensionDataClient, ExtensionDataRpcError, ManualExtensionRuntime,
-    ManualRuntimeInput, ManualRuntimePoll, ManualRuntimeWaker,
+    DispatchOutcome, ExtensionDataClient, ExtensionDataRpcError, LocalInputObservation,
+    ManualExtensionRuntime, ManualRuntimeInput, ManualRuntimePoll, ManualRuntimeWaker,
 };
 pub use protocol_io::{
     PROTOCOL_IO_MAX_KEYS_PER_DIRECTION, PROTOCOL_IO_OVERFLOW_KEY, ProtocolIoCumulativeStats,

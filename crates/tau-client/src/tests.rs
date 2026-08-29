@@ -4695,3 +4695,124 @@ fn test_extension_name(value: impl AsRef<str>) -> tau_proto::ExtensionName {
     tau_proto::ExtensionName::parse(value.as_ref())
         .expect("test extension name must satisfy the identifier grammar")
 }
+
+/// The real manual reader must gate, decode, size, associate, and expose one
+/// receipt-only observation for the exact message returned to its caller.
+#[test]
+fn enabled_local_input_observation_follows_real_manual_decode() {
+    let delivery = HarnessOutputMessage::deliver_live(UnixMicros::new(42), notice("observed"));
+    let mut encoded_delivery = Vec::new();
+    HarnessOutputWriter::new(&mut encoded_delivery)
+        .write_message(&delivery)
+        .expect("encode observed delivery");
+    let expected_bytes = encoded_delivery.len();
+    let input = encode_output_messages(&[configure_message(), delivery]);
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("provider-builtin.receipt=trace")
+        .without_time()
+        .with_ansi(false)
+        .with_writer(std::io::sink)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let runtime = TauExtensionRunner::new(ReplayExtension)
+            .start_manual_loop(
+                Cursor::new(input),
+                SharedWriter::default(),
+                Counts::default(),
+            )
+            .expect("start manual loop");
+        let (observed_path, mut runtime) = runtime.select_local_input_observation_path(
+            |runtime| (true, runtime),
+            |runtime| (false, runtime),
+        );
+        assert!(observed_path);
+        let message = match runtime.recv().expect("decoded message") {
+            ManualRuntimeInput::Message(message) => message,
+            ManualRuntimeInput::Timeout | ManualRuntimeInput::InputClosed => {
+                panic!("expected decoded message")
+            }
+        };
+        let observation = runtime
+            .take_local_input_observation()
+            .expect("enabled observation");
+        assert_eq!(
+            observation.frame_bytes.get(),
+            u64::try_from(expected_bytes).expect("fixture size fits u64")
+        );
+        assert!(observation.decoded_at.elapsed() < Duration::from_secs(1));
+        runtime.dispatch_one(message).expect("dispatch");
+        assert!(matches!(
+            runtime.recv().expect("EOF"),
+            ManualRuntimeInput::InputClosed
+        ));
+        runtime.finish().expect("finish");
+    });
+}
+
+/// The real manual reader must attach nothing and keep its accessor one-shot
+/// when the dedicated receipt target has no TRACE interest.
+#[test]
+fn disabled_local_input_observation_real_runtime_attaches_nothing() {
+    let first = HarnessOutputMessage::deliver_live(UnixMicros::new(43), notice("first"));
+    let second = HarnessOutputMessage::deliver_live(UnixMicros::new(44), notice("second"));
+    let input = encode_output_messages(&[configure_message(), first, second]);
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .without_time()
+        .with_ansi(false)
+        .with_writer(std::io::sink)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let runtime = TauExtensionRunner::new(ReplayExtension)
+            .start_manual_loop(
+                Cursor::new(input),
+                SharedWriter::default(),
+                Counts::default(),
+            )
+            .expect("start manual loop");
+        let (observed_path, mut runtime) = runtime.select_local_input_observation_path(
+            |runtime| (true, runtime),
+            |runtime| (false, runtime),
+        );
+        assert!(!observed_path);
+        for _ in 0..2 {
+            assert!(matches!(
+                runtime.recv().expect("decoded message"),
+                ManualRuntimeInput::Message(_)
+            ));
+            assert!(runtime.take_local_input_observation().is_none());
+            assert!(
+                runtime.take_local_input_observation().is_none(),
+                "accessor must remain one-shot"
+            );
+        }
+        assert!(matches!(
+            runtime.recv().expect("EOF"),
+            ManualRuntimeInput::InputClosed
+        ));
+        runtime.finish().expect("finish");
+    });
+}
+
+/// The internal path selector consumes its startup gate exactly once even when
+/// a caller deliberately returns the runtime from the selected branch.
+#[test]
+fn local_input_observation_path_selector_cannot_be_reused() {
+    let input = encode_output_messages(&[configure_message()]);
+    let runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(
+            Cursor::new(input),
+            SharedWriter::default(),
+            Counts::default(),
+        )
+        .expect("start manual loop");
+    let runtime =
+        runtime.select_local_input_observation_path(std::convert::identity, std::convert::identity);
+    let reused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.select_local_input_observation_path(std::convert::identity, std::convert::identity)
+    }));
+
+    assert!(reused.is_err(), "selector gate was reusable");
+}

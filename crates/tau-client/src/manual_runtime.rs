@@ -44,6 +44,8 @@ pub struct ManualExtensionRuntime<State> {
     writer_thread: JoinHandle<ClientResult<()>>,
     /// Whether startup has completed through the terminal `Ready` frame.
     startup: ManualStartupState,
+    /// One-shot startup-fixed private observation path selection.
+    local_input_observations_enabled: Option<bool>,
 }
 
 /// Shared manual-loop input queue used by receive calls and correlated helpers.
@@ -54,6 +56,8 @@ struct ManualInput {
     pending: VecDeque<ReaderMessage>,
     /// True once the reader reported EOF or a decode error.
     input_closed: bool,
+    /// Enabled-only observation for the last returned decoded message.
+    last_observation: Option<LocalInputObservation>,
 }
 
 /// Result of polling the manual runtime input side.
@@ -90,12 +94,31 @@ pub enum DispatchOutcome {
 }
 
 enum ReaderMessage {
-    /// One decoded harness output message.
+    /// One decoded harness output message without private diagnostics.
     Message(tau_proto::HarnessOutputMessage),
+    /// One decoded harness output message with private diagnostics.
+    ObservedMessage {
+        /// Decoded protocol payload.
+        message: tau_proto::HarnessOutputMessage,
+        /// Enabled-only scalar observation from the real decode path.
+        observation: LocalInputObservation,
+    },
     /// Clean EOF at a message boundary.
     InputClosed,
     /// Decode or read failure from the reader thread.
     Error(ClientError),
+}
+
+/// Content-free process-local timing attached to one decoded input frame.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct LocalInputObservation {
+    /// Encoded bytes consumed by the real decoder.
+    pub frame_bytes: tau_proto::ProtocolMessageBytes,
+    /// Time spent reading and decoding the complete frame.
+    pub decode_elapsed: Duration,
+    /// Monotonic instant immediately after decode completed.
+    pub decoded_at: Instant,
 }
 
 /// Cloneable wake handle for caller-owned manual runtime work.
@@ -565,6 +588,36 @@ impl<State> ManualExtensionRuntime<State> {
         }
     }
 
+    /// Takes the enabled-only observation associated with the most recently
+    /// returned decoded message.
+    #[doc(hidden)]
+    pub fn take_local_input_observation(&mut self) -> Option<LocalInputObservation> {
+        self.input.borrow_mut().last_observation.take()
+    }
+
+    /// Selects exactly one startup-fixed internal code path.
+    ///
+    /// This deliberately unstable, doc-hidden seam may reveal only whether the
+    /// operator enabled the private receipt target. It consumes its one-shot
+    /// selector before invoking either closure; returning the runtime cannot
+    /// reuse the capability. Neither closure receives payload or identity data.
+    #[doc(hidden)]
+    pub fn select_local_input_observation_path<T>(
+        mut self,
+        enabled: impl FnOnce(Self) -> T,
+        disabled: impl FnOnce(Self) -> T,
+    ) -> T {
+        let enabled_path = self
+            .local_input_observations_enabled
+            .take()
+            .expect("local input observation path is selected exactly once");
+        if enabled_path {
+            enabled(self)
+        } else {
+            disabled(self)
+        }
+    }
+
     /// Blocks until harness input or caller-owned work signals this runtime.
     ///
     /// Notifications are coalesced, so callers must always drain all currently
@@ -892,6 +945,13 @@ impl ManualInput {
         message: ReaderMessage,
     ) -> ClientResult<ManualRuntimeInput> {
         match message {
+            ReaderMessage::ObservedMessage {
+                message,
+                observation,
+            } => {
+                self.last_observation = Some(observation);
+                Ok(ManualRuntimeInput::Message(message))
+            }
             ReaderMessage::Message(message) => Ok(ManualRuntimeInput::Message(message)),
             ReaderMessage::InputClosed => {
                 self.input_closed = true;
@@ -907,7 +967,7 @@ impl ManualInput {
     fn drain_finished_reader_status(&mut self) -> ClientResult<()> {
         while let Ok(message) = self.receiver.try_recv() {
             match message {
-                ReaderMessage::Message(_) => {}
+                ReaderMessage::Message(_) | ReaderMessage::ObservedMessage { .. } => {}
                 ReaderMessage::InputClosed => {
                     self.input_closed = true;
                 }
@@ -958,13 +1018,30 @@ impl ManualInput {
                 ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Disconnect(
                     disconnect,
                 )) => {
-                    deferred.push_front(ReaderMessage::Message(
-                        tau_proto::HarnessOutputMessage::Disconnect(disconnect.clone()),
+                    deferred.push_front(self.last_observation.take().map_or_else(
+                        || {
+                            ReaderMessage::Message(tau_proto::HarnessOutputMessage::Disconnect(
+                                disconnect.clone(),
+                            ))
+                        },
+                        |observation| ReaderMessage::ObservedMessage {
+                            message: tau_proto::HarnessOutputMessage::Disconnect(
+                                disconnect.clone(),
+                            ),
+                            observation,
+                        },
                     ));
                     break Err(ExtensionDataRpcError::Disconnect(disconnect));
                 }
                 ManualRuntimeInput::Message(message) => {
-                    deferred.push_back(ReaderMessage::Message(message));
+                    let deferred_message = match self.last_observation.take() {
+                        Some(observation) => ReaderMessage::ObservedMessage {
+                            message,
+                            observation,
+                        },
+                        None => ReaderMessage::Message(message),
+                    };
+                    deferred.push_back(deferred_message);
                 }
                 ManualRuntimeInput::Timeout => break Err(ExtensionDataRpcError::Timeout),
                 ManualRuntimeInput::InputClosed => break Err(ExtensionDataRpcError::InputClosed),
@@ -1102,12 +1179,13 @@ where
             }
         };
         let (wake_sender, wake_receiver) = tau_blocking_notify_channel::channel();
-        let (input_receiver, reader_thread) =
+        let (input_receiver, reader_thread, local_input_observations_enabled) =
             spawn_peer_reader_thread(input_reader, wake_sender.clone());
         let input = Rc::new(RefCell::new(ManualInput {
             receiver: input_receiver,
             pending: VecDeque::new(),
             input_closed: false,
+            last_observation: None,
         }));
         let extension_data = ExtensionDataClient {
             handle: handle.clone(),
@@ -1146,6 +1224,7 @@ where
             reader_thread,
             writer_thread,
             startup,
+            local_input_observations_enabled: Some(local_input_observations_enabled),
         })
     }
 
@@ -1230,7 +1309,8 @@ where
 
         let state = make_state(handle.clone());
         let (wake_sender, wake_receiver) = tau_blocking_notify_channel::channel();
-        let (input, reader_thread) = spawn_reader_thread(reader, wake_sender.clone());
+        let (input, reader_thread, local_input_observations_enabled) =
+            spawn_reader_thread(reader, wake_sender.clone());
         Ok(ManualExtensionRuntime {
             state,
             builder,
@@ -1239,6 +1319,7 @@ where
                 receiver: input,
                 pending: VecDeque::new(),
                 input_closed: false,
+                last_observation: None,
             })),
             wake_receiver,
             waker: ManualRuntimeWaker {
@@ -1247,6 +1328,7 @@ where
             reader_thread,
             writer_thread,
             startup: ManualStartupState::AwaitingConfigure,
+            local_input_observations_enabled: Some(local_input_observations_enabled),
         })
     }
 }
@@ -1254,7 +1336,7 @@ where
 fn spawn_reader_thread<R>(
     reader: R,
     wake_sender: tau_blocking_notify_channel::Sender,
-) -> (mpsc::Receiver<ReaderMessage>, JoinHandle<()>)
+) -> (mpsc::Receiver<ReaderMessage>, JoinHandle<()>, bool)
 where
     R: Read + Send + 'static,
 {
@@ -1266,11 +1348,14 @@ where
 fn spawn_peer_reader_thread<R>(
     mut reader: tau_proto::PeerInputReader<R>,
     wake_sender: tau_blocking_notify_channel::Sender,
-) -> (mpsc::Receiver<ReaderMessage>, JoinHandle<()>)
+) -> (mpsc::Receiver<ReaderMessage>, JoinHandle<()>, bool)
 where
     R: Read + Send + 'static,
 {
     let (sender, receiver) = mpsc::sync_channel(1);
+    let diagnostics_enabled =
+        tracing::enabled!(target: "provider-builtin.receipt", tracing::Level::TRACE);
+    let dispatcher = diagnostics_enabled.then(|| tracing::dispatcher::get_default(Clone::clone));
     let reader_thread = std::thread::spawn(move || {
         /// Exit guard that wakes waiters when the reader thread leaves.
         struct WakeOnDrop {
@@ -1287,21 +1372,57 @@ where
         let _wake_on_exit = WakeOnDrop {
             sender: wake_sender.clone(),
         };
-        loop {
-            let message = match reader.read_message() {
-                Ok(Some(message)) => ReaderMessage::Message(message),
-                Ok(None) => ReaderMessage::InputClosed,
-                Err(error) => ReaderMessage::Error(ClientError::from(error)),
-            };
-            let should_stop = !matches!(message, ReaderMessage::Message(_));
-            if sender.send(message).is_err() {
-                break;
-            }
-            wake_sender.notify();
-            if should_stop {
-                break;
+        if let Some(dispatcher) = dispatcher {
+            tracing::dispatcher::with_default(&dispatcher, || {
+                loop {
+                    let started_at = Instant::now();
+                    let message = match reader.read_message_with_size() {
+                        Ok(Some(decoded)) => ReaderMessage::ObservedMessage {
+                            message: decoded.message,
+                            observation: LocalInputObservation {
+                                frame_bytes: decoded.encoded_bytes,
+                                decode_elapsed: started_at.elapsed(),
+                                decoded_at: Instant::now(),
+                            },
+                        },
+                        Ok(None) => ReaderMessage::InputClosed,
+                        Err(error) => ReaderMessage::Error(ClientError::from(error)),
+                    };
+                    if forward_reader_message(&sender, &wake_sender, message) {
+                        break;
+                    }
+                }
+            });
+        } else {
+            loop {
+                let message = match reader.read_message() {
+                    Ok(Some(message)) => ReaderMessage::Message(message),
+                    Ok(None) => ReaderMessage::InputClosed,
+                    Err(error) => ReaderMessage::Error(ClientError::from(error)),
+                };
+                if forward_reader_message(&sender, &wake_sender, message) {
+                    break;
+                }
             }
         }
     });
-    (receiver, reader_thread)
+    (receiver, reader_thread, diagnostics_enabled)
+}
+
+/// Queues one reader result, wakes the manual loop, and returns whether reading
+/// must stop.
+fn forward_reader_message(
+    sender: &mpsc::SyncSender<ReaderMessage>,
+    wake_sender: &tau_blocking_notify_channel::Sender,
+    message: ReaderMessage,
+) -> bool {
+    let should_stop = !matches!(
+        message,
+        ReaderMessage::Message(_) | ReaderMessage::ObservedMessage { .. }
+    );
+    if sender.send(message).is_err() {
+        return true;
+    }
+    wake_sender.notify();
+    should_stop
 }

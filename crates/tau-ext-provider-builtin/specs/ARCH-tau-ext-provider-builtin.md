@@ -152,6 +152,23 @@ scheduler thread and do not retain worker permits; their ownership and cooldown
 contract is specified by
 [SPEC-tau-ext-provider-builtin-retry-scheduler](SPEC-tau-ext-provider-builtin-retry-scheduler.md).
 
+Disabled-by-default private TRACE observation carries one content-free local
+measurement from the real input decode through handler materialization, selected
+settings clone, Secret/OAuth/quota admission, cooldown and worker-slot queues,
+and thread start. It correlates by ownership of the prompt's existing APID value
+without rendering that value. The fixed scalar schema contains only durations,
+encoded byte counts, bounded counts/depths, and closed class labels; it creates
+no protocol acknowledgement, event, journal, capture, durable fact, or scheduling
+authority.
+The disabled specialization performs no observation-specific clocks,
+allocations, byte sizing, hashing, I/O, trace construction/emission, dynamic
+stage traversal, or retained observation state. Ordinary provider work and its
+fixed inert `Option::None` carrier checks/moves remain intentionally unchanged;
+full type-level specialization of provider policy state is outside this local
+diagnostic boundary.
+The deliberately unstable reader seam is documented by
+[ARCH-tau-client](../../tau-client/specs/ARCH-tau-client.md).
+
 Initial prompts and due retries enter a main-loop-owned credential admission
 queue. The loop correlates bounded Secret reads and compare-and-swap results,
 coalesces OAuth refresh only for the same provider, startup Responses mode, and

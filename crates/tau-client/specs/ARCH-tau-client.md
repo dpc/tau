@@ -78,6 +78,22 @@ fairly after each wake, because one wake may represent multiple ready items.
 Extension state and handlers stay on the caller thread; only the protocol reader
 and writer need to move to background threads.
 
+The reader has one deliberately unstable, doc-hidden local-observation seam for
+the built-in Provider's disabled-by-default TRACE diagnostics. A startup trace
+interest check gates real-decode byte and elapsed-time capture; when disabled,
+the reader takes its plain decode path with no observation-specific clock,
+allocation, byte sizing, hashing, I/O, trace construction, or retained
+observation state. The consuming one-shot, doc-hidden path selector is an
+explicitly approved unstable internal seam: it reveals only this operator gate,
+invokes exactly one consuming branch, and cannot be reused after selection.
+When enabled,
+the manual runtime exposes only fixed scalar frame bytes, decode duration, and a
+monotonic receipt instant for immediate process-local consumption. The seam
+does not expose payloads or protocol identifiers and creates no supported client
+API, wire field, event, journal fact, or acknowledgement.
+The consuming lifecycle is documented by
+[ARCH-tau-ext-provider-builtin](../../tau-ext-provider-builtin/specs/ARCH-tau-ext-provider-builtin.md).
+
 The builder preserves the first-seen order of startup subscription selectors
 while coalescing exact structural duplicates. It does not collapse logical
 overlaps such as `Prefix("tool.")` plus an exact `tool.started` selector.
