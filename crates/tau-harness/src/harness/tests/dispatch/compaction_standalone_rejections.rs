@@ -2,7 +2,10 @@
 
 use super::*;
 
-/// failure.
+/// Rejected standalone terminals must preserve context accounting and leave
+/// their durable failure as the sole compaction-suppression authority. All
+/// cases share one provider fixture so the oracle does not multiply unrelated
+/// provider startup and shutdown handshakes under workspace-test load.
 #[test]
 fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
     fn valid_replacement() -> ContextItem {
@@ -219,23 +222,26 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
         ),
     ];
 
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+
     for (label, error, failure_kind, stop_reason, output_items, expected_reason) in cases {
-        let td = TempDir::new().expect("tempdir");
-        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-        enable_remote_compaction_for_test_model(&mut h);
-        let info = h
-            .provider_runtime
-            .model_info
-            .get_mut(&"test/model".into())
-            .expect("test model");
-        info.supports_compaction = false;
-        info.supports_standalone_compaction = true;
-        let cid = ensure_test_user_agent(&mut h);
+        let role = h.config.selected_role.clone();
+        let cid = h.create_durable_user_agent(test_session_id("s1"), &role);
         let agent_id = h.agent_runtime.agent_registry.agents[&cid]
             .identity
             .agent_id
             .clone()
             .expect("durable agent");
+        finish_test_agent_context_wait(&mut h, &crate::parse_agent_id(&agent_id));
         let head = h.agent_runtime.agent_registry.agents[&cid].identity.head;
         let agent = h
             .agent_runtime
@@ -249,12 +255,14 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
         agent.execution.context_usage_prompt_id =
             Some(test_agent_prompt_id("ap-test-provider-usage"));
         agent.execution.context_usage_head = head;
+        let compact_index =
+            event_log_count(&h, |event| matches!(event, Event::AgentPromptCreated(_)));
         h.handle_compact_request(
             crate::harness::harness_connection_id(),
             test_session_id("s1"),
             Some(&agent_id),
         );
-        let compact = read_nth_prompt_created(&h, 0);
+        let compact = read_nth_prompt_created(&h, compact_index);
         let context_before = (
             h.agent_runtime.agent_registry.agents[&cid]
                 .execution
@@ -489,6 +497,6 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
                 .expect("cold unresolved failure");
             assert_eq!(cold_failure.incomplete_response.as_ref(), Some(&expected));
         }
-        h.shutdown().expect("shutdown");
     }
+    h.shutdown().expect("shutdown");
 }
