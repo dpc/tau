@@ -438,6 +438,27 @@ fn plain_submission_does_not_request_a_second_redraw() {
     assert_eq!(handle.redraw_request_count(), before + 1);
 }
 
+/// Printed output must wake once, explicit redraws must remain independent, and
+/// a suppressed burst must release only its one coalesced wake.
+#[test]
+fn redraw_notification_counter_tracks_prints_explicit_wakes_and_suppressed_bursts() {
+    let (_term, handle, _input_tx) = new_test_term(Vec::new());
+    let before = handle.redraw_request_count();
+
+    handle.print_output("print-only", "printed output");
+    assert_eq!(handle.redraw_request_count(), before + 1);
+
+    handle.redraw();
+    assert_eq!(handle.redraw_request_count(), before + 2);
+
+    handle.with_redraw_suppressed(|| {
+        handle.print_output("burst-one", "one");
+        handle.redraw();
+        handle.print_output("burst-two", "two");
+    });
+    assert_eq!(handle.redraw_request_count(), before + 3);
+}
+
 /// Submission must request a redraw after removing an already-visible
 /// completion menu; raw terminal's input-clear redraw alone cannot erase that
 /// menu.

@@ -51,7 +51,7 @@ built.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-tau-cli-term-raw = { workspace = true }
+tau-cli-term-raw = { workspace = true, features = ["redraw-test-counter"] }
 tau-test-support.workspace = true
 tempfile.workspace = true
 vt100.workspace = true

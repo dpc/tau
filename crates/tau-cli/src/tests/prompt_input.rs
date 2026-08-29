@@ -55,6 +55,9 @@ fn rejected_prompt_replaces_queued_marker_with_actionable_failure() {
         agent_id: agent_id("main"),
         message_class: tau_proto::PromptMessageClass::User,
     }));
+    sync(&handle);
+    let redraw_wakes = handle.redraw_request_count();
+    let redraw_passes = vt.frame_generation();
     renderer.handle(&Event::AgentPromptRejected(AgentPromptRejected {
         agent_id: agent_id("main"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -62,6 +65,8 @@ fn rejected_prompt_replaces_queued_marker_with_actionable_failure() {
     }));
     sync(&handle);
 
+    assert_eq!(handle.redraw_request_count(), redraw_wakes + 1);
+    assert!(vt.frame_generation() > redraw_passes);
     assert!(!vt.screen_contains(100, "prompt without providers (queued)"));
     assert!(vt.screen_contains(100, "No provider models are available"));
     assert!(vt.screen_contains(100, "tau provider list"));
@@ -2185,6 +2190,9 @@ fn queued_prompt_then_late_ui_submit_advances_without_duplicate() {
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
     }));
+    sync(&handle);
+    let redraw_wakes = handle.redraw_request_count();
+    let redraw_passes = vt.frame_generation();
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         literal: false,
         session_id: test_session_id("s1"),
@@ -2195,6 +2203,8 @@ fn queued_prompt_then_late_ui_submit_advances_without_duplicate() {
         ctx_id: None,
     }));
     sync(&handle);
+    assert_eq!(handle.redraw_request_count(), redraw_wakes + 1);
+    assert!(vt.frame_generation() > redraw_passes);
     assert!(!vt.screen_contains(80, "late echo (queued)"));
     assert!(vt.screen_contains(80, "> late echo"));
     assert_eq!(
@@ -2232,6 +2242,8 @@ fn queued_prompt_steered_promotes_without_duplicate() {
         "queued marker should show before steering, got: {:?}",
         vt.screen_text(80)
     );
+    let redraw_wakes = handle.redraw_request_count();
+    let redraw_passes = vt.frame_generation();
 
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
         self_compaction_terminal: None,
@@ -2245,6 +2257,8 @@ fn queued_prompt_steered_promotes_without_duplicate() {
         ctx_id: None,
     }));
     sync(&handle);
+    assert_eq!(handle.redraw_request_count(), redraw_wakes + 1);
+    assert!(vt.frame_generation() > redraw_passes);
     assert!(
         !vt.screen_contains(80, "folded queued prompt (queued)"),
         "queued marker should be gone after steering, got: {:?}",
@@ -2355,7 +2369,10 @@ fn submitted_human_prompt_promotes_matching_front_queue_before_start() {
         agent_id: agent_id("main"),
         message_class: tau_proto::PromptMessageClass::User,
     }));
-    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+    sync(&handle);
+    let redraw_wakes = handle.redraw_request_count();
+    let redraw_passes = vt.frame_generation();
+    renderer.handle_agent_prompt_submitted_for_test(&AgentPromptSubmitted {
         inference_activation: true,
         agent_id: agent_id("main"),
         text: text.to_owned(),
@@ -2366,7 +2383,13 @@ fn submitted_human_prompt_promotes_matching_front_queue_before_start() {
         submission_source: tau_proto::PromptSubmissionSource::HumanUi,
         display_name: None,
         ctx_id: None,
-    }));
+    });
+    sync(&handle);
+    assert_eq!(handle.redraw_request_count(), redraw_wakes + 1);
+    assert!(vt.frame_generation() > redraw_passes);
+    assert!(vt.screen_contains(80, "⬤ accepted queued prompt"));
+    assert!(!vt.screen_contains(80, "accepted queued prompt (queued)"));
+
     renderer.handle(&Event::AgentPromptStarted(agent_prompt_started(
         "accepted-queued",
         "s1",
@@ -2385,6 +2408,25 @@ fn submitted_human_prompt_promotes_matching_front_queue_before_start() {
         "submitted queued prompt must render once: {:?}",
         vt.screen_text(80)
     );
+}
+
+/// An unmatched rejection retains its independent explicit redraw after the
+/// automatic failure-output wake.
+#[test]
+fn unmatched_prompt_rejection_keeps_its_explicit_redraw() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    let redraw_wakes = handle.redraw_request_count();
+
+    renderer.handle(&Event::AgentPromptRejected(AgentPromptRejected {
+        agent_id: agent_id("main"),
+        message_class: tau_proto::PromptMessageClass::User,
+        message: "unmatched rejection".to_owned(),
+    }));
+    sync(&handle);
+
+    assert_eq!(handle.redraw_request_count(), redraw_wakes + 2);
+    assert!(vt.screen_contains(80, "unmatched rejection"));
 }
 
 /// Harness-typed active and passive background completion notices stay out of

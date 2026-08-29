@@ -6616,7 +6616,6 @@ impl EventRenderer {
                 self.submitted_prompt_block(names::USER_PROMPT, &queued.text),
             );
             self.transcript.runtime.last_user_block = Some((id, queued.text));
-            self.resources.handle.redraw();
             return;
         }
         if self.handle_typed_internal_prompt_projection(
@@ -6646,6 +6645,15 @@ impl EventRenderer {
         // Legacy records intentionally retain their historical rendering:
         // there is no safe prefix-based way to reclassify them.
         self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
+    }
+
+    /// Applies only the submitted-prompt projection for focused terminal tests.
+    #[cfg(test)]
+    pub(crate) fn handle_agent_prompt_submitted_for_test(
+        &mut self,
+        prompt: &tau_proto::AgentPromptSubmitted,
+    ) {
+        self.handle_agent_prompt_submitted(prompt);
     }
 
     /// Apply typed internal-prompt UI treatment.
@@ -6831,7 +6839,6 @@ impl EventRenderer {
                 self.submitted_prompt_block(names::USER_PROMPT, &queued.text),
             );
             self.transcript.runtime.last_user_block = Some((id, queued.text));
-            self.resources.handle.redraw();
             return;
         }
         self.reset_main_tool_usage();
@@ -6911,7 +6918,7 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_rejected(&mut self, rejected: &tau_proto::AgentPromptRejected) {
-        if self
+        let removed_queued_block = if self
             .transcript
             .runtime
             .queued_user_blocks
@@ -6921,7 +6928,10 @@ impl EventRenderer {
             && let Some(queued_id) = queued.id
         {
             self.resources.handle.remove_block(queued_id);
-        }
+            true
+        } else {
+            false
+        };
         self.transcript
             .status
             .agent_activity
@@ -6931,7 +6941,9 @@ impl EventRenderer {
             "prompt-rejected",
             render_action_output_block(&self.resources.theme, &rejected.message),
         );
-        self.resources.handle.redraw();
+        if !removed_queued_block {
+            self.resources.handle.redraw();
+        }
     }
 
     fn handle_agent_prompt_steered(&mut self, steered: &tau_proto::AgentPromptSteered) {
@@ -6974,7 +6986,6 @@ impl EventRenderer {
                 "user-prompt-steered",
                 self.submitted_prompt_block(names::USER_PROMPT, &queued.text),
             );
-            self.resources.handle.redraw();
             return;
         }
         if self.handle_source_aware_prompt_projection(

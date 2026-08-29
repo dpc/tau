@@ -1174,8 +1174,7 @@ pub struct TermHandle {
     output_snapshot_count: Arc<path_std_sync::atomic::AtomicU64>,
     /// Number of transcript-sized output snapshots transferred by ownership.
     output_snapshot_take_count: Arc<path_std_sync::atomic::AtomicU64>,
-    /// Number of asynchronous redraw requests made through this handle in
-    /// redraw-count tests.
+    /// Number of asynchronous redraw notifications released by this handle.
     #[cfg(feature = "redraw-test-counter")]
     redraw_request_count: Arc<path_std_sync::atomic::AtomicU64>,
 }
@@ -1251,7 +1250,7 @@ impl Drop for RedrawSuppressionGuard<'_> {
             }
         };
         if notify {
-            self.handle.redraw.notify();
+            self.handle.release_redraw_notification();
         }
     }
 }
@@ -1323,16 +1322,21 @@ impl TermHandle {
     }
 
     fn notify_redraw(&self) {
-        #[cfg(feature = "redraw-test-counter")]
-        self.redraw_request_count
-            .fetch_add(1, path_std_sync_atomic::Ordering::Relaxed);
         let notify = {
             let mut st = self.lock();
             Self::request_redraw_locked(&mut st)
         };
         if notify {
-            self.redraw.notify();
+            self.release_redraw_notification();
         }
+    }
+
+    /// Releases one asynchronous redraw notification and records it in tests.
+    fn release_redraw_notification(&self) {
+        #[cfg(feature = "redraw-test-counter")]
+        self.redraw_request_count
+            .fetch_add(1, path_std_sync_atomic::Ordering::Relaxed);
+        self.redraw.notify();
     }
 
     /// Requests that the prompt input loop stop and return EOF.
@@ -1424,7 +1428,7 @@ impl TermHandle {
             )
         };
         if notify {
-            self.redraw.notify();
+            self.release_redraw_notification();
         }
         capture_suppressed
     }
@@ -1440,7 +1444,7 @@ impl TermHandle {
         self.observe_presentation_mutation_enabled(delivery_id, fact)
     }
 
-    /// Returns how many asynchronous redraw requests this handle has made.
+    /// Returns how many asynchronous redraw notifications this handle released.
     ///
     /// This excludes synchronous redraw barriers, which directly notify the
     /// renderer so callers can wait for their completion.
@@ -1554,7 +1558,7 @@ impl TermHandle {
         let notify = notify && Self::request_redraw_locked(&mut st);
         drop(st);
         if notify {
-            self.redraw.notify();
+            self.release_redraw_notification();
         }
     }
 
@@ -1889,7 +1893,7 @@ impl TermHandle {
         let notify = Self::request_redraw_locked(&mut st);
         drop(st);
         if notify {
-            self.redraw.notify();
+            self.release_redraw_notification();
         }
         id
     }
@@ -2031,7 +2035,7 @@ impl TermHandle {
             Self::request_redraw_locked(&mut st)
         };
         if notify {
-            self.redraw.notify();
+            self.release_redraw_notification();
         }
     }
 }
@@ -2235,7 +2239,7 @@ impl Term {
             redraw_request_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         };
 
-        handle.redraw.notify();
+        handle.release_redraw_notification();
 
         Ok((
             Self {
@@ -2311,7 +2315,7 @@ impl Term {
             redraw_request_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         };
 
-        handle.redraw.notify();
+        handle.release_redraw_notification();
 
         let term = Self {
             handle: handle.clone(),
@@ -3396,7 +3400,7 @@ impl Term {
             let mut st = self.handle.lock();
             st.terminal.shutdown = true;
         }
-        self.handle.redraw.notify();
+        self.handle.release_redraw_notification();
 
         if let Some(handle) = self.redraw_thread.take() {
             let _ = handle.join();
