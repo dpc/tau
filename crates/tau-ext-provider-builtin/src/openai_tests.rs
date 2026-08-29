@@ -5091,11 +5091,19 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
     queued.agent_prompt_id = "mixed-queued"
         .parse::<tau_proto::AgentPromptId>()
         .expect("known-safe AgentPromptId must be valid");
+    let mut queue_fence = prompt();
+    queue_fence.agent_prompt_id = "mixed-queue-fence"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[
         live_event(11, Event::AgentPromptCreated(delayed)),
         live_event(12, Event::AgentPromptCreated(active)),
         live_event(13, Event::AgentPromptCreated(queued)),
+        live_event(14, Event::AgentPromptCreated(queue_fence)),
     ]));
+    let (delayed_ready_tx, delayed_ready_rx) = mpsc::sync_channel(1);
+    let (delayed_release_tx, delayed_release_rx) = mpsc::sync_channel(1);
+    let delayed_release_rx = Mutex::new(delayed_release_rx);
     let (delayed_tx, delayed_rx) = mpsc::sync_channel(1);
     let (active_tx, active_rx) = mpsc::sync_channel(1);
     let (active_cancel_tx, active_cancel_rx) = mpsc::channel();
@@ -5109,6 +5117,14 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
         match id.as_str() {
             "mixed-delayed" => {
                 initial_workers_started.wait();
+                delayed_ready_tx
+                    .send(())
+                    .expect("report delayed worker readiness");
+                delayed_release_rx
+                    .lock()
+                    .expect("delayed release receiver")
+                    .recv_timeout(MIXED_STATE_TIMEOUT)
+                    .expect("release delayed retry after queue fence");
                 send_worker_message(
                     &execution.output_tx,
                     &execution.output_waker,
@@ -5183,6 +5199,42 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
         result.expect("run provider");
     });
 
+    delayed_ready_rx
+        .recv_timeout(MIXED_STATE_TIMEOUT)
+        .expect("delayed worker readiness");
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderPromptSubmittedReported(submitted))
+                    if submitted.agent_prompt_id.as_str() == "mixed-queue-fence"
+            )
+        })
+    });
+    input.push(encode_frames(&[live_event(
+        15,
+        Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+            session_id: tau_proto::SessionId::parse("test-session")
+                .expect("known-safe SessionId must be valid"),
+            target_agent_id: None,
+            agent_prompt_id: Some(
+                "mixed-queue-fence"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
+            ),
+        }),
+    )]));
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinishedReported(finished))
+                    if finished.agent_prompt_id.as_str() == "mixed-queue-fence"
+                        && finished.error.as_deref() == Some("(cancelled by harness)")
+            )
+        })
+    });
+    delayed_release_tx.send(()).expect("release delayed retry");
     delayed_rx
         .recv_timeout(MIXED_STATE_TIMEOUT)
         .expect("delayed state");
@@ -5206,7 +5258,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
         .parse::<tau_proto::AgentPromptId>()
         .expect("known-safe AgentPromptId must be valid");
     input.push(encode_frames(&[live_event(
-        14,
+        16,
         Event::AgentPromptCreated(cooldown_peer),
     )]));
     wait_for_runtime_frames(&output, |frames| {
@@ -5251,7 +5303,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                     )
                 })
                 .count()
-                == 4
+                == 5
         });
         input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
             tau_proto::Disconnect {
@@ -5270,6 +5322,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
         "mixed-delayed",
         "mixed-active",
         "mixed-queued",
+        "mixed-queue-fence",
         "mixed-cooldown-peer",
     ] {
         assert_eq!(
