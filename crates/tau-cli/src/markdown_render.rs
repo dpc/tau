@@ -25,9 +25,9 @@
 //! Live rendering uses [`MarkdownStreamCache`]. Complete lines become stable as
 //! soon as later input can no longer reinterpret them as a table; stable runs
 //! are parsed once and cached. A possible table header or growing table remains
-//! live because later rows can change its widths. The currently incomplete line
-//! remains plain until it receives a newline or final/static rendering parses
-//! the complete string.
+//! live because later rows can change its widths or make bounded padding fall
+//! back to raw Markdown. The currently incomplete line remains plain until it
+//! receives a newline or final/static rendering parses the complete string.
 //!
 //! Inline recognition indexes the suffix once before rendering it. Unmatched
 //! code backticks, link labels and targets, autolink brackets, and emphasis,
@@ -294,7 +294,7 @@ impl MarkdownStreamCache {
         {
             self.work_bytes += pending.len();
         }
-        let retain_at = unstable_suffix_start(pending, self.stable_fence, osc8_links);
+        let retain_at = unstable_suffix_start(pending, self.stable_fence);
         if 0 < retain_at {
             let stable = &pending[..retain_at];
             let mut fence = self.stable_fence;
@@ -691,7 +691,7 @@ fn visible_run_text(run: &MarkdownRun, show_link_target: bool) -> String {
 /// by a delimiter row, the entire trailing table remains live because each new
 /// row can revise every column width. All other complete lines, including fence
 /// lines and blank-line seals, are stable.
-fn unstable_suffix_start(text: &str, initial_fence: Option<FenceKind>, osc8_links: bool) -> usize {
+fn unstable_suffix_start(text: &str, initial_fence: Option<FenceKind>) -> usize {
     let lines = text
         .split_inclusive('\n')
         .map(|line| {
@@ -723,9 +723,7 @@ fn unstable_suffix_start(text: &str, initial_fence: Option<FenceKind>, osc8_link
             index += 1;
             continue;
         }
-        if let Some(table_end) = table_block_end(&parser_lines, index)
-            && pad_table_lines(&parser_lines[index..table_end], osc8_links).is_some()
-        {
+        if let Some(table_end) = table_block_end(&parser_lines, index) {
             if table_end == lines.len() {
                 return offset;
             }
@@ -832,24 +830,27 @@ fn parse_markdown_with_state(
 }
 
 fn table_block_end(lines: &[(&str, &str)], start: usize) -> Option<usize> {
-    if start + 1 >= lines.len()
-        || is_indented_code(lines[start].0)
-        || TableRow::parse(lines[start].0).is_none()
-    {
+    if start + 1 >= lines.len() || is_indented_code(lines[start].0) {
         return None;
     }
+    let header = TableRow::parse(lines[start].0)?;
+    let columns = header.cells.len();
     let separator = TableRow::parse(lines[start + 1].0)?;
-    if !separator
-        .cells
-        .iter()
-        .all(|cell| TableAlignment::parse(cell).is_some())
+    if separator.cells.len() != columns
+        || !separator
+            .cells
+            .iter()
+            .all(|cell| TableAlignment::parse(cell).is_some())
     {
         return None;
     }
 
     let mut end = start + 2;
     while end < lines.len() {
-        if is_indented_code(lines[end].0) || TableRow::parse(lines[end].0).is_none() {
+        let Some(row) = TableRow::parse(lines[end].0) else {
+            break;
+        };
+        if row.cells.len() != columns {
             break;
         }
         end += 1;

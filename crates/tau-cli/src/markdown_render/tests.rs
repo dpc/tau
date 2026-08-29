@@ -808,6 +808,32 @@ fn markdown_tables_are_padded_without_changing_cell_text() {
     );
 }
 
+/// Ensures a pipe-shaped row with more cells ends a valid table instead of
+/// invalidating its earlier rows after streaming has already rendered them.
+#[test]
+fn markdown_table_cell_count_mismatch_seals_prior_table() {
+    let theme = markdown_test_theme();
+    let source = concat!(
+        "| heading | value |\n",
+        "| --- | :---: |\n",
+        "| cell | row |\n",
+        "| mismatched | cells | here |\n",
+    );
+    let static_block = markdown_block(&theme, names::SHELL_OUTPUT, source);
+
+    assert_eq!(
+        rendered_text(&static_block),
+        concat!(
+            "| heading | value |\n",
+            "| ------- | :---: |\n",
+            "| cell    |  row  |\n",
+            "| mismatched | cells | here |\n",
+        )
+    );
+    assert_markdown_rendering_property(&theme, source)
+        .expect("sealed streaming table must retain its static projection");
+}
+
 /// Reproduces the reported ordinary prose table, which previously fell back at
 /// 80 scalar characters, and keeps its numeric-looking effort column right
 /// aligned in one bounded 139-column logical table.
@@ -1059,6 +1085,31 @@ fn table_rows_above_display_width_bound_are_not_padded() {
     let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
 
     assert_eq!(rendered_text(&block), source);
+}
+
+/// Ensures a growing syntactic table that exceeds either padding bound stays
+/// live until its blank-line seal, so streaming and final rendering both use
+/// the raw-Markdown fallback.
+#[test]
+fn live_stream_unpadded_tables_match_static_after_seal() {
+    let theme = markdown_test_theme();
+    let row_too_wide = "x".repeat(TABLE_MAX_LOGICAL_ROW_DISPLAY_WIDTH);
+    let width_bound_source = format!("| A | B |\n| --- | --- |\n| {row_too_wide} | y |\n\n");
+    let wide_cell = "x".repeat(110);
+    let mut padding_bound_source = format!("| {wide_cell} | {wide_cell} |\n| --- | --- |\n");
+    let padding_per_short_row = 2 * (wide_cell.len() - 1);
+    let short_rows = (TABLE_MAX_EXTRA_PADDING_BYTES / padding_per_short_row) + 1;
+    for _ in 0..short_rows {
+        padding_bound_source.push_str("| a | b |\n");
+    }
+    padding_bound_source.push('\n');
+
+    for source in [width_bound_source, padding_bound_source] {
+        let static_block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
+        assert_eq!(rendered_text(&static_block), source);
+        assert_markdown_rendering_property(&theme, &source)
+            .expect("sealed unpadded table must retain its static projection");
+    }
 }
 
 /// Ensures aggregate padding limits fall back even when each rendered line is
