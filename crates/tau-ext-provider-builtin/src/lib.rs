@@ -285,6 +285,7 @@ const RETRY_BASE_DELAY: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(10);
 const RESET_BOUNDARY_JITTER_MAX: Duration = Duration::from_secs(5);
+const RETRY_SCHEDULER_MAILBOX_CAPACITY: usize = 1_024;
 const PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const QUOTA_FETCH_MIN_INTERVAL: Duration = Duration::from_secs(60);
 const QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
@@ -4816,13 +4817,167 @@ enum SchedulerCommand {
     },
 }
 
+/// One actor command tagged at mailbox admission so timer ordering does not
+/// depend on when the scheduler thread happens to run.
+struct SchedulerMailboxCommand {
+    /// Serialized logical-admission publication timestamp.
+    admitted_at: Arc<SchedulerAdmissionTimestamp>,
+    /// Atomic scheduler mutation to apply.
+    command: SchedulerCommand,
+}
+
+impl SchedulerMailboxCommand {
+    /// Resolves transport-owned admission publication before synchronous state
+    /// evaluates timer precedence.
+    fn resolve(self) -> (Instant, SchedulerCommand) {
+        (self.admitted_at.wait(), self.command)
+    }
+}
+
+/// Clone-shared bounded mailbox sender with one coherent FIFO admission order.
+struct SchedulerCommandSender {
+    /// Bounded actor mailbox transport.
+    commands: SyncSender<SchedulerMailboxCommand>,
+    /// Clock sampled only after a bounded send succeeds.
+    clock: Arc<dyn RetryClock>,
+    /// Serializes send completion and publication across every producer.
+    admission: Mutex<()>,
+    /// Test hook fired when gate acquisition observes another producer.
+    #[cfg(test)]
+    gate_blocked: Mutex<Option<SyncSender<()>>>,
+    /// Test hook fired at the bounded-send call boundary.
+    #[cfg(test)]
+    send_attempted: Mutex<Option<SyncSender<()>>>,
+    /// Test hook fired after bounded admission reports a full mailbox.
+    #[cfg(test)]
+    send_blocked: Mutex<Option<SyncSender<()>>>,
+}
+
+impl SchedulerCommandSender {
+    /// Sends and timestamps one command while holding the shared admission
+    /// gate.
+    fn send(
+        &self,
+        command: SchedulerCommand,
+    ) -> Result<(), mpsc::SendError<SchedulerMailboxCommand>> {
+        #[cfg(test)]
+        let _admission = if let Some(blocked) = self
+            .gate_blocked
+            .lock()
+            .expect("scheduler gate-blocked hook")
+            .take()
+        {
+            match self.admission.try_lock() {
+                Ok(admission) => admission,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let _ = blocked.send(());
+                    self.admission.lock().expect("scheduler admission gate")
+                }
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            }
+        } else {
+            self.admission.lock().expect("scheduler admission gate")
+        };
+        #[cfg(not(test))]
+        let _admission = self.admission.lock().expect("scheduler admission gate");
+        #[cfg(test)]
+        if let Some(attempted) = self
+            .send_attempted
+            .lock()
+            .expect("scheduler send-attempt hook")
+            .take()
+        {
+            let _ = attempted.send(());
+        }
+        let admitted_at = Arc::new(SchedulerAdmissionTimestamp::pending());
+        let mailbox = SchedulerMailboxCommand {
+            admitted_at: Arc::clone(&admitted_at),
+            command,
+        };
+        #[cfg(test)]
+        let result = if let Some(blocked) = self
+            .send_blocked
+            .lock()
+            .expect("scheduler send-blocked hook")
+            .take()
+        {
+            match self.commands.try_send(mailbox) {
+                Ok(()) => Ok(()),
+                Err(mpsc::TrySendError::Full(mailbox)) => {
+                    let _ = blocked.send(());
+                    self.commands.send(mailbox)
+                }
+                Err(mpsc::TrySendError::Disconnected(mailbox)) => Err(mpsc::SendError(mailbox)),
+            }
+        } else {
+            self.commands.send(mailbox)
+        };
+        #[cfg(not(test))]
+        let result = self.commands.send(mailbox);
+        if result.is_ok() {
+            admitted_at.publish(self.clock.now());
+        }
+        result
+    }
+}
+
+/// Logical admission timestamp published after a bounded send succeeds.
+struct SchedulerAdmissionTimestamp {
+    /// Timestamp value, absent while a full-mailbox sender remains blocked.
+    value: Mutex<Option<Instant>>,
+    /// Wakes an actor that received the command as its sender unblocked.
+    ready: Condvar,
+    /// Test hook fired immediately before waiting on an unpublished timestamp.
+    #[cfg(test)]
+    pending_observed: Mutex<Option<SyncSender<()>>>,
+}
+
+impl SchedulerAdmissionTimestamp {
+    /// Creates an unpublished admission timestamp.
+    fn pending() -> Self {
+        Self {
+            value: Mutex::new(None),
+            ready: Condvar::new(),
+            #[cfg(test)]
+            pending_observed: Mutex::new(None),
+        }
+    }
+
+    /// Publishes logical admission at the producer's current clock instant.
+    fn publish(&self, now: Instant) {
+        *self.value.lock().expect("scheduler admission timestamp") = Some(now);
+        self.ready.notify_one();
+    }
+
+    /// Waits until the successful sender publishes its admission instant.
+    fn wait(&self) -> Instant {
+        let mut value = self.value.lock().expect("scheduler admission timestamp");
+        while value.is_none() {
+            #[cfg(test)]
+            if let Some(observed) = self
+                .pending_observed
+                .lock()
+                .expect("scheduler pending-observed hook")
+                .take()
+            {
+                let _ = observed.send(());
+            }
+            value = self
+                .ready
+                .wait(value)
+                .expect("scheduler admission timestamp wait");
+        }
+        value.expect("scheduler admission timestamp is published")
+    }
+}
+
 /// Monotonic retry clock, injectable so long quota windows need no wall wait.
 trait RetryClock: Send + Sync {
     /// Returns the current monotonic scheduler instant.
     fn now(&self) -> Instant;
 
     /// Receives the actor command channel for virtual-time wakeups.
-    fn attach_scheduler(&self, _commands: std::sync::Weak<SyncSender<SchedulerCommand>>) {}
+    fn attach_scheduler(&self, _commands: std::sync::Weak<SchedulerCommandSender>) {}
 }
 
 /// Production retry clock backed by the process monotonic clock.
@@ -4949,6 +5104,30 @@ impl RetrySchedulerState {
         }
     }
 
+    /// Orders one timestamped mailbox command against the current timer
+    /// boundary, independent of when the actor thread processes it.
+    fn step_mailbox(
+        &mut self,
+        admitted_at: Instant,
+        command: SchedulerCommand,
+    ) -> (Vec<RetrySchedulerAction>, Option<SyncSender<()>>) {
+        let (wake, acknowledged) = match &command {
+            SchedulerCommand::Wake { acknowledged } => (true, acknowledged.clone()),
+            _ => (false, None),
+        };
+        let mut actions = if !wake
+            && self
+                .next_due()
+                .is_some_and(|deadline| deadline <= admitted_at)
+        {
+            self.advance(admitted_at)
+        } else {
+            Vec::new()
+        };
+        actions.extend(self.step(command));
+        (actions, acknowledged)
+    }
+
     /// Advances supplied virtual time and returns every newly eligible job.
     fn advance(&mut self, now: Instant) -> Vec<RetrySchedulerAction> {
         std::iter::from_fn(|| self.queue.pop_due(now))
@@ -4970,7 +5149,7 @@ impl RetrySchedulerState {
 /// action.
 struct RetryScheduler {
     /// Last strong sender whose drop terminates the scheduler actor.
-    commands: Arc<SyncSender<SchedulerCommand>>,
+    commands: Arc<SchedulerCommandSender>,
     /// Count of logical prompts currently owned outside the provider main loop.
     delayed_count: Arc<AtomicUsize>,
     /// Joinable actor thread; dropping the scheduler disconnects and joins it.
@@ -4986,12 +5165,23 @@ impl RetryScheduler {
         // Bound scheduler admission independently of the parked-job heap. The
         // harness already caps outstanding manual controls, and backpressure
         // here also covers internal schedule/cancel/cooldown producers.
-        let (commands, receiver) = mpsc::sync_channel(1_024);
-        let commands = Arc::new(commands);
+        let (command_tx, receiver) = mpsc::sync_channel(RETRY_SCHEDULER_MAILBOX_CAPACITY);
+        let commands = Arc::new(SchedulerCommandSender {
+            commands: command_tx,
+            clock: Arc::clone(&clock),
+            admission: Mutex::new(()),
+            #[cfg(test)]
+            gate_blocked: Mutex::new(None),
+            #[cfg(test)]
+            send_attempted: Mutex::new(None),
+            #[cfg(test)]
+            send_blocked: Mutex::new(None),
+        });
         clock.attach_scheduler(Arc::downgrade(&commands));
         let delayed_count = Arc::new(AtomicUsize::new(0));
+        let actor_clock = Arc::clone(&clock);
         let actor = thread::spawn(move || {
-            run_retry_scheduler(receiver, worker_tx, worker_waker, clock);
+            run_retry_scheduler(receiver, worker_tx, worker_waker, actor_clock);
         });
         Self {
             commands,
@@ -5008,7 +5198,6 @@ impl RetryScheduler {
     ) {
         self.delayed_count.fetch_add(1, AtomicOrdering::Relaxed);
         if self
-            .commands
             .send(SchedulerCommand::Schedule {
                 independent_due,
                 cooldown,
@@ -5021,12 +5210,12 @@ impl RetryScheduler {
     }
 
     fn cancel(&self, prompt_id: tau_proto::AgentPromptId) {
-        let _ = self.commands.send(SchedulerCommand::Cancel(prompt_id));
+        let _ = self.send(SchedulerCommand::Cancel(prompt_id));
     }
 
     /// Requests cancellation of every delayed retry job owned by the scheduler.
     fn cancel_all(&self) {
-        let _ = self.commands.send(SchedulerCommand::CancelAll);
+        let _ = self.send(SchedulerCommand::CancelAll);
     }
 
     fn retry_now(
@@ -5034,14 +5223,14 @@ impl RetryScheduler {
         request_id: tau_proto::RetryPromptRequestId,
         agent_prompt_id: tau_proto::AgentPromptId,
     ) {
-        let _ = self.commands.send(SchedulerCommand::RetryNow {
+        let _ = self.send(SchedulerCommand::RetryNow {
             request_id,
             agent_prompt_id,
         });
     }
 
     fn extend_cooldown(&self, provider: ProviderName, due: Instant, generation: u64) {
-        let _ = self.commands.send(SchedulerCommand::ExtendCooldown {
+        let _ = self.send(SchedulerCommand::ExtendCooldown {
             provider,
             due,
             generation,
@@ -5049,7 +5238,7 @@ impl RetryScheduler {
     }
 
     fn release_cooldown(&self, provider: ProviderName, generation: u64, now: Instant) {
-        let _ = self.commands.send(SchedulerCommand::ReleaseCooldown {
+        let _ = self.send(SchedulerCommand::ReleaseCooldown {
             provider,
             generation,
             now,
@@ -5059,19 +5248,24 @@ impl RetryScheduler {
     fn is_empty(&self) -> bool {
         self.delayed_count.load(AtomicOrdering::Relaxed) == 0
     }
+
+    /// Admits one timestamped command to the scheduler actor.
+    fn send(
+        &self,
+        command: SchedulerCommand,
+    ) -> Result<(), mpsc::SendError<SchedulerMailboxCommand>> {
+        self.commands.send(command)
+    }
 }
 
 fn run_retry_scheduler(
-    commands: Receiver<SchedulerCommand>,
+    commands: Receiver<SchedulerMailboxCommand>,
     worker_tx: Sender<WorkerMessage>,
     worker_waker: ManualRuntimeWaker,
     clock: Arc<dyn RetryClock>,
 ) {
     let mut state = RetrySchedulerState::default();
     loop {
-        if !send_scheduler_actions(state.advance(clock.now()), &worker_tx, &worker_waker) {
-            return;
-        }
         let command = match state.next_due() {
             Some(next_due) => commands.recv_timeout(
                 next_due
@@ -5083,12 +5277,10 @@ fn run_retry_scheduler(
                 .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
         };
         match command {
-            Ok(command) => {
-                let acknowledged = match &command {
-                    SchedulerCommand::Wake { acknowledged } => acknowledged.clone(),
-                    _ => None,
-                };
-                if !send_scheduler_actions(state.step(command), &worker_tx, &worker_waker) {
+            Ok(mailbox) => {
+                let (admitted_at, command) = mailbox.resolve();
+                let (actions, acknowledged) = state.step_mailbox(admitted_at, command);
+                if !send_scheduler_actions(actions, &worker_tx, &worker_waker) {
                     return;
                 }
                 if let Some(acknowledged) = acknowledged {
@@ -5105,7 +5297,11 @@ fn run_retry_scheduler(
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !send_scheduler_actions(state.advance(clock.now()), &worker_tx, &worker_waker) {
+                    return;
+                }
+            }
         }
     }
 }
@@ -5113,8 +5309,18 @@ fn run_retry_scheduler(
 impl Drop for RetryScheduler {
     fn drop(&mut self) {
         // Disconnect the actor before joining; virtual clocks retain only Weak.
-        let (replacement, _) = mpsc::sync_channel(0);
-        self.commands = Arc::new(replacement);
+        let (commands, _) = mpsc::sync_channel(0);
+        self.commands = Arc::new(SchedulerCommandSender {
+            commands,
+            clock: Arc::new(SystemRetryClock),
+            admission: Mutex::new(()),
+            #[cfg(test)]
+            gate_blocked: Mutex::new(None),
+            #[cfg(test)]
+            send_attempted: Mutex::new(None),
+            #[cfg(test)]
+            send_blocked: Mutex::new(None),
+        });
         if let Some(actor) = self.actor.take() {
             let _ = actor.join();
         }

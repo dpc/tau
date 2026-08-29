@@ -146,7 +146,7 @@ struct VirtualRetryClock {
     /// Current virtual instant.
     now: Mutex<Instant>,
     /// Scheduler command sender attached when the actor starts.
-    scheduler: Mutex<Option<std::sync::Weak<SyncSender<SchedulerCommand>>>>,
+    scheduler: Mutex<Option<std::sync::Weak<SchedulerCommandSender>>>,
 }
 
 impl VirtualRetryClock {
@@ -187,8 +187,36 @@ impl RetryClock for VirtualRetryClock {
         *self.now.lock().expect("virtual retry clock")
     }
 
-    fn attach_scheduler(&self, commands: std::sync::Weak<SyncSender<SchedulerCommand>>) {
+    fn attach_scheduler(&self, commands: std::sync::Weak<SchedulerCommandSender>) {
         *self.scheduler.lock().expect("scheduler sender") = Some(commands);
+    }
+}
+
+/// Clock that exposes and pauses one logical-admission timestamp sample.
+struct ControlledAdmissionClock {
+    /// Instants returned in serialized sample order.
+    now: Mutex<VecDeque<Instant>>,
+    /// Reports that successful bounded admission reached clock sampling.
+    sampled: SyncSender<()>,
+    /// Releases the blocked timestamp sample.
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl RetryClock for ControlledAdmissionClock {
+    fn now(&self) -> Instant {
+        self.sampled
+            .send(())
+            .expect("report admission clock sample");
+        self.release
+            .lock()
+            .expect("lock admission clock release")
+            .recv()
+            .expect("release admission clock sample");
+        self.now
+            .lock()
+            .expect("lock admission clock instants")
+            .pop_front()
+            .expect("controlled admission clock instant")
     }
 }
 
@@ -1073,6 +1101,29 @@ pub(super) fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
     }
 }
 
+/// Applies one command whose logical admission was published at the supplied
+/// virtual instant.
+fn admitted_scheduler_command(
+    state: &mut RetrySchedulerState,
+    admitted_at: Instant,
+    command: SchedulerCommand,
+) -> (Vec<RetrySchedulerAction>, Option<SyncSender<()>>) {
+    state.step_mailbox(admitted_at, command)
+}
+
+/// Builds a transport command with an already-published logical admission.
+fn admitted_scheduler_mailbox_command(
+    admitted_at: Instant,
+    command: SchedulerCommand,
+) -> SchedulerMailboxCommand {
+    let timestamp = Arc::new(SchedulerAdmissionTimestamp::pending());
+    timestamp.publish(admitted_at);
+    SchedulerMailboxCommand {
+        admitted_at: timestamp,
+        command,
+    }
+}
+
 /// Minimal configured Chat Completions model for runtime routing fixtures.
 fn chat_model(id: &str) -> ChatCompletionsModel {
     ChatCompletionsModel {
@@ -1156,6 +1207,307 @@ fn retry_schedule_queue_enforces_shared_cooldown_without_cross_provider_herd() {
         "peer"
     );
     assert_eq!(queue.len(), 4);
+}
+
+/// Timestamped mailbox arbitration applies cooldown evidence queued behind an
+/// unrelated pre-deadline control before a later clock advance transfers work.
+#[test]
+fn retry_scheduler_mailbox_preserves_backlogged_cooldown_evidence() {
+    let epoch = Instant::now();
+    let mut state = RetrySchedulerState::default();
+    assert!(
+        state
+            .step(SchedulerCommand::Schedule {
+                independent_due: epoch + Duration::from_secs(1),
+                cooldown: None,
+                job: Box::new(scheduled_job("limited-1", "limited")),
+            })
+            .is_empty()
+    );
+
+    let (actions, _) = admitted_scheduler_command(
+        &mut state,
+        epoch,
+        SchedulerCommand::Cancel(
+            "unrelated"
+                .parse::<tau_proto::AgentPromptId>()
+                .expect("known-safe AgentPromptId must be valid"),
+        ),
+    );
+    assert!(actions.is_empty());
+    let (actions, _) = admitted_scheduler_command(
+        &mut state,
+        epoch,
+        SchedulerCommand::ExtendCooldown {
+            provider: ProviderName::new("limited"),
+            due: epoch + Duration::from_secs(10),
+            generation: 1,
+        },
+    );
+    assert!(actions.is_empty());
+    assert!(
+        state.advance(epoch + Duration::from_secs(2)).is_empty(),
+        "pre-deadline extension evidence must keep the peer owned"
+    );
+}
+
+/// Commands admitted before a deadline remain bounded, while the first
+/// post-deadline command transfers due work before applying its own mutation.
+#[test]
+fn retry_scheduler_mailbox_cannot_starve_elapsed_work() {
+    let epoch = Instant::now();
+    let mut state = RetrySchedulerState::default();
+    assert!(
+        state
+            .step(SchedulerCommand::Schedule {
+                independent_due: epoch + Duration::from_secs(1),
+                cooldown: None,
+                job: Box::new(scheduled_job("due-1", "limited")),
+            })
+            .is_empty()
+    );
+    let missing = "unrelated"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+    for _ in 0..RETRY_SCHEDULER_MAILBOX_CAPACITY {
+        let (actions, _) = admitted_scheduler_command(
+            &mut state,
+            epoch,
+            SchedulerCommand::Cancel(missing.clone()),
+        );
+        assert!(actions.is_empty());
+    }
+
+    let (actions, _) = admitted_scheduler_command(
+        &mut state,
+        epoch + Duration::from_secs(2),
+        SchedulerCommand::Cancel(missing),
+    );
+    assert!(matches!(
+        actions.as_slice(),
+        [RetrySchedulerAction::Due(job)] if job.agent_prompt_id.as_str() == "due-1"
+    ));
+}
+
+/// Successful mailbox admission immediately before a deadline may transfer a
+/// parked prompt manually; admission at or after it observes the prompt due.
+#[test]
+fn retry_scheduler_mailbox_manual_retry_respects_deadline_boundary() {
+    let epoch = Instant::now();
+    let deadline = epoch + Duration::from_secs(1);
+    for (suffix, admitted_at, accepted) in [
+        ("before", deadline - Duration::from_nanos(1), true),
+        ("equal", deadline, false),
+        ("after", deadline + Duration::from_nanos(1), false),
+    ] {
+        let prompt_id = format!("manual-{suffix}")
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe AgentPromptId must be valid");
+        let mut state = RetrySchedulerState::default();
+        assert!(
+            state
+                .step(SchedulerCommand::Schedule {
+                    independent_due: deadline,
+                    cooldown: None,
+                    job: Box::new(scheduled_job(prompt_id.as_str(), "limited")),
+                })
+                .is_empty()
+        );
+        let (actions, _) = admitted_scheduler_command(
+            &mut state,
+            admitted_at,
+            SchedulerCommand::RetryNow {
+                request_id: tau_proto::RetryPromptRequestId::parse(format!("request-{suffix}"))
+                    .expect("known-safe RetryPromptRequestId must be valid"),
+                agent_prompt_id: prompt_id,
+            },
+        );
+        if accepted {
+            assert!(matches!(
+                actions.as_slice(),
+                [RetrySchedulerAction::Manual { job: Some(_), .. }]
+            ));
+        } else {
+            assert!(matches!(
+                actions.as_slice(),
+                [
+                    RetrySchedulerAction::Due(_),
+                    RetrySchedulerAction::Manual { job: None, .. }
+                ]
+            ));
+        }
+    }
+}
+
+/// Transport resolution waits when the actor receives a command before its
+/// sender publishes the serialized logical-admission instant.
+#[test]
+fn retry_scheduler_mailbox_resumes_after_admission_publication() {
+    let admitted_at = Arc::new(SchedulerAdmissionTimestamp::pending());
+    let mailbox = SchedulerMailboxCommand {
+        admitted_at: Arc::clone(&admitted_at),
+        command: SchedulerCommand::CancelAll,
+    };
+    let published_at = Instant::now();
+    let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+    *admitted_at
+        .pending_observed
+        .lock()
+        .expect("scheduler pending-observed hook") = Some(pending_tx);
+    let (resolved_tx, resolved_rx) = mpsc::sync_channel(1);
+    let resolved = thread::scope(|scope| {
+        scope.spawn(move || {
+            let (resolved_at, _) = mailbox.resolve();
+            resolved_tx
+                .send(resolved_at)
+                .expect("report resolved timestamp");
+        });
+        let pending = pending_rx.recv_timeout(Duration::from_secs(1));
+        admitted_at.publish(published_at);
+        let resolved = resolved_rx.recv_timeout(Duration::from_secs(1));
+        admitted_at.ready.notify_all();
+        (pending, resolved)
+    });
+    resolved.0.expect("receiver observed pending timestamp");
+    assert_eq!(resolved.1.expect("receiver resumed"), published_at);
+}
+
+/// A sender facing a full bounded mailbox publishes no authority until capacity
+/// becomes available and its successful send reaches logical admission.
+#[test]
+fn retry_scheduler_full_mailbox_timestamps_after_capacity_admission() {
+    let epoch = Instant::now();
+    let (commands, receiver) = mpsc::sync_channel(1);
+    commands
+        .send(admitted_scheduler_mailbox_command(
+            epoch,
+            SchedulerCommand::CancelAll,
+        ))
+        .expect("fill scheduler mailbox");
+    let (sampled_tx, sampled_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::channel();
+    let admitted_at = epoch + Duration::from_secs(2);
+    let sender = Arc::new(SchedulerCommandSender {
+        commands,
+        clock: Arc::new(ControlledAdmissionClock {
+            now: Mutex::new(VecDeque::from([admitted_at])),
+            sampled: sampled_tx,
+            release: Mutex::new(release_rx),
+        }),
+        admission: Mutex::new(()),
+        gate_blocked: Mutex::new(None),
+        send_attempted: Mutex::new(None),
+        send_blocked: Mutex::new(None),
+    });
+    let (blocked_tx, blocked_rx) = mpsc::sync_channel(1);
+    *sender
+        .send_blocked
+        .lock()
+        .expect("scheduler send-blocked hook") = Some(blocked_tx);
+    let (sent_tx, sent_rx) = mpsc::sync_channel(1);
+    let sender_thread = {
+        let sender = Arc::clone(&sender);
+        thread::spawn(move || {
+            sender
+                .send(SchedulerCommand::CancelAll)
+                .expect("admit capacity-blocked command");
+            sent_tx.send(()).expect("report admitted command");
+        })
+    };
+    let blocked = blocked_rx.recv_timeout(Duration::from_secs(1));
+    let filled = receiver.recv_timeout(Duration::from_secs(1));
+    let admitted = receiver.recv_timeout(Duration::from_secs(1));
+    let sampled = sampled_rx.recv_timeout(Duration::from_secs(1));
+    let _ = release_tx.send(());
+    let sent = sent_rx.recv_timeout(Duration::from_secs(1));
+    sender_thread.join().expect("capacity-blocked sender joins");
+    blocked.expect("bounded admission observed the full mailbox");
+    filled.expect("release one mailbox slot");
+    let (resolved_at, _) = admitted
+        .expect("receive formerly blocked command")
+        .resolve();
+    sampled.expect("successful send reaches timestamp sample");
+    sent.expect("sender completed publication");
+    assert_eq!(resolved_at, admitted_at);
+}
+
+/// Cloned normal and Wake producers share one gate, so a second producer cannot
+/// enqueue or publish until the first producer publishes logical admission.
+#[test]
+fn retry_scheduler_cloned_senders_publish_in_fifo_order() {
+    let epoch = Instant::now();
+    let second = epoch + Duration::from_secs(1);
+    let (commands, receiver) = mpsc::sync_channel(2);
+    let (sampled_tx, sampled_rx) = mpsc::sync_channel(2);
+    let (release_tx, release_rx) = mpsc::channel();
+    let sender = Arc::new(SchedulerCommandSender {
+        commands,
+        clock: Arc::new(ControlledAdmissionClock {
+            now: Mutex::new(VecDeque::from([epoch, second])),
+            sampled: sampled_tx,
+            release: Mutex::new(release_rx),
+        }),
+        admission: Mutex::new(()),
+        gate_blocked: Mutex::new(None),
+        send_attempted: Mutex::new(None),
+        send_blocked: Mutex::new(None),
+    });
+    let (first_done_tx, first_done_rx) = mpsc::sync_channel(1);
+    let (gate_blocked_tx, gate_blocked_rx) = mpsc::sync_channel(1);
+    let (second_attempted_tx, second_attempted_rx) = mpsc::sync_channel(1);
+    let (second_done_tx, second_done_rx) = mpsc::sync_channel(1);
+    let first_thread = {
+        let first_sender = Arc::clone(&sender);
+        thread::spawn(move || {
+            first_sender
+                .send(SchedulerCommand::CancelAll)
+                .expect("admit first command");
+            first_done_tx.send(()).expect("report first publication");
+        })
+    };
+    let first_sampled = sampled_rx.recv_timeout(Duration::from_secs(1));
+    *sender
+        .gate_blocked
+        .lock()
+        .expect("scheduler gate-blocked hook") = Some(gate_blocked_tx);
+    *sender
+        .send_attempted
+        .lock()
+        .expect("scheduler send-attempt hook") = Some(second_attempted_tx);
+    let second_thread = {
+        let second_sender = Arc::clone(&sender);
+        thread::spawn(move || {
+            second_sender
+                .send(SchedulerCommand::Wake { acknowledged: None })
+                .expect("admit Wake command");
+            second_done_tx.send(()).expect("report second publication");
+        })
+    };
+    let gate_blocked = gate_blocked_rx.recv_timeout(Duration::from_secs(1));
+    let _ = release_tx.send(());
+    let first_done = first_done_rx.recv_timeout(Duration::from_secs(1));
+    let second_attempted = second_attempted_rx.recv_timeout(Duration::from_secs(1));
+    let second_sampled = sampled_rx.recv_timeout(Duration::from_secs(1));
+    let _ = release_tx.send(());
+    let second_done = second_done_rx.recv_timeout(Duration::from_secs(1));
+    let first = receiver.recv_timeout(Duration::from_secs(1));
+    let second_command = receiver.recv_timeout(Duration::from_secs(1));
+    let _ = release_tx.send(());
+    let _ = release_tx.send(());
+    first_thread.join().expect("first producer joins");
+    second_thread.join().expect("second producer joins");
+    first_sampled.expect("first producer reached timestamp sample");
+    gate_blocked.expect("second producer observed the held admission gate");
+    first_done.expect("first producer published");
+    second_attempted.expect("second producer passed the released admission gate");
+    second_sampled.expect("second producer reached timestamp sample");
+    second_done.expect("second producer published");
+    let first = first.expect("receive first command").resolve();
+    let second_command = second_command.expect("receive second command").resolve();
+    assert_eq!(first.0, epoch);
+    assert!(matches!(first.1, SchedulerCommand::CancelAll));
+    assert_eq!(second_command.0, second);
+    assert!(matches!(second_command.1, SchedulerCommand::Wake { .. }));
 }
 
 /// Ensures a successful probe advances only its provider's parked prompts,
@@ -2509,7 +2861,9 @@ fn pre_egress_chat_cancellation_retains_attempt_without_backend() {
 }
 
 /// The fifth transient compaction failure terminalizes that prompt but still
-/// extends the shared cooldown that keeps a same-profile peer parked.
+/// extends the shared cooldown that keeps same-profile peers parked. Manual
+/// transfer of one exact ownership probe proves scheduler ownership without
+/// releasing the independent peer used for the timed cooldown assertion.
 #[test]
 fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
     let clock = Arc::new(VirtualRetryClock::new(Instant::now()));
@@ -2523,18 +2877,30 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
     peer_prompt.agent_prompt_id = "peer-3"
         .parse::<tau_proto::AgentPromptId>()
         .expect("peer prompt id");
+    let mut ownership_probe = prompt();
+    ownership_probe.agent_prompt_id = "ownership-probe-4"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("ownership probe prompt id");
     input.push(encode_frames(&[live_event(
         11,
         Event::AgentPromptCreated(compact_prompt),
     )]));
     let compaction_attempts = Arc::new(AtomicUsize::new(0));
     let peer_attempts = Arc::new(AtomicUsize::new(0));
+    let probe_attempts = Arc::new(AtomicUsize::new(0));
     let (peer_finished_tx, peer_finished_rx) = mpsc::sync_channel(1);
+    let (probe_started_tx, probe_started_rx) = mpsc::sync_channel(1);
+    let (release_probe_tx, release_probe_rx) = mpsc::sync_channel(0);
+    let release_probe_rx = Mutex::new(release_probe_rx);
+    let (initial_peer_started_tx, initial_peer_started_rx) = mpsc::sync_channel(2);
+    let (release_initial_peers_tx, release_initial_peers_rx) = mpsc::sync_channel(0);
+    let release_initial_peers_rx = Mutex::new(release_initial_peers_rx);
     let (compact_started_tx, compact_started_rx) = mpsc::sync_channel(1);
     let (release_compact_tx, release_compact_rx) = mpsc::sync_channel(0);
     let release_compact_rx = Mutex::new(release_compact_rx);
     let executor_compaction_attempts = Arc::clone(&compaction_attempts);
     let executor_peer_attempts = Arc::clone(&peer_attempts);
+    let executor_probe_attempts = Arc::clone(&probe_attempts);
     let executor: PromptExecutor = Arc::new(move |execution| {
         if execution.job.agent_prompt_id.as_str() == "compact-4290" {
             executor_compaction_attempts.fetch_add(1, Ordering::SeqCst);
@@ -2562,8 +2928,63 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
             .expect("return compaction retry");
             return;
         }
+        if execution.job.agent_prompt_id.as_str() == "ownership-probe-4" {
+            let attempt = executor_probe_attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                initial_peer_started_tx
+                    .send(())
+                    .expect("report initial ownership probe");
+                release_initial_peers_rx
+                    .lock()
+                    .expect("lock initial peer release")
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("release initial ownership probe");
+                send_worker_message(
+                    &execution.output_tx,
+                    &execution.output_waker,
+                    WorkerMessage::Retry {
+                        job: execution.job,
+                        decision: RetryDecision::new(RetryClass::Throttle),
+                        live_detail: None,
+                        canonical_unauthorized: false,
+                        terminal_backend: None,
+                    },
+                )
+                .expect("park ownership probe retry");
+                return;
+            }
+            probe_started_tx
+                .send(())
+                .expect("report manually admitted ownership probe");
+            release_probe_rx
+                .lock()
+                .expect("lock ownership probe release")
+                .recv_timeout(Duration::from_secs(1))
+                .expect("release ownership probe");
+            let mut writer = execution.frame_writer();
+            writer
+                .write_message(&HarnessInputMessage::emit_transient(
+                    Event::ProviderResponseFinishedReported(simple_finished(
+                        execution.job.agent_prompt_id,
+                        execution.job.prompt.agent_id,
+                        execution.job.prompt.originator,
+                        "ownership probe done",
+                    )),
+                ))
+                .expect("finish ownership probe");
+            writer.flush().expect("flush ownership probe");
+            return;
+        }
         let attempt = executor_peer_attempts.fetch_add(1, Ordering::SeqCst);
         if attempt == 0 {
+            initial_peer_started_tx
+                .send(())
+                .expect("report initial independent peer");
+            release_initial_peers_rx
+                .lock()
+                .expect("lock initial peer release")
+                .recv_timeout(Duration::from_secs(1))
+                .expect("release initial independent peer");
             send_worker_message(
                 &execution.output_tx,
                 &execution.output_waker,
@@ -2604,7 +3025,7 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
             writer,
             profiles,
             move || prompt_profiles.clone(),
-            2,
+            3,
             RuntimeExecutors {
                 prompt: executor,
                 prewarm: production_prewarm_executor(),
@@ -2617,30 +3038,22 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
     compact_started_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("first compaction attempt starts");
-    input.push(encode_frames(&[live_event(
-        12,
-        Event::AgentPromptCreated(peer_prompt),
-    )]));
+    input.push(encode_frames(&[
+        live_event(12, Event::AgentPromptCreated(peer_prompt)),
+        live_event(13, Event::AgentPromptCreated(ownership_probe)),
+    ]));
+    for _ in 0..2 {
+        initial_peer_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("both peer attempts start before either returns retry");
+    }
+    for _ in 0..2 {
+        release_initial_peers_tx
+            .send(())
+            .expect("release initial peer retry");
+    }
     wait_for_runtime_frames(&output, |frames| {
-        frames.iter().any(|frame| {
-            matches!(
-                input_event(frame),
-                Some(Event::ProviderResponseUpdatedReported(update))
-                    if update.agent_prompt_id.as_str() == "peer-3"
-                        && update.status.as_ref().is_some_and(|status| status.retry.is_some())
-            )
-        })
-    });
-    assert_eq!(
-        peer_attempts.load(Ordering::SeqCst),
-        1,
-        "peer executes before the first compaction retry installs shared cooldown"
-    );
-    release_compact_tx
-        .send(())
-        .expect("release first compaction retry");
-    wait_for_runtime_frames(&output, |frames| {
-        ["compact-4290", "peer-3"].into_iter().all(|id| {
+        ["peer-3", "ownership-probe-4"].into_iter().all(|id| {
             frames.iter().any(|frame| {
                 matches!(
                     input_event(frame),
@@ -2650,6 +3063,29 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
                 )
             })
         })
+    });
+    assert_eq!(
+        peer_attempts.load(Ordering::SeqCst),
+        1,
+        "peer executes before the first compaction retry installs shared cooldown"
+    );
+    assert_eq!(probe_attempts.load(Ordering::SeqCst), 1);
+    release_compact_tx
+        .send(())
+        .expect("release first compaction retry");
+    wait_for_runtime_frames(&output, |frames| {
+        ["compact-4290", "peer-3", "ownership-probe-4"]
+            .into_iter()
+            .all(|id| {
+                frames.iter().any(|frame| {
+                matches!(
+                    input_event(frame),
+                    Some(Event::ProviderResponseUpdatedReported(update))
+                        if update.agent_prompt_id.as_str() == id
+                            && update.status.as_ref().is_some_and(|status| status.retry.is_some())
+                )
+            })
+            })
     });
     for expected_compaction_statuses in 2..=4 {
         clock.advance(Duration::from_secs(1));
@@ -2679,16 +3115,42 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
     });
     assert_eq!(compaction_attempts.load(Ordering::SeqCst), 5);
     assert_eq!(peer_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(probe_attempts.load(Ordering::SeqCst), 1);
 
     clock.advance(Duration::from_secs(4));
-    assert!(matches!(
-        peer_finished_rx.recv_timeout(Duration::from_millis(50)),
-        Err(mpsc::RecvTimeoutError::Timeout)
-    ));
+    input.push(encode_frames(&[live_event(
+        14,
+        Event::UiRetryPrompt(tau_proto::UiRetryPrompt {
+            request_id: tau_proto::RetryPromptRequestId::parse("cooldown-ownership")
+                .expect("valid retry request id"),
+            session_id: "session-1"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            target_agent_id: None,
+            agent_prompt_id: Some(
+                "ownership-probe-4"
+                    .parse::<tau_proto::AgentPromptId>()
+                    .expect("known-safe AgentPromptId must be valid"),
+            ),
+        }),
+    )]));
+    wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderRetryPromptResultReported(result))
+                    if result.request_id.as_str() == "cooldown-ownership"
+                        && result.status == tau_proto::RetryPromptStatus::Accepted
+            )
+        })
+    });
+    probe_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("parked ownership probe is manually admitted");
     assert_eq!(
         peer_attempts.load(Ordering::SeqCst),
         1,
-        "the fifth failure must extend the peer beyond the previous cooldown"
+        "the independent peer remains parked until the fifth cooldown expires"
     );
     clock.advance(Duration::from_secs(1));
     peer_finished_rx
@@ -2704,6 +3166,9 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
         })
     });
     assert_eq!(peer_attempts.load(Ordering::SeqCst), 2);
+    release_probe_tx
+        .send(())
+        .expect("release manually admitted ownership probe");
     input.close();
     runtime.join().expect("shared-cooldown runtime joins");
 }
