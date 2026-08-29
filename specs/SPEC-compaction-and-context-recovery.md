@@ -12,6 +12,8 @@ for ticket `b1yw`, including provider-rejection authority, per-pass progress,
 replay, and typed no-progress termination, satisfying the same gate.
 The user also approved the native Codex semantic-progress retry and cost
 boundary for ticket `gtdq`, satisfying the same gate.
+The user separately approved the Chat Completions local-summary semantic-idle
+and absolute request deadlines for ticket `boo4`, satisfying the same gate.
 
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and
@@ -60,6 +62,11 @@ live/cold replay contracts remain unchanged: a committed summary is replayed
 after restart without another model call. Ordinary opted-in provider debug
 capture policy also applies to local compaction and remains non-semantic
 observability data.
+Local-summary Chat Completions requests share the ordinary Chat Completions
+five-minute semantic-idle deadline and non-renewable thirty-minute absolute
+deadline from backend dispatch. Newly accepted nonempty narrative or reasoning
+renews idle time; content-free stream activity does not. Local-summary privacy,
+cancellation, and timeout/retry classification remain unchanged.
 
 ## Recovery authority
 

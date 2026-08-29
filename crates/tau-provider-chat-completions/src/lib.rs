@@ -40,6 +40,11 @@ thread_local! {
     /// Attempt-path capture sink used only by focused transport tests.
     static TEST_DEBUG_CAPTURES: std::cell::RefCell<Option<Vec<path_tau_provider_debug_capture_writer::ProviderDebugCapture>>> =
         const { std::cell::RefCell::new(None) };
+    /// Attempt-local deadline limits used by focused production-path tests.
+    static TEST_REQUEST_DEADLINE_LIMITS: Cell<Option<(Duration, Duration)>> =
+        const { Cell::new(None) };
+    /// Deterministic request clock used by focused production-path tests.
+    static TEST_REQUEST_NOW: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 /// Submit one private capture through production transport or the focused test
@@ -66,13 +71,121 @@ fn submit_provider_capture(capture: path_tau_provider_debug_capture_writer::Prov
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const STREAM_READ_POLL_TIMEOUT: Duration = Duration::from_secs(1);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const ATTEMPT_PHASE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const STREAM_ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 const MAX_DEBUG_EVENTS: usize = 4096;
 const MAX_HTTP_ERROR_BODY_BYTES: u64 = 64 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_REQUEST_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 const MAX_REQUEST_IMAGE_DATA_URL_BYTES: usize = 32 * 1024 * 1024;
+
+/// Read the monotonic clock used only for request lifetime enforcement.
+fn request_now() -> Instant {
+    #[cfg(test)]
+    if let Some(now) = TEST_REQUEST_NOW.with(Cell::get) {
+        return now;
+    }
+    Instant::now()
+}
+
+/// Semantic-idle and absolute deadlines for one dispatched backend request.
+struct RequestDeadlines {
+    /// Non-renewable request dispatch time.
+    dispatched_at: Instant,
+    /// Last accepted semantic assistant output, initially request dispatch.
+    semantic_progress_at: Instant,
+    /// Last observed parser generation for accepted semantic assistant output.
+    semantic_progress_generation: u64,
+    /// Idle duration selected when the request was dispatched.
+    idle_timeout: Duration,
+    /// Absolute duration selected when the request was dispatched.
+    absolute_timeout: Duration,
+}
+
+impl RequestDeadlines {
+    /// Start both request clocks at backend dispatch.
+    fn new(dispatched_at: Instant) -> Self {
+        #[cfg(test)]
+        let (idle_timeout, absolute_timeout) = TEST_REQUEST_DEADLINE_LIMITS
+            .with(Cell::get)
+            .unwrap_or((STREAM_IDLE_TIMEOUT, STREAM_ABSOLUTE_TIMEOUT));
+        #[cfg(not(test))]
+        let (idle_timeout, absolute_timeout) = (STREAM_IDLE_TIMEOUT, STREAM_ABSOLUTE_TIMEOUT);
+        Self {
+            dispatched_at,
+            semantic_progress_at: dispatched_at,
+            semantic_progress_generation: 0,
+            idle_timeout,
+            absolute_timeout,
+        }
+    }
+
+    /// Renew the idle clock only after the parser accepts new semantic output.
+    fn observe(&mut self, state: &StreamState) {
+        if self.semantic_progress_generation != state.semantic_progress_generation {
+            self.semantic_progress_generation = state.semantic_progress_generation;
+            self.semantic_progress_at = state
+                .semantic_progress_at
+                .expect("a semantic generation always records its acceptance time");
+        }
+    }
+
+    /// Return whether either request lifetime bound has expired.
+    fn expired(&self, now: Instant) -> bool {
+        now.duration_since(self.semantic_progress_at) >= self.idle_timeout
+            || now.duration_since(self.dispatched_at) >= self.absolute_timeout
+    }
+
+    /// Bound one cancellation poll by the nearest request deadline.
+    fn poll_timeout(&self, now: Instant) -> Duration {
+        let idle_remaining = self
+            .idle_timeout
+            .saturating_sub(now.duration_since(self.semantic_progress_at));
+        let absolute_remaining = self
+            .absolute_timeout
+            .saturating_sub(now.duration_since(self.dispatched_at));
+        STREAM_READ_POLL_TIMEOUT
+            .min(idle_remaining)
+            .min(absolute_remaining)
+    }
+}
+
+/// Install short request deadlines around one focused production-path test.
+#[cfg(test)]
+fn with_test_request_deadline_limits<R>(
+    idle_timeout: Duration,
+    absolute_timeout: Duration,
+    now: Instant,
+    run: impl FnOnce() -> R,
+) -> R {
+    TEST_REQUEST_DEADLINE_LIMITS.with(|limits| {
+        assert!(
+            limits
+                .replace(Some((idle_timeout, absolute_timeout)))
+                .is_none(),
+            "test request deadline override must not nest"
+        );
+        TEST_REQUEST_NOW.with(|clock| {
+            assert!(
+                clock.replace(Some(now)).is_none(),
+                "test request clock override must not nest"
+            );
+        });
+        let result = run();
+        TEST_REQUEST_NOW.with(|clock| clock.set(None));
+        limits.set(None);
+        result
+    })
+}
+
+/// Advance the deterministic request clock inside one focused test callback.
+#[cfg(test)]
+fn set_test_request_now(now: Instant) {
+    TEST_REQUEST_NOW.with(|clock| {
+        assert!(clock.get().is_some(), "test request clock is not installed");
+        clock.set(Some(now));
+    });
+}
 
 /// Raw provider-event retention for one optional debug response capture.
 enum DebugEventCapture {
@@ -766,6 +879,11 @@ struct StreamState {
     repetition_guard: StreamRepetitionGuard,
     transport_response_bytes: u64,
     semantic_progress: SemanticProgress,
+    /// Generation renewed by newly accepted assistant text, reasoning, or tool
+    /// name/argument output, but not identifiers or transport-only events.
+    semantic_progress_generation: u64,
+    /// Exact synchronous acceptance time for the latest semantic generation.
+    semantic_progress_at: Option<Instant>,
     /// Compact-only event validator, absent during ordinary inference.
     compact_validator: Option<compact_stream::CompactStreamValidator>,
 }
@@ -804,6 +922,8 @@ impl StreamState {
             repetition_guard: StreamRepetitionGuard::new(),
             transport_response_bytes: 0,
             semantic_progress: SemanticProgress::None,
+            semantic_progress_generation: 0,
+            semantic_progress_at: None,
             compact_validator: compact_output_bytes
                 .map(compact_stream::CompactStreamValidator::new),
         }
@@ -907,6 +1027,7 @@ impl StreamState {
             self.output_items
                 .push(OutputItemAccumulator::Message(delta.to_owned()));
         }
+        self.record_deadline_semantic_progress();
         Ok(())
     }
 
@@ -935,6 +1056,7 @@ impl StreamState {
             self.output_items
                 .push(OutputItemAccumulator::Reasoning(delta.to_owned()));
         }
+        self.record_deadline_semantic_progress();
         Ok(())
     }
 
@@ -959,7 +1081,16 @@ impl StreamState {
         self.tool_call_at_mut(stream_index)
             .arguments
             .push_str(delta);
+        if !delta.is_empty() {
+            self.record_deadline_semantic_progress();
+        }
         Ok(())
+    }
+
+    /// Record exact semantic acceptance before any caller-controlled callback.
+    fn record_deadline_semantic_progress(&mut self) {
+        self.semantic_progress_generation = self.semantic_progress_generation.saturating_add(1);
+        self.semantic_progress_at = Some(request_now());
     }
 
     fn tool_call_at_mut(&mut self, stream_index: usize) -> &mut ToolCallAccumulator {
@@ -1071,7 +1202,7 @@ fn read_chat_stream_body(
 ) -> Result<(), LlmError> {
     let mut buffer = [0; 8192];
     let mut pending = Vec::new();
-    let mut last_event_at = Instant::now();
+    let mut deadlines = RequestDeadlines::new(request_now());
     loop {
         if is_canceled() {
             return Err(LlmError::Canceled);
@@ -1089,16 +1220,14 @@ fn read_chat_stream_body(
                     raw_events,
                     on_update,
                 )?;
-                if outcome.provider_event {
-                    last_event_at = Instant::now();
-                }
+                deadlines.observe(state);
                 if outcome.done {
                     return Ok(());
                 }
-                if last_event_at.elapsed() >= STREAM_IDLE_TIMEOUT {
+                if deadlines.expired(request_now()) {
                     return Err(LlmError::Io(path_std_io::Error::new(
                         path_std_io::ErrorKind::TimedOut,
-                        "provider stream idle timeout",
+                        "provider stream deadline exceeded",
                     )));
                 }
             }
@@ -1108,10 +1237,10 @@ fn read_chat_stream_body(
                     std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
                 ) =>
             {
-                if last_event_at.elapsed() >= STREAM_IDLE_TIMEOUT {
+                if deadlines.expired(request_now()) {
                     return Err(LlmError::Io(path_std_io::Error::new(
                         path_std_io::ErrorKind::TimedOut,
-                        "provider stream idle timeout",
+                        "provider stream deadline exceeded",
                     )));
                 }
             }
@@ -1125,6 +1254,7 @@ struct SseChunkOutcome {
     /// Whether the current chunk carries the terminal SSE marker.
     done: bool,
     /// Whether the current chunk contains a provider `data:` field.
+    #[cfg_attr(not(test), allow(dead_code))]
     provider_event: bool,
 }
 
@@ -1326,6 +1456,23 @@ struct AsyncAttemptContext<'a> {
     capture_raw_events: bool,
 }
 
+/// Recheck cancellation before classifying a dispatched request deadline.
+fn ensure_request_active(
+    deadlines: &RequestDeadlines,
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+    url: &str,
+    phase: tau_provider::OutboundPhase,
+) -> Result<(), LlmError> {
+    if is_canceled() {
+        return Err(LlmError::Canceled);
+    }
+    if deadlines.expired(request_now()) {
+        return Err(LlmError::Outbound(network.deadline_error(url, phase)));
+    }
+    Ok(())
+}
+
 async fn chat_completions_stream_async(
     context: AsyncAttemptContext<'_>,
     on_update: &mut impl FnMut(&StreamState),
@@ -1345,17 +1492,29 @@ async fn chat_completions_stream_async(
         request = request.bearer_auth(&context.provider.api_key);
     }
     let mut send = Box::pin(request.send());
-    let mut header_started_at = None;
+    let mut request_deadlines = None;
     let mut response = loop {
-        if is_canceled() {
-            return Err(LlmError::Canceled);
-        }
-        let header_started_at = *header_started_at.get_or_insert_with(|| {
-            let at = Instant::now();
+        let deadlines = request_deadlines.get_or_insert_with(|| {
+            let at = request_now();
             on_dispatched(at);
-            at
+            RequestDeadlines::new(at)
         });
-        if let Ok(result) = tokio::time::timeout(STREAM_READ_POLL_TIMEOUT, &mut send).await {
+        ensure_request_active(
+            deadlines,
+            is_canceled,
+            network,
+            context.url,
+            tau_provider::OutboundPhase::Request,
+        )?;
+        let now = request_now();
+        if let Ok(result) = tokio::time::timeout(deadlines.poll_timeout(now), &mut send).await {
+            ensure_request_active(
+                deadlines,
+                is_canceled,
+                network,
+                context.url,
+                tau_provider::OutboundPhase::Request,
+            )?;
             break result.map_err(|error| {
                 LlmError::Outbound(network.reqwest_error(
                     context.url,
@@ -1364,12 +1523,9 @@ async fn chat_completions_stream_async(
                 ))
             })?;
         }
-        if header_started_at.elapsed() >= ATTEMPT_PHASE_TIMEOUT {
-            return Err(LlmError::Outbound(
-                network.deadline_error(context.url, tau_provider::OutboundPhase::Request),
-            ));
-        }
     };
+    let mut request_deadlines =
+        request_deadlines.expect("request dispatch precedes receiving response headers");
     if !response.status().is_success() {
         let code = response.status().as_u16();
         if let Some(error) = network.proxy_response_error(context.url, code) {
@@ -1381,14 +1537,26 @@ async fn chat_completions_stream_async(
             .and_then(|value| value.to_str().ok())
             .and_then(|value| parse_retry_after(value, SystemTime::now()));
         let mut bytes = Vec::new();
-        let mut last_body_progress = Instant::now();
         while bytes.len() < MAX_HTTP_ERROR_BODY_BYTES as usize {
-            if is_canceled() {
-                return Err(LlmError::Canceled);
-            }
-            match tokio::time::timeout(STREAM_READ_POLL_TIMEOUT, response.chunk()).await {
+            ensure_request_active(
+                &request_deadlines,
+                is_canceled,
+                network,
+                context.url,
+                tau_provider::OutboundPhase::Body,
+            )?;
+            let now = request_now();
+            let polled =
+                tokio::time::timeout(request_deadlines.poll_timeout(now), response.chunk()).await;
+            ensure_request_active(
+                &request_deadlines,
+                is_canceled,
+                network,
+                context.url,
+                tau_provider::OutboundPhase::Body,
+            )?;
+            match polled {
                 Ok(Ok(Some(chunk))) => {
-                    last_body_progress = Instant::now();
                     let remaining = MAX_HTTP_ERROR_BODY_BYTES as usize - bytes.len();
                     bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
                 }
@@ -1402,12 +1570,14 @@ async fn chat_completions_stream_async(
                 }
                 Err(_) => {}
             }
-            if last_body_progress.elapsed() >= ATTEMPT_PHASE_TIMEOUT {
-                return Err(LlmError::Outbound(
-                    network.deadline_error(context.url, tau_provider::OutboundPhase::Body),
-                ));
-            }
         }
+        ensure_request_active(
+            &request_deadlines,
+            is_canceled,
+            network,
+            context.url,
+            tau_provider::OutboundPhase::Body,
+        )?;
         let body = String::from_utf8_lossy(&bytes).into_owned();
         return Err(match retry_after {
             Some(delay) => LlmError::HttpStatusHinted(code, body, delay),
@@ -1427,29 +1597,104 @@ async fn chat_completions_stream_async(
         StreamState::new_for_attempt(context.provider.compat.cache_usage, compact_output_bytes);
     let mut raw_events = DebugEventCapture::new(context.capture_raw_events);
     let mut pending = Vec::new();
-    let mut last_event_at = Instant::now();
     loop {
-        if is_canceled() {
-            return Err(LlmError::Canceled);
-        }
-        match tokio::time::timeout(STREAM_READ_POLL_TIMEOUT, response.chunk()).await {
+        ensure_request_active(
+            &request_deadlines,
+            is_canceled,
+            network,
+            context.url,
+            tau_provider::OutboundPhase::Body,
+        )?;
+        let now = request_now();
+        let polled =
+            tokio::time::timeout(request_deadlines.poll_timeout(now), response.chunk()).await;
+        ensure_request_active(
+            &request_deadlines,
+            is_canceled,
+            network,
+            context.url,
+            tau_provider::OutboundPhase::Body,
+        )?;
+        match polled {
             Ok(Ok(Some(chunk))) => {
-                let outcome = process_stream_chunk(
-                    &chunk,
-                    &mut pending,
-                    &mut state,
-                    &mut raw_events,
-                    on_update,
-                )?;
-                if outcome.provider_event {
-                    last_event_at = Instant::now();
+                let mut boundary_error = None;
+                let parsed = {
+                    let mut on_parser_update = |state: &StreamState| {
+                        if boundary_error.is_some() {
+                            return;
+                        }
+                        on_update(state);
+                        request_deadlines.observe(state);
+                        boundary_error = ensure_request_active(
+                            &request_deadlines,
+                            is_canceled,
+                            network,
+                            context.url,
+                            tau_provider::OutboundPhase::Body,
+                        )
+                        .err();
+                    };
+                    process_stream_chunk(
+                        &chunk,
+                        &mut pending,
+                        &mut state,
+                        &mut raw_events,
+                        &mut on_parser_update,
+                    )
+                };
+                if let Some(error) = boundary_error {
+                    return Err(error);
                 }
+                request_deadlines.observe(&state);
+                ensure_request_active(
+                    &request_deadlines,
+                    is_canceled,
+                    network,
+                    context.url,
+                    tau_provider::OutboundPhase::Body,
+                )?;
+                let outcome = parsed?;
                 if outcome.done {
                     return Ok((state, raw_events));
                 }
             }
             Ok(Ok(None)) => {
-                apply_pending_sse_line(&mut pending, &mut state, &mut raw_events, on_update)?;
+                let mut boundary_error = None;
+                let parsed = {
+                    let mut on_parser_update = |state: &StreamState| {
+                        if boundary_error.is_some() {
+                            return;
+                        }
+                        on_update(state);
+                        request_deadlines.observe(state);
+                        boundary_error = ensure_request_active(
+                            &request_deadlines,
+                            is_canceled,
+                            network,
+                            context.url,
+                            tau_provider::OutboundPhase::Body,
+                        )
+                        .err();
+                    };
+                    apply_pending_sse_line(
+                        &mut pending,
+                        &mut state,
+                        &mut raw_events,
+                        &mut on_parser_update,
+                    )
+                };
+                if let Some(error) = boundary_error {
+                    return Err(error);
+                }
+                request_deadlines.observe(&state);
+                ensure_request_active(
+                    &request_deadlines,
+                    is_canceled,
+                    network,
+                    context.url,
+                    tau_provider::OutboundPhase::Body,
+                )?;
+                parsed?;
                 return Ok((state, raw_events));
             }
             Ok(Err(error)) => {
@@ -1460,11 +1705,6 @@ async fn chat_completions_stream_async(
                 )));
             }
             Err(_) => {}
-        }
-        if last_event_at.elapsed() >= STREAM_IDLE_TIMEOUT {
-            return Err(LlmError::Outbound(
-                network.deadline_error(context.url, tau_provider::OutboundPhase::Body),
-            ));
         }
     }
 }
@@ -2451,15 +2691,23 @@ fn update_tool_call_metadata(
     if id.is_some() || name.is_some() {
         state.semantic_progress = SemanticProgress::Parsed;
     }
-    let entry = state.tool_call_at_mut(index);
-    let mut changed = false;
-    if let Some(id) = id {
-        entry.id = id.to_owned();
-        changed = true;
-    }
-    if let Some(name) = name {
-        entry.name = name.to_owned();
-        changed = true;
+    let (changed, accepted_new_name) = {
+        let entry = state.tool_call_at_mut(index);
+        let mut changed = false;
+        if let Some(id) = id {
+            entry.id = id.to_owned();
+            changed = true;
+        }
+        let mut accepted_new_name = false;
+        if let Some(name) = name {
+            accepted_new_name = entry.name != name;
+            entry.name = name.to_owned();
+            changed = true;
+        }
+        (changed, accepted_new_name)
+    };
+    if accepted_new_name {
+        state.record_deadline_semantic_progress();
     }
     changed
 }

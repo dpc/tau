@@ -32,6 +32,15 @@ accounting apply to decoded payload bytes. Tau does not measure or publish the
 encoded-body byte count. The rate-limited emitter, not the parser's chunk
 cadence, decides when to publish an update.
 
+Chat Completions ordinary inference and standalone local-summary requests have
+two transport-lifetime bounds measured from backend dispatch: a five-minute idle
+deadline and a non-renewable thirty-minute absolute deadline. Only newly accepted
+nonempty assistant text, reasoning text, tool name, or tool arguments renews the
+idle deadline. Comments, empty JSON or semantic fields, usage, status,
+identifiers, and other content-free transport activity do not renew it. These
+bounds do not change cancellation precedence or timeout/retry classification and
+do not apply to other provider transports.
+
 For ordinary inference, `provider.response_finished.output_items` is the complete
 durable replacement and replay source. Successful local-summary compaction
 instead consumes its private terminal envelope into the canonical

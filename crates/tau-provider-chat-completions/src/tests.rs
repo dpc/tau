@@ -14,6 +14,130 @@ use tau_provider::debug_capture_writer::ProviderDebugCaptureClass;
 
 use super::*;
 
+/// Semantic assistant output renews the idle deadline from its accepted time.
+#[test]
+fn semantic_progress_renews_request_idle_deadline() {
+    let dispatched_at = Instant::now();
+    let mut deadlines = RequestDeadlines::new(dispatched_at);
+    let mut state = StreamState::new();
+
+    state
+        .append_assistant_text_delta("accepted")
+        .expect("accept semantic text");
+    state.semantic_progress_at = Some(dispatched_at + STREAM_IDLE_TIMEOUT - Duration::from_secs(1));
+    deadlines.observe(&state);
+
+    assert!(!deadlines.expired(
+        dispatched_at + STREAM_IDLE_TIMEOUT + STREAM_IDLE_TIMEOUT - Duration::from_secs(2)
+    ));
+    assert!(deadlines.expired(dispatched_at + STREAM_IDLE_TIMEOUT * 2));
+}
+
+/// Semantic progress cannot renew the absolute request deadline beyond thirty
+/// minutes from dispatch.
+#[test]
+fn request_absolute_deadline_never_renews() {
+    let dispatched_at = Instant::now();
+    let mut deadlines = RequestDeadlines::new(dispatched_at);
+    let mut state = StreamState::new();
+    state
+        .append_reasoning_delta("later")
+        .expect("accept semantic reasoning");
+    state.semantic_progress_at =
+        Some(dispatched_at + STREAM_ABSOLUTE_TIMEOUT - Duration::from_secs(1));
+    deadlines.observe(&state);
+    assert!(deadlines.expired(dispatched_at + STREAM_ABSOLUTE_TIMEOUT));
+}
+
+/// Empty objects, usage, status metadata, identifiers, and empty semantic
+/// fields must not turn content-free stream chatter into idle-clock progress.
+#[test]
+fn content_free_stream_chatter_does_not_renew_request_idle_deadline() {
+    let dispatched_at = Instant::now();
+    let mut deadlines = RequestDeadlines::new(dispatched_at);
+    let mut state = StreamState::new();
+    for event in [
+        serde_json::json!({}),
+        serde_json::json!({"usage": {"prompt_tokens": 1}}),
+        serde_json::json!({"id": "response-id", "status": "in_progress"}),
+        serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "content": "",
+                    "reasoning_content": "",
+                    "tool_calls": [{"index": 0, "id": "call-id", "function": {}}],
+                }
+            }]
+        }),
+    ] {
+        apply_event(&mut state, &event, &mut |_| {}).expect("content-free event");
+        deadlines.observe(&state);
+    }
+
+    assert_eq!(state.semantic_progress_generation, 0);
+    assert!(deadlines.expired(dispatched_at + STREAM_IDLE_TIMEOUT));
+}
+
+/// The ordinary SSE production parser renews the request deadline for accepted
+/// tool names and arguments.
+#[test]
+fn ordinary_stream_semantics_drive_request_idle_progress() {
+    let dispatched_at = Instant::now();
+    let mut deadlines = RequestDeadlines::new(dispatched_at);
+    let mut state = StreamState::new();
+    let mut raw_events = DebugEventCapture::new(false);
+    let event = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,",
+        "\"function\":{\"name\":\"status\",\"arguments\":\"{}\"}}]}}]}\n\n"
+    );
+
+    process_stream_chunk(
+        event.as_bytes(),
+        &mut Vec::new(),
+        &mut state,
+        &mut raw_events,
+        &mut |_| {},
+    )
+    .expect("ordinary semantic event");
+    deadlines.observe(&state);
+    let accepted_at = state
+        .semantic_progress_at
+        .expect("semantic acceptance time");
+
+    assert_eq!(state.semantic_progress_generation, 2);
+    assert!(!deadlines.expired(accepted_at + STREAM_IDLE_TIMEOUT - Duration::from_millis(1)));
+}
+
+/// The standalone local-summary production parser uses the same semantic idle
+/// clock while its accepted narrative remains private pending final validation.
+#[test]
+fn local_summary_stream_semantics_drive_request_idle_progress() {
+    let dispatched_at = Instant::now();
+    let mut deadlines = RequestDeadlines::new(dispatched_at);
+    let mut state = StreamState::new_for_attempt(
+        CacheUsageCompat::None,
+        Some(tau_proto::ByteCount::new(1024)),
+    );
+    let mut raw_events = DebugEventCapture::new(false);
+    let event = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"summary\"}}]}\n\n";
+
+    process_stream_chunk(
+        event,
+        &mut Vec::new(),
+        &mut state,
+        &mut raw_events,
+        &mut |_| {},
+    )
+    .expect("private summary semantic event");
+    deadlines.observe(&state);
+    let accepted_at = state
+        .semantic_progress_at
+        .expect("semantic acceptance time");
+
+    assert_eq!(state.semantic_progress_generation, 1);
+    assert!(!deadlines.expired(accepted_at + STREAM_IDLE_TIMEOUT - Duration::from_millis(1)));
+}
+
 #[derive(Clone, Copy)]
 enum NumericStatusExpectation {
     Terminal,
@@ -435,6 +559,106 @@ fn reqwest_awaiting_headers_is_prompt_cancelable() {
 #[test]
 fn reqwest_stalled_success_body_is_prompt_cancelable() {
     assert_reqwest_stall_is_canceled(true);
+}
+
+/// Verify any later stream outcome loses to an expired deadline after accepted
+/// progress.
+fn assert_callback_crossing_idle_yields_deadline(events: &str) {
+    let events = events.to_owned();
+    let server = ScriptedTcpServer::spawn(move |mut socket| {
+        let mut request = [0_u8; 16 * 1024];
+        let _ = path_std_io::Read::read(&mut socket, &mut request).expect("read request");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len()
+        );
+        socket
+            .write_all(response.as_bytes())
+            .expect("write streamed response");
+    });
+    let mut configured = provider();
+    configured.base_url = format!("http://{}/v1", server.address());
+    let model = configured.models[0].clone();
+    let resolved = resolved_provider(&configured);
+    let initial_now = Instant::now();
+    let outcome = with_test_request_deadline_limits(
+        Duration::from_millis(20),
+        Duration::from_secs(1),
+        initial_now,
+        || {
+            run_attempt(
+                &prompt(),
+                &resolved,
+                &model,
+                false,
+                &mut |update| {
+                    if matches!(
+                        update,
+                        AttemptUpdate::Progress(progress) if progress.has_timed_semantic_output()
+                    ) {
+                        set_test_request_now(initial_now + Duration::from_millis(40));
+                    }
+                },
+                &mut || false,
+                &tau_provider::OutboundNetworkPolicy::from_environment(
+                    path_std_collections::BTreeMap::new(),
+                    None,
+                ),
+            )
+        },
+    );
+    server.finish();
+
+    let AttemptOutcome::Retryable {
+        decision, progress, ..
+    } = outcome
+    else {
+        panic!("expired semantic stream must remain retryable");
+    };
+    assert_eq!(decision.class, RetryClass::Transport);
+    assert_eq!(progress, SemanticProgress::Parsed);
+}
+
+/// Complete SSE lines recheck the deadline after callbacks before returning a
+/// later parser error from the same provider event.
+#[test]
+fn production_chunk_parser_error_rechecks_deadline_after_callback() {
+    assert_callback_crossing_idle_yields_deadline(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"accepted\"},\
+         \"finish_reason\":\"unsupported\"}]}\n\n",
+    );
+}
+
+/// An incomplete final SSE line parsed at EOF rechecks the deadline after
+/// callbacks before returning its later parser error.
+#[test]
+fn production_eof_parser_error_rechecks_deadline_after_callback() {
+    assert_callback_crossing_idle_yields_deadline(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"accepted\"},\
+         \"finish_reason\":\"unsupported\"}]}",
+    );
+}
+
+/// A ready `[DONE]` terminal cannot bypass the deadline crossed by a semantic
+/// progress callback.
+#[test]
+fn production_ready_terminal_rechecks_deadline_after_callback() {
+    assert_callback_crossing_idle_yields_deadline(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"accepted\"}}]}\n\n\
+         data: [DONE]\n\n",
+    );
+}
+
+/// A later semantic event in the same decoded chunk cannot renew an idle
+/// deadline already crossed by an earlier semantic callback.
+#[test]
+fn production_same_chunk_semantics_cannot_revive_expired_idle_deadline() {
+    assert_callback_crossing_idle_yields_deadline(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{\"content\":\"second\"}}]}\n\n\
+         data: [DONE]\n\n",
+    );
 }
 
 /// Ensures transport failures crossing the Chat Completions attempt facade
@@ -867,10 +1091,10 @@ fn malformed_sse_data_after_delta_rejects_partial_stream() {
     assert_eq!(progress, SemanticProgress::Parsed);
 }
 
-/// Ensures SSE comments and blank heartbeat lines do not reset the semantic
-/// idle watchdog while actual `data:` provider events do.
+/// Ensures the SSE framing parser distinguishes comments from provider data
+/// without treating that framing distinction as semantic progress.
 #[test]
-fn stream_idle_progress_requires_data_event() {
+fn sse_framing_distinguishes_comments_from_provider_data() {
     for (bytes, expected_provider_event) in [
         (b": keepalive\n\n".as_slice(), false),
         (b": keepalive\ndata: {}\n".as_slice(), true),

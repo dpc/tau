@@ -8,6 +8,14 @@ classification, and replay conversion. Serialized profiles, OpenRouter
 discovery, model publication, public response sampling, and harness event writes
 belong to `tau-ext-provider-builtin`.
 
+Each dispatched ordinary-inference or local-summary request has a five-minute
+semantic-idle deadline and a non-renewable thirty-minute absolute deadline.
+Only newly accepted nonempty assistant text, reasoning text, tool name, or tool
+arguments renews idle time. SSE comments, empty JSON or semantic fields, usage,
+status, identifiers, and other content-free activity cannot extend the request.
+Cancellation remains checked before deadline classification, and deadline
+failures retain the established transport retry classification.
+
 ## Exact route compatibility
 
 The extension selects which Tau reasoning efforts a configured model publishes
