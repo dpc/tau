@@ -14,6 +14,9 @@ The user also approved the native Codex semantic-progress retry and cost
 boundary for ticket `gtdq`, satisfying the same gate.
 The user separately approved the Chat Completions local-summary semantic-idle
 and absolute request deadlines for ticket `boo4`, satisfying the same gate.
+The user separately approved public Responses max-output incompletion,
+continuation, truncated-tool, accounting, retry, and standalone-compaction
+semantics for ticket `8ds8`, satisfying the same gate.
 
 Typed image tool results are indivisible members of their existing closed
 call/result round. Durable canonical bytes replay through normal inference and
@@ -530,3 +533,13 @@ terminal. Unrelated descendants cannot claim that lineage.
 Compaction and cold context reconstruction replay retained full reasoning plus
 the exact internal continuation steer; summary-only reasoning never becomes
 continuation authority.
+
+Canonical public Responses `max_output_tokens` incompletion is the existing
+`Length` terminal. Ordinary inference preserves validated partial prose,
+reasoning, usage, and response identity, never executes a truncated tool call,
+and never retries the unchanged request. A reasoning-only response whose
+provider-native reasoning is replay-safe may claim the existing single bounded
+output-length continuation; prose or tool output cannot. Standalone compaction
+preserves the incomplete terminal for accounting but never splices its partial
+window or retries it automatically. Unknown incomplete reasons remain provider
+failures.

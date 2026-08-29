@@ -3258,6 +3258,7 @@ impl Harness {
                             reason,
                             resume_through: started.resume_through,
                             context_retreat: None,
+                            incomplete_response: None,
                         },
                     ),
                 );

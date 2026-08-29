@@ -360,7 +360,7 @@ fn terminal_output_fallback_materializes_plain_reasoning_and_text() {
     )
     .expect("terminal output");
 
-    assert!(state.terminal);
+    assert_eq!(state.terminal, Some(TerminalKind::Completed));
     assert!(!state.has_incomplete_reasoning());
     let output = state.output_items();
     assert_eq!(output.len(), 3);
@@ -505,7 +505,7 @@ fn repetition_guard_rejects_cumulative_and_terminal_replacements() {
             Err(Error::RepetitionDetected(_))
         ));
         assert!(terminal.items.is_empty());
-        assert!(!terminal.terminal);
+        assert_eq!(terminal.terminal, None);
         assert!(terminal.response_id.is_none());
     }
 }
@@ -1328,7 +1328,7 @@ fn terminal_output_rejects_streamed_reasoning_disagreement() {
             matches!(state.apply_event(&event), Err(Error::UnsupportedOutput)),
             "terminal reasoning replaced authority with {reasoning}"
         );
-        assert!(!state.terminal);
+        assert_eq!(state.terminal, None);
         assert!(state.response_id.is_none());
         assert!(matches!(
             state.output_items().as_slice(),
@@ -1430,8 +1430,73 @@ fn completion_event_ends_stream_without_done_sentinel() {
     state.apply_event(r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}}"#,
     )
     .expect("completion event");
-    assert!(state.terminal);
+    assert_eq!(state.terminal, Some(TerminalKind::Completed));
     assert_eq!(state.response_id.as_deref(), Some("resp_1"));
+}
+
+/// Canonical max-output incompletion must reconcile terminal prose, usage, and
+/// response identity while producing the narrow output-limit terminal marker.
+#[test]
+fn max_output_incomplete_preserves_partial_prose_usage_and_identity() {
+    let mut state = State::default();
+    state
+        .apply_event(
+            r#"{"type":"response.output_text.delta","output_index":0,"delta":"partial answer"}"#,
+        )
+        .expect("partial prose");
+    state
+        .apply_event(
+            r#"{"type":"response.incomplete","id":"adjacent-id","incomplete_details":{"reason":"content_filter"},"response":{"id":"resp_limited","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":11,"output_tokens":7}}}"#,
+        )
+        .expect("max-output terminal");
+
+    assert_eq!(state.terminal, Some(TerminalKind::MaxOutputTokens));
+    assert_eq!(state.response_id.as_deref(), Some("resp_limited"));
+    assert_eq!(
+        state
+            .usage
+            .as_ref()
+            .expect("terminal usage")
+            .prompt_sent_tokens,
+        11
+    );
+    assert_eq!(
+        state
+            .usage
+            .as_ref()
+            .expect("terminal usage")
+            .response_received_tokens,
+        7
+    );
+    assert!(matches!(
+        state.output_items().as_slice(),
+        [ContextItem::Message(message)]
+            if message.content == vec![ContentPart::Text {
+                text: "partial answer".to_owned(),
+            }]
+    ));
+}
+
+/// Unknown incomplete reasons must retain provider-failure behavior and cannot
+/// borrow max-output authority from an unrelated nested identifier.
+#[test]
+fn unknown_incomplete_reason_remains_a_failure() {
+    let mut state = State::default();
+    assert!(matches!(
+        state.apply_event(
+            r#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"content_filter"},"metadata":{"reason":"max_output_tokens"}}}"#
+        ),
+        Err(Error::StreamFailure)
+    ));
+    assert_eq!(state.terminal, None);
+
+    let mut top_level_only = State::default();
+    assert!(matches!(
+        top_level_only.apply_event(
+            r#"{"type":"response.incomplete","incomplete_details":{"reason":"max_output_tokens"},"response":{"incomplete_details":{"reason":"content_filter"}}}"#
+        ),
+        Err(Error::StreamFailure)
+    ));
 }
 
 /// Keepalive and empty/unknown events must not report qualifying semantic
@@ -2211,6 +2276,52 @@ fn websocket_rejects_invalid_and_oversized_frames() {
         failure.failure_kind,
         Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
     );
+}
+
+/// A WebSocket max-output terminal must complete once, preserve a truncated
+/// call for inspection, and expose `Length` so the harness suppresses
+/// execution.
+#[test]
+fn websocket_max_output_completes_with_truncated_tool_call() {
+    let outcome = run_websocket_messages(
+        vec![
+            Message::Text(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","status":"in_progress","call_id":"call_1","name":"run","arguments":""}}"#
+                    .into(),
+            ),
+            Message::Text(
+                r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"path\""}"#
+                    .into(),
+            ),
+            Message::Text(
+                r#"{"type":"response.incomplete","response":{"id":"resp_tool_limited","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":9,"output_tokens":4},"output":[{"type":"function_call","id":"fc_1","status":"in_progress","call_id":"call_1","name":"run","arguments":"{\"path\""}]}}"#
+                    .into(),
+            ),
+        ],
+        &mut || false,
+    );
+
+    let AttemptOutcome::Completed(success) = outcome else {
+        panic!("max-output WebSocket attempt must complete without retry");
+    };
+    assert_eq!(success.stop_reason, ProviderStopReason::Length);
+    assert_eq!(
+        success.provider_response_id.as_deref(),
+        Some("resp_tool_limited")
+    );
+    assert_eq!(
+        success
+            .usage
+            .expect("terminal usage")
+            .response_received_tokens,
+        4
+    );
+    assert!(matches!(
+        success.output_items.as_slice(),
+        [ContextItem::ToolCall(call)]
+            if call.call_id.as_str() == "call_1"
+                && call.raw_arguments_json.as_deref() == Some("{\"path\"")
+    ));
 }
 
 /// A text message exactly at the established one-MiB event limit must still

@@ -912,6 +912,9 @@ fn standalone_compaction_failure_message(
     match reason {
         tau_proto::StandaloneCompactionFailureReason::ProviderError => "provider_error",
         tau_proto::StandaloneCompactionFailureReason::InvalidWindow => "invalid_window",
+        tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded => {
+            "output_length_exceeded"
+        }
         tau_proto::StandaloneCompactionFailureReason::RouteFailed => "route_failed",
         tau_proto::StandaloneCompactionFailureReason::Cancelled => "compaction_cancelled",
         tau_proto::StandaloneCompactionFailureReason::StaleBranch => "stale_branch",

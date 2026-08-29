@@ -522,9 +522,20 @@ fn run_attempt_with_capture(
         network,
     ));
     match result {
-        Ok(state) if state.terminal => {
+        Ok(state) if state.terminal.is_some() => {
             let progress = state.progress();
             let output_items = state.output_items();
+            let stop_reason = match state.terminal.expect("guarded terminal state") {
+                TerminalKind::MaxOutputTokens => ProviderStopReason::Length,
+                TerminalKind::Completed
+                    if output_items
+                        .iter()
+                        .any(|item| matches!(item, ContextItem::ToolCall(_))) =>
+                {
+                    ProviderStopReason::ToolCalls
+                }
+                TerminalKind::Completed => ProviderStopReason::EndTurn,
+            };
             if state.has_incomplete_reasoning() {
                 debug_capture.submit_error(
                     prompt,
@@ -534,18 +545,10 @@ fn run_attempt_with_capture(
                     &progress,
                 );
                 terminal(Error::UnsupportedOutput, progress)
-            } else if output_items.is_empty() {
+            } else if output_items.is_empty() && stop_reason != ProviderStopReason::Length {
                 debug_capture.submit_error(prompt, config, model, &Error::EmptyResponse, &progress);
                 terminal(Error::EmptyResponse, progress)
             } else {
-                let stop_reason = if output_items
-                    .iter()
-                    .any(|item| matches!(item, ContextItem::ToolCall(_)))
-                {
-                    ProviderStopReason::ToolCalls
-                } else {
-                    ProviderStopReason::EndTurn
-                };
                 state
                     .debug_capture
                     .submit_response(prompt, config, model, &state, stop_reason);
@@ -675,6 +678,9 @@ enum OutputItemPhase {
     Completed,
     /// A terminal response array supplied a complete item without streaming.
     TerminalFallback,
+    /// An output-limit terminal supplied a validated but potentially truncated
+    /// item without complete streaming state.
+    IncompleteFallback,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -880,6 +886,10 @@ impl Slot {
                     tool_type: ToolType::Function,
                     arguments: if arguments.is_empty() {
                         tau_proto::CborValue::Null
+                    } else if phase == OutputItemPhase::IncompleteFallback {
+                        serde_json::from_str::<Value>(arguments)
+                            .map(|value| tau_proto::json_to_cbor(&value))
+                            .unwrap_or(tau_proto::CborValue::Null)
                     } else {
                         tau_proto::json_to_cbor(
                             &serde_json::from_str::<Value>(arguments).map_err(|_| Error::Json)?,
@@ -920,12 +930,15 @@ impl Slot {
                     OutputItemPhase::Completed if self.state != SlotState::ReasoningAdded => {
                         return Err(Error::UnsupportedOutput);
                     }
-                    OutputItemPhase::TerminalFallback if self.state != SlotState::Empty => {
+                    OutputItemPhase::TerminalFallback | OutputItemPhase::IncompleteFallback
+                        if self.state != SlotState::Empty =>
+                    {
                         return Err(Error::UnsupportedOutput);
                     }
                     OutputItemPhase::Added
                     | OutputItemPhase::Completed
-                    | OutputItemPhase::TerminalFallback => {}
+                    | OutputItemPhase::TerminalFallback
+                    | OutputItemPhase::IncompleteFallback => {}
                 }
                 let item_id = reasoning_item_id(item)?;
                 if self.reasoning_item_id.is_some() && self.reasoning_item_id != item_id {
@@ -961,7 +974,9 @@ impl Slot {
                 self.reasoning_text = final_reasoning.display;
                 if matches!(
                     phase,
-                    OutputItemPhase::Completed | OutputItemPhase::TerminalFallback
+                    OutputItemPhase::Completed
+                        | OutputItemPhase::TerminalFallback
+                        | OutputItemPhase::IncompleteFallback
                 ) {
                     let raw_json = raw_json
                         .expect("completed reasoning raw JSON checked above")
@@ -980,7 +995,9 @@ impl Slot {
                 }
                 matches!(
                     phase,
-                    OutputItemPhase::Completed | OutputItemPhase::TerminalFallback
+                    OutputItemPhase::Completed
+                        | OutputItemPhase::TerminalFallback
+                        | OutputItemPhase::IncompleteFallback
                 ) || self
                     .reasoning_text
                     .as_ref()
@@ -1041,7 +1058,8 @@ struct State {
     /// Terminalization rejects any remaining pending slot.
     items: Vec<Slot>,
     bytes: u64,
-    terminal: bool,
+    /// Validated provider terminal accepted by the shared transport parser.
+    terminal: Option<TerminalKind>,
     usage: Option<ProviderTokenUsage>,
     response_id: Option<String>,
     /// Monotonic revision advanced only by qualifying semantic observations.
@@ -1051,6 +1069,15 @@ struct State {
     repetition_guard: StreamRepetitionGuard,
     /// Private bounded capture state, inactive unless diagnostics are enabled.
     debug_capture: DebugCapture,
+}
+
+/// Canonical successful terminal classification retained by the assembler.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalKind {
+    /// Provider completed the response normally.
+    Completed,
+    /// Provider exhausted the configured output-token budget.
+    MaxOutputTokens,
 }
 
 /// Raw JSON projections retained alongside semantically parsed Responses
@@ -1186,9 +1213,9 @@ impl State {
 
     /// Marks this stream terminal only after its output indices form a complete
     /// provider-defined sequence.
-    fn terminalize(&mut self) -> Result<(), Error> {
+    fn terminalize(&mut self, terminal: TerminalKind) -> Result<(), Error> {
         self.validate_contiguous_output_indices()?;
-        self.terminal = true;
+        self.terminal = Some(terminal);
         Ok(())
     }
 
@@ -1472,7 +1499,15 @@ impl State {
                     Ok(!has_text && !text.is_empty())
                 })?
             }
-            "response.completed" | "response.done" => {
+            "response.completed" | "response.done" | "response.incomplete"
+                if event["type"].as_str() != Some("response.incomplete")
+                    || incomplete_reason(&event) == Some("max_output_tokens") =>
+            {
+                let terminal = if event["type"].as_str() == Some("response.incomplete") {
+                    TerminalKind::MaxOutputTokens
+                } else {
+                    TerminalKind::Completed
+                };
                 let response = event.get("response").unwrap_or(&event);
                 let response_id = response
                     .get("id")
@@ -1499,9 +1534,14 @@ impl State {
                         let index =
                             u32::try_from(position).map_err(|_| Error::UnsupportedOutput)?;
                         let mut slot = Slot::new(index);
+                        let phase = if terminal == TerminalKind::MaxOutputTokens {
+                            OutputItemPhase::IncompleteFallback
+                        } else {
+                            OutputItemPhase::TerminalFallback
+                        };
                         slot.apply_item(
                             item,
-                            OutputItemPhase::TerminalFallback,
+                            phase,
                             raw_output
                                 .as_ref()
                                 .and_then(|items| items.get(position))
@@ -1536,7 +1576,7 @@ impl State {
                 }
                 self.response_id = response_id;
                 self.usage = usage;
-                self.terminalize()?;
+                self.terminalize(terminal)?;
                 false
             }
             "response.failed" | "response.incomplete" | "error" => {
@@ -1550,6 +1590,13 @@ impl State {
         }
         Ok(previous_revision < self.semantic_progress_revision)
     }
+}
+
+/// Returns the canonical incomplete reason from its exact Responses envelope.
+fn incomplete_reason(event: &Value) -> Option<&str> {
+    event
+        .pointer("/response/incomplete_details/reason")
+        .and_then(Value::as_str)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1712,7 +1759,7 @@ async fn stream_sse(
             }
             if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
                 if data == "[DONE]" {
-                    state.terminalize()?;
+                    state.terminalize(TerminalKind::Completed)?;
                     return Ok(SseLineControl::Break);
                 }
                 let qualifying_progress = state.apply_event(data)?;
@@ -1720,7 +1767,7 @@ async fn stream_sse(
                 if qualifying_progress {
                     deadlines.renew_for_qualifying_progress(Instant::now());
                 }
-                if state.terminal {
+                if state.terminal.is_some() {
                     return Ok(SseLineControl::Break);
                 }
             }

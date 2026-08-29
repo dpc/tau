@@ -4065,6 +4065,7 @@ fn rollover_commits_deferred_default_mandatory_compaction_terminal() {
             reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
             resume_through: None,
             context_retreat: None,
+            incomplete_response: None,
         }),
     );
     assert!(h.runtime_io.publication.pending_intercept.is_some());

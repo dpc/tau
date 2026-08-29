@@ -4459,6 +4459,9 @@ pub enum StandaloneCompactionFailureReason {
     ProviderError,
     /// The provider returned a malformed replacement window.
     InvalidWindow,
+    /// The provider exhausted its output-token budget before completing a
+    /// replacement window.
+    OutputLengthExceeded,
     /// No matching provider route accepted the request.
     RouteFailed,
     /// The operation was explicitly cancelled.
@@ -4776,7 +4779,7 @@ pub enum StandaloneCompactionTrigger {
 }
 
 /// Durable terminal failure of one standalone-compaction transaction.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentStandaloneCompactionFailed {
     /// Agent that owned the transaction.
     pub agent_id: AgentId,
@@ -4792,6 +4795,31 @@ pub struct AgentStandaloneCompactionFailed {
     /// Exact automatic successor plan committed before a strict retreat start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_retreat: Option<ContextRetreatPlan>,
+    /// Canonical public Responses output-limit terminal retained for accounting
+    /// and inspection without installing its partial output as context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_response: Option<Box<StandaloneCompactionIncomplete>>,
+}
+
+/// Durable non-context projection of one output-limited standalone response.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StandaloneCompactionIncomplete {
+    /// Provider prompt that produced the incomplete response.
+    pub agent_prompt_id: AgentPromptId,
+    /// Validated partial provider output, excluded from transcript context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_items: Vec<ContextItem>,
+    /// Provider-reported usage retained for accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ProviderTokenUsage>,
+    /// Provider response identifier retained for diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_response_id: Option<String>,
+    /// Finite provider attempt that produced this terminal.
+    #[serde(default, skip_serializing_if = "ProviderAttempt::is_one")]
+    pub provider_attempt: ProviderAttempt,
+    /// Public Responses backend and transport that produced this terminal.
+    pub backend: ProviderBackend,
 }
 
 /// Pre-minted strict-predecessor successor for automatic context rejection.
@@ -6170,6 +6198,94 @@ pub struct ProviderResponseFinished {
     pub ws_pool_delta: Option<WsPoolDelta>,
 }
 
+impl ProviderResponseFinished {
+    /// Returns whether this terminal contains only the provider-native
+    /// reasoning representation that its backend can replay losslessly.
+    #[must_use]
+    pub fn has_replay_safe_reasoning_only_output(&self) -> bool {
+        let Some(backend) = self.backend.as_ref() else {
+            return false;
+        };
+        let mut has_authoritative_reasoning = false;
+        let only_reasoning = self
+            .output_items
+            .iter()
+            .all(|item| match (backend.kind, item) {
+                (ProviderBackendKind::PublicResponses, ContextItem::Reasoning(reasoning)) => {
+                    let valid = public_responses_plain_reasoning_is_replayable(reasoning);
+                    has_authoritative_reasoning |= valid;
+                    valid
+                }
+                (
+                    ProviderBackendKind::PublicResponses,
+                    ContextItem::ReasoningText(crate::ReasoningTextItem {
+                        kind: crate::ReasoningTextKind::Full,
+                        text,
+                    }),
+                ) => !text.is_empty(),
+                (
+                    ProviderBackendKind::ChatCompletions,
+                    ContextItem::ReasoningText(crate::ReasoningTextItem {
+                        kind: crate::ReasoningTextKind::Full,
+                        text,
+                    }),
+                ) => {
+                    has_authoritative_reasoning |= !text.is_empty();
+                    !text.is_empty()
+                }
+                (
+                    ProviderBackendKind::ChatCompletions | ProviderBackendKind::Responses,
+                    ContextItem::Message(_)
+                    | ContextItem::ToolCall(_)
+                    | ContextItem::ToolResult(_)
+                    | ContextItem::Reasoning(_)
+                    | ContextItem::ReasoningText(_)
+                    | ContextItem::Compaction(_)
+                    | ContextItem::CompactionTrigger
+                    | ContextItem::LocalCompactionNarrative(_)
+                    | ContextItem::UnknownProviderItem(_),
+                )
+                | (
+                    ProviderBackendKind::PublicResponses,
+                    ContextItem::Message(_)
+                    | ContextItem::ToolCall(_)
+                    | ContextItem::ToolResult(_)
+                    | ContextItem::ReasoningText(_)
+                    | ContextItem::Compaction(_)
+                    | ContextItem::CompactionTrigger
+                    | ContextItem::LocalCompactionNarrative(_)
+                    | ContextItem::UnknownProviderItem(_),
+                ) => false,
+            });
+        only_reasoning && has_authoritative_reasoning
+    }
+}
+
+/// Mirrors the public Responses adapter's durable plain-reasoning replay
+/// contract without granting authority to encrypted or summary-only items.
+fn public_responses_plain_reasoning_is_replayable(item: &crate::OpaqueProviderItem) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(item.raw_json()) else {
+        return false;
+    };
+    value.get("type").and_then(serde_json::Value::as_str) == Some("reasoning")
+        && value.get("encrypted_content").is_none()
+        && value.get("id").is_none_or(serde_json::Value::is_string)
+        && value.get("summary").is_none_or(
+            |summary| matches!(summary, serde_json::Value::Array(parts) if parts.is_empty()),
+        )
+        && value
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|parts| {
+                !parts.is_empty()
+                    && parts.iter().all(|part| {
+                        part.get("type").and_then(serde_json::Value::as_str)
+                            == Some("reasoning_text")
+                            && part.get("text").is_some_and(serde_json::Value::is_string)
+                    })
+            })
+}
+
 /// Bounded durable authority for one coalesced eager automatic compaction.
 ///
 /// A canonical response's resulting assistant node, or a canceled prompt
@@ -6278,12 +6394,10 @@ pub struct ProviderCacheMissDiagnostic {
 /// Identifies the LLM backend that handled an
 /// [`ProviderResponseFinished`].
 ///
-/// Kind discriminates the provider API shape (Chat Completions vs.
-/// Responses), and `base_url` pins down the specific endpoint —
-/// `https://api.openai.com/v1` and `https://chatgpt.com/backend-api`
-/// share the Responses kind but have very different cache /
-/// rate-limit behavior, so the base URL is what an offline analysis
-/// needs to tell them apart.
+/// Kind discriminates Chat Completions, generic public full-replay Responses,
+/// and private ChatGPT/Codex Responses. `base_url` pins down the specific
+/// configured endpoint within that family for offline cache and rate-limit
+/// analysis.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderBackend {
     /// Provider API family used for the turn.
@@ -6302,11 +6416,14 @@ pub struct ProviderBackend {
     pub stale_chain_fallback: bool,
 }
 
-/// The provider API shape an [`ProviderBackend`] talks.
+/// The provider protocol and replay family an [`ProviderBackend`] talks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderBackendKind {
     ChatCompletions,
+    /// Generic public Responses API with full local transcript replay.
+    PublicResponses,
+    /// Private ChatGPT/Codex Responses API.
     Responses,
 }
 

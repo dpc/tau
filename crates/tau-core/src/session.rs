@@ -4827,6 +4827,21 @@ impl AgentTree {
         &self,
         failed: &tau_proto::AgentStandaloneCompactionFailed,
     ) -> Result<(), AgentEventValidationError> {
+        if let Some(incomplete) = &failed.incomplete_response
+            && (failed.reason != tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded
+                || incomplete.backend.kind != tau_proto::ProviderBackendKind::PublicResponses)
+        {
+            return Err(AgentEventValidationError::new(
+                "standalone incomplete response mismatched reason or backend",
+            ));
+        }
+        if failed.reason == tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded
+            && failed.incomplete_response.is_none()
+        {
+            return Err(AgentEventValidationError::new(
+                "standalone output-length failure requires its incomplete response",
+            ));
+        }
         let Some(transaction) = self.compaction_transactions.get(&failed.transaction_id) else {
             let valid_stale_closure = self
                 .automatic_compaction_decisions
@@ -4842,6 +4857,7 @@ impl AgentTree {
                         )
                         && failed.reason
                             == tau_proto::StandaloneCompactionFailureReason::StaleBranch
+                        && failed.incomplete_response.is_none()
                         && failed.cut == decision.cut
                         && failed.resume_through.is_none()
                 });
@@ -4857,6 +4873,13 @@ impl AgentTree {
         {
             return Err(AgentEventValidationError::new(
                 "standalone compaction failure mismatched transaction or duplicate outcome",
+            ));
+        }
+        if let Some(incomplete) = &failed.incomplete_response
+            && incomplete.agent_prompt_id != transaction.started.compact_prompt_id
+        {
+            return Err(AgentEventValidationError::new(
+                "standalone incomplete response mismatched transaction",
             ));
         }
         if matches!(
@@ -5340,22 +5363,15 @@ impl AgentTree {
                     && response.stop_reason == tau_proto::ProviderStopReason::Length
                     && response.originator.is_user()
                     && response.backend.as_ref().is_some_and(|backend| {
-                        backend.kind == tau_proto::ProviderBackendKind::ChatCompletions
+                        matches!(
+                            backend.kind,
+                            tau_proto::ProviderBackendKind::ChatCompletions
+                                | tau_proto::ProviderBackendKind::PublicResponses
+                        )
                     })
                     && response.error.is_none()
                     && response.failure_kind.is_none()
-                    && response.output_items.iter().all(|item| {
-                        !matches!(item, ContextItem::Message(_) | ContextItem::ToolCall(_))
-                    })
-                    && response.output_items.iter().any(|item| {
-                        matches!(
-                            item,
-                            ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
-                                kind: tau_proto::ReasoningTextKind::Full,
-                                text,
-                            }) if !text.is_empty()
-                        )
-                    })
+                    && response.has_replay_safe_reasoning_only_output()
                     && self
                         .inference_dispatches
                         .get(&response.agent_prompt_id)

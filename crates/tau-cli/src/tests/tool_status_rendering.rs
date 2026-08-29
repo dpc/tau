@@ -5914,6 +5914,7 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: None,
             context_retreat: None,
+            incomplete_response: None,
         },
     ));
 

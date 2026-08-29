@@ -717,6 +717,7 @@ fn fail_compaction(tree: &mut AgentTree, started: &tau_proto::AgentStandaloneCom
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: started.resume_through,
             context_retreat: None,
+            incomplete_response: None,
         },
     ));
 }
@@ -1118,6 +1119,7 @@ fn automatic_context_retreat_claims_exact_strict_predecessor_plan() {
         reason: tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded,
         resume_through: rejected.resume_through,
         context_retreat: Some(plan.clone()),
+        incomplete_response: None,
     };
     let mut skipped_failure = failure.clone();
     skipped_failure.context_retreat.as_mut().expect("plan").cut = skipped;
@@ -1582,6 +1584,7 @@ fn compaction_fold_rejects_duplicate_start_and_outcome() {
         reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
         resume_through: Some(AgentHead::Root),
         context_retreat: None,
+        incomplete_response: None,
     };
     tree.validate_event(&Event::AgentStandaloneCompactionFailed(failed.clone()))
         .expect("first outcome is valid");
@@ -6249,7 +6252,33 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
             resume_through: None,
             context_retreat: None,
+            incomplete_response: None,
         });
+    let Event::AgentStandaloneCompactionFailed(mut stale_with_incomplete) = stale.clone() else {
+        unreachable!("constructed stale failure")
+    };
+    stale_with_incomplete.incomplete_response =
+        Some(Box::new(tau_proto::StandaloneCompactionIncomplete {
+            agent_prompt_id: tau_proto::AgentPromptId::parse("compact-stale").expect("prompt id"),
+            output_items: Vec::new(),
+            usage: None,
+            provider_response_id: None,
+            provider_attempt: tau_proto::ProviderAttempt::ONE,
+            backend: tau_proto::ProviderBackend {
+                kind: tau_proto::ProviderBackendKind::PublicResponses,
+                base_url: "https://example.invalid/v1".to_owned(),
+                transport: tau_proto::ProviderBackendTransport::HttpSse,
+                stale_chain_fallback: false,
+            },
+        }));
+    assert!(
+        stale_tree
+            .validate_event(&Event::AgentStandaloneCompactionFailed(
+                stale_with_incomplete
+            ))
+            .is_err(),
+        "no-dispatch stale closure cannot retain an incomplete provider response"
+    );
     stale_tree
         .validate_event(&stale)
         .expect("pre-start stale closure validates");
@@ -6286,6 +6315,64 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
         tree.standalone_compaction_recovery(),
         Some(super::StandaloneCompactionRecovery::Interrupted(_))
     ));
+    let output_length_failure = tau_proto::AgentStandaloneCompactionFailed {
+        agent_id: agent_id.clone(),
+        transaction_id: transaction_id.clone(),
+        cut,
+        reason: tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded,
+        resume_through: Some(cut),
+        context_retreat: None,
+        incomplete_response: Some(Box::new(tau_proto::StandaloneCompactionIncomplete {
+            agent_prompt_id: tau_proto::AgentPromptId::parse("compact-eager").expect("prompt"),
+            output_items: Vec::new(),
+            usage: None,
+            provider_response_id: Some("resp-incomplete".to_owned()),
+            provider_attempt: tau_proto::ProviderAttempt::new(2).expect("attempt"),
+            backend: tau_proto::ProviderBackend {
+                kind: tau_proto::ProviderBackendKind::PublicResponses,
+                base_url: "https://example.invalid/v1".to_owned(),
+                transport: tau_proto::ProviderBackendTransport::HttpSse,
+                stale_chain_fallback: false,
+            },
+        })),
+    };
+    tree.validate_event(&Event::AgentStandaloneCompactionFailed(
+        output_length_failure.clone(),
+    ))
+    .expect("matching output-length failure validates");
+    let mut wrong_reason = output_length_failure.clone();
+    wrong_reason.reason = tau_proto::StandaloneCompactionFailureReason::InvalidWindow;
+    assert!(
+        tree.validate_event(&Event::AgentStandaloneCompactionFailed(wrong_reason))
+            .is_err()
+    );
+    let mut wrong_backend = output_length_failure.clone();
+    wrong_backend
+        .incomplete_response
+        .as_mut()
+        .expect("incomplete")
+        .backend
+        .kind = tau_proto::ProviderBackendKind::Responses;
+    assert!(
+        tree.validate_event(&Event::AgentStandaloneCompactionFailed(wrong_backend))
+            .is_err()
+    );
+    let mut wrong_prompt = output_length_failure.clone();
+    wrong_prompt
+        .incomplete_response
+        .as_mut()
+        .expect("incomplete")
+        .agent_prompt_id = tau_proto::AgentPromptId::parse("wrong-prompt").expect("prompt");
+    assert!(
+        tree.validate_event(&Event::AgentStandaloneCompactionFailed(wrong_prompt))
+            .is_err()
+    );
+    let mut missing = output_length_failure;
+    missing.incomplete_response = None;
+    assert!(
+        tree.validate_event(&Event::AgentStandaloneCompactionFailed(missing))
+            .is_err()
+    );
     tree.apply_event(&Event::AgentStandaloneCompactionFailed(
         tau_proto::AgentStandaloneCompactionFailed {
             agent_id: agent_id.clone(),
@@ -6294,6 +6381,7 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
             reason: tau_proto::StandaloneCompactionFailureReason::Interrupted,
             resume_through: None,
             context_retreat: None,
+            incomplete_response: None,
         },
     ));
     let prompt_two = tau_proto::AgentPromptId::parse("prompt-eager-two").expect("prompt");

@@ -1182,6 +1182,7 @@ impl Harness {
                         reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
                         resume_through,
                         context_retreat: None,
+                        incomplete_response: None,
                     },
                 ),
             );

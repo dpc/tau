@@ -76,6 +76,24 @@ These validations limit the supported transcript surface; they do not make
 provider output trusted or redact reasoning from journals, session inspection,
 or other authorized transcript consumers.
 
+Only canonical `response.incomplete` with the exact nested
+`response.incomplete_details.reason` value `max_output_tokens` becomes a Length
+terminal. Top-level or neighboring identifiers cannot grant that authority, and
+only nested `response.id` supplies response identity. HTTP/SSE and WebSocket feed
+the same terminal assembler; WebSocket classification must not intercept this
+one accepted reason. The adapter reconciles validated partial output and usage
+without retrying the unchanged request. The harness retains prose, never executes
+a Length-truncated tool call, and grants its one bounded continuation only to
+reasoning-only output with provider-native replay authority.
+
+Standalone local-summary compaction records public Responses Length output,
+usage, response id, attempt, and required backend identity in a durable
+non-context failure projection. It never validates or splices that partial
+narrative as a replacement window and never retries it automatically. Revisit
+this boundary before accepting another incomplete identifier, changing identifier
+locations, retrying output-limited requests, broadening replay-safe reasoning,
+executing Length-stopped calls, or exposing standalone partial output as context.
+
 ## Typed OpenAI prompt-cache controls
 
 Only an operator-declared exact route may send

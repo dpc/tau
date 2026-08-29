@@ -955,6 +955,16 @@ replays the complete local transcript. It never continues from a response ID
 whose connection-local cache may have disappeared, never silently switches to
 SSE, and never targets the distinct OpenAI Realtime protocol.
 
+Both transports classify only canonical nested
+`response.incomplete_details.reason: "max_output_tokens"` as an output-length
+terminal. Tau preserves validated partial prose, reasoning, usage, and the
+nested response id without retrying the unchanged request. It never executes a
+Length-truncated Function call. Only replay-safe plain reasoning without prose
+or calls can use the existing one bounded continuation. During standalone
+summary compaction, the partial response remains durable non-context accounting
+data; Tau never installs it as the replacement window or retries it
+automatically. Other incomplete reasons remain provider failures.
+
 Each `responses.models[]` entry may set `efforts` to describe the exact
 reasoning-effort levels its upstream model accepts:
 

@@ -1206,8 +1206,10 @@ persisted trace state.
 
 `ProviderStopReason::Length` is never semantic success. Tau permits at most one
 successor in an ordinary user outer turn, and only when the accepted response
-contains reasoning the selected Chat Completions adapter can replay exactly and
-contains no assistant message or tool call.
+contains only reasoning the selected adapter can replay exactly. Chat Completions
+requires non-empty full reasoning; generic public Responses requires at least one
+provider-native opaque reasoning item and permits only its non-empty full display
+companion. Private ChatGPT/Codex Responses does not acquire this authority.
 
 The durable authority chain is
 `provider.response_finished(plan)` → exact trusted internal steer → matching

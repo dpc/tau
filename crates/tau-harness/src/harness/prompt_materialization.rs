@@ -507,6 +507,7 @@ impl Harness {
                     reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
                     resume_through: *resume_through,
                     context_retreat: None,
+                    incomplete_response: None,
                 })
             }),
             path_crate_agent::ActivationDispatchState::DispatchUncertain {
@@ -617,6 +618,7 @@ impl Harness {
                     reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
                     resume_through: *resume_through,
                     context_retreat: None,
+                    incomplete_response: None,
                 })
             }
             path_crate_agent::ActivationDispatchState::DispatchUncertain {

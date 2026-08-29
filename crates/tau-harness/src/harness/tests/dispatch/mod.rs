@@ -1770,6 +1770,7 @@ fn seed_historical_open_prefix_failure(
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: Some(results),
             context_retreat: None,
+            incomplete_response: None,
         }),
     );
     (prefix, assistant, results)
@@ -2747,6 +2748,7 @@ mod compaction_failure_recovery;
 mod compaction_generation_negative;
 mod compaction_reactive_rolling;
 mod compaction_runtime_state;
+mod compaction_standalone_rejections;
 mod compaction_strict;
 mod compaction_threshold;
 mod configuration;

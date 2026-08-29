@@ -46,6 +46,8 @@ pub(crate) enum StandaloneCompactionRejection {
     ContextWindowExceeded,
     /// The provider did not report a completed terminal turn.
     InvalidStop,
+    /// The provider exhausted its output-token budget.
+    OutputLengthExceeded,
     /// The provider did not return an acceptable replacement window.
     InvalidWindow,
 }
@@ -58,6 +60,9 @@ impl StandaloneCompactionRejection {
             Self::ProviderError => tau_proto::StandaloneCompactionFailureReason::ProviderError,
             Self::ContextWindowExceeded => {
                 tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
+            }
+            Self::OutputLengthExceeded => {
+                tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded
             }
             Self::InvalidStop | Self::InvalidWindow => {
                 tau_proto::StandaloneCompactionFailureReason::InvalidWindow

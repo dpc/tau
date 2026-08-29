@@ -1397,6 +1397,7 @@ impl Harness {
                         reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
                         resume_through,
                         context_retreat: None,
+                        incomplete_response: None,
                     },
                 ),
                 Some(AgentPublishCompletion::OwedCompactionFact {

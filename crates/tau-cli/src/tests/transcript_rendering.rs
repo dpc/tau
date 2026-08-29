@@ -1119,6 +1119,7 @@ fn standalone_compaction_terminals_clear_hidden_watched_activity() {
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: None,
             context_retreat: None,
+            incomplete_response: None,
         },
     ));
     sync(&handle);
@@ -1976,6 +1977,7 @@ fn standalone_compaction_terminal_failures_clear_private_progress() {
             reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
             resume_through: None,
             context_retreat: None,
+            incomplete_response: None,
         },
     ));
     sync(&handle);

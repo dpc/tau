@@ -182,7 +182,7 @@ pub(super) async fn stream(
                 if qualifying_progress {
                     deadlines.renew_for_qualifying_progress(Instant::now());
                 }
-                if state.terminal {
+                if state.terminal.is_some() {
                     return Ok(state);
                 }
             }
@@ -301,6 +301,9 @@ async fn send_bounded(
 fn provider_terminal_error(event: &Value) -> Option<Error> {
     let ty = event.get("type").and_then(Value::as_str)?;
     if !matches!(ty, "error" | "response.failed" | "response.incomplete") {
+        return None;
+    }
+    if ty == "response.incomplete" && super::incomplete_reason(event) == Some("max_output_tokens") {
         return None;
     }
     let status = event

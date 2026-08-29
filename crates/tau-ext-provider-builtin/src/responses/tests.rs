@@ -4,6 +4,32 @@ use std::{io as path_std_io, time as path_std_time};
 use super::sampling::ResponsesResponseSampler;
 use super::*;
 
+/// Generic public Responses reports must carry the distinct full-replay backend
+/// kind so private Codex cannot acquire their continuation authority.
+#[test]
+fn finished_response_uses_public_responses_backend_kind() {
+    let prompt = crate::openai_tests::prompt();
+    let provider = ResponsesProvider {
+        base_url: "https://api.openai.com/v1".to_owned(),
+        ..ResponsesProvider::default()
+    };
+    let response = finished(
+        &prompt.agent_prompt_id,
+        &prompt,
+        &provider,
+        Vec::new(),
+        tau_proto::ProviderStopReason::Length,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(
+        response.backend.expect("backend").kind,
+        tau_proto::ProviderBackendKind::PublicResponses
+    );
+}
+
 /// Generic Responses local summaries expose byte/timing progress without
 /// exposing assistant or reasoning output before terminal validation.
 #[test]

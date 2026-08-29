@@ -1557,6 +1557,7 @@ fn representative_events() -> Vec<Event> {
             reason: StandaloneCompactionFailureReason::InvalidWindow,
             resume_through: Some(AgentHead::Node(NodeId::new(1))),
             context_retreat: None,
+            incomplete_response: None,
         }),
         Event::AgentInferenceDispatchStarted(AgentInferenceDispatchStarted {
             agent_id: agent_id("engineer_abcd1234"),
@@ -4915,6 +4916,55 @@ fn context_limit_telemetry_json_and_cbor_round_trip() {
         ciborium::from_reader::<ContextLimitTelemetry, _>(cbor.as_slice())
             .expect("missing CBOR field decodes"),
         telemetry
+    );
+}
+
+/// The durable standalone output-limit projection must preserve every approved
+/// accounting and inspection field across both journal encodings.
+#[test]
+fn standalone_compaction_incomplete_round_trips_in_json_and_cbor() {
+    let failed = AgentStandaloneCompactionFailed {
+        agent_id: agent_id("agent-incomplete"),
+        transaction_id: CompactionTransactionId::parse("ct-incomplete").expect("transaction"),
+        cut: AgentHead::Node(NodeId::new(7)),
+        reason: StandaloneCompactionFailureReason::OutputLengthExceeded,
+        resume_through: Some(AgentHead::Node(NodeId::new(6))),
+        context_retreat: None,
+        incomplete_response: Some(Box::new(StandaloneCompactionIncomplete {
+            agent_prompt_id: test_agent_prompt_id("ap-incomplete"),
+            output_items: vec![ContextItem::Reasoning(
+                OpaqueProviderItem::from_raw_json(
+                    r#"{"type":"reasoning","id":"rs_1","summary":[],"content":[{"type":"reasoning_text","text":"partial"}]}"#,
+                )
+                .expect("opaque reasoning"),
+            )],
+            usage: Some(ProviderTokenUsage {
+                prompt_sent_tokens: 17,
+                response_received_tokens: 9,
+                ..Default::default()
+            }),
+            provider_response_id: Some("resp-incomplete".to_owned()),
+            provider_attempt: ProviderAttempt::new(3).expect("attempt"),
+            backend: ProviderBackend {
+                kind: ProviderBackendKind::PublicResponses,
+                base_url: "https://api.openai.com/v1".to_owned(),
+                transport: ProviderBackendTransport::Websocket,
+                stale_chain_fallback: false,
+            },
+        })),
+    };
+
+    let json = serde_json::to_value(&failed).expect("JSON encode");
+    assert_eq!(
+        serde_json::from_value::<AgentStandaloneCompactionFailed>(json).expect("JSON decode"),
+        failed
+    );
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&failed, &mut cbor).expect("CBOR encode");
+    assert_eq!(
+        ciborium::from_reader::<AgentStandaloneCompactionFailed, _>(cbor.as_slice())
+            .expect("CBOR decode"),
+        failed
     );
 }
 

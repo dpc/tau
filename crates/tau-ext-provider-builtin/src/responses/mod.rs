@@ -332,21 +332,36 @@ pub fn run_prompt_attempt<W: std::io::Write>(
     match outcome {
         tau_provider_responses::AttemptOutcome::Completed(mut success) => {
             if let Some(config) = summary_config.filter(|_| compact_prompt.is_some()) {
-                if success.stop_reason != tau_proto::ProviderStopReason::EndTurn {
-                    return invalid_compaction(
-                        agent_prompt_id,
-                        prompt,
-                        provider,
-                        "summary compactor did not complete its output",
-                    );
+                match success.stop_reason {
+                    tau_proto::ProviderStopReason::EndTurn => {
+                        success.output_items =
+                            match validate_responses_narrative_output(success.output_items, config)
+                            {
+                                Ok(output) => vec![output],
+                                Err(error) => {
+                                    return invalid_compaction(
+                                        agent_prompt_id,
+                                        prompt,
+                                        provider,
+                                        &error,
+                                    );
+                                }
+                            };
+                    }
+                    tau_proto::ProviderStopReason::Length => {
+                        // Preserve the incomplete terminal unchanged. The
+                        // harness records it outside
+                        // context and closes the transaction.
+                    }
+                    _ => {
+                        return invalid_compaction(
+                            agent_prompt_id,
+                            prompt,
+                            provider,
+                            "summary compactor did not complete its output",
+                        );
+                    }
                 }
-                success.output_items =
-                    match validate_responses_narrative_output(success.output_items, config) {
-                        Ok(output) => vec![output],
-                        Err(error) => {
-                            return invalid_compaction(agent_prompt_id, prompt, provider, &error);
-                        }
-                    };
             }
             sampler.latest_items = success.progress_items;
             sampler.latest_bytes = success.response_bytes_received;
@@ -549,7 +564,7 @@ fn finished(
         compaction_original_input_tokens: None,
         compaction_output_tokens: None,
         backend: Some(tau_proto::ProviderBackend {
-            kind: tau_proto::ProviderBackendKind::Responses,
+            kind: tau_proto::ProviderBackendKind::PublicResponses,
             base_url: provider.base_url.clone(),
             transport: backend_transport(provider),
             stale_chain_fallback: false,

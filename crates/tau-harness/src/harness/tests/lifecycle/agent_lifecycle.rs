@@ -3331,8 +3331,8 @@ fn earlier_gated_terminal_cannot_claim_later_prompt_cancellation() {
     );
 }
 
-/// Replay eligibility is limited to ordinary user work on the exact adapter
-/// whose retained reasoning representation is known to be replay-safe.
+/// Replay eligibility rejects side conversations and adapter/representation
+/// mismatches even when a neighboring reasoning shape looks replayable.
 #[test]
 fn reasoning_only_length_rejects_other_adapters_and_side_conversations() {
     let cases = [
@@ -3420,12 +3420,11 @@ fn reasoning_only_length_rejects_other_adapters_and_side_conversations() {
     }
 }
 
-/// Eligibility for the one replay-safe continuation is exact: only ordinary
-/// user Chat Completions inference with non-empty Full reasoning and no
-/// assistant message or tool call may plan a successor. Every other Length
-/// remains a visible semantic failure without reserving or dispatching
-/// anything, and no non-Inference operation or adapter becomes replay
-/// authority.
+/// Eligibility for the one replay-safe continuation is exact: ordinary user
+/// inference needs either Chat Completions Full reasoning or public Responses
+/// opaque reasoning, with no assistant message or tool call. Every other
+/// Length remains a visible semantic failure without reserving or dispatching
+/// anything, and no non-Inference operation becomes replay authority.
 #[test]
 fn output_length_eligibility_matrix_is_exact() {
     struct Case {
@@ -3441,6 +3440,12 @@ fn output_length_eligibility_matrix_is_exact() {
     }
     let chat = || tau_proto::ProviderBackend {
         kind: tau_proto::ProviderBackendKind::ChatCompletions,
+        base_url: "https://example.invalid/v1".to_owned(),
+        transport: tau_proto::ProviderBackendTransport::HttpSse,
+        stale_chain_fallback: false,
+    };
+    let responses = || tau_proto::ProviderBackend {
+        kind: tau_proto::ProviderBackendKind::PublicResponses,
         base_url: "https://example.invalid/v1".to_owned(),
         transport: tau_proto::ProviderBackendTransport::HttpSse,
         stale_chain_fallback: false,
@@ -3574,15 +3579,135 @@ fn output_length_eligibility_matrix_is_exact() {
             expect_plan: false,
         },
         Case {
-            name: "responses backend",
+            name: "responses backend with mismatched full text reasoning",
             output_items: vec![full_reasoning.clone()],
+            stop_reason: tau_proto::ProviderStopReason::Length,
+            error: None,
+            failure_kind: None,
+            backend: Some(responses()),
+            originator: tau_proto::PromptOriginator::User,
+            operation: None,
+            expect_plan: false,
+        },
+        Case {
+            name: "responses plain reasoning",
+            output_items: vec![
+                ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+                    kind: tau_proto::ReasoningTextKind::Full,
+                    text: "retained reasoning".to_owned(),
+                }),
+                ContextItem::Reasoning(
+                    tau_proto::OpaqueProviderItem::from_raw_json(
+                        r#"{"type":"reasoning","id":"rs_eligible","summary":[],"content":[{"type":"reasoning_text","text":"retained reasoning"}]}"#,
+                    )
+                    .expect("valid plain reasoning"),
+                ),
+            ],
+            stop_reason: tau_proto::ProviderStopReason::Length,
+            error: None,
+            failure_kind: None,
+            backend: Some(responses()),
+            originator: tau_proto::PromptOriginator::User,
+            operation: None,
+            expect_plan: true,
+        },
+        Case {
+            name: "public responses reasoning with prose",
+            output_items: vec![
+                ContextItem::Reasoning(
+                    tau_proto::OpaqueProviderItem::from_raw_json(
+                        r#"{"type":"reasoning","id":"rs_mixed","summary":[],"content":[{"type":"reasoning_text","text":"retained reasoning"}]}"#,
+                    )
+                    .expect("valid opaque reasoning"),
+                ),
+                ContextItem::Message(MessageItem {
+                    role: tau_proto::ContextRole::Assistant,
+                    content: vec![tau_proto::ContentPart::Text {
+                        text: "partial prose".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                }),
+            ],
+            stop_reason: tau_proto::ProviderStopReason::Length,
+            error: None,
+            failure_kind: None,
+            backend: Some(responses()),
+            originator: tau_proto::PromptOriginator::User,
+            operation: None,
+            expect_plan: false,
+        },
+        Case {
+            name: "public responses encrypted reasoning",
+            output_items: vec![ContextItem::Reasoning(
+                tau_proto::OpaqueProviderItem::from_raw_json(
+                    r#"{"type":"reasoning","id":"rs_encrypted","encrypted_content":"opaque","content":[]}"#,
+                )
+                .expect("valid opaque item"),
+            )],
+            stop_reason: tau_proto::ProviderStopReason::Length,
+            error: None,
+            failure_kind: None,
+            backend: Some(responses()),
+            originator: tau_proto::PromptOriginator::User,
+            operation: None,
+            expect_plan: false,
+        },
+        Case {
+            name: "public responses summary-only reasoning",
+            output_items: vec![ContextItem::Reasoning(
+                tau_proto::OpaqueProviderItem::from_raw_json(
+                    r#"{"type":"reasoning","id":"rs_summary","summary":[{"type":"summary_text","text":"summary"}],"content":[]}"#,
+                )
+                .expect("valid opaque item"),
+            )],
+            stop_reason: tau_proto::ProviderStopReason::Length,
+            error: None,
+            failure_kind: None,
+            backend: Some(responses()),
+            originator: tau_proto::PromptOriginator::User,
+            operation: None,
+            expect_plan: false,
+        },
+        Case {
+            name: "public responses reasoning with unknown provider item",
+            output_items: vec![
+                ContextItem::Reasoning(
+                    tau_proto::OpaqueProviderItem::from_raw_json(
+                        r#"{"type":"reasoning","id":"rs_unknown_peer","summary":[],"content":[{"type":"reasoning_text","text":"retained reasoning"}]}"#,
+                    )
+                    .expect("valid plain reasoning"),
+                ),
+                ContextItem::UnknownProviderItem(
+                    tau_proto::OpaqueProviderItem::from_raw_json(
+                        r#"{"type":"future_output","value":"not reasoning"}"#,
+                    )
+                    .expect("valid unknown item"),
+                ),
+            ],
+            stop_reason: tau_proto::ProviderStopReason::Length,
+            error: None,
+            failure_kind: None,
+            backend: Some(responses()),
+            originator: tau_proto::PromptOriginator::User,
+            operation: None,
+            expect_plan: false,
+        },
+        Case {
+            name: "private responses opaque reasoning",
+            output_items: vec![ContextItem::Reasoning(
+                tau_proto::OpaqueProviderItem::from_raw_json(
+                    r#"{"type":"reasoning","id":"rs_private","encrypted_content":"opaque"}"#,
+                )
+                .expect("valid opaque reasoning"),
+            )],
             stop_reason: tau_proto::ProviderStopReason::Length,
             error: None,
             failure_kind: None,
             backend: Some(tau_proto::ProviderBackend {
                 kind: tau_proto::ProviderBackendKind::Responses,
-                base_url: "https://example.invalid/v1".to_owned(),
-                transport: tau_proto::ProviderBackendTransport::HttpSse,
+                base_url: "https://chatgpt.com/backend-api".to_owned(),
+                transport: tau_proto::ProviderBackendTransport::Websocket,
                 stale_chain_fallback: false,
             }),
             originator: tau_proto::PromptOriginator::User,
@@ -3719,6 +3844,14 @@ fn output_length_eligibility_matrix_is_exact() {
             "row {index} ({}) must not register a pending call",
             case.name
         );
+        let records = h
+            .session_runtime
+            .agent_store
+            .agent_events(source.agent_id.as_str())
+            .expect("durable events")
+            .to_vec();
+        tau_core::AgentTree::try_from_events(source.agent_id.clone(), &records)
+            .unwrap_or_else(|error| panic!("row {index} ({}) cold replay: {error}", case.name));
         h.shutdown().expect("shutdown");
     }
 }

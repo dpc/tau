@@ -59,6 +59,43 @@ fn terminal_error_extracts_status_and_nested_codes() {
     assert_eq!(code.len(), 128);
 }
 
+/// The WebSocket pre-parser must pass only the exact max-output incomplete
+/// terminal to the shared assembler; unknown incomplete reasons remain errors.
+#[test]
+fn max_output_incomplete_bypasses_websocket_error_classification_only() {
+    let max_output = serde_json::json!({
+        "type": "response.incomplete",
+        "incomplete_details": {"reason": "content_filter"},
+        "response": {
+            "incomplete_details": {"reason": "max_output_tokens"}
+        }
+    });
+    assert!(provider_terminal_error(&max_output).is_none());
+
+    let unknown = serde_json::json!({
+        "type": "response.incomplete",
+        "response": {
+            "incomplete_details": {"reason": "content_filter"}
+        }
+    });
+    assert!(matches!(
+        provider_terminal_error(&unknown),
+        Some(Error::Provider { .. })
+    ));
+
+    let top_level_only = serde_json::json!({
+        "type": "response.incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "response": {
+            "incomplete_details": {"reason": "content_filter"}
+        }
+    });
+    assert!(matches!(
+        provider_terminal_error(&top_level_only),
+        Some(Error::Provider { .. })
+    ));
+}
+
 /// A server may not negotiate extensions or subprotocols the client did not
 /// offer; accepting either would bypass tungstenite's normal handshake
 /// validation because Tau performs the HTTP upgrade through reqwest.

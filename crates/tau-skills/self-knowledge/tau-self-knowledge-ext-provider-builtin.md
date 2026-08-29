@@ -196,6 +196,16 @@ Retries reconnect and replay the full local transcript; they do not reuse
 connection-local `previous_response_id` state. This public Responses mode is not
 OpenAI Realtime.
 
+Public Responses SSE and WebSocket attempts classify only exact nested
+`response.incomplete_details.reason: "max_output_tokens"` as output-length
+incompletion. Tau preserves validated partial prose, reasoning, usage, and the
+nested response id but never retries the unchanged request or executes a
+truncated Function call. Replay-safe plain reasoning-only output may use the
+existing single bounded continuation. Standalone summary compaction retains the
+partial terminal outside context for accounting and inspection, never installs
+it as a replacement window, and never retries it automatically. Other
+incomplete reasons remain provider failures.
+
 Each `responses.models[]` entry can set `efforts` to an exact set of supported
 reasoning levels. Omission uses `[off, minimal, low, medium, high, xhigh, max]`;
 an explicit empty list disables the control. Non-empty overrides reject

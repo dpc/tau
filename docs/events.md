@@ -938,8 +938,12 @@ terminal silently no-op. See
   explicit recovery by a normalized successor; their immutable events are not
   rewritten.
 - **`agent.standalone_compaction_failed`** — Harness-owned terminal transaction
-  failure with a safe categorical reason and retained resume obligation. Raw
-  provider diagnostics are deliberately excluded.
+  failure with a safe categorical reason and retained resume obligation. A
+  public Responses output-limit failure also retains its typed partial output,
+  usage, response id, attempt, and backend in a non-context projection; replay
+  requires the matching `output_length_exceeded` reason and never treats that
+  projection as a replacement window. Raw provider
+  diagnostics are deliberately excluded.
 - **`agent.inference_dispatch_started`** — Durable checkpoint committed before
   provider inference dispatch. Its `through` head acknowledges only activation
   nodes represented by that immutable prompt snapshot. A checkpoint without a

@@ -1269,6 +1269,7 @@ impl Harness {
             reason,
             resume_through: Some(checkpoint.through),
             context_retreat: None,
+            incomplete_response: None,
         };
         self.publish_event_for_agent_with_completion(
             cid,
@@ -1459,6 +1460,17 @@ impl Harness {
             return ProviderTerminalPlan::StandaloneCompaction(
                 StandaloneCompactionTerminalPlan::Rejected(
                     StandaloneCompactionRejection::ProviderError,
+                ),
+            );
+        }
+        if response.stop_reason == ProviderStopReason::Length
+            && response.backend.as_ref().is_some_and(|backend| {
+                backend.kind == tau_proto::ProviderBackendKind::PublicResponses
+            })
+        {
+            return ProviderTerminalPlan::StandaloneCompaction(
+                StandaloneCompactionTerminalPlan::Rejected(
+                    StandaloneCompactionRejection::OutputLengthExceeded,
                 ),
             );
         }
@@ -1756,6 +1768,10 @@ impl Harness {
                 "provider returned a non-terminal standalone compaction stop for agent_prompt_id={}",
                 response.agent_prompt_id
             )),
+            StandaloneCompactionRejection::OutputLengthExceeded => self.emit_info(&format!(
+                "provider exhausted standalone compaction output for agent_prompt_id={}",
+                response.agent_prompt_id
+            )),
             StandaloneCompactionRejection::InvalidWindow => self.emit_info(&format!(
                 "provider returned an invalid standalone compaction window for agent_prompt_id={}",
                 response.agent_prompt_id
@@ -1950,6 +1966,15 @@ impl Harness {
         let batch_parent = self
             .selected_head_for_agent(cid)
             .unwrap_or(tau_proto::AgentHead::Root);
+        let final_reason = if reason
+            == tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
+            && retreat_plan.is_none()
+            && automatic_context_irreducible
+        {
+            tau_proto::StandaloneCompactionFailureReason::ContextIrreducible
+        } else {
+            reason
+        };
         self.publish_event_for_agent_with_completion(
             cid,
             source,
@@ -1957,17 +1982,29 @@ impl Harness {
                 agent_id: response.agent_id.clone(),
                 transaction_id,
                 cut,
-                reason: if reason
-                    == tau_proto::StandaloneCompactionFailureReason::ContextWindowExceeded
-                    && retreat_plan.is_none()
-                    && automatic_context_irreducible
-                {
-                    tau_proto::StandaloneCompactionFailureReason::ContextIrreducible
-                } else {
-                    reason
-                },
+                reason: final_reason,
                 resume_through,
                 context_retreat: retreat_plan,
+                incomplete_response: response
+                    .backend
+                    .as_ref()
+                    .filter(|backend| {
+                        final_reason
+                            == tau_proto::StandaloneCompactionFailureReason::OutputLengthExceeded
+                            && response.stop_reason == ProviderStopReason::Length
+                            && backend.kind == tau_proto::ProviderBackendKind::PublicResponses
+                    })
+                    .cloned()
+                    .map(|backend| {
+                        Box::new(tau_proto::StandaloneCompactionIncomplete {
+                            agent_prompt_id: response.agent_prompt_id.clone(),
+                            output_items: response.output_items.clone(),
+                            usage: response.usage.clone(),
+                            provider_response_id: response.provider_response_id.clone(),
+                            provider_attempt: response.provider_attempt,
+                            backend,
+                        })
+                    }),
             }),
             Some(AgentPublishCompletion::OwedCompactionFact {
                 batch_parent,
@@ -3281,10 +3318,13 @@ impl Harness {
                 };
             return;
         }
-        let replay_safe_adapter = response
-            .backend
-            .as_ref()
-            .is_some_and(|backend| backend.kind == tau_proto::ProviderBackendKind::ChatCompletions);
+        let replay_safe_adapter = response.backend.as_ref().is_some_and(|backend| {
+            matches!(
+                backend.kind,
+                tau_proto::ProviderBackendKind::ChatCompletions
+                    | tau_proto::ProviderBackendKind::PublicResponses
+            )
+        });
         let ordinary_user_conversation = self
             .agent_runtime
             .agent_registry
@@ -3298,19 +3338,7 @@ impl Harness {
             || response.error.is_some()
             || response.failure_kind.is_some()
             || requested_tool_calls
-            || response
-                .output_items
-                .iter()
-                .any(|item| matches!(item, ContextItem::Message(_) | ContextItem::ToolCall(_)))
-            || !response.output_items.iter().any(|item| {
-                matches!(
-                    item,
-                    ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
-                        kind: tau_proto::ReasoningTextKind::Full,
-                        text,
-                    }) if !text.is_empty()
-                )
-            })
+            || !response.has_replay_safe_reasoning_only_output()
         {
             return;
         }

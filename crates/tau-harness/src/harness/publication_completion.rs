@@ -2880,6 +2880,7 @@ impl Harness {
                                     reason,
                                     resume_through: started.resume_through,
                                     context_retreat: None,
+                                    incomplete_response: None,
                                 },
                             ),
                             Some(AgentPublishCompletion::OwedCompactionFact {
@@ -2902,6 +2903,7 @@ impl Harness {
                                     reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
                                     resume_through: started.resume_through,
                                     context_retreat: None,
+                                    incomplete_response: None,
                                 },
                             ),
                             Some(AgentPublishCompletion::OwedCompactionFact {
@@ -2945,6 +2947,7 @@ impl Harness {
                                 reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
                                 resume_through: started.resume_through,
                                 context_retreat: None,
+                                incomplete_response: None,
                             },
                         ),
                     );

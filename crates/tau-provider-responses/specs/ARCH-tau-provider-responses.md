@@ -3,6 +3,9 @@
 `tau-provider-responses` owns one finite API-key HTTP/SSE or WebSocket attempt
 for the generic public Responses protocol. It is separate from both the generic Chat
 Completions backend and the private ChatGPT/Codex WebSocket backend.
+Canonical response metadata identifies it as `PublicResponses`; the legacy
+`Responses` backend kind remains private ChatGPT/Codex and cannot acquire public
+full-replay continuation authority.
 
 Standalone local-summary sampling exposes only bounded content-free response
 statistics and existing status/activity signals while the complete output shape remains unvalidated. The backend
@@ -39,6 +42,19 @@ replaces streamed slots in array/index order while retaining exact raw item
 sidecars; a terminal without that array accepts only a contiguous accumulated
 sequence. Invalid indices, gaps, and non-array terminal output fail the finite
 attempt rather than inventing an order.
+
+Canonical `response.incomplete` with exact reason `max_output_tokens` completes
+the finite attempt as `ProviderStopReason::Length`. Both transports reconcile
+and preserve validated partial output, terminal usage, and response identity;
+the extension never retries the unchanged request. Ordinary inference retains
+partial prose, suppresses truncated tool execution through the shared Length
+terminal policy, and may use the single existing continuation only for
+provider-native replay-safe reasoning-only output. Standalone local-summary
+compaction records the incomplete response outside transcript context, never
+accepts its partial narrative as a replacement window, and never retries it
+automatically. Every other incomplete reason remains a provider failure. The
+cross-component continuation and compaction contract is governed by
+[`SPEC-compaction-and-context-recovery`](../../../specs/SPEC-compaction-and-context-recovery.md).
 
 When the extension enables durable-session provider diagnostics, the adapter
 selects the existing HTTP/SSE or WebSocket capture class. HTTP/SSE records the
