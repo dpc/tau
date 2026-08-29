@@ -1,7 +1,136 @@
-use std::sync::{Arc, atomic as path_std_sync_atomic};
+use std::sync::{Arc, atomic as path_std_sync_atomic, mpsc as path_std_sync_mpsc};
 use std::{io as path_std_io, net as path_std_net, sync as path_std_sync, time as path_std_time};
 
 use super::*;
+
+/// Test cancellation source that reports when admission has entered its
+/// mutex-protected pre-state check.
+struct AdmissionEntered(path_std_sync_mpsc::Sender<()>);
+
+impl TurnAbort for AdmissionEntered {
+    fn is_aborted(&mut self) -> bool {
+        self.0.send(()).expect("admission observer");
+        false
+    }
+
+    fn register_waker(
+        &mut self,
+        _waker: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Box<dyn TurnAbortWaker> {
+        Box::new(NeverAbortWaker)
+    }
+}
+
+/// A fresh runtime must not create capability evidence or contact the provider
+/// until compaction explicitly asks for admission.
+#[test]
+fn compact_admission_does_not_probe_proactively() {
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+
+    assert!(
+        runtime
+            .compact_routes
+            .states
+            .lock()
+            .expect("compact admission lock")
+            .is_empty()
+    );
+}
+
+/// Negative evidence remains authoritative for an unchanged credential/account
+/// identity and admits no new probe.
+#[test]
+fn compact_admission_retains_unchanged_identity_rejection() {
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let identity = InferenceProfileIdentity(11);
+    assert!(runtime.mark_compact_route_unavailable(identity));
+
+    assert!(matches!(
+        runtime.acquire_compact_probe(identity, &mut NeverAbort),
+        CompactAdmissionResult::Unavailable
+    ));
+}
+
+/// Rotating credential/account identity invalidates only the stale generation:
+/// the old identity stays negative while the new identity owns one fresh probe.
+#[test]
+fn compact_admission_changed_identity_gets_one_fresh_probe() {
+    let runtime = CodexRuntime::new(Arc::new(crate::test_network_policy()));
+    let stale = InferenceProfileIdentity(21);
+    let fresh = InferenceProfileIdentity(22);
+    assert!(runtime.mark_compact_route_unavailable(stale));
+
+    let CompactAdmissionResult::Probe(probe) =
+        runtime.acquire_compact_probe(fresh, &mut NeverAbort)
+    else {
+        panic!("fresh identity must own one probe");
+    };
+    assert!(matches!(
+        runtime.acquire_compact_probe(stale, &mut NeverAbort),
+        CompactAdmissionResult::Unavailable
+    ));
+    probe.complete(CompactRouteState::Available);
+}
+
+/// Concurrent requests for one fresh identity wait behind the first probe and
+/// all become admitted after its successful capability result.
+#[test]
+fn compact_admission_coalesces_successful_concurrent_requests() {
+    let runtime = Arc::new(CodexRuntime::new(Arc::new(crate::test_network_policy())));
+    let identity = InferenceProfileIdentity(31);
+    let CompactAdmissionResult::Probe(probe) =
+        runtime.acquire_compact_probe(identity, &mut NeverAbort)
+    else {
+        panic!("first request must own the probe");
+    };
+    let waiter_runtime = Arc::clone(&runtime);
+    let (entered_tx, entered_rx) = path_std_sync_mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        matches!(
+            waiter_runtime.acquire_compact_probe(identity, &mut AdmissionEntered(entered_tx)),
+            CompactAdmissionResult::Admitted
+        )
+    });
+
+    entered_rx.recv().expect("waiter entered compact admission");
+    probe.complete(CompactRouteState::Available);
+
+    assert!(waiter.join().expect("compact waiter"));
+    assert!(matches!(
+        runtime.acquire_compact_probe(identity, &mut NeverAbort),
+        CompactAdmissionResult::Admitted
+    ));
+}
+
+/// A compaction-specific rejection publishes one negative result to every
+/// waiter, so no waiter can start a redundant probe for that generation.
+#[test]
+fn compact_admission_coalesces_rejection_for_all_waiters() {
+    let runtime = Arc::new(CodexRuntime::new(Arc::new(crate::test_network_policy())));
+    let identity = InferenceProfileIdentity(41);
+    let CompactAdmissionResult::Probe(probe) =
+        runtime.acquire_compact_probe(identity, &mut NeverAbort)
+    else {
+        panic!("first request must own the probe");
+    };
+    let waiter_runtime = Arc::clone(&runtime);
+    let (entered_tx, entered_rx) = path_std_sync_mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        matches!(
+            waiter_runtime.acquire_compact_probe(identity, &mut AdmissionEntered(entered_tx)),
+            CompactAdmissionResult::Unavailable
+        )
+    });
+
+    entered_rx.recv().expect("waiter entered compact admission");
+    probe.complete(CompactRouteState::Unavailable);
+
+    assert!(waiter.join().expect("compact waiter"));
+    assert!(matches!(
+        runtime.acquire_compact_probe(identity, &mut NeverAbort),
+        CompactAdmissionResult::Unavailable
+    ));
+}
 
 /// Ensures the enabled real Codex response producer submits typed response
 /// metadata through the shared compressed-capture boundary.

@@ -1252,6 +1252,7 @@ fn provider_model_info(
         ],
         supports_compaction: false,
         supports_standalone_compaction: false,
+        standalone_compaction_generation_negative: false,
         standalone_compaction_threshold: None,
         standalone_compaction_prefix_budget: Some(tau_proto::ByteCount::new(u64::MAX)),
         cache_policy: None,
@@ -1624,6 +1625,7 @@ pub(super) fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
             supports_compaction: true,
             supports_standalone_compaction: false,
+            standalone_compaction_generation_negative: false,
             standalone_compaction_threshold: None,
             standalone_compaction_prefix_budget: Some(tau_proto::ByteCount::new(u64::MAX)),
             cache_policy: None,
@@ -2742,6 +2744,7 @@ mod cancellation_and_background;
 mod compaction;
 mod compaction_agent_scope;
 mod compaction_failure_recovery;
+mod compaction_generation_negative;
 mod compaction_reactive_rolling;
 mod compaction_runtime_state;
 mod compaction_strict;

@@ -145,6 +145,11 @@ omitted. A newest-first 256,000-byte text budget retains complete groups and
 middle-truncates at most one boundary message; images and audio in retained
 messages do not consume this budget. Invalid output installs nothing. Raw
 provider sidecars remain intact through durable replacement and cold replay.
+The runtime retains compaction-specific rejection only for the exact resolved
+credential/account identity. It serializes the first request for each fresh
+identity and shares that capability result with concurrent requests. A changed
+identity can therefore probe once without clearing any other generation; an
+unchanged rejected identity returns locally, and idle runtimes never poll.
 Completed opaque reasoning, compaction, and unknown output retains its exact
 raw item JSON together with the equivalent structured value. Stream decoding
 rejects a completed opaque item when the raw item slice is unavailable, and

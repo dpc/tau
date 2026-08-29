@@ -481,6 +481,7 @@ fn model_snapshot(capabilities: FakeModelCapabilities) -> ProviderModelsDeclared
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
             supports_standalone_compaction: capabilities.standalone_compaction,
+            standalone_compaction_generation_negative: false,
             standalone_compaction_threshold: None,
             standalone_compaction_prefix_budget: capabilities
                 .standalone_compaction

@@ -1509,6 +1509,7 @@ fn quiet_provider_harness_for_with_start_reason_and_storage_mode(
                         thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
                         supports_compaction: true,
                         supports_standalone_compaction: false,
+                        standalone_compaction_generation_negative: false,
                         standalone_compaction_threshold: None,
                         standalone_compaction_prefix_budget: Some(tau_proto::ByteCount::new(
                             u64::MAX,

@@ -61,6 +61,14 @@ restart, and different namespaces may select different modes. The selected
 Codex surface is constrained by
 [GATE-tau-provider-codex-responses-surface-selection](../../tau-provider-codex/specs/GATE-tau-provider-codex-responses-surface-selection.md).
 
+For ChatGPT routes, model publication distinguishes a route that never supports
+standalone compaction from generation-scoped negative capability evidence.
+Automatic scheduling stops for either state. An explicit compaction remains
+admissible for the latter state so normal prompt-time credential resolution can
+compare the current identity; unchanged identity fails locally, while changed
+identity reaches the Codex runtime's single fresh generation probe. The
+extension performs no capability polling or model-refresh loop.
+
 The main runtime loop owns ChatGPT quota profile epochs and reconciliation.
 Prompt workers only report normalized observations through the worker channel;
 quota failures neither delay inference nor consume prompt retry budget. This

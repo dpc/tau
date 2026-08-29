@@ -165,6 +165,7 @@ fn write_startup(
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
                 supports_compaction: false,
                 supports_standalone_compaction: true,
+                standalone_compaction_generation_negative: false,
                 standalone_compaction_threshold: Some(tau_proto::TokenCount::new(100)),
                 standalone_compaction_prefix_budget: Some(tau_proto::ByteCount::new(u64::MAX)),
                 cache_policy: None,

@@ -167,8 +167,18 @@ inference deliberately retains its unbounded transient-retry policy.
 The Codex adapter serializes the first v2 compaction probe for a route/account
 generation. A compaction-specific request rejection removes standalone
 capability for that generation; explicit tools and automatic recovery share the
-downgrade. Credential/account generation changes reject stale observations and
-restore one fresh probe. Negative capability evidence is not persisted.
+downgrade. The provider publishes that generation-negative state separately
+from routes that never support standalone compaction. Automatic compaction
+treats it as unavailable, while an explicit `:compact`, `compact`, or authorized
+`agent_compact` request may ask the provider to refresh the credential/account
+identity. An unchanged identity retains the negative observation without a
+network probe. A changed identity invalidates only the stale observation and
+admits one serialized fresh probe for the new generation; concurrent explicit
+requests coalesce behind its capability result, then each successful waiter may
+compact its own context. A compaction-specific rejection marks the new
+generation negative and fails every waiter without redundant probes. Identity
+refresh is request-driven: no proactive polling, unrelated inference, or model
+republication is required. Negative capability evidence is not persisted.
 An explicit `:compact` or authorized `agent_compact` request may recover a
 terminally failed standalone transaction. Its successor may preserve the
 failed cut or retreat it along the same ancestor path to obtain a closed

@@ -235,6 +235,7 @@ pub fn models_for_provider(
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
                 supports_compaction: false,
                 supports_standalone_compaction: resolved_summary_config(model).is_some(),
+                standalone_compaction_generation_negative: false,
                 standalone_compaction_threshold: None,
                 standalone_compaction_prefix_budget: resolved_summary_config(model)
                     .and_then(SummaryCompactionConfig::max_input_bytes),

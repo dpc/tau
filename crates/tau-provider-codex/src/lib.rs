@@ -1353,6 +1353,7 @@ fn model_info(
         ],
         supports_compaction: !is_gpt_5_6(model),
         supports_standalone_compaction: is_gpt_5_6(model),
+        standalone_compaction_generation_negative: false,
         standalone_compaction_threshold: is_gpt_5_6(model)
             .then_some(GPT_5_6_STANDALONE_COMPACTION_TOKEN_THRESHOLD),
         standalone_compaction_prefix_budget: None,

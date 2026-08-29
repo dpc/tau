@@ -60,6 +60,7 @@ fn provider_models_declaration(model: &str, context_window: u64) -> Event {
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
             supports_compaction: false,
             supports_standalone_compaction: false,
+            standalone_compaction_generation_negative: false,
             standalone_compaction_threshold: None,
             standalone_compaction_prefix_budget: None,
             cache_policy: None,

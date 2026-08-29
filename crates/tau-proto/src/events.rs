@@ -3240,6 +3240,12 @@ pub struct ProviderModelInfo {
     /// operation, independently of inline context management.
     #[serde(default)]
     pub supports_standalone_compaction: bool,
+    /// Whether this route normally supports standalone compaction but has
+    /// generation-scoped negative capability evidence. Explicit compaction may
+    /// ask the provider to refresh its credential/account identity; automatic
+    /// compaction must treat the route as unavailable.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub standalone_compaction_generation_negative: bool,
     /// Provider-recommended token threshold for harness-scheduled standalone
     /// compaction. `None` means no provider default is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3295,6 +3301,13 @@ where
 }
 
 impl ProviderModelInfo {
+    /// Returns whether an explicit compaction request may either dispatch now
+    /// or ask the provider to refresh generation-scoped negative evidence.
+    #[must_use]
+    pub fn supports_explicit_standalone_compaction(&self) -> bool {
+        self.supports_standalone_compaction || self.standalone_compaction_generation_negative
+    }
+
     /// Resolve explicit basic pricing, using the central GPT-5.6 equivalent for
     /// each omitted price.
     #[must_use]

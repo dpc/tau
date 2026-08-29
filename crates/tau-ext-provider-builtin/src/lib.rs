@@ -7666,8 +7666,10 @@ fn apply_compact_route_downgrades(
         if identities
             .get(&model.id.provider)
             .is_some_and(|identity| unavailable.contains(identity))
+            && model.supports_standalone_compaction
         {
             model.supports_standalone_compaction = false;
+            model.standalone_compaction_generation_negative = true;
             model.standalone_compaction_threshold = None;
         }
     }

@@ -47,6 +47,7 @@ pub fn models_for_provider(
                     model.context_window,
                 )
                 .is_some(),
+                standalone_compaction_generation_negative: false,
                 standalone_compaction_threshold: None,
                 standalone_compaction_prefix_budget: super::resolved_local_summary_compaction(
                     model.local_summary_compaction,

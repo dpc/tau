@@ -22,8 +22,8 @@ fn oauth_test_credential_reference() -> ProviderCredentialReference {
     .expect("valid OAuth credential reference")
 }
 
-/// A route downgrade must remove both standalone admission fields only from
-/// the affected provider's published model snapshot.
+/// A route downgrade must stop automatic compaction while preserving explicit
+/// identity-refresh admission only for the affected provider generation.
 #[test]
 fn compact_route_downgrade_republishes_honest_capability() {
     let unavailable = ProviderName::new("chatgpt");
@@ -41,15 +41,30 @@ fn compact_route_downgrade_republishes_honest_capability() {
     assert!(
         models
             .iter()
-            .filter(|model| model.id.provider == unavailable)
+            .filter(|model| {
+                model.id.provider == unavailable && model.id.model.as_str().starts_with("gpt-5.6-")
+            })
             .all(|model| !model.supports_standalone_compaction
+                && model.standalone_compaction_generation_negative
+                && model.supports_explicit_standalone_compaction()
                 && model.standalone_compaction_threshold.is_none())
+    );
+    assert!(
+        models
+            .iter()
+            .filter(|model| {
+                model.id.provider == unavailable && !model.id.model.as_str().starts_with("gpt-5.6-")
+            })
+            .all(|model| !model.supports_standalone_compaction
+                && !model.standalone_compaction_generation_negative
+                && !model.supports_explicit_standalone_compaction())
     );
     assert!(
         models
             .iter()
             .filter(|model| model.id.provider == available)
             .any(|model| model.supports_standalone_compaction
+                && !model.standalone_compaction_generation_negative
                 && model.standalone_compaction_threshold.is_some())
     );
 }

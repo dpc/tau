@@ -149,13 +149,12 @@ impl Harness {
             }
             return;
         }
-        let standalone = self.model_for_agent_role(agent).filter(|model| {
-            self.provider_runtime
-                .model_info
-                .get(model)
-                .is_some_and(|info| info.supports_standalone_compaction)
-                && self.provider_runtime.model_routes.contains_key(model)
-        });
+        let standalone =
+            self.model_for_agent_role(agent).filter(|model| {
+                self.provider_runtime.model_info.get(model).is_some_and(
+                    tau_proto::ProviderModelInfo::supports_explicit_standalone_compaction,
+                ) && self.provider_runtime.model_routes.contains_key(model)
+            });
         if standalone.is_none() {
             if matches!(turn_state, AgentTurnState::Idle)
                 && matches!(
@@ -466,7 +465,7 @@ impl Harness {
             self.provider_runtime
                 .model_info
                 .get(model)
-                .is_some_and(|info| info.supports_standalone_compaction)
+                .is_some_and(tau_proto::ProviderModelInfo::supports_explicit_standalone_compaction)
         });
         if let Some(model) = standalone_model {
             let current_head = conv
@@ -687,13 +686,13 @@ impl Harness {
             );
             return;
         }
-        let Some(model) = self.model_for_agent_role(target).filter(|model| {
-            self.provider_runtime
-                .model_info
-                .get(model)
-                .is_some_and(|info| info.supports_standalone_compaction)
-                && self.provider_runtime.model_routes.contains_key(model)
-        }) else {
+        let Some(model) =
+            self.model_for_agent_role(target).filter(|model| {
+                self.provider_runtime.model_info.get(model).is_some_and(
+                    tau_proto::ProviderModelInfo::supports_explicit_standalone_compaction,
+                ) && self.provider_runtime.model_routes.contains_key(model)
+            })
+        else {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
                 call.id.clone(),
@@ -906,7 +905,7 @@ impl Harness {
             .provider_runtime
             .model_info
             .get(&accepted.request.model)
-            .is_some_and(|info| info.supports_standalone_compaction)
+            .is_some_and(tau_proto::ProviderModelInfo::supports_explicit_standalone_compaction)
         {
             self.fail_accepted_manual_compaction(
                 target_cid,
@@ -1145,7 +1144,9 @@ impl Harness {
         self.provider_runtime
             .model_info
             .get(&model)
-            .is_some_and(|info| info.supports_compaction || info.supports_standalone_compaction)
+            .is_some_and(|info| {
+                info.supports_compaction || info.supports_explicit_standalone_compaction()
+            })
     }
 
     /// Normalizes one provisional cut against the agent's durable transcript.

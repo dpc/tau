@@ -74,6 +74,7 @@ fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
         thinking_summaries: vec![ThinkingSummary::Off],
         supports_compaction: false,
         supports_standalone_compaction: false,
+        standalone_compaction_generation_negative: false,
         standalone_compaction_threshold: None,
         standalone_compaction_prefix_budget: None,
         cache_policy: None,
