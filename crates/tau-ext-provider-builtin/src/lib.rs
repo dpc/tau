@@ -32,6 +32,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use std::sync::TryLockError;
+
 pub use cache_contract::ProviderCacheContract;
 pub use chat_completions::{
     ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider,
@@ -4869,11 +4872,11 @@ impl SchedulerCommandSender {
         {
             match self.admission.try_lock() {
                 Ok(admission) => admission,
-                Err(std::sync::TryLockError::WouldBlock) => {
+                Err(TryLockError::WouldBlock) => {
                     let _ = blocked.send(());
                     self.admission.lock().expect("scheduler admission gate")
                 }
-                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
             }
         } else {
             self.admission.lock().expect("scheduler admission gate")
