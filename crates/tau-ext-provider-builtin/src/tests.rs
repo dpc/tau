@@ -1613,9 +1613,8 @@ fn credential_rotation_retains_shared_alias_compact_negative_evidence() {
             CredentialObservation::Contents(blake3::hash(b"shared")),
         ),
     ]);
-    let mut identities =
-        HashMap::from([(changed, identity.clone()), (unchanged, identity.clone())]);
-    let mut unavailable = HashSet::from([identity.clone()]);
+    let mut identities = HashMap::from([(changed, identity), (unchanged, identity)]);
+    let mut unavailable = HashSet::from([identity]);
 
     reconcile_compact_state_after_credential_changes(
         &previous,
