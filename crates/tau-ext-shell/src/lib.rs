@@ -2711,7 +2711,7 @@ fn discovery_skill_candidate(skill: tau_skills::Skill) -> DiscoverySkillCandidat
         .ok()
         .and_then(system_time_to_discovery_micros);
     DiscoverySkillCandidate {
-        name: skill.name.into(),
+        name: skill.name,
         description: skill.description,
         file_path,
         add_to_prompt: skill.add_to_prompt,

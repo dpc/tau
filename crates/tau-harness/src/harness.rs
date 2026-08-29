@@ -1038,7 +1038,7 @@ fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill
         .map(|skill| {
             let content = render_built_in_self_knowledge_content(&skill.name, skill.content);
             (
-                tau_proto::SkillName::from(skill.name),
+                skill.name,
                 DiscoveredSkill {
                     source_id: tau_proto::ConnectionId::parse(BUILT_IN_SKILLS_SOURCE_ID).expect(
                         "built-in skills source id must satisfy the connection identifier grammar",

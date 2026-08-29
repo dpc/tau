@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_yaml_ng::Value as YamlValue;
+use tau_proto::SkillName;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -27,7 +28,7 @@ use serde_yaml_ng::Value as YamlValue;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Skill {
     /// Validated skill name.
-    pub name: String,
+    pub name: SkillName,
     /// Short human-facing description from frontmatter.
     pub description: String,
     /// Path to the Markdown skill file.
@@ -72,7 +73,7 @@ pub struct SkillDir {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuiltInSkill {
     /// Validated skill name from frontmatter.
-    pub name: String,
+    pub name: SkillName,
     /// Validated and possibly truncated description from frontmatter.
     pub description: String,
     /// Full Markdown source included into the binary at build time,
@@ -707,7 +708,7 @@ pub fn load_skill_from_content(
     }
 
     let skill = Skill {
-        name,
+        name: SkillName::from(name),
         description,
         file_path: file_path.to_owned(),
         add_to_prompt,
@@ -1083,7 +1084,7 @@ fn load_skills_from_skill_dirs_with_limits(
     dirs: &[SkillDir],
     limits: DiscoveryLimits,
 ) -> LoadSkillsResult {
-    let mut skills_by_name: BTreeMap<String, SelectedSkill> = BTreeMap::new();
+    let mut skills_by_name: BTreeMap<SkillName, SelectedSkill> = BTreeMap::new();
     let mut all_diagnostics = Vec::new();
 
     for dir in dirs {

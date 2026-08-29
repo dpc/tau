@@ -6312,6 +6312,7 @@ name = "tau-skills"
 version = "0.1.0"
 dependencies = [
  "serde_yaml_ng",
+ "tau-proto",
  "tempfile",
 ]
 

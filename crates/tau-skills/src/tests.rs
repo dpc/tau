@@ -180,8 +180,10 @@ fn load_skill_truncates_long_description() {
     let path = Path::new("/skills/long-desc/SKILL.md");
     let (skill, diags) = load_skill_from_content(&content, path);
     let skill = skill.expect("should load");
-    assert_eq!(skill.description.len(), MAX_DESCRIPTION_LENGTH);
-    assert!(skill.description.ends_with('…'));
+    assert_eq!(
+        skill.description,
+        format!("{}…", "x".repeat(MAX_DESCRIPTION_LENGTH - "…".len()))
+    );
     assert!(
         diags
             .iter()
@@ -189,13 +191,25 @@ fn load_skill_truncates_long_description() {
     );
 }
 
+/// Ensures accepted frontmatter and directory fallback names remain the visible
+/// skill name after validation assigns their semantic type.
 #[test]
-fn load_skill_name_fallback_to_parent_dir() {
-    let content = "---\ndescription: Inferred name\n---\n";
-    let path = Path::new("/skills/inferred-name/SKILL.md");
-    let (skill, _diags) = load_skill_from_content(content, path);
-    let skill = skill.expect("should load");
-    assert_eq!(skill.name, "inferred-name");
+fn load_skill_visible_name_uses_frontmatter_or_skill_directory_fallback() {
+    for (content, path, expected_name) in [
+        (
+            "---\nname: frontmatter-name\ndescription: Explicit name\n---\n",
+            Path::new("/skills/other-directory/SKILL.md"),
+            "frontmatter-name",
+        ),
+        (
+            "---\ndescription: Inferred name\n---\n",
+            Path::new("/skills/inferred-name/SKILL.md"),
+            "inferred-name",
+        ),
+    ] {
+        let (skill, _diags) = load_skill_from_content(content, path);
+        assert_eq!(skill.expect("should load").name.as_str(), expected_name);
+    }
 }
 
 #[test]
@@ -380,9 +394,13 @@ fn load_skill_truncates_multibyte_argument_hint() {
     let (skill, diags) = load_skill_from_content(&content, path);
     let skill = skill.expect("should load");
     let hint = skill.argument_hint.expect("hint");
-    assert!(hint.len() <= MAX_ARGUMENT_HINT_LENGTH);
-    assert!(hint.is_char_boundary(hint.len()));
-    assert!(hint.ends_with('…'));
+    assert_eq!(
+        hint,
+        format!(
+            "{}…",
+            "é".repeat((MAX_ARGUMENT_HINT_LENGTH - "…".len()) / "é".len())
+        )
+    );
     assert_eq!(
         diags,
         [SkillDiagnostic {
@@ -712,6 +730,48 @@ fn load_from_dir_collision_newest_beats_path_sort() {
     assert_eq!(result.skills[0].description, "Second");
 }
 
+/// Ensures typed duplicate keys keep the previous winner and lexical output
+/// order, rather than inheriting traversal order from the filesystem.
+#[test]
+fn load_from_dirs_collision_winner_and_lexical_order_are_unchanged() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for (directory, name, description, modified) in [
+        ("alpha", "alpha", "Alpha", 1_700_000_000),
+        ("older-middle", "middle", "Older middle", 1_700_000_000),
+        ("newer-middle", "middle", "Newer middle", 1_700_000_100),
+        ("zulu", "zulu", "Zulu", 1_700_000_000),
+    ] {
+        let skill_dir = tmp.path().join(directory);
+        fs::create_dir_all(&skill_dir).expect("mkdir");
+        let path = skill_dir.join("SKILL.md");
+        fs::write(
+            &path,
+            format!("---\nname: {name}\ndescription: {description}\n---\n"),
+        )
+        .expect("write skill");
+        set_skill_mtime(&path, modified);
+    }
+
+    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    assert_eq!(
+        result
+            .skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha", "middle", "zulu"]
+    );
+    assert_eq!(result.skills[1].description, "Newer middle");
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.kind == DiagnosticKind::Collision)
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn load_from_dirs_reads_only_bounded_discovery_metadata_for_large_body() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -822,8 +882,11 @@ fn built_in_skill_sources_load_with_matching_frontmatter_names() {
         );
         let skill = skill.expect("embedded source must load");
         assert_eq!(
-            parse_frontmatter(&content).0.get("name"),
-            Some(&skill.name),
+            parse_frontmatter(&content)
+                .0
+                .get("name")
+                .map(String::as_str),
+            Some(skill.name.as_str()),
             "{}",
             source.diagnostic_path
         );
@@ -874,7 +937,7 @@ fn built_in_skill_root_indexes_exactly_the_focused_built_ins() {
     let focused_names: BTreeSet<&str> = skills
         .iter()
         .map(|skill| skill.name.as_str())
-        .filter(|name| *name != root.name)
+        .filter(|name| root.name != *name)
         .collect();
     let referenced_names: BTreeSet<&str> = root
         .content

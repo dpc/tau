@@ -193,7 +193,7 @@ fn hidden_repository_tool_verification_skills_load_by_exact_query() {
                 skill.name
             );
             InternalSkill {
-                name: skill.name,
+                name: skill.name.into_string(),
                 description: skill.description,
                 source: InternalSkillSource::File(skill.file_path),
             }
