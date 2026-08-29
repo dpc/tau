@@ -1473,8 +1473,24 @@ impl Harness {
 
     /// Inserts one automatic standalone compaction boundary before inference
     /// when the last accepted context usage reaches the role/model threshold.
+    #[cfg(test)]
     pub(crate) fn schedule_standalone_auto_compaction(&mut self, cid: &AgentId) -> bool {
-        self.schedule_standalone_auto_compaction_for_activation(cid, false, None)
+        self.schedule_standalone_auto_compaction_with_wake_view(cid, None)
+    }
+
+    /// Schedules automatic compaction using an existing selected-wake
+    /// projection.
+    pub(crate) fn schedule_standalone_auto_compaction_with_wake_view(
+        &mut self,
+        cid: &AgentId,
+        selected_wakes: Option<&super::selected_branch_wake_view::SelectedBranchWakeView>,
+    ) -> bool {
+        self.schedule_standalone_auto_compaction_for_activation_with_wake_view(
+            cid,
+            false,
+            None,
+            selected_wakes,
+        )
     }
 
     pub(super) fn schedule_standalone_auto_compaction_for_activation(
@@ -1482,6 +1498,22 @@ impl Harness {
         cid: &AgentId,
         committed_activation: bool,
         activation_cut: Option<tau_proto::AgentHead>,
+    ) -> bool {
+        self.schedule_standalone_auto_compaction_for_activation_with_wake_view(
+            cid,
+            committed_activation,
+            activation_cut,
+            None,
+        )
+    }
+
+    /// Schedules activation-aware compaction with one optional wake projection.
+    fn schedule_standalone_auto_compaction_for_activation_with_wake_view(
+        &mut self,
+        cid: &AgentId,
+        committed_activation: bool,
+        activation_cut: Option<tau_proto::AgentHead>,
+        selected_wakes: Option<&super::selected_branch_wake_view::SelectedBranchWakeView>,
     ) -> bool {
         let owed = self
             .agent_runtime
@@ -1528,6 +1560,7 @@ impl Harness {
             committed_activation,
             activation_cut,
             path_tau_config_settings::ContextPolicyPoint::BeforeInference,
+            selected_wakes,
         )
     }
 
@@ -1787,6 +1820,7 @@ impl Harness {
         committed_activation: bool,
         activation_cut: Option<tau_proto::AgentHead>,
         point: path_tau_config_settings::ContextPolicyPoint,
+        selected_wakes: Option<&super::selected_branch_wake_view::SelectedBranchWakeView>,
     ) -> bool {
         let Some(conv) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return false;
@@ -1929,9 +1963,20 @@ impl Harness {
         let resume_through = (committed_activation
             || !conv.dispatch.pending_message_wakes.is_empty())
         .then_some(selected_head);
-        let selected_message_cut = self.selected_message_activation_cut(cid);
+        let owned_selected_wakes;
+        let selected_wakes = if let Some(view) = selected_wakes {
+            Some(view)
+        } else {
+            owned_selected_wakes = self.selected_branch_wake_view(cid);
+            owned_selected_wakes.as_ref()
+        };
+        let selected_message_cut =
+            selected_wakes.and_then(|view| view.earliest_activation_cut(None));
         let activation_cut = if activation_cut.is_some() || selected_message_cut.is_some() {
-            let Some(cut) = self.earliest_activation_cut(cid, activation_cut) else {
+            let Some(cut) = selected_wakes.map_or_else(
+                || self.earliest_activation_cut(cid, activation_cut),
+                |view| view.earliest_activation_cut(activation_cut),
+            ) else {
                 return false;
             };
             Some(cut)

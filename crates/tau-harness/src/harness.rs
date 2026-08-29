@@ -1396,6 +1396,7 @@ mod publication_state;
 mod reactive_context_recovery_reducer;
 mod runtime_io_state;
 mod runtime_loop;
+mod selected_branch_wake_view;
 mod session_runtime;
 mod session_runtime_state;
 mod side_conversation_terminal_reducer;

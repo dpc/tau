@@ -717,6 +717,269 @@ fn readiness_deferred_incomparable_activations_remain_distinct() {
     assert!(h.runtime_io.publication.idle_dispatches.is_empty());
 }
 
+/// Fixed-seed randomized queue and lifecycle states keep the streaming
+/// selector exactly equal to the previous collecting reference, including
+/// current encounter order and output-length priority.
+#[test]
+fn randomized_streaming_runnable_selection_matches_collecting_reference() {
+    fn owner_ready(index: usize) -> path_crate_agent::OutputLengthContinuationState {
+        let source_agent_prompt_id = test_agent_prompt_id(format!("scheduler-source-{index}"));
+        path_crate_agent::OutputLengthContinuationState::OwnerReady(
+            path_crate_agent::OutputLengthContinuationDispatch {
+                plan: path_crate_agent::OutputLengthContinuationPlan {
+                    agent_prompt_id: test_agent_prompt_id(format!("scheduler-successor-{index}")),
+                    owner: tau_proto::OutputLengthContinuationOwner {
+                        outer_turn_id: tau_proto::AgentOuterTurnId::for_prompt(
+                            &source_agent_prompt_id,
+                        ),
+                        source_agent_prompt_id,
+                        ordinal: 1,
+                    },
+                    dispatch: path_crate_agent::InferenceDispatchOwnership {
+                        model: tau_proto::ModelId::from("test/model"),
+                        operation: tau_proto::PromptOperation::Inference,
+                        activation_cut: tau_proto::AgentHead::Root,
+                    },
+                },
+                through: tau_proto::AgentHead::Root,
+            },
+        )
+    }
+
+    fn input(agent_id: tau_proto::AgentId, text: &str) -> Event {
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id,
+            text: text.to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        })
+    }
+
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let agents = (0..24)
+        .map(|_| {
+            h.create_durable_user_agent(
+                h.session_runtime.current_session_id.clone(),
+                &h.config.selected_role.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut branch_nodes = path_std_collections::HashMap::new();
+    for cid in &agents {
+        let agent_id = durable_agent_id_for_conversation(&h, cid);
+        h.publish_for_agent(cid, input(agent_id.clone(), "selected wake branch"));
+        let selected = h.agent_runtime.agent_registry.agents[cid]
+            .identity
+            .head
+            .expect("selected node");
+        h.publish_for_agent(
+            cid,
+            Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                agent_id: agent_id.clone(),
+                head: tau_proto::AgentHead::Root,
+            }),
+        );
+        h.publish_for_agent(cid, input(agent_id.clone(), "dormant wake branch"));
+        let dormant = h.agent_runtime.agent_registry.agents[cid]
+            .identity
+            .head
+            .expect("dormant node");
+        h.publish_for_agent(
+            cid,
+            Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                agent_id,
+                head: tau_proto::AgentHead::Node(selected),
+            }),
+        );
+        branch_nodes.insert(cid.clone(), (selected, dormant));
+    }
+    let mut random = 0xbb67_ae85_84ca_a73b_u64;
+
+    for case in 0_usize..256 {
+        let mut allowed = path_std_collections::HashSet::new();
+        for (index, cid) in agents.iter().enumerate() {
+            random = random
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let durable_agent_id = durable_agent_id_for_conversation(&h, cid);
+            let agent = h
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get_mut(cid)
+                .expect("agent");
+            agent.dispatch.pending_prompts.clear();
+            agent.dispatch.pending_message_wakes.clear();
+            let (selected, dormant) = branch_nodes[cid];
+            for (wake_index, node_id) in [
+                random.is_multiple_of(7).then_some(selected),
+                random.is_multiple_of(11).then_some(dormant),
+                random.is_multiple_of(13).then_some(selected),
+                None,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if node_id.is_some() || (wake_index == 3 && random.is_multiple_of(17)) {
+                    agent.dispatch.pending_message_wakes.push_back(
+                        path_crate_agent::PendingMessageWake {
+                            source: path_crate_agent::PendingMessageWakeSource::MessageFact {
+                                durable_event_seq: tau_core::PersistedAgentEventSeq::new(
+                                    (case * agents.len() + index + wake_index) as u64,
+                                ),
+                            },
+                            node_id,
+                            activation_observation: None,
+                            source_observation: None,
+                        },
+                    );
+                }
+            }
+            agent.dispatch.pending_replay_activation = random.is_multiple_of(13);
+            agent.dispatch.terminating = random.is_multiple_of(11);
+            agent.dispatch.activation_dispatch = path_crate_agent::ActivationDispatchState::None;
+            agent.turn.turn_state = if random.is_multiple_of(7) {
+                AgentTurnState::AgentThinking {
+                    agent_prompt_id: test_agent_prompt_id(format!("scheduler-busy-{case}-{index}")),
+                }
+            } else {
+                AgentTurnState::Idle
+            };
+            agent.turn.output_length_continuation = if random.is_multiple_of(17) {
+                owner_ready(index)
+            } else {
+                Default::default()
+            };
+            for prompt_index in 0..(random as usize % 5) {
+                let mut prompt = if (random >> prompt_index).is_multiple_of(3) {
+                    PendingPrompt::passive_background_completion(format!(
+                        "passive {case} {index} {prompt_index}"
+                    ))
+                } else {
+                    PendingPrompt::user(format!("active {case} {index} {prompt_index}"))
+                };
+                if !prompt.is_passive_background_completion()
+                    && (random >> (prompt_index + 5)).is_multiple_of(19)
+                {
+                    prompt.initial_prompt_correlation =
+                        Some(path_crate_agent::InitialPromptCorrelation {
+                            request_id: format!("request-{case}-{index}"),
+                            agent_id: durable_agent_id.clone(),
+                            ctx_id: format!("ctx-{case}-{index}"),
+                            activation_through: None,
+                        });
+                }
+                agent.dispatch.pending_prompts.push_back(prompt);
+            }
+            if !random.is_multiple_of(5) {
+                allowed.insert(cid.clone());
+            }
+        }
+        let allowed = case.is_multiple_of(2).then_some(&allowed);
+
+        let reference = {
+            let runnable =
+                h.agent_runtime
+                    .agent_registry
+                    .agents
+                    .iter()
+                    .filter_map(|(agent_id, conv)| {
+                        let non_passive = conv
+                            .dispatch
+                            .pending_prompts
+                            .iter()
+                            .enumerate()
+                            .find(|(_, prompt)| !prompt.is_passive_background_completion());
+                        let ready_message_wake = conv
+                            .identity
+                            .agent_id
+                            .as_deref()
+                            .and_then(|durable_id| h.session_runtime.agent_store.agent(durable_id))
+                            .is_some_and(|tree| {
+                                let branch = tree
+                                    .branch_node_ids_from(conv.identity.head)
+                                    .into_iter()
+                                    .collect::<path_std_collections::HashSet<_>>();
+                                conv.dispatch.pending_message_wakes.iter().any(|wake| {
+                                    wake.node_id.is_some_and(|node| branch.contains(&node))
+                                })
+                            });
+                        (allowed.is_none_or(|allowed| allowed.contains(agent_id))
+                            && (allowed.is_some()
+                                || !h
+                                    .runtime_io
+                                    .publication
+                                    .capacity_rejected_activations
+                                    .contains_key(agent_id))
+                            && (non_passive.is_some()
+                                || ready_message_wake
+                                || conv.dispatch.pending_replay_activation)
+                            && matches!(conv.turn.turn_state, AgentTurnState::Idle)
+                            && !conv.dispatch.terminating
+                            && matches!(
+                                conv.dispatch.activation_dispatch,
+                                path_crate_agent::ActivationDispatchState::None
+                            )
+                            && (non_passive.as_ref().is_none_or(|(_, prompt)| {
+                                prompt.initial_prompt_correlation.is_none()
+                            }) || h.agent_initialization_ready_for(agent_id))
+                            && !h.has_deferred_prompt_dispatch_for(agent_id)
+                            && !h.agent_has_open_foreground_tool_round(agent_id))
+                        .then(|| {
+                            let dispatch_ready_message_wake =
+                                non_passive.as_ref().is_none_or(|(_, prompt)| {
+                                    prompt.initial_prompt_correlation.is_none()
+                                }) && ready_message_wake;
+                            (
+                                agent_id.clone(),
+                                non_passive.map(|(index, prompt)| {
+                                    (index, prompt.initial_prompt_correlation.clone())
+                                }),
+                                dispatch_ready_message_wake,
+                                matches!(
+                                    conv.turn.output_length_continuation,
+                                    path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
+                                ),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+            runnable
+                .iter()
+                .find(|(_, _, _, owner)| *owner)
+                .or_else(|| runnable.first())
+                .cloned()
+        };
+
+        let (selected, work) = h.next_runnable_agent_measured(allowed);
+        assert_eq!(
+            selected.as_ref().map(|selection| (
+                selection.agent_id.clone(),
+                selection.prompt_index,
+                selection.initial_prompt_correlation.clone(),
+                selection.had_ready_message_wake,
+            )),
+            reference.map(|(agent_id, prompt, ready_message_wake, _)| (
+                agent_id,
+                prompt.as_ref().map(|(index, _)| *index),
+                prompt.and_then(|(_, correlation)| correlation),
+                ready_message_wake,
+            )),
+            "case {case}"
+        );
+        assert_eq!(work[6], usize::from(selected.is_some()));
+        assert_eq!(work[7], 0, "streaming selection allocates no candidate Vec");
+        assert!(work[0] <= agents.len());
+    }
+}
+
 /// Initial and post-tool normal/canceled terminals each own one durable outer
 /// finish and protected automatic-compaction start, with no retained
 /// completion.

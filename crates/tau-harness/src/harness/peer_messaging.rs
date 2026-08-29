@@ -3,6 +3,7 @@
 //! Durable fact publication and external receive commit continuations remain
 //! with the publication coordinator.
 
+use super::selected_branch_wake_view::{SelectedBranchWakeProbe, SelectedBranchWakeView};
 use super::*;
 
 /// Runtime-only authentication, delivery, and fair routing state for
@@ -408,23 +409,26 @@ impl Harness {
     /// Returns whether at least one materialized wake belongs to the selected
     /// branch. Off-branch wakes remain dormant until navigation reselects them.
     pub(crate) fn has_ready_message_wake_on_selected_branch(&self, cid: &AgentId) -> bool {
-        let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
-            return false;
-        };
-        let Some(agent_id) = agent.identity.agent_id.as_deref() else {
-            return false;
-        };
-        let Some(tree) = self.session_runtime.agent_store.agent(agent_id) else {
-            return false;
-        };
-        let branch: HashSet<_> = tree
-            .branch_node_ids_from(agent.identity.head)
-            .into_iter()
-            .collect();
-        agent.dispatch.pending_message_wakes.iter().any(|wake| {
-            wake.node_id
-                .is_some_and(|node_id| branch.contains(&node_id))
-        })
+        self.selected_branch_wake_view(cid)
+            .is_some_and(|view| view.has_ready_wake())
+    }
+
+    /// Probes readiness and reports exact transient branch/wake work.
+    pub(crate) fn selected_branch_wake_probe(
+        &self,
+        cid: &AgentId,
+    ) -> Option<SelectedBranchWakeProbe> {
+        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
+        let tree = agent
+            .identity
+            .agent_id
+            .as_deref()
+            .and_then(|agent_id| self.session_runtime.agent_store.agent(agent_id))?;
+        Some(SelectedBranchWakeView::probe_ready(
+            tree,
+            agent.identity.head,
+            &agent.dispatch.pending_message_wakes,
+        ))
     }
 
     /// Returns whether accepted message input should interrupt a newly
@@ -448,79 +452,22 @@ impl Harness {
             || self.has_ready_message_wake_on_selected_branch(cid)
     }
 
-    /// Returns the earliest materialized message wake on the selected branch.
-    ///
-    /// Branch order, rather than wake insertion order, defines the immutable
-    /// activation cut used by proactive and reactive compaction.
-    pub(crate) fn earliest_selected_message_wake_node(&self, cid: &AgentId) -> Option<NodeId> {
+    /// Builds one immutable projection of pending wakes onto the selected
+    /// branch.
+    pub(crate) fn selected_branch_wake_view(
+        &self,
+        cid: &AgentId,
+    ) -> Option<SelectedBranchWakeView> {
         let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
         let tree = self
             .session_runtime
             .agent_store
             .agent(agent.identity.agent_id.as_deref()?)?;
-        let wake_nodes: HashSet<_> = agent
-            .dispatch
-            .pending_message_wakes
-            .iter()
-            .filter_map(|wake| wake.node_id)
-            .collect();
-        tree.branch_node_ids_from(agent.identity.head)
-            .into_iter()
-            .find(|node_id| wake_nodes.contains(node_id))
-    }
-
-    /// Returns the parent of the earliest selected-branch message wake.
-    pub(crate) fn selected_message_activation_cut(
-        &self,
-        cid: &AgentId,
-    ) -> Option<tau_proto::AgentHead> {
-        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
-        let tree = self
-            .session_runtime
-            .agent_store
-            .agent(agent.identity.agent_id.as_deref()?)?;
-        let wake_node = tree.node(self.earliest_selected_message_wake_node(cid)?)?;
-        Some(
-            wake_node
-                .parent_id
-                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-        )
-    }
-
-    /// Classifies selected-branch wake work for lifecycle fanout suppression.
-    ///
-    /// Any ordinary input promotes a coalesced isolated-watch turn to ordinary
-    /// lifecycle.
-    pub(crate) fn selected_message_wake_activation_class(
-        &self,
-        cid: &AgentId,
-    ) -> Option<crate::agent::AgentMessageActivationClass> {
-        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
-        let agent_id = agent.identity.agent_id.as_deref()?;
-        let tree = self.session_runtime.agent_store.agent(agent_id)?;
-        let branch: HashSet<_> = tree
-            .branch_node_ids_from(agent.identity.head)
-            .into_iter()
-            .collect();
-        let mut classes = agent
-            .dispatch
-            .pending_message_wakes
-            .iter()
-            .filter(|wake| {
-                wake.node_id
-                    .is_some_and(|node_id| branch.contains(&node_id))
-            })
-            .map(|wake| wake.source.activation_class());
-        let first = classes.next()?;
-        if first == path_crate_agent::AgentMessageActivationClass::IsolatedWatchNotification
-            && classes.all(|class| {
-                class == path_crate_agent::AgentMessageActivationClass::IsolatedWatchNotification
-            })
-        {
-            Some(path_crate_agent::AgentMessageActivationClass::IsolatedWatchNotification)
-        } else {
-            Some(path_crate_agent::AgentMessageActivationClass::OrdinaryAgentInput)
-        }
+        Some(SelectedBranchWakeView::new(
+            tree,
+            agent.identity.head,
+            &agent.dispatch.pending_message_wakes,
+        ))
     }
 
     pub(super) fn preempt_queued_tool_calls_for_message_received(&mut self, cid: &AgentId) {

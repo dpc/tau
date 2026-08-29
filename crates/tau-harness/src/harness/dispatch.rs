@@ -23,13 +23,45 @@ use std::time::Instant;
 use tau_proto::{AgentId, Event, SessionId};
 
 use crate::agent as path_crate_agent;
-use crate::agent::{AgentTurnState, PendingPrompt};
+use crate::agent::{AgentTurnState, InitialPromptCorrelation, PendingPrompt};
 use crate::error::HarnessError;
 use crate::harness::{
     AgentPublishCompletion, Harness, InferenceDispatchSelectionError, prompt_acceptance_timing,
 };
 
 const NO_PROVIDER_MODELS_MESSAGE: &str = "No provider models are available. Run `tau provider list` to inspect provider status, then configure or enable a provider before submitting another prompt.";
+
+/// One streaming scheduler choice and its already-located non-passive prompt.
+pub(crate) struct RunnableAgentSelection {
+    /// Selected loaded-agent key in current hash-map encounter order.
+    pub(super) agent_id: AgentId,
+    /// Exact first non-passive queue position, when prompt work made it
+    /// runnable.
+    pub(super) prompt_index: Option<usize>,
+    /// Initial-prompt correlation cloned once from that exact queue entry.
+    pub(super) initial_prompt_correlation: Option<InitialPromptCorrelation>,
+    /// Whether the selection probe found a ready selected-branch wake.
+    pub(super) had_ready_message_wake: bool,
+}
+
+/// Exact streaming-selector work exposed to complexity regression tests.
+#[derive(Default)]
+struct RunnableSelectionWork {
+    /// Loaded agents visited in current encounter order.
+    agent_visits: usize,
+    /// Prompt queue entries inspected while locating first non-passive work.
+    prompt_visits: usize,
+    /// Linear selected-wake ancestry probes.
+    wake_probes: usize,
+    /// Wake records visited by readiness probes.
+    wake_visits: usize,
+    /// Branch nodes visited by readiness probes.
+    wake_branch_visits: usize,
+    /// Transient wake-membership buffers allocated by readiness probes.
+    wake_probe_buffers: usize,
+    /// Maximum candidate records retained concurrently.
+    high_retained_candidates: usize,
+}
 
 impl Harness {
     pub(crate) fn dispatch_user_prompt(
@@ -381,9 +413,10 @@ impl Harness {
                 self.reject_runnable_activations_without_provider_models(allowed);
                 return;
             }
-            let Some(agent_id) = self.next_runnable_agent(allowed) else {
+            let Some(selected) = self.next_runnable_agent(allowed) else {
                 break;
             };
+            let agent_id = selected.agent_id;
             let session_id = self
                 .agent_runtime
                 .agent_registry
@@ -400,19 +433,7 @@ impl Harness {
                 return;
             }
 
-            let has_ready_initial_prompt = self
-                .agent_runtime
-                .agent_registry
-                .agents
-                .get(&agent_id)
-                .is_some_and(|agent| {
-                    agent
-                        .dispatch
-                        .pending_prompts
-                        .iter()
-                        .find(|prompt| !prompt.is_passive_background_completion())
-                        .is_some_and(|prompt| prompt.initial_prompt_correlation.is_some())
-                });
+            let has_ready_initial_prompt = selected.initial_prompt_correlation.is_some();
             let has_durable_activation = !has_ready_initial_prompt
                 && self
                     .agent_runtime
@@ -420,8 +441,7 @@ impl Harness {
                     .agents
                     .get(&agent_id)
                     .is_some_and(|agent| {
-                        agent.dispatch.pending_replay_activation
-                            || self.has_ready_message_wake_on_selected_branch(&agent_id)
+                        agent.dispatch.pending_replay_activation || selected.had_ready_message_wake
                     });
             if has_durable_activation {
                 let _ = self.ensure_agent_id_for_agent(&agent_id);
@@ -440,6 +460,7 @@ impl Harness {
                     }
                     self.fold_pending_prompts_as_steered(&agent_id);
                 }
+                let selected_wakes = self.selected_branch_wake_view(&agent_id);
                 let output_length_owner_ready = self
                     .agent_runtime
                     .agent_registry
@@ -451,7 +472,11 @@ impl Harness {
                             path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
                         )
                     });
-                if !output_length_owner_ready && self.schedule_standalone_auto_compaction(&agent_id)
+                if !output_length_owner_ready
+                    && self.schedule_standalone_auto_compaction_with_wake_view(
+                        &agent_id,
+                        selected_wakes.as_ref(),
+                    )
                 {
                     continue;
                 }
@@ -460,8 +485,9 @@ impl Harness {
                 {
                     return;
                 }
-                if let Some(activation_class) =
-                    self.selected_message_wake_activation_class(&agent_id)
+                if let Some(activation_class) = selected_wakes
+                    .as_ref()
+                    .and_then(|view| view.activation_class())
                     && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&agent_id)
                 {
                     agent.turn.lifecycle_notification_only_turn = activation_class
@@ -487,9 +513,11 @@ impl Harness {
                             .map(tau_proto::AgentHead::Node)
                             .or(Some(tau_proto::AgentHead::Root))
                     });
-                let selection = match self
-                    .select_inference_dispatch(&agent_id, captured_activation_cut)
-                {
+                let selection = match self.select_inference_dispatch_with_wake_view(
+                    &agent_id,
+                    captured_activation_cut,
+                    selected_wakes.as_ref(),
+                ) {
                     Ok(selection) => selection,
                     Err(InferenceDispatchSelectionError::MissingModel) => {
                         let role_name = self.role_name_for_agent_id(&agent_id);
@@ -542,9 +570,9 @@ impl Harness {
             }
 
             let prompt = self
-                .pop_next_runnable_prompt(&agent_id)
+                .pop_runnable_prompt_at(&agent_id, selected.prompt_index)
                 .expect("runnable agent has a prompt");
-            let initial_prompt_correlation = prompt.initial_prompt_correlation.clone();
+            let initial_prompt_correlation = selected.initial_prompt_correlation;
             let prompt = match self.resolve_pending_user_skill_for_agent(&agent_id, prompt) {
                 Ok(prompt) => prompt,
                 Err(message) => {
@@ -708,64 +736,186 @@ impl Harness {
         }
     }
 
-    fn next_runnable_agent(&self, allowed: Option<&HashSet<AgentId>>) -> Option<AgentId> {
-        let runnable = self
-            .agent_runtime
-            .agent_registry
-            .agents
-            .iter()
-            .filter(|(agent_id, conv)| {
-                allowed.is_none_or(|allowed| allowed.contains(*agent_id))
-                    && (allowed.is_some()
-                        || !self
-                            .runtime_io
-                            .publication
-                            .capacity_rejected_activations
-                            .contains_key(*agent_id))
-                    && (conv
-                        .dispatch
-                        .pending_prompts
-                        .iter()
-                        .any(|prompt| !prompt.is_passive_background_completion())
-                        || self.has_ready_message_wake_on_selected_branch(agent_id)
-                        || conv.dispatch.pending_replay_activation)
-                    && matches!(conv.turn.turn_state, AgentTurnState::Idle)
-                    && !conv.dispatch.terminating
-                    && matches!(
-                        conv.dispatch.activation_dispatch,
-                        crate::agent::ActivationDispatchState::None
-                    )
-                    && (conv
-                        .dispatch
-                        .pending_prompts
-                        .iter()
-                        .find(|prompt| !prompt.is_passive_background_completion())
-                        .is_none_or(|prompt| prompt.initial_prompt_correlation.is_none())
-                        || self.agent_initialization_ready_for(agent_id))
-                    && !self.has_deferred_prompt_dispatch_for(agent_id)
-                    && !self.agent_has_open_foreground_tool_round(agent_id)
-            })
-            .collect::<Vec<_>>();
-        runnable
-            .iter()
-            .find(|(_, agent)| {
-                matches!(
-                    agent.turn.output_length_continuation,
-                    path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
-                )
-            })
-            .or_else(|| runnable.first())
-            .map(|(agent_id, _)| (*agent_id).clone())
+    fn next_runnable_agent(
+        &self,
+        allowed: Option<&HashSet<AgentId>>,
+    ) -> Option<RunnableAgentSelection> {
+        self.next_runnable_agent_inner::<false>(allowed, &mut RunnableSelectionWork::default())
     }
 
-    fn pop_next_runnable_prompt(&mut self, agent_id: &AgentId) -> Option<PendingPrompt> {
+    /// Runs the production selector with exact work accounting.
+    #[cfg(test)]
+    pub(crate) fn next_runnable_agent_measured(
+        &self,
+        allowed: Option<&HashSet<AgentId>>,
+    ) -> (Option<RunnableAgentSelection>, [usize; 8]) {
+        let mut work = RunnableSelectionWork::default();
+        let selected = self.next_runnable_agent_inner::<true>(allowed, &mut work);
+        (
+            selected,
+            [
+                work.agent_visits,
+                work.prompt_visits,
+                work.wake_probes,
+                work.wake_visits,
+                work.wake_branch_visits,
+                work.wake_probe_buffers,
+                work.high_retained_candidates,
+                0,
+            ],
+        )
+    }
+
+    /// Implements current-order selection without collecting runnable agents.
+    fn next_runnable_agent_inner<const MEASURE: bool>(
+        &self,
+        allowed: Option<&HashSet<AgentId>>,
+        work: &mut RunnableSelectionWork,
+    ) -> Option<RunnableAgentSelection> {
+        let mut first = None;
+        for (agent_id, conv) in &self.agent_runtime.agent_registry.agents {
+            if MEASURE {
+                work.agent_visits += 1;
+            }
+            if allowed.is_some_and(|allowed| !allowed.contains(agent_id))
+                || (allowed.is_none()
+                    && self
+                        .runtime_io
+                        .publication
+                        .capacity_rejected_activations
+                        .contains_key(agent_id))
+                || !matches!(conv.turn.turn_state, AgentTurnState::Idle)
+                || conv.dispatch.terminating
+                || !matches!(
+                    conv.dispatch.activation_dispatch,
+                    crate::agent::ActivationDispatchState::None
+                )
+                || self.has_deferred_prompt_dispatch_for(agent_id)
+                || self.agent_has_open_foreground_tool_round(agent_id)
+            {
+                continue;
+            }
+
+            let non_passive =
+                conv.dispatch
+                    .pending_prompts
+                    .iter()
+                    .enumerate()
+                    .find(|(_, prompt)| {
+                        if MEASURE {
+                            work.prompt_visits += 1;
+                        }
+                        !prompt.is_passive_background_completion()
+                    });
+            let prompt_index = non_passive.as_ref().map(|(index, _)| *index);
+            let initial_prompt_correlation = non_passive
+                .as_ref()
+                .and_then(|(_, prompt)| prompt.initial_prompt_correlation.as_ref());
+            if initial_prompt_correlation.is_some()
+                && !self.agent_initialization_ready_for(agent_id)
+            {
+                continue;
+            }
+            let had_ready_message_wake =
+                if prompt_index.is_none() && !conv.dispatch.pending_replay_activation {
+                    let probe = self.selected_branch_wake_probe(agent_id);
+                    if MEASURE {
+                        work.wake_probes += 1;
+                        if let Some(probe) = &probe {
+                            work.wake_visits += probe.wakes;
+                            work.wake_branch_visits += probe.branch_nodes;
+                            work.wake_probe_buffers += probe.owned_buffers;
+                        }
+                    }
+                    let ready = probe.is_some_and(|probe| probe.ready);
+                    if !ready {
+                        continue;
+                    }
+                    Some(true)
+                } else {
+                    None
+                };
+            let output_length_owner_ready = matches!(
+                conv.turn.output_length_continuation,
+                path_crate_agent::OutputLengthContinuationState::OwnerReady(_)
+            );
+            if output_length_owner_ready {
+                if MEASURE {
+                    work.high_retained_candidates = 1;
+                }
+                return Some(self.finish_runnable_selection::<MEASURE>(
+                    agent_id,
+                    prompt_index,
+                    initial_prompt_correlation,
+                    had_ready_message_wake,
+                    work,
+                ));
+            }
+            if first.is_none() {
+                first = Some((
+                    agent_id,
+                    prompt_index,
+                    initial_prompt_correlation,
+                    had_ready_message_wake,
+                ));
+                if MEASURE {
+                    work.high_retained_candidates = 1;
+                }
+            }
+        }
+        first.map(
+            |(agent_id, prompt_index, initial_prompt_correlation, had_ready_message_wake)| {
+                self.finish_runnable_selection::<MEASURE>(
+                    agent_id,
+                    prompt_index,
+                    initial_prompt_correlation,
+                    had_ready_message_wake,
+                    work,
+                )
+            },
+        )
+    }
+
+    /// Clones only the winner and resolves its deferred selected-wake probe.
+    fn finish_runnable_selection<const MEASURE: bool>(
+        &self,
+        agent_id: &AgentId,
+        prompt_index: Option<usize>,
+        initial_prompt_correlation: Option<&InitialPromptCorrelation>,
+        known_ready_message_wake: Option<bool>,
+        work: &mut RunnableSelectionWork,
+    ) -> RunnableAgentSelection {
+        let had_ready_message_wake = if initial_prompt_correlation.is_some() {
+            false
+        } else if let Some(ready) = known_ready_message_wake {
+            ready
+        } else {
+            let probe = self.selected_branch_wake_probe(agent_id);
+            if MEASURE {
+                work.wake_probes += 1;
+                if let Some(probe) = &probe {
+                    work.wake_visits += probe.wakes;
+                    work.wake_branch_visits += probe.branch_nodes;
+                    work.wake_probe_buffers += probe.owned_buffers;
+                }
+            }
+            probe.is_some_and(|probe| probe.ready)
+        };
+        RunnableAgentSelection {
+            agent_id: agent_id.clone(),
+            prompt_index,
+            initial_prompt_correlation: initial_prompt_correlation.cloned(),
+            had_ready_message_wake,
+        }
+    }
+
+    fn pop_runnable_prompt_at(
+        &mut self,
+        agent_id: &AgentId,
+        index: Option<usize>,
+    ) -> Option<PendingPrompt> {
         let conv = self.agent_runtime.agent_registry.agents.get_mut(agent_id)?;
-        let index = conv
-            .dispatch
-            .pending_prompts
-            .iter()
-            .position(|prompt| !prompt.is_passive_background_completion())?;
-        conv.dispatch.pending_prompts.remove(index)
+        conv.dispatch.pending_prompts.remove(index?)
     }
 
     /// Project one accepted durable-agent activation into its session's

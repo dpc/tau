@@ -3843,38 +3843,8 @@ impl Harness {
         cid: &AgentId,
         captured: Option<tau_proto::AgentHead>,
     ) -> Option<tau_proto::AgentHead> {
-        let message = self.selected_message_activation_cut(cid);
-        let (Some(captured), Some(message)) = (captured, message) else {
-            let selected = captured.or(message)?;
-            let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
-            let tree = self
-                .session_runtime
-                .agent_store
-                .agent(agent.identity.agent_id.as_deref()?)?;
-            let through = agent
-                .identity
-                .head
-                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-            return tree.is_ancestor_head(selected, through).then_some(selected);
-        };
-        let agent = self.agent_runtime.agent_registry.agents.get(cid)?;
-        let tree = self
-            .session_runtime
-            .agent_store
-            .agent(agent.identity.agent_id.as_deref()?)?;
-        let through = agent
-            .identity
-            .head
-            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
-        if !tree.is_ancestor_head(captured, through) || !tree.is_ancestor_head(message, through) {
-            None
-        } else if tree.is_ancestor_head(captured, message) {
-            Some(captured)
-        } else if tree.is_ancestor_head(message, captured) {
-            Some(message)
-        } else {
-            None
-        }
+        self.selected_branch_wake_view(cid)?
+            .earliest_activation_cut(captured)
     }
 
     /// Select one exact inference checkpoint for both ordinary and intercepted
@@ -3883,6 +3853,21 @@ impl Harness {
         &self,
         cid: &AgentId,
         captured_activation_cut: Option<tau_proto::AgentHead>,
+    ) -> Result<InferenceDispatchSelection, InferenceDispatchSelectionError> {
+        let selected_wakes = self.selected_branch_wake_view(cid);
+        self.select_inference_dispatch_with_wake_view(
+            cid,
+            captured_activation_cut,
+            selected_wakes.as_ref(),
+        )
+    }
+
+    /// Selects inference authority using one existing selected-wake projection.
+    pub(crate) fn select_inference_dispatch_with_wake_view(
+        &self,
+        cid: &AgentId,
+        captured_activation_cut: Option<tau_proto::AgentHead>,
+        selected_wakes: Option<&super::selected_branch_wake_view::SelectedBranchWakeView>,
     ) -> Result<InferenceDispatchSelection, InferenceDispatchSelectionError> {
         let agent = self
             .agent_runtime
@@ -3917,11 +3902,12 @@ impl Harness {
             .as_ref()
             .map(|continuation| continuation.plan.dispatch.activation_cut)
             .or_else(|| {
-                self.earliest_activation_cut(
-                    cid,
-                    captured_activation_cut
-                        .or_else(|| self.activation_cut_before_current_head(cid))
-                        .or(Some(tau_proto::AgentHead::Root)),
+                let captured = captured_activation_cut
+                    .or_else(|| self.activation_cut_before_current_head(cid))
+                    .or(Some(tau_proto::AgentHead::Root));
+                selected_wakes.map_or_else(
+                    || self.earliest_activation_cut(cid, captured),
+                    |view| view.earliest_activation_cut(captured),
                 )
             })
             .ok_or(InferenceDispatchSelectionError::MissingActivationCut)?;
