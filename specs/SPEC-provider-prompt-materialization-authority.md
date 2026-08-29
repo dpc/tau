@@ -1,4 +1,4 @@
-# SPEC-compact-prompt-materialization-authority: Compact prompt materialization
+# SPEC-provider-prompt-materialization-authority: Provider prompt materialization authority
 
 ## Record justification
 

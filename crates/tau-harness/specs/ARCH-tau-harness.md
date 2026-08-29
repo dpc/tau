@@ -157,7 +157,7 @@ Provider prompt materialization crosses the semantic-store and extension-route
 boundary: a durable dispatch owner permits one content-free prompt-start append,
 and only its write-complete post-commit continuation directs the transient full
 request to the selected provider. The authority and crash cuts are governed by
-[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
+[SPEC-provider-prompt-materialization-authority](../../../specs/SPEC-provider-prompt-materialization-authority.md).
 
 The harness is the sole process-local owner of disabled-by-default Provider
 cache refresh scheduling. It derives keyed exact-prefix identities and economic

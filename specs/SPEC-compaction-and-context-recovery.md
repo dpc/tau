@@ -335,7 +335,7 @@ watermark. Replay folds transaction outcomes and inference
 responses in core; an uncompleted checkpoint restores as dispatch-uncertain
 rather than being silently duplicated.
 This materialization gate is governed by
-[SPEC-compact-prompt-materialization-authority](SPEC-compact-prompt-materialization-authority.md).
+[SPEC-provider-prompt-materialization-authority](SPEC-provider-prompt-materialization-authority.md).
 
 If persistence rejects a completion-bearing steer after successful compaction,
 the harness retains the exact interceptor-approved failed event, untouched

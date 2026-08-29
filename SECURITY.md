@@ -397,7 +397,7 @@ cut never resends work. Persisted old full prompts are unsupported. Debug JSONL
 represents full prompts only as bounded content-free summaries. Re-check these cuts
 whenever prompt persistence, interception, replay, routing, or diagnostics change;
 see
-[SPEC-compact-prompt-materialization-authority](specs/SPEC-compact-prompt-materialization-authority.md)
+[SPEC-provider-prompt-materialization-authority](specs/SPEC-provider-prompt-materialization-authority.md)
 and
 [SPEC-tau-harness-prompt-dispatch](crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md).
 

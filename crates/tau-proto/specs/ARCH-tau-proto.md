@@ -83,7 +83,7 @@ Prompt lifecycle deliberately separates the durable, content-free
 `agent.prompt_started` authority fact from the transient, content-bearing
 `agent.prompt_created` provider request. Their ordering, replay, and compatibility
 contract is governed by
-[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
+[SPEC-provider-prompt-materialization-authority](../../../specs/SPEC-provider-prompt-materialization-authority.md).
 
 Transient `extension.internal_prompt_submit_request` carries optional
 `internal_prompt` or `timer` activation provenance. Absence preserves ordinary

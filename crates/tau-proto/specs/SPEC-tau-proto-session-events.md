@@ -165,7 +165,7 @@ from the matching prompt-start fact's live post-commit continuation and never
 enters semantic persistence. UI and observer lifecycle tracking should subscribe
 to `agent.prompt_started` instead of the full provider payload.
 This split is governed by
-[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
+[SPEC-provider-prompt-materialization-authority](../../../specs/SPEC-provider-prompt-materialization-authority.md).
 
 ## Prompt-draft scope
 

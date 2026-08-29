@@ -226,7 +226,7 @@ Any mismatch fails closed. Persisted full `agent.prompt_created` records are
 unsupported legacy data; operators must discard or reset those journals rather
 than relying on decoding compatibility or migration.
 This authority chain is governed by
-[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
+[SPEC-provider-prompt-materialization-authority](../../../specs/SPEC-provider-prompt-materialization-authority.md).
 
 Typed image bytes in provider tool results are never generic UI traffic. Live
 `provider.tool_result` delivery excludes UI clients; they receive the separate

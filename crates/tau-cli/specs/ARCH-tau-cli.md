@@ -13,7 +13,7 @@ only a fresh exact binding and trustworthy weekly timing permit colored pacing.
 Capability lasts for the running harness: a replayed empty snapshot after
 provider clear keeps live and late clients converged on neutral unknown.
 The lifecycle split is governed by
-[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
+[SPEC-provider-prompt-materialization-authority](../../../specs/SPEC-provider-prompt-materialization-authority.md).
 
 Terminal bells and OSC user-variable writes are live-only side effects. The CLI
 requests their event names only in its live selector set and independently drops

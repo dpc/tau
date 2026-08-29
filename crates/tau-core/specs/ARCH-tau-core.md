@@ -35,7 +35,7 @@ Agent journals accept one source-free `agent.prompt_started` only when it unique
 matches an unresolved durable inference or standalone-compaction owner; they
 reject persisted full prompts. This fold and dispatch-authority boundary is
 governed by
-[SPEC-compact-prompt-materialization-authority](../../../specs/SPEC-compact-prompt-materialization-authority.md).
+[SPEC-provider-prompt-materialization-authority](../../../specs/SPEC-provider-prompt-materialization-authority.md).
 
 Prompt facts are the canonical raw-text and typed-provenance authority. Folding
 preserves their `PromptSubmissionSource` in derived user-input entries; provider
