@@ -5,6 +5,8 @@
 //! Provider delta ordering and accumulation follow
 //! `SPEC-tau-cli-provider-stream-rendering`.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,6 +62,31 @@ const BLOCKER_TOOL_NAME: &str = "task_blocker";
 const TIMER_WAKEUP_CTX_PREFIX: &str = "timer:";
 static LAST_HANDLER_STALL_WARNING: std::sync::OnceLock<Mutex<Option<Instant>>> =
     path_std_sync::OnceLock::new();
+
+#[cfg(test)]
+type SubmittedPromptParserInputObserver = Box<dyn FnMut(&str)>;
+
+#[cfg(test)]
+thread_local! {
+    static SUBMITTED_PROMPT_PARSER_INPUT_OBSERVER: RefCell<Option<SubmittedPromptParserInputObserver>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_submitted_prompt_parser_input(body_text: &str) {
+    SUBMITTED_PROMPT_PARSER_INPUT_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow_mut().as_mut() {
+            observer(body_text);
+        }
+    });
+}
+
+#[cfg(test)]
+fn set_submitted_prompt_parser_input_observer_for_test(
+    observer: Option<SubmittedPromptParserInputObserver>,
+) {
+    SUBMITTED_PROMPT_PARSER_INPUT_OBSERVER.with(|slot| *slot.borrow_mut() = observer);
+}
 
 /// Canonical outcome that owns a terminal tool row's displayed status.
 #[derive(Clone, Copy)]
@@ -4547,17 +4574,23 @@ impl EventRenderer {
         }
     }
 
+    /// Parses a submitted prompt while borrowing its raw text.
+    ///
+    /// The caller retains or moves the raw string only when later queue
+    /// matching requires it; the Markdown renderer owns the resulting
+    /// styled text.
     fn submitted_prompt_block(
         &self,
         body_name: &str,
-        body_text: impl Into<String>,
+        body_text: &str,
     ) -> tau_cli_term::StyledBlock {
-        let body_text = body_text.into();
+        #[cfg(test)]
+        observe_submitted_prompt_parser_input(body_text);
         markdown_prompt_block_with_osc8(
             &self.resources.theme,
             body_name,
             format!("{} ", self.resources.submitted_prompt_symbol),
-            &body_text,
+            body_text,
             self.presentation.osc8_links,
         )
     }
@@ -6544,17 +6577,17 @@ impl EventRenderer {
                 tau_proto::PromptSubmissionSource::HumanUi
                     | tau_proto::PromptSubmissionSource::Legacy
             )
-            && let Some(queued) = queued.as_ref()
-            && let Some(queued_id) = queued.id
+            && let Some(queued_id) = queued.as_ref().and_then(|queued| queued.id)
         {
             use tau_themes::names;
             self.resources.handle.remove_block(queued_id);
             self.reset_main_tool_usage();
+            let queued = queued.expect("queued block supplied its identifier");
             let id = self.resources.handle.print_output(
                 "user-prompt",
-                self.submitted_prompt_block(names::USER_PROMPT, queued.text.clone()),
+                self.submitted_prompt_block(names::USER_PROMPT, &queued.text),
             );
-            self.transcript.runtime.last_user_block = Some((id, queued.text.clone()));
+            self.transcript.runtime.last_user_block = Some((id, queued.text));
             self.resources.handle.redraw();
             return;
         }
@@ -6767,14 +6800,14 @@ impl EventRenderer {
             self.reset_main_tool_usage();
             let id = self.resources.handle.print_output(
                 "user-prompt",
-                self.submitted_prompt_block(names::USER_PROMPT, queued.text.clone()),
+                self.submitted_prompt_block(names::USER_PROMPT, &queued.text),
             );
             self.transcript.runtime.last_user_block = Some((id, queued.text));
             self.resources.handle.redraw();
             return;
         }
         self.reset_main_tool_usage();
-        let block = self.submitted_prompt_block(names::USER_PROMPT, text.to_owned());
+        let block = self.submitted_prompt_block(names::USER_PROMPT, text);
         let id = self.resources.handle.print_output("user-prompt", block);
         self.transcript.runtime.last_user_block = Some((id, text.to_owned()));
     }
@@ -6911,7 +6944,7 @@ impl EventRenderer {
                 .remove_block(queued.id.expect("matched queued user prompt owns a block"));
             self.resources.handle.print_output(
                 "user-prompt-steered",
-                self.submitted_prompt_block(names::USER_PROMPT, queued.text),
+                self.submitted_prompt_block(names::USER_PROMPT, &queued.text),
             );
             self.resources.handle.redraw();
             return;
@@ -6932,7 +6965,7 @@ impl EventRenderer {
         // the user still sees their message land.
         self.resources.handle.print_output(
             "user-prompt-steered",
-            self.submitted_prompt_block(names::USER_PROMPT, steered.text.clone()),
+            self.submitted_prompt_block(names::USER_PROMPT, &steered.text),
         );
         self.resources.handle.redraw();
     }
@@ -7360,7 +7393,7 @@ impl EventRenderer {
             self.resources.handle.remove_block(queued_id);
             self.resources.handle.print_output(
                 label,
-                self.submitted_prompt_block(names::USER_PROMPT, queued.text),
+                self.submitted_prompt_block(names::USER_PROMPT, &queued.text),
             );
         }
     }

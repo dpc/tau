@@ -1,6 +1,9 @@
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync as path_std_sync;
 use std::sync::atomic as path_std_sync_atomic;
+use std::time::Instant;
 
 use tau_cli_term_raw::Term;
 use tau_config::settings as path_tau_config_settings;
@@ -29,6 +32,161 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
         tau_cli_term::CompletionData::new(),
         crate::tests::cli_test_theme(),
     )
+}
+
+/// Submitted prompts must parse the caller's borrowed text and produce the
+/// same styled block as the former temporary-owned parser input for every
+/// supported prompt shape, OSC 8 mode, and built-in theme.
+#[test]
+fn submitted_prompt_parsing_borrows_raw_text_without_changing_styled_output() {
+    let cases = [
+        "",
+        "plain prompt",
+        "# heading\n*strong* and `code`",
+        "Zażółć gęślą jaźń 👋",
+        "[Tau](https://tau-agent.dev/guide)",
+    ];
+
+    for theme_name in tau_themes::theme::BUILTIN_THEME_NAMES {
+        let theme =
+            tau_themes::Theme::builtin_named(theme_name).expect("registered built-in theme");
+        for osc8_links in [false, true] {
+            let mut renderer = super::EventRenderer::new(
+                tau_cli_term_raw::Term::new_virtual(
+                    80,
+                    24,
+                    "> ",
+                    Box::new(std::io::sink()),
+                    tau_cli_term::CursorShape::Bar,
+                )
+                .1,
+                tau_cli_term::CompletionData::new(),
+                theme.clone(),
+            );
+            renderer.presentation.osc8_links = osc8_links;
+
+            for text in cases {
+                let previous_parser_input = text.to_owned();
+                let parser_input_pointer = Rc::new(Cell::new(std::ptr::null()));
+                let parser_input_length = Rc::new(Cell::new(0));
+                let observed_pointer = Rc::clone(&parser_input_pointer);
+                let observed_length = Rc::clone(&parser_input_length);
+                super::set_submitted_prompt_parser_input_observer_for_test(Some(Box::new(
+                    move |parser_input| {
+                        observed_pointer.set(parser_input.as_ptr());
+                        observed_length.set(parser_input.len());
+                    },
+                )));
+                let expected = crate::markdown_render::markdown_prompt_block_with_osc8(
+                    &theme,
+                    tau_themes::names::USER_PROMPT,
+                    format!("{} ", renderer.resources.submitted_prompt_symbol),
+                    &previous_parser_input,
+                    osc8_links,
+                );
+                let actual = renderer.submitted_prompt_block(tau_themes::names::USER_PROMPT, text);
+                super::set_submitted_prompt_parser_input_observer_for_test(None);
+
+                assert_eq!(
+                    parser_input_pointer.get(),
+                    text.as_ptr(),
+                    "parser must borrow rather than clone text={text:?}"
+                );
+                assert_eq!(parser_input_length.get(), text.len());
+                assert_eq!(
+                    actual, expected,
+                    "theme={theme_name}, text={text:?}, osc8_links={osc8_links}"
+                );
+            }
+        }
+    }
+}
+
+/// Promoting a queued submitted prompt must move its exact raw match state
+/// after parsing rather than retaining a second full prompt allocation.
+#[test]
+fn promoted_submitted_prompt_retains_the_queued_raw_text_allocation() {
+    let mut renderer = renderer_for_agent_id_tests();
+    let queued = tau_proto::AgentPromptQueued {
+        agent_id: agent_id("main"),
+        text: "[link](https://tau-agent.dev/) Zażółć".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+    };
+    renderer.handle_agent_prompt_queued(&queued);
+    let queued_pointer = renderer
+        .transcript
+        .runtime
+        .queued_user_blocks
+        .front()
+        .expect("queued raw match state")
+        .text
+        .as_ptr();
+
+    renderer.handle_agent_prompt_submitted(&tau_proto::AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: agent_id("main"),
+        text: queued.text.clone(),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+        display_name: None,
+        ctx_id: None,
+    });
+
+    let retained = renderer
+        .transcript
+        .runtime
+        .last_user_block
+        .as_ref()
+        .expect("promoted raw match state");
+    assert_eq!(retained.1, queued.text);
+    assert_eq!(
+        retained.1.as_ptr(),
+        queued_pointer,
+        "the parser must borrow queued raw text and move it into exact-match state"
+    );
+}
+
+/// This manual benchmark reports submitted-prompt parse work without treating
+/// elapsed time as a correctness threshold.
+#[test]
+#[ignore = "manual submitted-prompt allocation benchmark"]
+fn benchmark_submitted_prompt_borrowed_parser_input() {
+    let renderer = renderer_for_agent_id_tests();
+    let text = format!(
+        "# prompt\n{}\n",
+        "[Tau](https://tau-agent.dev/) ".repeat(256)
+    );
+    let started = Instant::now();
+    let parser_input_full_copies = Rc::new(Cell::new(0));
+    let parser_input_copy_bytes = Rc::new(Cell::new(0));
+    let observed_full_copies = Rc::clone(&parser_input_full_copies);
+    let observed_copy_bytes = Rc::clone(&parser_input_copy_bytes);
+    let text_pointer = text.as_ptr();
+    super::set_submitted_prompt_parser_input_observer_for_test(Some(Box::new(
+        move |parser_input| {
+            if parser_input.as_ptr() != text_pointer {
+                observed_full_copies.set(observed_full_copies.get() + 1);
+                observed_copy_bytes.set(observed_copy_bytes.get() + parser_input.len());
+            }
+        },
+    )));
+    for _ in 0..100 {
+        let block = renderer.submitted_prompt_block(tau_themes::names::USER_PROMPT, &text);
+        std::hint::black_box(block);
+    }
+    super::set_submitted_prompt_parser_input_observer_for_test(None);
+    let previous_parser_input_copy_bytes = text.len() * 100;
+    eprintln!(
+        "submitted-prompt benchmark: parser_input=borrowed input_bytes={} iterations=100 parser_input_full_copies={} parser_input_copy_bytes={} previous_parser_input_copy_bytes={previous_parser_input_copy_bytes} avoided_parser_input_copy_bytes={} elapsed={:?}; no timing threshold",
+        text.len(),
+        parser_input_full_copies.get(),
+        parser_input_copy_bytes.get(),
+        previous_parser_input_copy_bytes.saturating_sub(parser_input_copy_bytes.get()),
+        started.elapsed()
+    );
 }
 
 use tau_cli_term::RendererDeliveryId;
