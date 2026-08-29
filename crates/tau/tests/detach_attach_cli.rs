@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use rustix_openpty::rustix::termios::Winsize;
@@ -227,7 +228,9 @@ impl PtyChild {
 
 /// `:detach` from the CLI-owned initial transport must return promptly while
 /// the same daemon remains discoverable and accepts repeated real PTY
-/// attachments.
+/// attachments. A concurrent reader keeps parsing the runtime metadata
+/// throughout those handoffs to verify observers retain a complete discovery
+/// document while UI ownership changes.
 #[test]
 fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
     let environment = TestEnvironment::new();
@@ -243,6 +246,29 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
         .expect("metadata session id")
         .to_owned();
     let socket = metadata.with_extension("sock");
+    let (stop_reader_tx, stop_reader_rx) = mpsc::channel();
+    let (reader_ready_tx, reader_ready_rx) = mpsc::sync_channel(0);
+    let observed_metadata = metadata.clone();
+    let observed_session_id = session_id.clone();
+    let metadata_reader = std::thread::spawn(move || {
+        let initial = std::fs::read(&observed_metadata).expect("initial live daemon metadata");
+        serde_json::from_slice::<serde_json::Value>(&initial)
+            .expect("initial live daemon metadata is complete");
+        reader_ready_tx
+            .send(())
+            .expect("report active metadata reader");
+        while stop_reader_rx.try_recv().is_err() {
+            let encoded =
+                std::fs::read(&observed_metadata).expect("live daemon metadata remains readable");
+            let value: serde_json::Value =
+                serde_json::from_slice(&encoded).expect("live daemon metadata remains complete");
+            assert_eq!(value["session_id"], observed_session_id);
+            std::thread::yield_now();
+        }
+    });
+    reader_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("metadata reader became active");
 
     owner.line(":detach");
     owner.wait_success(&environment.state_home);
@@ -276,6 +302,8 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
         assert!(metadata.exists(), "reattach cycle replaced daemon metadata");
         assert!(socket.exists(), "reattach cycle removed daemon socket");
     }
+    let _ = stop_reader_tx.send(());
+    metadata_reader.join().expect("concurrent metadata reader");
 }
 
 /// Ctrl-D on the owning initial UI remains a stop-owned exit rather than being

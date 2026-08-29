@@ -520,6 +520,119 @@ fn update_session_id_rewrites_active_session_metadata() {
     );
 }
 
+/// Pins the publication boundary so a reader deterministically sees the old
+/// complete document until the new complete document is atomically installed.
+#[test]
+fn metadata_replacement_keeps_previous_document_visible_until_rename() {
+    let temp = TempDir::new().expect("temp runtime");
+    let _guard = runtime_override(&temp);
+    let project_root = temp.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    let paths = prepare_harness_paths(&project_root, "session-a").expect("paths");
+    paths.write_metadata().expect("initial metadata");
+    let path = paths.path().to_path_buf();
+    let metadata_path = metadata_path(&path);
+    let (reached_tx, reached_rx) = mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(0);
+    *TEST_METADATA_RENAME_PAUSE
+        .lock()
+        .expect("metadata rename pause lock poisoned") = Some(MetadataRenamePause {
+        path: metadata_path.clone(),
+        reached: reached_tx,
+        resume: resume_rx,
+    });
+
+    let writer_path = path.clone();
+    let writer = std::thread::spawn(move || {
+        update_session_id(&writer_path, "session-b").expect("replace active session");
+    });
+    reached_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("writer reached publication boundary");
+
+    let old: DaemonMetadata = serde_json::from_slice(
+        &std::fs::read(&metadata_path).expect("read metadata before publication"),
+    )
+    .expect("old metadata remains complete before publication");
+    assert_eq!(old.session_id, "session-a");
+
+    resume_tx.send(()).expect("resume metadata publication");
+    writer.join().expect("metadata writer");
+    let new = read_metadata(&path).expect("new metadata");
+    assert_eq!(new.session_id, "session-b");
+}
+
+/// Ensures repeated production metadata replacements remain complete JSON for
+/// concurrent discovery readers instead of exposing the truncate/write window.
+#[test]
+fn metadata_replacement_is_atomic_under_concurrent_read_pressure() {
+    let temp = TempDir::new().expect("temp runtime");
+    let _guard = runtime_override(&temp);
+    let project_root = temp.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    let paths = prepare_harness_paths(&project_root, "session-a").expect("paths");
+    paths.write_metadata().expect("initial metadata");
+
+    let path = paths.path().to_path_buf();
+    let finished = Arc::new(AtomicBool::new(false));
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let readers = (0..4)
+        .map(|_| {
+            let path = path.clone();
+            let finished = Arc::clone(&finished);
+            let ready_tx = ready_tx.clone();
+            std::thread::spawn(move || {
+                let encoded =
+                    std::fs::read(metadata_path(&path)).expect("initial published metadata");
+                serde_json::from_slice::<DaemonMetadata>(&encoded)
+                    .expect("initial published metadata is complete");
+                ready_tx.send(()).expect("report active metadata reader");
+                while !finished.load(Ordering::Acquire) {
+                    let encoded =
+                        std::fs::read(metadata_path(&path)).expect("published metadata remains");
+                    let metadata: DaemonMetadata =
+                        serde_json::from_slice(&encoded).expect("published metadata is complete");
+                    assert!(matches!(
+                        metadata.session_id.as_str(),
+                        "session-a" | "session-b"
+                    ));
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    drop(ready_tx);
+    for _ in 0..readers.len() {
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("metadata reader became active");
+    }
+
+    for index in 0..2_000 {
+        let session_id = if index % 2 == 0 {
+            "session-b"
+        } else {
+            "session-a"
+        };
+        update_session_id(&path, session_id).expect("replace active session");
+    }
+    finished.store(true, Ordering::Release);
+    for reader in readers {
+        reader.join().expect("metadata reader");
+    }
+
+    let metadata = read_metadata(&path).expect("final metadata");
+    assert_eq!(metadata.session_id, "session-a");
+    assert_eq!(
+        std::fs::read_dir(path.parent().expect("runtime directory"))
+            .expect("runtime entries")
+            .filter_map(Result::ok)
+            .filter(|entry| { entry.file_name().to_string_lossy().contains(".json.tmp-") })
+            .count(),
+        0,
+        "successful replacements left temporary publication files"
+    );
+}
+
 /// Runtime metadata writers reject identifiers their reader cannot accept.
 #[test]
 fn runtime_metadata_writers_reject_invalid_session_ids() {

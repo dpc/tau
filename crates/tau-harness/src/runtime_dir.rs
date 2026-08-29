@@ -55,6 +55,21 @@ pub const HARNESS_INSTANCE_ID_ENV: &str = "TAU_HARNESS_INSTANCE_ID";
 
 static ACTIVE_DISCOVERY_CALLS: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(test)]
+static TEST_METADATA_RENAME_PAUSE: path_std_sync::LazyLock<Mutex<Option<MetadataRenamePause>>> =
+    path_std_sync::LazyLock::new(|| Mutex::new(None));
+
+/// One deterministic test interception immediately before metadata publication.
+#[cfg(test)]
+struct MetadataRenamePause {
+    /// Public metadata path whose next replacement should pause.
+    path: PathBuf,
+    /// Notification sent after the complete temporary file is ready.
+    reached: mpsc::SyncSender<()>,
+    /// Release received before the atomic rename proceeds.
+    resume: mpsc::Receiver<()>,
+}
+
 /// Random process-instance discriminator used in one daemon runtime path.
 ///
 /// The process id remains in the path for diagnostics, while this discriminator
@@ -361,7 +376,7 @@ impl HarnessPaths {
     /// Writes the daemon metadata. Must be called after the socket is bound.
     pub fn write_metadata(&self) -> Result<(), std::io::Error> {
         let json = serde_json::to_vec_pretty(&self.metadata).map_err(path_std_io::Error::other)?;
-        tau_util_fs_err::write(metadata_path(&self.path), json)
+        replace_metadata(&metadata_path(&self.path), &json)
     }
 
     /// Removes the daemon socket and metadata.
@@ -808,7 +823,69 @@ pub fn update_session_id(harness_path: &Path, session_id: &str) -> Result<(), st
     })?;
     metadata.session_id = session_id.to_string();
     let json = serde_json::to_vec_pretty(&metadata).map_err(path_std_io::Error::other)?;
-    std::fs::write(metadata_path(harness_path), json)
+    replace_metadata(&metadata_path(harness_path), &json)
+}
+
+/// Atomically replaces one daemon metadata file through its private runtime
+/// directory.
+///
+/// Closing a fully written adjacent temporary file before `rename` ensures
+/// discovery readers observe either the previous complete document or the new
+/// complete document. Runtime discovery is ephemeral and does not promise
+/// crash durability, so this visibility boundary deliberately does not fsync.
+fn replace_metadata(path: &Path, json: &[u8]) -> Result<(), std::io::Error> {
+    use std::io::Write as _;
+
+    loop {
+        let temporary = path.with_extension(format!(
+            "{METADATA_EXTENSION}.tmp-{:016x}",
+            rand::random::<u64>()
+        ));
+        let mut file = match tau_util_fs_err::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == path_std_io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = file.write_all(json) {
+            drop(file);
+            let _ = tau_util_fs_err::remove_file(&temporary);
+            return Err(error);
+        }
+        drop(file);
+        #[cfg(test)]
+        pause_before_metadata_rename(path);
+        if let Err(error) = tau_util_fs_err::rename(&temporary, path) {
+            let _ = tau_util_fs_err::remove_file(&temporary);
+            return Err(error);
+        }
+        return Ok(());
+    }
+}
+
+/// Applies and consumes a matching deterministic metadata publication pause.
+#[cfg(test)]
+fn pause_before_metadata_rename(path: &Path) {
+    let pause = {
+        let mut configured = TEST_METADATA_RENAME_PAUSE
+            .lock()
+            .expect("metadata rename pause lock poisoned");
+        if configured.as_ref().is_some_and(|pause| pause.path == path) {
+            configured.take()
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        pause
+            .reached
+            .send(())
+            .expect("report metadata rename pause");
+        pause.resume.recv().expect("resume metadata rename");
+    }
 }
 
 /// Creates paths and metadata for the current process.
