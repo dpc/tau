@@ -1938,11 +1938,6 @@ impl Harness {
                 waiting_on,
             } => {
                 let removed = waiting_on.remove(&source_id);
-                if removed {
-                    self.session_runtime
-                        .session_init_progress_generation
-                        .advance();
-                }
                 if removed && waiting_on.is_empty() {
                     Some((session_id.clone(), *reason))
                 } else {
@@ -1955,23 +1950,6 @@ impl Harness {
             self.complete_session_init(session_id, reason)?;
         }
         Ok(())
-    }
-
-    /// Records accepted discovery from a provider still outstanding in the
-    /// current session-initialization generation.
-    pub(super) fn record_session_init_provider_progress(
-        &mut self,
-        source_id: &tau_proto::ConnectionId,
-    ) {
-        let is_outstanding = matches!(
-            &self.session_runtime.turn_state,
-            TurnState::InitializingSession { waiting_on, .. } if waiting_on.contains(source_id)
-        );
-        if is_outstanding {
-            self.session_runtime
-                .session_init_progress_generation
-                .advance();
-        }
     }
 
     pub(super) fn maybe_complete_session_init_for_disconnect(

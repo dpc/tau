@@ -510,7 +510,6 @@ impl Harness {
             agents_files,
         );
         self.publish_session_skills_projection();
-        self.record_session_init_provider_progress(source_id);
     }
 
     pub(super) fn apply_agent_discovery_snapshot(

@@ -55,14 +55,14 @@ plumbing, configured-process launch ordering, or runtime settings lookups.
 ### Accepted configured-component availability risks
 
 Registered session-context providers may delay session initialization, but only
-within a two-second accepted-progress idle window and a non-renewable
-thirty-second absolute cap. Only accepted current-session/current-generation
-discovery or readiness from an outstanding provider renews the idle window;
-generic, stale, wrong-session, and non-outstanding traffic cannot. Final waiter
-removal and harness-owned synchronous finalization take precedence over timeout
-classification, while genuine expiry returns `SessionInitTimeout` rather than
-process `StartupTimeout`. Deterministic deadline and classification boundaries
-are covered in `crates/tau-harness/src/session_init_deadline/tests.rs` and
+within a non-renewable thirty-second absolute cap. Exact readiness or disconnect
+from each outstanding provider owns early completion; provider silence and
+generic, stale, wrong-session, or non-outstanding traffic cannot complete or
+extend the wait. Final waiter removal and harness-owned synchronous finalization
+take precedence over timeout classification, while absolute expiry returns
+`SessionInitTimeout` rather than process `StartupTimeout`. Deterministic deadline
+and classification boundaries are covered in
+`crates/tau-harness/src/session_init_deadline/tests.rs` and
 `crates/tau-harness/src/error/tests.rs`; lifecycle tests cover admission and
 finalization wiring. Revisit these safeguards when changing waiter identity,
 admission filtering, event ordering, finalization, or timeout classification.
@@ -719,8 +719,9 @@ per-agent keyed context, and readiness without a capability. Post-commit consume
 revalidate the exact connection generation plus applicable session, agent, and
 process-unique initialization id before mutating state. Only registered live
 non-socket Tool subscribers participate in captured waits; per-agent readiness
-cannot release session readiness or another agent. A connected effective waiter
-has no deadline and can hold initialization until acknowledgement or disconnect.
+cannot release session readiness or another agent. A connected effective
+per-agent waiter has no deadline and can hold initialization until
+acknowledgement or disconnect.
 Pre-Ready declarations reserve bounded activation count/bytes, and snapshot
 validation additionally bounds item count, decoded bytes, and individual AGENTS.md
 content. Invalid items are diagnosed and omitted before one atomic source swap.

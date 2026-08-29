@@ -48,17 +48,14 @@ discovery and readiness transaction or fail the connection so disconnect
 handling removes their wait source; successful connection handling cannot
 silently omit readiness.
 
-The harness bounds session initialization with a two-second idle deadline and a
-non-renewable thirty-second absolute deadline while registered providers remain
-outstanding. Only an accepted current-session, current-connection-generation
-snapshot or readiness event from an outstanding provider renews the idle
-deadline; activation-staged snapshots renew only after current admission and
-snapshot validation. Generic events, stale or wrong-session declarations, and
-traffic from providers no longer outstanding do not renew it. Final waiter
-removal takes precedence over deadline classification, and synchronous
-harness-owned finalization after that readiness cannot retroactively fail with a
-provider timeout. Expiry reports `SessionInitTimeout`, distinct from extension
-process `StartupTimeout`.
+The harness waits for exact readiness or disconnect from every outstanding
+registered provider, bounded by a non-renewable thirty-second absolute
+deadline. Provider silence, generic events, snapshots, stale or wrong-session
+declarations, and traffic from providers no longer outstanding do not complete
+or extend the wait. Final waiter removal takes precedence over deadline
+classification, and synchronous harness-owned finalization after that readiness
+cannot retroactively fail with a provider timeout. Absolute expiry reports
+`SessionInitTimeout`, distinct from extension process `StartupTimeout`.
 
 Each live agent load carries a fresh mandatory `agent_initialization_id`. Its
 pending discovery state is seeded from the completed session baseline. Providers

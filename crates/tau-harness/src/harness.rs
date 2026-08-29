@@ -199,7 +199,7 @@ use crate::provider_cache_residency::{
 use crate::secrets::{
     ResolvedExtensionSecrets, load_secret_sources, resolve_extension_secrets_excluding,
 };
-use crate::session_init_deadline::{SessionInitDeadline, SessionInitProgressGeneration};
+use crate::session_init_deadline::SessionInitDeadline;
 use crate::settings::{Config, ExtensionStartupDiagnostic, ExtensionStartupDiagnosticKind};
 use crate::tool_turn::{
     ForegroundAction, PendingToolInvocation, ToolTurnCategories, ToolTurnMachine,

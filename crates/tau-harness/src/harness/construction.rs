@@ -443,7 +443,6 @@ impl Harness {
                 next_user_interaction_order: 1,
                 precommitted_user_interactions: HashMap::new(),
                 turn_state: TurnState::Idle,
-                session_init_progress_generation: SessionInitProgressGeneration::default(),
                 current_session_state: CurrentSessionState::default(),
             },
             config: HarnessConfigState {
@@ -984,7 +983,6 @@ impl Harness {
                 next_user_interaction_order: 1,
                 precommitted_user_interactions: HashMap::new(),
                 turn_state: TurnState::Idle,
-                session_init_progress_generation: SessionInitProgressGeneration::default(),
                 current_session_state: CurrentSessionState::default(),
             },
             config: HarnessConfigState {

@@ -21,13 +21,6 @@ impl SessionGeneration {
     pub(crate) const fn saturating_next(self) -> Self {
         Self(self.0.saturating_add(1))
     }
-
-    /// Moves back one generation in focused rollover tests.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) const fn saturating_previous(self) -> Self {
-        Self(self.0.saturating_sub(1))
-    }
 }
 
 impl std::fmt::Display for SessionGeneration {
@@ -74,8 +67,6 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) precommitted_user_interactions: HashMap<String, u64>,
     /// Current session initialization turn state.
     pub(crate) turn_state: TurnState,
-    /// Current-generation session initialization progress.
-    pub(crate) session_init_progress_generation: SessionInitProgressGeneration,
     /// State reset as one unit when the active session changes.
     pub(crate) current_session_state: CurrentSessionState,
 }

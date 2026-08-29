@@ -20,21 +20,17 @@ impl Harness {
     /// Drives the event loop until the in-flight session initialization
     /// completes (turn state returns to `Idle`).
     ///
-    /// The provider wait has a two-second idle deadline, renewed only by
-    /// accepted discovery or readiness from a current outstanding provider,
-    /// and a non-renewable thirty-second cap. Final readiness completes
-    /// synchronous harness finalization before deadline classification, so
-    /// success cannot become [`HarnessError::SessionInitTimeout`]
-    /// retroactively. See
+    /// Exact readiness or disconnect from every outstanding provider completes
+    /// the wait before its non-renewable thirty-second cap. Final readiness
+    /// completes synchronous harness finalization before deadline
+    /// classification, so success cannot become
+    /// [`HarnessError::SessionInitTimeout`] retroactively. See
     /// `SPEC-session-discovery-declarations-and-readiness`.
     pub(super) fn wait_for_session_init(&mut self) -> Result<(), HarnessError> {
         if self.session_runtime.turn_state.is_idle() {
             return Ok(());
         }
-        let deadline = SessionInitDeadline::new(
-            Instant::now(),
-            self.session_runtime.session_init_progress_generation,
-        );
+        let deadline = SessionInitDeadline::new(Instant::now());
         self.wait_for_session_init_with_deadline(deadline)
     }
 
@@ -45,13 +41,12 @@ impl Harness {
     /// [`Self::wait_for_session_init`].
     pub(super) fn wait_for_session_init_with_deadline(
         &mut self,
-        mut deadline: SessionInitDeadline,
+        deadline: SessionInitDeadline,
     ) -> Result<(), HarnessError> {
         while !self.session_runtime.turn_state.is_idle() {
             let harness_evt = self
                 .recv_session_init_event_until(deadline.next_deadline())
                 .map_err(|_| HarnessError::SessionInitTimeout)?;
-            let received_at = Instant::now();
             self.log_event(&harness_evt);
             match harness_evt {
                 HarnessEvent::FromConnection {
@@ -90,10 +85,6 @@ impl Harness {
             if !providers_outstanding {
                 return Ok(());
             }
-            deadline.observe_progress(
-                received_at,
-                self.session_runtime.session_init_progress_generation,
-            );
             if deadline.expired(Instant::now()) {
                 return Err(HarnessError::SessionInitTimeout);
             }
