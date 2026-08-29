@@ -5070,28 +5070,29 @@ where
     }
 
     fn park_cooled_queued_prompts(&mut self, handle: &ClientHandle) -> ClientResult<()> {
-        let mut index = 0;
-        while index < self.prompt_queue.len() {
-            if self.prompt_queue[index].manual_cooldown_bypass {
-                index += 1;
+        let mut pending = std::mem::take(&mut self.prompt_queue);
+        let mut retained = VecDeque::with_capacity(pending.len());
+        while let Some(job) = pending.pop_front() {
+            if job.manual_cooldown_bypass {
+                retained.push_back(job);
                 continue;
             }
             let Some(cooldown) = self
-                .prompt_queue
-                .get(index)
-                .and_then(|job| self.shared_cooldowns.get(&job.prompt.model.provider))
+                .shared_cooldowns
+                .get(&job.prompt.model.provider)
                 .copied()
                 .filter(|cooldown| cooldown.not_before > self.retry_clock.now())
             else {
-                index += 1;
-                continue;
-            };
-            let Some(job) = self.prompt_queue.remove(index) else {
+                retained.push_back(job);
                 continue;
             };
             let now = self.retry_clock.now();
             let due = cooldown_due_for_job(cooldown.not_before, &job);
-            emit_retry_status(&job, cooldown.class, due, now, None, handle)?;
+            if let Err(error) = emit_retry_status(&job, cooldown.class, due, now, None, handle) {
+                retained.append(&mut pending);
+                self.prompt_queue = retained;
+                return Err(error);
+            }
             self.retry_scheduler
                 .as_ref()
                 .expect("retry scheduler starts with the runtime waker")
@@ -5104,6 +5105,7 @@ where
                     }),
                 );
         }
+        self.prompt_queue = retained;
         Ok(())
     }
 
@@ -5727,8 +5729,13 @@ struct CooldownConstraint {
 struct RetryScheduleQueue {
     /// Min-heap of delayed logical prompts.
     prompts: BinaryHeap<ScheduledPrompt>,
+    /// Exact logical-prompt membership mirrored by every heap mutation.
+    prompt_ids: HashSet<tau_proto::AgentPromptId>,
     /// Stable FIFO tie-breaker for equal deadlines.
     sequence: u64,
+    /// Number of entries visited by bulk queue mutations.
+    #[cfg(test)]
+    mutation_work: usize,
 }
 
 impl RetryScheduleQueue {
@@ -5739,11 +5746,7 @@ impl RetryScheduleQueue {
         cooldown: Option<CooldownConstraint>,
         job: PromptJob,
     ) -> Result<(), Box<PromptJob>> {
-        if self
-            .prompts
-            .iter()
-            .any(|scheduled| scheduled.job.agent_prompt_id == job.agent_prompt_id)
-        {
+        if !self.prompt_ids.insert(job.agent_prompt_id.clone()) {
             return Err(Box::new(job));
         }
         let due = cooldown.map_or(independent_due, |constraint| {
@@ -5769,7 +5772,11 @@ impl RetryScheduleQueue {
         {
             return None;
         }
-        self.prompts.pop().map(|scheduled| scheduled.job)
+        self.prompts.pop().map(|scheduled| {
+            let removed = self.prompt_ids.remove(&scheduled.job.agent_prompt_id);
+            assert!(removed, "heap membership must have an exact prompt ID");
+            scheduled.job
+        })
     }
 
     /// Returns the earliest deadline, if any.
@@ -5779,11 +5786,15 @@ impl RetryScheduleQueue {
 
     /// Removes all delayed instances of one logical prompt.
     fn cancel(&mut self, prompt_id: &tau_proto::AgentPromptId) -> Vec<PromptJob> {
+        if !self.prompt_ids.contains(prompt_id) {
+            return Vec::new();
+        }
         self.remove_matching(|scheduled| scheduled.job.agent_prompt_id == *prompt_id)
     }
 
     /// Removes every delayed logical prompt.
     fn cancel_all(&mut self) -> Vec<PromptJob> {
+        self.prompt_ids.clear();
         self.prompts
             .drain()
             .map(|scheduled| scheduled.job)
@@ -5792,8 +5803,12 @@ impl RetryScheduleQueue {
 
     /// Monotonically moves same-provider prompts beyond a shared cooldown.
     fn extend_cooldown(&mut self, provider: &ProviderName, due: Instant, generation: u64) {
-        let mut updated = BinaryHeap::new();
-        while let Some(mut scheduled) = self.prompts.pop() {
+        let mut prompts = std::mem::take(&mut self.prompts).into_vec();
+        #[cfg(test)]
+        {
+            self.mutation_work += prompts.len();
+        }
+        for scheduled in &mut prompts {
             if scheduled.job.prompt.model.provider == *provider {
                 if scheduled.cooldown_generation.is_none() {
                     scheduled.independent_due = scheduled.due;
@@ -5803,15 +5818,18 @@ impl RetryScheduleQueue {
                     .independent_due
                     .max(cooldown_due_for_job(due, &scheduled.job));
             }
-            updated.push(scheduled);
         }
-        self.prompts = updated;
+        self.prompts = BinaryHeap::from(prompts);
     }
 
     /// Advances only matching provider prompts after an authoritative probe.
     fn release_cooldown(&mut self, provider: &ProviderName, generation: u64, now: Instant) {
-        let mut updated = BinaryHeap::new();
-        while let Some(mut scheduled) = self.prompts.pop() {
+        let mut prompts = std::mem::take(&mut self.prompts).into_vec();
+        #[cfg(test)]
+        {
+            self.mutation_work += prompts.len();
+        }
+        for scheduled in &mut prompts {
             if scheduled.job.prompt.model.provider == *provider
                 && scheduled.cooldown_generation == Some(generation)
             {
@@ -5820,9 +5838,8 @@ impl RetryScheduleQueue {
                     .independent_due
                     .max(cooldown_due_for_job(now, &scheduled.job));
             }
-            updated.push(scheduled);
         }
-        self.prompts = updated;
+        self.prompts = BinaryHeap::from(prompts);
     }
 
     /// Number of logical prompts currently parked outside the worker pool.
@@ -5846,22 +5863,45 @@ impl RetryScheduleQueue {
             .collect()
     }
 
-    /// Removes entries matching a scheduler command while retaining heap order.
+    /// Reports whether the heap and exact prompt-ID index describe one set.
+    #[cfg(test)]
+    fn membership_is_exact(&self) -> bool {
+        self.prompts.len() == self.prompt_ids.len()
+            && self
+                .prompts
+                .iter()
+                .all(|scheduled| self.prompt_ids.contains(&scheduled.job.agent_prompt_id))
+    }
+
+    /// Partitions entries matching a scheduler command, then heapifies once.
     fn remove_matching(
         &mut self,
         mut predicate: impl FnMut(&ScheduledPrompt) -> bool,
     ) -> Vec<PromptJob> {
         let mut removed = Vec::new();
-        let mut retained = BinaryHeap::new();
-        while let Some(scheduled) = self.prompts.pop() {
+        let prompts = std::mem::take(&mut self.prompts).into_vec();
+        let mut retained = Vec::with_capacity(prompts.len());
+        #[cfg(test)]
+        {
+            self.mutation_work += prompts.len();
+        }
+        for scheduled in prompts {
             if predicate(&scheduled) {
+                let present = self.prompt_ids.remove(&scheduled.job.agent_prompt_id);
+                assert!(present, "heap membership must have an exact prompt ID");
                 removed.push(scheduled.job);
             } else {
                 retained.push(scheduled);
             }
         }
-        self.prompts = retained;
+        self.prompts = BinaryHeap::from(retained);
         removed
+    }
+
+    /// Returns and resets the number of entries visited by bulk mutations.
+    #[cfg(test)]
+    fn take_mutation_work(&mut self) -> usize {
+        std::mem::take(&mut self.mutation_work)
     }
 }
 

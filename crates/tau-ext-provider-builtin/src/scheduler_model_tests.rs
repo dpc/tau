@@ -394,6 +394,12 @@ fn check_trace(seed: u64, trace: &[ModelCommand]) -> Result<(), TestCaseError> {
             step,
             format_trace(seed, trace)
         );
+        prop_assert!(
+            sut.queue.membership_is_exact(),
+            "heap/index mismatch at step {}\n{}",
+            step,
+            format_trace(seed, trace)
+        );
         prop_assert_eq!(
             action_count,
             reference.removed,
@@ -404,6 +410,48 @@ fn check_trace(seed: u64, trace: &[ModelCommand]) -> Result<(), TestCaseError> {
         assert_deadlines(seed, trace, step, epoch, &sut, &reference)?;
     }
     Ok(())
+}
+
+/// Measures production queue visits across increasing queue sizes. The exact
+/// counter keeps this benchmark deterministic: extend, release, and a present
+/// cancel inspect every entry once, while an absent indexed cancel inspects
+/// none.
+#[test]
+#[ignore = "descriptive performance benchmark"]
+fn benchmark_retry_queue_bulk_mutation_scaling() {
+    let epoch = Instant::now();
+    let provider = ProviderName::new("limited");
+    for queue_size in [1_024_usize, 4_096, 16_384] {
+        let mut queue = RetryScheduleQueue::default();
+        for index in 0..queue_size {
+            assert!(
+                queue
+                    .schedule(
+                        epoch + Duration::from_secs(1),
+                        None,
+                        scheduled_job(&format!("ap-bench-{index}"), provider.as_str()),
+                    )
+                    .is_ok(),
+                "benchmark prompt IDs are unique"
+            );
+        }
+
+        queue.extend_cooldown(&provider, epoch + Duration::from_secs(2), 7);
+        queue.release_cooldown(&provider, 7, epoch + Duration::from_secs(3));
+        let present = "ap-bench-0"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe benchmark prompt ID");
+        assert_eq!(queue.cancel(&present).len(), 1);
+        let absent = "ap-bench-absent"
+            .parse::<tau_proto::AgentPromptId>()
+            .expect("known-safe benchmark prompt ID");
+        assert!(queue.cancel(&absent).is_empty());
+
+        let visits = queue.take_mutation_work();
+        eprintln!("retry_queue_bulk queue={queue_size} visits={visits}");
+        assert_eq!(visits, queue_size * 3);
+        assert!(queue.membership_is_exact());
+    }
 }
 
 /// Preserves the production action kind and accounting for model comparison.
