@@ -483,11 +483,30 @@ fn cold_resume_recovers_agent_session_and_restore_suffixes() {
             .expect("append torn header");
     }
 
-    let harness =
+    let mut harness =
         quiet_provider_harness_with_start_reason(&state_dir, tau_proto::SessionStartReason::Resume)
             .expect("resume harness");
 
     assert!(harness.session_runtime.agent_store.agent("main").is_some());
+    let main_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let active_snapshot =
+        tau_core::AgentJournalSnapshot::capture(&state_dir.join("agents"), [main_id.clone()]);
+    assert!(matches!(
+        active_snapshot,
+        Err(tau_core::AgentStoreError::Open { source, .. })
+            if source.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    let active_entry = tau_core::list_agent_entries(&state_dir.join("agents"))
+        .expect("list active agents")
+        .into_iter()
+        .find(|entry| entry.id == main_id)
+        .expect("active main agent entry");
+    assert_eq!(active_entry.status, tau_core::AgentListStatus::Busy);
+    // Resume queues fresh initialization and restore suffixes on the managed
+    // persistence worker. Release those writer leases before opening offline
+    // strict readers, which intentionally have no live-writer snapshot authority.
+    harness.shutdown().expect("shutdown resumed harness");
+    drop(harness);
     for path in &paths {
         let bytes = std::fs::read(path).expect("recovered journal");
         assert!(!bytes.ends_with(&[1, 2, 3]));
@@ -498,13 +517,12 @@ fn cold_resume_recovers_agent_session_and_restore_suffixes() {
     session_store
         .session_restore_events("s1")
         .expect("strict restore replay");
-    let main_id = tau_proto::AgentId::parse("main").expect("agent id");
-    let entry = tau_core::list_agent_entries(&state_dir.join("agents"))
+    let released_entry = tau_core::list_agent_entries(&state_dir.join("agents"))
         .expect("list agents")
         .into_iter()
         .find(|entry| entry.id == main_id)
         .expect("main agent entry");
-    assert_eq!(entry.status, tau_core::AgentListStatus::Busy);
+    assert_eq!(released_entry.status, tau_core::AgentListStatus::Fresh);
 }
 /// A cold boot preserves one unresolved ordinary outer turn without duplicating
 /// its start, then accounts a later completed turn alongside the crash
