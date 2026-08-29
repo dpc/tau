@@ -110,11 +110,10 @@ pub fn run_quota_recovery_fixture(reader: UnixStream, writer: UnixStream) -> Res
         };
         let mut frame_writer = execution.frame_writer();
         frame_writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(finished),
             ))
             .expect("write fixture terminal");
-        frame_writer.flush().expect("flush fixture terminal");
     });
 
     let mut providers = path_std_collections::BTreeMap::new();

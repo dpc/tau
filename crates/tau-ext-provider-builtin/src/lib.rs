@@ -17,6 +17,7 @@ mod openai_prompt_cache;
 mod prewarm;
 #[cfg(feature = "quota-test-support")]
 mod quota_test_support;
+mod report_sink;
 mod responses;
 mod setup_store;
 
@@ -24,7 +25,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::hash::{Hash, Hasher};
-use std::io::{BufWriter, Cursor, Read, Write};
+#[cfg(test)]
+use std::io::Cursor;
+use std::io::{Read, Write};
 use std::marker::PhantomData;
 #[cfg(test)]
 use std::sync::TryLockError;
@@ -55,6 +58,7 @@ pub use openai_prompt_cache::{OpenAiPromptCacheKey, OpenAiPromptCacheRetention};
 use prewarm::{PrewarmAbort, PrewarmKey, PrewarmSupervisor};
 #[cfg(feature = "quota-test-support")]
 pub use quota_test_support::run_quota_recovery_fixture;
+use report_sink::ProviderReportSink;
 pub use responses::{
     OpenAiExplicitPromptCacheMode as ResponsesOpenAiExplicitPromptCacheMode,
     OpenAiPromptCache as ResponsesOpenAiPromptCache,
@@ -80,13 +84,14 @@ use tau_config::provider_settings::{
     ProviderCredentialSlot, parse_provider_credential,
 };
 use tau_config::settings::BuiltinComponentIdentity;
+#[cfg(test)]
+use tau_proto::PeerOutputWriter;
 use tau_proto::{
-    ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessInputReader, ModelId,
-    ModelName, PeerOutputWriter, ProviderBackend, ProviderBackendKind, ProviderBackendTransport,
-    ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderModelsDeclared, ProviderName,
-    ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseStats,
-    ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason, SecretValue,
-    ServerOffsetMillis, UnixMillis,
+    ClientKind, ContextItem, Event, EventName, HarnessInputMessage, ModelId, ModelName,
+    ProviderBackend, ProviderBackendKind, ProviderBackendTransport, ProviderCacheMissDiagnostic,
+    ProviderModelInfo, ProviderModelsDeclared, ProviderName, ProviderPromptSubmitted,
+    ProviderResponseFinished, ProviderResponseStats, ProviderResponseStatusUpdate,
+    ProviderResponseUpdated, ProviderStopReason, SecretValue, ServerOffsetMillis, UnixMillis,
 };
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider_codex::{
@@ -3617,7 +3622,7 @@ where
         handle: &ClientHandle,
     ) -> ClientResult<()> {
         let agent_prompt_id = prompt.agent_prompt_id.clone();
-        let prompt = materialize_prompt(&prompt);
+        let prompt = materialize_prompt(prompt);
         if self.cancellation.take_canceled(&agent_prompt_id) {
             return self.finish_canceled_prompt(&agent_prompt_id, &prompt, handle);
         }
@@ -3631,7 +3636,7 @@ where
         prompt: &tau_proto::AgentPromptCreated,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
-        let mut frame_writer = handle_frame_writer(handle);
+        let mut frame_writer = handle_report_sink(handle);
         finish_canceled(agent_prompt_id, prompt, &mut frame_writer)
             .map_err(|error| ClientError::handler(error.to_string()))?;
         Ok(())
@@ -3670,7 +3675,7 @@ where
             PromptBackend::Responses(config) => Some(config.clone()),
             _ => None,
         };
-        let mut frame_writer = handle_frame_writer(handle);
+        let mut frame_writer = handle_report_sink(handle);
         write_prompt_submitted(&agent_prompt_id, &prompt.originator, &mut frame_writer)
             .map_err(|error| ClientError::handler(error.to_string()))?;
         let job = PromptJob {
@@ -4026,8 +4031,8 @@ where
                     } else {
                         tau_proto::RetryPromptStatus::NotParked
                     };
-                    let mut frame_writer = handle_frame_writer(handle);
-                    frame_writer.write_message(&HarnessInputMessage::emit_transient(
+                    let mut frame_writer = handle_report_sink(handle);
+                    frame_writer.send_report(HarnessInputMessage::emit_transient(
                         Event::ProviderRetryPromptResultReported(
                             tau_proto::ProviderRetryPromptResult {
                                 request_id,
@@ -4036,7 +4041,6 @@ where
                             },
                         ),
                     ))?;
-                    frame_writer.flush()?;
                 }
                 Ok(WorkerMessage::DelayedCanceled { job, delayed_count }) => {
                     if let Some(scheduler) = &self.retry_scheduler {
@@ -5395,14 +5399,14 @@ struct PromptWorkerContext {
 }
 
 impl PromptExecution {
-    fn frame_writer(&self) -> PeerOutputWriter<BufWriter<HarnessInputMessageWrite>> {
-        PeerOutputWriter::new(BufWriter::new(HarnessInputMessageWrite::worker(
-            self.output_tx.clone(),
-            self.output_waker.clone(),
-            self.job.cancel_generation,
-            self.job.agent_prompt_id.clone(),
-            self.cooldown_probe.clone(),
-        )))
+    fn frame_writer(&self) -> WorkerReportSink {
+        WorkerReportSink {
+            tx: self.output_tx.clone(),
+            waker: self.output_waker.clone(),
+            cancel_generation: self.job.cancel_generation,
+            agent_prompt_id: self.job.agent_prompt_id.clone(),
+            cooldown_probe: self.cooldown_probe.clone(),
+        }
     }
 }
 
@@ -5507,121 +5511,80 @@ enum WorkerMessage {
     },
 }
 
-/// Destination for decoded provider output frames.
-enum HarnessInputMessageTarget {
-    /// Synchronous output path used by main-loop helper code.
-    Handle(ClientHandle),
-    /// Worker-to-main-loop path used by prompt workers.
-    Worker {
-        /// Channel that carries decoded worker messages to the main loop.
-        tx: Sender<WorkerMessage>,
-        /// Wake handle signaled after the worker message is queued.
-        waker: ManualRuntimeWaker,
-        /// Global-cancel generation captured synchronously at dispatch.
-        cancel_generation: u64,
-        /// Prompt identity used for targeted-cancel commit validation.
-        agent_prompt_id: tau_proto::AgentPromptId,
-        /// Exact cooldown probe authority attached to this finite attempt.
-        cooldown_probe: Option<CooldownProbe>,
-    },
+/// Direct typed report destination for one finite prompt attempt.
+struct WorkerReportSink<W = ManualRuntimeWaker> {
+    /// Channel carrying admitted reports to the provider main loop.
+    tx: Sender<WorkerMessage>,
+    /// Wake handle signaled after the report is queued.
+    waker: W,
+    /// Global-cancel generation captured synchronously at dispatch.
+    cancel_generation: u64,
+    /// Prompt identity used for targeted-cancel commit validation.
+    agent_prompt_id: tau_proto::AgentPromptId,
+    /// Exact cooldown probe authority attached to this finite attempt.
+    cooldown_probe: Option<CooldownProbe>,
 }
 
-/// `Write` adapter that preserves existing `PeerOutputWriter` call sites while
-/// converting completed frame bytes back into typed `HarnessInputMessage`s.
-///
-/// Bytes are buffered until `flush`, decoded FIFO, and forwarded either to the
-/// main-loop client handle or the worker output channel. Partial or invalid
-/// frames become `InvalidData` so the caller observes a normal output failure.
-struct HarnessInputMessageWrite {
-    /// Destination that receives decoded frames on flush.
-    target: HarnessInputMessageTarget,
-    /// Encoded bytes accumulated since the previous flush.
-    buf: Vec<u8>,
+/// Wake capability used after a typed worker report becomes channel-visible.
+trait WorkerReportWaker {
+    /// Wake the provider main loop.
+    fn wake_provider_loop(&self);
 }
 
-impl HarnessInputMessageWrite {
-    fn handle(handle: ClientHandle) -> Self {
-        Self {
-            target: HarnessInputMessageTarget::Handle(handle),
-            buf: Vec::new(),
-        }
-    }
-
-    fn worker(
-        tx: Sender<WorkerMessage>,
-        waker: ManualRuntimeWaker,
-        cancel_generation: u64,
-        agent_prompt_id: tau_proto::AgentPromptId,
-        cooldown_probe: Option<CooldownProbe>,
-    ) -> Self {
-        Self {
-            target: HarnessInputMessageTarget::Worker {
-                tx,
-                waker,
-                cancel_generation,
-                agent_prompt_id,
-                cooldown_probe,
-            },
-            buf: Vec::new(),
-        }
-    }
-
-    fn send_decoded(&self, message: HarnessInputMessage) -> std::io::Result<()> {
-        match &self.target {
-            HarnessInputMessageTarget::Handle(handle) => handle.send(message).map_err(|error| {
-                path_std_io::Error::new(path_std_io::ErrorKind::BrokenPipe, error)
-            }),
-            HarnessInputMessageTarget::Worker {
-                tx,
-                waker,
-                cancel_generation,
-                agent_prompt_id,
-                cooldown_probe,
-            } => send_worker_message(
-                tx,
-                waker,
-                WorkerMessage::Output {
-                    message: Box::new(message),
-                    cancel_generation: *cancel_generation,
-                    agent_prompt_id: agent_prompt_id.clone(),
-                    cooldown_probe: cooldown_probe.clone(),
-                },
-            )
-            .map_err(|_| {
-                path_std_io::Error::new(path_std_io::ErrorKind::BrokenPipe, "writer closed")
-            }),
-        }
+impl WorkerReportWaker for ManualRuntimeWaker {
+    fn wake_provider_loop(&self) {
+        self.wake();
     }
 }
 
-impl Write for HarnessInputMessageWrite {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.buf.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        if self.buf.is_empty() {
-            return Ok(());
-        }
-        let bytes = std::mem::take(&mut self.buf);
-        let mut reader = HarnessInputReader::new(Cursor::new(bytes));
-        while let Some(message) = reader
-            .read_message()
-            .map_err(|error| path_std_io::Error::new(path_std_io::ErrorKind::InvalidData, error))?
-        {
-            self.send_decoded(message)?;
-        }
+impl<W: WorkerReportWaker> ProviderReportSink for WorkerReportSink<W> {
+    fn send_report(&mut self, message: HarnessInputMessage) -> ClientResult<()> {
+        let message = prepare_worker_report(message)?;
+        self.tx
+            .send(WorkerMessage::Output {
+                message,
+                cancel_generation: self.cancel_generation,
+                agent_prompt_id: self.agent_prompt_id.clone(),
+                cooldown_probe: self.cooldown_probe.clone(),
+            })
+            .map_err(|_| path_std_io::Error::from(path_std_io::ErrorKind::BrokenPipe))?;
+        self.waker.wake_provider_loop();
         Ok(())
     }
 }
 
-fn handle_frame_writer(
-    handle: &ClientHandle,
-) -> PeerOutputWriter<BufWriter<HarnessInputMessageWrite>> {
-    PeerOutputWriter::new(BufWriter::new(HarnessInputMessageWrite::handle(
-        handle.clone(),
-    )))
+/// Check the old worker encoder's validity boundary without moving the final
+/// frame-size admission ahead of main-loop cancellation arbitration.
+fn prepare_worker_report(message: HarnessInputMessage) -> ClientResult<Box<HarnessInputMessage>> {
+    let encoded_bytes = tau_client::encoded_outbound_frame_bytes(&message)?;
+    if tau_proto::MAX_PROTOCOL_MESSAGE_BYTES < encoded_bytes {
+        return Err(path_std_io::Error::new(
+            path_std_io::ErrorKind::InvalidData,
+            format!(
+                "protocol message exceeds {} byte limit",
+                tau_proto::MAX_PROTOCOL_MESSAGE_BYTES
+            ),
+        )
+        .into());
+    }
+    Ok(Box::new(message))
+}
+
+/// Direct typed report destination for provider main-loop helpers.
+struct HandleReportSink<'a> {
+    /// Client handle that owns admission, ordering, and wire publication.
+    handle: &'a ClientHandle,
+}
+
+impl ProviderReportSink for HandleReportSink<'_> {
+    fn send_report(&mut self, message: HarnessInputMessage) -> ClientResult<()> {
+        self.handle.send(message)?;
+        Ok(())
+    }
+}
+
+fn handle_report_sink(handle: &ClientHandle) -> HandleReportSink<'_> {
+    HandleReportSink { handle }
 }
 
 #[derive(Default)]
@@ -5926,9 +5889,9 @@ fn send_worker_message(
     waker: &ManualRuntimeWaker,
     message: WorkerMessage,
 ) -> Result<(), ()> {
-    // All worker-to-loop messages must be enqueued through this helper so the
-    // main loop can rely on enqueue-before-wake ordering before blocking in
-    // `ManualExtensionRuntime::wait_for_wake`.
+    // Helper-based worker messages preserve the same enqueue-before-wake order
+    // as `WorkerReportSink`, so the main loop may block only after checking the
+    // corresponding channel.
     tx.send(message).map_err(|_| ())?;
     waker.wake();
     Ok(())
@@ -5946,7 +5909,7 @@ fn start_queued_prompts(
             return Ok(());
         };
         if context.cancellation.take_canceled(&job.agent_prompt_id) {
-            let mut frame_writer = handle_frame_writer(handle);
+            let mut frame_writer = handle_report_sink(handle);
             finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)
                 .map_err(|error| ClientError::handler(error.to_string()))?;
             continue;
@@ -5971,7 +5934,7 @@ fn finish_queued_canceled(
     let Some(job) = prompt_queue.remove(index) else {
         return Ok(false);
     };
-    let mut frame_writer = handle_frame_writer(handle);
+    let mut frame_writer = handle_report_sink(handle);
     finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)
         .map_err(|error| ClientError::handler(error.to_string()))?;
     Ok(true)
@@ -6058,10 +6021,11 @@ fn saturating_retry_delay(delay: Duration) -> u32 {
     u32::try_from(delay.as_secs()).unwrap_or(u32::MAX)
 }
 
-fn materialize_prompt(prompt: &tau_proto::AgentPromptCreated) -> tau_proto::AgentPromptCreated {
-    let mut materialized = prompt.clone();
-    materialized.tools_ref = None;
-    materialized
+/// Consume one provider work envelope and discard its transport-only tool
+/// reuse reference without cloning the owned prompt payload.
+fn materialize_prompt(mut prompt: tau_proto::AgentPromptCreated) -> tau_proto::AgentPromptCreated {
+    prompt.tools_ref = None;
+    prompt
 }
 
 fn trace_provider_prompt(
@@ -6093,32 +6057,31 @@ fn trace_provider_prompt(
     );
 }
 
-fn write_prompt_submitted<W: Write>(
+fn write_prompt_submitted<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
 ) -> Result<(), Box<dyn Error>> {
-    writer.write_message(&HarnessInputMessage::emit_transient(
+    writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderPromptSubmittedReported(ProviderPromptSubmitted {
             agent_prompt_id: agent_prompt_id.clone(),
             originator: originator.clone(),
         }),
     ))?;
-    writer.flush()?;
     Ok(())
 }
 
-fn finish_canceled<W: Write>(
+fn finish_canceled<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
 ) -> Result<(), Box<dyn Error>> {
     tracing::debug!(
         target: LOG_TARGET,
         agent_prompt_id = %agent_prompt_id,
         "skipping provider request — already canceled by harness",
     );
-    writer.write_message(&HarnessInputMessage::emit_transient(
+    writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderResponseFinishedReported(simple_finished(
             agent_prompt_id.clone(),
             prompt.agent_id.clone(),
@@ -6126,7 +6089,6 @@ fn finish_canceled<W: Write>(
             "(cancelled by harness)",
         )),
     ))?;
-    writer.flush()?;
     Ok(())
 }
 
@@ -6713,11 +6675,11 @@ fn jwt_issued_at_ms(jwt: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
-fn emit_retry_banner<W: Write>(
+fn emit_retry_banner<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     error: &str,
     delay: Duration,
     attempt: usize,
@@ -6728,7 +6690,7 @@ fn emit_retry_banner<W: Write>(
         attempt,
         error,
     );
-    let _ = writer.write_message(&HarnessInputMessage::emit_transient(
+    let _ = writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.clone(),
             agent_id: agent_id.clone(),
@@ -6743,7 +6705,6 @@ fn emit_retry_banner<W: Write>(
             originator: originator.clone(),
         }),
     ));
-    let _ = writer.flush();
 }
 
 fn resolve_prewarm_backend(
@@ -6825,11 +6786,11 @@ fn handle_resolved_prewarm(
     }
 }
 
-fn handle_prompt_backend<R, W: Write>(
+fn handle_prompt_backend<R, S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     backend: &PromptBackend,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     retry_ctx: &mut R,
     context: ChatGptPromptExecutionContext<'_>,
     on_quota: &mut impl FnMut(&tau_provider_codex::RollingQuotaObservation),
@@ -6875,12 +6836,12 @@ where
 }
 
 /// Runs one Chat Completions attempt and reports its terminal or retry outcome.
-fn handle_chat_completions_backend<R, W: Write>(
+fn handle_chat_completions_backend<R, S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ChatCompletionsProvider,
     model: &ChatCompletionsModel,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     retry_ctx: &mut R,
     context: ChatGptPromptExecutionContext<'_>,
 ) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
@@ -6964,12 +6925,12 @@ fn chat_completions_backend(provider: &ChatCompletionsProvider) -> ProviderBacke
 }
 
 /// Runs one public Responses attempt and reports its terminal or retry outcome.
-fn handle_public_responses_backend<R, W: Write>(
+fn handle_public_responses_backend<R, S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ResponsesProvider,
     model: &ResponsesModel,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     retry_ctx: &mut R,
     context: ChatGptPromptExecutionContext<'_>,
 ) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
@@ -7037,10 +6998,10 @@ struct CancellationFinishPolicy {
 }
 
 /// Emits a successful final response unless a concurrent cancellation won.
-fn finish_backend_attempt<R, W: Write>(
+fn finish_backend_attempt<R, S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     retry_ctx: &mut R,
     finished: ProviderResponseFinished,
     has_partial_output: bool,
@@ -7076,10 +7037,10 @@ where
 
 /// Emits a terminal backend result after clearing any rendered partial
 /// response.
-fn finish_terminal_attempt<W: Write>(
+fn finish_terminal_attempt<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     finished: ProviderResponseFinished,
     has_partial_output: bool,
 ) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>> {
@@ -7095,10 +7056,10 @@ fn finish_terminal_attempt<W: Write>(
 }
 
 /// Returns retry evidence after clearing any rendered partial response.
-fn finish_retry_attempt<W: Write>(
+fn finish_retry_attempt<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     decision: RetryDecision,
     has_partial_output: bool,
     terminal_backend: Option<ProviderBackend>,
@@ -7119,10 +7080,10 @@ fn finish_retry_attempt<W: Write>(
 }
 
 /// Finishes a cancellation after clearing any rendered partial response.
-fn finish_canceled_attempt<W: Write>(
+fn finish_canceled_attempt<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     has_partial_output: bool,
     backend: Option<ProviderBackend>,
     provider_attempt: tau_proto::ProviderAttempt,
@@ -7139,10 +7100,10 @@ fn finish_canceled_attempt<W: Write>(
 }
 
 /// Emit one cancellation terminal while retaining attempt correlation.
-fn emit_canceled_correlated<W: Write>(
+fn emit_canceled_correlated<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     backend: Option<ProviderBackend>,
     provider_attempt: tau_proto::ProviderAttempt,
 ) -> Result<(), Box<dyn Error>> {
@@ -7159,10 +7120,10 @@ fn emit_canceled_correlated<W: Write>(
 }
 
 /// Clears partial provider text only when the backend reported semantic output.
-fn clear_partial_backend_response<W: Write>(
+fn clear_partial_backend_response<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     has_partial_output: bool,
     detail: &str,
 ) -> Result<(), Box<dyn Error>> {
@@ -7172,25 +7133,24 @@ fn clear_partial_backend_response<W: Write>(
     Ok(())
 }
 
-/// Serializes and flushes one terminal provider response report.
-fn emit_finished_backend_response<W: Write>(
-    writer: &mut PeerOutputWriter<W>,
+/// Submits one terminal provider response report.
+fn emit_finished_backend_response<S: ProviderReportSink>(
+    writer: &mut S,
     finished: ProviderResponseFinished,
 ) -> Result<(), Box<dyn Error>> {
-    writer.write_message(&HarnessInputMessage::emit_transient(
+    writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderResponseFinishedReported(finished),
     ))?;
-    writer.flush()?;
     Ok(())
 }
 
-fn emit_chat_completions_partial_clear<W: Write>(
+fn emit_chat_completions_partial_clear<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     text: &str,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
 ) -> Result<(), Box<dyn Error>> {
-    writer.write_message(&HarnessInputMessage::emit_transient(
+    writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.clone(),
             agent_id: prompt.agent_id.clone(),
@@ -7205,7 +7165,6 @@ fn emit_chat_completions_partial_clear<W: Write>(
             originator: prompt.originator.clone(),
         }),
     ))?;
-    writer.flush()?;
     Ok(())
 }
 
@@ -7235,12 +7194,12 @@ struct PromptAttemptRetry {
     terminal_backend: Option<ProviderBackend>,
 }
 
-fn handle_compact_prompt<R, W: Write>(
+fn handle_compact_prompt<R, S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     config: &ResolvedConfig,
     prompt: &tau_proto::AgentPromptCreated,
     request: &CodexPrompt<'_>,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     retry_ctx: &mut R,
     execution: ChatGptPromptExecutionContext<'_>,
 ) -> Result<Option<PromptAttemptRetry>, Box<dyn Error>>
@@ -7259,7 +7218,7 @@ where
             output_items,
             usage,
         } => {
-            writer.write_message(&HarnessInputMessage::emit_transient(
+            writer.send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(compact_finished_response(
                     agent_prompt_id,
                     prompt,
@@ -7269,7 +7228,6 @@ where
                     execution.logical_attempt.provider_attempt(),
                 )),
             ))?;
-            writer.flush()?;
             Ok(None)
         }
         CompactOutcome::Retry(decision) => Ok(Some(PromptAttemptRetry {
@@ -7356,11 +7314,11 @@ fn compact_finished_response(
     }
 }
 
-fn handle_prompt<R, W: Write>(
+fn handle_prompt<R, S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     config: &ResolvedConfig,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
     retry_ctx: &mut R,
     execution: ChatGptPromptExecutionContext<'_>,
     on_quota: &mut impl FnMut(&tau_provider_codex::RollingQuotaObservation),
@@ -7551,11 +7509,11 @@ where
     Ok(None)
 }
 
-fn emit_chatgpt_connecting_update<W: Write>(
+fn emit_chatgpt_connecting_update<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
 ) {
     let update = ProviderResponseUpdated {
         agent_prompt_id: agent_prompt_id.clone(),
@@ -7570,10 +7528,9 @@ fn emit_chatgpt_connecting_update<W: Write>(
         response_stats: None,
         originator: originator.clone(),
     };
-    let _ = writer.write_message(&HarnessInputMessage::emit_transient(
+    let _ = writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(update),
     ));
-    let _ = writer.flush();
 }
 
 /// Samples ChatGPT streaming progress according to
@@ -7618,13 +7575,13 @@ impl RateLimitedResponseUpdateEmitter {
         }
     }
 
-    fn emit_if_due<W: Write>(
+    fn emit_if_due<S: ProviderReportSink>(
         &mut self,
         agent_prompt_id: &tau_proto::AgentPromptId,
         agent_id: &tau_proto::AgentId,
         originator: &tau_proto::PromptOriginator,
         state: &CodexStreamState,
-        writer: &mut PeerOutputWriter<W>,
+        writer: &mut S,
     ) {
         let target = ResponseUpdateTarget {
             agent_prompt_id,
@@ -7634,13 +7591,13 @@ impl RateLimitedResponseUpdateEmitter {
         self.emit_at(&target, state, writer, Instant::now(), false);
     }
 
-    fn emit_terminal_flush<W: Write>(
+    fn emit_terminal_flush<S: ProviderReportSink>(
         &mut self,
         agent_prompt_id: &tau_proto::AgentPromptId,
         agent_id: &tau_proto::AgentId,
         originator: &tau_proto::PromptOriginator,
         state: &CodexStreamState,
-        writer: &mut PeerOutputWriter<W>,
+        writer: &mut S,
     ) {
         let target = ResponseUpdateTarget {
             agent_prompt_id,
@@ -7650,11 +7607,11 @@ impl RateLimitedResponseUpdateEmitter {
         self.emit_at(&target, state, writer, Instant::now(), true);
     }
 
-    fn emit_at<W: Write>(
+    fn emit_at<S: ProviderReportSink>(
         &mut self,
         target: &ResponseUpdateTarget<'_>,
         state: &CodexStreamState,
-        writer: &mut PeerOutputWriter<W>,
+        writer: &mut S,
         now: Instant,
         terminal_flush: bool,
     ) {
@@ -7711,14 +7668,14 @@ impl RateLimitedResponseUpdateEmitter {
     }
 }
 
-fn emit_chatgpt_stream_update<W: Write>(
+fn emit_chatgpt_stream_update<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
     state: &CodexStreamState,
     delta_emitter: &mut CodexStreamDeltaEmitter,
     response_stats: ProviderResponseStats,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
 ) -> bool {
     // RATE-LIMIT GUARDRAIL — DO NOT CALL THIS DIRECTLY FROM UPSTREAM CHUNKS.
     // provider.response_updated is a bus/event-log event, not a per-chunk
@@ -7736,7 +7693,7 @@ fn emit_chatgpt_stream_update<W: Write>(
     {
         return false;
     }
-    let Ok(()) = writer.write_message(&HarnessInputMessage::emit_transient(
+    let Ok(()) = writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.clone(),
             agent_id: agent_id.clone(),
@@ -7749,7 +7706,7 @@ fn emit_chatgpt_stream_update<W: Write>(
     )) else {
         return false;
     };
-    writer.flush().is_ok()
+    true
 }
 
 fn backend_descriptor(
@@ -7780,7 +7737,7 @@ fn maybe_debug_submit_provider_response(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish_stream<W: Write>(
+fn finish_stream<S: ProviderReportSink>(
     session_id: &tau_proto::SessionId,
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
@@ -7791,7 +7748,7 @@ fn finish_stream<W: Write>(
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
     debug_provider_requests: bool,
     provider_attempt: tau_proto::ProviderAttempt,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
 ) -> Result<(), Box<dyn Error>> {
     let token_counts = state.token_counts();
     let input_tokens = token_counts.input;
@@ -7839,14 +7796,13 @@ fn finish_stream<W: Write>(
     );
     let diagnostic = cache_miss_diagnostic(prompt, request, &finished);
     if let Some(diagnostic) = diagnostic {
-        writer.write_message(&HarnessInputMessage::emit_transient(
+        writer.send_report(HarnessInputMessage::emit_transient(
             Event::ProviderCacheMissDiagnosticReported(diagnostic),
         ))?;
     }
-    writer.write_message(&HarnessInputMessage::emit_transient(
+    writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderResponseFinishedReported(finished),
     ))?;
-    writer.flush()?;
     Ok(())
 }
 
@@ -7889,7 +7845,7 @@ fn cache_miss_diagnostic(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish_error<W: Write>(
+fn finish_error<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     backend: Option<&ProviderBackend>,
@@ -7897,7 +7853,7 @@ fn finish_error<W: Write>(
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
     debug_provider_requests: bool,
     provider_attempt: tau_proto::ProviderAttempt,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
 ) -> Result<(), Box<dyn Error>> {
     let finished = ProviderResponseFinished {
         automatic_compaction_decision: None,
@@ -7932,24 +7888,23 @@ fn finish_error<W: Write>(
         debug_provider_requests,
         None,
     );
-    writer.write_message(&HarnessInputMessage::emit_transient(
+    writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderResponseFinishedReported(finished),
     ))?;
-    writer.flush()?;
     Ok(())
 }
 
-fn emit_repetition_detected_update<W: Write>(
+fn emit_repetition_detected_update<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
     repetition: &tau_provider::StreamRepetition,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &mut S,
 ) {
     let text = bounded_provider_error(&format!(
         "provider stream repetition detected; aborting response ({repetition})"
     ));
-    let _ = writer.write_message(&HarnessInputMessage::emit_transient(
+    let _ = writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.clone(),
             agent_id: agent_id.clone(),
@@ -7964,7 +7919,6 @@ fn emit_repetition_detected_update<W: Write>(
             originator: originator.clone(),
         }),
     ));
-    let _ = writer.flush();
 }
 
 fn bounded_provider_error(text: &str) -> String {

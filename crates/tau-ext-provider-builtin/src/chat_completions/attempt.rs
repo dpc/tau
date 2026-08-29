@@ -4,6 +4,7 @@ use tau_provider::local_summary_compaction::Config as SummaryCompactionConfig;
 
 use super::sampling::ResponseSampler;
 use super::{ChatCompletionsModel, ChatCompletionsProvider};
+use crate::report_sink::ProviderReportSink;
 
 /// Return publication records for one extension-owned compatible profile.
 pub fn models_for_provider(
@@ -78,13 +79,13 @@ pub fn models_for_provider(
 /// Run one finite backend attempt while owning all public event
 /// sampling/writes.
 #[allow(clippy::too_many_arguments)] // Boundary inputs are intentionally explicit and have distinct owners.
-pub fn run_prompt_attempt<W: std::io::Write>(
+pub fn run_prompt_attempt<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ChatCompletionsProvider,
     model: &ChatCompletionsModel,
     debug_provider_requests: bool,
-    writer: &mut tau_proto::PeerOutputWriter<W>,
+    writer: &mut S,
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
     provider_attempt: tau_proto::ProviderAttempt,

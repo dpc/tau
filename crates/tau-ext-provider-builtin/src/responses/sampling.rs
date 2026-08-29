@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::time as path_std_time;
 
+use crate::report_sink::ProviderReportSink;
+
 pub(super) const RESPONSE_UPDATE_INTERVAL: std::time::Duration =
     path_std_time::Duration::from_secs(1);
 
@@ -44,12 +46,12 @@ impl ResponsesResponseSampler {
         }
     }
 
-    pub(super) fn emit_if_due<W: std::io::Write>(
+    pub(super) fn emit_if_due<S: ProviderReportSink>(
         &mut self,
         apid: &tau_proto::AgentPromptId,
         prompt: &tau_proto::AgentPromptCreated,
         progress: tau_provider_responses::AttemptProgress,
-        writer: &mut tau_proto::PeerOutputWriter<W>,
+        writer: &mut S,
     ) {
         let now = path_std_time::Instant::now();
         self.observe_progress(now, progress.has_timed_semantic_output);
@@ -71,20 +73,20 @@ impl ResponsesResponseSampler {
         }
     }
 
-    pub(super) fn flush<W: std::io::Write>(
+    pub(super) fn flush<S: ProviderReportSink>(
         &mut self,
         apid: &tau_proto::AgentPromptId,
         prompt: &tau_proto::AgentPromptCreated,
-        writer: &mut tau_proto::PeerOutputWriter<W>,
+        writer: &mut S,
     ) {
         self.emit_at(apid, prompt, writer, path_std_time::Instant::now(), true);
     }
 
-    pub(super) fn emit_at<W: std::io::Write>(
+    pub(super) fn emit_at<S: ProviderReportSink>(
         &mut self,
         apid: &tau_proto::AgentPromptId,
         prompt: &tau_proto::AgentPromptCreated,
-        writer: &mut tau_proto::PeerOutputWriter<W>,
+        writer: &mut S,
         now: std::time::Instant,
         terminal: bool,
     ) {
@@ -122,11 +124,10 @@ impl ResponsesResponseSampler {
             originator: prompt.originator.clone(),
         };
         if writer
-            .write_message(&tau_proto::HarnessInputMessage::emit_transient(
+            .send_report(tau_proto::HarnessInputMessage::emit_transient(
                 tau_proto::Event::ProviderResponseUpdatedReported(event),
             ))
             .is_ok()
-            && writer.flush().is_ok()
         {
             self.last_sample = current;
             self.last_emitted_at = Some(now);

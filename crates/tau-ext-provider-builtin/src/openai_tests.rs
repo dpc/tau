@@ -59,6 +59,18 @@ impl Write for SharedWriter {
     }
 }
 
+#[derive(Clone, Default)]
+struct TestReportWaker {
+    /// Number of reports made visible before the wake.
+    wakes: Arc<AtomicUsize>,
+}
+
+impl WorkerReportWaker for TestReportWaker {
+    fn wake_provider_loop(&self) {
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 /// Blocking byte source used by tests that need to delay harness EOF.
 #[derive(Clone, Default)]
 struct BlockingInput {
@@ -261,6 +273,64 @@ fn try_decode_frames(bytes: &[u8]) -> Option<Vec<HarnessInputMessage>> {
     }
 }
 
+/// Concurrent polling may observe every proper prefix of a valid frame, but it
+/// must accept only the complete frame and must still reject malformed complete
+/// bytes rather than classifying them as a transient writer cut.
+#[test]
+fn concurrent_frame_polling_distinguishes_mid_frame_from_malformed_output() {
+    const ITERATIONS: usize = 256;
+    let message = HarnessInputMessage::emit_transient(Event::ProviderResponseFinishedReported(
+        simple_finished(
+            tau_proto::AgentPromptId::parse("ap-mid-frame").expect("prompt id"),
+            tau_proto::AgentId::parse("agent-mid-frame").expect("agent id"),
+            tau_proto::PromptOriginator::User,
+            "complete",
+        ),
+    ));
+    let mut encoded = Vec::new();
+    tau_proto::PeerOutputWriter::new(&mut encoded)
+        .write_message(&message)
+        .expect("encode polling fixture");
+    let (snapshot_tx, snapshot_rx) = mpsc::sync_channel::<Vec<u8>>(1);
+    let publisher = thread::spawn({
+        let encoded = encoded.clone();
+        move || {
+            for _ in 0..ITERATIONS {
+                for cut in 1..=encoded.len() {
+                    snapshot_tx
+                        .send(encoded[..cut].to_vec())
+                        .expect("publish controlled writer snapshot");
+                }
+            }
+        }
+    });
+
+    for _ in 0..ITERATIONS {
+        for cut in 1..=encoded.len() {
+            let snapshot = snapshot_rx.recv().expect("receive writer snapshot");
+            if cut < encoded.len() {
+                assert!(
+                    try_decode_frames(&snapshot).is_none(),
+                    "proper frame prefix {cut} must remain transient"
+                );
+            } else {
+                assert_eq!(
+                    try_decode_frames(&snapshot),
+                    Some(vec![message.clone()]),
+                    "complete frame must become authoritative"
+                );
+            }
+        }
+    }
+    publisher.join().expect("snapshot publisher");
+
+    let malformed = [0xff, 0xff];
+    assert!(
+        std::panic::catch_unwind(|| try_decode_frames(&malformed)).is_err(),
+        "complete malformed output must remain a strict decode failure"
+    );
+}
+
 fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
     let mut bytes = Vec::new();
     {
@@ -458,7 +528,7 @@ fn silent_duplicate_prewarm_does_not_block_real_prompt() {
     let prompt_executor: PromptExecutor = Arc::new(|execution| {
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
@@ -467,7 +537,6 @@ fn silent_duplicate_prewarm_does_not_block_real_prompt() {
                 )),
             ))
             .expect("finished");
-        writer.flush().expect("flush fake response");
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
     let prompt_profiles = profiles.clone();
@@ -531,7 +600,7 @@ fn cache_refresh_reports_correlated_terminal() {
     let prompt_executor: PromptExecutor = Arc::new(|execution| {
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
@@ -540,7 +609,6 @@ fn cache_refresh_reports_correlated_terminal() {
                 )),
             ))
             .expect("finished");
-        writer.flush().expect("flush fake response");
     });
     let output = SharedWriter::default();
     let runtime_output = output.clone();
@@ -604,7 +672,7 @@ fn cache_refresh_cancel_precedes_real_prompt() {
     let prompt_executor: PromptExecutor = Arc::new(|execution| {
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
@@ -613,7 +681,6 @@ fn cache_refresh_cancel_precedes_real_prompt() {
                 )),
             ))
             .expect("finished");
-        writer.flush().expect("flush fake response");
     });
     let output = SharedWriter::default();
     let runtime_output = output.clone();
@@ -750,7 +817,7 @@ fn profile_rotation_cancels_active_prewarm() {
     let prompt_executor: PromptExecutor = Arc::new(|execution| {
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
@@ -759,7 +826,6 @@ fn profile_rotation_cancels_active_prewarm() {
                 )),
             ))
             .expect("finished");
-        writer.flush().expect("flush fake response");
     });
     let profiles = Arc::new(Mutex::new(profiles_with_chatgpt_auth(chatgpt_auth())));
     let startup_profiles = profiles.lock().expect("profiles").clone();
@@ -846,11 +912,10 @@ fn profile_identity_rotation_releases_old_shared_cooldown() {
         finished.stop_reason = tau_proto::ProviderStopReason::EndTurn;
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(finished),
             ))
             .expect("successful terminal");
-        writer.flush().expect("flush terminal");
         completed_tx
             .send(id.to_string())
             .expect("report completion");
@@ -980,11 +1045,10 @@ fn stale_old_identity_retry_cannot_park_new_profile_work() {
         finished.error = None;
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(finished),
             ))
             .expect("write identity-race terminal");
-        writer.flush().expect("flush identity-race terminal");
         completed_tx.send(id).expect("report identity-race finish");
     });
     let profiles = Arc::new(Mutex::new(profiles_with_chatgpt_auth(chatgpt_auth())));
@@ -2177,27 +2241,77 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         .expect("known-safe AgentPromptId must be valid");
     let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
     let originator = tau_proto::PromptOriginator::User;
-    tx.send(WorkerMessage::Output {
-        message: Box::new(HarnessInputMessage::emit_transient(
-            Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
-                agent_prompt_id: target.clone(),
-                agent_id: agent_id.clone(),
-                deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
-                    output_index: 0,
-                    text: "must not commit".to_owned(),
-                    phase: None,
-                }],
-                compaction: None,
-                status: None,
-                response_stats: None,
-                originator: originator.clone(),
-            }),
-        )),
+    let oversized_target = HarnessInputMessage::emit_transient(
+        Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
+            agent_prompt_id: target.clone(),
+            agent_id: agent_id.clone(),
+            deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                output_index: 0,
+                text: "must not commit".repeat(1024 * 1024),
+                phase: None,
+            }],
+            compaction: None,
+            status: None,
+            response_stats: None,
+            originator: originator.clone(),
+        }),
+    );
+    assert!(
+        tau_client::MAX_OUTBOUND_FRAME_BYTES
+            < tau_client::encoded_outbound_frame_bytes(&oversized_target)
+                .expect("measure oversized typed report"),
+        "fixture must cross the final client admission boundary"
+    );
+    assert!(
+        tau_client::encoded_outbound_frame_bytes(&oversized_target)
+            .expect("remeasure oversized typed report")
+            < tau_proto::MAX_PROTOCOL_MESSAGE_BYTES,
+        "fixture must remain inside the old worker decoder boundary"
+    );
+    let target_waker = TestReportWaker::default();
+    WorkerReportSink {
+        tx: tx.clone(),
+        waker: target_waker.clone(),
         cancel_generation: 0,
         agent_prompt_id: target.clone(),
         cooldown_probe: None,
-    })
-    .expect("queue target delta");
+    }
+    .send_report(oversized_target.clone())
+    .expect("worker sink accepts an oversized report before cancellation arbitration");
+    assert_eq!(target_waker.wakes.load(Ordering::SeqCst), 1);
+
+    let mut beyond_decoder_limit = oversized_target;
+    let HarnessInputMessage::Emit(emit) = &mut beyond_decoder_limit else {
+        unreachable!("fixture is an emitted provider update");
+    };
+    let Event::ProviderResponseUpdatedReported(update) = emit.event.as_mut() else {
+        unreachable!("fixture is a provider update");
+    };
+    let tau_proto::ProviderResponseTextDelta::Message { text, .. } = &mut update.deltas[0] else {
+        unreachable!("fixture carries one message delta");
+    };
+    *text = "rejected before enqueue".repeat(1024 * 1024);
+    assert!(
+        tau_proto::MAX_PROTOCOL_MESSAGE_BYTES
+            < tau_client::encoded_outbound_frame_bytes(&beyond_decoder_limit)
+                .expect("measure decoder-limit fixture")
+    );
+    let (rejected_tx, rejected_rx) = mpsc::channel();
+    let rejected_waker = TestReportWaker::default();
+    let result = WorkerReportSink {
+        tx: rejected_tx,
+        waker: rejected_waker.clone(),
+        cancel_generation: 0,
+        agent_prompt_id: target.clone(),
+        cooldown_probe: None,
+    }
+    .send_report(beyond_decoder_limit);
+    assert!(result.is_err(), "old 16-MiB decoder boundary must reject");
+    assert!(matches!(
+        rejected_rx.try_recv(),
+        Err(TryRecvError::Empty | TryRecvError::Disconnected)
+    ));
+    assert_eq!(rejected_waker.wakes.load(Ordering::SeqCst), 0);
     tx.send(WorkerMessage::Output {
         message: Box::new(HarnessInputMessage::emit_transient(
             Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
@@ -2340,6 +2454,127 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
             if finished.agent_prompt_id == target
                 && finished.error.as_deref() == Some("reused prompt success")
     ));
+}
+
+/// The production main-loop drain must arbitrate cancellation before the
+/// client's lower 8-MiB frame cap, so an already-canceled oversized tentative
+/// update cannot stop the runtime before its small clear and canceled terminal.
+#[test]
+fn canceled_oversized_worker_report_reaches_real_client_boundary_as_small_terminal() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        let agent_prompt_id = execution.job.agent_prompt_id.clone();
+        let agent_id = execution.job.prompt.agent_id.clone();
+        let originator = execution.job.prompt.originator.clone();
+        execution.cancellation.cancel(agent_prompt_id.clone());
+        let mut sink = execution.frame_writer();
+        let oversized = HarnessInputMessage::emit_transient(
+            Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
+                agent_prompt_id: agent_prompt_id.clone(),
+                agent_id: agent_id.clone(),
+                deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                    output_index: 0,
+                    text: "discard at main-loop cancellation".repeat(300 * 1024),
+                    phase: None,
+                }],
+                compaction: None,
+                status: None,
+                response_stats: None,
+                originator: originator.clone(),
+            }),
+        );
+        let encoded_bytes =
+            tau_client::encoded_outbound_frame_bytes(&oversized).expect("measure oversized update");
+        assert!(tau_client::MAX_OUTBOUND_FRAME_BYTES < encoded_bytes);
+        assert!(encoded_bytes < tau_proto::MAX_PROTOCOL_MESSAGE_BYTES);
+        sink.send_report(oversized).expect("queue oversized update");
+        sink.send_report(HarnessInputMessage::emit_transient(
+            Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
+                agent_prompt_id: agent_prompt_id.clone(),
+                agent_id: agent_id.clone(),
+                deltas: Vec::new(),
+                compaction: None,
+                status: Some(tau_proto::ProviderResponseStatusUpdate {
+                    text: "discarding tentative output".to_owned(),
+                    clear_response: true,
+                    retry: None,
+                }),
+                response_stats: None,
+                originator: originator.clone(),
+            }),
+        ))
+        .expect("queue intentional clear");
+        sink.send_report(HarnessInputMessage::emit_transient(
+            Event::ProviderResponseFinishedReported(simple_finished(
+                agent_prompt_id,
+                agent_id,
+                originator,
+                "stale success",
+            )),
+        ))
+        .expect("queue stale terminal");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let output = SharedWriter::default();
+    let runtime_output = output.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            runtime_output,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("oversized cancellation runtime");
+    });
+
+    let frames = wait_for_runtime_frames(&output, |frames| {
+        frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinishedReported(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+                        && finished.error.as_deref() == Some("(cancelled by harness)")
+            )
+        })
+    });
+    let provider_events = frames
+        .iter()
+        .filter_map(input_event)
+        .filter(|event| {
+            matches!(
+                event,
+                Event::ProviderResponseUpdatedReported(_)
+                    | Event::ProviderResponseFinishedReported(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        provider_events.as_slice(),
+        [
+            Event::ProviderResponseUpdatedReported(clear),
+            Event::ProviderResponseFinishedReported(finished)
+        ] if clear.status.as_ref().is_some_and(|status| status.clear_response)
+            && finished.error.as_deref() == Some("(cancelled by harness)")
+    ));
+
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime
+        .join()
+        .expect("oversized cancellation runtime joins");
+    decode_frames(&output.bytes());
 }
 
 /// Registered ChatGPT profiles must publish their models even when credentials
@@ -2531,7 +2766,7 @@ fn prompt_workers_start_concurrently() {
         let mut writer = execution.frame_writer();
         write_prompt_submitted(&agent_prompt_id, &originator, &mut writer).expect("submitted");
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     agent_prompt_id.clone(),
                     tau_proto::AgentId::parse("agent-1").expect("valid test agent id"),
@@ -2540,7 +2775,6 @@ fn prompt_workers_start_concurrently() {
                 )),
             ))
             .expect("finished");
-        writer.flush().expect("flush fake response");
 
         let mut guard = lock.lock().expect("started lock");
         guard.0 -= 1;
@@ -2620,7 +2854,7 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
@@ -2629,7 +2863,6 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
                 )),
             ))
             .expect("finished frame");
-        writer.flush().expect("flush finished frame");
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
     let prompt_profiles = profiles.clone();
@@ -2964,7 +3197,7 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
                 .expect("release ownership probe");
             let mut writer = execution.frame_writer();
             writer
-                .write_message(&HarnessInputMessage::emit_transient(
+                .send_report(HarnessInputMessage::emit_transient(
                     Event::ProviderResponseFinishedReported(simple_finished(
                         execution.job.agent_prompt_id,
                         execution.job.prompt.agent_id,
@@ -2973,7 +3206,6 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
                     )),
                 ))
                 .expect("finish ownership probe");
-            writer.flush().expect("flush ownership probe");
             return;
         }
         let attempt = executor_peer_attempts.fetch_add(1, Ordering::SeqCst);
@@ -3002,7 +3234,7 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
@@ -3011,7 +3243,6 @@ fn standalone_retry_exhaustion_preserves_shared_peer_cooldown() {
                 )),
             ))
             .expect("finish peer");
-        writer.flush().expect("flush peer");
         peer_finished_tx.send(()).expect("report peer finish");
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
@@ -3204,7 +3435,7 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
         } else {
             let mut writer = execution.frame_writer();
             writer
-                .write_message(&HarnessInputMessage::emit_transient(
+                .send_report(HarnessInputMessage::emit_transient(
                     Event::ProviderResponseFinishedReported(simple_finished(
                         execution.job.agent_prompt_id,
                         execution.job.prompt.agent_id,
@@ -3213,7 +3444,6 @@ fn manual_retry_transfer_clears_delayed_count_through_main_loop() {
                     )),
                 ))
                 .expect("finish manual attempt");
-            writer.flush().expect("flush finish");
         }
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
@@ -3402,11 +3632,10 @@ fn rrqmwy_virtual_time_quota_recovery_acceptance() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(finished),
             ))
             .expect("successful terminal");
-        writer.flush().expect("flush successful terminal");
         completed_tx.send(id).expect("report successful attempt");
     });
 
@@ -4016,7 +4245,7 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
         } else {
             let mut writer = execution.frame_writer();
             writer
-                .write_message(&HarnessInputMessage::emit_transient(
+                .send_report(HarnessInputMessage::emit_transient(
                     Event::ProviderResponseFinishedReported(simple_finished(
                         execution.job.agent_prompt_id,
                         execution.job.prompt.agent_id,
@@ -4025,7 +4254,6 @@ fn manual_retry_failure_reparks_with_normal_accounting_then_finishes_once() {
                     )),
                 ))
                 .expect("finish");
-            writer.flush().expect("flush finish");
         }
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
@@ -4138,11 +4366,10 @@ fn context_window_rejection_finishes_once_without_retry_status() {
         );
         finished.failure_kind = Some(tau_proto::ProviderFailureKind::ContextWindowExceeded);
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(finished),
             ))
             .expect("terminal frame");
-        writer.flush().expect("flush terminal frame");
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
     let prompt_profiles = profiles.clone();
@@ -4267,7 +4494,7 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
@@ -4276,7 +4503,6 @@ fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
                 )),
             ))
             .expect("healthy finished");
-        writer.flush().expect("flush healthy finish");
         healthy_tx.send(()).expect("report healthy completion");
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
@@ -4409,7 +4635,7 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
                 assert!(config.credentials_match("fresh-token", Some("account")));
                 let mut writer = execution.frame_writer();
                 writer
-                    .write_message(&HarnessInputMessage::emit_transient(
+                    .send_report(HarnessInputMessage::emit_transient(
                         Event::ProviderResponseFinishedReported(simple_finished(
                             execution.job.agent_prompt_id,
                             execution.job.prompt.agent_id,
@@ -4418,7 +4644,6 @@ fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
                         )),
                     ))
                     .expect("finish after re-addition");
-                writer.flush().expect("flush re-added finish");
                 finished_tx.send(()).expect("report finish");
                 return;
             }
@@ -4504,7 +4729,7 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
         if executor_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
             let mut writer = execution.frame_writer();
             writer
-                .write_message(&HarnessInputMessage::emit_transient(
+                .send_report(HarnessInputMessage::emit_transient(
                     Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
                         agent_prompt_id: execution.job.agent_prompt_id.clone(),
                         agent_id: execution.job.prompt.agent_id.clone(),
@@ -4520,7 +4745,6 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
                     }),
                 ))
                 .expect("tentative update");
-            writer.flush().expect("flush tentative update");
             send_worker_message(
                 &execution.output_tx,
                 &execution.output_waker,
@@ -4553,11 +4777,10 @@ fn retry_clears_failed_attempt_output_before_durable_success() {
         })];
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(finished),
             ))
             .expect("durable finish");
-        writer.flush().expect("flush durable finish");
         finished_tx.send(()).expect("report durable finish");
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
@@ -4744,7 +4967,7 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
@@ -4753,7 +4976,6 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
                 )),
             ))
             .expect("family finish");
-        writer.flush().expect("flush family finish");
         finished_tx.send(id).expect("report family finish");
     });
     let writer = SharedWriter::default();
@@ -4906,7 +5128,7 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                     .expect("shutdown did not wake active backend");
                 let mut writer = execution.frame_writer();
                 writer
-                    .write_message(&HarnessInputMessage::emit_transient(
+                    .send_report(HarnessInputMessage::emit_transient(
                         Event::ProviderResponseFinishedReported(simple_finished(
                             execution.job.agent_prompt_id,
                             execution.job.prompt.agent_id,
@@ -4915,7 +5137,6 @@ fn assert_mixed_state_shutdown(shutdown: MixedStateShutdown) {
                         )),
                     ))
                     .expect("late active terminal");
-                writer.flush().expect("flush late active terminal");
             }
             other => panic!("queued prompt unexpectedly executed: {other}"),
         }
@@ -5108,7 +5329,7 @@ fn cold_restart_discards_old_work_and_cooldown() {
         );
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
@@ -5117,7 +5338,6 @@ fn cold_restart_discards_old_work_and_cooldown() {
                 )),
             ))
             .expect("write fresh terminal");
-        writer.flush().expect("flush fresh terminal");
         finished_tx.send(()).expect("report fresh completion");
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
@@ -5339,7 +5559,7 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
@@ -5348,7 +5568,6 @@ fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
                 )),
             ))
             .expect("status fixture finish");
-        writer.flush().expect("flush status fixture");
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
     let prompt_profiles = profiles.clone();
@@ -5597,7 +5816,7 @@ fn queued_targeted_cancel_allows_prompt_id_reuse() {
         }
         let mut writer = execution.frame_writer();
         writer
-            .write_message(&HarnessInputMessage::emit_transient(
+            .send_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     execution.job.agent_prompt_id,
                     execution.job.prompt.agent_id,
@@ -5606,7 +5825,6 @@ fn queued_targeted_cancel_allows_prompt_id_reuse() {
                 )),
             ))
             .expect("reuse fixture finish");
-        writer.flush().expect("flush reuse fixture");
     });
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
     let prompt_profiles = profiles.clone();
@@ -5779,7 +5997,7 @@ fn late_retry_after_targeted_cancel_is_not_rescheduled() {
 
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        let frames = decode_frames(&output.bytes());
+        let frames = try_decode_frames(&output.bytes()).unwrap_or_default();
         if frames.iter().any(|frame| {
             matches!(
                 input_event(frame),
@@ -5857,7 +6075,6 @@ fn worker_output_wakes_loop_before_prompt_done() {
             &mut writer,
         )
         .expect("submitted");
-        writer.flush().expect("flush submitted");
 
         let (lock, cv) = &*executor_release;
         let mut released = lock.lock().expect("release lock");

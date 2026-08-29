@@ -1,5 +1,6 @@
 //! Extension-owned public Responses profiles and finite attempt adapter.
 
+use crate::report_sink::ProviderReportSink;
 mod prompt_cache;
 mod sampling;
 #[cfg(test)]
@@ -257,13 +258,13 @@ pub fn models_for_provider(
 
 /// Runs and samples one finite generic public Responses attempt.
 #[allow(clippy::too_many_arguments)]
-pub fn run_prompt_attempt<W: std::io::Write>(
+pub fn run_prompt_attempt<S: ProviderReportSink>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ResponsesProvider,
     model: &ResponsesModel,
     debug_provider_requests: bool,
-    writer: &mut tau_proto::PeerOutputWriter<W>,
+    writer: &mut S,
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> PromptAttemptOutcome {

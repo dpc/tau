@@ -2893,6 +2893,272 @@ fn minimal_prompt() -> tau_proto::AgentPromptCreated {
     }
 }
 
+/// Provider materialization must consume the handler-owned prompt allocation,
+/// retain every large payload allocation, and clear only the transport reuse
+/// reference.
+#[test]
+fn provider_materialization_moves_owned_prompt_without_payload_clones() {
+    let mut prompt = minimal_prompt();
+    prompt.system_prompt = "owned-system-prompt".repeat(256);
+    prompt.context.blocks = vec![tau_proto::ContextBlock::UserInput(
+        tau_proto::UserInputBlock {
+            items: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+                role: tau_proto::ContextRole::User,
+                content: vec![tau_proto::ContentPart::Text {
+                    text: "owned-context".repeat(256),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        },
+    )];
+    prompt.tools = vec![tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("owned_tool"),
+        model_visible_name: None,
+        description: Some("owned-description".repeat(256)),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: None,
+        format: None,
+    }];
+    prompt.tools_ref = Some(tau_proto::PromptToolsRef {
+        base_agent_prompt_id: tau_proto::AgentPromptId::parse("ap-base")
+            .expect("known-safe prompt id"),
+    });
+
+    let system_prompt_ptr = prompt.system_prompt.as_ptr();
+    let context_ptr = prompt.context.blocks.as_ptr();
+    let tools_ptr = prompt.tools.as_ptr();
+    let materialized = materialize_prompt(prompt);
+
+    let retained_allocation_count = [
+        materialized.system_prompt.as_ptr() == system_prompt_ptr,
+        materialized.context.blocks.as_ptr().cast::<u8>() == context_ptr.cast::<u8>(),
+        materialized.tools.as_ptr().cast::<u8>() == tools_ptr.cast::<u8>(),
+    ]
+    .into_iter()
+    .filter(|retained| *retained)
+    .count();
+    assert_eq!(
+        retained_allocation_count, 3,
+        "all three independently allocated prompt surfaces must move without cloning"
+    );
+    assert_eq!(materialized.tools_ref, None);
+}
+
+/// Every report variant converted to typed worker delivery must remain
+/// byte-for-byte identical to the ordinary peer writer and preserve FIFO order.
+#[test]
+fn typed_worker_reports_match_wire_roundtrip_for_every_converted_variant() {
+    #[derive(Clone, Default)]
+    struct RecordingWaker(Arc<path_std_sync_atomic::AtomicUsize>);
+
+    impl WorkerReportWaker for RecordingWaker {
+        fn wake_provider_loop(&self) {
+            self.0.fetch_add(1, path_std_sync_atomic::Ordering::SeqCst);
+        }
+    }
+
+    let prompt = minimal_prompt();
+    let messages = vec![
+        HarnessInputMessage::emit_transient(Event::ProviderPromptSubmittedReported(
+            ProviderPromptSubmitted {
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                originator: prompt.originator.clone(),
+            },
+        )),
+        HarnessInputMessage::emit_transient(Event::ProviderResponseUpdatedReported(
+            ProviderResponseUpdated {
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                agent_id: prompt.agent_id.clone(),
+                deltas: Vec::new(),
+                compaction: None,
+                status: Some(ProviderResponseStatusUpdate {
+                    text: "typed update".to_owned(),
+                    clear_response: false,
+                    retry: None,
+                }),
+                response_stats: Some(tau_proto::ProviderResponseStats {
+                    current: tau_proto::ProviderResponseStatsSample {
+                        response_bytes_received: 4096,
+                        elapsed_micros: 2000,
+                    },
+                    previous: tau_proto::ProviderResponseStatsSample {
+                        response_bytes_received: 1024,
+                        elapsed_micros: 1000,
+                    },
+                    first_semantic_output_elapsed_micros: Some(750),
+                }),
+                originator: prompt.originator.clone(),
+            },
+        )),
+        HarnessInputMessage::emit_transient(Event::ProviderCacheMissDiagnosticReported(
+            tau_proto::ProviderCacheMissDiagnostic {
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                model: prompt.model.clone(),
+                originator: prompt.originator.clone(),
+                tool_choice: prompt.tool_choice,
+                ws_pool_delta: None,
+                input_tokens: 200,
+                cached_tokens: 10,
+                previous_input_tokens: 180,
+                cacheable_input_tokens: 160,
+                corrected_cache_efficiency: 0.0625,
+            },
+        )),
+        HarnessInputMessage::emit_transient(Event::ProviderResponseFinishedReported(
+            simple_finished(
+                prompt.agent_prompt_id.clone(),
+                prompt.agent_id.clone(),
+                prompt.originator.clone(),
+                "typed finish",
+            ),
+        )),
+        HarnessInputMessage::emit_transient(Event::ProviderRetryPromptResultReported(
+            tau_proto::ProviderRetryPromptResult {
+                request_id: tau_proto::RetryPromptRequestId::parse("retry-result")
+                    .expect("known-safe retry request id"),
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                status: tau_proto::RetryPromptStatus::Accepted,
+            },
+        )),
+    ];
+
+    let (tx, rx) = mpsc::channel();
+    let waker = RecordingWaker::default();
+    let mut sink = WorkerReportSink {
+        tx,
+        waker: waker.clone(),
+        cancel_generation: 7,
+        agent_prompt_id: prompt.agent_prompt_id.clone(),
+        cooldown_probe: None,
+    };
+    for message in messages.iter().cloned() {
+        sink.send_report(message).expect("admit typed report");
+    }
+    let direct = rx
+        .try_iter()
+        .map(|worker| {
+            let WorkerMessage::Output {
+                message,
+                cancel_generation,
+                agent_prompt_id,
+                cooldown_probe,
+            } = worker
+            else {
+                panic!("report sink emitted non-output worker message");
+            };
+            assert_eq!(cancel_generation, 7);
+            assert_eq!(agent_prompt_id, prompt.agent_prompt_id);
+            assert!(cooldown_probe.is_none());
+            *message
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        waker.0.load(path_std_sync_atomic::Ordering::SeqCst),
+        messages.len()
+    );
+    assert_eq!(
+        direct, messages,
+        "typed admission must preserve exact FIFO values"
+    );
+
+    let mut expected_wire = Vec::new();
+    let mut trait_wire = Vec::new();
+    {
+        let mut expected = tau_proto::PeerOutputWriter::new(&mut expected_wire);
+        let mut through_trait = tau_proto::PeerOutputWriter::new(&mut trait_wire);
+        for message in &messages {
+            expected
+                .write_message(message)
+                .expect("encode expected report");
+            expected.flush().expect("flush expected report");
+            through_trait
+                .send_report(message.clone())
+                .expect("encode report through compatibility sink");
+        }
+    }
+    assert_eq!(
+        trait_wire, expected_wire,
+        "remote peer transport bytes must not change"
+    );
+    assert_eq!(decode_frames(&trait_wire), direct);
+}
+
+/// Describes report-count and payload-size scaling for the owned typed handoff
+/// against the removed encode-buffer-decode worker roundtrip.
+#[test]
+#[ignore = "descriptive performance benchmark"]
+fn benchmark_owned_provider_report_handoff_scaling() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    eprintln!(
+        "reports,payload_bytes,typed_elapsed_ns,wire_roundtrip_elapsed_ns,wire_intermediate_bytes,checksum"
+    );
+    for report_count in [1_usize, 64, 4096] {
+        for payload_bytes in [0_usize, 4 * 1024, 256 * 1024] {
+            let message = HarnessInputMessage::emit_transient(
+                Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
+                    agent_prompt_id: tau_proto::AgentPromptId::parse("ap-benchmark")
+                        .expect("known-safe prompt id"),
+                    agent_id: tau_proto::AgentId::parse("agent-benchmark")
+                        .expect("known-safe agent id"),
+                    deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                        output_index: 0,
+                        text: "x".repeat(payload_bytes),
+                        phase: None,
+                    }],
+                    compaction: None,
+                    status: None,
+                    response_stats: None,
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+            );
+
+            let typed_started = Instant::now();
+            let mut typed_checksum = 0_u64;
+            for _ in 0..report_count {
+                let report =
+                    prepare_worker_report(message.clone()).expect("admit benchmark typed report");
+                typed_checksum = typed_checksum.wrapping_add(
+                    tau_client::encoded_outbound_frame_bytes(&report)
+                        .expect("measure typed benchmark report"),
+                );
+                black_box(report);
+            }
+            let typed_elapsed = typed_started.elapsed();
+
+            let wire_started = Instant::now();
+            let mut wire_intermediate_bytes = 0_u64;
+            let mut wire_checksum = 0_u64;
+            for _ in 0..report_count {
+                let report = message.clone();
+                let mut bytes = Vec::new();
+                tau_proto::PeerOutputWriter::new(&mut bytes)
+                    .write_message(&report)
+                    .expect("encode benchmark wire report");
+                wire_intermediate_bytes =
+                    wire_intermediate_bytes.saturating_add(bytes.len() as u64);
+                let decoded = decode_frames(&bytes);
+                wire_checksum = wire_checksum.wrapping_add(
+                    tau_client::encoded_outbound_frame_bytes(
+                        decoded.first().expect("one decoded benchmark report"),
+                    )
+                    .expect("measure decoded benchmark report"),
+                );
+                black_box(decoded);
+            }
+            let wire_elapsed = wire_started.elapsed();
+            assert_eq!(typed_checksum, wire_checksum);
+            eprintln!(
+                "{report_count},{payload_bytes},{},{},{wire_intermediate_bytes},{typed_checksum}",
+                typed_elapsed.as_nanos(),
+                wire_elapsed.as_nanos(),
+            );
+        }
+    }
+}
+
 /// Native compact usage must retain cache-read and cache-write observations
 /// when the adapter turns a finished compact outcome into its reported event.
 #[test]
