@@ -95,9 +95,9 @@ use tau_proto::{
 };
 use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider_codex::{
-    AttemptOutcome as CodexAttemptOutcome, CodexError, CodexMode, CodexRuntime, CompactOutcome,
-    InferenceProfileIdentity, PrewarmOutcome, Prompt as CodexPrompt, QuotaProfileIdentity,
-    ResolvedConfig, SemanticProgress as CodexSemanticProgress,
+    AttemptOutcome as CodexAttemptOutcome, ChatGptRetryIdentity, CodexError, CodexMode,
+    CodexRuntime, CompactOutcome, InferenceProfileIdentity, PrewarmOutcome, Prompt as CodexPrompt,
+    QuotaProfileIdentity, ResolvedConfig, SemanticProgress as CodexSemanticProgress,
     StreamDeltaEmitter as CodexStreamDeltaEmitter, StreamState as CodexStreamState, StreamUpdate,
     TurnAbort, TurnAbortWaker,
 };
@@ -736,9 +736,14 @@ fn backend_profile_identity(backend: &PromptBackend) -> Option<BackendProfileIde
     })
 }
 
-fn automatic_retry_identity_matches(pinned: Option<&ResolvedConfig>, next: &PromptBackend) -> bool {
+fn automatic_retry_identity_matches(
+    pinned: Option<&ChatGptRetryIdentity>,
+    next: &PromptBackend,
+) -> bool {
     match (pinned, next) {
-        (Some(pinned), PromptBackend::Responses(next)) => pinned.same_chatgpt_identity(next),
+        (Some(pinned), PromptBackend::Responses(next)) => {
+            next.matches_chatgpt_retry_identity(pinned)
+        }
         (Some(_), PromptBackend::Unavailable { .. }) => true,
         (Some(_), _) => false,
         (None, _) => true,
@@ -3964,7 +3969,7 @@ where
         let backend = self.resolve_admitted_backend_with_quota(&prompt.model, profiles, handle)?;
         let profile_identity = backend_profile_identity(&backend);
         let pinned_chatgpt_identity = match &backend {
-            PromptBackend::Responses(config) => Some(config.clone()),
+            PromptBackend::Responses(config) => Some(config.chatgpt_retry_identity()),
             _ => None,
         };
         let mut frame_writer = handle_report_sink(handle);
@@ -5445,7 +5450,7 @@ struct PromptJob {
     prompt: tau_proto::AgentPromptCreated,
     backend: PromptBackend,
     /// Immutable account anchor for every automatic retry of this owned prompt.
-    pinned_chatgpt_identity: Option<ResolvedConfig>,
+    pinned_chatgpt_identity: Option<ChatGptRetryIdentity>,
     /// Inference profile identity used by the next finite attempt.
     profile_identity: Option<BackendProfileIdentity>,
     retry_state: PromptRetryState,
@@ -6675,14 +6680,18 @@ enum PromptBackend {
     },
     Responses(ResolvedConfig),
     ChatCompletions {
-        provider: ChatCompletionsProvider,
-        model: ChatCompletionsModel,
+        /// One shared immutable route snapshot, including its model catalog.
+        provider: Arc<ChatCompletionsProvider>,
+        /// Stable position of the selected model in the route snapshot.
+        model_index: usize,
     },
     /// Generic public Responses API request using profile-selected SSE or
     /// WebSocket.
     PublicResponses {
-        provider: ResponsesProvider,
-        model: ResponsesModel,
+        /// One shared immutable route snapshot, including its model catalog.
+        provider: Arc<ResponsesProvider>,
+        /// Stable position of the selected model in the route snapshot.
+        model_index: usize,
     },
 }
 
@@ -7510,39 +7519,38 @@ fn resolve_prompt_backend(
         }
         BuiltinProviderProfile::ChatCompletions(provider) => {
             refresh_rejections.clear(&model.provider);
-            let configured_model = provider
+            let model_index = provider
                 .models
                 .iter()
-                .find(|configured| configured.id == model.model)?
-                .clone();
+                .position(|configured| configured.id == model.model)?;
+            let provider = Arc::new(std::mem::take(provider));
             Some(PromptBackend::ChatCompletions {
-                provider: provider.clone(),
-                model: configured_model,
+                provider,
+                model_index,
             })
         }
         BuiltinProviderProfile::OpenRouter(profile) => {
             refresh_rejections.clear(&model.provider);
-            let provider = profile.to_chat_completions();
-            let configured_model = provider
+            let provider = std::mem::take(profile).into_chat_completions();
+            let model_index = provider
                 .models
                 .iter()
-                .find(|configured| configured.id == model.model)?
-                .clone();
+                .position(|configured| configured.id == model.model)?;
             Some(PromptBackend::ChatCompletions {
-                provider,
-                model: configured_model,
+                provider: Arc::new(provider),
+                model_index,
             })
         }
         BuiltinProviderProfile::Responses(provider) => {
             refresh_rejections.clear(&model.provider);
-            let configured_model = provider
+            let model_index = provider
                 .models
                 .iter()
-                .find(|configured| configured.id == model.model)?
-                .clone();
+                .position(|configured| configured.id == model.model)?;
+            let provider = Arc::new(std::mem::take(provider));
             Some(PromptBackend::PublicResponses {
-                provider: provider.clone(),
-                model: configured_model,
+                provider,
+                model_index,
             })
         }
     }
@@ -7579,39 +7587,38 @@ fn resolve_prompt_backend_without_refresh(
         }
         BuiltinProviderProfile::ChatCompletions(provider) => {
             refresh_rejections.clear(&model.provider);
-            let configured_model = provider
+            let model_index = provider
                 .models
                 .iter()
-                .find(|configured| configured.id == model.model)?
-                .clone();
+                .position(|configured| configured.id == model.model)?;
+            let provider = Arc::new(std::mem::take(provider));
             Some(PromptBackend::ChatCompletions {
-                provider: provider.clone(),
-                model: configured_model,
+                provider,
+                model_index,
             })
         }
         BuiltinProviderProfile::OpenRouter(profile) => {
             refresh_rejections.clear(&model.provider);
-            let provider = profile.to_chat_completions();
-            let configured_model = provider
+            let provider = std::mem::take(profile).into_chat_completions();
+            let model_index = provider
                 .models
                 .iter()
-                .find(|configured| configured.id == model.model)?
-                .clone();
+                .position(|configured| configured.id == model.model)?;
             Some(PromptBackend::ChatCompletions {
-                provider,
-                model: configured_model,
+                provider: Arc::new(provider),
+                model_index,
             })
         }
         BuiltinProviderProfile::Responses(provider) => {
             refresh_rejections.clear(&model.provider);
-            let configured_model = provider
+            let model_index = provider
                 .models
                 .iter()
-                .find(|configured| configured.id == model.model)?
-                .clone();
+                .position(|configured| configured.id == model.model)?;
+            let provider = Arc::new(std::mem::take(provider));
             Some(PromptBackend::PublicResponses {
-                provider: provider.clone(),
-                model: configured_model,
+                provider,
+                model_index,
             })
         }
     }
@@ -8204,20 +8211,26 @@ where
             context,
             on_quota,
         ),
-        PromptBackend::ChatCompletions { provider, model } => handle_chat_completions_backend(
+        PromptBackend::ChatCompletions {
+            provider,
+            model_index,
+        } => handle_chat_completions_backend(
             agent_prompt_id,
             prompt,
             provider,
-            model,
+            &provider.models[*model_index],
             writer,
             retry_ctx,
             context,
         ),
-        PromptBackend::PublicResponses { provider, model } => handle_public_responses_backend(
+        PromptBackend::PublicResponses {
+            provider,
+            model_index,
+        } => handle_public_responses_backend(
             agent_prompt_id,
             prompt,
             provider,
-            model,
+            &provider.models[*model_index],
             writer,
             retry_ctx,
             context,

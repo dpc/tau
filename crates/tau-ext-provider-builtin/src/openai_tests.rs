@@ -1993,20 +1993,20 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
         ..ChatCompletionsProvider::default()
     };
     let old = PromptBackend::ChatCompletions {
-        provider: provider.clone(),
-        model: chat_model("model"),
+        provider: Arc::new(provider.clone()),
+        model_index: 0,
     };
     let mut rotated = provider;
     rotated.api_key = "new-key".to_owned();
     let new = PromptBackend::ChatCompletions {
-        provider: rotated.clone(),
-        model: chat_model("model"),
+        provider: Arc::new(rotated.clone()),
+        model_index: 0,
     };
     let mut moved = rotated;
     moved.base_url = "https://replacement.invalid/v1".to_owned();
     let moved = PromptBackend::ChatCompletions {
-        provider: moved,
-        model: chat_model("model"),
+        provider: Arc::new(moved),
+        model_index: 0,
     };
     let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
     let mut refresh_rejections = OAuthRefreshRejectionCache::default();
@@ -2044,8 +2044,8 @@ fn inference_profile_identity_tracks_chat_completions_rotation() {
     };
     let router_backend =
         |profile: &crate::chat_completions::OpenRouterProfile| PromptBackend::ChatCompletions {
-            provider: profile.to_chat_completions(),
-            model: chat_model("route/model"),
+            provider: Arc::new(profile.to_chat_completions()),
+            model_index: 0,
         };
     assert_ne!(
         backend_profile_identity(&router_backend(&router_old)),
@@ -4920,21 +4920,23 @@ fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
             (
                 "generic-retry",
                 PromptBackend::ChatCompletions {
-                    provider, model, ..
+                    provider,
+                    model_index,
                 },
             ) => {
                 assert_eq!(provider.base_url, "https://generic.invalid/v1");
-                assert_eq!(model.id.as_str(), "generic-model");
+                assert_eq!(provider.models[*model_index].id.as_str(), "generic-model");
             }
             (
                 "router-retry",
                 PromptBackend::ChatCompletions {
-                    provider, model, ..
+                    provider,
+                    model_index,
                 },
             ) => {
                 assert_eq!(provider.base_url, "https://openrouter.ai/api/v1");
                 assert_eq!(provider.api_key, "router-key");
-                assert_eq!(model.id.as_str(), "router-model");
+                assert_eq!(provider.models[*model_index].id.as_str(), "router-model");
             }
             _ => panic!("provider family changed routing backend for {id}"),
         }

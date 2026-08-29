@@ -154,6 +154,20 @@ pub struct ResolvedConfig {
     inner: responses::ResponsesConfig,
 }
 
+/// Exact ChatGPT account identity retained across automatic prompt retries.
+///
+/// This proof deliberately contains no bearer token and has no `Debug` or
+/// serialization implementation. It can only answer whether a newly resolved
+/// configuration belongs to the originally accepted account.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ChatGptRetryIdentity {
+    /// Domain-separated digest of the accepted non-empty account selector.
+    ///
+    /// Absence is retained explicitly so a malformed initial identity cannot
+    /// become authority to adopt a different account during retry.
+    account_digest: Option<blake3::Hash>,
+}
+
 /// Opaque identity for quota/account control-plane state.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct QuotaProfileIdentity(u64);
@@ -272,24 +286,28 @@ impl ResolvedConfig {
         self.inner.api_key == access_token && self.inner.account_id.as_deref() == account_id
     }
 
-    /// Returns whether another resolved configuration is pinned to this
-    /// account.
+    /// Returns the minimum closed identity proof needed to pin automatic
+    /// retries.
     #[must_use]
-    pub fn same_chatgpt_identity(&self, other: &Self) -> bool {
-        self.inner
+    pub fn chatgpt_retry_identity(&self) -> ChatGptRetryIdentity {
+        let account_digest = self
+            .inner
             .account_id
             .as_deref()
             .filter(|value| !value.trim().is_empty())
-            == other
-                .inner
-                .account_id
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-            && self
-                .inner
-                .account_id
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
+            .map(|account_id| {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(b"tau.chatgpt.prompt-retry-account.v1\0");
+                hasher.update(account_id.as_bytes());
+                hasher.finalize()
+            });
+        ChatGptRetryIdentity { account_digest }
+    }
+
+    /// Checks whether this configuration belongs to an accepted retry identity.
+    #[must_use]
+    pub fn matches_chatgpt_retry_identity(&self, identity: &ChatGptRetryIdentity) -> bool {
+        identity.account_digest.is_some() && self.chatgpt_retry_identity() == *identity
     }
 
     /// Returns an opaque process-local identity for endpoint and credential

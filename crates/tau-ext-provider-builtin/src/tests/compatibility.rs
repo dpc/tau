@@ -110,11 +110,15 @@ fn responses_profile_routes_to_public_responses_backend() {
         &test_network_policy(),
         None,
     );
-    let Some(PromptBackend::PublicResponses { provider, model }) = backend else {
+    let Some(PromptBackend::PublicResponses {
+        provider,
+        model_index,
+    }) = backend
+    else {
         panic!("Responses fixture must resolve to the public Responses backend");
     };
     assert_eq!(provider.base_url, "https://example.test/v1");
-    assert_eq!(model.id.as_str(), "fixture-model");
+    assert_eq!(provider.models[model_index].id.as_str(), "fixture-model");
 }
 
 fn compatibility_route_snapshot(
@@ -152,7 +156,10 @@ fn compatibility_route_snapshot(
             "supports_compaction": config.supports_compaction(),
             "supports_prompt_cache_key": config.supports_prompt_cache_key(),
         }),
-        Some(PromptBackend::ChatCompletions { provider, model }) => serde_json::json!({
+        Some(PromptBackend::ChatCompletions {
+            provider,
+            model_index,
+        }) => serde_json::json!({
             "requested": requested,
             "backend": "chat_completions",
             "provider": {
@@ -162,9 +169,12 @@ fn compatibility_route_snapshot(
                 "extra_body": provider.extra_body,
                 "compat": provider.compat,
             },
-            "model": model,
+            "model": provider.models[model_index],
         }),
-        Some(PromptBackend::PublicResponses { provider, model }) => serde_json::json!({
+        Some(PromptBackend::PublicResponses {
+            provider,
+            model_index,
+        }) => serde_json::json!({
             "requested": requested,
             "backend": "responses",
             "provider": {
@@ -172,7 +182,7 @@ fn compatibility_route_snapshot(
                 "credential_present": !provider.api_key.trim().is_empty(),
                 "max_output_tokens": provider.max_output_tokens,
             },
-            "model": model,
+            "model": provider.models[model_index],
         }),
         Some(PromptBackend::Unavailable { .. }) => serde_json::json!({
             "requested": requested,
@@ -301,7 +311,15 @@ fn chat_completions_event_snapshot(
         .parse::<tau_proto::SessionId>()
         .expect("known-safe SessionId must be valid");
     prompt.model = ModelId::new(ProviderName::new(provider_name), model.id.clone());
-    let backend = PromptBackend::ChatCompletions { provider, model };
+    let model_index = provider
+        .models
+        .iter()
+        .position(|configured| configured.id == model.id)
+        .expect("compatibility model belongs to route");
+    let backend = PromptBackend::ChatCompletions {
+        provider: Arc::new(provider),
+        model_index,
+    };
     let mut bytes = Vec::new();
     let runtime = CodexRuntime::new(Arc::new(test_network_policy()));
     let mut abort = RecordingRetrySleeper;

@@ -2503,23 +2503,28 @@ fn oauth_unauthorized_with_empty_refresh_token_fails_closed() {
 #[test]
 fn automatic_retry_refuses_cross_account_backend_rotation() {
     let model = ModelName::new("gpt-5.4");
-    let config = |account: &str| {
+    let config = |account: &str, token_suffix: &str| {
         PromptBackend::Responses(tau_provider_codex::resolved_config_for_provider_model(
             &ProviderName::new("chatgpt"),
             &model,
             tau_provider_codex::ResolvedCredentials::new(
-                oauth_test_jwt(account),
+                format!("{}-{token_suffix}", oauth_test_jwt(account)),
                 Some(account.to_owned()),
             ),
             CodexMode::Standard,
         ))
     };
-    let PromptBackend::Responses(anchor) = config("account-a") else {
+    let PromptBackend::Responses(anchor) = config("account-a", "initial") else {
         unreachable!()
     };
+    let anchor = anchor.chatgpt_retry_identity();
+    assert!(
+        std::mem::size_of_val(&anchor) <= 40,
+        "retry pin retains one closed digest rather than bearer-bearing config"
+    );
     assert!(automatic_retry_identity_matches(
         Some(&anchor),
-        &config("account-a")
+        &config("account-a", "rotated")
     ));
     assert!(automatic_retry_identity_matches(
         Some(&anchor),
@@ -2529,8 +2534,19 @@ fn automatic_retry_refuses_cross_account_backend_rotation() {
     ));
     assert!(!automatic_retry_identity_matches(
         Some(&anchor),
-        &config("account-b")
+        &config("account-b", "initial")
     ));
+    let missing = tau_provider_codex::resolved_config_for_provider_model(
+        &ProviderName::new("chatgpt"),
+        &model,
+        tau_provider_codex::ResolvedCredentials::new("credential-content-canary".to_owned(), None),
+        CodexMode::Standard,
+    )
+    .chatgpt_retry_identity();
+    assert!(
+        !automatic_retry_identity_matches(Some(&missing), &config("account-a", "after-missing")),
+        "missing initial account identity must not authorize account adoption"
+    );
 }
 
 /// CAS adoption requires equal non-empty identity anchors.
@@ -2909,7 +2925,10 @@ fn chat_completions_profiles_publish_and_route_only_configured_models() {
             &test_network_policy(),
                     None,
         ),
-        Some(PromptBackend::ChatCompletions { model, .. }) if model.id == configured.id
+        Some(PromptBackend::ChatCompletions {
+            provider,
+            model_index,
+        }) if provider.models[model_index].id == configured.id
     ));
     assert!(
         resolve_prompt_backend(
@@ -2955,9 +2974,12 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
             &test_network_policy(),
                     None,
         ),
-        Some(PromptBackend::ChatCompletions { provider, model })
+        Some(PromptBackend::ChatCompletions {
+            provider,
+            model_index,
+        })
             if provider.base_url == "https://openrouter.ai/api/v1"
-                && model.id == configured.id
+                && provider.models[model_index].id == configured.id
     ));
     assert!(
         resolve_prompt_backend(
@@ -2968,6 +2990,123 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
             None,
         )
         .is_none()
+    );
+}
+
+/// A large generic route must retain one catalog allocation and select by
+/// index.
+///
+/// This is a descriptive clone-work benchmark without a wall-clock threshold:
+/// increasing the catalog exercises production resolution, while repeated
+/// backend clones must share the same route allocation regardless of its size.
+#[test]
+fn large_catalog_backend_clones_share_one_indexed_route_snapshot() {
+    const MODEL_COUNT: usize = 4_096;
+    const CLONE_COUNT: usize = 1_024;
+    let provider_name = ProviderName::new("large");
+    let selected_index = MODEL_COUNT - 17;
+    let models = (0..MODEL_COUNT)
+        .map(|index| test_chat_model(&format!("model-{index}")))
+        .collect::<Vec<_>>();
+    let selected_id = models[selected_index].id.clone();
+    let provider = ChatCompletionsProvider {
+        base_url: "https://large.invalid/v1".to_owned(),
+        api_key: "catalog-canary-bearer".to_owned(),
+        models,
+        ..ChatCompletionsProvider::default()
+    };
+    let mut profiles = BuiltinProviderProfiles {
+        credentials: Default::default(),
+        missing_logins: Default::default(),
+        providers: BTreeMap::from([(
+            provider_name.clone(),
+            BuiltinProviderProfile::ChatCompletions(provider),
+        )]),
+    };
+    let mut refresh_rejections = OAuthRefreshRejectionCache::default();
+    let backend = resolve_prompt_backend_without_refresh(
+        &ModelId::new(provider_name.clone(), selected_id.clone()),
+        &mut profiles,
+        &mut refresh_rejections,
+    )
+    .expect("selected model resolves");
+    let PromptBackend::ChatCompletions {
+        provider,
+        model_index,
+    } = &backend
+    else {
+        panic!("generic route resolves to Chat Completions");
+    };
+    assert_eq!(*model_index, selected_index);
+    assert_eq!(provider.models[*model_index].id, selected_id);
+    assert_eq!(provider.models.len(), MODEL_COUNT);
+    assert!(
+        matches!(
+            profiles.providers.get(&provider_name),
+            Some(BuiltinProviderProfile::ChatCompletions(moved)) if moved.models.is_empty()
+        ),
+        "resolution moves the catalog instead of cloning it"
+    );
+
+    for clone in std::iter::repeat_with(|| backend.clone()).take(CLONE_COUNT) {
+        let PromptBackend::ChatCompletions {
+            provider: cloned,
+            model_index: cloned_index,
+        } = clone
+        else {
+            unreachable!()
+        };
+        assert!(Arc::ptr_eq(provider, &cloned));
+        assert_eq!(cloned_index, selected_index);
+    }
+}
+
+/// OpenRouter conversion must normalize a large catalog in place before the
+/// shared indexed route takes ownership.
+#[test]
+fn large_openrouter_catalog_moves_into_indexed_route_snapshot() {
+    const MODEL_COUNT: usize = 4_096;
+    let provider_name = ProviderName::new("large-router");
+    let selected_index = MODEL_COUNT / 2;
+    let selected_id = ModelName::new(format!("route/model-{selected_index}"));
+    let profile = OpenRouterProfile {
+        api_key: "router-content-canary-bearer".to_owned(),
+        models: (0..MODEL_COUNT)
+            .map(|index| test_chat_model(&format!("route/model-{index}")))
+            .collect(),
+    };
+    let mut profiles = BuiltinProviderProfiles {
+        credentials: Default::default(),
+        missing_logins: Default::default(),
+        providers: BTreeMap::from([(
+            provider_name.clone(),
+            BuiltinProviderProfile::OpenRouter(profile),
+        )]),
+    };
+    let mut refresh_rejections = OAuthRefreshRejectionCache::default();
+    let backend = resolve_prompt_backend_without_refresh(
+        &ModelId::new(provider_name.clone(), selected_id.clone()),
+        &mut profiles,
+        &mut refresh_rejections,
+    )
+    .expect("selected OpenRouter model resolves");
+    let PromptBackend::ChatCompletions {
+        provider,
+        model_index,
+    } = backend
+    else {
+        panic!("OpenRouter resolves to Chat Completions");
+    };
+    assert_eq!(model_index, selected_index);
+    assert_eq!(provider.models[model_index].id, selected_id);
+    assert_eq!(provider.models.len(), MODEL_COUNT);
+    assert!(
+        matches!(
+            profiles.providers.get(&provider_name),
+            Some(BuiltinProviderProfile::OpenRouter(moved)) if moved.models.is_empty()
+                && moved.api_key.is_empty()
+        ),
+        "OpenRouter resolution moves the catalog and bearer instead of cloning them"
     );
 }
 

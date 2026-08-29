@@ -3,6 +3,47 @@ use std::{io as path_std_io, net as path_std_net, sync as path_std_sync, time as
 
 use super::*;
 
+/// Retry identity retains only an account digest: bearer rotation is invisible,
+/// raw account content is absent, and missing identity stays fail-closed.
+#[test]
+fn chatgpt_retry_identity_is_closed_and_credential_free() {
+    let provider = ProviderName::new("chatgpt");
+    let model = ModelName::new("gpt-5.6-sol");
+    let resolved = |bearer: &str, account_id: Option<&str>| {
+        resolved_config_for_provider_model(
+            &provider,
+            &model,
+            ResolvedCredentials::new(bearer.to_owned(), account_id.map(str::to_owned)),
+            CodexMode::Standard,
+        )
+    };
+    let account_canary = "private-account-canary";
+    let identity =
+        resolved("private-bearer-canary-a", Some(account_canary)).chatgpt_retry_identity();
+    let rotated =
+        resolved("private-bearer-canary-b", Some(account_canary)).chatgpt_retry_identity();
+    assert!(
+        identity == rotated,
+        "bearer rotation preserves retry account"
+    );
+    assert!(
+        !identity
+            .account_digest
+            .expect("non-empty account produces digest")
+            .as_bytes()
+            .windows(account_canary.len())
+            .any(|window| window == account_canary.as_bytes()),
+        "closed proof must not retain raw account content"
+    );
+    for missing_account in [None, Some(""), Some(" \t")] {
+        let missing = resolved("private-bearer-canary-c", missing_account).chatgpt_retry_identity();
+        assert!(missing.account_digest.is_none());
+        assert!(
+            !resolved("new-bearer", Some(account_canary)).matches_chatgpt_retry_identity(&missing)
+        );
+    }
+}
+
 /// Test cancellation source that reports when admission has entered its
 /// mutex-protected pre-state check.
 struct AdmissionEntered(path_std_sync_mpsc::Sender<()>);

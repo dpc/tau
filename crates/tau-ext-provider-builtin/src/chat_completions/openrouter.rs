@@ -107,30 +107,29 @@ pub struct OpenRouterProfile {
 impl OpenRouterProfile {
     /// Convert OpenRouterProfile to a standard ChatCompletionsProvider.
     pub fn to_chat_completions(&self) -> ChatCompletionsProvider {
+        self.clone().into_chat_completions()
+    }
+
+    /// Move an owned OpenRouter profile into a standard Chat Completions route.
+    pub fn into_chat_completions(mut self) -> ChatCompletionsProvider {
+        for model in &mut self.models {
+            // OpenRouter is a known remote route; the explicit cache contract
+            // has no authority on this profile because the selected upstream
+            // may vary. A model-level compatibility override retains unrelated
+            // controls but cannot alter the telemetry-only cache route.
+            model.cache_contract = None;
+            model.input_modalities.clear();
+            model.tool_result_modalities.clear();
+            if let Some(compat) = model.compat.as_mut() {
+                compat.stream_options = true;
+                compat.openai_prompt_cache = None;
+                compat.cache_usage = super::CacheUsageCompat::OpenAi;
+            }
+        }
         ChatCompletionsProvider {
             base_url: "https://openrouter.ai/api/v1".to_owned(),
-            api_key: self.api_key.clone(),
-            models: self
-                .models
-                .iter()
-                .cloned()
-                .map(|mut model| {
-                    // OpenRouter is a known remote route; the explicit cache
-                    // contract has no authority on this profile because the
-                    // selected upstream may vary. A
-                    // model-level compatibility override retains unrelated
-                    // controls but cannot alter the telemetry-only cache route.
-                    model.cache_contract = None;
-                    model.input_modalities.clear();
-                    model.tool_result_modalities.clear();
-                    if let Some(compat) = model.compat.as_mut() {
-                        compat.stream_options = true;
-                        compat.openai_prompt_cache = None;
-                        compat.cache_usage = super::CacheUsageCompat::OpenAi;
-                    }
-                    model
-                })
-                .collect(),
+            api_key: self.api_key,
+            models: self.models,
             tags: Vec::new(),
             max_output_tokens: tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS,
             extra_body: BTreeMap::new(),
