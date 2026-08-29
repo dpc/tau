@@ -703,6 +703,28 @@ fn run_local_resource_script(script: ServerScript) -> (Result<WsTurnResult, LlmE
     (result, retired.0, retired.1)
 }
 
+/// The live turn owner semantically decodes and lexically indexes each frame
+/// once while preserving an opaque replay sidecar exactly.
+#[test]
+fn live_turn_decodes_each_frame_once_and_preserves_opaque_sidecar() {
+    let raw_item = r#"{ "type":"compaction", "summary":{"n":1.2300} }"#;
+    let item_event =
+        format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{raw_item}}}"#);
+    let quota = r#"{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"reset_at":1700000000}}}"#.to_owned();
+    let terminal = r#"{"type":"response.completed","response":{"id":"once"}}"#.to_owned();
+    crate::decoded_event::reset_test_counts();
+    let state = run_local_resource_script(ServerScript::Frames(vec![quota, item_event, terminal]))
+        .0
+        .expect("live turn")
+        .state;
+    assert_eq!(crate::decoded_event::test_counts(), (3, 3));
+    assert!(state.quota_observation.is_some());
+    let Some(OutputItemAccumulator::Compaction(Some(item))) = state.output_items.first() else {
+        panic!("opaque compaction output");
+    };
+    assert_eq!(item.raw_json(), raw_item);
+}
+
 /// Ensures plain WebSocket traffic uses an HTTP proxy's absolute-form upgrade,
 /// carries the shared HTTP response-coding policy, and offers no WebSocket
 /// extension while avoiding a direct target connection.

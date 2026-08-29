@@ -281,6 +281,7 @@ struct WsWindow {
 /// string contract. A non-null explicit string must normalize successfully:
 /// empty, whitespace-only, or otherwise invalid values reject the observation
 /// and cannot fall through to a lower-precedence or default pool.
+#[cfg(any(test, feature = "test-support"))]
 pub fn parse_ws_event(body: &str) -> Option<RollingQuotaObservation> {
     let event: serde_json::Value = serde_json::from_str(body).ok()?;
     parse_ws_event_value(&event)

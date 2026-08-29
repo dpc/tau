@@ -5,6 +5,7 @@
 
 mod deadlines;
 mod debug_capture;
+mod decoded_event;
 mod websocket;
 
 use std::collections::BTreeMap;
@@ -881,7 +882,7 @@ impl Slot {
         &mut self,
         item: &Value,
         phase: OutputItemPhase,
-        raw_json: Option<&RawValue>,
+        raw_json: Option<&str>,
     ) -> Result<bool, Error> {
         let qualifying_progress = match item["type"].as_str().unwrap_or("") {
             "message" if item["role"].as_str() == Some("assistant") => {
@@ -896,7 +897,7 @@ impl Slot {
                     content: Vec::new(),
                     phase: None,
                     responses_raw_json: Some(
-                        raw_json.map_or_else(|| item.to_string(), |raw| raw.get().to_owned()),
+                        raw_json.map_or_else(|| item.to_string(), ToOwned::to_owned),
                     ),
                 };
                 if let Some(parts) = item["content"].as_array() {
@@ -1029,7 +1030,6 @@ impl Slot {
                 ) {
                     let raw_json = raw_json
                         .expect("completed reasoning raw JSON checked above")
-                        .get()
                         .to_owned();
                     self.item = ContextItem::Reasoning(
                         tau_proto::OpaqueProviderItem::try_new(
@@ -1127,29 +1127,6 @@ enum TerminalKind {
     Completed,
     /// Provider exhausted the configured output-token budget.
     MaxOutputTokens,
-}
-
-/// Raw JSON projections retained alongside semantically parsed Responses
-/// events.
-#[derive(Deserialize)]
-struct RawEvent<'a> {
-    /// Exact output item carried by an added or done event.
-    #[serde(default, borrow)]
-    item: Option<&'a RawValue>,
-    /// Exact terminal response envelope when nested under `response`.
-    #[serde(default, borrow)]
-    response: Option<RawResponse<'a>>,
-    /// Exact terminal output when the event itself is the response envelope.
-    #[serde(default, borrow)]
-    output: Option<&'a RawValue>,
-}
-
-/// Borrowed terminal response fields whose exact item syntax must survive.
-#[derive(Deserialize)]
-struct RawResponse<'a> {
-    /// Exact ordered provider output items.
-    #[serde(default, borrow)]
-    output: Option<&'a RawValue>,
 }
 
 impl State {
@@ -1283,7 +1260,7 @@ impl State {
         index: u32,
         item: &Value,
         phase: OutputItemPhase,
-        raw_json: Option<&RawValue>,
+        raw_json: Option<&str>,
     ) -> Result<bool, Error> {
         self.update_slot(index, |slot| slot.apply_item(item, phase, raw_json))
     }
@@ -1455,33 +1432,42 @@ impl State {
     }
 
     fn apply_event(&mut self, data: &str) -> Result<bool, Error> {
-        let event: Value = serde_json::from_str(data).map_err(|_| Error::Json)?;
-        self.debug_capture.record_event(&event, data);
-        let raw_event: RawEvent<'_> = serde_json::from_str(data).map_err(|_| Error::Json)?;
+        let decoded = decoded_event::DecodedEvent::decode(data).map_err(|_| Error::Json)?;
+        self.apply_decoded_event(&decoded, data)
+    }
+
+    /// Apply one event already decoded by its transport owner.
+    fn apply_decoded_event(
+        &mut self,
+        decoded: &decoded_event::DecodedEvent<'_>,
+        data: &str,
+    ) -> Result<bool, Error> {
+        let event = decoded.value();
+        self.debug_capture.record_event(event, data);
         let qualifying_progress = match event["type"].as_str().unwrap_or("") {
             "response.output_item.added" => {
-                let index = output_index(&event)?;
+                let index = output_index(event)?;
                 if let Some(item) = event.get("item") {
-                    self.apply_item_at(index, item, OutputItemPhase::Added, raw_event.item)?
+                    self.apply_item_at(index, item, OutputItemPhase::Added, decoded.raw_item())?
                 } else {
                     false
                 }
             }
             "response.output_item.done" => {
-                let index = output_index(&event)?;
+                let index = output_index(event)?;
                 if let Some(item) = event.get("item") {
-                    self.apply_item_at(index, item, OutputItemPhase::Completed, raw_event.item)?
+                    self.apply_item_at(index, item, OutputItemPhase::Completed, decoded.raw_item())?
                 } else {
                     false
                 }
             }
             "response.output_text.delta" | "response.content_part.delta" => {
-                let index = output_index(&event)?;
+                let index = output_index(event)?;
                 let delta = event["delta"].as_str().unwrap_or("");
                 self.append_message_delta(index, delta)?
             }
             "response.output_text.done" => {
-                let index = output_index(&event)?;
+                let index = output_index(event)?;
                 let text = event["text"].as_str().ok_or(Error::UnsupportedOutput)?;
                 self.update_slot(index, |slot| {
                     if !matches!(slot.state, SlotState::Empty | SlotState::Message) {
@@ -1497,12 +1483,12 @@ impl State {
                 })?
             }
             "response.function_call_arguments.delta" => {
-                let index = output_index(&event)?;
+                let index = output_index(event)?;
                 let delta = event["delta"].as_str().unwrap_or("");
                 self.append_function_arguments_delta(index, delta)?
             }
             "response.function_call_arguments.done" => {
-                let index = output_index(&event)?;
+                let index = output_index(event)?;
                 let arguments = event["arguments"]
                     .as_str()
                     .ok_or(Error::UnsupportedOutput)?;
@@ -1525,20 +1511,20 @@ impl State {
                 })?
             }
             "response.reasoning_text.delta" => {
-                let index = output_index(&event)?;
-                let content_index = reasoning_content_index(&event)?;
+                let index = output_index(event)?;
+                let content_index = reasoning_content_index(event)?;
                 let delta = event["delta"].as_str().ok_or(Error::UnsupportedOutput)?;
-                self.append_reasoning_delta(index, content_index, &event, delta)?
+                self.append_reasoning_delta(index, content_index, event, delta)?
             }
             "response.reasoning_text.done" => {
-                let index = output_index(&event)?;
-                let content_index = reasoning_content_index(&event)?;
+                let index = output_index(event)?;
+                let content_index = reasoning_content_index(event)?;
                 let text = event["text"].as_str().ok_or(Error::UnsupportedOutput)?;
                 self.update_existing_slot(index, |slot| {
                     if slot.state != SlotState::ReasoningAdded {
                         return Err(Error::UnsupportedOutput);
                     }
-                    let item_id = slot.reasoning_event_id(&event)?;
+                    let item_id = slot.reasoning_event_id(event)?;
                     let has_text = slot
                         .reasoning_parts
                         .get(&content_index)
@@ -1550,14 +1536,14 @@ impl State {
             }
             "response.completed" | "response.done" | "response.incomplete"
                 if event["type"].as_str() != Some("response.incomplete")
-                    || incomplete_reason(&event) == Some("max_output_tokens") =>
+                    || incomplete_reason(event) == Some("max_output_tokens") =>
             {
                 let terminal = if event["type"].as_str() == Some("response.incomplete") {
                     TerminalKind::MaxOutputTokens
                 } else {
                     TerminalKind::Completed
                 };
-                let response = event.get("response").unwrap_or(&event);
+                let response = event.get("response").unwrap_or(event);
                 let response_id = response
                     .get("id")
                     .and_then(Value::as_str)
@@ -1569,15 +1555,7 @@ impl State {
                     if !(output.len() <= MAX_OUTPUT_ITEMS as usize) {
                         return Err(Error::UnsupportedOutput);
                     }
-                    let raw_output = raw_event
-                        .response
-                        .and_then(|response| response.output)
-                        .or(raw_event.output)
-                        .map(|output| {
-                            serde_json::from_str::<Vec<&RawValue>>(output.get())
-                                .map_err(|_| Error::Json)
-                        })
-                        .transpose()?;
+                    let raw_output = decoded.raw_output_items().map_err(|()| Error::Json)?;
                     let mut terminal_items = Vec::with_capacity(output.len());
                     for (position, item) in output.iter().enumerate() {
                         let index =

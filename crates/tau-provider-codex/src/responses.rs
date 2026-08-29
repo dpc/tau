@@ -27,6 +27,7 @@ use crate::common::{
     LlmError, OutputItemAccumulator, PromptPayload, StreamState, cbor_to_json, effort_wire,
     json_to_cbor, output_item_retained_payload_bytes,
 };
+use crate::decoded_event::DecodedEvent;
 use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
 
 #[cfg(test)]
@@ -1013,7 +1014,7 @@ pub fn apply_event(
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
     let raw = serde_json::to_string(event).map_err(LlmError::Json)?;
-    apply_parsed_json_event(state, event, raw_output_item_json(&raw), on_update)
+    apply_raw_json_event(state, &raw, on_update)
 }
 
 /// Applies one raw upstream Responses event while preserving replay sidecars.
@@ -1027,11 +1028,11 @@ pub(super) fn apply_raw_json_event(
     data: &str,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
-    let event: serde_json::Value = match serde_json::from_str(data) {
-        Ok(v) => v,
+    let decoded = match DecodedEvent::decode(data) {
+        Ok(decoded) => decoded,
         Err(_) => return Ok(false),
     };
-    apply_parsed_json_event(state, &event, raw_output_item_json(data), on_update)
+    apply_parsed_json_event(state, decoded.value(), decoded.raw_item(), on_update)
 }
 
 /// Applies one already-decoded event while preserving its raw item sidecar.
@@ -1461,6 +1462,8 @@ impl IndexedStreamUpdate {
     }
 }
 
+/// Extracts an exact item sidecar through the previous test oracle.
+#[cfg(test)]
 fn raw_output_item_json(event_json: &str) -> Option<&str> {
     #[derive(Deserialize)]
     struct RawOutputItemEvent<'a> {

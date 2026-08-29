@@ -508,6 +508,40 @@ fn terminal_vcr_stream(response_id: &str) -> ProviderRawEventStream {
     }
 }
 
+/// VCR replay uses the same one-decode envelope as live WebSocket parsing and
+/// retains exact opaque item bytes.
+#[test]
+fn websocket_replay_decodes_each_event_once_and_preserves_opaque_sidecar() {
+    let raw_item = r#"{ "type":"compaction", "summary":{"n":1.2300} }"#;
+    let stream = ProviderRawEventStream {
+        raw_events: vec![
+            ProviderRawEvent {
+                delta_micros: 0,
+                raw: r#"{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"reset_at":1700000000}}}"#.to_owned(),
+            },
+            ProviderRawEvent {
+                delta_micros: 0,
+                raw: format!(
+                    r#"{{"type":"response.output_item.done","output_index":0,"item":{raw_item}}}"#
+                ),
+            },
+            ProviderRawEvent {
+                delta_micros: 0,
+                raw: r#"{"type":"response.completed","response":{"id":"replay-once"}}"#.to_owned(),
+            },
+        ],
+    };
+    crate::decoded_event::reset_test_counts();
+    let state =
+        ws::run_replay(&stream, ws::ResponseMode::Ordinary, &mut |_| {}).expect("replayed stream");
+    assert_eq!(crate::decoded_event::test_counts(), (3, 3));
+    assert!(state.quota_observation.is_some());
+    let Some(OutputItemAccumulator::Compaction(Some(item))) = state.output_items.first() else {
+        panic!("opaque compaction output");
+    };
+    assert_eq!(item.raw_json(), raw_item);
+}
+
 #[test]
 fn build_request_includes_prompt_cache_key_when_supported() {
     let config = ResponsesConfig {

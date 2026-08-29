@@ -783,9 +783,10 @@ fn terminal_output_retains_exact_raw_message_sidecar() {
     );
 }
 
-/// Both SSE and WebSocket streams use `State::apply_event`; when either
-/// transport delivers index one before index zero, progress waits and then
-/// projects the completed prefix in provider output-index order.
+/// Both SSE and WebSocket feed one decoded projection into the shared
+/// assembler; when either transport delivers index one before index zero,
+/// progress waits and then projects the completed prefix in provider
+/// output-index order.
 #[test]
 fn shared_assembler_orders_out_of_order_progress_and_terminal_output() {
     let mut state = State::default();
@@ -828,6 +829,18 @@ fn shared_assembler_orders_out_of_order_progress_and_terminal_output() {
         ] if first == &vec![ContentPart::Text { text: "first".to_owned() }]
             && second == &vec![ContentPart::Text { text: "second".to_owned() }]
     ));
+}
+
+/// The SSE production assembler entry decodes and indexes each event exactly
+/// once before applying semantic state.
+#[test]
+fn sse_assembler_entry_decodes_event_once() {
+    super::decoded_event::reset_test_counts();
+    let mut state = State::default();
+    state
+        .apply_event(r#"{"type":"response.heartbeat"}"#)
+        .expect("heartbeat");
+    assert_eq!(super::decoded_event::test_counts(), (1, 1));
 }
 
 /// A terminal response may not turn a sparse stream into a silently reordered

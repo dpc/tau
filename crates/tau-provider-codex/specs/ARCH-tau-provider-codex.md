@@ -76,7 +76,9 @@ starts inference, and cannot refresh a prompt cache.
 Tau caps each incoming WebSocket frame and complete text message at 1 MiB. The
 async reader forwards bounded raw text through one queued provider-event slot,
 so a faster upstream is backpressured without dropping or reordering events.
-The synchronous turn owner parses each event once. One finite attempt admits at
+The synchronous turn owner parses each event once and lexically indexes the
+same bounded raw bytes for exact replay sidecars without a second JSON
+interpretation. One finite attempt admits at
 most 64 MiB of cumulative received text, including a discarded transparent
 repair dispatch, and separately admits at most 64 MiB of logical retained
 semantic state. The retained-state model charges output slots and retained

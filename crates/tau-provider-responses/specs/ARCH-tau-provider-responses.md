@@ -34,7 +34,10 @@ therefore reconnects and replays the complete local transcript rather than
 depending on connection-local continuation state. WebSocket selection never
 falls back to SSE.
 
-Both transports feed their decoded events into one indexed response assembler.
+Both transports decode each bounded event's accepted JSON text once.
+Assembler-bound events build a lexical index of exact value spans in that text
+without interpreting JSON a second time. They feed the shared semantic
+projection into one indexed response assembler.
 It retains slots in ascending provider `output_index` order and projects only
 the contiguous prefix beginning at zero, so a later item never appears before
 an unresolved earlier item. A terminal `response.output` array authoritatively

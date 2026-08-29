@@ -55,11 +55,12 @@ use tungstenite::{
 use super::compact_stream::CompactStreamShape;
 use super::{
     CachedResponseAnchor, DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT, ProviderRawEventStream,
-    ResponsesConfig, apply_parsed_json_event, apply_raw_json_event, build_ws_envelope,
+    ResponsesConfig, apply_parsed_json_event, build_ws_envelope,
     load_provider_stream_cassette_candidates, projected_retained_state_bytes,
     record_provider_raw_event_after, stream_idle_timeout_error,
 };
 use crate::common::{LlmError, PromptPayload, StreamState};
+use crate::decoded_event::DecodedEvent;
 use crate::responses::ws_runtime;
 use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
 
@@ -223,17 +224,17 @@ fn websocket_config() -> path_tungstenite_protocol::WebSocketConfig {
         .max_message_size(Some(MAX_WS_EVENT_BYTES))
 }
 
-fn apply_ws_replay_raw_json_event(
+fn apply_ws_replay_decoded_event(
     state: &mut StreamState,
-    data: &str,
+    decoded: &crate::decoded_event::DecodedEvent<'_>,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
-    if let Some(observation) = crate::quota::parse_ws_event(data) {
+    if let Some(observation) = crate::quota::parse_ws_event_value(decoded.value()) {
         state.quota_observation = Some(observation);
         on_update(state);
         return Ok(false);
     }
-    apply_raw_json_event(state, data, on_update)
+    apply_parsed_json_event(state, decoded.value(), decoded.raw_item(), on_update)
 }
 
 type SharedStream = WebSocketStream<reqwest::Upgraded>;
@@ -941,15 +942,15 @@ impl WsConn {
                     if let Some(stream) = execution.recording_stream.as_deref_mut() {
                         record_provider_raw_event_after(stream, delta, text.to_string())?;
                     }
-                    let event: serde_json::Value = serde_json::from_str(text.as_ref())
+                    let decoded = DecodedEvent::decode(text.as_ref())
                         .map_err(|_| malformed_text_error(text.len()))?;
                     if let Some(shape) = compact_shape.as_mut() {
-                        shape.validate(&event)?;
+                        shape.validate(decoded.value())?;
                     }
                     let terminal = apply_ws_json_event(
                         &mut state,
-                        &event,
-                        super::raw_output_item_json(text.as_ref()),
+                        decoded.value(),
+                        decoded.raw_item(),
                         on_update,
                     );
                     if terminal.as_ref().is_err_and(is_response_resource_limit) {
@@ -1283,12 +1284,12 @@ pub(super) fn run_replay(
     let mut compact_shape =
         (response_mode == ResponseMode::Compact).then(CompactStreamShape::default);
     for (index, event) in stream.raw_events.iter().enumerate() {
-        let parsed: serde_json::Value =
-            serde_json::from_str(&event.raw).map_err(|_| malformed_text_error(event.raw.len()))?;
+        let decoded =
+            DecodedEvent::decode(&event.raw).map_err(|_| malformed_text_error(event.raw.len()))?;
         if let Some(shape) = compact_shape.as_mut() {
-            shape.validate(&parsed)?;
+            shape.validate(decoded.value())?;
         }
-        let terminal = apply_ws_replay_raw_json_event(&mut state, &event.raw, on_update)?;
+        let terminal = apply_ws_replay_decoded_event(&mut state, &decoded, on_update)?;
         if terminal {
             if index + 1 != stream.raw_events.len() {
                 return Err(super::replay_unconsumed_frames_error(

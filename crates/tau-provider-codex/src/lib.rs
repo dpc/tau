@@ -15,6 +15,7 @@ use std::sync as path_std_sync;
 use std::time::Duration;
 
 mod compact_v2;
+mod decoded_event;
 use attempt_context::{AttemptOperation, ProviderAttemptContext, RetryFailureInput};
 use compact_v2::build_v2_compacted_window;
 use responses::pool as path_responses_pool;

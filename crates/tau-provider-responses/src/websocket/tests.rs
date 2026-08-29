@@ -4,6 +4,7 @@ use tungstenite::protocol::frame::Frame;
 use tungstenite::protocol::frame::coding::{Data, OpCode};
 
 use super::*;
+use crate::decoded_event::{reset_test_counts, test_counts};
 
 /// Post-upgrade errors must retain bounded codes from every documented
 /// envelope location so callers can distinguish retryable transport/service
@@ -57,6 +58,36 @@ fn terminal_error_extracts_status_and_nested_codes() {
         panic!("bounded provider code");
     };
     assert_eq!(code.len(), 128);
+}
+
+/// Provider terminal classification must precede strict sidecar indexing, as
+/// it did before transports shared one semantic decode.
+#[test]
+fn terminal_error_with_duplicate_sidecars_keeps_provider_classification() {
+    let raw = r#"{"type":"error","status":429,"code":"rate_limit","item":1,"item":2}"#;
+    let decoded = decode_websocket_event(raw).expect("semantic provider error");
+    let DecodedWebSocketEvent::ProviderError { error, .. } = decoded else {
+        panic!("provider error must bypass sidecar indexing");
+    };
+    assert!(matches!(
+        error,
+        Error::Provider {
+            status: Some(429),
+            code: Some(ref code)
+        } if code == "rate_limit"
+    ));
+}
+
+/// The WebSocket production pre-parser shares one semantic decode with strict
+/// sidecar indexing for ordinary assembler-bound events.
+#[test]
+fn websocket_preparser_decodes_event_once() {
+    reset_test_counts();
+    assert!(matches!(
+        decode_websocket_event(r#"{"type":"response.heartbeat"}"#),
+        Ok(DecodedWebSocketEvent::Apply(_))
+    ));
+    assert_eq!(test_counts(), (1, 1));
 }
 
 /// The WebSocket pre-parser must pass only the exact max-output incomplete

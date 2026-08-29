@@ -11,11 +11,30 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{self, Message};
 
+use super::decoded_event::DecodedEvent;
 use super::{
     AttemptConfig, AttemptModel, AttemptProgress, AttemptUpdate, CANCELLATION_POLL_INTERVAL,
     DebugCapture, Error, MAX_EVENT_BYTES, MAX_RESPONSE_BYTES, RequestBody, State, deadlines,
     read_capped_error_body,
 };
+
+/// One semantically decoded WebSocket event after legacy error precedence.
+enum DecodedWebSocketEvent<'a> {
+    /// Event ready for exact-sidecar indexing and assembly.
+    Apply(DecodedEvent<'a>),
+    /// Provider terminal classified before sidecar indexing.
+    ProviderError { value: Value, error: Error },
+}
+
+fn decode_websocket_event(raw: &str) -> Result<DecodedWebSocketEvent<'_>, Error> {
+    let value = DecodedEvent::decode_value(raw).map_err(|_| Error::Json)?;
+    if let Some(error) = provider_terminal_error(&value) {
+        return Ok(DecodedWebSocketEvent::ProviderError { value, error });
+    }
+    DecodedEvent::from_value(raw, value)
+        .map(DecodedWebSocketEvent::Apply)
+        .map_err(|_| Error::Json)
+}
 
 /// Runs one fresh-socket WebSocket attempt.
 ///
@@ -174,14 +193,17 @@ pub(super) async fn stream(
                     return Err((Error::StreamFailure, state.progress()));
                 };
                 state.bytes = bytes;
-                let value: Value = serde_json::from_str(text.as_ref())
-                    .map_err(|_| (Error::Json, state.progress()))?;
-                if let Some(error) = provider_terminal_error(&value) {
-                    state.debug_capture.record_event(&value, text.as_ref());
-                    return Err((error, state.progress()));
-                }
+                let decoded = match decode_websocket_event(text.as_ref())
+                    .map_err(|error| (error, state.progress()))?
+                {
+                    DecodedWebSocketEvent::Apply(decoded) => decoded,
+                    DecodedWebSocketEvent::ProviderError { value, error } => {
+                        state.debug_capture.record_event(&value, text.as_ref());
+                        return Err((error, state.progress()));
+                    }
+                };
                 let qualifying_progress = state
-                    .apply_event(text.as_ref())
+                    .apply_decoded_event(&decoded, text.as_ref())
                     .map_err(|error| (error, state.progress()))?;
                 on_update(AttemptUpdate::Progress(state.progress()));
                 if qualifying_progress {
