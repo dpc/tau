@@ -1702,65 +1702,81 @@ fn slow_healthy_worker_does_not_amplify_complete_projection_per_frame() {
 }
 
 /// Every length-prefix and payload offset proves exact rollback before the same
-/// FIFO node retries; no offset duplicates or skips the frame.
+/// FIFO node retries; no offset duplicates or skips the frame. One owner serves
+/// the exhaustive matrix so scheduler load cannot turn fixture setup into the
+/// behavior under test.
 #[test]
 fn every_frame_write_offset_rolls_back_and_retries_exactly_once() {
-    let event = loaded_event("managed-session");
-    let record = crate::PersistedSessionEvent {
-        seq: crate::PersistedSessionEventSeq::new(0),
-        source: None,
-        event: event.clone(),
-        recorded_at: tau_proto::UnixMicros::new(7),
-    };
-    let mut expected_payload = Vec::new();
-    ciborium::into_writer(&record, &mut expected_payload).expect("encode expected frame");
+    let root = tempfile::tempdir().expect("temporary root");
+    let backend = Arc::new(WriteFaultBackend::new());
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(
+            PersistenceCapacity::default(),
+            backend.clone(),
+        )
+        .expect("owner"),
+    );
+    let sessions = root.path().join("sessions");
+    let mut store = SessionStore::open_managed(&sessions, owner.clone()).expect("store");
 
-    let run = |write_call: usize, offset: usize| {
-        let root = tempfile::tempdir().expect("temporary root");
-        let backend = Arc::new(WriteFaultBackend::new());
-        let owner = Arc::new(
-            SemanticPersistenceOwner::with_test_backend(
-                PersistenceCapacity::default(),
-                backend.clone(),
-            )
-            .expect("owner"),
-        );
-        let sessions = root.path().join("sessions");
-        let mut store = SessionStore::open_managed(&sessions, owner.clone()).expect("store");
+    let run = |case: usize, write_call: usize, offset: usize, store: &mut SessionStore| {
+        let session_id = format!("managed-session-{case:03}");
+        let event = loaded_event(&session_id);
+        let record = crate::PersistedSessionEvent {
+            seq: crate::PersistedSessionEventSeq::new(0),
+            source: None,
+            event: event.clone(),
+            recorded_at: tau_proto::UnixMicros::new(7),
+        };
+        let mut expected_payload = Vec::new();
+        ciborium::into_writer(&record, &mut expected_payload).expect("encode expected frame");
+
         store
-            .prepare_session("managed-session", SessionPreparationMode::New)
+            .prepare_session(&session_id, SessionPreparationMode::New)
             .expect("prepare");
         backend.inject_short_write(write_call, offset);
         store
-            .append_session_event_at(
-                "managed-session",
-                None,
-                event.clone(),
-                tau_proto::UnixMicros::new(7),
-            )
+            .append_session_event_at(&session_id, None, event, tau_proto::UnixMicros::new(7))
             .expect("live append accepted");
         assert!(
             owner.wait_for_failure_for_test(PersistenceFailureKind::Write, Duration::from_secs(2),)
         );
         owner
             .release(
-                &store.managed_persistence_leases("managed-session"),
+                &store.managed_persistence_leases(&session_id),
                 Duration::from_secs(2),
             )
             .expect("retry drains before release");
+        store.finish_managed_release(&session_id);
         let bytes =
-            std::fs::read(sessions.join("managed-session/events.cbor")).expect("journal bytes");
+            std::fs::read(sessions.join(&session_id).join("events.cbor")).expect("journal bytes");
         assert_eq!(
             u64::from_le_bytes(bytes[..8].try_into().expect("length prefix")) as usize,
             expected_payload.len()
         );
         assert_eq!(&bytes[8..], expected_payload);
+        expected_payload.len()
     };
 
+    let mut case = 0;
     for offset in 0..=8 {
-        run(1, offset);
+        run(case, 1, offset, &mut store);
+        case += 1;
     }
-    for offset in 0..=expected_payload.len() {
-        run(2, offset);
+    let payload_len = {
+        let session_id = format!("managed-session-{case:03}");
+        let record = crate::PersistedSessionEvent {
+            seq: crate::PersistedSessionEventSeq::new(0),
+            source: None,
+            event: loaded_event(&session_id),
+            recorded_at: tau_proto::UnixMicros::new(7),
+        };
+        let mut payload = Vec::new();
+        ciborium::into_writer(&record, &mut payload).expect("encode expected frame");
+        payload.len()
+    };
+    for offset in 0..=payload_len {
+        assert_eq!(run(case, 2, offset, &mut store), payload_len);
+        case += 1;
     }
 }
