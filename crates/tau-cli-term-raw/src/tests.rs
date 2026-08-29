@@ -6830,6 +6830,25 @@ fn append_history_for_cache_test(st: &mut SharedState, text: String) {
     st.append_history(id);
 }
 
+/// Adds a specified history entry so removal tests can place duplicate
+/// references without changing the block-store identity.
+fn append_history_id_for_cache_test(st: &mut SharedState, id: BlockId, text: String) {
+    st.layout.blocks.insert(id, plain_block(text));
+    st.layout
+        .block_debug_ids
+        .insert(id, "cache-removal-test".to_owned());
+    st.append_history(id);
+}
+
+/// Recomputes the history membership index independently of the implementation.
+fn history_reference_counts(history: &[BlockId]) -> HashMap<BlockId, usize> {
+    let mut counts = HashMap::new();
+    for &id in history {
+        *counts.entry(id).or_insert(0) += 1;
+    }
+    counts
+}
+
 /// A new prompt on a long transcript must lay out only its appended history
 /// entry, preventing redraw CPU from growing with session length.
 #[test]
@@ -6853,6 +6872,278 @@ fn history_layout_cache_refreshes_only_appended_suffix() {
     assert_eq!(
         line_text(cache.lines.last().expect("appended line")).trim_end(),
         "submitted prompt"
+    );
+}
+
+/// Queued active-block removal must skip a long persistent-history scan when
+/// its exact membership index proves the active block is absent from history.
+#[test]
+fn queued_active_removal_skips_long_history_when_membership_is_absent() {
+    let mut st = SharedState::new(80, 24, "> ".into());
+    for index in 0..10_000 {
+        append_history_for_cache_test(&mut st, format!("history {index}"));
+    }
+    let mut cache = HistoryLayoutCache::default();
+    assert_eq!(cache.refresh(&mut st), 10_000);
+
+    let active = st.alloc_id();
+    st.layout.blocks.insert(active, plain_block("queued"));
+    st.layout
+        .block_debug_ids
+        .insert(active, "queued-active".to_owned());
+    st.layout.above_active.push(active);
+    st.layout.history_removal_scan_entries = 0;
+
+    assert!(st.remove_block(active, true));
+    assert_eq!(
+        st.layout.history_removal_scan_entries, 0,
+        "history membership must prevent scanning an unrelated long transcript"
+    );
+    assert_eq!(
+        cache.refresh(&mut st),
+        0,
+        "active removal must not dirty history"
+    );
+    assert_eq!(st.layout.history.len(), 10_000);
+    assert_eq!(st.layout.history_refs.len(), 10_000);
+}
+
+/// History removal must scan exactly once to remove duplicate references, then
+/// re-layout only from the first removed entry for every long-history
+/// placement.
+#[test]
+fn history_removal_uses_first_changed_suffix_for_all_placements_and_duplicates() {
+    const HISTORY_LEN: usize = 10_000;
+    let cases = [
+        ("early", vec![3]),
+        ("middle", vec![HISTORY_LEN / 2]),
+        ("late", vec![HISTORY_LEN - 4]),
+        ("duplicates", vec![3, HISTORY_LEN / 2, HISTORY_LEN - 4]),
+    ];
+
+    for (name, positions) in cases {
+        let mut st = SharedState::new(80, 24, "> ".into());
+        let target = BlockId(u64::MAX);
+        for index in 0..HISTORY_LEN {
+            let id = if positions.contains(&index) {
+                target
+            } else {
+                BlockId(index as u64)
+            };
+            append_history_id_for_cache_test(&mut st, id, format!("history {index}"));
+        }
+        let mut cache = HistoryLayoutCache::default();
+        assert_eq!(cache.refresh(&mut st), HISTORY_LEN, "{name}");
+        st.layout.history_removal_scan_entries = 0;
+
+        assert!(st.remove_block(target, true), "{name}");
+        let first_removed = positions[0];
+        let expected_history: Vec<_> = (0..HISTORY_LEN)
+            .filter(|index| !positions.contains(index))
+            .map(|index| BlockId(index as u64))
+            .collect();
+
+        assert_eq!(
+            st.layout.history_removal_scan_entries, HISTORY_LEN,
+            "{name}: one complete scan removes every duplicate reference"
+        );
+        assert_eq!(st.layout.history, expected_history, "{name}");
+        assert_eq!(
+            st.layout.history_refs,
+            history_reference_counts(&st.layout.history),
+            "{name}: membership index remains exact"
+        );
+        assert_eq!(st.layout.history_dirty_from, Some(first_removed), "{name}");
+        assert_eq!(
+            cache.refresh(&mut st),
+            st.layout.history.len() - first_removed,
+            "{name}: cache must re-layout only the changed suffix"
+        );
+        assert_eq!(
+            cache.entry_line_offsets.len(),
+            st.layout.history.len() + 1,
+            "{name}: cache offsets must match the compacted history"
+        );
+    }
+}
+
+/// The optimized removal must preserve the reference model's blocks, ordered
+/// zones, duplicate-history membership, and presentation delta across a
+/// deterministic mixed mutation sequence.
+#[test]
+fn randomized_block_removal_matches_reference_model() {
+    let mut st = SharedState::new(80, 24, "> ".into());
+    let mut reference = OutputSnapshot::default();
+    let mut seed = 0x8f3b_7a51_u64;
+
+    for step in 0..2_000 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let operation = seed % 7;
+        let mut existing_ids: Vec<_> = reference.blocks.keys().copied().collect();
+        existing_ids.sort_unstable_by_key(|id| id.0);
+
+        match operation {
+            0 => {
+                let text = format!("block {step}");
+                let id = st.alloc_id();
+                st.layout.blocks.insert(id, plain_block(text.clone()));
+                st.layout
+                    .block_debug_ids
+                    .insert(id, format!("block-{step}"));
+                let reference_id = reference.new_block(format!("block-{step}"), plain_block(text));
+                assert_eq!(id, reference_id);
+            }
+            1 if !existing_ids.is_empty() => {
+                let id = existing_ids[(seed as usize) % existing_ids.len()];
+                st.append_history(id);
+                reference.push_history(id);
+            }
+            2 if !existing_ids.is_empty() => {
+                let id = existing_ids[(seed as usize) % existing_ids.len()];
+                if !st.layout.above_active.contains(&id) {
+                    st.layout.above_active.push(id);
+                }
+                reference.push_above_active(id);
+            }
+            3 if !existing_ids.is_empty() => {
+                let id = existing_ids[(seed as usize) % existing_ids.len()];
+                if !st.layout.above_sticky.contains(&id) {
+                    st.layout.above_sticky.push(id);
+                }
+                reference.push_above_sticky(id);
+            }
+            4 if !existing_ids.is_empty() => {
+                let id = existing_ids[(seed as usize) % existing_ids.len()];
+                if !st.layout.suggestions.contains(&id) {
+                    st.layout.suggestions.push(id);
+                }
+                if !reference.suggestions.contains(&id) {
+                    reference.suggestions.push(id);
+                }
+            }
+            5 if !existing_ids.is_empty() => {
+                let id = existing_ids[(seed as usize) % existing_ids.len()];
+                if !st.layout.below.contains(&id) {
+                    st.layout.below.push(id);
+                }
+                reference.push_below(id);
+            }
+            _ => {
+                let id = if existing_ids.is_empty() || seed & 1 == 0 {
+                    BlockId(st.layout.next_id.saturating_add(1))
+                } else {
+                    existing_ids[(seed as usize) % existing_ids.len()]
+                };
+                let expected_delta = reference.history.contains(&id)
+                    || reference.above_active.contains(&id)
+                    || reference.above_sticky.contains(&id)
+                    || reference.suggestions.contains(&id)
+                    || reference.below.contains(&id);
+                reference.remove_block(id);
+                assert_eq!(st.remove_block(id, true), expected_delta, "step {step}");
+            }
+        }
+
+        assert_eq!(st.layout.blocks, reference.blocks, "step {step}: blocks");
+        assert_eq!(
+            st.layout.block_debug_ids, reference.block_debug_ids,
+            "step {step}: block diagnostics"
+        );
+        assert_eq!(
+            st.layout.next_id, reference.next_id,
+            "step {step}: identities"
+        );
+        assert_eq!(st.layout.history, reference.history, "step {step}: history");
+        assert_eq!(
+            st.layout.history_refs,
+            history_reference_counts(&reference.history),
+            "step {step}: history membership"
+        );
+        assert_eq!(
+            st.layout.above_active, reference.above_active,
+            "step {step}: active zone"
+        );
+        assert_eq!(
+            st.layout.above_sticky, reference.above_sticky,
+            "step {step}: sticky zone"
+        );
+        assert_eq!(
+            st.layout.suggestions, reference.suggestions,
+            "step {step}: suggestions"
+        );
+        assert_eq!(st.layout.below, reference.below, "step {step}: below zone");
+    }
+}
+
+/// This manual benchmark reports scan and suffix-layout work at increasing
+/// history sizes without treating elapsed time as a correctness threshold.
+#[test]
+#[ignore = "manual queued active-block removal scaling benchmark"]
+fn benchmark_queued_active_removal_history_membership_scaling() {
+    for history_len in [1_000, 10_000, 100_000] {
+        let mut st = SharedState::new(80, 24, "> ".into());
+        for index in 0..history_len {
+            append_history_for_cache_test(&mut st, format!("history {index}"));
+        }
+        let mut cache = HistoryLayoutCache::default();
+        cache.refresh(&mut st);
+        let active = st.alloc_id();
+        st.layout.blocks.insert(active, plain_block("queued"));
+        st.layout.above_active.push(active);
+        st.layout.history_removal_scan_entries = 0;
+        let started = path_std_time::Instant::now();
+
+        assert!(st.remove_block(active, true));
+        let cache_entries_relaid = cache.refresh(&mut st);
+        eprintln!(
+            "queued active removal benchmark: history_entries={history_len} history_scan_entries={} cache_entries_relaid={cache_entries_relaid} previous_history_scan_entries={history_len} elapsed={:?}; no timing threshold",
+            st.layout.history_removal_scan_entries,
+            started.elapsed()
+        );
+    }
+}
+
+/// Removing a queued active block above a scrolled transcript must leave hidden
+/// history untouched, preserve the visible tail, and stay on the scrolling-safe
+/// incremental rendering path.
+#[test]
+fn queued_active_removal_preserves_hidden_history_visible_tail_and_scrollback() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(4, 40, 50);
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(40, 4, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    flush_redraws(&handle, &buf, &mut parser);
+
+    for index in 0..8 {
+        handle.print_output("history", plain_block(format!("history {index}")));
+    }
+    let active = handle.new_block("queued", plain_block("queued prompt"));
+    handle.push_above_active(active);
+    flush_redraws(&handle, &buf, &mut parser);
+    handle.lock().layout.history_removal_scan_entries = 0;
+
+    assert_no_full_redraw_after(&handle, &buf, &mut parser, || handle.remove_block(active));
+    let visible = visible_rows(&parser);
+    assert_eq!(
+        visible.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),
+        ["history 6", "history 7", "", ">"],
+        "rubber keeps the visible tail stable while the active row disappears"
+    );
+    parser.screen_mut().set_scrollback(6);
+    let scrollback = visible_rows(&parser);
+    assert_eq!(
+        scrollback[..4]
+            .iter()
+            .map(|row| row.trim_end())
+            .collect::<Vec<_>>(),
+        ["history 0", "history 1", "history 2", "history 3"],
+        "the incremental frame must preserve already-scrolled history"
+    );
+    parser.screen_mut().set_scrollback(0);
+    assert_eq!(
+        handle.lock().layout.history_removal_scan_entries,
+        0,
+        "queued active removal must not revisit hidden history"
     );
 }
 

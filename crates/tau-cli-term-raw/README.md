@@ -12,9 +12,9 @@ different situations, chosen by the redraw loop in `redraw_loop()`.
 ### Path 1 — Differential update (common case)
 
 The layout engine caches wrapped persistent-history rows. Ordinary history
-appends lay out only the new suffix; updates, removals, snapshot replacement,
-and width changes conservatively relayout the complete history cache. For a
-non-scrolling redraw we combine the cached history with freshly laid-out live,
+appends and removals lay out only the changed suffix; updates, snapshot
+replacement, and width changes conservatively relayout the complete history
+cache. For a non-scrolling redraw we combine the cached history with freshly laid-out live,
 prompt, and status rows, then pass only the visible viewport to
 `Screen::update()`. It diffs against what was previously on the terminal and
 emits only the escape sequences needed to update changed cells. This keeps both

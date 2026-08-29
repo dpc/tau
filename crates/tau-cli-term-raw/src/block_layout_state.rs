@@ -21,9 +21,12 @@ pub(super) struct BlockLayoutState {
     pub(super) history_generation: TerminalHistoryGeneration,
     /// Earliest history entry changed since the redraw cache last refreshed.
     ///
-    /// Ordinary output appends mark only the new suffix. Destructive or
-    /// content-changing operations conservatively invalidate from entry zero.
+    /// Ordinary output appends and removals mark their changed suffix. Content
+    /// changes conservatively invalidate from entry zero.
     pub(super) history_dirty_from: Option<usize>,
+    /// Number of history entries inspected by removal in test builds.
+    #[cfg(test)]
+    pub(super) history_removal_scan_entries: usize,
     /// Mutable blocks above the prompt (can be reordered).
     pub(super) above_active: Vec<BlockId>,
     /// Blocks pinned right above the prompt.
@@ -46,6 +49,8 @@ impl BlockLayoutState {
             history_refs: HashMap::new(),
             history_generation: TerminalHistoryGeneration::default(),
             history_dirty_from: None,
+            #[cfg(test)]
+            history_removal_scan_entries: 0,
             above_active: Vec::new(),
             above_sticky: Vec::new(),
             suggestions: Vec::new(),

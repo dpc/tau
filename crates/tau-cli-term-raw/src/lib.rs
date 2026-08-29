@@ -393,6 +393,48 @@ impl SharedState {
             || self.layout.below.contains(&id)
     }
 
+    /// Removes one block and every one of its rendered-zone references.
+    fn remove_block(&mut self, id: BlockId, observe_delta: bool) -> bool {
+        let presentation_changed = observe_delta && self.block_is_visible(id);
+        let existed = self.layout.blocks.remove(&id).is_some();
+        let debug_id = self.layout.block_debug_ids.remove(&id);
+
+        // `history_refs` is the authoritative membership index. Queued/live
+        // blocks occupy an active zone but not persistent history, so skipping
+        // this scan is both safe and keeps their removal independent of
+        // transcript length.
+        if self.block_in_history(id) {
+            #[cfg(test)]
+            {
+                self.layout.history_removal_scan_entries += self.layout.history.len();
+            }
+            let removal = remove_all_from_zone(&mut self.layout.history, id);
+            let indexed_refs = self
+                .layout
+                .history_refs
+                .get(&id)
+                .copied()
+                .expect("history membership index must contain referenced block");
+            debug_assert_eq!(
+                removal.count, indexed_refs,
+                "history membership index must exactly count duplicate references"
+            );
+            self.remove_history_refs(id, removal.count);
+            self.mark_history_dirty_from(
+                removal
+                    .first_index
+                    .expect("history membership index must imply one matching entry"),
+            );
+        }
+
+        remove_all_from_zone(&mut self.layout.above_active, id);
+        remove_all_from_zone(&mut self.layout.above_sticky, id);
+        remove_all_from_zone(&mut self.layout.suggestions, id);
+        remove_all_from_zone(&mut self.layout.below, id);
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, ?debug_id, existed, "remove block");
+        presentation_changed
+    }
+
     fn current_snapshot(&self) -> PromptSnapshot {
         PromptSnapshot {
             buffer: self.editor.buffer.clone(),
@@ -975,10 +1017,31 @@ pub enum Event {
     ExternalEditor,
 }
 
-fn remove_all_from_zone(zone: &mut Vec<BlockId>, id: BlockId) -> usize {
-    let before = zone.len();
-    zone.retain(|&x| x != id);
-    before - zone.len()
+/// References removed from one ordered render zone.
+#[derive(Default)]
+struct ZoneRemoval {
+    /// Number of removed references.
+    count: usize,
+    /// First entry whose removal changes the remaining suffix.
+    first_index: Option<usize>,
+}
+
+/// Removes every occurrence of `id` from one rendered zone.
+fn remove_all_from_zone(zone: &mut Vec<BlockId>, id: BlockId) -> ZoneRemoval {
+    let mut removal = ZoneRemoval::default();
+    let mut index = 0;
+    zone.retain(|&candidate| {
+        let current_index = index;
+        index += 1;
+        if candidate == id {
+            removal.count += 1;
+            removal.first_index.get_or_insert(current_index);
+            false
+        } else {
+            true
+        }
+    });
+    removal
 }
 
 /// Snapshot of terminal output zones, excluding prompt input/history state.
@@ -1608,20 +1671,7 @@ impl TermHandle {
     fn remove_block_inner(&self, id: BlockId, observe_delta: bool) -> bool {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
-        let presentation_changed = observe_delta && st.block_is_visible(id);
-        let existed = st.layout.blocks.remove(&id).is_some();
-        let debug_id = st.layout.block_debug_ids.remove(&id);
-        let removed_history_refs = remove_all_from_zone(&mut st.layout.history, id);
-        st.remove_history_refs(id, removed_history_refs);
-        if removed_history_refs != 0 {
-            st.mark_history_dirty_from(0);
-        }
-        st.layout.above_active.retain(|&x| x != id);
-        st.layout.above_sticky.retain(|&x| x != id);
-        st.layout.suggestions.retain(|&x| x != id);
-        st.layout.below.retain(|&x| x != id);
-        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, ?debug_id, existed, "remove block");
-        presentation_changed
+        st.remove_block(id, observe_delta)
     }
 
     // --- Zone lists ---
