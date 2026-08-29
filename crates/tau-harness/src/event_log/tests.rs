@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Write;
 use std::sync::mpsc::sync_channel;
 use std::time::Instant;
@@ -224,10 +224,54 @@ fn enabled_live_suffix_measurement_tracks_and_releases_real_ownership() {
     assert!(trace.contains("high_water_pending_target_fanout"));
     assert!(!trace.contains("canary"));
     assert!(!trace.contains("consumer"));
-    let actual = trace
+    let final_record = trace
+        .lines()
+        .rev()
+        .find(|line| line.contains("tau_harness::delivery_memory"))
+        .expect("final delivery-memory trace record");
+    let fields = final_record
         .split_whitespace()
-        .filter_map(|word| word.split_once('=').map(|(field, _)| field))
-        .collect::<BTreeSet<_>>();
+        .filter_map(|word| word.split_once('='))
+        .collect::<BTreeMap<_, _>>();
+    let numeric_field = |field| {
+        fields
+            .get(field)
+            .unwrap_or_else(|| panic!("final delivery-memory record has {field}"))
+            .parse::<u64>()
+            .unwrap_or_else(|_| panic!("final delivery-memory {field} is numeric"))
+    };
+    for field in [
+        "items",
+        "encoded_bytes",
+        "decoded_logical_bytes_estimate",
+        "decoded_requested_capacity_estimate",
+        "decoded_containers",
+        "expansion_milli",
+        "shared_allocations",
+        "shared_fanout",
+        "pending_target_fanout",
+        "overlap_fanout",
+    ] {
+        assert_eq!(
+            numeric_field(field),
+            0,
+            "final delivery-memory {field} releases current ownership"
+        );
+    }
+    for field in [
+        "high_water_encoded_bytes",
+        "high_water_decoded_logical_bytes_estimate",
+        "high_water_decoded_requested_capacity_estimate",
+        "high_water_shared_allocations",
+        "high_water_shared_fanout",
+        "high_water_pending_target_fanout",
+    ] {
+        assert!(
+            numeric_field(field) > 0,
+            "final delivery-memory {field} preserves observed high water"
+        );
+    }
+    let actual = fields.keys().copied().collect::<BTreeSet<_>>();
     let expected = [
         "cut",
         "decoded_containers",
