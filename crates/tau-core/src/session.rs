@@ -313,6 +313,8 @@ struct AgentTreeIndexes {
     context_nodes_by_event_seq: HashMap<PersistedAgentEventSeq, NodeId>,
     /// Logical active provider-window positions and boundary anchors.
     provider_window: ProviderWindowIndex,
+    /// Replay-derived compaction-chain observability facts.
+    compaction_chains: crate::compaction_chain_view::CompactionChainIndex,
 }
 
 /// Niche-optimized optional materialized node id for replay-only indexes.
@@ -933,6 +935,28 @@ fn normalize_display_name(value: Option<&str>) -> Option<String> {
 }
 
 impl AgentTree {
+    /// Derive observability for the explicit durable chain ending at `latest`.
+    ///
+    /// Returns `None` when no decision, start, or terminal with this
+    /// transaction identity exists. A returned view includes only the
+    /// prefix ending at the requested transaction; later successors do not
+    /// rewrite it. Elapsed time runs from the first start through the
+    /// latest correlated durable prompt-start, provider response,
+    /// accounting/correction, boundary, or checkpoint fact. Preflight and
+    /// route failures proven never dispatched contribute known zero cost,
+    /// while corrections replace their awaiting initial rather than adding
+    /// another attempt.
+    ///
+    /// This query reads a replay-derived index and cannot affect admission,
+    /// recovery, scheduling, or policy.
+    #[must_use]
+    pub fn compaction_chain_view(
+        &self,
+        latest: &tau_proto::CompactionTransactionId,
+    ) -> Option<crate::CompactionChainView> {
+        self.indexes.compaction_chains.derive(latest)
+    }
+
     /// Returns the latest validated standalone transaction's recovery
     /// projection, following `SPEC-compaction-and-context-recovery`.
     #[must_use]
@@ -2393,6 +2417,9 @@ impl AgentTree {
                 record.fold_semantics,
             )
         };
+        self.indexes
+            .compaction_chains
+            .observe(record.seq, record.recorded_at, &record.event);
         self.advance_next_event_seq();
         Ok(node_id)
     }

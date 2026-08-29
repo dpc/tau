@@ -723,6 +723,17 @@ live/cold folds own logical target projection and rejection of cuts beyond that
 target; deterministic end-to-end coverage retains the existing opaque
 standalone restart oracle rather than multiplying a broad matrix.
 
+### Derived compaction-chain observability
+
+`tau-core` reducer tests own explicit predecessor membership, correction
+replacement, known/unknown/saturating cost folds, and missing or reversed
+timestamp quality. Canonical `AgentTree` tests own valid-history live, cold, and
+restart equivalence across decision, prompt-start, provider-response, accounting,
+terminal, continuation, and branch-away/back cuts. Harness and deterministic E2E
+tests continue to own recovery, dispatch, provider-attempt bounds, and generic
+loop-policy behavior; the derived query has no policy consumer and does not
+duplicate those suites.
+
 
 ## Output-length continuation coverage
 

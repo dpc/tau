@@ -425,6 +425,27 @@ fn apply_persisted_test_record(
     (seq, node)
 }
 
+/// Applies one contiguous durable record with a nonzero sequence-derived time.
+fn apply_timed_persisted_test_record(
+    tree: &mut AgentTree,
+    parent: AgentEventParent,
+    event: Event,
+) -> (PersistedAgentEventSeq, Option<NodeId>) {
+    let seq = tree.next_event_seq;
+    let node = tree
+        .apply_persisted_record(&PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([1_u8; 16]),
+            seq,
+            source: None,
+            event,
+            parent,
+            fold_semantics: crate::AgentJournalFoldSemantics::Legacy,
+            recorded_at: tau_proto::UnixMicros::new(seq.get().saturating_add(1)),
+        })
+        .expect("timed test record is contiguous and valid");
+    (seq, node)
+}
+
 /// Observation-only events must survive validation without mutating replayed
 /// transcript or runtime state.
 #[test]
@@ -1033,6 +1054,315 @@ fn standalone_execution_accounting_is_idempotent_per_logical_attempt() {
         .validate_event(&Event::ProviderStandaloneExecutionAccounted(jumped))
         .expect_err("cross-session accounting must fail closed");
     assert!(error.to_string().contains("session does not match"));
+}
+
+/// The public compaction-chain view must match after live append, cold replay,
+/// and a restart cut while remaining observational with respect to recovery.
+#[test]
+fn compaction_chain_view_is_live_cold_and_restart_equivalent() {
+    fn append(
+        tree: &mut AgentTree,
+        records: &mut Vec<PersistedAgentEvent>,
+        event: Event,
+        recorded_at: u64,
+    ) {
+        let record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([records.len() as u8; 16]),
+            seq: tree.next_event_seq(),
+            source: None,
+            event,
+            parent: AgentEventParent::InheritHead,
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: UnixMicros::new(recorded_at),
+        };
+        tree.apply_persisted_record(&record)
+            .expect("valid chain record");
+        records.push(record);
+    }
+
+    let mut live = AgentTree::from_events(agent_id(), &[]);
+    let mut records = Vec::new();
+    let started = compaction_start("ct-derived-chain-live-cold");
+    append(
+        &mut live,
+        &mut records,
+        Event::AgentStandaloneCompactionStarted(started.clone()),
+        100,
+    );
+    let partial = live
+        .compaction_chain_view(&started.transaction_id)
+        .expect("partial chain view");
+    assert_eq!(partial.pass_count, 1);
+    assert_eq!(
+        partial.completion,
+        crate::CompactionChainCompletion::InFlight
+    );
+    assert_eq!(
+        partial.estimated_cost,
+        crate::CompactionChainEstimatedCost::Unknown,
+        "a possibly dispatched start without accounting remains unknown"
+    );
+    assert_eq!(
+        partial.elapsed,
+        crate::CompactionChainElapsed::Observed {
+            duration: std::time::Duration::ZERO
+        },
+        "partial elapsed is explicitly paired with InFlight completion"
+    );
+
+    let session_id = tau_proto::SessionId::parse("chain-view-session").expect("session id");
+    append(
+        &mut live,
+        &mut records,
+        Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            agent_prompt_id: started.compact_prompt_id.clone(),
+            agent_id: agent_id(),
+            session_id: session_id.clone(),
+            model: started.model.clone(),
+            model_params: None,
+            outer_turn_id: None,
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+        110,
+    );
+    let after_prompt_start = live
+        .compaction_chain_view(&started.transaction_id)
+        .expect("prompt-start chain view");
+    assert_eq!(
+        after_prompt_start.completion,
+        crate::CompactionChainCompletion::InFlight
+    );
+    assert_eq!(
+        after_prompt_start.elapsed,
+        crate::CompactionChainElapsed::Observed {
+            duration: std::time::Duration::from_micros(10)
+        },
+        "exact compact-prompt ownership advances incomplete elapsed time"
+    );
+    let usage = tau_proto::ProviderTokenUsage {
+        model: Some(started.model.clone()),
+        prompt_sent_tokens: 10,
+        prompt_cached_tokens: 2,
+        response_received_tokens: 3,
+        ..Default::default()
+    };
+    let cost =
+        tau_proto::EstimatedApiCost::for_usage(&usage, tau_proto::ESTIMATED_API_COST_FALLBACK);
+    append(
+        &mut live,
+        &mut records,
+        Event::ProviderStandaloneExecutionAccounted(
+            tau_proto::ProviderStandaloneExecutionAccounted {
+                session_id,
+                agent_id: agent_id(),
+                agent_prompt_id: started.compact_prompt_id.clone(),
+                logical_attempt: tau_proto::ProviderAttempt::ONE,
+                transaction_id: started.transaction_id.clone(),
+                model: started.model.clone(),
+                backend: None,
+                usage: tau_proto::StandaloneExecutionUsage::Known(usage),
+                estimated_api_cost_rates: Some(tau_proto::ESTIMATED_API_COST_FALLBACK),
+                estimated_api_cost_increment: Some(cost),
+                output: tau_proto::StandaloneExecutionOutput::Rejected,
+                finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
+            },
+        ),
+        120,
+    );
+    let restart_records = records.clone();
+    append(
+        &mut live,
+        &mut records,
+        Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+            agent_id: agent_id(),
+            transaction_id: started.transaction_id.clone(),
+            cut: started.cut,
+            reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
+            resume_through: started.resume_through,
+            context_retreat: None,
+            incomplete_response: None,
+        }),
+        130,
+    );
+    let terminal_record = records.last().cloned().expect("terminal record");
+
+    let before_query = live.clone();
+    let expected = live
+        .compaction_chain_view(&started.transaction_id)
+        .expect("complete chain view");
+    assert_eq!(live, before_query, "query cannot mutate recovery authority");
+    assert_eq!(
+        expected.completion,
+        crate::CompactionChainCompletion::Complete
+    );
+    assert_eq!(
+        expected.estimated_cost,
+        crate::CompactionChainEstimatedCost::Known(cost)
+    );
+    assert_eq!(
+        expected.elapsed,
+        crate::CompactionChainElapsed::Observed {
+            duration: std::time::Duration::from_micros(30)
+        }
+    );
+
+    append(
+        &mut live,
+        &mut records,
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            agent_id: agent_id(),
+            text: "branch away".to_owned(),
+            inference_activation: false,
+            message_class: Default::default(),
+        }),
+        140,
+    );
+    let branch = live.head().expect("branch node");
+    append(
+        &mut live,
+        &mut records,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id(),
+            head: AgentHead::Root,
+        }),
+        150,
+    );
+    append(
+        &mut live,
+        &mut records,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: agent_id(),
+            head: AgentHead::Node(branch),
+        }),
+        160,
+    );
+    assert_eq!(
+        live.compaction_chain_view(&started.transaction_id),
+        Some(expected.clone()),
+        "branch-away/back cannot change immutable chain observability"
+    );
+
+    let cold = AgentTree::try_from_events(agent_id(), &records).expect("cold replay");
+    assert_eq!(
+        cold.compaction_chain_view(&started.transaction_id),
+        Some(expected.clone()),
+        "cold replay derives the same view"
+    );
+
+    let mut restarted =
+        AgentTree::try_from_events(agent_id(), &restart_records).expect("restart prefix");
+    restarted
+        .apply_persisted_record(&terminal_record)
+        .expect("post-restart terminal append");
+    assert_eq!(
+        restarted.compaction_chain_view(&started.transaction_id),
+        Some(expected),
+        "restart continuation derives the same view"
+    );
+}
+
+/// A canonical standalone provider response must advance incomplete elapsed
+/// observability before its separate typed failure boundary commits.
+#[test]
+fn compaction_chain_view_tracks_correlated_provider_response_cut() {
+    fn append(
+        tree: &mut AgentTree,
+        records: &mut Vec<PersistedAgentEvent>,
+        event: Event,
+        recorded_at: u64,
+    ) {
+        let record = PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([records.len() as u8; 16]),
+            seq: tree.next_event_seq(),
+            source: None,
+            event,
+            parent: AgentEventParent::InheritHead,
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: UnixMicros::new(recorded_at),
+        };
+        tree.apply_persisted_record(&record)
+            .expect("valid provider-cut record");
+        records.push(record);
+    }
+
+    let mut live = AgentTree::from_events(agent_id(), &[]);
+    let mut records = Vec::new();
+    let started = compaction_start("ct-derived-provider-cut");
+    append(
+        &mut live,
+        &mut records,
+        Event::AgentStandaloneCompactionStarted(started.clone()),
+        100,
+    );
+    append(
+        &mut live,
+        &mut records,
+        Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            agent_prompt_id: started.compact_prompt_id.clone(),
+            agent_id: agent_id(),
+            session_id: "provider-cut-session".parse().expect("session id"),
+            model: started.model.clone(),
+            model_params: None,
+            outer_turn_id: None,
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: started.originator.clone(),
+            ctx_id: None,
+        }),
+        110,
+    );
+    append(
+        &mut live,
+        &mut records,
+        Event::ProviderStandaloneExecutionAccounted(
+            tau_proto::ProviderStandaloneExecutionAccounted {
+                session_id: "provider-cut-session".parse().expect("session id"),
+                agent_id: agent_id(),
+                agent_prompt_id: started.compact_prompt_id.clone(),
+                logical_attempt: tau_proto::ProviderAttempt::ONE,
+                transaction_id: started.transaction_id.clone(),
+                model: started.model.clone(),
+                backend: None,
+                usage: tau_proto::StandaloneExecutionUsage::Unknown,
+                estimated_api_cost_rates: Some(tau_proto::ESTIMATED_API_COST_FALLBACK),
+                estimated_api_cost_increment: None,
+                output: tau_proto::StandaloneExecutionOutput::Rejected,
+                finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
+            },
+        ),
+        120,
+    );
+    let mut response =
+        tool_calling_response(&agent_id(), started.compact_prompt_id.as_str(), Vec::new());
+    response.stop_reason = tau_proto::ProviderStopReason::Error;
+    response.failure_kind = Some(tau_proto::ProviderFailureKind::ContextWindowExceeded);
+    append(
+        &mut live,
+        &mut records,
+        Event::ProviderResponseFinished(response),
+        130,
+    );
+
+    let at_response = live
+        .compaction_chain_view(&started.transaction_id)
+        .expect("provider response view");
+    assert_eq!(
+        at_response.completion,
+        crate::CompactionChainCompletion::InFlight
+    );
+    assert_eq!(
+        at_response.elapsed,
+        crate::CompactionChainElapsed::Observed {
+            duration: std::time::Duration::from_micros(30)
+        }
+    );
+    let cold = AgentTree::try_from_events(agent_id(), &records).expect("provider-cut replay");
+    assert_eq!(
+        cold.compaction_chain_view(&started.transaction_id),
+        Some(at_response),
+        "cold replay preserves the incomplete provider-response cut"
+    );
 }
 
 fn append_user_input(tree: &mut AgentTree, text: &str) -> AgentHead {
@@ -2607,13 +2937,30 @@ fn standalone_compaction_opaque_windows_match_live_append_and_cold_replay() {
         ];
 
         let mut live = AgentTree::from_events(agent_id(), &[]);
-        for event in &records {
+        for (index, event) in records.iter().enumerate() {
             live.apply_persisted_record(event)
                 .expect("generated canonical boundary must append");
+            if index == 1 {
+                assert_eq!(
+                    live.compaction_chain_view(&started.transaction_id)
+                        .expect("successful partial chain")
+                        .completion,
+                    crate::CompactionChainCompletion::AwaitingContinuation,
+                    "successful boundary remains incomplete until its checkpoint or successor"
+                );
+            }
         }
         let replay = AgentTree::from_events(agent_id(), &records);
 
         assert_eq!(live, replay, "case {case}: live and replay projections");
+        assert_eq!(
+            replay
+                .compaction_chain_view(&started.transaction_id)
+                .expect("checkpointed chain")
+                .completion,
+            crate::CompactionChainCompletion::Complete,
+            "checkpoint is immutable chain-completion evidence"
+        );
         assert_eq!(live.head(), replay.head(), "case {case}: boundary head");
         assert_eq!(
             live.standalone_compaction_recovery(),
@@ -7301,7 +7648,15 @@ fn eager_automatic_decision_replays_terminal_finish_and_start_cuts() {
     );
     tree.validate_event(&terminal)
         .expect("terminal decision validates");
-    tree.apply_event(&terminal);
+    apply_timed_persisted_test_record(&mut tree, AgentEventParent::InheritHead, terminal);
+    let decision_view = tree
+        .compaction_chain_view(&transaction_id)
+        .expect("durable automatic decision view");
+    assert_eq!(decision_view.pass_count, 0);
+    assert_eq!(
+        decision_view.completion,
+        crate::CompactionChainCompletion::AwaitingStart
+    );
     let cut = tree.head().map_or(AgentHead::Root, AgentHead::Node);
     assert!(matches!(
         tree.standalone_compaction_recovery(),

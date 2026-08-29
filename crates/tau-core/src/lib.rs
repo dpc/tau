@@ -8,6 +8,7 @@ mod action_registry;
 mod agent_checkpoint;
 mod agent_store;
 mod bus;
+mod compaction_chain_view;
 mod connection;
 mod journal_sync;
 mod memory;
@@ -34,6 +35,10 @@ pub use agent_store::{
     read_agent_creation_record,
 };
 pub use bus::{DeliveryOutcomeCount, EventBus};
+pub use compaction_chain_view::{
+    CompactionChainCompletion, CompactionChainElapsed, CompactionChainEstimatedCost,
+    CompactionChainView,
+};
 pub use connection::{
     AllowAll, Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError,
     ConnectionSink, DeliveryFailure, PendingConnectionMetadata, RouteError, RouteReport,

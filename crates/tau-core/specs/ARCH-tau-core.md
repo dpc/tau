@@ -37,6 +37,19 @@ reject persisted full prompts. This fold and dispatch-authority boundary is
 governed by
 [SPEC-provider-prompt-materialization-authority](../../../specs/SPEC-provider-prompt-materialization-authority.md).
 
+`AgentTree` also reconstructs a non-authoritative compaction-chain view from
+explicit durable predecessor links, transaction starts and terminals, record
+timestamps, and canonical per-attempt accounting. The view reports pass count,
+completion state, elapsed-time quality, and known-or-unknown saturating estimated
+cost. Corrections replace their awaiting observation. The index is rebuilt by
+the same live and cold fold, persists no aggregate, infers no chain membership
+from adjacency, and cannot affect recovery, admission, scheduling, or terminal
+policy.
+See
+[SPEC-compaction-and-context-recovery](../../../specs/SPEC-compaction-and-context-recovery.md)
+and
+[SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
+
 Prompt facts are the canonical raw-text and typed-provenance authority. Folding
 preserves their `PromptSubmissionSource` in derived user-input entries; provider
 assembly may then apply the source-specific presentation required by

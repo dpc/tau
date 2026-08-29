@@ -151,7 +151,11 @@ existing session id without recreating the previous runtime branch.
 publication neither authorizes nor
 blocks compaction outcome, transcript mutation, recovery, or retry; those remain
 owned by their existing canonical facts and transactions. The accounting fact
-does not define aggregate UI, budget, or breaker policy.
+does not define aggregate UI, budget, or breaker policy. Core may derive
+compaction-chain pass, elapsed, completion, and estimated-cost observability from
+these facts and the explicit durable transaction lineage. Such aggregates remain
+replay-derived views rather than persisted authority and impose no
+compaction-specific cutoff or terminal behavior.
 
 `ProviderStopReason::Length` is always an incomplete semantic terminal. The
 harness clears provider-authored output-length disposition and may derive one
