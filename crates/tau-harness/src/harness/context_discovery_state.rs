@@ -35,6 +35,8 @@ pub(crate) struct ContextDiscoveryState {
         BTreeMap<tau_proto::ConnectionId, BTreeMap<String, PromptFragment>>,
     /// Loaded system-prompt templates keyed by template name.
     pub(crate) system_prompt_templates: HashMap<String, String>,
+    /// Reusable configured renderer and exact source parse cache.
+    pub(crate) prompt_template_engine: crate::prompt::PromptTemplateEngine,
     /// Sessions whose AGENTS.md and skill discovery completed.
     pub(crate) initialized_sessions: HashSet<SessionId>,
 }
@@ -68,6 +70,7 @@ impl ContextDiscoveryState {
             session_skills,
             prompt_fragments: BTreeMap::new(),
             system_prompt_templates,
+            prompt_template_engine: PromptTemplateEngine::default(),
             initialized_sessions: HashSet::new(),
         }
     }

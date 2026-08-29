@@ -997,6 +997,8 @@ fn prompt_fragments_order_by_priority_name_and_expose_priority() {
         tau_proto::PromptFragment::new("b", tau_proto::PromptPriority::new(20), "B"),
     ];
     let data = system_prompt_template_data(
+        &PromptTemplateEngine::default(),
+        0,
         RolePromptTemplateContext::for_role("engineer"),
         &path_std_collections::HashMap::new(),
         &fragments,
@@ -2989,4 +2991,112 @@ fn semantic_watch_payloads_replay_with_activation_boundaries() {
         replay, context,
         "durable replay must reproduce live context"
     );
+}
+/// The immutable-source cache keys parsed templates by both exact source bytes
+/// and owning generation while every call still renders current dynamic data.
+/// This prevents stale prompt output across context or configuration refreshes.
+#[test]
+fn template_cache_invalidates_by_exact_generation_and_content_without_caching_output() {
+    reset_prompt_template_test_counters();
+    let engine = PromptTemplateEngine::default();
+    let source = "{{#if enabled}}{{trim value}}{{else}}off{{/if}}";
+
+    let first = engine
+        .render(
+            4,
+            source,
+            &serde_json::json!({"enabled": true, "value": " one "}),
+        )
+        .expect("first render");
+    let dynamic = engine
+        .render(
+            4,
+            source,
+            &serde_json::json!({"enabled": true, "value": " two "}),
+        )
+        .expect("dynamic rerender");
+    assert_eq!((first.as_str(), dynamic.as_str()), ("one", "two"));
+    assert_eq!(prompt_template_parse_count(), 1);
+    assert_eq!(prompt_template_render_count(), 2);
+
+    engine
+        .render(4, "{{value}}!", &serde_json::json!({"value": "two"}))
+        .expect("changed content");
+    engine
+        .render(
+            5,
+            source,
+            &serde_json::json!({"enabled": false, "value": "ignored"}),
+        )
+        .expect("changed generation");
+    assert_eq!(prompt_template_parse_count(), 3);
+    assert_eq!(prompt_template_render_count(), 4);
+}
+
+/// Cached parsing preserves the previous registry's strict-mode errors,
+/// escaping policy, helpers, and inline-partial behavior byte for byte.
+#[test]
+fn cached_templates_match_uncached_prompt_bytes_and_errors() {
+    let engine = PromptTemplateEngine::default();
+    let registry = prompt_template_renderer();
+    let source =
+        "{{#*inline \"row\"}}<{{xml_escape this}}>{{/inline}}{{#each values}}{{> row}}{{/each}}";
+    let data = serde_json::json!({"values": ["a&b", "<c>"]});
+    assert_eq!(
+        engine.render(0, source, &data).expect("cached render"),
+        registry
+            .render_template(source, &data)
+            .expect("uncached render")
+    );
+
+    let invalid = "{{missing.value}}";
+    let cached_error = engine
+        .render(0, invalid, &serde_json::json!({}))
+        .expect_err("strict cached error");
+    let uncached_error = registry
+        .render_template(invalid, &serde_json::json!({}))
+        .expect_err("strict uncached error");
+    assert_eq!(cached_error.to_string(), uncached_error.to_string());
+}
+
+/// Replacing any template source advances the complete source snapshot and
+/// evicts old parsed entries instead of retaining extension generations for the
+/// daemon lifetime.
+#[test]
+fn prompt_source_replacement_invalidates_and_bounds_the_active_generation() {
+    reset_prompt_template_test_counters();
+    let engine = PromptTemplateEngine::default();
+    let skills = path_std_collections::HashMap::new();
+    let mut fragments = vec![PromptFragment::new(
+        "runtime",
+        tau_proto::PromptPriority::new(20),
+        "old {{role.name}}",
+    )];
+    let render = |fragments: &[PromptFragment]| {
+        try_build_system_prompt_with_engine(
+            &engine,
+            "{{#each prompt_fragments}}{{content}}{{/each}}",
+            &skills,
+            fragments,
+            &[],
+            serde_json::json!({}),
+            RolePromptTemplateContext::for_role("engineer"),
+            PromptCapabilities::default(),
+        )
+        .expect("render source generation")
+    };
+
+    assert_eq!(render(&fragments), "old engineer");
+    assert_eq!(render(&fragments), "old engineer");
+    assert_eq!(engine.cached_template_count(), 2);
+    assert_eq!(prompt_template_parse_count(), 2);
+
+    fragments[0] = PromptFragment::new(
+        "runtime",
+        tau_proto::PromptPriority::new(20),
+        "new {{role.name}}",
+    );
+    assert_eq!(render(&fragments), "new engineer");
+    assert_eq!(engine.cached_template_count(), 2);
+    assert_eq!(prompt_template_parse_count(), 4);
 }

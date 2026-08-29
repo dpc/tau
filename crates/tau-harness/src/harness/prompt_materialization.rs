@@ -5,7 +5,43 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static DISPATCH_PROVIDER_SORT_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Reset the deterministic dispatch provider-sort work counter.
+#[cfg(test)]
+pub(super) fn reset_dispatch_provider_sort_count() {
+    DISPATCH_PROVIDER_SORT_COUNT.set(0);
+}
+
+/// Return the dispatch provider-sort work count for the current test.
+#[cfg(test)]
+pub(super) fn dispatch_provider_sort_count() -> usize {
+    DISPATCH_PROVIDER_SORT_COUNT.get()
+}
+
+/// Prompt-surface preparation failure that preserves duplicate-tool diagnostics
+/// separately from template rendering failures.
+#[derive(Debug)]
+pub(super) enum PromptSurfaceError {
+    /// Duplicate provider-visible tool name in the effective snapshot.
+    DuplicateToolName(String),
+    /// Strict Handlebars rendering failure.
+    Render(handlebars::RenderError),
+}
+
 impl Harness {
+    /// Acquire one actually sorted provider snapshot and account its work in
+    /// deterministic regression tests.
+    fn sorted_prompt_tool_providers(&self) -> Vec<&tau_core::ToolProvider> {
+        #[cfg(test)]
+        DISPATCH_PROVIDER_SORT_COUNT.set(DISPATCH_PROVIDER_SORT_COUNT.get() + 1);
+        self.tool_routing.registry.all_tool_providers()
+    }
+
     /// Activates already-committed input for the first user agent in the
     /// requested session.
     ///
@@ -804,15 +840,6 @@ impl Harness {
             self.terminalize_owned_dispatch_error(cid, message);
             return None;
         }
-        let tool_specs = self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model));
-        if let Some(name) = duplicate_model_visible_tool_name(&tool_specs) {
-            let message = format!(
-                "cannot dispatch prompt for role `{role_name}`: effective tool surface contains duplicate model-visible name `{name}`"
-            );
-            self.emit_harness_failure(&message);
-            self.terminalize_owned_dispatch_error(cid, message);
-            return None;
-        }
         let prompt_context = tree
             .and_then(|tree| {
                 standalone_window.map_or_else(
@@ -846,23 +873,25 @@ impl Harness {
             ));
         }
         let operation = owned_operation;
-        let tools = self.tool_definitions_from_specs(&tool_specs);
         let durable_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
-        let prompt_capability_specs = if is_non_tool_ext_query {
-            &[][..]
-        } else {
-            tool_specs.as_slice()
-        };
-        let system_prompt = match self.try_build_system_prompt_for_role_and_agent(
+        let (tool_specs, tools, system_prompt) = match self.prepare_prompt_surface_for_dispatch(
             &role_name,
             durable_agent_id.as_ref(),
             durable_agent_id.as_ref(),
-            prompt_capability_specs,
-            Some(&model),
+            &model,
+            is_non_tool_ext_query,
             contains_payload_envelope_provenance_projection,
         ) {
-            Ok(prompt) => prompt,
-            Err(error) => {
+            Ok(surface) => surface,
+            Err(PromptSurfaceError::DuplicateToolName(name)) => {
+                let message = format!(
+                    "cannot dispatch prompt for role `{role_name}`: effective tool surface contains duplicate model-visible name `{name}`"
+                );
+                self.emit_harness_failure(&message);
+                self.terminalize_owned_dispatch_error(cid, message);
+                return None;
+            }
+            Err(PromptSurfaceError::Render(error)) => {
                 let message =
                     format!("failed to render system prompt for role `{role_name}`: {error}");
                 self.emit_harness_failure(&message);
@@ -1185,6 +1214,52 @@ impl Harness {
         )
     }
 
+    /// Resolve and render one provider-visible prompt surface from a single
+    /// sorted provider snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_prompt_surface_for_dispatch(
+        &self,
+        role_name: &str,
+        agent_id: Option<&tau_proto::AgentId>,
+        context_agent_id: Option<&tau_proto::AgentId>,
+        model: &ModelId,
+        hide_tool_capabilities: bool,
+        contains_payload_envelope_provenance_projection: bool,
+    ) -> Result<(Vec<tau_proto::ToolSpec>, Vec<ToolDefinition>, String), PromptSurfaceError> {
+        let providers = self.sorted_prompt_tool_providers();
+        let specs = self.gather_effective_tool_specs_for_role_model_from_providers(
+            role_name,
+            Some(model),
+            &providers,
+        );
+        if let Some(name) = duplicate_model_visible_tool_name(&specs) {
+            return Err(PromptSurfaceError::DuplicateToolName(name.to_string()));
+        }
+        let capability_specs = if hide_tool_capabilities {
+            &[][..]
+        } else {
+            specs.as_slice()
+        };
+        let effective_tool_names = capability_specs
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect::<HashSet<_>>();
+        let prompt = self
+            .try_build_system_prompt_for_role_and_agent_with_snapshot(
+                role_name,
+                agent_id,
+                context_agent_id,
+                capability_specs,
+                Some(model),
+                contains_payload_envelope_provenance_projection,
+                &providers,
+                &effective_tool_names,
+            )
+            .map_err(PromptSurfaceError::Render)?;
+        let tools = self.tool_definitions_from_specs(&specs);
+        Ok((specs, tools, prompt))
+    }
+
     pub(super) fn try_build_system_prompt_for_role_and_agent(
         &self,
         role_name: &str,
@@ -1194,6 +1269,37 @@ impl Harness {
         model: Option<&ModelId>,
         contains_payload_envelope_provenance_projection: bool,
     ) -> Result<String, handlebars::RenderError> {
+        let providers = self.sorted_prompt_tool_providers();
+        let effective_tool_names = tool_specs
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect::<HashSet<_>>();
+        self.try_build_system_prompt_for_role_and_agent_with_snapshot(
+            role_name,
+            agent_id,
+            context_agent_id,
+            tool_specs,
+            model,
+            contains_payload_envelope_provenance_projection,
+            &providers,
+            &effective_tool_names,
+        )
+    }
+
+    /// Render with the dispatch-owned sorted provider and effective-name
+    /// snapshots rather than re-reading and re-sorting the live registry.
+    #[allow(clippy::too_many_arguments)]
+    fn try_build_system_prompt_for_role_and_agent_with_snapshot(
+        &self,
+        role_name: &str,
+        agent_id: Option<&tau_proto::AgentId>,
+        context_agent_id: Option<&tau_proto::AgentId>,
+        tool_specs: &[tau_proto::ToolSpec],
+        model: Option<&ModelId>,
+        contains_payload_envelope_provenance_projection: bool,
+        providers: &[&tau_core::ToolProvider],
+        effective_tool_names: &HashSet<ToolName>,
+    ) -> Result<String, handlebars::RenderError> {
         if let Some(name) = duplicate_model_visible_tool_name(tool_specs) {
             return Err(handlebars::RenderError::from(
                 handlebars::RenderErrorReason::Other(format!(
@@ -1201,22 +1307,22 @@ impl Harness {
                 )),
             ));
         }
-        let (prompt_fragments, tool_prompt_fragments) =
-            self.gather_prompt_fragment_groups_for_role_specs(role_name, tool_specs);
-        let visible_workdir_contributors = self
-            .tool_routing
-            .registry
-            .all_tool_providers()
-            .into_iter()
+        let (prompt_fragments, tool_prompt_fragments) = self
+            .gather_prompt_fragment_groups_for_role_snapshot(
+                role_name,
+                providers,
+                effective_tool_names,
+            );
+        let visible_workdir_contributors = providers
+            .iter()
+            .copied()
             .filter(|provider| {
                 provider
                     .tool
                     .tags
                     .iter()
                     .any(|tag| tag.as_str() == "shell:workdir")
-                    && tool_specs
-                        .iter()
-                        .any(|spec| spec.name == provider.tool.name)
+                    && effective_tool_names.contains(&provider.tool.name)
             })
             .map(|provider| provider.connection_id.clone())
             .collect::<HashSet<_>>();
@@ -1243,7 +1349,11 @@ impl Harness {
             contains_payload_envelope_provenance_projection
                 .then_some(PAYLOAD_ENVELOPE_PROVENANCE_NOTICE),
         );
-        try_build_system_prompt_with_tool_template_context(
+        try_build_system_prompt_with_engine(
+            &self
+                .prompt_coordination
+                .context_discovery
+                .prompt_template_engine,
             system_template,
             skills,
             &prompt_fragments,
@@ -1318,13 +1428,19 @@ impl Harness {
         )))
     }
 
-    pub(super) fn gather_prompt_fragment_groups_for_role_specs(
+    /// Gather ordered fragments from an already-sorted provider snapshot.
+    fn gather_prompt_fragment_groups_for_role_snapshot(
         &self,
         role_name: &str,
-        tool_specs: &[tau_proto::ToolSpec],
+        providers: &[&tau_core::ToolProvider],
+        effective_tool_names: &HashSet<ToolName>,
     ) -> (Vec<PromptFragment>, Vec<ToolPromptFragment>) {
-        let (fragments, tool_fragments) =
-            self.gather_sourced_prompt_fragment_groups_for_specs(role_name, Some(tool_specs));
+        let (fragments, tool_fragments) = self
+            .gather_sourced_prompt_fragment_groups_for_provider_snapshot(
+                role_name,
+                providers,
+                Some(effective_tool_names),
+            );
         (
             sorted_prompt_fragments(fragments),
             sorted_tool_prompt_fragments(tool_fragments),
@@ -1339,19 +1455,41 @@ impl Harness {
         self.gather_sourced_prompt_fragment_groups_for_specs(role_name, None)
     }
 
+    #[cfg(test)]
     pub(super) fn gather_sourced_prompt_fragment_groups_for_specs(
         &self,
         role_name: &str,
         effective_specs: Option<&[tau_proto::ToolSpec]>,
     ) -> (Vec<SourcedPromptFragment>, Vec<SourcedToolPromptFragment>) {
-        let providers = self.tool_routing.registry.all_tool_providers();
+        let providers = self.sorted_prompt_tool_providers();
+        let effective_tool_names = effective_specs.map(|specs| {
+            specs
+                .iter()
+                .map(|spec| spec.name.clone())
+                .collect::<HashSet<_>>()
+        });
+        self.gather_sourced_prompt_fragment_groups_for_provider_snapshot(
+            role_name,
+            &providers,
+            effective_tool_names.as_ref(),
+        )
+    }
+
+    /// Gather sourced fragments without taking another provider-registry
+    /// snapshot.
+    fn gather_sourced_prompt_fragment_groups_for_provider_snapshot(
+        &self,
+        role_name: &str,
+        providers: &[&tau_core::ToolProvider],
+        effective_tool_names: Option<&HashSet<ToolName>>,
+    ) -> (Vec<SourcedPromptFragment>, Vec<SourcedToolPromptFragment>) {
         let provider_enabled = |provider: &tau_core::ToolProvider| {
-            effective_specs.map_or_else(
+            effective_tool_names.map_or_else(
                 || self.is_tool_provider_enabled_for_role(provider, role_name),
-                |specs| specs.iter().any(|spec| spec.name == provider.tool.name),
+                |names| names.contains(&provider.tool.name),
             )
         };
-        let shell_workdir_visible = effective_specs.map_or_else(
+        let shell_workdir_visible = effective_tool_names.map_or_else(
             || {
                 providers.iter().any(|provider| {
                     provider_enabled(provider)
@@ -1362,10 +1500,15 @@ impl Harness {
                             .any(|tag| tag.as_str() == "shell:workdir")
                 })
             },
-            |specs| {
-                specs
-                    .iter()
-                    .any(|spec| spec.tags.iter().any(|tag| tag.as_str() == "shell:workdir"))
+            |_| {
+                providers.iter().copied().any(|provider| {
+                    provider_enabled(provider)
+                        && provider
+                            .tool
+                            .tags
+                            .iter()
+                            .any(|tag| tag.as_str() == "shell:workdir")
+                })
             },
         );
         let mut fragments: Vec<_> = self
@@ -1430,7 +1573,7 @@ impl Harness {
             .collect::<HashSet<_>>();
         let mut seen_group_fragments = HashSet::new();
         let mut tool_fragments = Vec::new();
-        for provider in providers {
+        for provider in providers.iter().copied() {
             let tool_prompt_repeated_by_group = provider
                 .tool_group
                 .as_ref()
@@ -1509,13 +1652,22 @@ impl Harness {
         role_name: &str,
         model: Option<&ModelId>,
     ) -> Vec<tau_proto::ToolSpec> {
+        let providers = self.sorted_prompt_tool_providers();
+        self.gather_effective_tool_specs_for_role_model_from_providers(role_name, model, &providers)
+    }
+
+    /// Resolve effective tool specs from one already-sorted provider snapshot.
+    fn gather_effective_tool_specs_for_role_model_from_providers(
+        &self,
+        role_name: &str,
+        model: Option<&ModelId>,
+        providers: &[&tau_core::ToolProvider],
+    ) -> Vec<tau_proto::ToolSpec> {
         let model_info = model.and_then(|model| self.provider_runtime.model_info.get(model));
         let supported_tool_types = model_info.map(|info| info.supported_tool_types.as_slice());
-        let mut specs: Vec<_> = self
-            .tool_routing
-            .registry
-            .all_tool_providers()
-            .into_iter()
+        let mut specs: Vec<_> = providers
+            .iter()
+            .copied()
             .filter(|provider| {
                 let provider_supports_type = supported_tool_types
                     .is_none_or(|supported| supported.contains(&provider.tool.tool_type));

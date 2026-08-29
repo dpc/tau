@@ -3,6 +3,57 @@
 use super::super::lifecycle::{assert_no_message, connect_socket_ui, read_notice};
 use super::*;
 
+/// One provider dispatch sorts the live registry exactly once and reuses that
+/// snapshot for tools, fragments, capabilities, and workdir filtering.
+#[test]
+fn provider_dispatch_reuses_one_sorted_tool_provider_snapshot() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let role = h.config.selected_role.clone();
+    let model = h.config.selected_model.clone().expect("selected model");
+    reset_dispatch_provider_sort_count();
+
+    h.prepare_prompt_surface_for_dispatch(&role, None, None, &model, false, false)
+        .expect("prepare dispatch surface");
+
+    assert_eq!(dispatch_provider_sort_count(), 1);
+    h.shutdown().expect("shutdown");
+}
+
+/// Manual benchmark reports dispatch-surface scaling while deterministic work
+/// counters prove one provider sort per dispatch and parse-cache reuse after
+/// warmup. It intentionally has no wall-clock pass/fail threshold.
+#[test]
+#[ignore = "manual prompt-surface dispatch scaling benchmark"]
+fn benchmark_prompt_surface_dispatch_scaling() {
+    let mut warm_source_parse_count = None;
+    for dispatches in [1_usize, 10, 100] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = echo_harness(td.path().join("state")).expect("start");
+        let role = h.config.selected_role.clone();
+        let model = h.config.selected_model.clone().expect("selected model");
+        reset_dispatch_provider_sort_count();
+        reset_prompt_template_test_counters();
+        let started = path_std_time::Instant::now();
+        for _ in 0..dispatches {
+            h.prepare_prompt_surface_for_dispatch(&role, None, None, &model, false, false)
+                .expect("prepare dispatch surface");
+        }
+        eprintln!(
+            "dispatches={dispatches} elapsed={:?} provider_sorts={} template_parses={} template_renders={}",
+            started.elapsed(),
+            dispatch_provider_sort_count(),
+            prompt_template_parse_count(),
+            prompt_template_render_count(),
+        );
+        assert_eq!(dispatch_provider_sort_count(), dispatches);
+        let parses = prompt_template_parse_count();
+        assert!(parses > 0);
+        assert_eq!(*warm_source_parse_count.get_or_insert(parses), parses);
+        h.shutdown().expect("shutdown");
+    }
+}
+
 /// Provider-owned prompt fanout must preserve exact/prefix observer equality,
 /// delivery metadata, provider exclusion, and typed-image projection semantics.
 #[test]

@@ -2,8 +2,13 @@
 //! AGENTS.md context message, and the conversation assembly that turns a
 //! [`tau_core::AgentTree`] into item-based prompt context.
 
-use std::{cmp as path_std_cmp, collections as path_std_collections, time as path_std_time};
+use std::collections::hash_map::DefaultHasher as PathStdDefaultHasher;
+use std::{
+    cell as path_std_cell, cmp as path_std_cmp, collections as path_std_collections,
+    hash as path_std_hash, time as path_std_time,
+};
 
+use handlebars::Renderable as _;
 use tau_core::AgentEntry;
 use tau_proto::{ContextItem, PromptFragment, ToolName};
 
@@ -12,6 +17,10 @@ thread_local! {
     static PROMPT_CONTEXT_CONSTRUCTION_COUNT: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     static PROMPT_PREFLIGHT_ENTRY_VISIT_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static PROMPT_TEMPLATE_PARSE_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static PROMPT_TEMPLATE_RENDER_COUNT: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -34,6 +43,25 @@ pub(crate) fn prompt_preflight_entry_visit_count() -> usize {
     PROMPT_PREFLIGHT_ENTRY_VISIT_COUNT.get()
 }
 
+/// Reset deterministic template parse and render work counters.
+#[cfg(test)]
+pub(crate) fn reset_prompt_template_test_counters() {
+    PROMPT_TEMPLATE_PARSE_COUNT.set(0);
+    PROMPT_TEMPLATE_RENDER_COUNT.set(0);
+}
+
+/// Return the number of immutable template sources parsed by the current test.
+#[cfg(test)]
+pub(crate) fn prompt_template_parse_count() -> usize {
+    PROMPT_TEMPLATE_PARSE_COUNT.get()
+}
+
+/// Return the number of dynamic template renders performed by the current test.
+#[cfg(test)]
+pub(crate) fn prompt_template_render_count() -> usize {
+    PROMPT_TEMPLATE_RENDER_COUNT.get()
+}
+
 use crate::discovery as path_crate_discovery;
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 pub(crate) const BUILT_IN_SYSTEM_TEMPLATE_NAME: &str = "built-in";
@@ -50,6 +78,141 @@ const WATCH_RESPONSE_CLOSE: &str = "</response>";
 const WATCH_RESPONSE_CLOSE_VISIBLE: &str = "&lt;/response&gt;";
 const WATCH_PROMPT_CLOSE: &str = "</prompt>";
 const WATCH_PROMPT_CLOSE_VISIBLE: &str = "&lt;/prompt&gt;";
+
+/// Reusable strict Handlebars registry and exact immutable-source parse cache.
+///
+/// The cache stores parsed templates only. Every invocation still renders
+/// against current dynamic data, so agent context, secrets, capabilities, and
+/// other per-dispatch values can never be reused as final output.
+pub(crate) struct PromptTemplateEngine {
+    /// Registry configured once with Tau's escaping policy and helper set.
+    registry: handlebars::Handlebars<'static>,
+    /// Parsed sources in collision-safe generation/content hash buckets.
+    cache: path_std_cell::RefCell<PromptTemplateCache>,
+}
+
+/// Active exact source generation and its bounded parsed-template cache.
+#[derive(Default)]
+struct PromptTemplateCache {
+    /// Monotonic process-local source generation.
+    generation: u64,
+    /// Exact ordered source snapshot owning this generation.
+    sources: Vec<String>,
+    /// Parsed sources in collision-safe generation/content hash buckets.
+    templates: std::collections::HashMap<u64, Vec<CachedPromptTemplate>>,
+}
+
+/// One collision-safe immutable source cache entry.
+struct CachedPromptTemplate {
+    /// Generation that owns this source.
+    generation: u64,
+    /// Exact source bytes used to reject hash collisions.
+    source: String,
+    /// Parsed immutable Handlebars template.
+    template: handlebars::Template,
+}
+
+impl Default for PromptTemplateEngine {
+    fn default() -> Self {
+        Self {
+            registry: prompt_template_renderer(),
+            cache: path_std_cell::RefCell::new(PromptTemplateCache::default()),
+        }
+    }
+}
+
+impl PromptTemplateEngine {
+    /// Return the number of parsed templates retained for the active
+    /// generation.
+    #[cfg(test)]
+    fn cached_template_count(&self) -> usize {
+        self.cache.borrow().templates.values().map(Vec::len).sum()
+    }
+
+    /// Select the exact ordered source snapshot for one render generation.
+    ///
+    /// A changed system, ordinary-fragment, or tool-fragment source advances
+    /// the generation and discards all parsed entries from the old snapshot.
+    fn activate_source_snapshot(
+        &self,
+        system_template: &str,
+        prompt_fragments: &[PromptFragment],
+        tool_prompt_fragments: &[ToolPromptFragment],
+    ) -> u64 {
+        let sources = std::iter::once(system_template)
+            .chain(
+                prompt_fragments
+                    .iter()
+                    .map(|fragment| fragment.template.as_str()),
+            )
+            .chain(
+                tool_prompt_fragments
+                    .iter()
+                    .map(|item| item.fragment.template.as_str()),
+            );
+        let mut cache = self.cache.borrow_mut();
+        let unchanged = cache.sources.len()
+            == 1 + prompt_fragments.len() + tool_prompt_fragments.len()
+            && cache.sources.iter().map(String::as_str).eq(sources.clone());
+        if !unchanged {
+            cache.generation = cache.generation.wrapping_add(1);
+            cache.sources = sources.map(str::to_owned).collect();
+            cache.templates.clear();
+        }
+        cache.generation
+    }
+
+    /// Parse an immutable source at most once per exact generation/content key
+    /// and render it against the supplied current data.
+    fn render(
+        &self,
+        generation: u64,
+        source: &str,
+        data: &serde_json::Value,
+    ) -> Result<String, handlebars::RenderError> {
+        #[cfg(test)]
+        PROMPT_TEMPLATE_RENDER_COUNT.set(PROMPT_TEMPLATE_RENDER_COUNT.get() + 1);
+
+        let mut hasher = PathStdDefaultHasher::new();
+        path_std_hash::Hash::hash(&generation, &mut hasher);
+        path_std_hash::Hash::hash(source, &mut hasher);
+        let key = path_std_hash::Hasher::finish(&hasher);
+        let matches =
+            |entry: &CachedPromptTemplate| entry.generation == generation && entry.source == source;
+        if !self
+            .cache
+            .borrow()
+            .templates
+            .get(&key)
+            .is_some_and(|bucket| bucket.iter().any(matches))
+        {
+            #[cfg(test)]
+            PROMPT_TEMPLATE_PARSE_COUNT.set(PROMPT_TEMPLATE_PARSE_COUNT.get() + 1);
+            let template =
+                handlebars::Template::compile(source).map_err(handlebars::RenderError::from)?;
+            self.cache
+                .borrow_mut()
+                .templates
+                .entry(key)
+                .or_default()
+                .push(CachedPromptTemplate {
+                    generation,
+                    source: source.to_owned(),
+                    template,
+                });
+        }
+        let cache = self.cache.borrow();
+        let template = &cache
+            .templates
+            .get(&key)
+            .and_then(|bucket| bucket.iter().find(|entry| matches(entry)))
+            .expect("parsed prompt template cache entry must exist")
+            .template;
+        let context = handlebars::Context::wraps(data)?;
+        let mut render_context = handlebars::RenderContext::new(None);
+        template.renders(&self.registry, &context, &mut render_context)
+    }
+}
 
 pub(crate) fn built_in_system_prompt_templates() -> std::collections::HashMap<String, String> {
     path_std_collections::HashMap::from([
@@ -294,6 +457,7 @@ pub(crate) fn build_system_prompt_with_tool_template_context(
 }
 
 /// Render a complete system prompt, returning any template error to the caller.
+#[cfg(test)]
 pub(crate) fn try_build_system_prompt_with_tool_template_context(
     system_template: &str,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
@@ -303,22 +467,58 @@ pub(crate) fn try_build_system_prompt_with_tool_template_context(
     template_context: RolePromptTemplateContext<'_>,
     capabilities: PromptCapabilities,
 ) -> Result<String, handlebars::RenderError> {
-    // Tool definitions are delivered out-of-band via the provider's
-    // tool-use channel, so the built-in system template doesn't restate them.
-    let fragments: Vec<_> = prompt_fragments.to_vec();
-    let tool_fragments: Vec<_> = tool_prompt_fragments.to_vec();
+    let engine = PromptTemplateEngine::default();
+    // This test-only convenience API accepts arbitrary fragment order. The
+    // production harness passes its already source/name/priority-sorted slices
+    // directly to `try_build_system_prompt_with_engine`.
+    let mut prompt_fragments = prompt_fragments.to_vec();
+    prompt_fragments.sort_by_key(|fragment| fragment.priority);
+    let mut tool_prompt_fragments = tool_prompt_fragments.to_vec();
+    tool_prompt_fragments.sort_by_key(|item| item.fragment.priority);
+    try_build_system_prompt_with_engine(
+        &engine,
+        system_template,
+        skills,
+        &prompt_fragments,
+        &tool_prompt_fragments,
+        agent_context,
+        template_context,
+        capabilities,
+    )
+}
+
+/// Render one system prompt with a reusable registry and immutable-source
+/// cache.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_build_system_prompt_with_engine(
+    engine: &PromptTemplateEngine,
+    system_template: &str,
+    skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
+    prompt_fragments: &[PromptFragment],
+    tool_prompt_fragments: &[ToolPromptFragment],
+    agent_context: serde_json::Value,
+    template_context: RolePromptTemplateContext<'_>,
+    capabilities: PromptCapabilities,
+) -> Result<String, handlebars::RenderError> {
+    let template_generation =
+        engine.activate_source_snapshot(system_template, prompt_fragments, tool_prompt_fragments);
     render_system_prompt_template(
+        engine,
+        template_generation,
         system_template,
         template_context,
         skills,
-        &fragments,
-        &tool_fragments,
+        prompt_fragments,
+        tool_prompt_fragments,
         agent_context,
         capabilities,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_system_prompt_template(
+    engine: &PromptTemplateEngine,
+    template_generation: u64,
     system_template: &str,
     context: RolePromptTemplateContext<'_>,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
@@ -328,6 +528,8 @@ fn render_system_prompt_template(
     capabilities: PromptCapabilities,
 ) -> Result<String, handlebars::RenderError> {
     let data = system_prompt_template_data(
+        engine,
+        template_generation,
         context,
         skills,
         prompt_fragments,
@@ -335,8 +537,7 @@ fn render_system_prompt_template(
         agent_context,
         capabilities,
     )?;
-    let handlebars = prompt_template_renderer();
-    handlebars.render_template(system_template, &data)
+    engine.render(template_generation, system_template, &data)
 }
 
 fn prompt_template_data(
@@ -368,7 +569,10 @@ fn prompt_template_data(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn system_prompt_template_data(
+    engine: &PromptTemplateEngine,
+    template_generation: u64,
     context: RolePromptTemplateContext<'_>,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     prompt_fragments: &[PromptFragment],
@@ -378,9 +582,18 @@ fn system_prompt_template_data(
 ) -> Result<serde_json::Value, handlebars::RenderError> {
     let payload_envelope_provenance_notice = context.payload_envelope_provenance_notice;
     let mut data = prompt_template_data(context, skills, agent_context, capabilities);
-    let rendered_fragments = rendered_prompt_fragment_template_parts(prompt_fragments, &data)?;
-    let rendered_tool_fragments =
-        rendered_tool_prompt_fragment_template_parts(tool_prompt_fragments, &data)?;
+    let rendered_fragments = rendered_prompt_fragment_template_parts(
+        engine,
+        template_generation,
+        prompt_fragments,
+        &data,
+    )?;
+    let rendered_tool_fragments = rendered_tool_prompt_fragment_template_parts(
+        engine,
+        template_generation,
+        tool_prompt_fragments,
+        &data,
+    )?;
     let object = data
         .as_object_mut()
         .expect("system prompt template data is an object");
@@ -395,79 +608,69 @@ fn system_prompt_template_data(
 }
 
 fn rendered_prompt_fragment_template_parts(
+    engine: &PromptTemplateEngine,
+    template_generation: u64,
     fragments: &[PromptFragment],
     data: &serde_json::Value,
 ) -> Result<serde_json::Value, handlebars::RenderError> {
-    let handlebars = prompt_template_renderer();
     Ok(serde_json::Value::Array(
-        {
-            let mut ordered = fragments.iter().collect::<Vec<_>>();
-            // Preserve the caller's deterministic source/name tie-break within
-            // a priority bucket. The harness gathers tool fragments in
-            // priority/source/name order before rendering.
-            ordered.sort_by_key(|a| a.priority);
-            ordered
-        }
-        .into_iter()
-        .filter_map(|fragment| {
-            if fragment.template.is_empty() {
-                return None;
-            }
-            let content = match handlebars.render_template(fragment.template.as_str(), data) {
-                Ok(content) => content,
-                Err(error) => return Some(Err(error)),
-            };
-            if content.trim().is_empty() {
-                return None;
-            }
-            Some(Ok(serde_json::json!({
-                "name": fragment.name,
-                "priority": fragment.priority.get(),
-                "content": content,
-                "early": fragment.priority.get() < 100,
-            })))
-        })
-        .collect::<Result<Vec<_>, _>>()?,
+        fragments
+            .iter()
+            .filter_map(|fragment| {
+                if fragment.template.is_empty() {
+                    return None;
+                }
+                let content =
+                    match engine.render(template_generation, fragment.template.as_str(), data) {
+                        Ok(content) => content,
+                        Err(error) => return Some(Err(error)),
+                    };
+                if content.trim().is_empty() {
+                    return None;
+                }
+                Some(Ok(serde_json::json!({
+                    "name": fragment.name,
+                    "priority": fragment.priority.get(),
+                    "content": content,
+                    "early": fragment.priority.get() < 100,
+                })))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
     ))
 }
 
 fn rendered_tool_prompt_fragment_template_parts(
+    engine: &PromptTemplateEngine,
+    template_generation: u64,
     fragments: &[ToolPromptFragment],
     data: &serde_json::Value,
 ) -> Result<serde_json::Value, handlebars::RenderError> {
-    let handlebars = prompt_template_renderer();
     Ok(serde_json::Value::Array(
-        {
-            let mut ordered = fragments.iter().collect::<Vec<_>>();
-            // Preserve the caller's deterministic source/name tie-break within
-            // a priority bucket. The harness gathers tool fragments in
-            // priority/source/name order before rendering.
-            ordered.sort_by_key(|item| item.fragment.priority);
-            ordered
-        }
-        .into_iter()
-        .filter_map(|item| {
-            let fragment = &item.fragment;
-            if fragment.template.is_empty() {
-                return None;
-            }
-            let rendered = match handlebars.render_template(fragment.template.as_str(), data) {
-                Ok(rendered) => rendered,
-                Err(error) => return Some(Err(error)),
-            };
-            let rendered = rendered.trim();
-            if rendered.is_empty() {
-                return None;
-            }
-            Some(Ok(serde_json::json!({
-                "name": fragment.name,
-                "priority": fragment.priority.get(),
-                "tool_name": item.tool_name,
-                "content": rendered,
-                "early": fragment.priority.get() < 100,
-            })))
-        })
-        .collect::<Result<Vec<_>, _>>()?,
+        fragments
+            .iter()
+            .filter_map(|item| {
+                let fragment = &item.fragment;
+                if fragment.template.is_empty() {
+                    return None;
+                }
+                let rendered =
+                    match engine.render(template_generation, fragment.template.as_str(), data) {
+                        Ok(rendered) => rendered,
+                        Err(error) => return Some(Err(error)),
+                    };
+                let rendered = rendered.trim();
+                if rendered.is_empty() {
+                    return None;
+                }
+                Some(Ok(serde_json::json!({
+                    "name": fragment.name,
+                    "priority": fragment.priority.get(),
+                    "tool_name": item.tool_name,
+                    "content": rendered,
+                    "early": fragment.priority.get() < 100,
+                })))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
     ))
 }
 fn prompt_template_renderer() -> handlebars::Handlebars<'static> {

@@ -14,6 +14,9 @@ use tracing_subscriber::prelude::*;
 use super::*;
 use crate::agent::{ActivationDispatchState, Agent, AgentTurnState, PendingPrompt};
 use crate::harness::interception::{AgentPublishCompletion, DeferredActivationObligation};
+use crate::harness::prompt_materialization::{
+    dispatch_provider_sort_count, reset_dispatch_provider_sort_count,
+};
 use crate::harness::{
     BackgroundCompletionPromptMode, GatedFinalDisposition, PendingRenderedPreview,
     PendingRenderedPrompt, PendingTool, RestoredCheckpointAuthority, STATUS_REMINDER,
@@ -23,6 +26,9 @@ use crate::harness::{
     is_restore_notice_prompt_text, restore_notice_prompt_for_elapsed,
     self_compaction_terminal_pending_prompt, self_compaction_terminal_prompt,
     unavailable_tool_error_message,
+};
+use crate::prompt::{
+    prompt_template_parse_count, prompt_template_render_count, reset_prompt_template_test_counters,
 };
 use crate::{
     AgentId, agent as path_crate_agent, discovery as path_crate_discovery,
