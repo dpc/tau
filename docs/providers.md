@@ -837,7 +837,11 @@ object, or using keyless mode for a provider kind that requires authentication
 remains invalid; losing a referenced Secret therefore never turns an
 authenticated profile into unauthenticated network requests. The runtime loads
 referenced version-zero credentials before model publication and at prompt
-boundaries. Credential rotation therefore takes effect without restart;
+boundaries. Prompt and due-retry reads run asynchronously with a 30-second
+Secret-response deadline. Ready prompts retain accepted order while reads or
+OAuth refreshes finish out of order; cancellation removes only the affected
+prompt, and late results have no runtime authority. Credential rotation
+therefore takes effect without restart;
 settings changes require a full harness restart. Provider-process restart does
 not reload either directory, and Tau creates no imported copy or watcher.
 Missing or malformed referenced credentials exclude that provider. If prompt-time
@@ -1024,8 +1028,10 @@ It publishes hardcoded ChatGPT/Codex metadata and configured Chat Completions/Op
 It owns execution for those namespaces and preserves the existing provider execution event semantics for streaming, tool calls, usage, and retries.
 
 ChatGPT profiles fetch the bounded full account quota snapshot from `/wham/usage`
-and merge sparse in-band WebSocket `codex.rate_limits` observations. Quota telemetry is best-effort
-and never delays inference or consumes prompt retry budget. The compact status
+and merge sparse in-band WebSocket `codex.rate_limits` observations. Quota
+telemetry is best-effort, starts after provider `Ready` in incremental
+background rounds, and never delays inference or consumes prompt retry budget.
+The compact status
 chip is shown for a selected model when its provider publishes quota current
 state. Tau uses neutral `Q?` when weekly state is absent, unbound, stale, expired,
 or timing-untrusted. It never guesses a colored claim from a default or sole

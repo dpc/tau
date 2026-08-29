@@ -152,6 +152,19 @@ scheduler thread and do not retain worker permits; their ownership and cooldown
 contract is specified by
 [SPEC-tau-ext-provider-builtin-retry-scheduler](SPEC-tau-ext-provider-builtin-retry-scheduler.md).
 
+Initial prompts and due retries enter a main-loop-owned credential admission
+queue. The loop correlates bounded Secret reads and compare-and-swap results,
+coalesces OAuth refresh only for the same provider, startup Responses mode, and
+credential-content generation, and releases ready work in accepted-prompt
+order. A manually released retry enters the same fresh credential boundary
+before its existing one-attempt cooldown bypass takes effect. Each Secret
+operation has a finite response deadline; deadline, cancellation, and shutdown
+remove its correlation authority, so a late result cannot dispatch work or
+change runtime state. Credential I/O and OAuth network work therefore do not stop
+cancellation, shutdown, worker reconciliation, or unrelated scheduler work.
+Best-effort initial quota work advances after `Ready` in incremental reactive
+rounds and never gates inference.
+
 Prompt cancellation is cooperative. Queued work can be removed immediately,
 retry sleeps can be aborted, and backends may register prompt-specific transport
 wakers. Input EOF stops new work while allowing active workers to flush; explicit

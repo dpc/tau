@@ -144,6 +144,12 @@ startup loads and validates referenced typed records before publishing models;
 missing or malformed referenced credentials exclude the profile. Runtime
 reloads credentials at prompt boundaries and refreshes ChatGPT OAuth records
 with compare-and-swap, so a losing refresher never retries a rotated token.
+Initial and due-retry Secret reads run asynchronously with a 30-second response
+deadline. Accepted prompts remain FIFO while credential work finishes out of
+order; cancellation removes one waiter, and late results cannot dispatch work.
+Only the same provider, startup Responses mode, and credential-content
+generation share an OAuth refresh. Best-effort quota starts after `Ready` and
+yields to inference.
 
 Initial Configure validates the complete bounded provider settings snapshot
 before retaining parsed profiles or publishing models. An invalid filename or

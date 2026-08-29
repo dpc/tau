@@ -2712,6 +2712,61 @@ fn manual_loop_extension_data_request_reports_harness_error() {
     runtime.finish().expect("finish");
 }
 
+/// Ensures non-blocking extension-data admission leaves correlation and
+/// unrelated input processing under the caller-owned manual loop.
+#[test]
+fn manual_loop_extension_data_start_request_returns_before_result() {
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+
+    let request_id = runtime
+        .extension_data_client()
+        .start_request(
+            tau_proto::ExtensionDataScope::Secret,
+            tau_proto::ExtensionDataRequestOp::ReadFile {
+                path: tau_proto::ExtensionDataPath::new("credential"),
+            },
+        )
+        .expect("start request");
+    let request = latest_extension_data_request(&written);
+    assert_eq!(request.request_id, request_id);
+
+    let mut input_writer = HarnessOutputWriter::new(writer_stream);
+    input_writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            UnixMicros::new(31),
+            notice("while-request-pending"),
+        ))
+        .expect("write unrelated delivery");
+    input_writer
+        .write_message(&extension_data_result(
+            request_id.clone(),
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::ReadFile {
+                    contents: b"credential".to_vec(),
+                },
+            },
+        ))
+        .expect("write result");
+    input_writer.flush().expect("flush input");
+
+    assert!(matches!(
+        runtime.recv().expect("unrelated delivery"),
+        ManualRuntimeInput::Message(HarnessOutputMessage::Deliver(_))
+    ));
+    assert!(matches!(
+        runtime.recv().expect("correlated result"),
+        ManualRuntimeInput::Message(HarnessOutputMessage::ExtensionDataResult(result))
+            if result.request_id == request_id
+    ));
+    runtime.finish().expect("finish");
+}
+
 /// Ensures extension-data RPC preserves an early Disconnect for the caller's
 /// normal manual-loop shutdown path.
 #[test]

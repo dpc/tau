@@ -1102,6 +1102,138 @@ fn assert_production_credential_read(
     ));
 }
 
+/// Proves the production prompt path accepts out-of-order Secret replies
+/// asynchronously but emits submitted ownership in original prompt order.
+#[test]
+fn production_prompt_secret_replies_preserve_admission_fifo() {
+    use std::collections::BTreeMap;
+    use std::os::unix::net::UnixStream;
+
+    let provider_name = ProviderName::new("deepseek");
+    let model = tau_proto::ModelId::new(
+        provider_name.clone(),
+        tau_proto::ModelName::new("deepseek-chat"),
+    );
+    let credential_path = "providers/0123456789abcdef0123456789abcdef/api-key.json";
+    let (extension_socket, harness_socket) = UnixStream::pair().expect("provider socket pair");
+    let extension_reader = extension_socket.try_clone().expect("clone provider reader");
+    let provider = std::thread::spawn(move || {
+        run(extension_reader, extension_socket).map_err(|error| error.to_string())
+    });
+    let harness_reader = harness_socket.try_clone().expect("clone harness reader");
+    harness_reader
+        .set_read_timeout(Some(path_std_time::Duration::from_secs(2)))
+        .expect("set harness timeout");
+    let mut reader = tau_proto::HarnessInputReader::new(harness_reader);
+    let mut writer = tau_proto::HarnessOutputWriter::new(harness_socket);
+
+    assert!(matches!(
+        reader.read_message().expect("provider Hello"),
+        Some(HarnessInputMessage::Hello(_))
+    ));
+    writer
+        .write_message(&tau_proto::HarnessOutputMessage::Configure(
+            tau_proto::Configure {
+                tool_prefix: None,
+                config: tau_proto::CborValue::Map(Vec::new()),
+                instance_name: tau_proto::ExtensionName::parse("provider-builtin")
+                    .expect("extension name"),
+                state_dir: None,
+                secrets: BTreeMap::new(),
+                settings_files: BTreeMap::from([(
+                    "deepseek.json".to_owned(),
+                    configured_chat_completions_settings("deepseek", serde_json::json!({})),
+                )]),
+            },
+        ))
+        .expect("write Configure");
+    writer.flush().expect("flush Configure");
+
+    loop {
+        match reader
+            .read_message()
+            .expect("read startup")
+            .expect("provider connected")
+        {
+            HarnessInputMessage::ExtensionDataRequest(request) => {
+                assert_production_credential_read(&request, credential_path);
+                writer
+                    .write_message(&tau_proto::HarnessOutputMessage::ExtensionDataResult(
+                        Box::new(tau_proto::ExtensionDataResult {
+                            request_id: request.request_id,
+                            result: ProductionCredentialReply::Missing.into_payload(),
+                        }),
+                    ))
+                    .expect("write missing startup credential");
+                writer.flush().expect("flush startup credential");
+            }
+            HarnessInputMessage::Ready(_) => break,
+            _ => {}
+        }
+    }
+
+    let mut first = super::openai_tests::prompt();
+    first.agent_prompt_id = "fifo-1".parse().expect("prompt id");
+    first.model = model.clone();
+    let mut second = first.clone();
+    second.agent_prompt_id = "fifo-2".parse().expect("prompt id");
+    for prompt in [first, second] {
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::deliver_live(
+                tau_proto::UnixMicros::new(1),
+                Event::AgentPromptCreated(prompt),
+            ))
+            .expect("write prompt");
+    }
+    writer.flush().expect("flush prompts");
+
+    let mut requests = Vec::new();
+    while requests.len() < 2 {
+        if let HarnessInputMessage::ExtensionDataRequest(request) = reader
+            .read_message()
+            .expect("read credential request")
+            .expect("provider connected")
+        {
+            assert_production_credential_read(&request, credential_path);
+            requests.push(request.request_id);
+        }
+    }
+    for request_id in requests.into_iter().rev() {
+        writer
+            .write_message(&tau_proto::HarnessOutputMessage::ExtensionDataResult(
+                Box::new(tau_proto::ExtensionDataResult {
+                    request_id,
+                    result: ProductionCredentialReply::Missing.into_payload(),
+                }),
+            ))
+            .expect("write out-of-order credential result");
+        writer.flush().expect("flush credential result");
+    }
+
+    let mut submitted = Vec::new();
+    while submitted.len() < 2 {
+        if let HarnessInputMessage::Emit(emit) = reader
+            .read_message()
+            .expect("read submitted report")
+            .expect("provider connected")
+            && let Event::ProviderPromptSubmittedReported(report) = emit.event.as_ref()
+        {
+            submitted.push(report.agent_prompt_id.to_string());
+        }
+    }
+    assert_eq!(submitted, ["fifo-1", "fifo-2"]);
+
+    drop(writer);
+    drop(reader);
+    let result = provider.join().expect("join provider");
+    assert!(
+        result
+            .as_ref()
+            .map_or_else(|error| error.contains("Broken pipe"), |_| true),
+        "provider exits after harness close: {result:?}"
+    );
+}
+
 /// Ordered production transport observations relevant to credential
 /// declarations.
 #[derive(Debug)]
@@ -3064,6 +3196,319 @@ fn minimal_prompt() -> tau_proto::AgentPromptCreated {
         compaction: None,
         operation: tau_proto::PromptOperation::Inference,
     }
+}
+
+/// Returns a valid ChatGPT OAuth value for prompt-admission state tests.
+fn prompt_async_test_auth() -> OpenAiAuth {
+    OpenAiAuth {
+        access_token: oauth_test_jwt("account-a"),
+        refresh_token: "refresh".to_owned(),
+        expires_at_ms: now_ms().saturating_add(3_600_000),
+        account_id: Some("account-a".to_owned()),
+    }
+}
+
+/// Ensures admission completion never re-enters synchronous OAuth refresh:
+/// a still-valid token that is already inside the proactive refresh window
+/// remains usable after the asynchronous refresh state machine fails.
+#[test]
+fn admitted_backend_uses_still_valid_refresh_due_oauth_without_io() {
+    let auth = OpenAiAuth {
+        access_token: oauth_test_jwt("account-a"),
+        refresh_token: "refresh".to_owned(),
+        expires_at_ms: now_ms().saturating_add(60_000),
+        account_id: Some("account-a".to_owned()),
+    };
+    assert!(oauth_token_should_refresh(
+        &auth.access_token,
+        auth.expires_at_ms
+    ));
+    let mut profiles = profiles_with_chatgpt_auth(auth);
+    let model = ModelId::new(
+        ProviderName::new("chatgpt"),
+        ModelName::new("gpt-5.3-codex"),
+    );
+    let backend = resolve_prompt_backend_without_refresh(
+        &model,
+        &mut profiles,
+        &mut OAuthRefreshRejectionCache::default(),
+    );
+    assert!(matches!(backend, Some(PromptBackend::Responses(_))));
+}
+
+/// Credential deadlines share one deterministic min-heap: cancellation
+/// invalidates a late timeout, equal deadlines retain arm order, and clearing
+/// the session prevents any old request from firing.
+#[test]
+fn prompt_credential_deadline_queue_orders_and_invalidates_without_sleeping() {
+    let origin = Instant::now();
+    let mut queue = PromptCredentialDeadlineQueue::default();
+    queue.apply(PromptCredentialDeadlineCommand::Schedule {
+        request_id: "late".to_owned(),
+        due: origin + Duration::from_secs(2),
+    });
+    queue.apply(PromptCredentialDeadlineCommand::Schedule {
+        request_id: "first".to_owned(),
+        due: origin + Duration::from_secs(1),
+    });
+    queue.apply(PromptCredentialDeadlineCommand::Schedule {
+        request_id: "second".to_owned(),
+        due: origin + Duration::from_secs(1),
+    });
+    queue.apply(PromptCredentialDeadlineCommand::Cancel("late".to_owned()));
+
+    assert!(queue.pop_due(origin).is_empty());
+    assert_eq!(
+        queue.pop_due(origin + Duration::from_secs(1)),
+        ["first", "second"]
+    );
+    queue.apply(PromptCredentialDeadlineCommand::Schedule {
+        request_id: "shutdown".to_owned(),
+        due: origin + Duration::from_secs(3),
+    });
+    queue.apply(PromptCredentialDeadlineCommand::CancelAll);
+    assert_eq!(queue.next_due(), None);
+    assert!(queue.pop_due(origin + Duration::from_secs(10)).is_empty());
+}
+
+/// OAuth refresh coalescing is scoped to the complete provider/path/generation/
+/// mode key: exact keys join, while every authority-bearing component splits
+/// the operation.
+#[test]
+fn prompt_oauth_refresh_key_coalesces_exactly_and_not_across_generations() {
+    let key = PromptOAuthRefreshKey {
+        provider: ProviderName::new("chatgpt"),
+        path: tau_proto::ExtensionDataPath::new("providers/identity/oauth.json"),
+        generation: "generation-a".to_owned(),
+        lite_compatibility: false,
+    };
+    let mut refreshes = HashMap::from([(
+        key.clone(),
+        PromptOAuthRefresh {
+            current: prompt_async_test_auth(),
+            forced: false,
+        },
+    )]);
+    assert!(refreshes.contains_key(&key));
+
+    for distinct in [
+        PromptOAuthRefreshKey {
+            provider: ProviderName::new("other"),
+            ..key.clone()
+        },
+        PromptOAuthRefreshKey {
+            path: tau_proto::ExtensionDataPath::new("providers/other/oauth.json"),
+            ..key.clone()
+        },
+        PromptOAuthRefreshKey {
+            generation: "generation-b".to_owned(),
+            ..key.clone()
+        },
+        PromptOAuthRefreshKey {
+            lite_compatibility: true,
+            ..key.clone()
+        },
+    ] {
+        assert!(!refreshes.contains_key(&distinct));
+        refreshes.insert(
+            distinct,
+            PromptOAuthRefresh {
+                current: prompt_async_test_auth(),
+                forced: false,
+            },
+        );
+    }
+    assert_eq!(refreshes.len(), 5);
+}
+
+/// A second 401 waiter for an exact generation joins the forced flight even
+/// after the first waiter consumed that generation's recovery authority.
+#[test]
+fn prompt_oauth_exhausted_waiter_joins_matching_forced_flight() {
+    let provider = ProviderName::new("chatgpt");
+    let identity = BackendProfileIdentity::from_test_value(19);
+    let mut rejections = OAuthRefreshRejectionCache::default();
+    rejections.record_unauthorized(provider.clone(), identity);
+    assert!(rejections.take_unauthorized(&provider, identity));
+    assert!(rejections.unauthorized_exhausted(&provider, identity));
+
+    let flight = PromptOAuthRefresh {
+        current: prompt_async_test_auth(),
+        forced: true,
+    };
+    let joined_forced = flight.forced || rejections.take_unauthorized(&provider, identity);
+    assert!(
+        joined_forced,
+        "in-flight forced authority applies to every exact-generation waiter"
+    );
+}
+
+/// A CAS loser observes the winner through the same authoritative reload used
+/// after CAS success; unrelated payloads fail closed instead.
+#[test]
+fn prompt_oauth_cas_loser_and_winner_both_require_authoritative_reload() {
+    assert!(prompt_oauth_cas_requires_reload(
+        &tau_proto::ExtensionDataResultPayload::Ok {
+            value: tau_proto::ExtensionDataValue::CompareAndSwapFile,
+        }
+    ));
+    assert!(prompt_oauth_cas_requires_reload(
+        &tau_proto::ExtensionDataResultPayload::Error {
+            kind: tau_proto::ExtensionDataErrorKind::GenerationMismatch,
+            message: "lost CAS".to_owned(),
+        }
+    ));
+    assert!(!prompt_oauth_cas_requires_reload(
+        &tau_proto::ExtensionDataResultPayload::Error {
+            kind: tau_proto::ExtensionDataErrorKind::Io,
+            message: "failed".to_owned(),
+        }
+    ));
+}
+
+/// Canceling one coalesced OAuth waiter must retain the shared operation for
+/// its sibling; only removal of the final exact-key waiter invalidates it.
+#[test]
+fn prompt_oauth_shared_refresh_survives_one_waiter_cancellation() {
+    let key = PromptOAuthRefreshKey {
+        provider: ProviderName::new("chatgpt"),
+        path: tau_proto::ExtensionDataPath::new("providers/identity/oauth.json"),
+        generation: "generation".to_owned(),
+        lite_compatibility: false,
+    };
+    let admission = |agent_prompt_id: &str| {
+        let mut prompt = minimal_prompt();
+        prompt.agent_prompt_id = agent_prompt_id.parse().expect("valid prompt id");
+        PendingPromptAdmission {
+            kind: PendingPromptAdmissionKind::Initial {
+                agent_prompt_id: prompt.agent_prompt_id.clone(),
+                prompt,
+            },
+            profiles: BuiltinProviderProfiles::default(),
+            request_id: None,
+            observations: Some(BTreeMap::new()),
+            oauth_refresh: Some(key.clone()),
+            oauth_forced: false,
+        }
+    };
+    let mut admissions = VecDeque::from([admission("waiter-a"), admission("waiter-b")]);
+
+    admissions.pop_front();
+    assert!(prompt_oauth_has_waiter(&admissions, &key));
+    admissions.pop_front();
+    assert!(!prompt_oauth_has_waiter(&admissions, &key));
+}
+
+/// Read and CAS deadlines invalidate their exact correlations once. A late
+/// harness reply or duplicate timer notification cannot re-enter either state.
+#[test]
+fn prompt_credential_read_and_cas_timeouts_ignore_late_reentry() {
+    let mut prompt = minimal_prompt();
+    prompt.agent_prompt_id = "timed-read".parse().expect("valid prompt id");
+    let mut admissions = VecDeque::from([PendingPromptAdmission {
+        kind: PendingPromptAdmissionKind::Initial {
+            agent_prompt_id: prompt.agent_prompt_id.clone(),
+            prompt,
+        },
+        profiles: BuiltinProviderProfiles::default(),
+        request_id: Some("read-rpc".to_owned()),
+        observations: None,
+        oauth_refresh: None,
+        oauth_forced: false,
+    }]);
+    let mut oauth_rpcs = HashMap::new();
+
+    assert_eq!(
+        apply_prompt_credential_timeout("read-rpc", &mut oauth_rpcs, &mut admissions),
+        None
+    );
+    assert!(admissions[0].observations.is_some());
+    assert_eq!(admissions[0].request_id, None);
+    assert_eq!(
+        apply_prompt_credential_timeout("read-rpc", &mut oauth_rpcs, &mut admissions),
+        None,
+        "duplicate timeout and late reply correlation stay invalid"
+    );
+
+    let key = PromptOAuthRefreshKey {
+        provider: ProviderName::new("chatgpt"),
+        path: tau_proto::ExtensionDataPath::new("providers/identity/oauth.json"),
+        generation: "generation".to_owned(),
+        lite_compatibility: false,
+    };
+    oauth_rpcs.insert(
+        "cas-rpc".to_owned(),
+        PromptOAuthRpc::CompareAndSwap { key: key.clone() },
+    );
+    assert_eq!(
+        apply_prompt_credential_timeout("cas-rpc", &mut oauth_rpcs, &mut admissions),
+        Some(key)
+    );
+    assert_eq!(
+        apply_prompt_credential_timeout("cas-rpc", &mut oauth_rpcs, &mut admissions),
+        None,
+        "late CAS result cannot resurrect the continuation"
+    );
+}
+
+/// Startup quota selection consumes one provider per reactive turn. This leaves
+/// a prompt-drain boundary between providers instead of letting quota startup
+/// monopolize the loop.
+#[test]
+fn initial_quota_selection_yields_between_providers_for_prompt_input() {
+    let mut profiles = profiles_with_chatgpt_auth(prompt_async_test_auth());
+    let chatgpt = profiles
+        .providers
+        .get(&ProviderName::new("chatgpt"))
+        .expect("ChatGPT profile")
+        .clone();
+    profiles
+        .providers
+        .insert(ProviderName::new("chatgpt-second"), chatgpt);
+    let mut startup = Some(profiles);
+
+    let first = take_next_initial_quota_profile(&mut startup).expect("first quota provider");
+    assert_eq!(first.providers.len(), 1);
+    assert!(
+        startup.is_some(),
+        "another provider remains, but the caller regains the reactive loop"
+    );
+
+    let second = take_next_initial_quota_profile(&mut startup).expect("second quota provider");
+    assert_eq!(second.providers.len(), 1);
+    assert!(startup.is_none());
+}
+
+/// Due and manually released retries each invoke the mutable profile loader at
+/// their own transition, so neither inherits the prior attempt's credential
+/// generation.
+#[test]
+fn due_and_manual_retry_transitions_each_load_fresh_credentials() {
+    let calls = Cell::new(0_u64);
+    let mut loader = |selected: Option<&ProviderName>| {
+        assert_eq!(selected, Some(&ProviderName::new("chatgpt")));
+        let generation = calls.get() + 1;
+        calls.set(generation);
+        profiles_with_chatgpt_auth(OpenAiAuth {
+            access_token: format!("generation-{generation}"),
+            ..prompt_async_test_auth()
+        })
+    };
+    let provider = ProviderName::new("chatgpt");
+    let modes = BTreeMap::from([(provider.clone(), CodexMode::Standard)]);
+
+    let due = load_fresh_retry_profiles(&mut loader, &modes, &provider);
+    let manual = load_fresh_retry_profiles(&mut loader, &modes, &provider);
+    let access_token = |profiles: &BuiltinProviderProfiles| {
+        let Some(BuiltinProviderProfile::Chatgpt(profile)) = profiles.providers.get(&provider)
+        else {
+            panic!("ChatGPT profile")
+        };
+        profile.auth.access_token.clone()
+    };
+    assert_eq!(access_token(&due), "generation-1");
+    assert_eq!(access_token(&manual), "generation-2");
+    assert_eq!(calls.get(), 2);
 }
 
 /// Provider materialization must consume the handler-owned prompt allocation,

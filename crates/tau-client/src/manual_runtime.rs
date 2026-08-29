@@ -198,6 +198,36 @@ impl From<ClientError> for ExtensionDataRpcError {
 static NEXT_EXTENSION_DATA_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 impl ExtensionDataClient {
+    /// Sends one extension-data request without waiting for its correlated
+    /// response.
+    ///
+    /// The caller owns the returned request identifier and must consume the
+    /// matching [`tau_proto::HarnessOutputMessage::ExtensionDataResult`] from
+    /// its normal manual-runtime receive loop. This is the non-blocking
+    /// building block for policy loops that must continue handling
+    /// unrelated input while an extension-data operation is outstanding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request frame cannot be queued and flushed.
+    pub fn start_request(
+        &self,
+        scope: tau_proto::ExtensionDataScope,
+        op: tau_proto::ExtensionDataRequestOp,
+    ) -> Result<String, ClientError> {
+        let request_id = next_extension_data_request_id();
+        self.handle
+            .send(tau_proto::HarnessInputMessage::ExtensionDataRequest(
+                tau_proto::ExtensionDataRequest {
+                    request_id: request_id.clone(),
+                    scope,
+                    expected_session_id: None,
+                    op,
+                },
+            ))?;
+        Ok(request_id)
+    }
+
     /// Sends one extension-data request and waits for its correlated response.
     ///
     /// This call has no timeout and may wait indefinitely if the harness never
@@ -251,23 +281,19 @@ impl ExtensionDataClient {
         op: tau_proto::ExtensionDataRequestOp,
         timeout: Option<Duration>,
     ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataRpcError> {
-        let request_id = format!(
-            "tau-client-extension-data-{}",
-            NEXT_EXTENSION_DATA_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
-        );
-        self.handle
-            .send(tau_proto::HarnessInputMessage::ExtensionDataRequest(
-                tau_proto::ExtensionDataRequest {
-                    request_id: request_id.clone(),
-                    scope,
-                    expected_session_id: None,
-                    op,
-                },
-            ))?;
+        let request_id = self.start_request(scope, op)?;
         self.input
             .borrow_mut()
             .wait_for_extension_data_result(request_id, timeout)
     }
+}
+
+/// Allocates one process-unique extension-data request identifier.
+fn next_extension_data_request_id() -> String {
+    format!(
+        "tau-client-extension-data-{}",
+        NEXT_EXTENSION_DATA_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 impl<State> ManualExtensionRuntime<State> {

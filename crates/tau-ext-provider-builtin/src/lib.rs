@@ -109,6 +109,9 @@ pub const LOG_TARGET: &str = "provider-builtin";
 const EXTENSION_NAME: &str = "tau-ext-provider-builtin";
 const CHATGPT_PROVIDER_NAME: &str = "chatgpt";
 const DEFAULT_RESPONSES_LITE_COMPATIBILITY: bool = false;
+const PROMPT_CREDENTIAL_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounded control mailbox for the single prompt-credential deadline actor.
+const PROMPT_CREDENTIAL_DEADLINE_MAILBOX_CAPACITY: usize = 256;
 
 /// Parsed, immutable provider settings accepted by initial Configure.
 type SettingsSnapshot = Arc<Mutex<BuiltinProviderProfiles>>;
@@ -248,6 +251,7 @@ impl BuiltinProviderProfiles {
         }
     }
 
+    #[cfg(test)]
     fn resolve_initial_quota_backends<R>(
         &mut self,
         mut resolve: impl FnMut(&ModelId, &mut Self) -> Option<R>,
@@ -2762,6 +2766,7 @@ where
         worker_rx,
         worker_waker: None,
         retry_scheduler: None,
+        credential_admission: PromptCredentialAdmissionState::default(),
         retry_clock: executors.retry_clock,
         shared_cooldowns: BTreeMap::new(),
         shared_cooldown_generation: 0,
@@ -2964,6 +2969,16 @@ where
                 match runtime.try_recv() {
                     Ok(ManualRuntimePoll::Message(frame)) => {
                         handled_input = true;
+                        if let tau_proto::HarnessOutputMessage::ExtensionDataResult(result) = frame
+                        {
+                            runtime
+                                .state_mut()
+                                .handle_extension_data_result(*result, &handle)?;
+                            runtime
+                                .state_mut()
+                                .drain_workers_and_start_prompts(&handle)?;
+                            continue;
+                        }
                         match runtime.dispatch_one(frame)? {
                             DispatchOutcome::Continue => {}
                             DispatchOutcome::Disconnect(_) => {
@@ -2978,6 +2993,13 @@ where
                                 return Ok(());
                             }
                         }
+                        // Preserve source causality before observing a later
+                        // queued EOF/shutdown frame. In particular, an
+                        // immediately ready keyless admission owns its
+                        // submitted transition before input closure.
+                        runtime
+                            .state_mut()
+                            .drain_workers_and_start_prompts(&handle)?;
                     }
                     Ok(ManualRuntimePoll::InputClosed) => {
                         handled_input = true;
@@ -2995,10 +3017,33 @@ where
             }
         }
 
+        if !runtime.state().input_closed && runtime.state_mut().advance_initial_quota(&handle)? {
+            handled_input = true;
+        }
+
         if !handled_input {
             runtime.wait_for_wake();
         }
     }
+}
+
+/// Main-loop-owned state for asynchronous prompt credential admission.
+#[derive(Default)]
+struct PromptCredentialAdmissionState {
+    /// Single bounded timer actor shared by every prompt credential RPC.
+    deadlines: Option<PromptCredentialDeadlineScheduler>,
+    /// Prompt admissions retained in source order until credential work
+    /// completes.
+    admissions: VecDeque<PendingPromptAdmission>,
+    /// Exact Secret generations currently undergoing prompt-owned OAuth
+    /// refresh.
+    oauth_refreshes: HashMap<PromptOAuthRefreshKey, PromptOAuthRefresh>,
+    /// Correlated Secret CAS/reload continuations for prompt-owned refreshes.
+    oauth_rpcs: HashMap<String, PromptOAuthRpc>,
+    /// Credential-hydrated startup snapshot retained for initial quota work.
+    startup_quota_profiles: Option<BuiltinProviderProfiles>,
+    /// Whether the post-Ready initial quota pass consumed its startup snapshot.
+    initial_quota_started: bool,
 }
 
 /// Live provider event loop state after the Tau extension handshake completes.
@@ -3022,6 +3067,8 @@ struct ProviderRuntime<F> {
     worker_waker: Option<ManualRuntimeWaker>,
     /// Single timer scheduler shared by every delayed logical prompt.
     retry_scheduler: Option<RetryScheduler>,
+    /// Main-loop-owned prompt credential admission and deadline state.
+    credential_admission: PromptCredentialAdmissionState,
     /// Monotonic clock used by retry policy and scheduler admission.
     retry_clock: Arc<dyn RetryClock>,
     /// Account/profile cooldowns, keyed without credentials or account ids.
@@ -3083,6 +3130,9 @@ where
         if let Some(client) = &self.extension_data_client {
             let observations = hydrate_profile_credentials(client, &mut profiles);
             self.publish_models_if_changed(&profiles, observations, handle)?;
+            if !self.credential_admission.initial_quota_started {
+                self.credential_admission.startup_quota_profiles = Some(profiles.clone());
+            }
         }
         Ok(profiles)
     }
@@ -3199,6 +3249,10 @@ where
             waker.clone(),
             Arc::clone(&self.retry_clock),
         ));
+        self.credential_admission.deadlines = Some(PromptCredentialDeadlineScheduler::start(
+            self.worker_tx.clone(),
+            waker.clone(),
+        ));
         self.worker_waker = Some(waker);
     }
 
@@ -3228,25 +3282,10 @@ where
     }
 
     #[cfg(not(test))]
-    fn initialize_quota(&mut self, handle: &ClientHandle) -> ClientResult<()> {
-        let mut profiles = self.load_all_profiles(handle)?;
-        let observes_oauth_refresh = profiles
-            .providers
-            .values()
-            .any(|profile| matches!(profile, BuiltinProviderProfile::Chatgpt(_)));
-        let backends = profiles.resolve_initial_quota_backends(|model, profiles| {
-            resolve_responses_backend(
-                model,
-                profiles,
-                &mut self.oauth_refresh_rejections,
-                self.codex_runtime.network(),
-                self.extension_data_client.as_ref(),
-            )
-        });
-        self.observe_all_oauth_resolutions(observes_oauth_refresh, handle)?;
-        for (provider, config) in backends {
-            self.ensure_quota_profile(&provider, &config, handle)?;
-        }
+    fn initialize_quota(&mut self, _handle: &ClientHandle) -> ClientResult<()> {
+        // The reactive loop advances this snapshot one provider per round after
+        // draining input, so quota orchestration cannot sit ahead of inference.
+        self.credential_admission.initial_quota_started = true;
         Ok(())
     }
 
@@ -3257,6 +3296,33 @@ where
         // covered through the injected parser/coordinator seams instead of
         // introducing an unrelated startup load into those tests.
         Ok(())
+    }
+
+    /// Starts best-effort initial quota work for at most one provider.
+    ///
+    /// Returns whether more startup profiles remain for a later reactive round.
+    #[cfg(not(test))]
+    fn advance_initial_quota(&mut self, handle: &ClientHandle) -> ClientResult<bool> {
+        let Some(mut selected) =
+            take_next_initial_quota_profile(&mut self.credential_admission.startup_quota_profiles)
+        else {
+            return Ok(false);
+        };
+        if let Some(model) = models_for_profiles(&selected).into_iter().next()
+            && let Some(PromptBackend::Responses(config)) = resolve_prompt_backend_without_refresh(
+                &model.id,
+                &mut selected,
+                &mut self.oauth_refresh_rejections,
+            )
+        {
+            let _ = self.ensure_quota_profile(&model.id.provider, &config, handle)?;
+        }
+        Ok(self.credential_admission.startup_quota_profiles.is_some())
+    }
+
+    #[cfg(test)]
+    fn advance_initial_quota(&mut self, _handle: &ClientHandle) -> ClientResult<bool> {
+        Ok(false)
     }
 
     fn ensure_quota_profile(
@@ -3359,6 +3425,53 @@ where
         Ok(backend)
     }
 
+    /// Resolves a prompt whose OAuth state machine already completed, without
+    /// re-entering blocking Secret or network refresh work.
+    fn resolve_admitted_backend_with_quota(
+        &mut self,
+        model: &ModelId,
+        profiles: &mut BuiltinProviderProfiles,
+        handle: &ClientHandle,
+    ) -> ClientResult<PromptBackend> {
+        let backend = resolve_prompt_backend_without_refresh(
+            model,
+            profiles,
+            &mut self.oauth_refresh_rejections,
+        )
+        .unwrap_or_else(|| PromptBackend::Unavailable {
+            login_required: profiles
+                .missing_login(&model.provider)
+                .then(|| model.provider.clone()),
+        });
+        self.reconcile_provider_profile(&model.provider, backend_profile_identity(&backend));
+        if let PromptBackend::Responses(config) = &backend {
+            let identity = config.inference_identity();
+            let changed = self
+                .compact_profile_identities
+                .insert(model.provider.clone(), identity)
+                .is_some_and(|previous| previous != identity);
+            if changed {
+                let mut models = self.declared_models.as_ref().map_or_else(
+                    || models_for_profiles(profiles),
+                    |previous| replace_provider_models(previous, &model.provider, profiles),
+                );
+                apply_compact_route_downgrades(
+                    &mut models,
+                    &self.compact_profile_identities,
+                    &self.unavailable_compact_identities,
+                );
+                self.emit_model_declaration(models, handle)?;
+            }
+            let _ = self.ensure_quota_profile(&model.provider, config, handle)?;
+        } else {
+            self.clear_prewarm_profile(&model.provider);
+            if let Some(event) = self.quota.clear_profile(&model.provider) {
+                handle.send(quota_report_message(event))?;
+            }
+        }
+        Ok(backend)
+    }
+
     fn schedule_quota_refresh(
         &mut self,
         provider: ProviderName,
@@ -3389,6 +3502,7 @@ where
 
     fn drain_workers_and_start_prompts(&mut self, handle: &ClientHandle) -> ClientResult<()> {
         self.drain_worker_messages(handle)?;
+        self.drain_prompt_admissions(handle)?;
         if !self.input_closed {
             self.park_cooled_queued_prompts(handle)?;
         }
@@ -3407,6 +3521,8 @@ where
             && self.active_prompts == 0
             && self.prewarm_supervisor.is_empty()
             && self.prompt_queue.is_empty()
+            && self.credential_admission.admissions.is_empty()
+            && self.credential_admission.oauth_refreshes.is_empty()
             && self
                 .retry_scheduler
                 .as_ref()
@@ -3417,6 +3533,13 @@ where
         self.input_closed = true;
         self.cancel_all_prewarms();
         self.cancellation.shutdown();
+        // No late Secret reply may resurrect an admission after input shutdown.
+        self.credential_admission.admissions.clear();
+        self.credential_admission.oauth_refreshes.clear();
+        self.credential_admission.oauth_rpcs.clear();
+        if let Some(deadlines) = &self.credential_admission.deadlines {
+            deadlines.cancel_all();
+        }
         if let Some(scheduler) = &self.retry_scheduler {
             scheduler.cancel_all();
         }
@@ -3757,19 +3880,88 @@ where
         ))
     }
 
+    /// Finishes one canceled credential admission and closes any correlated
+    /// manual-retry request that had already left the scheduler.
+    fn finish_canceled_admission(
+        &mut self,
+        admission: &PendingPromptAdmission,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        self.finish_canceled_prompt(
+            admission.kind.agent_prompt_id(),
+            admission.kind.prompt(),
+            handle,
+        )?;
+        if let PendingPromptAdmissionKind::Manual { job, request_id } = &admission.kind {
+            handle.emit_transient(Event::ProviderRetryPromptResultReported(
+                tau_proto::ProviderRetryPromptResult {
+                    request_id: request_id.clone(),
+                    agent_prompt_id: job.agent_prompt_id.clone(),
+                    status: tau_proto::RetryPromptStatus::NotParked,
+                },
+            ))?;
+        }
+        Ok(())
+    }
+
     fn start_or_reject_prompt(
         &mut self,
         agent_prompt_id: tau_proto::AgentPromptId,
         prompt: tau_proto::AgentPromptCreated,
-        handle: &ClientHandle,
+        _handle: &ClientHandle,
     ) -> ClientResult<()> {
         self.prewarm_supervisor.cancel_key(&PrewarmKey {
             provider: prompt.model.provider.clone(),
             agent_id: prompt.agent_id.clone(),
             refresh_id: None,
         });
-        let mut profiles = self.load_selected_profile(&prompt.model.provider, handle)?;
-        let backend = self.resolve_backend_with_quota(&prompt.model, &mut profiles, handle)?;
+        let mut profiles = (self.load_prompt_profiles)(Some(&prompt.model.provider));
+        profiles.apply_startup_responses_modes(&self.startup_responses_modes);
+        if self.extension_data_client.is_none() {
+            return self.start_resolved_prompt(agent_prompt_id, prompt, &mut profiles, _handle);
+        }
+        let request_id = if let (Some(ProviderCredential::Stored(reference)), Some(client)) = (
+            profiles.credentials.get(&prompt.model.provider),
+            self.extension_data_client.as_ref(),
+        ) {
+            client.start_request(
+                tau_proto::ExtensionDataScope::Secret,
+                tau_proto::ExtensionDataRequestOp::ReadFile {
+                    path: reference.path().clone(),
+                },
+            )?
+        } else {
+            String::new()
+        };
+        let ready = request_id.is_empty();
+        if !ready {
+            self.arm_prompt_credential_timeout(request_id.clone());
+        }
+        self.credential_admission
+            .admissions
+            .push_back(PendingPromptAdmission {
+                kind: PendingPromptAdmissionKind::Initial {
+                    agent_prompt_id,
+                    prompt,
+                },
+                profiles,
+                request_id: (!request_id.is_empty()).then_some(request_id),
+                observations: ready.then(BTreeMap::new),
+                oauth_refresh: None,
+                oauth_forced: false,
+            });
+        Ok(())
+    }
+
+    /// Starts one credential-eligible prompt after preserving admission order.
+    fn start_resolved_prompt(
+        &mut self,
+        agent_prompt_id: tau_proto::AgentPromptId,
+        prompt: tau_proto::AgentPromptCreated,
+        profiles: &mut BuiltinProviderProfiles,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        let backend = self.resolve_admitted_backend_with_quota(&prompt.model, profiles, handle)?;
         let profile_identity = backend_profile_identity(&backend);
         let pinned_chatgpt_identity = match &backend {
             PromptBackend::Responses(config) => Some(config.clone()),
@@ -3819,6 +4011,60 @@ where
         Ok(())
     }
 
+    /// Starts the selected credential read for a delayed prompt. Each retry
+    /// owns a fresh read rather than inheriting the original prompt's
+    /// credential generation.
+    fn start_retry_credential_read(
+        &mut self,
+        kind: PendingPromptAdmissionKind,
+    ) -> ClientResult<Option<PendingPromptAdmissionKind>> {
+        let provider = kind.prompt().model.provider.clone();
+        let profiles = load_fresh_retry_profiles(
+            &mut self.load_prompt_profiles,
+            &self.startup_responses_modes,
+            &provider,
+        );
+        let Some(client) = self.extension_data_client.as_ref() else {
+            return Ok(Some(kind));
+        };
+        let request_id = if let Some(ProviderCredential::Stored(reference)) =
+            profiles.credentials.get(&provider)
+        {
+            Some(client.start_request(
+                tau_proto::ExtensionDataScope::Secret,
+                tau_proto::ExtensionDataRequestOp::ReadFile {
+                    path: reference.path().clone(),
+                },
+            )?)
+        } else {
+            None
+        };
+        let ready = request_id.is_none();
+        if let Some(request_id) = &request_id {
+            self.arm_prompt_credential_timeout(request_id.clone());
+        }
+        self.credential_admission
+            .admissions
+            .push_back(PendingPromptAdmission {
+                kind,
+                profiles,
+                request_id,
+                observations: ready.then(BTreeMap::new),
+                oauth_refresh: None,
+                oauth_forced: false,
+            });
+        Ok(None)
+    }
+
+    /// Arms the finite deadline for one already-sent credential RPC.
+    fn arm_prompt_credential_timeout(&self, request_id: String) {
+        self.credential_admission
+            .deadlines
+            .as_ref()
+            .expect("credential deadline scheduler starts with the runtime waker")
+            .schedule(request_id, Instant::now() + PROMPT_CREDENTIAL_RPC_TIMEOUT);
+    }
+
     fn enqueue_or_start_prompt(&mut self, job: PromptJob) {
         if self.active_prompts >= self.prompt_concurrency_limit {
             self.prompt_queue.push_back(job);
@@ -3826,6 +4072,472 @@ where
         }
         let prompt_worker_context = self.prompt_worker_context();
         start_prompt_job(job, &mut self.active_prompts, &prompt_worker_context);
+    }
+
+    /// Records one asynchronous Secret reply for later FIFO admission.
+    ///
+    /// Unknown replies belong to another caller-owned extension-data operation
+    /// or an invalidated deadline and are deliberately ignored.
+    fn handle_extension_data_result(
+        &mut self,
+        result: tau_proto::ExtensionDataResult,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        if let Some(deadlines) = &self.credential_admission.deadlines {
+            deadlines.cancel(result.request_id.clone());
+        }
+        if let Some(continuation) = self
+            .credential_admission
+            .oauth_rpcs
+            .remove(&result.request_id)
+        {
+            return self.handle_prompt_oauth_rpc_result(continuation, result.result, handle);
+        }
+        let Some(admission) = self
+            .credential_admission
+            .admissions
+            .iter_mut()
+            .find(|admission| admission.request_id.as_deref() == Some(&result.request_id))
+        else {
+            return Ok(());
+        };
+        let payload = result.result;
+        let observations =
+            hydrate_profile_credentials_with(&mut admission.profiles, |_| match payload.clone() {
+                tau_proto::ExtensionDataResultPayload::Ok { value } => Ok(value),
+                tau_proto::ExtensionDataResultPayload::Error { kind, message } => {
+                    Err(tau_client::ExtensionDataRpcError::Harness { kind, message })
+                }
+            });
+        admission.observations = Some(observations);
+        self.stage_prompt_oauth_refresh(&result.request_id);
+        if let Some(admission) = self
+            .credential_admission
+            .admissions
+            .iter_mut()
+            .find(|admission| admission.request_id.as_deref() == Some(&result.request_id))
+        {
+            // Consume the correlation only after OAuth staging used it to find
+            // the admission. Duplicate/late harness replies are then no-ops.
+            admission.request_id = None;
+        }
+        Ok(())
+    }
+
+    /// Advances one prompt OAuth CAS/reload continuation.
+    fn handle_prompt_oauth_rpc_result(
+        &mut self,
+        continuation: PromptOAuthRpc,
+        result: tau_proto::ExtensionDataResultPayload,
+        _handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        match continuation {
+            PromptOAuthRpc::CompareAndSwap { key } => {
+                if prompt_oauth_cas_requires_reload(&result) {
+                    self.start_prompt_oauth_rpc(
+                        tau_proto::ExtensionDataRequestOp::ReadFile {
+                            path: key.path.clone(),
+                        },
+                        PromptOAuthRpc::Reload { key },
+                    )
+                } else {
+                    self.fail_prompt_oauth_refresh(&key, None);
+                    Ok(())
+                }
+            }
+            PromptOAuthRpc::Reload { key } => {
+                let matching = self
+                    .credential_admission
+                    .admissions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, admission)| admission.oauth_refresh.as_ref() == Some(&key))
+                    .map(|(index, admission)| {
+                        (index, admission.kind.prompt().model.provider.clone())
+                    })
+                    .collect::<Vec<_>>();
+                let (authoritative, observation) = match result {
+                    tau_proto::ExtensionDataResultPayload::Ok {
+                        value: tau_proto::ExtensionDataValue::ReadFile { contents },
+                    } => (
+                        serde_json::from_slice::<credential_record::ChatGptOAuthCredential>(
+                            &contents,
+                        )
+                        .ok()
+                        .map(credential_record::ChatGptOAuthCredential::into_auth),
+                        Some(CredentialObservation::Contents(blake3::hash(&contents))),
+                    ),
+                    tau_proto::ExtensionDataResultPayload::Ok { .. }
+                    | tau_proto::ExtensionDataResultPayload::Error { .. } => (None, None),
+                };
+                if let Some(authoritative) = authoritative {
+                    self.complete_prompt_oauth_refresh(&key, authoritative);
+                } else {
+                    self.fail_prompt_oauth_refresh(&key, None);
+                }
+                for (index, provider) in matching {
+                    if let Some(observation) = observation.clone()
+                        && let Some(admission) = self.credential_admission.admissions.get_mut(index)
+                    {
+                        admission.observations = Some(BTreeMap::from([(provider, observation)]));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Starts or joins the exact-generation OAuth refresh needed by one
+    /// hydrated prompt admission.
+    fn stage_prompt_oauth_refresh(&mut self, request_id: &str) {
+        let Some(index) = self
+            .credential_admission
+            .admissions
+            .iter()
+            .position(|admission| admission.request_id.as_deref() == Some(request_id))
+        else {
+            return;
+        };
+        let (provider, model) = {
+            let admission = &self.credential_admission.admissions[index];
+            (
+                admission.kind.prompt().model.provider.clone(),
+                admission.kind.prompt().model.clone(),
+            )
+        };
+        let Some(reference) = self.credential_admission.admissions[index]
+            .profiles
+            .chatgpt_credential_reference(&provider)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(BuiltinProviderProfile::Chatgpt(profile)) = self.credential_admission.admissions
+            [index]
+            .profiles
+            .providers
+            .get(&provider)
+        else {
+            return;
+        };
+        let current = profile.auth.clone();
+        let mode = profile.responses_mode();
+        let current_config = tau_provider_codex::resolved_config_for_provider_model(
+            &model.provider,
+            &model.model,
+            tau_provider_codex::ResolvedCredentials::new(
+                current.access_token.clone(),
+                current.account_id.clone(),
+            ),
+            mode,
+        );
+        let identity = backend_profile_identity(&PromptBackend::Responses(current_config));
+        let Some(CredentialObservation::Contents(generation)) =
+            self.credential_admission.admissions[index]
+                .observations
+                .as_ref()
+                .and_then(|observations| observations.get(&provider))
+        else {
+            return;
+        };
+        let key = PromptOAuthRefreshKey {
+            provider: provider.clone(),
+            path: reference.path().clone(),
+            generation: generation.to_hex().to_string(),
+            lite_compatibility: mode.is_lite_compatibility(),
+        };
+        if let Some(refresh) = self.credential_admission.oauth_refreshes.get(&key) {
+            let forced = refresh.forced
+                || identity.is_some_and(|identity| {
+                    self.oauth_refresh_rejections
+                        .take_unauthorized(&provider, identity)
+                });
+            self.credential_admission.admissions[index].oauth_refresh = Some(key);
+            self.credential_admission.admissions[index].oauth_forced = forced;
+            return;
+        }
+        if identity.is_some_and(|identity| {
+            self.oauth_refresh_rejections
+                .unauthorized_exhausted(&provider, identity)
+        }) {
+            if let Some(BuiltinProviderProfile::Chatgpt(profile)) =
+                self.credential_admission.admissions[index]
+                    .profiles
+                    .providers
+                    .get_mut(&provider)
+            {
+                profile.auth.access_token.clear();
+            }
+            return;
+        }
+        let forced = identity.is_some_and(|identity| {
+            self.oauth_refresh_rejections
+                .take_unauthorized(&provider, identity)
+        });
+        if self
+            .oauth_refresh_rejections
+            .rejection(&provider, &current, mode)
+            .is_some()
+        {
+            if forced
+                && let Some(BuiltinProviderProfile::Chatgpt(profile)) =
+                    self.credential_admission.admissions[index]
+                        .profiles
+                        .providers
+                        .get_mut(&provider)
+            {
+                profile.auth.access_token.clear();
+            }
+            return;
+        }
+        let refresh_due = oauth_token_should_refresh(&current.access_token, current.expires_at_ms);
+        if !forced && !refresh_due {
+            return;
+        }
+        if current.refresh_token.trim().is_empty() {
+            if (forced || oauth_token_is_expired(current.expires_at_ms))
+                && let Some(BuiltinProviderProfile::Chatgpt(profile)) =
+                    self.credential_admission.admissions[index]
+                        .profiles
+                        .providers
+                        .get_mut(&provider)
+            {
+                profile.auth.access_token.clear();
+            }
+            return;
+        }
+        self.credential_admission.admissions[index].oauth_refresh = Some(key.clone());
+        self.credential_admission.admissions[index].oauth_forced = forced;
+        let refresh_token = current.refresh_token.clone();
+        self.credential_admission
+            .oauth_refreshes
+            .insert(key.clone(), PromptOAuthRefresh { current, forced });
+        let tx = self.worker_tx.clone();
+        let waker = self
+            .worker_waker
+            .as_ref()
+            .expect("provider runtime worker waker is installed before prompt admission")
+            .clone();
+        let runtime = Arc::clone(&self.codex_runtime);
+        thread::spawn(move || {
+            let result =
+                tau_provider_codex::oauth::openai_codex_refresh(&refresh_token, runtime.network());
+            let _ = send_worker_message(
+                &tx,
+                &waker,
+                WorkerMessage::PromptOAuthRefreshFinished { key, result },
+            );
+        });
+    }
+
+    /// Applies one failed refresh to every exact-generation waiter.
+    fn fail_prompt_oauth_refresh(
+        &mut self,
+        key: &PromptOAuthRefreshKey,
+        oauth_error: Option<&tau_provider_codex::oauth::OAuthError>,
+    ) {
+        let Some(refresh) = self.credential_admission.oauth_refreshes.remove(key) else {
+            return;
+        };
+        for admission in &mut self.credential_admission.admissions {
+            if admission.oauth_refresh.as_ref() != Some(key) {
+                continue;
+            }
+            let provider = admission.kind.prompt().model.provider.clone();
+            if let Some(BuiltinProviderProfile::Chatgpt(profile)) =
+                admission.profiles.providers.get_mut(&provider)
+            {
+                profile.auth = refresh.current.clone();
+                if let Some(error) = oauth_error {
+                    self.oauth_refresh_rejections.record_if_permanent(
+                        &provider,
+                        &profile.auth,
+                        profile.responses_mode(),
+                        error,
+                    );
+                }
+                if admission.oauth_forced || oauth_token_is_expired(profile.auth.expires_at_ms) {
+                    profile.auth.access_token.clear();
+                }
+            }
+            admission.oauth_refresh = None;
+        }
+    }
+
+    /// Adopts an authoritative OAuth record for every exact-generation waiter.
+    fn complete_prompt_oauth_refresh(
+        &mut self,
+        key: &PromptOAuthRefreshKey,
+        authoritative: OpenAiAuth,
+    ) {
+        self.credential_admission.oauth_refreshes.remove(key);
+        for admission in &mut self.credential_admission.admissions {
+            if admission.oauth_refresh.as_ref() != Some(key) {
+                continue;
+            }
+            let provider = admission.kind.prompt().model.provider.clone();
+            if let Some(BuiltinProviderProfile::Chatgpt(profile)) =
+                admission.profiles.providers.get_mut(&provider)
+            {
+                let valid = validate_authoritative_rotation(
+                    &profile.auth,
+                    &authoritative,
+                    admission.oauth_forced,
+                )
+                .is_ok();
+                if valid {
+                    profile.auth = authoritative.clone();
+                    self.oauth_refresh_rejections
+                        .clear_refresh_rejection(&provider);
+                } else {
+                    profile.auth.access_token.clear();
+                }
+            }
+            admission.oauth_refresh = None;
+        }
+    }
+
+    /// Starts one finite Secret RPC and remembers its refresh continuation.
+    fn start_prompt_oauth_rpc(
+        &mut self,
+        op: tau_proto::ExtensionDataRequestOp,
+        continuation: PromptOAuthRpc,
+    ) -> ClientResult<()> {
+        let client = self
+            .extension_data_client
+            .as_ref()
+            .expect("production prompt OAuth has an extension-data client");
+        let request_id = client.start_request(tau_proto::ExtensionDataScope::Secret, op)?;
+        self.arm_prompt_credential_timeout(request_id.clone());
+        self.credential_admission
+            .oauth_rpcs
+            .insert(request_id, continuation);
+        Ok(())
+    }
+
+    /// Invalidates an OAuth operation after its final prompt waiter disappears.
+    fn prune_unreferenced_prompt_oauth(&mut self, key: &PromptOAuthRefreshKey) {
+        if prompt_oauth_has_waiter(&self.credential_admission.admissions, key) {
+            return;
+        }
+        self.credential_admission.oauth_refreshes.remove(key);
+        let mut canceled = Vec::new();
+        self.credential_admission
+            .oauth_rpcs
+            .retain(|request_id, continuation| {
+                let continuation_key = match continuation {
+                    PromptOAuthRpc::CompareAndSwap { key } | PromptOAuthRpc::Reload { key } => key,
+                };
+                let retain = continuation_key != key;
+                if !retain {
+                    canceled.push(request_id.clone());
+                }
+                retain
+            });
+        if let Some(deadlines) = &self.credential_admission.deadlines {
+            for request_id in canceled {
+                deadlines.cancel(request_id);
+            }
+        }
+    }
+
+    /// Moves every ready head entry into normal prompt admission. A completed
+    /// later Secret read remains behind an earlier unresolved prompt, so prompt
+    /// eligibility and `ProviderPromptSubmitted` stay FIFO even when the
+    /// harness replies out of order.
+    fn drain_prompt_admissions(&mut self, handle: &ClientHandle) -> ClientResult<()> {
+        while self
+            .credential_admission
+            .admissions
+            .front()
+            .is_some_and(|admission| {
+                admission.observations.is_some() && admission.oauth_refresh.is_none()
+            })
+        {
+            let admission = self
+                .credential_admission
+                .admissions
+                .pop_front()
+                .expect("ready admission is queued");
+            if self.input_closed
+                || self
+                    .cancellation
+                    .take_canceled(admission.kind.agent_prompt_id())
+            {
+                self.finish_canceled_admission(&admission, handle)?;
+                continue;
+            }
+            self.finish_prompt_admission(admission, handle)?;
+        }
+        Ok(())
+    }
+
+    /// Applies a credential-ready transition after it reaches the FIFO
+    /// admission head.
+    fn finish_prompt_admission(
+        &mut self,
+        mut admission: PendingPromptAdmission,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        let provider = admission.kind.prompt().model.provider.clone();
+        self.publish_selected_models_if_changed(
+            &provider,
+            &admission.profiles,
+            admission.observations.clone().unwrap_or_default(),
+            handle,
+        )?;
+        match admission.kind {
+            PendingPromptAdmissionKind::Initial {
+                agent_prompt_id,
+                prompt,
+            } => {
+                self.start_resolved_prompt(agent_prompt_id, prompt, &mut admission.profiles, handle)
+            }
+            PendingPromptAdmissionKind::RetryDue(mut job) => {
+                let backend = self.resolve_admitted_backend_with_quota(
+                    &job.prompt.model,
+                    &mut admission.profiles,
+                    handle,
+                )?;
+                if !automatic_retry_identity_matches(job.pinned_chatgpt_identity.as_ref(), &backend)
+                {
+                    return self.finish_identity_changed_prompt(&job, handle);
+                }
+                job.backend = backend;
+                job.profile_identity = backend_profile_identity(&job.backend);
+                self.prompt_queue.push_back(job);
+                Ok(())
+            }
+            PendingPromptAdmissionKind::Manual {
+                mut job,
+                request_id,
+            } => {
+                job.backend = self.resolve_admitted_backend_with_quota(
+                    &job.prompt.model,
+                    &mut admission.profiles,
+                    handle,
+                )?;
+                job.profile_identity = backend_profile_identity(&job.backend);
+                job.manual_cooldown_bypass = true;
+                job.cooldown_probe = self
+                    .shared_cooldowns
+                    .get(&job.prompt.model.provider)
+                    .filter(|cooldown| cooldown.not_before > self.retry_clock.now())
+                    .map(|cooldown| CooldownProbe {
+                        provider: job.prompt.model.provider.clone(),
+                        generation: cooldown.generation,
+                    });
+                let agent_prompt_id = job.agent_prompt_id.clone();
+                self.prompt_queue.push_back(job);
+                handle.emit_transient(Event::ProviderRetryPromptResultReported(
+                    tau_proto::ProviderRetryPromptResult {
+                        request_id,
+                        agent_prompt_id,
+                        status: tau_proto::RetryPromptStatus::Accepted,
+                    },
+                ))
+            }
+        }
     }
 
     fn handle_cancel_prompt(
@@ -3843,6 +4555,20 @@ where
             while let Some(job) = self.prompt_queue.pop_front() {
                 self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
             }
+            while let Some(admission) = self.credential_admission.admissions.pop_front() {
+                if let (Some(deadlines), Some(request_id)) = (
+                    &self.credential_admission.deadlines,
+                    admission.request_id.as_ref(),
+                ) {
+                    deadlines.cancel(request_id.clone());
+                }
+                self.finish_canceled_admission(&admission, handle)?;
+            }
+            self.credential_admission.oauth_refreshes.clear();
+            self.credential_admission.oauth_rpcs.clear();
+            if let Some(deadlines) = &self.credential_admission.deadlines {
+                deadlines.cancel_all();
+            }
             return Ok(());
         };
         self.cancellation.cancel(apid.clone());
@@ -3851,6 +4577,26 @@ where
         }
         if finish_queued_canceled(&apid, &mut self.prompt_queue, handle)? {
             self.cancellation.take_canceled(&apid);
+        }
+        if let Some(index) = self
+            .credential_admission
+            .admissions
+            .iter()
+            .position(|admission| admission.kind.agent_prompt_id() == &apid)
+            && let Some(admission) = self.credential_admission.admissions.remove(index)
+        {
+            let oauth_refresh = admission.oauth_refresh.clone();
+            if let (Some(deadlines), Some(request_id)) = (
+                &self.credential_admission.deadlines,
+                admission.request_id.as_ref(),
+            ) {
+                deadlines.cancel(request_id.clone());
+            }
+            self.cancellation.take_canceled(&apid);
+            self.finish_canceled_admission(&admission, handle)?;
+            if let Some(key) = oauth_refresh {
+                self.prune_unreferenced_prompt_oauth(&key);
+            }
         }
         Ok(())
     }
@@ -3889,6 +4635,48 @@ where
     fn drain_worker_messages(&mut self, handle: &ClientHandle) -> ClientResult<()> {
         loop {
             match self.worker_rx.try_recv() {
+                Ok(WorkerMessage::PromptOAuthRefreshFinished { key, result }) => {
+                    let Some(refresh) = self.credential_admission.oauth_refreshes.get(&key) else {
+                        continue;
+                    };
+                    match result {
+                        Ok(tokens) => match merge_chatgpt_refresh(&refresh.current, tokens) {
+                            Ok(refreshed) => {
+                                let contents = serde_json::to_vec(
+                                    &credential_record::ChatGptOAuthCredential::from(
+                                        refreshed.clone(),
+                                    ),
+                                )
+                                .map_err(|_| {
+                                    ClientError::handler(
+                                        "could not encode refreshed OAuth credential",
+                                    )
+                                })?;
+                                self.start_prompt_oauth_rpc(
+                                    tau_proto::ExtensionDataRequestOp::CompareAndSwapFile {
+                                        path: key.path.clone(),
+                                        expected_generation: key.generation.clone(),
+                                        contents,
+                                    },
+                                    PromptOAuthRpc::CompareAndSwap { key },
+                                )?;
+                            }
+                            Err(_) => self.fail_prompt_oauth_refresh(&key, None),
+                        },
+                        Err(error) => {
+                            self.fail_prompt_oauth_refresh(&key, Some(&error));
+                        }
+                    }
+                }
+                Ok(WorkerMessage::PromptCredentialRpcTimedOut { request_id }) => {
+                    if let Some(key) = apply_prompt_credential_timeout(
+                        &request_id,
+                        &mut self.credential_admission.oauth_rpcs,
+                        &mut self.credential_admission.admissions,
+                    ) {
+                        self.fail_prompt_oauth_refresh(&key, None);
+                    }
+                }
                 Ok(WorkerMessage::Output {
                     message,
                     cancel_generation,
@@ -4059,7 +4847,7 @@ where
                         .expect("retry scheduler starts with the runtime waker")
                         .schedule(job, independent_due, cooldown_constraint);
                 }
-                Ok(WorkerMessage::RetryDue(mut job)) => {
+                Ok(WorkerMessage::RetryDue(job)) => {
                     if let Some(scheduler) = &self.retry_scheduler {
                         scheduler
                             .delayed_count
@@ -4072,6 +4860,11 @@ where
                         self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
                         continue;
                     }
+                    let Some(PendingPromptAdmissionKind::RetryDue(mut job)) = self
+                        .start_retry_credential_read(PendingPromptAdmissionKind::RetryDue(job))?
+                    else {
+                        continue;
+                    };
                     let mut profiles =
                         self.load_selected_profile(&job.prompt.model.provider, handle)?;
                     let backend =
@@ -4092,7 +4885,7 @@ where
                     request_id,
                     agent_prompt_id,
                 }) => {
-                    let status = if let Some(mut owned_job) = job.take() {
+                    let status = if let Some(owned_job) = job.take() {
                         if let Some(scheduler) = &self.retry_scheduler {
                             scheduler
                                 .delayed_count
@@ -4109,6 +4902,20 @@ where
                             )?;
                             tau_proto::RetryPromptStatus::NotParked
                         } else {
+                            let Some(PendingPromptAdmissionKind::Manual {
+                                job: mut owned_job,
+                                request_id: _,
+                            }) = self.start_retry_credential_read(
+                                PendingPromptAdmissionKind::Manual {
+                                    job: owned_job,
+                                    request_id: request_id.clone(),
+                                },
+                            )?
+                            else {
+                                // The response is emitted only after this
+                                // admission reaches the FIFO-ready head.
+                                continue;
+                            };
                             let mut profiles = self
                                 .load_selected_profile(&owned_job.prompt.model.provider, handle)?;
                             owned_job.backend = self.resolve_backend_with_quota(
@@ -4308,6 +5115,91 @@ where
             codex_runtime: self.codex_runtime.clone(),
         }
     }
+}
+
+/// Reports whether one exact-generation refresh still has a prompt owner.
+fn prompt_oauth_has_waiter(
+    admissions: &VecDeque<PendingPromptAdmission>,
+    key: &PromptOAuthRefreshKey,
+) -> bool {
+    admissions
+        .iter()
+        .any(|admission| admission.oauth_refresh.as_ref() == Some(key))
+}
+
+/// Loads the selected profile at the due/manual transition rather than reusing
+/// the generation captured by the previous attempt.
+fn load_fresh_retry_profiles<F>(
+    load_prompt_profiles: &mut F,
+    startup_responses_modes: &BTreeMap<ProviderName, CodexMode>,
+    provider: &ProviderName,
+) -> BuiltinProviderProfiles
+where
+    F: FnMut(Option<&ProviderName>) -> BuiltinProviderProfiles,
+{
+    let mut profiles = load_prompt_profiles(Some(provider));
+    profiles.apply_startup_responses_modes(startup_responses_modes);
+    profiles
+}
+
+/// Removes at most one provider from the startup quota snapshot. The reactive
+/// loop regains control between calls, so newly arrived prompt input is drained
+/// before the next provider's best-effort quota work.
+fn take_next_initial_quota_profile(
+    startup_profiles: &mut Option<BuiltinProviderProfiles>,
+) -> Option<BuiltinProviderProfiles> {
+    let profiles = startup_profiles.as_mut()?;
+    let Some(provider) = profiles.providers.keys().next().cloned() else {
+        *startup_profiles = None;
+        return None;
+    };
+    let selected = profiles.selected(&provider);
+    profiles.providers.remove(&provider);
+    profiles.credentials.remove(&provider);
+    profiles.missing_logins.remove(&provider);
+    if profiles.providers.is_empty() {
+        *startup_profiles = None;
+    }
+    Some(selected)
+}
+
+/// Invalidates one expired Secret correlation. OAuth continuations return their
+/// shared key to the caller; initial/retry reads become credential-missing and
+/// ready. Repeated or late notifications are no-ops.
+fn apply_prompt_credential_timeout(
+    request_id: &str,
+    oauth_rpcs: &mut HashMap<String, PromptOAuthRpc>,
+    admissions: &mut VecDeque<PendingPromptAdmission>,
+) -> Option<PromptOAuthRefreshKey> {
+    if let Some(continuation) = oauth_rpcs.remove(request_id) {
+        return Some(match continuation {
+            PromptOAuthRpc::CompareAndSwap { key } | PromptOAuthRpc::Reload { key } => key,
+        });
+    }
+    if let Some(admission) = admissions.iter_mut().find(|admission| {
+        admission.request_id.as_deref() == Some(request_id) && admission.observations.is_none()
+    }) {
+        let observations = hydrate_profile_credentials_with(&mut admission.profiles, |_| {
+            Err(tau_client::ExtensionDataRpcError::Timeout)
+        });
+        admission.observations = Some(observations);
+        admission.request_id = None;
+    }
+    None
+}
+
+/// Both a successful CAS and a generation-mismatch loser must reload the
+/// authoritative Secret record before any prompt adopts refreshed OAuth.
+fn prompt_oauth_cas_requires_reload(result: &tau_proto::ExtensionDataResultPayload) -> bool {
+    matches!(
+        result,
+        tau_proto::ExtensionDataResultPayload::Ok {
+            value: tau_proto::ExtensionDataValue::CompareAndSwapFile,
+        } | tau_proto::ExtensionDataResultPayload::Error {
+            kind: tau_proto::ExtensionDataErrorKind::GenerationMismatch,
+            ..
+        }
+    )
 }
 
 /// Drops stale compact evidence without restoring aliases that share an
@@ -4563,6 +5455,107 @@ struct PromptJob {
     manual_cooldown_bypass: bool,
     /// Shared cooldown generation this job was manually admitted to probe.
     cooldown_probe: Option<CooldownProbe>,
+}
+
+/// One prompt held at the credential boundary before it is eligible for
+/// `ProviderPromptSubmitted`.
+///
+/// The main loop owns this state.  In particular, a Secret reply only makes an
+/// entry ready; [`ProviderRuntime::drain_prompt_admissions`] preserves FIFO
+/// submission when replies arrive out of order.
+struct PendingPromptAdmission {
+    /// The logical prompt transition that owns this credential read.
+    kind: PendingPromptAdmissionKind,
+    /// The selected credential-free profile plus any hydrated credential.
+    profiles: BuiltinProviderProfiles,
+    /// Correlation identifier returned by `ExtensionDataClient::start_request`,
+    /// or `None` for an immediately ready keyless admission.
+    request_id: Option<String>,
+    /// Credential generation observations returned with the selected Secret
+    /// read.
+    observations: Option<BTreeMap<ProviderName, CredentialObservation>>,
+    /// Exact OAuth refresh generation awaited before this admission is ready.
+    oauth_refresh: Option<PromptOAuthRefreshKey>,
+    /// Whether this admission is recovering one canonical unauthorized result.
+    oauth_forced: bool,
+}
+
+/// Provider, startup mode, and exact Secret generation used to coalesce OAuth
+/// refresh.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PromptOAuthRefreshKey {
+    /// Provider namespace whose rejection and identity state owns this refresh.
+    provider: ProviderName,
+    /// Opaque Secret-scope path; never rendered.
+    path: tau_proto::ExtensionDataPath,
+    /// BLAKE3 generation expected by Secret compare-and-swap.
+    generation: String,
+    /// Startup-selected Responses Lite mode, retained without making
+    /// `CodexMode` part of the hash key.
+    lite_compatibility: bool,
+}
+
+/// One shared network refresh and its main-loop-owned Secret publication state.
+struct PromptOAuthRefresh {
+    /// Credential generation supplied to the OAuth endpoint.
+    current: OpenAiAuth,
+    /// Whether this flight consumed forced recovery authority for the
+    /// generation.
+    forced: bool,
+}
+
+/// Main-loop continuation for one prompt-owned Secret operation.
+enum PromptOAuthRpc {
+    /// Publish the refreshed credential, then verify the authoritative record.
+    CompareAndSwap {
+        /// Exact refresh operation.
+        key: PromptOAuthRefreshKey,
+    },
+    /// Adopt the authoritative record after CAS success or a losing CAS.
+    Reload {
+        /// Exact refresh operation.
+        key: PromptOAuthRefreshKey,
+    },
+}
+
+/// Prompt ownership returned after an asynchronous credential read.
+enum PendingPromptAdmissionKind {
+    /// Initial prompt admission has not emitted its submitted marker.
+    Initial {
+        /// Prompt identity used by cancellation and Secret-result correlation.
+        agent_prompt_id: tau_proto::AgentPromptId,
+        /// Fully materialized prompt retained while the Secret read is pending.
+        prompt: tau_proto::AgentPromptCreated,
+    },
+    /// A scheduler-owned automatic retry whose credential must be reloaded.
+    RetryDue(PromptJob),
+    /// A scheduler-owned manual retry awaiting its correlated UI result.
+    Manual {
+        /// Owned job released by the retry scheduler.
+        job: PromptJob,
+        /// UI request correlation retained until admission completes.
+        request_id: tau_proto::RetryPromptRequestId,
+    },
+}
+
+impl PendingPromptAdmissionKind {
+    /// Returns the prompt identity protected by this admission.
+    fn agent_prompt_id(&self) -> &tau_proto::AgentPromptId {
+        match self {
+            Self::Initial {
+                agent_prompt_id, ..
+            } => agent_prompt_id,
+            Self::RetryDue(job) | Self::Manual { job, .. } => &job.agent_prompt_id,
+        }
+    }
+
+    /// Returns the prompt retained by this admission.
+    fn prompt(&self) -> &tau_proto::AgentPromptCreated {
+        match self {
+            Self::Initial { prompt, .. } => prompt,
+            Self::RetryDue(job) | Self::Manual { job, .. } => &job.prompt,
+        }
+    }
 }
 
 /// Shared provider-profile lower bound and its visible normalized reason.
@@ -5254,6 +6247,213 @@ impl RetrySchedulerState {
     }
 }
 
+/// One correlated RPC deadline retained by the credential timer actor.
+#[derive(Eq, PartialEq)]
+struct PromptCredentialDeadline {
+    /// Absolute monotonic deadline.
+    due: Instant,
+    /// Stable tie-breaker for requests armed at the same instant.
+    sequence: u64,
+    /// Extension-data correlation invalidated at the deadline.
+    request_id: String,
+}
+
+impl Ord for PromptCredentialDeadline {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .due
+            .cmp(&self.due)
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
+}
+
+impl PartialOrd for PromptCredentialDeadline {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Bounded commands accepted by the prompt credential deadline actor.
+enum PromptCredentialDeadlineCommand {
+    /// Arms one already-issued extension-data request.
+    Schedule {
+        /// Correlation invalidated when `due` is reached.
+        request_id: String,
+        /// Absolute monotonic deadline.
+        due: Instant,
+    },
+    /// Invalidates one deadline after a reply or prompt cancellation.
+    Cancel(String),
+    /// Invalidates every outstanding deadline during session/process shutdown.
+    CancelAll,
+}
+
+/// Pure min-heap state for prompt credential deadlines.
+#[derive(Default)]
+struct PromptCredentialDeadlineQueue {
+    /// Deadlines ordered earliest first.
+    deadlines: BinaryHeap<PromptCredentialDeadline>,
+    /// Requests that still own a live deadline.
+    active: HashSet<String>,
+    /// Stable deadline tie-breaker.
+    sequence: u64,
+}
+
+impl PromptCredentialDeadlineQueue {
+    /// Applies one scheduler command.
+    fn apply(&mut self, command: PromptCredentialDeadlineCommand) {
+        match command {
+            PromptCredentialDeadlineCommand::Schedule { request_id, due } => {
+                self.active.insert(request_id.clone());
+                self.deadlines.push(PromptCredentialDeadline {
+                    due,
+                    sequence: self.sequence,
+                    request_id,
+                });
+                self.sequence = self.sequence.wrapping_add(1);
+            }
+            PromptCredentialDeadlineCommand::Cancel(request_id) => {
+                self.active.remove(&request_id);
+            }
+            PromptCredentialDeadlineCommand::CancelAll => self.active.clear(),
+        }
+        self.discard_invalid();
+    }
+
+    /// Returns all live request ids due at `now`.
+    fn pop_due(&mut self, now: Instant) -> Vec<String> {
+        self.discard_invalid();
+        let mut due = Vec::new();
+        while self
+            .deadlines
+            .peek()
+            .is_some_and(|deadline| deadline.due <= now)
+        {
+            let deadline = self
+                .deadlines
+                .pop()
+                .expect("peeked credential deadline remains present");
+            if self.active.remove(&deadline.request_id) {
+                due.push(deadline.request_id);
+            }
+            self.discard_invalid();
+        }
+        due
+    }
+
+    /// Returns the earliest still-live deadline.
+    fn next_due(&mut self) -> Option<Instant> {
+        self.discard_invalid();
+        self.deadlines.peek().map(|deadline| deadline.due)
+    }
+
+    /// Removes lazily canceled entries from the heap head.
+    fn discard_invalid(&mut self) {
+        while self
+            .deadlines
+            .peek()
+            .is_some_and(|deadline| !self.active.contains(&deadline.request_id))
+        {
+            self.deadlines.pop();
+        }
+    }
+}
+
+/// Owned bounded actor that replaces one sleeping thread per credential RPC.
+struct PromptCredentialDeadlineScheduler {
+    /// Last command sender; dropping it disconnects the actor.
+    commands: Option<SyncSender<PromptCredentialDeadlineCommand>>,
+    /// Joinable actor thread.
+    actor: Option<thread::JoinHandle<()>>,
+}
+
+impl PromptCredentialDeadlineScheduler {
+    /// Starts the one process-local credential deadline actor.
+    fn start(worker_tx: Sender<WorkerMessage>, worker_waker: ManualRuntimeWaker) -> Self {
+        let (commands, receiver) = mpsc::sync_channel(PROMPT_CREDENTIAL_DEADLINE_MAILBOX_CAPACITY);
+        let actor = thread::spawn(move || {
+            run_prompt_credential_deadline_scheduler(receiver, worker_tx, worker_waker);
+        });
+        Self {
+            commands: Some(commands),
+            actor: Some(actor),
+        }
+    }
+
+    /// Arms one request's absolute deadline.
+    fn schedule(&self, request_id: String, due: Instant) {
+        let _ = self
+            .commands
+            .as_ref()
+            .expect("live deadline scheduler owns its command sender")
+            .send(PromptCredentialDeadlineCommand::Schedule { request_id, due });
+    }
+
+    /// Lazily invalidates one request deadline.
+    fn cancel(&self, request_id: String) {
+        let _ = self
+            .commands
+            .as_ref()
+            .expect("live deadline scheduler owns its command sender")
+            .send(PromptCredentialDeadlineCommand::Cancel(request_id));
+    }
+
+    /// Invalidates all request deadlines.
+    fn cancel_all(&self) {
+        let _ = self
+            .commands
+            .as_ref()
+            .expect("live deadline scheduler owns its command sender")
+            .send(PromptCredentialDeadlineCommand::CancelAll);
+    }
+}
+
+impl Drop for PromptCredentialDeadlineScheduler {
+    fn drop(&mut self) {
+        self.commands.take();
+        if let Some(actor) = self.actor.take() {
+            let _ = actor.join();
+        }
+    }
+}
+
+/// Runs the prompt credential min-heap and emits only live expired ids.
+fn run_prompt_credential_deadline_scheduler(
+    commands: Receiver<PromptCredentialDeadlineCommand>,
+    worker_tx: Sender<WorkerMessage>,
+    worker_waker: ManualRuntimeWaker,
+) {
+    let mut queue = PromptCredentialDeadlineQueue::default();
+    loop {
+        let command = match queue.next_due() {
+            Some(due) => commands.recv_timeout(
+                due.checked_duration_since(Instant::now())
+                    .unwrap_or(Duration::ZERO),
+            ),
+            None => commands
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        match command {
+            Ok(command) => queue.apply(command),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                for request_id in queue.pop_due(Instant::now()) {
+                    if send_worker_message(
+                        &worker_tx,
+                        &worker_waker,
+                        WorkerMessage::PromptCredentialRpcTimedOut { request_id },
+                    )
+                    .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// RAII owner of the delayed-work scheduler actor.
 ///
 /// Dropping the last strong command sender disconnects the actor, then joins
@@ -5517,6 +6717,21 @@ impl PromptExecution {
 }
 
 enum WorkerMessage {
+    /// OAuth network result for one exact prompt credential generation.
+    PromptOAuthRefreshFinished {
+        /// Refresh generation shared by its current waiters.
+        key: PromptOAuthRefreshKey,
+        /// Provider-typed OAuth result, kept inside the provider process.
+        result: Result<
+            tau_provider_codex::oauth::OAuthTokenRefresh,
+            tau_provider_codex::oauth::OAuthError,
+        >,
+    },
+    /// One correlated prompt credential RPC exceeded its finite deadline.
+    PromptCredentialRpcTimedOut {
+        /// Request correlation to invalidate.
+        request_id: String,
+    },
     /// One typed provider frame produced by a prompt worker and awaiting main
     /// loop serialization.
     Output {
@@ -6292,6 +7507,75 @@ fn resolve_prompt_backend(
                 extension_data_client,
             )
             .map(PromptBackend::Responses)
+        }
+        BuiltinProviderProfile::ChatCompletions(provider) => {
+            refresh_rejections.clear(&model.provider);
+            let configured_model = provider
+                .models
+                .iter()
+                .find(|configured| configured.id == model.model)?
+                .clone();
+            Some(PromptBackend::ChatCompletions {
+                provider: provider.clone(),
+                model: configured_model,
+            })
+        }
+        BuiltinProviderProfile::OpenRouter(profile) => {
+            refresh_rejections.clear(&model.provider);
+            let provider = profile.to_chat_completions();
+            let configured_model = provider
+                .models
+                .iter()
+                .find(|configured| configured.id == model.model)?
+                .clone();
+            Some(PromptBackend::ChatCompletions {
+                provider,
+                model: configured_model,
+            })
+        }
+        BuiltinProviderProfile::Responses(provider) => {
+            refresh_rejections.clear(&model.provider);
+            let configured_model = provider
+                .models
+                .iter()
+                .find(|configured| configured.id == model.model)?
+                .clone();
+            Some(PromptBackend::PublicResponses {
+                provider: provider.clone(),
+                model: configured_model,
+            })
+        }
+    }
+}
+
+/// Resolves an already-hydrated prompt profile without performing OAuth I/O.
+fn resolve_prompt_backend_without_refresh(
+    model: &ModelId,
+    profiles: &mut BuiltinProviderProfiles,
+    refresh_rejections: &mut OAuthRefreshRejectionCache,
+) -> Option<PromptBackend> {
+    let Some(profile) = profiles.providers.get_mut(&model.provider) else {
+        refresh_rejections.clear(&model.provider);
+        return None;
+    };
+    match profile {
+        BuiltinProviderProfile::Chatgpt(profile) => {
+            if profile.auth.access_token.trim().is_empty()
+                || oauth_token_is_expired(profile.auth.expires_at_ms)
+            {
+                return None;
+            }
+            Some(PromptBackend::Responses(
+                tau_provider_codex::resolved_config_for_provider_model(
+                    &model.provider,
+                    &model.model,
+                    tau_provider_codex::ResolvedCredentials::new(
+                        profile.auth.access_token.clone(),
+                        profile.auth.account_id.clone(),
+                    ),
+                    profile.responses_mode(),
+                ),
+            ))
         }
         BuiltinProviderProfile::ChatCompletions(provider) => {
             refresh_rejections.clear(&model.provider);

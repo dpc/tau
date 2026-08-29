@@ -278,7 +278,10 @@ not need to rediscover runtime regressions independently. Focused
 cumulative-counter compatibility, cold-attach boundaries, replay/non-replay
 classification, selected payload attribution, bounded histograms, and
 equality-cache reset boundaries.
-`ExtensionDataClient` preserves unrelated input while performing correlated
-Secret reads and compare-and-swap writes. These runtime operations implement
+`ExtensionDataClient` supports both blocking correlated operations and
+caller-owned asynchronous admission. `start_request` sends one request and
+returns its correlation id; a manual runtime keeps receiving ordinary harness
+input and owns matching or invalidating the eventual result. Both forms
+implement
 [SPEC-extension-secret-storage](../../../specs/SPEC-extension-secret-storage.md)
 without routing secret payloads through events or generic diagnostics.
