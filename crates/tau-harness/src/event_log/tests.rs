@@ -1,5 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::Write;
+use std::sync::mpsc::sync_channel;
+use std::time::Instant;
 
 use proptest::prelude::*;
 
@@ -363,6 +365,292 @@ fn replacement_generation_starts_at_live_tail() {
     );
 }
 
+/// A sparse target must advance across the complete non-target run with one
+/// minimum-cursor pass, one memory observation, and one wakeup.
+#[test]
+fn sparse_target_scan_batches_cursor_prune_observation_and_notification() {
+    let log = EventLog::new();
+    let consumers = (0..5).map(|_| log.register_consumer()).collect::<Vec<_>>();
+    let selected = consumers[0];
+    for _ in 0..64 {
+        let _ = log.append_egress(routed_notice("untargeted"), &[]);
+    }
+    let _ = log.append_egress(
+        routed_notice("selected"),
+        &[tau_core::SharedDeliveryTarget::new(log.group(), selected)],
+    );
+
+    log.reset_work();
+    let pending = log.next_egress(selected).expect("sparse target");
+    assert_eq!(pending.seq.0, 64);
+    let (work, notifications) = log.work();
+    assert_eq!(
+        work,
+        EventLogWork {
+            prune_calls: 1,
+            prune_consumer_visits: 5,
+            observe_calls: 1,
+            scan_position_visits: 65,
+            catch_up_waits: 0,
+            tail_waits: 0,
+        }
+    );
+    assert_eq!(notifications, 1);
+}
+
+/// Reaching a captured close boundary through only non-target positions must
+/// retire in the same batch and release a later frozen payload.
+#[test]
+fn sparse_close_boundary_retires_with_one_prune_observation_and_notification() {
+    let log = EventLog::new();
+    let consumer = log.register_consumer();
+    for _ in 0..32 {
+        let _ = log.append_egress(routed_notice("before close"), &[]);
+    }
+    log.close_consumer_after_current(consumer);
+    let _ = log.append_egress(
+        routed_notice("after close"),
+        &[tau_core::SharedDeliveryTarget::new(log.group(), consumer)],
+    );
+
+    log.reset_work();
+    assert!(log.next_egress(consumer).is_none());
+    let (work, notifications) = log.work();
+    assert_eq!(
+        work,
+        EventLogWork {
+            prune_calls: 1,
+            prune_consumer_visits: 0,
+            observe_calls: 1,
+            scan_position_visits: 32,
+            catch_up_waits: 0,
+            tail_waits: 0,
+        }
+    );
+    assert_eq!(notifications, 1);
+    assert!(log.inner.lock().expect("log").retained.is_empty());
+}
+
+/// A follower that batches to the live tail must resume after a later append
+/// instead of missing the append notification between lock acquisitions.
+#[test]
+fn sparse_tail_scan_resumes_for_later_target() {
+    let log = EventLog::new();
+    let consumer = log.register_consumer();
+    for _ in 0..32 {
+        let _ = log.append_egress(routed_notice("before tail"), &[]);
+    }
+    log.reset_work();
+    let (tx, rx) = sync_channel(1);
+    let follower = {
+        let log = Arc::clone(&log);
+        std::thread::spawn(move || {
+            let _ = tx.send(log.next_egress(consumer));
+        })
+    };
+    if !log.wait_for_tail_wait(1, Duration::from_secs(1)) {
+        log.retire_consumer_after_io(consumer);
+        let _ = follower.join();
+        panic!("follower did not batch to the tail and enter its wait");
+    }
+    let _ = log.append_egress(
+        routed_notice("after tail"),
+        &[tau_core::SharedDeliveryTarget::new(log.group(), consumer)],
+    );
+    let pending = match rx.recv_timeout(Duration::from_secs(1)) {
+        Ok(Some(pending)) => pending,
+        Ok(None) => {
+            follower.join().expect("follower thread");
+            panic!("follower retired before returning the later target");
+        }
+        Err(error) => {
+            log.retire_consumer_after_io(consumer);
+            let _ = follower.join();
+            panic!("follower did not return the later target: {error}");
+        }
+    };
+    follower.join().expect("follower thread");
+    assert_eq!(pending.seq.0, 32);
+    let (work, notifications) = log.work();
+    assert_eq!(work.prune_calls, 2);
+    assert_eq!(work.prune_consumer_visits, 2);
+    assert_eq!(work.observe_calls, 3);
+    assert_eq!(work.scan_position_visits, 33);
+    assert_eq!(notifications, 2);
+}
+
+/// A flush barrier remains behind a selected frame until successful
+/// acknowledgement even when selection skipped a sparse prefix in one batch.
+#[test]
+fn sparse_scan_preserves_flush_acknowledgement_barrier() {
+    let log = EventLog::new();
+    let consumer = log.register_consumer();
+    for _ in 0..16 {
+        let _ = log.append_egress(routed_notice("untargeted"), &[]);
+    }
+    let _ = log.append_egress(
+        routed_notice("barrier"),
+        &[tau_core::SharedDeliveryTarget::new(log.group(), consumer)],
+    );
+    let pending = log.next_egress(consumer).expect("barrier target");
+    assert_eq!(
+        log.inner
+            .lock()
+            .expect("log")
+            .consumers
+            .get(&consumer)
+            .expect("consumer")
+            .cursor
+            .0,
+        pending.seq.0,
+        "selection must not cross the write/flush acknowledgement barrier"
+    );
+    log.acknowledge_egress(consumer, &pending);
+    log.flush_consumer(consumer);
+    assert_eq!(
+        log.inner
+            .lock()
+            .expect("log")
+            .consumers
+            .get(&consumer)
+            .expect("consumer")
+            .cursor
+            .0,
+        17
+    );
+}
+
+/// Retiring the slow minimum cursor after another consumer batches a sparse
+/// prefix must prune that prefix while preserving the fast consumer's target.
+#[test]
+fn sparse_scan_preserves_consumer_retirement_and_minimum_cursor_pruning() {
+    let log = EventLog::new();
+    let fast = log.register_consumer();
+    let slow = log.register_consumer();
+    for _ in 0..16 {
+        let _ = log.append_egress(routed_notice("untargeted"), &[]);
+    }
+    let targets = [
+        tau_core::SharedDeliveryTarget::new(log.group(), fast),
+        tau_core::SharedDeliveryTarget::new(log.group(), slow),
+    ];
+    let _ = log.append_egress(routed_notice("shared target"), &targets);
+    let pending = log.next_egress(fast).expect("fast target");
+    assert_eq!(pending.seq.0, 16);
+    assert_eq!(log.inner.lock().expect("log").retained.len(), 17);
+
+    log.reset_work();
+    log.retire_consumer(slow);
+    let (work, notifications) = log.work();
+    assert_eq!(work.prune_calls, 1);
+    assert_eq!(work.prune_consumer_visits, 1);
+    assert_eq!(work.observe_calls, 1);
+    assert_eq!(notifications, 1);
+    let inner = log.inner.lock().expect("log");
+    assert_eq!(inner.retained.len(), 1);
+    assert_eq!(inner.retained[0].seq.0, 16);
+    assert!(inner.retained[0].pending_targets.contains(&fast));
+    drop(inner);
+
+    log.acknowledge_egress(fast, &pending);
+    assert!(log.inner.lock().expect("log").retained.is_empty());
+}
+
+/// Replay pause must keep the cursor fixed; release may then batch a sparse
+/// live suffix without changing target visibility.
+#[test]
+fn replay_pause_release_batches_sparse_live_suffix() {
+    let log = EventLog::new();
+    let consumer = log.register_consumer();
+    log.set_catch_up_paused(consumer, true);
+    for _ in 0..24 {
+        let _ = log.append_egress(routed_notice("buffered live"), &[]);
+    }
+    let _ = log.append_egress(
+        routed_notice("visible after replay"),
+        &[tau_core::SharedDeliveryTarget::new(log.group(), consumer)],
+    );
+    let (tx, rx) = sync_channel(1);
+    let follower = {
+        let log = Arc::clone(&log);
+        std::thread::spawn(move || {
+            let _ = tx.send(log.next_egress(consumer));
+        })
+    };
+    if !log.wait_for_catch_up_wait(1, Duration::from_secs(1)) {
+        log.retire_consumer_after_io(consumer);
+        let _ = follower.join();
+        panic!("follower did not enter the replay-pause wait before release");
+    }
+    assert_eq!(
+        log.inner
+            .lock()
+            .expect("log")
+            .consumers
+            .get(&consumer)
+            .expect("consumer")
+            .cursor
+            .0,
+        0
+    );
+    log.set_catch_up_paused(consumer, false);
+    let pending = match rx.recv_timeout(Duration::from_secs(1)) {
+        Ok(Some(pending)) => pending,
+        Ok(None) => {
+            follower.join().expect("follower thread");
+            panic!("follower retired before returning the post-replay target");
+        }
+        Err(error) => {
+            log.retire_consumer_after_io(consumer);
+            let _ = follower.join();
+            panic!("follower did not return the post-replay target: {error}");
+        }
+    };
+    follower.join().expect("follower thread");
+    assert_eq!(pending.seq.0, 24);
+}
+
+/// Manual work benchmark demonstrates that sparse scanning performs `U`
+/// position checks but only one `C`-consumer minimum pass and one observation.
+#[test]
+#[ignore = "manual sparse EventLog asymptotic work benchmark"]
+fn benchmark_sparse_egress_scan_work() {
+    for consumer_count in [1_u64, 8, 64] {
+        for untargeted_count in [100_u64, 1_000, 10_000] {
+            let log = EventLog::new();
+            let consumers = (0..consumer_count)
+                .map(|_| log.register_consumer())
+                .collect::<Vec<_>>();
+            for _ in 0..untargeted_count {
+                let _ = log.append_egress(routed_notice("untargeted"), &[]);
+            }
+            let _ = log.append_egress(
+                routed_notice("target"),
+                &[tau_core::SharedDeliveryTarget::new(
+                    log.group(),
+                    consumers[0],
+                )],
+            );
+            log.reset_work();
+            let started = Instant::now();
+            let pending = log.next_egress(consumers[0]).expect("target");
+            let elapsed = started.elapsed();
+            assert_eq!(pending.seq.0, untargeted_count);
+            let (work, notifications) = log.work();
+            assert_eq!(work.scan_position_visits, untargeted_count + 1);
+            assert_eq!(work.prune_calls, 1);
+            assert_eq!(work.prune_consumer_visits, consumer_count);
+            assert_eq!(work.observe_calls, 1);
+            assert_eq!(notifications, 1);
+            eprintln!(
+                "sparse EventLog scan: U={untargeted_count} C={consumer_count} \
+                 position_visits={} consumer_visits={} observations={} elapsed={elapsed:?}",
+                work.scan_position_visits, work.prune_consumer_visits, work.observe_calls
+            );
+        }
+    }
+}
+
 proptest! {
     /// Random connect, publish, advance, and retirement traces must agree with a
     /// small single-consumer cursor model after every observable transition.
@@ -424,6 +712,99 @@ proptest! {
                 );
             } else {
                 prop_assert!(inner.consumers.is_empty());
+            }
+        }
+    }
+
+    /// Random two-consumer live publication, delivery, and replay-pause traces
+    /// must preserve independent cursors, target visibility, and minimum-cursor
+    /// retention after every transition.
+    #[test]
+    fn randomized_multi_consumer_live_replay_matches_reference_model(
+        actions in prop::collection::vec(0_u8..8, 1..192)
+    ) {
+        let log = EventLog::new();
+        let consumers = [log.register_consumer(), log.register_consumer()];
+        let group = log.group();
+        let mut tail = 0_u64;
+        let mut cursors = [0_u64; 2];
+        let mut paused = [false; 2];
+        let mut target_masks = Vec::<u8>::new();
+
+        for action in actions {
+            match action {
+                mask @ 0..=3 => {
+                    let targets = consumers
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| mask & (1 << index) != 0)
+                        .map(|(_, consumer)| {
+                            tau_core::SharedDeliveryTarget::new(group, *consumer)
+                        })
+                        .collect::<Vec<_>>();
+                    let _ = log.append_egress(routed_notice("model"), &targets);
+                    target_masks.push(mask);
+                    tail = tail.saturating_add(1);
+                }
+                deliver @ 4..=5 => {
+                    let index = usize::from(deliver - 4);
+                    if !paused[index]
+                        && let Some(expected) = target_masks
+                            .iter()
+                            .enumerate()
+                            .skip(usize::try_from(cursors[index]).expect("cursor fits usize"))
+                            .find_map(|(seq, mask)| {
+                                (mask & (1 << index) != 0)
+                                    .then(|| u64::try_from(seq).expect("sequence fits u64"))
+                            })
+                    {
+                        let pending = log
+                            .next_egress(consumers[index])
+                            .expect("modeled target");
+                        prop_assert_eq!(pending.seq.0, expected);
+                        log.acknowledge_egress(consumers[index], &pending);
+                        cursors[index] = expected.saturating_add(1);
+                    }
+                }
+                toggle @ 6..=7 => {
+                    let index = usize::from(toggle - 6);
+                    paused[index] = !paused[index];
+                    log.set_catch_up_paused(consumers[index], paused[index]);
+                }
+                _ => unreachable!("action strategy is bounded"),
+            }
+
+            let inner = log.inner.lock().expect("model snapshot");
+            let first = cursors.into_iter().min().expect("two cursors");
+            prop_assert_eq!(inner.next_egress_seq.0, tail);
+            prop_assert_eq!(
+                inner.retained.front().map(|position| position.seq.0),
+                (first < tail).then_some(first)
+            );
+            prop_assert_eq!(
+                inner.retained.len(),
+                usize::try_from(tail.saturating_sub(first)).expect("retained length fits usize")
+            );
+            for (index, consumer) in consumers.iter().enumerate() {
+                let state = inner.consumers.get(consumer).expect("modeled consumer");
+                prop_assert_eq!(state.cursor.0, cursors[index]);
+                prop_assert_eq!(state.catch_up_paused, paused[index]);
+            }
+            for position in &inner.retained {
+                let expected_pending = consumers
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| {
+                        target_masks
+                            [usize::try_from(position.seq.0).expect("sequence fits usize")]
+                            & (1 << index)
+                            != 0
+                            && cursors[*index] <= position.seq.0
+                    })
+                    .map(|(_, consumer)| *consumer)
+                    .collect::<HashSet<_>>();
+                prop_assert_eq!(&position.pending_targets, &expected_pending);
+                prop_assert_eq!(position.payload.is_some(), !expected_pending.is_empty());
             }
         }
     }

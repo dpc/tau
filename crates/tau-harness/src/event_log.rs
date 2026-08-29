@@ -85,6 +85,28 @@ struct EventLogInner {
     /// publication.
     #[cfg(test)]
     force_delivery_memory: bool,
+    /// Test-only exact work counters for complexity regression oracles.
+    #[cfg(test)]
+    work: EventLogWork,
+}
+
+/// Exact test-only operation counts for event-log hot paths.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct EventLogWork {
+    /// Calls that recompute and prune the retained prefix.
+    prune_calls: u64,
+    /// Consumer cursors inspected while finding retained-prefix minima.
+    prune_consumer_visits: u64,
+    /// Calls that inspect the optional delivery-memory observation seam.
+    observe_calls: u64,
+    /// Logical positions inspected while searching for a consumer's next
+    /// target.
+    scan_position_visits: u64,
+    /// Waits entered while replay catch-up held a consumer cursor.
+    catch_up_waits: u64,
+    /// Waits entered after a consumer reached the current live tail.
+    tail_waits: u64,
 }
 
 /// Enabled-only estimates and high-water aggregates for the live suffix.
@@ -173,6 +195,12 @@ pub(crate) struct EventLog {
     inner: Mutex<EventLogInner>,
     /// Wakeup for append, cursor advancement, retirement, and catch-up release.
     changed: Condvar,
+    /// Test-only count of condition-variable broadcasts.
+    #[cfg(test)]
+    notifications: AtomicU64,
+    /// Test-only wakeup when a follower enters a blocking wait.
+    #[cfg(test)]
+    waiter_entered: Condvar,
 }
 
 /// Allocates process-local stream identities without exposing pointer values.
@@ -196,8 +224,14 @@ impl EventLog {
                 delivery_memory: None,
                 #[cfg(test)]
                 force_delivery_memory: false,
+                #[cfg(test)]
+                work: EventLogWork::default(),
             }),
             changed: Condvar::new(),
+            #[cfg(test)]
+            notifications: AtomicU64::new(0),
+            #[cfg(test)]
+            waiter_entered: Condvar::new(),
         })
     }
 
@@ -252,12 +286,19 @@ impl EventLog {
         });
         Self::prune_locked(&mut inner);
         Self::observe_delivery_memory_locked(&mut inner);
-        drop(inner);
-        self.changed.notify_all();
+        self.notify_changed(inner);
         admitted
     }
 
-    /// Waits for the next targeted frame, skipping non-target positions.
+    /// Follows this consumer to its next target, close boundary, or live tail.
+    ///
+    /// The scan stops before the first targeted position so successful delivery
+    /// acknowledgement remains the only operation that advances past and
+    /// releases that target. Reaching a captured close boundary retires the
+    /// consumer immediately; reaching the current tail waits for later work.
+    /// Each non-empty skipped batch updates the cursor once, then prunes and
+    /// observes memory once. Every such transition releases the mutex before
+    /// broadcasting its one state-change notification.
     pub(crate) fn next_egress(
         &self,
         consumer: tau_core::SharedConsumerId,
@@ -267,11 +308,15 @@ impl EventLog {
             let state = *inner.consumers.get(&consumer)?;
             if state.close_after == Some(state.cursor) {
                 Self::retire_consumer_locked(&mut inner, consumer);
-                drop(inner);
-                self.changed.notify_all();
+                self.notify_changed(inner);
                 return None;
             }
             if state.catch_up_paused {
+                #[cfg(test)]
+                {
+                    inner.work.catch_up_waits = inner.work.catch_up_waits.saturating_add(1);
+                    self.waiter_entered.notify_all();
+                }
                 inner = self
                     .changed
                     .wait(inner)
@@ -279,6 +324,11 @@ impl EventLog {
                 continue;
             }
             if state.cursor == inner.next_egress_seq {
+                #[cfg(test)]
+                {
+                    inner.work.tail_waits = inner.work.tail_waits.saturating_add(1);
+                    self.waiter_entered.notify_all();
+                }
                 inner = self
                     .changed
                     .wait(inner)
@@ -293,33 +343,69 @@ impl EventLog {
                 // Prefix pruning cannot pass an active cursor.
                 unreachable!("active live cursor fell behind retained prefix");
             }
-            let index = usize::try_from(state.cursor.distance_from(first))
+            let start_index = usize::try_from(state.cursor.distance_from(first))
                 .expect("egress index fits usize");
-            let entry = inner
+            let boundary = state
+                .close_after
+                .map_or(inner.next_egress_seq, |close_after| {
+                    close_after.min(inner.next_egress_seq)
+                });
+            let scan_len = usize::try_from(boundary.distance_from(state.cursor))
+                .expect("scan length fits usize");
+            let next_target = inner
                 .retained
-                .get(index)
-                .expect("cursor before tail must name a retained entry");
-            if entry.pending_targets.contains(&consumer) {
-                let pending = PendingEgress {
-                    seq: entry.seq,
-                    frame: Arc::clone(
-                        entry
-                            .payload
-                            .as_ref()
-                            .expect("pending target must retain its shared payload"),
-                    ),
-                };
+                .iter()
+                .skip(start_index)
+                .take(scan_len)
+                .enumerate()
+                .find(|(_, entry)| entry.pending_targets.contains(&consumer))
+                .map(|(offset, entry)| {
+                    (
+                        offset,
+                        entry.seq,
+                        Arc::clone(
+                            entry
+                                .payload
+                                .as_ref()
+                                .expect("pending target must retain its shared payload"),
+                        ),
+                    )
+                });
+            #[cfg(test)]
+            {
+                let position_visits = next_target
+                    .as_ref()
+                    .map_or(scan_len, |(offset, _, _)| offset.saturating_add(1));
+                inner.work.scan_position_visits = inner
+                    .work
+                    .scan_position_visits
+                    .saturating_add(u64::try_from(position_visits).expect("scan length fits u64"));
+            }
+            let next_cursor = next_target
+                .as_ref()
+                .map_or(boundary, |(_, position, _)| *position);
+            if next_cursor == state.cursor {
+                let (_, seq, frame) = next_target.expect("current position is a target");
                 Self::observe_delivery_memory_locked(&mut inner);
-                return Some(pending);
+                return Some(PendingEgress { seq, frame });
             }
             inner
                 .consumers
                 .get_mut(&consumer)
                 .expect("consumer remains registered")
-                .cursor = state.cursor.next();
+                .cursor = next_cursor;
+            if state.close_after == Some(next_cursor) {
+                Self::retire_consumer_locked(&mut inner, consumer);
+                self.notify_changed(inner);
+                return None;
+            }
             Self::prune_locked(&mut inner);
             Self::observe_delivery_memory_locked(&mut inner);
-            self.changed.notify_all();
+            self.notify_changed(inner);
+            if let Some((_, seq, frame)) = next_target {
+                return Some(PendingEgress { seq, frame });
+            }
+            inner = self.inner.lock().expect("event log mutex poisoned");
         }
     }
 
@@ -357,8 +443,7 @@ impl EventLog {
             Self::prune_locked(&mut inner);
         }
         Self::observe_delivery_memory_locked(&mut inner);
-        drop(inner);
-        self.changed.notify_all();
+        self.notify_changed(inner);
     }
 
     /// Retires a generation unless terminal close ownership has been
@@ -375,16 +460,14 @@ impl EventLog {
         {
             Self::retire_consumer_locked(&mut inner, consumer);
         }
-        drop(inner);
-        self.changed.notify_all();
+        self.notify_changed(inner);
     }
 
     /// Retires a generation after its writer finishes or fails transport I/O.
     pub(crate) fn retire_consumer_after_io(&self, consumer: tau_core::SharedConsumerId) {
         let mut inner = self.inner.lock().expect("event log mutex poisoned");
         Self::retire_consumer_locked(&mut inner, consumer);
-        drop(inner);
-        self.changed.notify_all();
+        self.notify_changed(inner);
     }
 
     /// Captures the current tail and asks the consumer to retire after reaching
@@ -399,8 +482,7 @@ impl EventLog {
             state.close_after = Some(close_after);
             state.catch_up_paused = false;
         }
-        drop(inner);
-        self.changed.notify_all();
+        self.notify_changed(inner);
     }
 
     /// Waits at most `timeout` for a consumer generation to retire.
@@ -427,8 +509,7 @@ impl EventLog {
         if let Some(state) = inner.consumers.get_mut(&consumer) {
             state.catch_up_paused = paused;
         }
-        drop(inner);
-        self.changed.notify_all();
+        self.notify_changed(inner);
     }
 
     /// Captures the current tail and waits until the consumer reaches it or
@@ -471,6 +552,14 @@ impl EventLog {
 
     /// Prunes every prefix position inspected by all active generations.
     fn prune_locked(inner: &mut EventLogInner) {
+        #[cfg(test)]
+        {
+            inner.work.prune_calls = inner.work.prune_calls.saturating_add(1);
+            inner.work.prune_consumer_visits = inner
+                .work
+                .prune_consumer_visits
+                .saturating_add(u64::try_from(inner.consumers.len()).expect("count fits u64"));
+        }
         let min_cursor = inner
             .consumers
             .values()
@@ -502,6 +591,10 @@ impl EventLog {
     /// Recursively measures the canonical shared live suffix behind its
     /// explicit trace guard and emits no payload or process-local identity.
     fn observe_delivery_memory_locked(inner: &mut EventLogInner) {
+        #[cfg(test)]
+        {
+            inner.work.observe_calls = inner.work.observe_calls.saturating_add(1);
+        }
         let tracing_enabled = tracing::enabled!(
             target: "tau_harness::delivery_memory",
             tracing::Level::TRACE
@@ -608,6 +701,52 @@ impl EventLog {
             .lock()
             .expect("event log mutex poisoned")
             .force_delivery_memory = true;
+    }
+
+    /// Unlocks one completed state transition before broadcasting it.
+    fn notify_changed(&self, inner: std::sync::MutexGuard<'_, EventLogInner>) {
+        drop(inner);
+        #[cfg(test)]
+        self.notifications.fetch_add(1, Ordering::Relaxed);
+        self.changed.notify_all();
+    }
+
+    /// Resets exact operation counts for one focused complexity observation.
+    #[cfg(test)]
+    fn reset_work(&self) {
+        self.inner.lock().expect("event log mutex poisoned").work = EventLogWork::default();
+        self.notifications.store(0, Ordering::Relaxed);
+    }
+
+    /// Returns exact operation counts and broadcasts since the last reset.
+    #[cfg(test)]
+    fn work(&self) -> (EventLogWork, u64) {
+        (
+            self.inner.lock().expect("event log mutex poisoned").work,
+            self.notifications.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Waits until a follower has entered the requested replay-pause wait.
+    #[cfg(test)]
+    fn wait_for_catch_up_wait(&self, count: u64, timeout: Duration) -> bool {
+        let inner = self.inner.lock().expect("event log mutex poisoned");
+        let (inner, _) = self
+            .waiter_entered
+            .wait_timeout_while(inner, timeout, |inner| inner.work.catch_up_waits < count)
+            .expect("event log mutex poisoned while observing catch-up wait");
+        inner.work.catch_up_waits >= count
+    }
+
+    /// Waits until a follower has entered the requested live-tail wait.
+    #[cfg(test)]
+    fn wait_for_tail_wait(&self, count: u64, timeout: Duration) -> bool {
+        let inner = self.inner.lock().expect("event log mutex poisoned");
+        let (inner, _) = self
+            .waiter_entered
+            .wait_timeout_while(inner, timeout, |inner| inner.work.tail_waits < count)
+            .expect("event log mutex poisoned while observing tail wait");
+        inner.work.tail_waits >= count
     }
 
     /// Reserves the next harness runtime event-log sequence.
