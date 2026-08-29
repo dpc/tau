@@ -9,7 +9,7 @@ use std::os::unix as path_std_os_unix;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command as path_std_process_Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{collections as path_std_collections, fs as path_std_fs, thread};
 
@@ -1854,20 +1854,29 @@ fn rewrite_finished_response_tool_call_items_preserves_provider_replay_sidecars(
     assert_eq!(call.responses_envelope, Some(responses_envelope));
 }
 
+/// Receives the next harness event after exposing the causal wait cut to a
+/// test.
+fn recv_next_harness_event_after(h: &Harness, before_wait: impl FnOnce()) -> HarnessEvent {
+    before_wait();
+    h.expand_component_ingress_wake(
+        h.runtime_io
+            .rx
+            .recv()
+            .expect("harness event channel should remain connected"),
+    )
+}
+
+/// Receives the next harness event without imposing a scheduler-sensitive
+/// wall-clock deadline on its producer.
+fn recv_next_harness_event(h: &Harness) -> HarnessEvent {
+    recv_next_harness_event_after(h, || {})
+}
+
 /// Pumps the harness event loop until the named tool call's result
-/// or error is received and handled. Panics on timeout.
+/// or error is received and handled.
 fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
-    let started = Instant::now();
     loop {
-        if started.elapsed() >= Duration::from_secs(3) {
-            panic!("timed out waiting for {target_call_id} to complete");
-        }
-        let event = h.expand_component_ingress_wake(
-            h.runtime_io
-                .rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("tool result should arrive"),
-        );
+        let event = recv_next_harness_event(h);
         match event {
             HarnessEvent::FromConnection {
                 connection_id,
@@ -1909,20 +1918,11 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
 }
 
 fn drive_harness_until_tool_turn_empty(h: &mut Harness) {
-    let started = Instant::now();
     loop {
         if h.tool_routing.tool_runtime.tool_turn.is_empty() {
             return;
         }
-        if started.elapsed() >= Duration::from_secs(3) {
-            panic!("timed out waiting for tool turn to empty");
-        }
-        let event = h.expand_component_ingress_wake(
-            h.runtime_io
-                .rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("tool result should arrive"),
-        );
+        let event = recv_next_harness_event(h);
         match event {
             HarnessEvent::FromConnection {
                 connection_id,
@@ -1945,6 +1945,48 @@ fn drive_harness_until_tool_turn_empty(h: &mut Harness) {
             HarnessEvent::Command(command) => h.handle_harness_command(command).expect("handle"),
         }
     }
+}
+
+/// A harness helper must await causally delayed ingress rather than declaring a
+/// timeout while a runnable producer is descheduled under host contention.
+#[test]
+fn tool_result_driver_waits_for_causally_released_ingress() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let tx = h.runtime_io.tx.clone();
+    let (producer_ready_tx, producer_ready_rx) = mpsc::sync_channel(0);
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    let delayed_connection = crate::test_connection_id("causally-delayed");
+    let sent_connection = delayed_connection.clone();
+    let producer = thread::spawn(move || {
+        producer_ready_tx
+            .send(())
+            .expect("report producer parked at the causal cut");
+        release_rx
+            .recv()
+            .expect("test should release the parked producer");
+        tx.send(HarnessEvent::Disconnected {
+            connection_id: sent_connection,
+        })
+        .expect("send causally delayed ingress");
+    });
+
+    producer_ready_rx
+        .recv()
+        .expect("producer should reach the causal cut");
+    let event = recv_next_harness_event_after(&h, || {
+        release_tx
+            .send(())
+            .expect("release producer only once the helper begins its wait");
+    });
+    assert!(matches!(
+        event,
+        HarnessEvent::Disconnected { connection_id }
+            if connection_id == delayed_connection
+    ));
+
+    producer.join().expect("delayed producer");
+    h.shutdown().expect("shutdown");
 }
 
 fn wait_for_session_unlock(state_dir: &Path, session_id: &str) {
