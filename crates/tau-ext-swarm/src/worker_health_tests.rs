@@ -51,14 +51,15 @@ fn retirement_serializes_with_complete_mutation_authority() {
 #[test]
 fn panic_unwind_retires_worker_health() {
     let health = WorkerHealth::running();
-    let result = std::panic::catch_unwind(|| {
-        let _terminal = health.terminal_guard();
+    let task_health = health.clone();
+    let worker = std::thread::spawn(move || {
+        let _terminal = task_health.terminal_guard();
         panic!("forced worker panic");
     });
 
     assert!(
-        result.is_err(),
-        "test panic must unwind through terminal guard"
+        worker.join().is_err(),
+        "worker panic must be contained by its owned thread"
     );
     assert!(!health.is_running());
     assert!(health.mutation_authority().is_err());

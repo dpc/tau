@@ -9,3 +9,8 @@ codegen-backend = "cranelift"
 
 [profile.dev.package."*"]
 codegen-backend = "llvm"
+
+# Cranelift aborts instead of unwinding test panics, so use LLVM where the
+# Swarm worker-retirement regression must observe guard drop after a panic.
+[profile.test]
+codegen-backend = "llvm"
