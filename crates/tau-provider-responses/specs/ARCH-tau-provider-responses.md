@@ -87,6 +87,16 @@ bytes, SSE comments, WebSocket ping/pong/control frames, status and usage,
 empty allocations/deltas, unknown events, and duplicate semantic state do not
 qualify. Cancellation remains cooperative throughout every bounded wait.
 
+The adapter emits one internal dispatch observation only after pre-dispatch
+work succeeds: immediately before SSE first polls its request send, or
+immediately before WebSocket enqueues `response.create` after connection and
+upgrade. Build, runtime, capture, connection, upgrade, and canceled or failed
+pre-dispatch exits emit none. The built-in extension uses this observation to
+re-anchor its existing transient response-stat clocks and immutable
+first-semantic-output duration under
+[`SPEC-provider-response-streaming`](../../../specs/SPEC-provider-response-streaming.md);
+it adds no event field or response semantics.
+
 Every request also lowers the harness-selected effective reasoning effort as
 `reasoning.effort`. The public API spells Tau's `off` as `none`; the remaining
 canonical levels (`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`) pass

@@ -12,8 +12,9 @@ use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{self, Message};
 
 use super::{
-    AttemptConfig, AttemptModel, AttemptProgress, CANCELLATION_POLL_INTERVAL, DebugCapture, Error,
-    MAX_EVENT_BYTES, MAX_RESPONSE_BYTES, RequestBody, State, deadlines, read_capped_error_body,
+    AttemptConfig, AttemptModel, AttemptProgress, AttemptUpdate, CANCELLATION_POLL_INTERVAL,
+    DebugCapture, Error, MAX_EVENT_BYTES, MAX_RESPONSE_BYTES, RequestBody, State, deadlines,
+    read_capped_error_body,
 };
 
 /// Runs one fresh-socket WebSocket attempt.
@@ -30,7 +31,7 @@ pub(super) async fn stream(
     model: &AttemptModel,
     body: &RequestBody,
     debug_capture: DebugCapture,
-    on_update: &mut impl FnMut(AttemptProgress),
+    on_update: &mut impl FnMut(AttemptUpdate),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<State, (Error, AttemptProgress)> {
@@ -134,6 +135,10 @@ pub(super) async fn stream(
         return Err((Error::Canceled, State::default().progress()));
     }
     debug_capture.submit_wire_request(prompt, config, model, &envelope);
+    if is_canceled() {
+        return Err((Error::Canceled, State::default().progress()));
+    }
+    on_update(AttemptUpdate::Dispatched(Instant::now()));
     send_bounded(
         &mut socket,
         Message::Text(serialized.into()),
@@ -178,7 +183,7 @@ pub(super) async fn stream(
                 let qualifying_progress = state
                     .apply_event(text.as_ref())
                     .map_err(|error| (error, state.progress()))?;
-                on_update(state.progress());
+                on_update(AttemptUpdate::Progress(state.progress()));
                 if qualifying_progress {
                     deadlines.renew_for_qualifying_progress(Instant::now());
                 }

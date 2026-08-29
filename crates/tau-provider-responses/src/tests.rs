@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -2077,6 +2077,107 @@ fn websocket_provider_error_message_escapes_unsafe_detail_without_redaction() {
     );
 }
 
+/// SSE marks dispatch once before the fake server can receive request bytes, so
+/// local request construction and capture work cannot enter semantic latency.
+#[test]
+fn sse_dispatch_callback_precedes_request_bytes_and_runs_once() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE server");
+    let address = listener.local_addr().expect("SSE server address");
+    listener
+        .set_nonblocking(true)
+        .expect("set nonblocking fake server");
+    let (callback_started_tx, callback_started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let client_count = Arc::clone(&callback_count);
+    let client = std::thread::spawn(move || {
+        run_attempt_with_debug(
+            &minimal_prompt(),
+            &AttemptConfig {
+                base_url: format!("http://{address}"),
+                api_key: String::new(),
+                max_output_tokens: 0,
+                transport: Transport::Sse,
+                prompt_cache: None,
+            },
+            &AttemptModel {
+                id: ModelName::new("test-model"),
+            },
+            false,
+            &mut |update| {
+                if matches!(update, AttemptUpdate::Dispatched(_)) {
+                    client_count.fetch_add(1, Ordering::SeqCst);
+                    callback_started_tx
+                        .send(())
+                        .expect("notify fake server of dispatch");
+                    release_rx
+                        .recv_timeout(Duration::from_secs(3))
+                        .expect("release request send");
+                }
+            },
+            &mut || false,
+            &test_network(),
+        )
+    });
+    callback_started_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("dispatch callback must run before request polling");
+    assert_eq!(
+        listener
+            .accept()
+            .expect_err("SSE peer must not receive a connection before callback release")
+            .kind(),
+        ErrorKind::WouldBlock
+    );
+    release_tx.send(()).expect("release request send");
+    listener
+        .set_nonblocking(false)
+        .expect("restore blocking fake server");
+    let (mut socket, _) = listener.accept().expect("accept released SSE request");
+    let _ = read_http_request(&mut socket);
+    drop(socket);
+    let outcome = client.join().expect("join SSE client");
+    assert!(matches!(outcome, AttemptOutcome::Retryable { .. }));
+    assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+}
+
+/// Cancellation raised by SSE request capture must win at the final pre-send
+/// check, leaving no dispatch observation.
+#[test]
+fn sse_capture_cancellation_skips_final_dispatch_observation() {
+    let canceled = Arc::new(AtomicBool::new(false));
+    let capture_canceled = Arc::clone(&canceled);
+    let capture = DebugCapture::with_test_sink(
+        true,
+        Arc::new(move |_| capture_canceled.store(true, Ordering::SeqCst)),
+    );
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&callback_count);
+    let outcome = run_attempt_with_capture_and_updates(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: "http://example.invalid".to_owned(),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        capture,
+        &mut |update| {
+            if matches!(update, AttemptUpdate::Dispatched(_)) {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        },
+        &mut || canceled.load(Ordering::SeqCst),
+        &test_network(),
+    );
+    assert!(matches!(outcome, AttemptOutcome::Canceled { .. }));
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+}
+
 /// WebSocket mode must negotiate `/responses`, send the public
 /// `response.create` envelope without SSE-only fields, and consume the ordinary
 /// Responses event stream without falling back to HTTP/SSE.
@@ -2170,6 +2271,133 @@ fn websocket_attempt_uses_response_create_protocol() {
         captures[1].class(),
         tau_provider::debug_capture_writer::ProviderDebugCaptureClass::WebsocketResponse
     );
+}
+
+/// WebSocket connection and upgrade work remain before dispatch, while exactly
+/// one callback runs before the fake peer can read `response.create`.
+#[test]
+fn websocket_dispatch_callback_precedes_response_create_and_runs_once() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind WebSocket server");
+    let address = listener.local_addr().expect("WebSocket server address");
+    let (callback_started_tx, callback_started_rx) = mpsc::channel();
+    let (peer_checked_tx, peer_checked_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let socket = accept_websocket_peer(&listener);
+        let mut socket = tungstenite::accept(socket).expect("upgrade WebSocket");
+        callback_started_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("dispatch callback must run after upgrade");
+        socket
+            .get_mut()
+            .set_nonblocking(true)
+            .expect("set nonblocking frame read");
+        assert!(
+            socket.read().is_err(),
+            "response.create must wait for dispatch callback release"
+        );
+        peer_checked_tx
+            .send(())
+            .expect("report pre-enqueue frame check");
+        socket
+            .get_mut()
+            .set_nonblocking(false)
+            .expect("restore blocking frame read");
+        let Message::Text(_) = socket.read().expect("read response.create") else {
+            panic!("request must use a text response.create frame");
+        };
+    });
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let client_count = Arc::clone(&callback_count);
+    let client = std::thread::spawn(move || {
+        run_attempt_with_debug(
+            &minimal_prompt(),
+            &AttemptConfig {
+                base_url: format!("http://{address}"),
+                api_key: String::new(),
+                max_output_tokens: 0,
+                transport: Transport::Websocket,
+                prompt_cache: None,
+            },
+            &AttemptModel {
+                id: ModelName::new("test-model"),
+            },
+            false,
+            &mut |update| {
+                if matches!(update, AttemptUpdate::Dispatched(_)) {
+                    client_count.fetch_add(1, Ordering::SeqCst);
+                    callback_started_tx
+                        .send(())
+                        .expect("notify fake server of dispatch");
+                    release_rx
+                        .recv_timeout(Duration::from_secs(3))
+                        .expect("release response.create");
+                }
+            },
+            &mut || false,
+            &test_network(),
+        )
+    });
+    peer_checked_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("fake server must observe callback-held response.create");
+    release_tx.send(()).expect("release response.create");
+    let outcome = client.join().expect("join WebSocket client");
+    join_websocket_peer(server);
+    assert!(matches!(outcome, AttemptOutcome::Retryable { .. }));
+    assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+}
+
+/// Cancellation raised by WebSocket request capture must win after upgrade but
+/// before `response.create`, without inventing a dispatch observation or frame.
+#[test]
+fn websocket_capture_cancellation_skips_final_dispatch_observation() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind WebSocket server");
+    let address = listener.local_addr().expect("WebSocket server address");
+    let server = std::thread::spawn(move || {
+        let socket = accept_websocket_peer(&listener);
+        let mut socket = tungstenite::accept(socket).expect("upgrade WebSocket");
+        socket
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("set bounded frame read");
+        assert!(
+            socket.read().is_err(),
+            "canceled response.create must not reach the peer"
+        );
+    });
+    let canceled = Arc::new(AtomicBool::new(false));
+    let capture_canceled = Arc::clone(&canceled);
+    let capture = DebugCapture::with_test_sink(
+        true,
+        Arc::new(move |_| capture_canceled.store(true, Ordering::SeqCst)),
+    );
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&callback_count);
+    let outcome = run_attempt_with_capture_and_updates(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Websocket,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        capture,
+        &mut |update| {
+            if matches!(update, AttemptUpdate::Dispatched(_)) {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        },
+        &mut || canceled.load(Ordering::SeqCst),
+        &test_network(),
+    );
+    join_websocket_peer(server);
+    assert!(matches!(outcome, AttemptOutcome::Canceled { .. }));
+    assert_eq!(callback_count.load(Ordering::SeqCst), 0);
 }
 
 /// A rejected WebSocket upgrade must remain on the selected transport and

@@ -10,8 +10,8 @@ pub(super) const RESPONSE_UPDATE_INTERVAL: std::time::Duration =
 
 /// Prompt-local cadence and append-delta state for public transient events.
 pub(super) struct ResponsesResponseSampler {
-    /// Attempt start used for elapsed response stats.
-    pub(super) started_at: std::time::Instant,
+    /// Dispatch-origin clock used for elapsed response stats.
+    pub(super) dispatch_origin: std::time::Instant,
     /// Last successfully written transient sample.
     pub(super) last_emitted_at: Option<std::time::Instant>,
     /// Stats baseline from the last successfully written sample.
@@ -33,8 +33,13 @@ pub(super) struct ResponsesResponseSampler {
 
 impl ResponsesResponseSampler {
     pub(super) fn new() -> Self {
+        Self::new_at(path_std_time::Instant::now())
+    }
+
+    /// Construct a sampler at an explicit clock instant.
+    pub(super) fn new_at(dispatch_origin: std::time::Instant) -> Self {
         Self {
-            started_at: path_std_time::Instant::now(),
+            dispatch_origin,
             last_emitted_at: None,
             last_sample: Default::default(),
             emitted_non_empty: false,
@@ -43,6 +48,14 @@ impl ResponsesResponseSampler {
             latest_bytes: 0,
             emitted_text: BTreeMap::new(),
             emitted_reasoning: BTreeMap::new(),
+        }
+    }
+
+    /// Re-anchor sampling and first-semantic timing at the finite backend
+    /// request's actual send or frame-enqueue boundary.
+    pub(super) fn mark_dispatched(&mut self, dispatched_at: std::time::Instant) {
+        if self.last_emitted_at.is_none() {
+            self.dispatch_origin = dispatched_at;
         }
     }
 
@@ -69,8 +82,19 @@ impl ResponsesResponseSampler {
     fn observe_progress(&mut self, now: std::time::Instant, has_timed_semantic_output: bool) {
         if self.first_semantic_output_elapsed.is_none() && has_timed_semantic_output {
             self.first_semantic_output_elapsed =
-                Some(now.saturating_duration_since(self.started_at));
+                Some(now.saturating_duration_since(self.dispatch_origin));
         }
+    }
+
+    /// Observe semantic state at an explicit instant for deterministic timing
+    /// tests without a wall-clock sleep.
+    #[cfg(test)]
+    pub(super) fn observe_progress_at(
+        &mut self,
+        now: std::time::Instant,
+        has_timed_semantic_output: bool,
+    ) {
+        self.observe_progress(now, has_timed_semantic_output);
     }
 
     pub(super) fn flush<S: ProviderReportSink>(
@@ -93,7 +117,7 @@ impl ResponsesResponseSampler {
         let current = tau_proto::ProviderResponseStatsSample {
             response_bytes_received: self.latest_bytes,
             elapsed_micros: now
-                .saturating_duration_since(self.started_at)
+                .saturating_duration_since(self.dispatch_origin)
                 .as_micros()
                 .min(u128::from(u64::MAX)) as u64,
         };
@@ -139,7 +163,7 @@ impl ResponsesResponseSampler {
         terminal
             || !self.emitted_non_empty && 0 < bytes
             || self.last_emitted_at.map_or(
-                now.saturating_duration_since(self.started_at) >= RESPONSE_UPDATE_INTERVAL,
+                now.saturating_duration_since(self.dispatch_origin) >= RESPONSE_UPDATE_INTERVAL,
                 |last| now.saturating_duration_since(last) >= RESPONSE_UPDATE_INTERVAL,
             )
     }

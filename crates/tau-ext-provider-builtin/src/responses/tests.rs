@@ -91,6 +91,53 @@ fn standalone_summary_progress_is_stats_only() {
     );
 }
 
+/// Public Responses excludes arbitrary local lowering time and includes only
+/// post-send semantic latency for both ordinary and standalone sampling.
+#[test]
+fn dispatch_reanchors_semantic_timing_without_changing_update_schema() {
+    let attempt_started = path_std_time::Instant::now();
+    let dispatched_at = attempt_started + path_std_time::Duration::from_secs(91);
+    let semantic_at = dispatched_at + path_std_time::Duration::from_millis(17);
+
+    for operation in [
+        tau_proto::PromptOperation::Inference,
+        tau_proto::PromptOperation::StandaloneCompaction,
+    ] {
+        let mut prompt = crate::openai_tests::prompt();
+        prompt.operation = operation;
+        let mut sampler = ResponsesResponseSampler::new_at(attempt_started);
+        sampler.mark_dispatched(dispatched_at);
+        sampler.observe_progress_at(semantic_at, true);
+        sampler.latest_bytes = 1;
+
+        let mut bytes = Vec::new();
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        sampler.emit_at(
+            &prompt.agent_prompt_id,
+            &prompt,
+            &mut writer,
+            semantic_at,
+            true,
+        );
+
+        let mut reader =
+            tau_proto::HarnessInputReader::new(path_std_io::BufReader::new(bytes.as_slice()));
+        let message = reader
+            .read_message()
+            .expect("decode response update")
+            .expect("one response update");
+        let tau_proto::HarnessInputMessage::Emit(emit) = message else {
+            panic!("sampler must emit a transient event");
+        };
+        let tau_proto::Event::ProviderResponseUpdatedReported(update) = *emit.event else {
+            panic!("sampler must retain the existing response-update event");
+        };
+        let stats = update.response_stats.expect("existing stats payload");
+        assert_eq!(stats.current.elapsed_micros, 17_000);
+        assert_eq!(stats.first_semantic_output_elapsed_micros, Some(17_000));
+    }
+}
+
 fn summary_config() -> SummaryCompactionConfig {
     SummaryCompactionConfig::new(
         NonZeroU64::new(128_000).expect("positive"),

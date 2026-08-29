@@ -264,6 +264,19 @@ pub struct AttemptProgress {
     pub has_timed_semantic_output: bool,
 }
 
+/// One synchronous observation from a finite public Responses attempt.
+pub enum AttemptUpdate {
+    /// The selected transport is about to poll its first request send or
+    /// enqueue its `response.create` frame.
+    ///
+    /// This occurs exactly once after all pre-dispatch work succeeds, and does
+    /// not occur when an attempt exits before that boundary.
+    Dispatched(Instant),
+    /// Accepted parser state changed or response transport progress was
+    /// observed.
+    Progress(AttemptProgress),
+}
+
 /// Result of one finite attempt.
 #[derive(Debug)]
 pub enum AttemptOutcome {
@@ -438,7 +451,11 @@ pub fn run_attempt(
         config,
         model,
         false,
-        on_update,
+        &mut |update| {
+            if let AttemptUpdate::Progress(progress) = update {
+                on_update(progress);
+            }
+        },
         is_canceled,
         network,
     )
@@ -446,17 +463,22 @@ pub fn run_attempt(
 
 /// Run one cancellable full-transcript public Responses attempt with private
 /// debug capture controlled by the extension's durable-session policy.
+///
+/// `on_update` receives an exact-once `AttemptUpdate::Dispatched` observation
+/// immediately before the selected transport starts its first request send or
+/// `response.create` frame enqueue. Pre-dispatch exits emit no dispatch
+/// observation.
 #[allow(clippy::too_many_arguments)]
 pub fn run_attempt_with_debug(
     prompt: &tau_proto::AgentPromptCreated,
     config: &AttemptConfig,
     model: &AttemptModel,
     debug_provider_requests: bool,
-    on_update: &mut impl FnMut(AttemptProgress),
+    on_update: &mut impl FnMut(AttemptUpdate),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
-    run_attempt_with_capture(
+    run_attempt_with_capture_and_updates(
         prompt,
         config,
         model,
@@ -476,6 +498,7 @@ fn debug_capture_enabled(
 }
 
 /// Run an attempt with already-selected capture policy and sink.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn run_attempt_with_capture(
     prompt: &tau_proto::AgentPromptCreated,
@@ -483,6 +506,32 @@ fn run_attempt_with_capture(
     model: &AttemptModel,
     debug_capture: DebugCapture,
     on_update: &mut impl FnMut(AttemptProgress),
+    is_canceled: &mut impl FnMut() -> bool,
+    network: &tau_provider::OutboundNetworkPolicy,
+) -> AttemptOutcome {
+    run_attempt_with_capture_and_updates(
+        prompt,
+        config,
+        model,
+        debug_capture,
+        &mut |update| {
+            if let AttemptUpdate::Progress(progress) = update {
+                on_update(progress);
+            }
+        },
+        is_canceled,
+        network,
+    )
+}
+
+/// Run an attempt with selected capture policy and synchronous observations.
+#[allow(clippy::too_many_arguments)]
+fn run_attempt_with_capture_and_updates(
+    prompt: &tau_proto::AgentPromptCreated,
+    config: &AttemptConfig,
+    model: &AttemptModel,
+    debug_capture: DebugCapture,
+    on_update: &mut impl FnMut(AttemptUpdate),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
@@ -1606,7 +1655,7 @@ async fn stream(
     model: &AttemptModel,
     body: &RequestBody,
     debug_capture: DebugCapture,
-    on_update: &mut impl FnMut(AttemptProgress),
+    on_update: &mut impl FnMut(AttemptUpdate),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<State, (Error, AttemptProgress)> {
@@ -1647,7 +1696,7 @@ async fn stream_sse(
     model: &AttemptModel,
     body: &RequestBody,
     debug_capture: DebugCapture,
-    on_update: &mut impl FnMut(AttemptProgress),
+    on_update: &mut impl FnMut(AttemptUpdate),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> Result<State, (Error, AttemptProgress)> {
@@ -1669,8 +1718,12 @@ async fn stream_sse(
         return Err((Error::Canceled, State::default().progress()));
     }
     debug_capture.submit_request(prompt, config, model, body);
+    if is_canceled() {
+        return Err((Error::Canceled, State::default().progress()));
+    }
     let header_deadline = Instant::now() + deadlines::REQUEST_CONNECT_HEADER_TIMEOUT;
     let mut send = Box::pin(request.send());
+    on_update(AttemptUpdate::Dispatched(Instant::now()));
     let response = loop {
         tokio::select! {
             response = &mut send => break response.map_err(|error| {
@@ -1763,7 +1816,7 @@ async fn stream_sse(
                     return Ok(SseLineControl::Break);
                 }
                 let qualifying_progress = state.apply_event(data)?;
-                on_update(state.progress());
+                on_update(AttemptUpdate::Progress(state.progress()));
                 if qualifying_progress {
                     deadlines.renew_for_qualifying_progress(Instant::now());
                 }

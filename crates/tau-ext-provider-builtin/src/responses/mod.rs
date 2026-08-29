@@ -325,7 +325,14 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                 &config,
                 &model,
                 debug_provider_requests,
-                &mut |progress| sampler.emit_if_due(agent_prompt_id, prompt, progress, writer),
+                &mut |update| match update {
+                    tau_provider_responses::AttemptUpdate::Dispatched(dispatched_at) => {
+                        sampler.mark_dispatched(dispatched_at);
+                    }
+                    tau_provider_responses::AttemptUpdate::Progress(progress) => {
+                        sampler.emit_if_due(agent_prompt_id, prompt, progress, writer);
+                    }
+                },
                 is_canceled,
                 network,
             )
