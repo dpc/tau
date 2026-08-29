@@ -6,6 +6,14 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    /// Number of requested loop-guard progress resets on this test thread.
+    static LOOP_GUARD_PROGRESS_RESET_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// Runtime-only ownership and coordination state for tool calls in the active
 /// session.
 ///
@@ -1258,12 +1266,27 @@ impl Harness {
     }
 
     pub(super) fn reset_loop_guard_for_progress(&mut self, cid: &AgentId) {
+        #[cfg(test)]
+        LOOP_GUARD_PROGRESS_RESET_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+
         if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             conv.execution.loop_guard.reset_for_progress();
             conv.dispatch
                 .pending_prompts
                 .retain(|prompt| !prompt.is_loop_guard());
         }
+    }
+
+    /// Resets the test-thread count of requested loop-guard progress resets.
+    #[cfg(test)]
+    pub(super) fn reset_loop_guard_progress_reset_count_for_test(&self) {
+        LOOP_GUARD_PROGRESS_RESET_COUNT.with(|count| count.set(0));
+    }
+
+    /// Returns requested loop-guard progress resets on the current test thread.
+    #[cfg(test)]
+    pub(super) fn loop_guard_progress_reset_count_for_test(&self) -> usize {
+        LOOP_GUARD_PROGRESS_RESET_COUNT.with(|count| count.get())
     }
 
     pub(super) fn record_loop_signature(

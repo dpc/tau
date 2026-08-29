@@ -69,7 +69,7 @@ impl Harness {
         agent_id: &AgentId,
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
-        self.publish_pending_prompt_for_agent_inner(agent_id, prompt.into(), None)
+        self.publish_pending_prompt_for_agent_inner(agent_id, prompt.into(), None, true)
     }
 
     fn publish_pending_prompt_for_agent_inner(
@@ -77,11 +77,12 @@ impl Harness {
         agent_id: &AgentId,
         prompt: PendingPrompt,
         prompt_acceptance: Option<prompt_acceptance_timing::PromptAcceptanceTiming>,
+        reset_loop_guard_for_progress: bool,
     ) -> Result<(), HarnessError> {
         let mut prompt = prompt;
         self.ensure_prompt_activation_observed(agent_id, &mut prompt);
         self.promote_lifecycle_notification_turn(agent_id);
-        if !prompt.is_internal() {
+        if reset_loop_guard_for_progress && !prompt.is_internal() {
             self.reset_loop_guard_for_progress(agent_id);
         }
         let target_agent_id: tau_proto::AgentId =
@@ -305,13 +306,19 @@ impl Harness {
                     agent_id,
                     prompt,
                     prompt_acceptance.take(),
+                    false,
                 )?;
                 self.dispatch_activation_after_publish_idle(agent_id);
                 return Ok(());
             }
         }
 
-        self.publish_pending_prompt_for_agent_inner(agent_id, prompt, prompt_acceptance.take())?;
+        self.publish_pending_prompt_for_agent_inner(
+            agent_id,
+            prompt,
+            prompt_acceptance.take(),
+            false,
+        )?;
         // If the publish parked in interception (or queued behind one
         // that is), defer the agent dispatch until this user-prompt
         // event actually commits. If it committed inline, the helper

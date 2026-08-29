@@ -616,9 +616,11 @@ fn loop_guard_resets_when_user_prompt_is_published() {
     h.record_assistant_loop_signature(&cid, Some(text));
     h.record_assistant_loop_signature(&cid, Some(text));
 
+    h.reset_loop_guard_progress_reset_count_for_test();
     h.publish_pending_prompt_for_agent(&cid, PendingPrompt::user("new direction".to_owned()))
         .expect("publish user prompt");
 
+    assert_eq!(h.loop_guard_progress_reset_count_for_test(), 1);
     let conv = h
         .agent_runtime
         .agent_registry
@@ -632,6 +634,48 @@ fn loop_guard_resets_when_user_prompt_is_published() {
             .iter()
             .any(PendingPrompt::is_loop_guard)
     );
+}
+
+/// Ordinary dispatch owns one progress reset before it reaches publication, so
+/// publication must not scan and retain the pending queue a second time.
+#[test]
+fn loop_guard_ordinary_dispatch_resets_once_before_publication() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .pending_prompts
+        .push_back(PendingPrompt::loop_guard("stale pivot".to_owned()));
+
+    h.reset_loop_guard_progress_reset_count_for_test();
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("new direction".to_owned()))
+        .expect("dispatch user prompt");
+
+    assert_eq!(h.loop_guard_progress_reset_count_for_test(), 1);
+    let conv = h
+        .agent_runtime
+        .agent_registry
+        .agents
+        .get(&cid)
+        .expect("agent");
+    assert!(
+        !conv
+            .dispatch
+            .pending_prompts
+            .iter()
+            .any(PendingPrompt::is_loop_guard),
+        "the single reset must retain the old pivot-removal outcome"
+    );
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted) if submitted.text == "new direction"
+    )));
 }
 
 #[test]
@@ -699,6 +743,7 @@ fn loop_guard_resets_when_user_prompt_is_queued() {
         Some("I will keep trying the same plan without taking any tool action or making progress."),
     );
 
+    h.reset_loop_guard_progress_reset_count_for_test();
     let submission = h
         .submit_prompt_to_agent(
             h.session_runtime.current_session_id.clone(),
@@ -708,6 +753,7 @@ fn loop_guard_resets_when_user_prompt_is_queued() {
         .expect("submit prompt");
 
     assert_eq!(submission, PromptSubmission::Queued);
+    assert_eq!(h.loop_guard_progress_reset_count_for_test(), 1);
     let conv = h
         .agent_runtime
         .agent_registry
@@ -764,6 +810,88 @@ fn loop_guard_queued_user_prompt_removes_pending_breaker() {
             .iter()
             .any(PendingPrompt::is_loop_guard)
     );
+}
+
+/// Passive completion and restore notices form an extra publication batch, but
+/// the outer ordinary prompt still performs exactly one reset before either
+/// notice can publish.
+#[test]
+fn loop_guard_passive_restore_extra_batch_resets_once() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .pending_prompts
+        .extend([
+            PendingPrompt::loop_guard("stale pivot".to_owned()),
+            PendingPrompt::passive_background_completion("passive completion".to_owned()),
+        ]);
+    h.prompt_coordination
+        .pending_notices
+        .restore_sessions
+        .insert(h.session_runtime.current_session_id.clone(), None);
+
+    h.reset_loop_guard_progress_reset_count_for_test();
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("new direction".to_owned()))
+        .expect("dispatch user prompt with notices");
+
+    assert_eq!(h.loop_guard_progress_reset_count_for_test(), 1);
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.text == "passive completion"
+                && submitted.internal_kind
+                    == Some(tau_proto::InternalPromptKind::BackgroundToolCompletion)
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.message_class == tau_proto::PromptMessageClass::Internal
+                && submitted.text.contains("state of the world")
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted) if submitted.text == "new direction"
+    )));
+    assert!(
+        h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .pending_prompts
+            .iter()
+            .all(|prompt| !prompt.is_loop_guard()),
+        "the batch must retain the reset's stale-pivot removal"
+    );
+}
+
+/// Rejected dispatches must not reset a terminating agent before any
+/// publication work begins.
+#[test]
+fn loop_guard_rejected_dispatch_does_not_reset_before_publication() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.agent_runtime
+        .agent_registry
+        .agents
+        .get_mut(&cid)
+        .expect("agent")
+        .dispatch
+        .terminating = true;
+
+    h.reset_loop_guard_progress_reset_count_for_test();
+    assert!(
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("new direction".to_owned()))
+            .is_err()
+    );
+
+    assert_eq!(h.loop_guard_progress_reset_count_for_test(), 0);
 }
 
 /// Folding an ordinary queued user prompt removes a stale loop-guard pivot from
