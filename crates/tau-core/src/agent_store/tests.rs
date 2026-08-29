@@ -256,6 +256,142 @@ fn memory_only_store_never_touches_durable_root() {
     assert!(!agents_dir.join(agent_id.as_str()).exists());
 }
 
+/// Prompt previews retain the legacy normalized text for empty, boundary, and
+/// Unicode inputs while avoiding a full scan after the retained prefix.
+#[test]
+fn preview_text_matches_legacy_normalization_for_varied_unicode() {
+    fn reference_preview_text(text: &str, max: usize) -> String {
+        let single_line: String = text
+            .chars()
+            .map(|character| if character == '\n' { ' ' } else { character })
+            .collect();
+        if single_line.chars().count() < max + 1 {
+            single_line
+        } else {
+            format!("{}…", single_line.chars().take(max).collect::<String>())
+        }
+    }
+
+    let arbitrary_unicode: String = (0..=char::MAX as u32)
+        .step_by(7_919)
+        .filter_map(char::from_u32)
+        .collect();
+    let inputs = [
+        String::new(),
+        "short prompt".to_owned(),
+        "x".repeat(48),
+        "x".repeat(49),
+        "first\nsecond\r\nthird".to_owned(),
+        "e\u{301}".repeat(24),
+        arbitrary_unicode,
+    ];
+    for max in [0, 1, 47, 48, 49] {
+        for text in &inputs {
+            assert_eq!(
+                preview_text(text, max),
+                reference_preview_text(text, max),
+                "max={max}, input={text:?}"
+            );
+        }
+    }
+}
+
+/// A multi-megabyte prompt must inspect only the retained prefix plus the
+/// scalar that decides whether the preview needs an ellipsis.
+#[test]
+fn preview_text_stops_after_retained_prefix() {
+    const MAX: usize = 48;
+    let text = "雪\n".repeat(2 * 1024 * 1024);
+    let mut inspected = 0;
+    let preview = preview_text_from_chars(
+        text.chars().inspect(|_| {
+            inspected += 1;
+        }),
+        MAX,
+    );
+
+    assert_eq!(inspected, MAX + 1);
+    assert_eq!(preview, format!("{}…", "雪 ".repeat(MAX / 2)));
+}
+
+/// A live ephemeral append and a same-daemon refold of its retained events
+/// preserve the identical newline-normalized Unicode prompt preview.
+#[test]
+fn ephemeral_prompt_preview_matches_live_and_refolded_metadata() {
+    let agent_id = AgentId::parse("preview-agent").expect("agent id");
+    let event = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        inference_activation: false,
+        agent_id: agent_id.clone(),
+        text: format!("{}\n{}", "雪".repeat(47), "ignored"),
+        trusted_internal_spans: Vec::new(),
+        message_class: tau_proto::PromptMessageClass::User,
+        internal_kind: None,
+        originator: tau_proto::PromptOriginator::User,
+        submission_source: Default::default(),
+        display_name: None,
+        ctx_id: None,
+    });
+    let mut store = AgentStore::open_memory_only("/unused/ephemeral-agents");
+    store
+        .append_agent_event(agent_id.as_str(), None, started_event(&agent_id))
+        .expect("ephemeral creation");
+    store
+        .append_agent_event(agent_id.as_str(), None, event)
+        .expect("ephemeral prompt");
+    let live = store
+        .agent_meta(agent_id.as_str())
+        .expect("ephemeral metadata")
+        .expect("ephemeral metadata exists");
+    let mut replayed = AgentMeta::default();
+
+    for record in store
+        .agent_events(agent_id.as_str())
+        .expect("retained events")
+    {
+        touch_ephemeral_meta_for_event(
+            &mut replayed,
+            &record.event,
+            record.recorded_at.get() / 1_000_000,
+        );
+    }
+
+    assert_eq!(
+        live.latest_user_prompt_preview,
+        replayed.latest_user_prompt_preview
+    );
+    let expected = format!("{} …", "雪".repeat(47));
+    assert_eq!(
+        live.latest_user_prompt_preview.as_deref(),
+        Some(expected.as_str())
+    );
+}
+
+/// Manual work and output benchmark documents that preview storage remains
+/// bounded by 48 retained scalars rather than by the source prompt size.
+#[test]
+#[ignore = "manual prompt preview work/output benchmark"]
+fn benchmark_preview_text_work_and_output() {
+    const MAX: usize = 48;
+    println!("input_bytes,inspected_scalars,output_bytes,output_capacity");
+    for input_bytes in [48, 1024 * 1024, 8 * 1024 * 1024] {
+        let text = "x".repeat(input_bytes);
+        let mut inspected = 0;
+        let preview = preview_text_from_chars(
+            text.chars().inspect(|_| {
+                inspected += 1;
+            }),
+            MAX,
+        );
+        assert!(inspected <= MAX + 1);
+        assert!(preview.chars().count() <= MAX + 1);
+        println!(
+            "{input_bytes},{inspected},{},{}",
+            preview.len(),
+            preview.capacity()
+        );
+    }
+}
+
 /// Returns the CBOR payload size of the representative oversized agent record.
 fn encoded_record_length(text_len: usize, seq: u64) -> usize {
     let agent_id = AgentId::parse("agent-1").expect("agent id");

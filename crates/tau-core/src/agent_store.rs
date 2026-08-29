@@ -2200,14 +2200,16 @@ fn user_prompt_text(event: &Event) -> Option<&str> {
 }
 
 fn preview_text(text: &str, max: usize) -> String {
-    let single_line: String = text
-        .chars()
-        .map(|c| if c == '\n' { ' ' } else { c })
-        .collect();
-    if single_line.chars().count() < max + 1 {
-        single_line
+    preview_text_from_chars(text.chars(), max)
+}
+
+fn preview_text_from_chars(chars: impl Iterator<Item = char>, max: usize) -> String {
+    let mut chars = chars.map(|character| if character == '\n' { ' ' } else { character });
+    let preview = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{preview}…")
     } else {
-        format!("{}…", single_line.chars().take(max).collect::<String>())
+        preview
     }
 }
 
