@@ -34,16 +34,57 @@ impl Harness {
             .output_items
             .iter()
             .any(|item| matches!(item, ContextItem::ToolCall(_)));
-        if self.discard_finished_response_if_canceled(&response.agent_prompt_id) {
+        if self
+            .prompt_coordination
+            .canceled_prompts
+            .contains(&response.agent_prompt_id)
+        {
+            let cid = self
+                .agent_id_for_prompt(&response.agent_prompt_id)
+                .or_else(|| {
+                    self.prompt_coordination
+                        .standalone_accounting
+                        .owners
+                        .get(&response.agent_prompt_id)
+                        .map(|owner| owner.cid.clone())
+                });
+            if let Some(cid) = cid
+                && self
+                    .prompt_coordination
+                    .standalone_accounting
+                    .owners
+                    .contains_key(&response.agent_prompt_id)
+            {
+                self.assign_finished_response_agent_id(&cid, &mut response);
+                self.account_early_standalone_terminal(&cid, &mut response, source);
+            }
+            self.discard_finished_response_if_canceled(&response.agent_prompt_id);
             return Ok(());
         }
 
-        let Some(cid) = self.agent_id_for_prompt(&response.agent_prompt_id) else {
+        let Some(cid) = self
+            .agent_id_for_prompt(&response.agent_prompt_id)
+            .or_else(|| {
+                self.prompt_coordination
+                    .standalone_accounting
+                    .owners
+                    .get(&response.agent_prompt_id)
+                    .map(|owner| owner.cid.clone())
+            })
+        else {
             self.emit_duplicate_finished_response_notice(&response.agent_prompt_id);
             return Ok(());
         };
         if !self.assign_finished_response_agent_id(&cid, &mut response) {
-            return Ok(());
+            let Some(owner) = self
+                .prompt_coordination
+                .standalone_accounting
+                .owners
+                .get(&response.agent_prompt_id)
+            else {
+                return Ok(());
+            };
+            response.agent_id = owner.agent_id.clone();
         }
         let active_compaction_response = self
             .agent_runtime
@@ -60,8 +101,17 @@ impl Harness {
                 )
             });
         if !active_compaction_response
-            && self.discard_finished_response_if_stale(&cid, &response, source)
+            && self.is_finished_response_stale(&cid, &response.agent_prompt_id)
         {
+            if self
+                .prompt_coordination
+                .standalone_accounting
+                .owners
+                .contains_key(&response.agent_prompt_id)
+            {
+                self.account_early_standalone_terminal(&cid, &mut response, source);
+            }
+            self.discard_finished_response_if_stale(&cid, &response, source);
             return Ok(());
         }
         // A tool-bearing response cannot acquire a second foreground round in
@@ -69,6 +119,11 @@ impl Harness {
         // telemetry or mutating usage, alerts, provider-watch state, or watcher
         // journals: rejected provider work must have no semantic side effects.
         let standalone_compaction = active_compaction_response
+            || self
+                .prompt_coordination
+                .standalone_accounting
+                .owners
+                .contains_key(&response.agent_prompt_id)
             || self
                 .prompt_coordination
                 .prompt_runtime
@@ -94,6 +149,7 @@ impl Harness {
             );
             response.output_items.clear();
             if standalone_compaction {
+                self.account_early_standalone_terminal(&cid, &mut response, source);
                 self.prompt_coordination
                     .compaction_runtime
                     .silent_failure_prompts
@@ -146,6 +202,7 @@ impl Harness {
         if active_compaction_response
             && !self.standalone_compaction_response_matches_current_branch(&cid, &response)
         {
+            self.account_early_standalone_terminal(&cid, &mut response, source);
             self.fail_standalone_compaction(
                 &cid,
                 &response,
@@ -196,26 +253,35 @@ impl Harness {
             .usage
             .as_ref()
             .map(|usage| usage.response_received_tokens);
-        let terminal_attempt = self
-            .target_agent_id_for_agent(&cid)
-            .and_then(|agent_id| {
-                self.agent_runtime
-                    .agent_watch
-                    .provider_status
-                    .get(&agent_id)
-            })
-            .filter(|status| status.agent_prompt_id == response.agent_prompt_id)
-            .and_then(|status| match status.state {
-                tau_proto::AgentWatchProviderState::Retrying { attempt, .. }
-                | tau_proto::AgentWatchProviderState::RecoveringContext { attempt }
-                | tau_proto::AgentWatchProviderState::TerminalError { attempt, .. }
-                | tau_proto::AgentWatchProviderState::TerminalIncomplete { attempt, .. } => {
-                    Some(attempt)
-                }
-                tau_proto::AgentWatchProviderState::Blocked { .. }
-                | tau_proto::AgentWatchProviderState::DispatchUncertain { .. } => None,
-            })
-            .map_or(1, |attempt| attempt.saturating_add(1));
+        let terminal_attempt = if standalone_compaction {
+            self.prompt_coordination
+                .standalone_accounting
+                .highest_retry_attempt
+                .get(&response.agent_prompt_id)
+                .copied()
+                .unwrap_or_default()
+                + 1
+        } else {
+            self.target_agent_id_for_agent(&cid)
+                .and_then(|agent_id| {
+                    self.agent_runtime
+                        .agent_watch
+                        .provider_status
+                        .get(&agent_id)
+                })
+                .filter(|status| status.agent_prompt_id == response.agent_prompt_id)
+                .and_then(|status| match status.state {
+                    tau_proto::AgentWatchProviderState::Retrying { attempt, .. }
+                    | tau_proto::AgentWatchProviderState::RecoveringContext { attempt }
+                    | tau_proto::AgentWatchProviderState::TerminalError { attempt, .. }
+                    | tau_proto::AgentWatchProviderState::TerminalIncomplete { attempt, .. } => {
+                        Some(attempt)
+                    }
+                    tau_proto::AgentWatchProviderState::Blocked { .. }
+                    | tau_proto::AgentWatchProviderState::DispatchUncertain { .. } => None,
+                })
+                .map_or(1, |attempt| attempt.saturating_add(1))
+        };
         response.provider_attempt = tau_proto::ProviderAttempt::new(terminal_attempt)
             .expect("terminal attempt is one-based");
         let terminal_model = self
@@ -338,8 +404,22 @@ impl Harness {
             input_tokens,
             cached_tokens,
             output_tokens,
+            !standalone_compaction,
         );
-        self.add_finished_response_estimated_cost(&cid, &mut response, source);
+        self.add_finished_response_estimated_cost(
+            &cid,
+            &mut response,
+            source,
+            !standalone_compaction,
+        );
+        if standalone_compaction {
+            self.publish_standalone_execution_accounting(
+                &cid,
+                &response,
+                standalone_success,
+                source,
+            );
+        }
         let prompt_operation = self
             .prompt_coordination
             .prompt_runtime
@@ -818,6 +898,48 @@ impl Harness {
         Ok(())
     }
 
+    /// Normalize and publish billing for a dispatched terminal rejected before
+    /// the ordinary standalone terminal reducer.
+    fn account_early_standalone_terminal(
+        &mut self,
+        cid: &AgentId,
+        response: &mut ProviderResponseFinished,
+        source: Option<&tau_proto::ConnectionId>,
+    ) {
+        let terminal_attempt = self
+            .prompt_coordination
+            .standalone_accounting
+            .highest_retry_attempt
+            .get(&response.agent_prompt_id)
+            .copied()
+            .unwrap_or_default()
+            + 1;
+        response.provider_attempt = tau_proto::ProviderAttempt::new(terminal_attempt)
+            .expect("standalone terminal attempt is one-based");
+        normalize_finished_response_cached_usage(response);
+        let input_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.prompt_sent_tokens);
+        let cached_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.prompt_cached_tokens);
+        let output_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.response_received_tokens);
+        self.attach_finished_response_usage(
+            response,
+            input_tokens,
+            cached_tokens,
+            output_tokens,
+            false,
+        );
+        self.add_finished_response_estimated_cost(cid, response, source, false);
+        self.publish_standalone_execution_accounting(cid, response, false, source);
+    }
+
     /// Captures immutable, content-free native context-limit evidence
     /// immediately before provider dispatch.
     pub(super) fn prompt_context_limit_snapshot(
@@ -1103,8 +1225,14 @@ impl Harness {
             .usage
             .as_ref()
             .map(|usage| usage.response_received_tokens);
-        self.attach_finished_response_usage(response, input_tokens, cached_tokens, output_tokens);
-        self.add_finished_response_estimated_cost(cid, response, source.as_ref());
+        self.attach_finished_response_usage(
+            response,
+            input_tokens,
+            cached_tokens,
+            output_tokens,
+            true,
+        );
+        self.add_finished_response_estimated_cost(cid, response, source.as_ref(), true);
         self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid)
             && agent.dispatch.in_flight_prompt.as_ref() == Some(&response.agent_prompt_id)
@@ -2519,6 +2647,7 @@ impl Harness {
         input_tokens: Option<u64>,
         cached_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        update_live_totals: bool,
     ) {
         let reported_cache_read_ceiling = response
             .usage
@@ -2570,14 +2699,16 @@ impl Harness {
                     "discarding invalid provider cache-read ceiling"
                 );
             }
-            self.session_runtime
-                .current_session_state
-                .token_usage
-                .add_sent(model, sent_tokens, cached_tokens);
-            self.session_runtime
-                .current_session_state
-                .token_usage
-                .add_received(model, received_tokens);
+            if update_live_totals {
+                self.session_runtime
+                    .current_session_state
+                    .token_usage
+                    .add_sent(model, sent_tokens, cached_tokens);
+                self.session_runtime
+                    .current_session_state
+                    .token_usage
+                    .add_received(model, received_tokens);
+            }
             response.usage = Some(ProviderTokenUsage {
                 model: Some(model.clone()),
                 prompt_sent_tokens: sent_tokens,
@@ -2599,6 +2730,7 @@ impl Harness {
         cid: &AgentId,
         response: &mut ProviderResponseFinished,
         source: Option<&tau_proto::ConnectionId>,
+        update_live_totals: bool,
     ) {
         let captured_rates = self
             .prompt_coordination
@@ -2611,20 +2743,490 @@ impl Harness {
             self.emit_agent_stats_updated_from(cid, source);
             return;
         };
-        let rates = captured_rates.unwrap_or_else(|| {
-            tracing::warn!(
-                target: "tau_harness",
-                agent_prompt_id = %response.agent_prompt_id,
-                model = ?usage.model,
-                "accepted provider response has no dispatch pricing snapshot; \
-                 using estimated API cost fallback"
-            );
-            tau_proto::ESTIMATED_API_COST_FALLBACK
-        });
+        let rates = captured_rates
+            .or_else(|| {
+                self.prompt_coordination
+                    .standalone_accounting
+                    .owners
+                    .get(&response.agent_prompt_id)
+                    .map(|owner| owner.estimated_cost_rates)
+            })
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    target: "tau_harness",
+                    agent_prompt_id = %response.agent_prompt_id,
+                    model = ?usage.model,
+                    "accepted provider response has no dispatch pricing snapshot; \
+                     using estimated API cost fallback"
+                );
+                tau_proto::ESTIMATED_API_COST_FALLBACK
+            });
         let increment = tau_proto::EstimatedApiCost::for_usage(usage, rates);
         response.estimated_api_cost_rates = Some(rates);
         response.estimated_api_cost_increment = Some(increment);
-        self.add_estimated_cost_increment(cid, increment, source);
+        if update_live_totals {
+            self.add_estimated_cost_increment(cid, increment, source);
+        }
+    }
+
+    /// Publish canonical accounting independently from the standalone outcome.
+    pub(super) fn publish_standalone_execution_accounting(
+        &mut self,
+        _cid: &AgentId,
+        response: &ProviderResponseFinished,
+        accepted: bool,
+        _source: Option<&tau_proto::ConnectionId>,
+    ) {
+        let Some(owner) = self
+            .prompt_coordination
+            .standalone_accounting
+            .owners
+            .get(&response.agent_prompt_id)
+            .cloned()
+        else {
+            tracing::error!(
+                target: "tau_harness",
+                agent_prompt_id = %response.agent_prompt_id,
+                "standalone backend terminal has no accounting owner"
+            );
+            return;
+        };
+        let identity = (response.agent_prompt_id.clone(), response.provider_attempt);
+        if self
+            .prompt_coordination
+            .standalone_accounting
+            .awaiting_corrections
+            .get(&response.agent_prompt_id)
+            == Some(&response.provider_attempt)
+        {
+            self.publish_standalone_execution_accounting_correction(&owner, response);
+            return;
+        }
+        if !self
+            .prompt_coordination
+            .standalone_accounting
+            .observed_attempts
+            .insert(identity.clone())
+        {
+            return;
+        }
+        let key = (
+            identity.0.clone(),
+            identity.1,
+            StandaloneAccountingPublicationPhase::Initial,
+        );
+        let usage = response.usage.clone().map_or(
+            tau_proto::StandaloneExecutionUsage::Unknown,
+            tau_proto::StandaloneExecutionUsage::Known,
+        );
+        self.publish_event_for_agent_with_completion(
+            &owner.cid,
+            Some(crate::harness::harness_connection_id()),
+            Event::ProviderStandaloneExecutionAccounted(
+                tau_proto::ProviderStandaloneExecutionAccounted {
+                    session_id: owner.session_id,
+                    agent_id: owner.agent_id,
+                    agent_prompt_id: response.agent_prompt_id.clone(),
+                    logical_attempt: response.provider_attempt,
+                    transaction_id: owner.transaction_id,
+                    model: owner.model,
+                    backend: response.backend.clone(),
+                    usage,
+                    estimated_api_cost_rates: Some(owner.estimated_cost_rates),
+                    estimated_api_cost_increment: response.estimated_api_cost_increment,
+                    output: if accepted {
+                        tau_proto::StandaloneExecutionOutput::Accepted
+                    } else {
+                        tau_proto::StandaloneExecutionOutput::Rejected
+                    },
+                    finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
+                },
+            ),
+            Some(AgentPublishCompletion::StandaloneExecutionAccounting {
+                key,
+                owned_publication: None,
+            }),
+            false,
+        );
+        self.prompt_coordination
+            .standalone_accounting
+            .owners
+            .remove(&response.agent_prompt_id);
+    }
+
+    /// Publish the request-counting unknown observation before an independent
+    /// post-dispatch cancellation outcome.
+    pub(super) fn publish_awaiting_cancelled_standalone_accounting(
+        &mut self,
+        agent_prompt_id: &AgentPromptId,
+    ) {
+        let Some(owner) = self
+            .prompt_coordination
+            .standalone_accounting
+            .owners
+            .get(agent_prompt_id)
+            .cloned()
+        else {
+            return;
+        };
+        let attempt = self
+            .prompt_coordination
+            .standalone_accounting
+            .highest_retry_attempt
+            .get(agent_prompt_id)
+            .copied()
+            .unwrap_or_default()
+            + 1;
+        let logical_attempt =
+            tau_proto::ProviderAttempt::new(attempt).expect("bounded attempt is nonzero");
+        let identity = (agent_prompt_id.clone(), logical_attempt);
+        if !self
+            .prompt_coordination
+            .standalone_accounting
+            .observed_attempts
+            .insert(identity.clone())
+        {
+            return;
+        }
+        self.prompt_coordination
+            .standalone_accounting
+            .awaiting_corrections
+            .insert(agent_prompt_id.clone(), logical_attempt);
+        self.publish_event_for_agent_with_completion(
+            &owner.cid,
+            Some(crate::harness::harness_connection_id()),
+            Event::ProviderStandaloneExecutionAccounted(
+                tau_proto::ProviderStandaloneExecutionAccounted {
+                    session_id: owner.session_id,
+                    agent_id: owner.agent_id,
+                    agent_prompt_id: agent_prompt_id.clone(),
+                    logical_attempt,
+                    transaction_id: owner.transaction_id,
+                    model: owner.model,
+                    backend: None,
+                    usage: tau_proto::StandaloneExecutionUsage::Unknown,
+                    estimated_api_cost_rates: Some(owner.estimated_cost_rates),
+                    estimated_api_cost_increment: None,
+                    output: tau_proto::StandaloneExecutionOutput::Rejected,
+                    finality:
+                        tau_proto::StandaloneExecutionAccountingFinality::AwaitingCancelledTerminal,
+                },
+            ),
+            Some(AgentPublishCompletion::StandaloneExecutionAccounting {
+                key: (
+                    identity.0,
+                    identity.1,
+                    StandaloneAccountingPublicationPhase::Initial,
+                ),
+                owned_publication: None,
+            }),
+            false,
+        );
+    }
+
+    /// Close a dispatched attempt as final Unknown when its provider generation
+    /// can no longer supply a correction.
+    pub(super) fn publish_final_unknown_standalone_accounting(
+        &mut self,
+        agent_prompt_id: &AgentPromptId,
+    ) {
+        let Some(owner) = self
+            .prompt_coordination
+            .standalone_accounting
+            .owners
+            .get(agent_prompt_id)
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(logical_attempt) = self
+            .prompt_coordination
+            .standalone_accounting
+            .awaiting_corrections
+            .remove(agent_prompt_id)
+        {
+            let identity = (agent_prompt_id.clone(), logical_attempt);
+            if !self
+                .prompt_coordination
+                .standalone_accounting
+                .observed_corrections
+                .insert(identity.clone())
+            {
+                return;
+            }
+            let corrected = tau_proto::ProviderStandaloneExecutionAccountingCorrected {
+                session_id: owner.session_id.clone(),
+                agent_id: owner.agent_id.clone(),
+                agent_prompt_id: agent_prompt_id.clone(),
+                logical_attempt,
+                transaction_id: owner.transaction_id.clone(),
+                model: owner.model.clone(),
+                backend: None,
+                usage: tau_proto::StandaloneExecutionUsage::Unknown,
+                estimated_api_cost_rates: Some(owner.estimated_cost_rates),
+                estimated_api_cost_increment: None,
+                output: tau_proto::StandaloneExecutionOutput::Rejected,
+            };
+            self.prompt_coordination
+                .standalone_accounting
+                .owners
+                .remove(agent_prompt_id);
+            if self
+                .prompt_coordination
+                .standalone_accounting
+                .folded
+                .get(&identity)
+                == Some(&FoldedStandaloneAccountingPhase::AwaitingCorrection)
+            {
+                self.publish_standalone_execution_accounting_correction_event(
+                    &owner.cid, corrected,
+                );
+            } else {
+                self.prompt_coordination
+                    .standalone_accounting
+                    .pending_corrections
+                    .insert(
+                        identity,
+                        PendingStandaloneAccountingCorrection {
+                            cid: owner.cid,
+                            corrected,
+                        },
+                    );
+            }
+            return;
+        }
+        let attempt = self
+            .prompt_coordination
+            .standalone_accounting
+            .highest_retry_attempt
+            .get(agent_prompt_id)
+            .copied()
+            .unwrap_or_default()
+            + 1;
+        let logical_attempt =
+            tau_proto::ProviderAttempt::new(attempt).expect("bounded attempt is nonzero");
+        let identity = (agent_prompt_id.clone(), logical_attempt);
+        if !self
+            .prompt_coordination
+            .standalone_accounting
+            .observed_attempts
+            .insert(identity.clone())
+        {
+            return;
+        }
+        self.prompt_coordination
+            .standalone_accounting
+            .owners
+            .remove(agent_prompt_id);
+        self.publish_event_for_agent_with_completion(
+            &owner.cid,
+            Some(crate::harness::harness_connection_id()),
+            Event::ProviderStandaloneExecutionAccounted(
+                tau_proto::ProviderStandaloneExecutionAccounted {
+                    session_id: owner.session_id,
+                    agent_id: owner.agent_id,
+                    agent_prompt_id: agent_prompt_id.clone(),
+                    logical_attempt,
+                    transaction_id: owner.transaction_id,
+                    model: owner.model,
+                    backend: None,
+                    usage: tau_proto::StandaloneExecutionUsage::Unknown,
+                    estimated_api_cost_rates: Some(owner.estimated_cost_rates),
+                    estimated_api_cost_increment: None,
+                    output: tau_proto::StandaloneExecutionOutput::Rejected,
+                    finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
+                },
+            ),
+            Some(AgentPublishCompletion::StandaloneExecutionAccounting {
+                key: (
+                    identity.0,
+                    identity.1,
+                    StandaloneAccountingPublicationPhase::Initial,
+                ),
+                owned_publication: None,
+            }),
+            false,
+        );
+    }
+
+    /// Queue the sole final correction for a cancellation-time observation.
+    fn publish_standalone_execution_accounting_correction(
+        &mut self,
+        owner: &StandaloneExecutionAccountingOwner,
+        response: &ProviderResponseFinished,
+    ) {
+        let identity = (response.agent_prompt_id.clone(), response.provider_attempt);
+        if !self
+            .prompt_coordination
+            .standalone_accounting
+            .observed_corrections
+            .insert(identity.clone())
+        {
+            return;
+        }
+        let corrected = tau_proto::ProviderStandaloneExecutionAccountingCorrected {
+            session_id: owner.session_id.clone(),
+            agent_id: owner.agent_id.clone(),
+            agent_prompt_id: response.agent_prompt_id.clone(),
+            logical_attempt: response.provider_attempt,
+            transaction_id: owner.transaction_id.clone(),
+            model: owner.model.clone(),
+            backend: response.backend.clone(),
+            usage: response.usage.clone().map_or(
+                tau_proto::StandaloneExecutionUsage::Unknown,
+                tau_proto::StandaloneExecutionUsage::Known,
+            ),
+            estimated_api_cost_rates: Some(owner.estimated_cost_rates),
+            estimated_api_cost_increment: response.estimated_api_cost_increment,
+            output: tau_proto::StandaloneExecutionOutput::Rejected,
+        };
+        self.prompt_coordination
+            .standalone_accounting
+            .owners
+            .remove(&response.agent_prompt_id);
+        if self
+            .prompt_coordination
+            .standalone_accounting
+            .folded
+            .get(&identity)
+            != Some(&FoldedStandaloneAccountingPhase::AwaitingCorrection)
+        {
+            self.prompt_coordination
+                .standalone_accounting
+                .pending_corrections
+                .insert(
+                    identity,
+                    PendingStandaloneAccountingCorrection {
+                        cid: owner.cid.clone(),
+                        corrected,
+                    },
+                );
+            return;
+        }
+        self.publish_standalone_execution_accounting_correction_event(&owner.cid, corrected);
+    }
+
+    /// Publish a correction whose required initial observation already
+    /// committed.
+    pub(super) fn publish_standalone_execution_accounting_correction_event(
+        &mut self,
+        cid: &AgentId,
+        corrected: tau_proto::ProviderStandaloneExecutionAccountingCorrected,
+    ) {
+        let key = (
+            corrected.agent_prompt_id.clone(),
+            corrected.logical_attempt,
+            StandaloneAccountingPublicationPhase::Correction,
+        );
+        self.publish_event_for_agent_with_completion(
+            cid,
+            Some(crate::harness::harness_connection_id()),
+            Event::ProviderStandaloneExecutionAccountingCorrected(corrected),
+            Some(AgentPublishCompletion::StandaloneExecutionAccounting {
+                key,
+                owned_publication: None,
+            }),
+            false,
+        );
+    }
+
+    /// Publish explicit unknown usage for a completed retry attempt.
+    pub(super) fn publish_unknown_standalone_retry_accounting(
+        &mut self,
+        _cid: &AgentId,
+        agent_prompt_id: &AgentPromptId,
+        attempt: u32,
+        _source: Option<&tau_proto::ConnectionId>,
+    ) {
+        let Some(owner) = self
+            .prompt_coordination
+            .standalone_accounting
+            .owners
+            .get(agent_prompt_id)
+            .cloned()
+        else {
+            return;
+        };
+        if self
+            .prompt_coordination
+            .standalone_accounting
+            .awaiting_corrections
+            .contains_key(agent_prompt_id)
+        {
+            return;
+        }
+        if attempt > tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS {
+            if self
+                .prompt_coordination
+                .standalone_accounting
+                .rejected_retry_bounds
+                .insert(agent_prompt_id.clone())
+            {
+                tracing::warn!(
+                    target: "tau_harness",
+                    %agent_prompt_id,
+                    attempt,
+                    maximum = tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS,
+                    "standalone provider retry status exceeds the accounting contract; retaining it only as transient provider diagnostics"
+                );
+            }
+            return;
+        }
+        let previous = self
+            .prompt_coordination
+            .standalone_accounting
+            .highest_retry_attempt
+            .entry(agent_prompt_id.clone())
+            .or_default();
+        if attempt <= *previous {
+            return;
+        }
+        let first = previous.saturating_add(1);
+        *previous = attempt;
+        for attempt in first..=attempt {
+            let Some(logical_attempt) = tau_proto::ProviderAttempt::new(attempt) else {
+                break;
+            };
+            let identity = (agent_prompt_id.clone(), logical_attempt);
+            if !self
+                .prompt_coordination
+                .standalone_accounting
+                .observed_attempts
+                .insert(identity.clone())
+            {
+                continue;
+            }
+            let key = (
+                identity.0.clone(),
+                identity.1,
+                StandaloneAccountingPublicationPhase::Initial,
+            );
+            self.publish_event_for_agent_with_completion(
+                &owner.cid,
+                Some(crate::harness::harness_connection_id()),
+                Event::ProviderStandaloneExecutionAccounted(
+                    tau_proto::ProviderStandaloneExecutionAccounted {
+                        session_id: owner.session_id.clone(),
+                        agent_id: owner.agent_id.clone(),
+                        agent_prompt_id: agent_prompt_id.clone(),
+                        logical_attempt,
+                        transaction_id: owner.transaction_id.clone(),
+                        model: owner.model.clone(),
+                        backend: None,
+                        usage: tau_proto::StandaloneExecutionUsage::Unknown,
+                        estimated_api_cost_rates: Some(owner.estimated_cost_rates),
+                        estimated_api_cost_increment: None,
+                        output: tau_proto::StandaloneExecutionOutput::Rejected,
+                        finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
+                    },
+                ),
+                Some(AgentPublishCompletion::StandaloneExecutionAccounting {
+                    key,
+                    owned_publication: None,
+                }),
+                false,
+            );
+        }
     }
 
     /// Accounts for one accepted response increment and publishes affected live

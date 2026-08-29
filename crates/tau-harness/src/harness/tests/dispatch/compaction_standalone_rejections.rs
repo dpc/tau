@@ -317,7 +317,7 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
             failure_kind,
             context_limit_telemetry: None,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-            usage: Some(tau_proto::ProviderTokenUsage {
+            usage: (label != "provider error").then_some(tau_proto::ProviderTokenUsage {
                 model: None,
                 prompt_sent_tokens: 10,
                 prompt_cached_tokens: 100,
@@ -374,6 +374,15 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
         );
         assert_eq!(
             h.session_runtime
+                .current_session_state
+                .token_usage
+                .total
+                .requests,
+            billable_before.requests.saturating_add(1),
+            "{label}: every dispatched attempt increments request accounting"
+        );
+        assert_eq!(
+            h.session_runtime
                 .agent_store
                 .agent(&agent_id)
                 .expect("agent tree")
@@ -387,7 +396,9 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
                 .token_usage
                 .total
                 .sent_tokens,
-            billable_before.sent_tokens.saturating_add(10),
+            billable_before
+                .sent_tokens
+                .saturating_add(u64::from(label != "provider error") * 10),
             "{label}"
         );
         assert_eq!(
@@ -396,7 +407,9 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
                 .token_usage
                 .total
                 .cached_tokens,
-            billable_before.cached_tokens.saturating_add(10),
+            billable_before
+                .cached_tokens
+                .saturating_add(u64::from(label != "provider error") * 10),
             "{label}"
         );
         assert_eq!(
@@ -405,7 +418,9 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
                 .token_usage
                 .total
                 .received_tokens,
-            billable_before.received_tokens.saturating_add(2),
+            billable_before
+                .received_tokens
+                .saturating_add(u64::from(label != "provider error") * 2),
             "{label}"
         );
         assert!(
@@ -443,6 +458,45 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
                 .any(|event| matches!(event, Event::AgentCompacted(_))),
             "{label}"
         );
+        let accounting = event_log_events(&h)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::ProviderStandaloneExecutionAccounted(accounted)
+                    if accounted.agent_prompt_id == compact.agent_prompt_id =>
+                {
+                    Some(accounted)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(accounting.len(), 1, "{label}");
+        assert_eq!(accounting[0].transaction_id, transaction_id, "{label}");
+        assert_eq!(
+            accounting[0].output,
+            tau_proto::StandaloneExecutionOutput::Rejected,
+            "{label}"
+        );
+        if label == "provider error" {
+            assert_eq!(
+                accounting[0].usage,
+                tau_proto::StandaloneExecutionUsage::Unknown
+            );
+            assert!(accounting[0].estimated_api_cost_rates.is_some());
+            assert!(accounting[0].estimated_api_cost_increment.is_none());
+        } else {
+            assert!(matches!(
+                &accounting[0].usage,
+                tau_proto::StandaloneExecutionUsage::Known(usage)
+                    if usage.prompt_sent_tokens == 10
+                        && usage.prompt_cached_tokens == 10
+                        && usage.response_received_tokens == 2
+            ));
+            assert!(accounting[0].estimated_api_cost_rates.is_some(), "{label}");
+            assert!(
+                accounting[0].estimated_api_cost_increment.is_some(),
+                "{label}"
+            );
+        }
         assert!(
             event_log_events(&h).iter().any(|event| {
                 matches!(event, Event::AgentStandaloneCompactionFailed(failed)

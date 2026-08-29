@@ -234,6 +234,7 @@ impl Harness {
             .pending_prompts
             .retain(|_, provider_id| provider_id != connection_id);
         for prompt_id in lost_provider_prompts {
+            self.publish_final_unknown_standalone_accounting(&prompt_id);
             let Some(cid) = self
                 .prompt_coordination
                 .prompt_runtime

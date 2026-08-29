@@ -102,6 +102,57 @@ session token and cost accounting remains intentionally billable. Ordinary and
 reactive-recovery paths retain their canonical response behavior.
 Every report-derived alternative uses harness source.
 
+Every standalone backend attempt also derives one durable
+`provider.standalone_execution_accounted` fact before publishing the independent
+compaction outcome. Its idempotency key is the pair of prompt id and finite logical
+provider attempt. The fact carries the required session whose ledger owns the
+attempt and repeats the owning agent and compaction transaction,
+provider-qualified model, optional observed backend, normalized response-local
+usage (as a closed known-or-unknown value), effective rates, the estimated cost
+increment when usage is known, and whether the compaction output was accepted or
+rejected. Unknown usage is a first-class value rather than an all-zero sample.
+Retry updates close preceding attempts with explicit unknown usage; the final
+terminal closes its finite attempt with normalized reported or unknown usage.
+Standalone retry accounting accepts attempts 1 through 64 and reserves logical
+attempt 65 for the terminal result. A retry status above 64 remains visible only
+in its transient `_reported` observation: the harness warns once per prompt and
+does not treat it as accounting or watcher-attempt authority.
+Provider work rejected as invalid remains billable; cancellation or rejection
+before backend dispatch produces no accounting fact.
+
+Cancellation after provider dispatch publishes an
+`awaiting_cancelled_terminal` initial observation before publishing the
+independent Cancelled outcome. The initial freezes
+`highest_authoritative_retry + 1` as the terminal attempt, counts one request,
+and is Unknown, Rejected, and without backend or cost. Later retry statuses are
+diagnostic-only. At most one later terminal from the same still-live provider
+generation may publish
+`provider.standalone_execution_accounting_corrected`; it repeats the immutable
+session, agent, prompt, attempt, transaction, model, rates, and Rejected
+disposition, adds no request, and replaces the necessarily absent
+usage/backend/cost with final known-or-unknown terminal values. An
+append-rejected initial remains ordered before its retained correction but does
+not commit-gate the independent cancellation outcome. Restart preserves an
+awaiting observation without recreating provider-report correction authority.
+Provider-generation loss, graceful shutdown, and agent unload revoke correction
+authority and publish a Final Unknown/Rejected observation for every still
+dispatched owner before removing its runtime or persistence route.
+
+Session token totals and the agent cost ledger consume only committed standalone
+accounting facts, at most once per idempotency key. Live commit and cold replay
+therefore fold the same increments. Restore scans the durable journals of agents
+that participated in the session and folds only facts whose required session id
+matches the session being rebuilt; it does not use a session-owned cross-journal
+index. Currently loaded journals use their existing session leases; historical
+unloaded journals use validated read-only snapshots whose locks end with the
+restore scan. Ephemeral membership has no durable journal to scan. Accounting
+restore also runs for sequence-continuing Initial and New bindings of an
+existing session id without recreating the previous runtime branch.
+publication neither authorizes nor
+blocks compaction outcome, transcript mutation, recovery, or retry; those remain
+owned by their existing canonical facts and transactions. The accounting fact
+does not define aggregate UI, budget, or breaker policy.
+
 `ProviderStopReason::Length` is always an incomplete semantic terminal. The
 harness clears provider-authored output-length disposition and may derive one
 `ContinuationPlanned` disposition only for an ordinary inference that contains

@@ -787,6 +787,12 @@ impl Harness {
             self.emit_info(&format!("already on session `{}`", new_session_id.as_str()));
             return Ok(());
         }
+        self.retry_pending_standalone_accounting_publications();
+        if self.has_unsettled_standalone_accounting_publication() {
+            return Err(HarnessError::Participant(
+                "cannot switch sessions while standalone accounting remains uncommitted".to_owned(),
+            ));
+        }
 
         let old_id = self.session_runtime.current_session_id.clone();
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::SessionChanged);
@@ -1148,6 +1154,8 @@ impl Harness {
         self.session_runtime.current_session_state = CurrentSessionState::default();
         self.agent_runtime.agent_registry.creator_topology = AgentCreatorTopology::default();
         self.agent_runtime.agent_registry.cost_ledger = AgentCostLedger::default();
+        self.prompt_coordination.standalone_accounting =
+            StandaloneExecutionAccountingState::default();
 
         // Drop agents from the previous bound session. New user agents are
         // created explicitly by `UiCreateAgent`/first prompt in the new session.
@@ -1160,6 +1168,10 @@ impl Harness {
             .clear();
         self.agent_runtime.agent_registry.roster_loaded.clear();
         self.agent_runtime.agent_registry.roster_ever_loaded.clear();
+        self.agent_runtime
+            .agent_registry
+            .roster_durable_ever_loaded
+            .clear();
         self.agent_runtime.agent_registry.roster_valid = true;
         self.agent_runtime.agent_registry.navigation_modes.clear();
         self.agent_runtime.agent_watch.forward.clear();
@@ -1203,6 +1215,8 @@ impl Harness {
         if matches!(reason, tau_proto::SessionStartReason::Resume) {
             self.rehydrate_agents_from_session();
             self.activate_replayed_prompt_occurrences();
+        } else {
+            self.restore_existing_session_accounting_without_runtime_rehydration();
         }
         self.publish_delegate_roles_context();
 
@@ -2493,6 +2507,15 @@ impl Harness {
                 return;
             }
         };
+        let durable_ever_loaded = events
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                Event::SessionAgentLoaded(loaded) if !loaded.ephemeral => {
+                    Some(loaded.agent_id.clone())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
         let ever_loaded = events
             .into_iter()
             .chain(ephemeral_events)
@@ -2511,6 +2534,7 @@ impl Harness {
             .session_ever_loaded
             .extend(ever_loaded.iter().cloned());
         self.agent_runtime.agent_registry.roster_ever_loaded = ever_loaded;
+        self.agent_runtime.agent_registry.roster_durable_ever_loaded = durable_ever_loaded;
         self.agent_runtime.agent_registry.roster_loaded = loaded_agents.iter().cloned().collect();
         let mut restored_parent_edges = Vec::new();
         let mut restored_output_length_steers = Vec::new();
@@ -3268,6 +3292,7 @@ impl Harness {
         for cid in restored_output_length_dormant {
             self.repair_dormant_output_length_lineage(&cid);
         }
+        self.restore_standalone_execution_accounting();
         if !self.provider_runtime.model_info.is_empty() {
             self.reconcile_agent_context_usage_models();
         }
@@ -3289,6 +3314,220 @@ impl Harness {
             })
             .collect();
         self.restore_manual_compaction_tools(restored_manual_compactions);
+        self.finalize_restored_standalone_costs();
+    }
+
+    /// Rebuild session and agent ledgers from canonical standalone accounting.
+    pub(super) fn restore_standalone_execution_accounting(&mut self) {
+        let historical_agents = self
+            .agent_runtime
+            .agent_registry
+            .roster_durable_ever_loaded
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let (leased, inactive): (Vec<_>, Vec<_>) =
+            historical_agents.into_iter().partition(|agent_id| {
+                self.session_runtime
+                    .agent_store
+                    .has_managed_persistence_lease(agent_id)
+            });
+        let mut journals = Vec::new();
+        for agent_id in leased {
+            let events = match self
+                .session_runtime
+                .agent_store
+                .agent_events(agent_id.as_str())
+            {
+                Ok(events) => events,
+                Err(error) => {
+                    self.fail_standalone_accounting_restore(&agent_id, &error.to_string());
+                    return;
+                }
+            };
+            journals.push((agent_id, events));
+        }
+        if !inactive.is_empty() {
+            let agents_dir = self.session_runtime.state_dir.join("agents");
+            let snapshot = match tau_core::AgentJournalSnapshot::capture(
+                &agents_dir,
+                inactive.iter().cloned(),
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.fail_standalone_accounting_restore(
+                        inactive.first().expect("non-empty inactive journal set"),
+                        &error.to_string(),
+                    );
+                    return;
+                }
+            };
+            for agent_id in inactive {
+                let events = match snapshot
+                    .records(&agent_id)
+                    .and_then(|records| records.collect())
+                {
+                    Ok(events) => events,
+                    Err(error) => {
+                        self.fail_standalone_accounting_restore(&agent_id, &error.to_string());
+                        return;
+                    }
+                };
+                journals.push((agent_id, events));
+            }
+        }
+        let mut facts = Vec::new();
+        for (agent_id, events) in journals {
+            if let Some(Event::AgentStarted(started)) = events.first().map(|entry| &entry.event)
+                && started.agent_id == agent_id
+            {
+                self.record_agent_creator_topology(started);
+            }
+            facts.extend(events);
+        }
+        for record in facts {
+            match record.event {
+                Event::ProviderStandaloneExecutionAccounted(accounted)
+                    if accounted.session_id == self.session_runtime.current_session_id =>
+                {
+                    self.fold_committed_standalone_accounting(&accounted, None, false);
+                }
+                Event::ProviderStandaloneExecutionAccountingCorrected(corrected)
+                    if corrected.session_id == self.session_runtime.current_session_id =>
+                {
+                    self.fold_committed_standalone_accounting_correction(&corrected, None, false);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Rebuild only the session ledger for a sequence-continuing New/Initial
+    /// binding without recreating the prior runtime agent branch.
+    pub(super) fn restore_existing_session_accounting_without_runtime_rehydration(&mut self) {
+        let events = match self
+            .session_runtime
+            .store
+            .durable_session_history(self.session_runtime.current_session_id.as_str())
+        {
+            Ok(events) => events,
+            Err(error) => {
+                self.agent_runtime.agent_registry.roster_valid = false;
+                self.emit_harness_failure(&format!(
+                    "failed to load session accounting membership: {error}"
+                ));
+                return;
+            }
+        };
+        self.agent_runtime.agent_registry.roster_durable_ever_loaded = events
+            .into_iter()
+            .filter_map(|record| match record.event {
+                Event::SessionAgentLoaded(loaded) if !loaded.ephemeral => Some(loaded.agent_id),
+                _ => None,
+            })
+            .collect();
+        self.restore_standalone_execution_accounting();
+        self.finalize_restored_standalone_costs();
+    }
+
+    /// Marks session restore invalid when one durable accounting journal cannot
+    /// be read as a complete validated snapshot.
+    fn fail_standalone_accounting_restore(&mut self, agent_id: &AgentId, error: &str) {
+        self.agent_runtime.agent_registry.roster_valid = false;
+        self.emit_harness_failure(&format!(
+            "failed to restore standalone accounting for `{agent_id}`: {error}"
+        ));
+    }
+
+    /// Returns whether lifecycle teardown would discard canonical standalone
+    /// accounting that has not reached semantic persistence.
+    pub(super) fn has_unsettled_standalone_accounting_publication(&self) -> bool {
+        let is_accounting = |event: &Event| {
+            matches!(
+                event,
+                Event::ProviderStandaloneExecutionAccounted(_)
+                    | Event::ProviderStandaloneExecutionAccountingCorrected(_)
+            )
+        };
+        !self
+            .prompt_coordination
+            .standalone_accounting
+            .retained
+            .is_empty()
+            || self
+                .runtime_io
+                .publication
+                .pending_intercept
+                .as_ref()
+                .is_some_and(|pending| is_accounting(&pending.event))
+            || self
+                .runtime_io
+                .publication
+                .deferred
+                .iter()
+                .any(|pending| is_accounting(pending.event()))
+    }
+
+    /// Returns whether one agent still owns any accounting publication or
+    /// correction that must settle before endpoint removal.
+    pub(super) fn has_unsettled_standalone_accounting_for(&self, cid: &AgentId) -> bool {
+        let agent_id = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.identity.agent_id.as_deref());
+        let event_matches = |event: &Event| match event {
+            Event::ProviderStandaloneExecutionAccounted(accounted) => {
+                agent_id == Some(accounted.agent_id.as_str())
+            }
+            Event::ProviderStandaloneExecutionAccountingCorrected(corrected) => {
+                agent_id == Some(corrected.agent_id.as_str())
+            }
+            _ => false,
+        };
+        self.prompt_coordination
+            .standalone_accounting
+            .owners
+            .values()
+            .any(|owner| &owner.cid == cid)
+            || self
+                .prompt_coordination
+                .standalone_accounting
+                .pending_corrections
+                .values()
+                .any(|pending| &pending.cid == cid)
+            || self
+                .prompt_coordination
+                .standalone_accounting
+                .retained
+                .values()
+                .any(|retained| &retained.cid == cid)
+            || self
+                .runtime_io
+                .publication
+                .pending_intercept
+                .as_ref()
+                .is_some_and(|pending| event_matches(&pending.event))
+            || self
+                .runtime_io
+                .publication
+                .deferred
+                .iter()
+                .any(|pending| event_matches(pending.event()))
+    }
+
+    /// Rebuild cold standalone costs after startup has installed final routes.
+    pub(super) fn finalize_restored_standalone_costs(&mut self) {
+        let costs =
+            std::mem::take(&mut self.prompt_coordination.standalone_accounting.pending_costs);
+        for (agent_id, increment) in costs {
+            self.agent_runtime.agent_registry.cost_ledger.add_increment(
+                &agent_id,
+                increment,
+                &self.agent_runtime.agent_registry.creator_topology,
+            );
+        }
     }
 
     /// Restores durable descriptive facts while detaching a completed worker

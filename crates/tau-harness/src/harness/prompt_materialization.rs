@@ -996,10 +996,12 @@ impl Harness {
         );
 
         let stage_started = stage_start(timing);
-        self.session_runtime
-            .current_session_state
-            .token_usage
-            .start_request(&model);
+        if operation != tau_proto::PromptOperation::StandaloneCompaction {
+            self.session_runtime
+                .current_session_state
+                .token_usage
+                .start_request(&model);
+        }
         self.prompt_coordination
             .prompt_runtime
             .models

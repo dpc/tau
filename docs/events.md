@@ -1104,3 +1104,16 @@ recipients and other start paths retain their existing navigation behavior.
   content-free terminal observation.
 - **`provider.cache_refresh_finished`** — Harness-canonical transient,
   content-free terminal after exact owner correlation.
+- **`provider.standalone_execution_accounted`** — Harness-sourced durable
+  response-local accounting for one standalone backend attempt. Its required
+  session id selects the live and restored ledger; the prompt id and logical
+  attempt form its idempotency key. Usage is explicitly known or unknown, and
+  output acceptance is independent from billing. Standalone retry attempts are
+  bounded at 64, with attempt 65 reserved for the terminal; larger retry statuses
+  remain transient report diagnostics and do not update accounting or watcher
+  attempt state.
+- **`provider.standalone_execution_accounting_corrected`** — Harness-sourced
+  durable final correction for one cancellation-time awaiting observation. It
+  keeps the same logical attempt, counts no request, and finalizes only the
+  previously absent usage, backend, and cost from the same live provider
+  generation.

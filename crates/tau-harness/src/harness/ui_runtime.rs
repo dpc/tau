@@ -1390,6 +1390,7 @@ impl Harness {
                 _ => None,
             });
         if let Some((agent_id, transaction_id, cut, resume_through)) = transaction {
+            self.publish_awaiting_cancelled_standalone_accounting(prompt_id);
             self.publish_event_for_agent_with_completion(
                 cid,
                 None,

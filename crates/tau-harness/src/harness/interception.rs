@@ -32,6 +32,7 @@ use super::gated_final::GatedFinalDisposition;
 use super::prompt_materialization_timing::PromptMaterializationTiming;
 use crate::harness::compaction_runtime_state::ManualCompactionRequestKey;
 use crate::harness::prompt_acceptance_timing::PromptAcceptanceTiming;
+use crate::harness::standalone_execution_accounting_state::StandaloneAccountingPublicationKey;
 use crate::harness::{InferenceDispatchSelectionError, SessionGeneration};
 use crate::{agent as path_crate_agent, extension as path_crate_extension};
 
@@ -536,6 +537,13 @@ pub(crate) enum AgentPublishCompletion {
         /// Exact interceptor-approved fact retained after rejection.
         owned_publication: Option<OwnedPublication>,
     },
+    /// Retain one standalone accounting fact in its prompt/attempt keyed owner.
+    StandaloneExecutionAccounting {
+        /// Prompt/attempt/phase key for independent retention.
+        key: StandaloneAccountingPublicationKey,
+        /// Exact interceptor-approved fact retained after rejection.
+        owned_publication: Option<OwnedPublication>,
+    },
     /// Retain a successful pass's exact rolling successor until its durable
     /// start append commits.
     RollingCompactionStart {
@@ -600,6 +608,9 @@ impl AgentPublishCompletion {
             | Self::OwedCompactionFact {
                 owned_publication, ..
             }
+            | Self::StandaloneExecutionAccounting {
+                owned_publication, ..
+            }
             | Self::RollingCompactionStart { owned_publication }
             | Self::StandaloneContinuation {
                 owned_publication, ..
@@ -642,6 +653,9 @@ impl AgentPublishCompletion {
             | Self::OwedCompactionFact {
                 owned_publication, ..
             }
+            | Self::StandaloneExecutionAccounting {
+                owned_publication, ..
+            }
             | Self::RollingCompactionStart { owned_publication }
             | Self::StandaloneContinuation {
                 owned_publication, ..
@@ -668,6 +682,7 @@ impl AgentPublishCompletion {
             | Self::ReactiveContextRecoveryStart { .. }
             | Self::StandaloneContextRejection { .. }
             | Self::OwedCompactionFact { .. }
+            | Self::StandaloneExecutionAccounting { .. }
             | Self::RollingCompactionStart { .. } => Some(OwnedPublicationBranch::SemanticParent),
             Self::InitialPromptSubmission { .. } => None,
         }
@@ -727,6 +742,7 @@ impl AgentPublishCompletion {
             | Self::ReactiveContextRecoveryStart { .. }
             | Self::StandaloneContextRejection { .. }
             | Self::OwedCompactionFact { .. }
+            | Self::StandaloneExecutionAccounting { .. }
             | Self::RollingCompactionStart { .. }
             | Self::StandaloneContinuation { .. } => None,
         };
@@ -753,6 +769,7 @@ impl AgentPublishCompletion {
             | Self::ReactiveContextRecoveryStart { .. }
             | Self::StandaloneContextRejection { .. }
             | Self::OwedCompactionFact { .. }
+            | Self::StandaloneExecutionAccounting { .. }
             | Self::RollingCompactionStart { .. }
             | Self::InitialPromptSubmission { .. } => {
                 unreachable!("non-standalone completions do not own compaction transactions")
@@ -835,6 +852,8 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // `prompt_agents` bookkeeping and the conversation
     // would never advance.
     EventName::PROVIDER_RESPONSE_FINISHED,
+    EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTED,
+    EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTING_CORRECTED,
     // Validated ephemeral provider current state must agree between live and
     // late-subscriber projections.
     EventName::HARNESS_PROVIDER_QUOTA_CHANGED,
@@ -995,6 +1014,8 @@ pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacemen
             | Event::AgentOuterTurnStarted(_)
             | Event::AgentOuterTurnFinished(_)
             | Event::ProviderResponseFinished(_)
+            | Event::ProviderStandaloneExecutionAccounted(_)
+            | Event::ProviderStandaloneExecutionAccountingCorrected(_)
             | Event::HarnessProviderQuotaChanged(_)
             | Event::ToolResult(_)
             | Event::ToolResultDisplay(_)
@@ -1534,6 +1555,7 @@ impl Harness {
         event: Event,
         completion: AgentPublishCompletion,
         semantic_parent: tau_core::AgentEventParent,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         let notify_watchers = match &completion {
             AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => retry_prompts
@@ -1549,6 +1571,7 @@ impl Harness {
             AgentPublishCompletion::ReactiveContextRecoveryStart { .. } => false,
             AgentPublishCompletion::StandaloneContextRejection { .. } => false,
             AgentPublishCompletion::OwedCompactionFact { .. } => false,
+            AgentPublishCompletion::StandaloneExecutionAccounting { .. } => false,
             AgentPublishCompletion::RollingCompactionStart { .. } => false,
             AgentPublishCompletion::InitialPromptSubmission { .. } => false,
         };
@@ -1561,7 +1584,7 @@ impl Harness {
                 .map(crate::parse_agent_id)
         });
         self.commit_event(
-            None,
+            source,
             &PeerPublicationContext::default(),
             event.clone(),
             event.defaults_to_persist(),

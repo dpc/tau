@@ -1036,6 +1036,8 @@ fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
             | Event::ToolCancelled(_)
             | Event::ShellCommandFinished(_)
             | Event::ProviderResponseFinished(_)
+            | Event::ProviderStandaloneExecutionAccounted(_)
+            | Event::ProviderStandaloneExecutionAccountingCorrected(_)
     )
 }
 

@@ -44,6 +44,71 @@ fn token_and_byte_counts_preserve_scalar_shape_and_overflow_behavior() {
     );
 }
 
+/// Standalone accounting keeps required session attribution and the closed
+/// known-or-unknown usage tag stable across JSON and CBOR.
+#[test]
+fn standalone_execution_accounting_wire_requires_session_and_tags_usage() {
+    let fact = crate::ProviderStandaloneExecutionAccounted {
+        session_id: crate::SessionId::parse("session-accounting").expect("valid session"),
+        agent_id: crate::AgentId::parse("agent-accounting").expect("valid agent"),
+        agent_prompt_id: crate::AgentPromptId::parse("prompt-accounting").expect("valid prompt"),
+        logical_attempt: crate::ProviderAttempt::ONE,
+        transaction_id: crate::CompactionTransactionId::parse("transaction-accounting")
+            .expect("valid transaction"),
+        model: "provider/model".into(),
+        backend: None,
+        usage: crate::StandaloneExecutionUsage::Unknown,
+        estimated_api_cost_rates: Some(crate::ESTIMATED_API_COST_FALLBACK),
+        estimated_api_cost_increment: None,
+        output: crate::StandaloneExecutionOutput::Rejected,
+        finality: crate::StandaloneExecutionAccountingFinality::Final,
+    };
+    let mut json = serde_json::to_value(&fact).expect("serialize accounting JSON");
+    assert_eq!(json["session_id"], "session-accounting");
+    assert_eq!(json["usage"]["status"], "unknown");
+    assert_eq!(json["finality"], "final");
+    assert_eq!(
+        serde_json::from_value::<crate::ProviderStandaloneExecutionAccounted>(json.clone())
+            .expect("deserialize accounting JSON"),
+        fact
+    );
+    json.as_object_mut()
+        .expect("accounting object")
+        .remove("session_id");
+    assert!(
+        serde_json::from_value::<crate::ProviderStandaloneExecutionAccounted>(json).is_err(),
+        "session attribution is a required wire field"
+    );
+
+    let correction = crate::ProviderStandaloneExecutionAccountingCorrected {
+        session_id: fact.session_id.clone(),
+        agent_id: fact.agent_id.clone(),
+        agent_prompt_id: fact.agent_prompt_id.clone(),
+        logical_attempt: fact.logical_attempt,
+        transaction_id: fact.transaction_id.clone(),
+        model: fact.model.clone(),
+        backend: None,
+        usage: crate::StandaloneExecutionUsage::Unknown,
+        estimated_api_cost_rates: fact.estimated_api_cost_rates,
+        estimated_api_cost_increment: None,
+        output: crate::StandaloneExecutionOutput::Rejected,
+    };
+    let json = serde_json::to_value(&correction).expect("serialize correction JSON");
+    assert_eq!(json["usage"]["status"], "unknown");
+    assert_eq!(
+        serde_json::from_value::<crate::ProviderStandaloneExecutionAccountingCorrected>(json)
+            .expect("deserialize correction JSON"),
+        correction
+    );
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&fact, &mut cbor).expect("serialize accounting CBOR");
+    assert_eq!(
+        ciborium::from_reader::<crate::ProviderStandaloneExecutionAccounted, _>(cbor.as_slice())
+            .expect("deserialize accounting CBOR"),
+        fact
+    );
+}
+
 /// Notice-purpose wire tags must remain explicit and independent of notice
 /// level.
 #[test]

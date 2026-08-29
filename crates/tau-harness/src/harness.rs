@@ -118,6 +118,11 @@ use crate::harness::extension_data::{
     run_scoped_extension_data_append_file, with_extension_data_scope_lock,
 };
 use crate::harness::extensions::StartupDeadline;
+use crate::harness::standalone_execution_accounting_state::{
+    FoldedStandaloneAccountingPhase, PendingStandaloneAccountingCorrection,
+    RetainedStandaloneAccountingPublication, StandaloneAccountingPublicationPhase,
+    StandaloneExecutionAccountingOwner, StandaloneExecutionAccountingState,
+};
 use crate::{
     agent as path_crate_agent, extension as path_crate_extension, harness as path_crate_harness,
     prompt as path_crate_prompt,
@@ -1405,6 +1410,7 @@ mod session_runtime;
 mod session_runtime_state;
 mod side_conversation_terminal_reducer;
 mod standalone_compaction_terminal_reducer;
+mod standalone_execution_accounting_state;
 mod tool_call_terminal_reducer;
 mod tool_routing_state;
 mod tool_runtime;
@@ -2345,6 +2351,22 @@ impl Harness {
         &mut self,
         in_process_cleanup_grace: Duration,
     ) -> Result<(), HarnessError> {
+        let active_standalone_prompts = self
+            .prompt_coordination
+            .standalone_accounting
+            .owners
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for prompt_id in active_standalone_prompts {
+            self.publish_final_unknown_standalone_accounting(&prompt_id);
+        }
+        self.retry_pending_standalone_accounting_publications();
+        if self.has_unsettled_standalone_accounting_publication() {
+            return Err(HarnessError::Participant(
+                "cannot shut down while standalone accounting remains uncommitted".to_owned(),
+            ));
+        }
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::Shutdown);
         self.extensions.restart_deadlines.clear();
         self.extensions.cleanup_deadlines.clear();

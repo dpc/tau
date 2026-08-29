@@ -34,6 +34,9 @@ pub(crate) struct AgentRegistryState {
     pub(super) roster_loaded: HashSet<AgentId>,
     /// Successfully committed membership history used by roster snapshots.
     pub(super) roster_ever_loaded: HashSet<AgentId>,
+    /// Durable membership history eligible for journal-backed accounting
+    /// restore.
+    pub(super) roster_durable_ever_loaded: HashSet<AgentId>,
     /// Whether restored and newly committed roster membership remains valid.
     pub(super) roster_valid: bool,
     /// Harness-owned navigation classification for loaded agents.
@@ -1571,6 +1574,32 @@ impl Harness {
     }
 
     pub(super) fn remove_agent(&mut self, cid: &AgentId) {
+        let active_standalone_prompts = self
+            .prompt_coordination
+            .standalone_accounting
+            .owners
+            .iter()
+            .filter_map(|(prompt_id, owner)| (&owner.cid == cid).then_some(prompt_id.clone()))
+            .collect::<Vec<_>>();
+        if !active_standalone_prompts.is_empty()
+            || self.has_unsettled_standalone_accounting_for(cid)
+        {
+            self.prompt_coordination
+                .standalone_accounting
+                .pending_agent_removals
+                .insert(cid.clone());
+        }
+        for prompt_id in &active_standalone_prompts {
+            self.publish_final_unknown_standalone_accounting(prompt_id);
+        }
+        if self
+            .prompt_coordination
+            .standalone_accounting
+            .pending_agent_removals
+            .contains(cid)
+        {
+            return;
+        }
         let marked_owner = self
             .agent_runtime
             .agent_registry

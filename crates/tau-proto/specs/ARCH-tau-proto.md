@@ -95,9 +95,17 @@ See
 Bounded provider quota reports are transient provider observations.
 
 Provider execution also separates five Provider-authored `_reported` observations from
-four harness-canonical provider facts and the directed UI retry outcome. The old
+five harness-canonical provider facts and the directed UI retry outcome. The old
 unreported provider retry-result event no longer exists. See
 [SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
+Canonical standalone execution accounting is a separate durable fact. Its
+required session id selects the live and restored ledger; prompt and logical
+attempt form its idempotency key. Usage is a closed known-or-unknown value and
+accepted-or-rejected output disposition remains independent from billing.
+Standalone retry attempts are bounded at 64 and reserve attempt 65 for the
+terminal result. A cancellation-time initial observation can be marked awaiting;
+one separate final correction event may then fill its absent usage/backend/cost
+without creating another logical attempt.
 
 Cache-refresh lifecycle adds directed sensitive harness requests plus a
 content-free Provider terminal report/canonical fact. Its nonpersistence,

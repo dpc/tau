@@ -376,6 +376,12 @@ impl EventName {
         Self::from_static(EventCategory::Provider, "response_finished_reported");
     pub const PROVIDER_RESPONSE_FINISHED: Self =
         Self::from_static(EventCategory::Provider, "response_finished");
+    pub const PROVIDER_STANDALONE_EXECUTION_ACCOUNTED: Self =
+        Self::from_static(EventCategory::Provider, "standalone_execution_accounted");
+    pub const PROVIDER_STANDALONE_EXECUTION_ACCOUNTING_CORRECTED: Self = Self::from_static(
+        EventCategory::Provider,
+        "standalone_execution_accounting_corrected",
+    );
     /// Result of an atomic manual delayed-retry ownership check.
     pub const PROVIDER_RETRY_PROMPT_RESULT_REPORTED: Self =
         Self::from_static(EventCategory::Provider, "retry_prompt_result_reported");

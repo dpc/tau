@@ -2408,6 +2408,11 @@ pub struct ProviderRetryStatus {
     pub next_retry_delay_secs: u32,
 }
 
+/// Maximum retry attempts that a standalone provider prompt may report.
+///
+/// Attempt 65 is reserved for the terminal backend result after these retries.
+pub const MAX_STANDALONE_RETRY_ATTEMPTS: u32 = 64;
+
 /// Invariant-preserving current state of watched provider work.
 ///
 /// The phase is the serde discriminator rather than an independent field, so
@@ -6094,6 +6099,98 @@ impl Default for ProviderAttempt {
     }
 }
 
+/// Closed usage observation for one canonical standalone backend attempt.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status", content = "usage")]
+pub enum StandaloneExecutionUsage {
+    /// The provider supplied response-local token and cache counters.
+    Known(ProviderTokenUsage),
+    /// The provider supplied no usage counters for the backend attempt.
+    Unknown,
+}
+
+/// Semantic disposition of the standalone output, independent of billing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandaloneExecutionOutput {
+    /// The output was accepted as a compaction replacement.
+    Accepted,
+    /// The output was rejected or the provider attempt failed.
+    Rejected,
+}
+
+/// Whether an initial standalone accounting observation can receive one live
+/// provider-terminal correction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandaloneExecutionAccountingFinality {
+    /// The initial observation is complete and cannot be corrected.
+    Final,
+    /// Local cancellation closed the attempt before provider usage arrived.
+    AwaitingCancelledTerminal,
+}
+
+/// Durable canonical accounting for one standalone backend attempt.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderStandaloneExecutionAccounted {
+    /// Session whose live and restored ledgers own this attempt.
+    pub session_id: SessionId,
+    /// Agent whose standalone transaction dispatched the attempt.
+    pub agent_id: AgentId,
+    /// Provider prompt identifying the logical backend request.
+    pub agent_prompt_id: AgentPromptId,
+    /// Logical attempt 1..=65; paired with the prompt id for idempotency.
+    pub logical_attempt: ProviderAttempt,
+    /// Standalone compaction transaction that owns the prompt.
+    pub transaction_id: CompactionTransactionId,
+    /// Provider-qualified model captured by the transaction.
+    pub model: ModelId,
+    /// Backend observed on the terminal response, when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<ProviderBackend>,
+    /// Explicit known-or-unknown normalized response usage.
+    pub usage: StandaloneExecutionUsage,
+    /// Harness-captured effective rates required for every dispatched attempt.
+    pub estimated_api_cost_rates: Option<crate::EstimatedApiCostRates>,
+    /// Harness-calculated response-local increment, present exactly for known
+    /// usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_api_cost_increment: Option<crate::EstimatedApiCost>,
+    /// Whether Tau accepted or rejected the provider's compaction output.
+    pub output: StandaloneExecutionOutput,
+    /// Whether one same-generation canceled terminal may correct this fact.
+    pub finality: StandaloneExecutionAccountingFinality,
+}
+
+/// Final durable correction for one cancellation-time standalone observation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderStandaloneExecutionAccountingCorrected {
+    /// Session whose live and restored ledgers own this attempt.
+    pub session_id: SessionId,
+    /// Agent whose standalone transaction dispatched the attempt.
+    pub agent_id: AgentId,
+    /// Provider prompt identifying the logical backend request.
+    pub agent_prompt_id: AgentPromptId,
+    /// Frozen logical attempt corrected by this terminal.
+    pub logical_attempt: ProviderAttempt,
+    /// Standalone compaction transaction that owns the prompt.
+    pub transaction_id: CompactionTransactionId,
+    /// Provider-qualified model captured by the transaction.
+    pub model: ModelId,
+    /// Backend observed on the late canceled terminal, when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<ProviderBackend>,
+    /// Final known-or-unknown normalized response usage.
+    pub usage: StandaloneExecutionUsage,
+    /// Harness-captured effective rates, identical to the initial observation.
+    pub estimated_api_cost_rates: Option<crate::EstimatedApiCostRates>,
+    /// Exact response-local increment, present exactly for known usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_api_cost_increment: Option<crate::EstimatedApiCost>,
+    /// Always rejected because local cancellation already owns the outcome.
+    pub output: StandaloneExecutionOutput,
+}
+
 /// Terminal provider-response payload shared by a Provider-authored
 /// `provider.response_finished_reported` observation and the harness-canonical
 /// `provider.response_finished` fact.
@@ -6839,6 +6936,12 @@ pub enum Event {
     ProviderResponseFinishedReported(ProviderResponseFinished),
     #[serde(rename = "provider.response_finished")]
     ProviderResponseFinished(ProviderResponseFinished),
+    /// Harness-canonical durable standalone execution accounting.
+    #[serde(rename = "provider.standalone_execution_accounted")]
+    ProviderStandaloneExecutionAccounted(ProviderStandaloneExecutionAccounted),
+    /// Final correction for cancellation-time standalone accounting.
+    #[serde(rename = "provider.standalone_execution_accounting_corrected")]
+    ProviderStandaloneExecutionAccountingCorrected(ProviderStandaloneExecutionAccountingCorrected),
     /// Provider-authored manual-retry outcome awaiting harness correlation.
     #[serde(rename = "provider.retry_prompt_result_reported")]
     ProviderRetryPromptResultReported(ProviderRetryPromptResult),
@@ -7259,6 +7362,12 @@ impl Event {
                 EventName::PROVIDER_RESPONSE_FINISHED_REPORTED
             }
             Self::ProviderResponseFinished(_) => EventName::PROVIDER_RESPONSE_FINISHED,
+            Self::ProviderStandaloneExecutionAccounted(_) => {
+                EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTED
+            }
+            Self::ProviderStandaloneExecutionAccountingCorrected(_) => {
+                EventName::PROVIDER_STANDALONE_EXECUTION_ACCOUNTING_CORRECTED
+            }
             Self::ProviderRetryPromptResultReported(_) => {
                 EventName::PROVIDER_RETRY_PROMPT_RESULT_REPORTED
             }

@@ -652,9 +652,9 @@ fn agent_stats_accumulate_runtime_estimated_api_cost_by_serving_model() {
     };
 
     let mut response_a = response(model_a);
-    h.add_finished_response_estimated_cost(&cid, &mut response_a, None);
+    h.add_finished_response_estimated_cost(&cid, &mut response_a, None, true);
     let mut response_fallback = response(tau_proto::ModelId::from("local/unpriced"));
-    h.add_finished_response_estimated_cost(&cid, &mut response_fallback, None);
+    h.add_finished_response_estimated_cost(&cid, &mut response_fallback, None, true);
     assert_eq!(response_a.estimated_api_cost_rates, Some(captured_rates));
     assert_eq!(
         response_a.estimated_api_cost_increment,

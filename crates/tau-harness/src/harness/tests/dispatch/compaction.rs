@@ -5290,6 +5290,11 @@ fn manual_cross_compaction_rejects_uncertain_dispatch() {
 #[test]
 fn manual_cross_compaction_rejects_unsupported_model() {
     let (_td, mut h, caller, _target, call, target_id) = setup_manual_cross_compaction_test();
+    h.session_runtime
+        .current_session_state
+        .token_usage
+        .start_request(&"prior/model".into());
+    let prior_usage = h.session_runtime.current_session_state.token_usage.clone();
     h.provider_runtime
         .model_info
         .get_mut(&"echo/model".into())
@@ -5302,6 +5307,30 @@ fn manual_cross_compaction_rejects_unsupported_model() {
         Some(&target_id),
     );
     assert_manual_cross_compaction_error(&h, &call, "standalone_compaction_unsupported");
+    assert!(
+        h.session_runtime
+            .current_session_state
+            .token_usage
+            .total
+            .requests
+            >= prior_usage.total.requests,
+        "pre-dispatch rejection must not subtract an earlier request"
+    );
+    assert_eq!(
+        h.session_runtime
+            .current_session_state
+            .token_usage
+            .by_model
+            .get(&"prior/model".into())
+            .map(|usage| usage.requests),
+        Some(1),
+        "the prior model's request remains untouched"
+    );
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::ProviderStandaloneExecutionAccounted(_)))
+    );
 }
 
 /// A cross-agent request rejects an unavailable target without revealing its
@@ -6424,144 +6453,8 @@ fn agent_compacted_resets_live_and_restored_context_usage() {
     h.shutdown().expect("shutdown");
 }
 
-/// A standalone-capable model must dispatch an explicit compact operation and
-/// accept its validated output as exactly one replacement-window boundary.
-#[test]
-fn manual_standalone_compact_installs_one_boundary() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
-    enable_remote_compaction_for_test_model(&mut h);
-    let info = h
-        .provider_runtime
-        .model_info
-        .get_mut(&"test/model".into())
-        .expect("test model");
-    info.supports_compaction = false;
-    info.supports_standalone_compaction = true;
-    info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(900));
-    let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
-        .identity
-        .agent_id
-        .clone()
-        .expect("durable agent");
-
-    h.handle_compact_request(
-        crate::harness::harness_connection_id(),
-        test_session_id("s1"),
-        Some(&agent_id),
-    );
-    let prompt = read_nth_prompt_created(&h, 0);
-    assert_eq!(
-        prompt.operation,
-        tau_proto::PromptOperation::StandaloneCompaction
-    );
-    let events = event_log_events(&h);
-    let (started_index, started) = events
-        .iter()
-        .enumerate()
-        .find_map(|(index, event)| match event {
-            Event::AgentStandaloneCompactionStarted(started) => Some((index, started.clone())),
-            _ => None,
-        })
-        .expect("durable start");
-    let prompt_index = events
-        .iter()
-        .position(|event| {
-            matches!(
-                event,
-                Event::AgentPromptCreated(created)
-                    if created.agent_prompt_id == prompt.agent_prompt_id
-            )
-        })
-        .expect("provider prompt");
-    assert!(
-        started_index < prompt_index,
-        "durable start must commit before provider dispatch"
-    );
-    assert_eq!(started.compact_prompt_id, prompt.agent_prompt_id);
-    assert_eq!(started.model, prompt.model);
-    assert_eq!(started.operation, prompt.operation);
-    let response = ProviderResponseFinished {
-        automatic_compaction_decision: None,
-        output_length_disposition: tau_proto::OutputLengthDisposition::None,
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
-
-        agent_prompt_id: prompt.agent_prompt_id,
-        agent_id: crate::parse_agent_id(&agent_id),
-        output_items: vec![ContextItem::Message(tau_proto::MessageItem {
-            role: tau_proto::ContextRole::Assistant,
-            content: vec![tau_proto::ContentPart::Text {
-                text: "summary".to_owned(),
-            }],
-            phase: None,
-            responses_raw_json: None,
-        })],
-        stop_reason: tau_proto::ProviderStopReason::EndTurn,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        originator: tau_proto::PromptOriginator::User,
-        usage: Some(tau_proto::ProviderTokenUsage {
-            prompt_sent_tokens: 226_200,
-            response_received_tokens: 4_500,
-            ..Default::default()
-        }),
-        compaction_original_input_tokens: None,
-        compaction_output_tokens: None,
-        backend: None,
-        provider_attempt: Default::default(),
-        provider_response_id: None,
-        ws_pool_delta: None,
-    };
-    h.handle_provider_response_finished(response.clone())
-        .expect("accept compact response");
-    h.handle_provider_response_finished(response)
-        .expect("ignore duplicate compact response");
-
-    let compacted: Vec<_> = event_log_events(&h)
-        .into_iter()
-        .filter_map(|event| match event {
-            Event::AgentCompacted(compacted) => Some(compacted),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(compacted.len(), 1);
-    assert_eq!(
-        (
-            compacted[0].original_input_tokens,
-            compacted[0].compaction_output_tokens,
-        ),
-        (
-            Some(tau_proto::TokenCount::new(226_200)),
-            Some(tau_proto::TokenCount::new(4_500)),
-        ),
-        "the durable boundary must retain canonical provider usage"
-    );
-    assert_eq!(
-        (
-            compacted[0].compact_prompt_id.as_ref(),
-            compacted[0].model.as_ref(),
-            compacted[0].operation,
-        ),
-        (
-            Some(&started.compact_prompt_id),
-            Some(&started.model),
-            Some(started.operation),
-        ),
-        "terminal correlation must be copied from the durable start"
-    );
-    assert!(matches!(
-        agent_tree_for_conversation(&h, &cid).current_branch().last(),
-        Some(tau_core::AgentEntry::Compaction {
-            replacement_window, ..
-        })
-            if replacement_window.len() == 1
-    ));
-    h.shutdown().expect("shutdown");
-}
+#[path = "compaction/standalone_accounting.rs"]
+mod standalone_accounting;
 
 /// A canonical no-output inference rejection commits the harness-authored plan
 /// before one durable claim, dispatches one compact request, and continues the
@@ -7286,85 +7179,6 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
         tau_proto::PromptOperation::StandaloneCompaction
     );
     h.shutdown().expect("shutdown");
-}
-
-/// UI cancellation during reactive compaction publishes one durable Cancelled
-/// outcome; a late provider terminal and cold replay cannot duplicate it.
-#[test]
-fn reactive_context_overflow_ui_cancel_is_terminal_once() {
-    let td = TempDir::new().expect("tempdir");
-    let state = td.path().join("state");
-    let (agent_id, compact);
-    {
-        let mut h = quiet_provider_harness(&state).expect("start");
-        enable_remote_compaction_for_test_model(&mut h);
-        h.provider_runtime
-            .model_info
-            .get_mut(&"test/model".into())
-            .expect("test model")
-            .supports_standalone_compaction = true;
-        let cid = ensure_test_user_agent(&mut h);
-        seed_reactive_compaction_prefix(&mut h, &cid);
-        agent_id = h.agent_runtime.agent_registry.agents[&cid]
-            .identity
-            .agent_id
-            .clone()
-            .expect("agent id");
-        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))
-            .expect("dispatch inference");
-        let inference = read_nth_prompt_created(&h, 0);
-        h.handle_provider_response_finished(context_overflow_response(&inference))
-            .expect("start recovery");
-        compact = read_nth_prompt_created(&h, 1);
-        h.handle_cancel_prompt(
-            crate::harness::harness_connection_id(),
-            &tau_proto::UiCancelPrompt {
-                session_id: test_session_id("s1"),
-                target_agent_id: Some(crate::parse_agent_id(&agent_id)),
-                agent_prompt_id: Some(compact.agent_prompt_id.clone()),
-            },
-        );
-        h.handle_provider_response_finished(context_overflow_response(&compact))
-            .expect("discard late response");
-        assert_eq!(
-            event_log_events(&h)
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    Event::AgentStandaloneCompactionFailed(failed)
-                        if failed.reason
-                            == tau_proto::StandaloneCompactionFailureReason::Cancelled
-                ))
-                .count(),
-            1
-        );
-        h.shutdown().expect("shutdown");
-    }
-    wait_for_session_unlock(&state, "s1");
-    let mut resumed =
-        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
-            .expect("resume");
-    assert!(
-        !event_log_events(&resumed).iter().any(|event| matches!(
-            event,
-            Event::AgentPromptStarted(prompt)
-                if prompt.agent_prompt_id == compact.agent_prompt_id
-        )),
-        "terminal cancelled compaction is not replay-dispatched"
-    );
-    assert!(
-        resumed
-            .agent_runtime
-            .agent_watch
-            .provider_status
-            .get(&agent_id)
-            .is_none_or(|status| !matches!(
-                status.state,
-                tau_proto::AgentWatchProviderState::Blocked { .. }
-            )),
-        "a durable cancelled terminal must replay as usable"
-    );
-    resumed.shutdown().expect("shutdown");
 }
 
 /// A delegated side conversation whose reactive compact fails must return one
@@ -8231,12 +8045,27 @@ fn standalone_compaction_rejects_response_after_head_navigation() {
             .into_iter()
             .any(|event| matches!(event, Event::AgentCompacted(_)))
     );
-    assert_eq!(
+    assert!(
         h.agent_stats_snapshot(&cid)
             .expect("agent stats")
-            .estimated_api_cost,
-        tau_proto::EstimatedApiCost::default(),
-        "a stale terminal must not charge the agent"
+            .estimated_api_cost
+            .as_picodollars()
+            > 0,
+        "a dispatched stale terminal remains billable"
+    );
+    assert!(
+        event_log_events(&h).into_iter().any(|event| matches!(
+            event,
+            Event::ProviderStandaloneExecutionAccounted(accounted)
+                if accounted.agent_prompt_id == compact.agent_prompt_id
+                    && accounted.output == tau_proto::StandaloneExecutionOutput::Rejected
+                    && matches!(
+                        accounted.usage,
+                        tau_proto::StandaloneExecutionUsage::Known(ref usage)
+                            if usage.prompt_sent_tokens == 1_000_000
+                    )
+        )),
+        "stale output must retain canonical rejected accounting"
     );
     h.shutdown().expect("shutdown");
 }

@@ -293,6 +293,16 @@ then publishes canonical provider facts or a requester-directed retry outcome. T
 response alternatives retain the existing recovery, persistence, tool dispatch, and turn
 closure pipeline. See
 [SPEC-provider-execution-reports-and-canonical-facts](../../../specs/SPEC-provider-execution-reports-and-canonical-facts.md).
+Standalone backend terminals publish their canonical accounting independently;
+only its committed facts update live ledgers. Restore folds those same facts only
+when their required session identity matches the session being rebuilt. It scans
+unloaded durable journals through bounded read-only snapshots rather than
+retaining exclusive session leases. Sequence-continuing Initial/New bindings
+restore that ledger without recreating the old runtime branch. Post-dispatch
+cancellation publishes one Unknown awaiting observation; only a terminal from
+the same live provider generation may correct it without counting another
+request. Provider loss, shutdown, and unload close remaining owners as Final
+Unknown before runtime authority disappears.
 Peer requests routed to harness-internal tools use separate runtime loaded-agent
 correlation for execution, wait, ephemeral, and unload lifecycle; they never
 acquire transcript tool-call ownership, so their terminal facts remain

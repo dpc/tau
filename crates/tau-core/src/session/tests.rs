@@ -718,7 +718,7 @@ fn provider_response_rejects_input_side_tool_result_items() {
     let tree = AgentTree::from_events(agent_id(), &[]);
     let response = tau_proto::ProviderResponseFinished {
         automatic_compaction_decision: None,
-        estimated_api_cost_rates: None,
+        estimated_api_cost_rates: Some(tau_proto::ESTIMATED_API_COST_FALLBACK),
         estimated_api_cost_increment: None,
 
         agent_prompt_id: "ap-invalid-result"
@@ -864,6 +864,175 @@ fn compaction_start(id: &str) -> tau_proto::AgentStandaloneCompactionStarted {
         supersedes: None,
         trigger: tau_proto::StandaloneCompactionTrigger::Manual,
     }
+}
+
+/// Canonical standalone accounting must reject a replayed prompt/attempt key
+/// even when every other correlation field is unchanged.
+#[test]
+fn standalone_execution_accounting_is_idempotent_per_logical_attempt() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let started = compaction_start("ct-accounting-idempotency");
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(started.clone()))
+        .expect("valid start");
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
+    let session_id = tau_proto::SessionId::parse("session-accounting").expect("valid session id");
+    let prompt_started = tau_proto::AgentPromptStarted {
+        agent_prompt_id: started.compact_prompt_id.clone(),
+        agent_id: agent_id(),
+        session_id: session_id.clone(),
+        model: started.model.clone(),
+        model_params: None,
+        outer_turn_id: None,
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    };
+    tree.validate_event(&Event::AgentPromptStarted(prompt_started.clone()))
+        .expect("valid prompt start");
+    tree.apply_event(&Event::AgentPromptStarted(prompt_started));
+    let accounted = tau_proto::ProviderStandaloneExecutionAccounted {
+        session_id,
+        agent_id: agent_id(),
+        agent_prompt_id: started.compact_prompt_id.clone(),
+        logical_attempt: tau_proto::ProviderAttempt::ONE,
+        transaction_id: started.transaction_id.clone(),
+        model: started.model.clone(),
+        backend: None,
+        usage: tau_proto::StandaloneExecutionUsage::Unknown,
+        estimated_api_cost_rates: Some(tau_proto::ESTIMATED_API_COST_FALLBACK),
+        estimated_api_cost_increment: None,
+        output: tau_proto::StandaloneExecutionOutput::Rejected,
+        finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
+    };
+    let mut known = accounted.clone();
+    let usage = tau_proto::ProviderTokenUsage {
+        model: Some(known.model.clone()),
+        prompt_sent_tokens: 10,
+        prompt_cached_tokens: 2,
+        response_received_tokens: 3,
+        ..Default::default()
+    };
+    let rates = known.estimated_api_cost_rates.expect("rates");
+    known.usage = tau_proto::StandaloneExecutionUsage::Known(usage.clone());
+    known.estimated_api_cost_increment =
+        Some(tau_proto::EstimatedApiCost::for_usage(&usage, rates));
+    tree.validate_event(&Event::ProviderStandaloneExecutionAccounted(known.clone()))
+        .expect("normalized known accounting");
+    let mut invalid = known.clone();
+    if let tau_proto::StandaloneExecutionUsage::Known(usage) = &mut invalid.usage {
+        usage.model = None;
+    }
+    assert!(
+        tree.validate_event(&Event::ProviderStandaloneExecutionAccounted(invalid))
+            .expect_err("usage model mismatch")
+            .to_string()
+            .contains("usage model")
+    );
+    let mut invalid = known.clone();
+    if let tau_proto::StandaloneExecutionUsage::Known(usage) = &mut invalid.usage {
+        usage.prompt_cached_tokens = usage.prompt_sent_tokens + 1;
+    }
+    assert!(
+        tree.validate_event(&Event::ProviderStandaloneExecutionAccounted(invalid))
+            .expect_err("unnormalized cache usage")
+            .to_string()
+            .contains("normalized")
+    );
+    let mut invalid = known.clone();
+    invalid.estimated_api_cost_increment = Some(tau_proto::EstimatedApiCost::from_picodollars(1));
+    assert!(
+        tree.validate_event(&Event::ProviderStandaloneExecutionAccounted(invalid))
+            .expect_err("inexact cost")
+            .to_string()
+            .contains("cost")
+    );
+
+    let mut awaiting = accounted.clone();
+    awaiting.finality = tau_proto::StandaloneExecutionAccountingFinality::AwaitingCancelledTerminal;
+    let mut correction_tree = tree.clone();
+    correction_tree
+        .validate_event(&Event::ProviderStandaloneExecutionAccounted(
+            awaiting.clone(),
+        ))
+        .expect("awaiting initial");
+    correction_tree.apply_event(&Event::ProviderStandaloneExecutionAccounted(
+        awaiting.clone(),
+    ));
+    let correction = tau_proto::ProviderStandaloneExecutionAccountingCorrected {
+        session_id: awaiting.session_id.clone(),
+        agent_id: awaiting.agent_id.clone(),
+        agent_prompt_id: awaiting.agent_prompt_id.clone(),
+        logical_attempt: awaiting.logical_attempt,
+        transaction_id: awaiting.transaction_id.clone(),
+        model: awaiting.model.clone(),
+        backend: None,
+        usage: tau_proto::StandaloneExecutionUsage::Unknown,
+        estimated_api_cost_rates: awaiting.estimated_api_cost_rates,
+        estimated_api_cost_increment: None,
+        output: tau_proto::StandaloneExecutionOutput::Rejected,
+    };
+    correction_tree
+        .validate_event(&Event::ProviderStandaloneExecutionAccountingCorrected(
+            correction.clone(),
+        ))
+        .expect("first matching correction");
+    correction_tree.apply_event(&Event::ProviderStandaloneExecutionAccountingCorrected(
+        correction.clone(),
+    ));
+    assert!(
+        correction_tree
+            .validate_event(&Event::ProviderStandaloneExecutionAccountingCorrected(
+                correction,
+            ))
+            .expect_err("duplicate correction")
+            .to_string()
+            .contains("duplicate")
+    );
+    tree.validate_event(&Event::ProviderStandaloneExecutionAccounted(
+        accounted.clone(),
+    ))
+    .expect("first accounting fact");
+    tree.apply_event(&Event::ProviderStandaloneExecutionAccounted(
+        accounted.clone(),
+    ));
+    let error = tree
+        .validate_event(&Event::ProviderStandaloneExecutionAccounted(accounted))
+        .expect_err("duplicate accounting key must fail closed");
+    assert!(error.to_string().contains("consecutive and unique"));
+
+    let mut jumped = tau_proto::ProviderStandaloneExecutionAccounted {
+        session_id: tau_proto::SessionId::parse("session-accounting").expect("valid session id"),
+        agent_id: agent_id(),
+        agent_prompt_id: started.compact_prompt_id.clone(),
+        logical_attempt: tau_proto::ProviderAttempt::new(3).expect("finite attempt"),
+        transaction_id: started.transaction_id.clone(),
+        model: started.model.clone(),
+        backend: None,
+        usage: tau_proto::StandaloneExecutionUsage::Unknown,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        output: tau_proto::StandaloneExecutionOutput::Rejected,
+        finality: tau_proto::StandaloneExecutionAccountingFinality::Final,
+    };
+    let error = tree
+        .validate_event(&Event::ProviderStandaloneExecutionAccounted(jumped.clone()))
+        .expect_err("jumped accounting attempt must fail closed");
+    assert!(error.to_string().contains("consecutive and unique"));
+
+    jumped.logical_attempt =
+        tau_proto::ProviderAttempt::new(tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS + 2)
+            .expect("finite attempt");
+    let error = tree
+        .validate_event(&Event::ProviderStandaloneExecutionAccounted(jumped.clone()))
+        .expect_err("attempt beyond the reserved terminal must fail closed");
+    assert!(error.to_string().contains("exceeds"));
+
+    jumped.logical_attempt = tau_proto::ProviderAttempt::new(2).expect("finite attempt");
+    jumped.session_id = tau_proto::SessionId::parse("other-session").expect("valid session id");
+    let error = tree
+        .validate_event(&Event::ProviderStandaloneExecutionAccounted(jumped))
+        .expect_err("cross-session accounting must fail closed");
+    assert!(error.to_string().contains("session does not match"));
 }
 
 fn append_user_input(tree: &mut AgentTree, text: &str) -> AgentHead {

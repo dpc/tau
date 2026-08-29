@@ -797,7 +797,17 @@ facts or directed retry outcomes. Reports are excluded from semantic journals fo
 either supplied `persist` value. Raw terminal report delivery/debug projections clear
 provider-image bytes. This boundary validates routing and lifecycle ownership; it does
 not treat configured provider payloads as hostile extension input or add spoofing
-hardening. See
+hardening. Standalone-attempt accounting is a separate harness-sourced durable
+fact: it carries required session correlation and normalized usage/rates/cost but
+no credential or provider account identity. Its retry authority is bounded to 64
+attempts, reserving attempt 65 for the terminal; larger configured-Provider
+statuses remain transient diagnostics and cannot drive accounting or watcher
+attempt state. A post-dispatch cancellation first publishes an Unknown awaiting
+observation. Only the same live provider generation can publish its one durable
+terminal correction; restart preserves the observation but restores no
+correction authority. Provider disconnect, graceful shutdown, and agent unload
+instead close still-dispatched owners as Final Unknown before discarding their
+routes. See
 [SPEC-provider-execution-reports-and-canonical-facts](specs/SPEC-provider-execution-reports-and-canonical-facts.md).
 Committed terminal result reports may carry typed provider images for downstream
 validation, but every debug JSONL projection clears image bytes under

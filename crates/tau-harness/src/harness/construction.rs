@@ -132,6 +132,7 @@ impl Harness {
                     session_ever_loaded: HashSet::new(),
                     roster_loaded: HashSet::new(),
                     roster_ever_loaded: HashSet::new(),
+                    roster_durable_ever_loaded: HashSet::new(),
                     roster_valid: true,
                     navigation_modes: HashMap::new(),
                     stopped_ids: HashSet::new(),
@@ -148,6 +149,7 @@ impl Harness {
             prompt_coordination: PromptCoordinationState {
                 prompt_runtime: PromptRuntimeState::default(),
                 compaction_runtime: CompactionRuntimeState::default(),
+                standalone_accounting: StandaloneExecutionAccountingState::default(),
                 context_discovery: ContextDiscoveryState::new(
                     initial_session_id,
                     parts.system_prompt_templates,
@@ -475,6 +477,8 @@ impl Harness {
         harness.install_internal_tool_handlers(internal_tool_handlers);
         if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
             harness.rehydrate_agents_from_session();
+        } else {
+            harness.restore_existing_session_accounting_without_runtime_rehydration();
         }
         harness.publish_current_session_dir();
 
@@ -520,6 +524,9 @@ impl Harness {
         harness.wait_for_session_init()?;
         harness.activate_replayed_prompt_occurrences();
         harness.ensure_selected_role_available_after_required_skill_validation()?;
+        if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
+            harness.finalize_restored_standalone_costs();
+        }
         Ok(harness)
     }
     /// Creates a harness from configuration, spawning real child processes.
@@ -637,6 +644,8 @@ impl Harness {
 
         if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
             harness.rehydrate_agents_from_session();
+        } else {
+            harness.restore_existing_session_accounting_without_runtime_rehydration();
         }
         let initial_client_id =
             harness.accept_initial_client(initial_client, initial_client_error_stream)?;
@@ -685,6 +694,9 @@ impl Harness {
             return Err(error);
         }
         harness.activate_replayed_prompt_occurrences();
+        if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
+            harness.finalize_restored_standalone_costs();
+        }
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "session init complete");
         Ok((harness, initial_client_id))
     }

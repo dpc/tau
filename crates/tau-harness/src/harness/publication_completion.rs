@@ -366,6 +366,7 @@ impl Harness {
                 | AgentPublishCompletion::ReactiveContextRecoveryStart { .. }
                 | AgentPublishCompletion::StandaloneContextRejection { .. }
                 | AgentPublishCompletion::OwedCompactionFact { .. }
+                | AgentPublishCompletion::StandaloneExecutionAccounting { .. }
                 | AgentPublishCompletion::RollingCompactionStart { .. }
                 | AgentPublishCompletion::StandaloneContinuation { .. } => None,
             }
@@ -773,6 +774,9 @@ impl Harness {
         if let AgentPublishCompletion::OwedCompactionFact { .. } = completion {
             return;
         }
+        if let AgentPublishCompletion::StandaloneExecutionAccounting { .. } = completion {
+            return;
+        }
         if let AgentPublishCompletion::RollingCompactionStart { .. } = completion {
             return;
         }
@@ -922,6 +926,7 @@ impl Harness {
         sync: Option<&ConversationHeadSync>,
         event: &Event,
         semantic_parent: tau_core::AgentEventParent,
+        source: Option<&tau_proto::ConnectionId>,
     ) {
         let Some((cid, mut completion)) = sync.and_then(|sync| {
             sync.completion()
@@ -957,6 +962,24 @@ impl Harness {
             owning_branch,
             retry_policy: OwnedPublicationRetryPolicy::ApprovedEventWithoutInterception,
         });
+        if let AgentPublishCompletion::StandaloneExecutionAccounting {
+            key,
+            owned_publication: Some(publication),
+        } = completion
+        {
+            self.prompt_coordination
+                .standalone_accounting
+                .retained
+                .insert(
+                    key,
+                    RetainedStandaloneAccountingPublication {
+                        cid,
+                        publication,
+                        source: source.cloned(),
+                    },
+                );
+            return;
+        }
         if matches!(
             completion,
             AgentPublishCompletion::StandaloneContinuation { .. }
@@ -1110,6 +1133,7 @@ impl Harness {
                 *publication.approved_event,
                 approved,
                 publication.semantic_parent,
+                None,
             );
             if self
                 .prompt_coordination
@@ -1163,6 +1187,7 @@ impl Harness {
         for cid in pending {
             self.retry_pending_agent_publish_completion(&cid);
         }
+        self.retry_pending_standalone_accounting_publications();
         let pending_finishes = self
             .agent_runtime
             .agent_registry
@@ -1186,6 +1211,46 @@ impl Harness {
             .is_empty()
         {
             self.retry_capacity_rejected_activations();
+        }
+    }
+
+    /// Retry exact append-rejected accounting facts independently from
+    /// outcomes.
+    pub(super) fn retry_pending_standalone_accounting_publications(&mut self) {
+        let mut keys = self
+            .prompt_coordination
+            .standalone_accounting
+            .retained
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort_by(|left, right| {
+            left.0
+                .as_str()
+                .cmp(right.0.as_str())
+                .then_with(|| left.1.get().cmp(&right.1.get()))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+        for key in keys {
+            let Some(retained) = self
+                .prompt_coordination
+                .standalone_accounting
+                .retained
+                .remove(&key)
+            else {
+                continue;
+            };
+            let completion = AgentPublishCompletion::StandaloneExecutionAccounting {
+                key,
+                owned_publication: None,
+            };
+            self.commit_approved_agent_retry(
+                &retained.cid,
+                *retained.publication.approved_event,
+                completion,
+                retained.publication.semantic_parent,
+                retained.source.as_ref(),
+            );
         }
     }
 
@@ -2458,6 +2523,12 @@ impl Harness {
         append_outcome: Option<&tau_core::AgentAppendOutcome>,
     ) {
         self.react_to_committed_tool_terminal(source, event, append_outcome);
+        if let Event::ProviderStandaloneExecutionAccounted(accounted) = event {
+            self.fold_committed_standalone_accounting(accounted, source, true);
+        }
+        if let Event::ProviderStandaloneExecutionAccountingCorrected(corrected) = event {
+            self.fold_committed_standalone_accounting_correction(corrected, source, true);
+        }
         if let Event::AgentManualCompactionRequested(requested) = event
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(requested.target_agent_id.as_str()))
@@ -3765,6 +3836,171 @@ impl Harness {
         }
     }
 
+    /// Fold one committed session-correlated accounting fact at most once.
+    pub(super) fn fold_committed_standalone_accounting(
+        &mut self,
+        accounted: &tau_proto::ProviderStandaloneExecutionAccounted,
+        source: Option<&tau_proto::ConnectionId>,
+        publish_stats: bool,
+    ) {
+        if accounted.session_id != self.session_runtime.current_session_id {
+            return;
+        }
+        let key = (accounted.agent_prompt_id.clone(), accounted.logical_attempt);
+        if self
+            .prompt_coordination
+            .standalone_accounting
+            .folded
+            .contains_key(&key)
+        {
+            return;
+        }
+        let phase = if accounted.finality
+            == tau_proto::StandaloneExecutionAccountingFinality::AwaitingCancelledTerminal
+        {
+            FoldedStandaloneAccountingPhase::AwaitingCorrection
+        } else {
+            FoldedStandaloneAccountingPhase::Final
+        };
+        self.prompt_coordination
+            .standalone_accounting
+            .folded
+            .insert(key.clone(), phase);
+        self.session_runtime
+            .current_session_state
+            .token_usage
+            .start_request(&accounted.model);
+        self.fold_standalone_accounting_payload(
+            &accounted.agent_id,
+            &accounted.model,
+            &accounted.usage,
+            accounted.estimated_api_cost_increment,
+            source,
+            publish_stats,
+        );
+        if phase == FoldedStandaloneAccountingPhase::AwaitingCorrection
+            && let Some(pending) = self
+                .prompt_coordination
+                .standalone_accounting
+                .pending_corrections
+                .remove(&key)
+        {
+            self.publish_standalone_execution_accounting_correction_event(
+                &pending.cid,
+                pending.corrected,
+            );
+        } else if phase == FoldedStandaloneAccountingPhase::Final {
+            self.finish_agent_removal_after_standalone_accounting(&accounted.agent_id);
+        }
+    }
+
+    /// Fold the sole correction without counting a second backend request.
+    pub(super) fn fold_committed_standalone_accounting_correction(
+        &mut self,
+        corrected: &tau_proto::ProviderStandaloneExecutionAccountingCorrected,
+        source: Option<&tau_proto::ConnectionId>,
+        publish_stats: bool,
+    ) {
+        if corrected.session_id != self.session_runtime.current_session_id {
+            return;
+        }
+        let key = (corrected.agent_prompt_id.clone(), corrected.logical_attempt);
+        if self
+            .prompt_coordination
+            .standalone_accounting
+            .folded
+            .get(&key)
+            != Some(&FoldedStandaloneAccountingPhase::AwaitingCorrection)
+        {
+            return;
+        }
+        self.prompt_coordination
+            .standalone_accounting
+            .folded
+            .insert(key, FoldedStandaloneAccountingPhase::Corrected);
+        self.fold_standalone_accounting_payload(
+            &corrected.agent_id,
+            &corrected.model,
+            &corrected.usage,
+            corrected.estimated_api_cost_increment,
+            source,
+            publish_stats,
+        );
+        self.finish_agent_removal_after_standalone_accounting(&corrected.agent_id);
+    }
+
+    /// Continue an unload only after its final accounting publication commits.
+    fn finish_agent_removal_after_standalone_accounting(&mut self, agent_id: &tau_proto::AgentId) {
+        let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str())) else {
+            return;
+        };
+        if self
+            .prompt_coordination
+            .standalone_accounting
+            .pending_agent_removals
+            .contains(&cid)
+            && !self.has_unsettled_standalone_accounting_for(&cid)
+        {
+            self.prompt_coordination
+                .standalone_accounting
+                .pending_agent_removals
+                .remove(&cid);
+            self.remove_agent(&cid);
+        }
+    }
+
+    /// Apply known token and cost payload without changing request count.
+    fn fold_standalone_accounting_payload(
+        &mut self,
+        agent_id: &tau_proto::AgentId,
+        model: &tau_proto::ModelId,
+        usage: &tau_proto::StandaloneExecutionUsage,
+        increment: Option<tau_proto::EstimatedApiCost>,
+        source: Option<&tau_proto::ConnectionId>,
+        publish_stats: bool,
+    ) {
+        if let tau_proto::StandaloneExecutionUsage::Known(usage) = usage {
+            self.session_runtime
+                .current_session_state
+                .token_usage
+                .add_sent(model, usage.prompt_sent_tokens, usage.prompt_cached_tokens);
+            self.session_runtime
+                .current_session_state
+                .token_usage
+                .add_received(model, usage.response_received_tokens);
+        }
+        let Some(increment) = increment else {
+            if publish_stats
+                && let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str()))
+            {
+                self.emit_agent_stats_updated_from(&cid, source);
+            }
+            return;
+        };
+        if publish_stats {
+            self.agent_runtime.agent_registry.cost_ledger.add_increment(
+                agent_id,
+                increment,
+                &self.agent_runtime.agent_registry.creator_topology,
+            );
+            if let Some(cid) = self.runtime_agent_id_for_target_agent(Some(agent_id.as_str())) {
+                self.emit_agent_stats_updated_from(&cid, source);
+            }
+        } else {
+            let pending = self
+                .prompt_coordination
+                .standalone_accounting
+                .pending_costs
+                .entry(agent_id.clone())
+                .or_default();
+            *pending = tau_proto::EstimatedApiCost::from_picodollars(
+                pending
+                    .as_picodollars()
+                    .saturating_add(increment.as_picodollars()),
+            );
+        }
+    }
+
     /// Synchronize idle continuation budget state after selected ancestry
     /// moves.
     ///
@@ -4599,6 +4835,12 @@ impl Harness {
             Event::AgentHeadMoved(moved) => Some(moved.agent_id.clone()),
             Event::ShellCommandFinished(finished) => finished.target_agent_id.clone(),
             Event::ProviderResponseFinished(finished) => Some(finished.agent_id.clone()),
+            Event::ProviderStandaloneExecutionAccounted(accounted) => {
+                Some(accounted.agent_id.clone())
+            }
+            Event::ProviderStandaloneExecutionAccountingCorrected(corrected) => {
+                Some(corrected.agent_id.clone())
+            }
             Event::ProviderToolResult(result) => self
                 .tool_routing
                 .tool_runtime

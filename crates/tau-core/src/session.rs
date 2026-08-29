@@ -522,10 +522,8 @@ pub struct AgentTree {
     /// Globally unique tool calls that already have one real background
     /// completion event.
     background_completed_tool_calls: HashSet<ToolCallId>,
-    /// Durable standalone-compaction transactions folded from control facts.
-    compaction_transactions: HashMap<tau_proto::CompactionTransactionId, CompactionTransactionFold>,
-    /// Durable insertion order for deterministic recovery projection.
-    compaction_transaction_order: Vec<tau_proto::CompactionTransactionId>,
+    /// Durable standalone-compaction transactions and their accounting state.
+    compaction_transactions: StandaloneCompactionTransactions,
     /// Failed authorities cleared by a successful explicit successor chain.
     resolved_compaction_failures: HashSet<tau_proto::CompactionTransactionId>,
     /// Terminal-owned eager decisions keyed by eventual transaction id.
@@ -713,6 +711,40 @@ struct CompactionTransactionFold {
     checkpoint: Option<tau_proto::AgentInferenceDispatchStarted>,
     inference_finished: bool,
     standalone_context_rejection: Option<tau_proto::ProviderResponseFinished>,
+}
+
+/// Durable accounting phase retained for one prompt's latest attempt.
+#[derive(Clone, Debug, PartialEq)]
+struct StandaloneExecutionAccountingFold {
+    /// Initial canonical observation.
+    initial: tau_proto::ProviderStandaloneExecutionAccounted,
+    /// Whether its sole permitted correction already committed.
+    corrected: bool,
+}
+
+/// Coherent durable state owned by standalone compaction transactions.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct StandaloneCompactionTransactions {
+    /// Transaction folds keyed by durable transaction identity.
+    entries: HashMap<tau_proto::CompactionTransactionId, CompactionTransactionFold>,
+    /// Durable insertion order for deterministic recovery projection.
+    order: Vec<tau_proto::CompactionTransactionId>,
+    /// Latest accounting identity and correction phase per provider prompt.
+    accounting: HashMap<tau_proto::AgentPromptId, StandaloneExecutionAccountingFold>,
+}
+
+impl std::ops::Deref for StandaloneCompactionTransactions {
+    type Target = HashMap<tau_proto::CompactionTransactionId, CompactionTransactionFold>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl std::ops::DerefMut for StandaloneCompactionTransactions {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.entries
+    }
 }
 
 /// Terminal-owned eager automatic-compaction authority.
@@ -920,7 +952,7 @@ impl AgentTree {
                 finish_committed: decision.finish_committed,
             });
         }
-        let id = self.compaction_transaction_order.last()?;
+        let id = self.compaction_transactions.order.last()?;
         let transaction = self.compaction_transactions.get(id)?;
         match (&transaction.outcome, &transaction.checkpoint) {
             (None, _) => transaction
@@ -1115,7 +1147,8 @@ impl AgentTree {
         model: &tau_proto::ModelId,
         current_head: tau_proto::AgentHead,
     ) -> Option<&tau_proto::AgentStandaloneCompactionFailed> {
-        self.compaction_transaction_order
+        self.compaction_transactions
+            .order
             .iter()
             .rev()
             .filter(|id| !self.resolved_compaction_failures.contains(*id))
@@ -2122,8 +2155,7 @@ impl AgentTree {
             tool_call_rounds: HashMap::new(),
             pending_context_inputs: Vec::new(),
             background_completed_tool_calls: HashSet::new(),
-            compaction_transactions: HashMap::new(),
-            compaction_transaction_order: Vec::new(),
+            compaction_transactions: StandaloneCompactionTransactions::default(),
             resolved_compaction_failures: HashSet::new(),
             automatic_compaction_decisions: HashMap::new(),
             automatic_compaction_decision_order: Vec::new(),
@@ -2680,7 +2712,8 @@ impl AgentTree {
                 }
             }
             Event::AgentStandaloneCompactionStarted(started) => {
-                self.compaction_transaction_order
+                self.compaction_transactions
+                    .order
                     .push(started.transaction_id.clone());
                 self.compaction_transactions.insert(
                     started.transaction_id.clone(),
@@ -2721,6 +2754,24 @@ impl AgentTree {
                 {
                     request.state =
                         ManualCompactionRequestState::Started(started.transaction_id.clone());
+                }
+            }
+            Event::ProviderStandaloneExecutionAccounted(accounted) => {
+                self.compaction_transactions.accounting.insert(
+                    accounted.agent_prompt_id.clone(),
+                    StandaloneExecutionAccountingFold {
+                        initial: accounted.clone(),
+                        corrected: false,
+                    },
+                );
+            }
+            Event::ProviderStandaloneExecutionAccountingCorrected(corrected) => {
+                if let Some(fold) = self
+                    .compaction_transactions
+                    .accounting
+                    .get_mut(&corrected.agent_prompt_id)
+                {
+                    fold.corrected = true;
                 }
             }
             Event::AgentStandaloneCompactionFailed(failed) => {
@@ -3730,6 +3781,16 @@ impl AgentTree {
             Event::ProviderResponseFinished(response) if response.agent_id == self.agent_id => {
                 Some(self.validate_provider_response(response))
             }
+            Event::ProviderStandaloneExecutionAccounted(accounted)
+                if accounted.agent_id == self.agent_id =>
+            {
+                Some(self.validate_standalone_execution_accounting(accounted))
+            }
+            Event::ProviderStandaloneExecutionAccountingCorrected(corrected)
+                if corrected.agent_id == self.agent_id =>
+            {
+                Some(self.validate_standalone_execution_accounting_correction(corrected))
+            }
             Event::ShellCommandFinished(finished)
                 if finished.target_agent_id.as_ref() == Some(&self.agent_id) =>
             {
@@ -3737,6 +3798,174 @@ impl AgentTree {
             }
             _ => None,
         }
+    }
+
+    fn validate_standalone_execution_accounting(
+        &self,
+        accounted: &tau_proto::ProviderStandaloneExecutionAccounted,
+    ) -> Result<(), AgentEventValidationError> {
+        if accounted.logical_attempt.get() > tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS + 1 {
+            return Err(AgentEventValidationError::new(
+                "standalone execution accounting attempt exceeds the retry and terminal bound",
+            ));
+        }
+        let previous_attempt = self
+            .compaction_transactions
+            .accounting
+            .get(&accounted.agent_prompt_id)
+            .map(|fold| fold.initial.logical_attempt);
+        let expected_attempt =
+            previous_attempt.map_or(1, |attempt| attempt.get().saturating_add(1));
+        if accounted.logical_attempt.get() != expected_attempt {
+            return Err(AgentEventValidationError::new(
+                "standalone execution accounting attempts must be consecutive and unique",
+            ));
+        }
+        let Some(transaction) = self.compaction_transactions.get(&accounted.transaction_id) else {
+            return Err(AgentEventValidationError::new(
+                "standalone execution accounting references an unknown transaction",
+            ));
+        };
+        if transaction.started.compact_prompt_id != accounted.agent_prompt_id
+            || transaction.started.model != accounted.model
+        {
+            return Err(AgentEventValidationError::new(
+                "standalone execution accounting does not match its transaction",
+            ));
+        }
+        let Some(prompt_started) = self.prompt_started(&accounted.agent_prompt_id) else {
+            return Err(AgentEventValidationError::new(
+                "standalone execution accounting references an unknown prompt start",
+            ));
+        };
+        if prompt_started.session_id != accounted.session_id {
+            return Err(AgentEventValidationError::new(
+                "standalone execution accounting session does not match its prompt",
+            ));
+        }
+        let Some(rates) = accounted.estimated_api_cost_rates else {
+            return Err(AgentEventValidationError::new(
+                "standalone execution accounting requires effective rates",
+            ));
+        };
+        if accounted.finality
+            == tau_proto::StandaloneExecutionAccountingFinality::AwaitingCancelledTerminal
+            && (!matches!(
+                accounted.usage,
+                tau_proto::StandaloneExecutionUsage::Unknown
+            ) || accounted.backend.is_some()
+                || accounted.estimated_api_cost_increment.is_some()
+                || accounted.output != tau_proto::StandaloneExecutionOutput::Rejected)
+        {
+            return Err(AgentEventValidationError::new(
+                "awaiting canceled standalone accounting must be unknown, rejected, and omit backend and cost",
+            ));
+        }
+        Self::validate_standalone_usage_and_cost(
+            &accounted.model,
+            &accounted.usage,
+            rates,
+            accounted.estimated_api_cost_increment,
+        )?;
+        Ok(())
+    }
+
+    fn validate_standalone_execution_accounting_correction(
+        &self,
+        corrected: &tau_proto::ProviderStandaloneExecutionAccountingCorrected,
+    ) -> Result<(), AgentEventValidationError> {
+        let Some(fold) = self
+            .compaction_transactions
+            .accounting
+            .get(&corrected.agent_prompt_id)
+        else {
+            return Err(AgentEventValidationError::new(
+                "standalone accounting correction has no initial observation",
+            ));
+        };
+        let initial = &fold.initial;
+        if fold.corrected
+            || initial.finality
+                != tau_proto::StandaloneExecutionAccountingFinality::AwaitingCancelledTerminal
+        {
+            return Err(AgentEventValidationError::new(
+                "standalone accounting correction is duplicate or targets a final observation",
+            ));
+        }
+        if corrected.session_id != initial.session_id
+            || corrected.agent_id != initial.agent_id
+            || corrected.agent_prompt_id != initial.agent_prompt_id
+            || corrected.logical_attempt != initial.logical_attempt
+            || corrected.transaction_id != initial.transaction_id
+            || corrected.model != initial.model
+            || corrected.estimated_api_cost_rates != initial.estimated_api_cost_rates
+            || corrected.output != tau_proto::StandaloneExecutionOutput::Rejected
+        {
+            return Err(AgentEventValidationError::new(
+                "standalone accounting correction does not match its initial observation",
+            ));
+        }
+        let rates = corrected
+            .estimated_api_cost_rates
+            .expect("validated initial accounting has rates");
+        Self::validate_standalone_usage_and_cost(
+            &corrected.model,
+            &corrected.usage,
+            rates,
+            corrected.estimated_api_cost_increment,
+        )
+    }
+
+    fn validate_standalone_usage_and_cost(
+        model: &tau_proto::ModelId,
+        usage: &tau_proto::StandaloneExecutionUsage,
+        rates: tau_proto::EstimatedApiCostRates,
+        increment: Option<tau_proto::EstimatedApiCost>,
+    ) -> Result<(), AgentEventValidationError> {
+        let tau_proto::StandaloneExecutionUsage::Known(usage) = usage else {
+            return if increment.is_none() {
+                Ok(())
+            } else {
+                Err(AgentEventValidationError::new(
+                    "unknown standalone usage cannot carry cost",
+                ))
+            };
+        };
+        if usage.model.as_ref() != Some(model) {
+            return Err(AgentEventValidationError::new(
+                "standalone accounting usage model does not match the transaction model",
+            ));
+        }
+        let sent = usage.prompt_sent_tokens;
+        let normalized_cache = usage
+            .cache
+            .as_deref()
+            .copied()
+            .map(|cache| cache.normalized(sent));
+        if usage.cache.as_deref().copied() != normalized_cache {
+            return Err(AgentEventValidationError::new(
+                "standalone accounting cache usage is not normalized",
+            ));
+        }
+        let expected_cached = normalized_cache
+            .and_then(|cache| cache.read_tokens)
+            .unwrap_or(usage.prompt_cached_tokens)
+            .min(sent);
+        if usage.prompt_cached_tokens != expected_cached
+            || usage
+                .prompt_cache_read_ceiling_tokens
+                .is_some_and(|ceiling| ceiling < expected_cached || sent < ceiling)
+        {
+            return Err(AgentEventValidationError::new(
+                "standalone accounting cached-token usage is not normalized",
+            ));
+        }
+        if increment != Some(tau_proto::EstimatedApiCost::for_usage(usage, rates)) {
+            return Err(AgentEventValidationError::new(
+                "standalone accounting cost does not match normalized usage and rates",
+            ));
+        }
+        Ok(())
     }
 
     fn proactive_threshold_source_is_valid(source: &tau_proto::CompactionThresholdSource) -> bool {
@@ -3891,7 +4120,7 @@ impl AgentTree {
                 ));
             }
         }
-        if let Some(previous_id) = self.compaction_transaction_order.last()
+        if let Some(previous_id) = self.compaction_transactions.order.last()
             && let Some(previous) = self.compaction_transactions.get(previous_id)
             && matches!(
                 previous.outcome,
@@ -4181,7 +4410,7 @@ impl AgentTree {
                 }
                 _ => None,
             };
-            if self.compaction_transaction_order.last() != Some(previous_transaction_id)
+            if self.compaction_transactions.order.last() != Some(previous_transaction_id)
                 || !matches!(
                     previous.outcome,
                     Some(CompactionTransactionOutcome::Succeeded(_))

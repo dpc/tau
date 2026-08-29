@@ -1000,12 +1000,14 @@ impl Harness {
         event: &Event,
         provider_connection_id: tau_proto::ConnectionId,
     ) {
-        let Some((agent_prompt_id, model)) = (match event {
-            Event::AgentPromptCreated(prompt) => Some((&prompt.agent_prompt_id, &prompt.model)),
+        let Some(prompt) = (match event {
+            Event::AgentPromptCreated(prompt) => Some(prompt),
             _ => None,
         }) else {
             return;
         };
+        let agent_prompt_id = &prompt.agent_prompt_id;
+        let model = &prompt.model;
         let rates = self
             .provider_runtime
             .models_by_extension
@@ -1034,6 +1036,42 @@ impl Harness {
             .prompt_runtime
             .estimated_cost_rates
             .insert(agent_prompt_id.clone(), rates);
+        if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+            && let Some(cid) = self
+                .prompt_coordination
+                .prompt_runtime
+                .agents
+                .get(agent_prompt_id)
+                .cloned()
+            && let Some(transaction_id) = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(&cid)
+                .and_then(|agent| match &agent.dispatch.activation_dispatch {
+                    path_crate_agent::ActivationDispatchState::Running {
+                        id,
+                        compact_prompt_id,
+                        ..
+                    } if compact_prompt_id == agent_prompt_id => Some(id.clone()),
+                    _ => None,
+                })
+        {
+            self.prompt_coordination
+                .standalone_accounting
+                .owners
+                .insert(
+                    agent_prompt_id.clone(),
+                    StandaloneExecutionAccountingOwner {
+                        session_id: prompt.session_id.clone(),
+                        agent_id: prompt.agent_id.clone(),
+                        cid,
+                        transaction_id,
+                        model: prompt.model.clone(),
+                        estimated_cost_rates: rates,
+                    },
+                );
+        }
     }
 
     /// Idempotently disposes runtime state allocated while materializing a
@@ -1057,7 +1095,8 @@ impl Harness {
         self.provider_runtime
             .pending_prompts
             .remove(agent_prompt_id);
-        self.prompt_coordination
+        let operation = self
+            .prompt_coordination
             .prompt_runtime
             .operations
             .remove(agent_prompt_id);
@@ -1078,11 +1117,13 @@ impl Harness {
             .estimated_cost_rates
             .remove(agent_prompt_id);
         self.clear_prompt_tool_snapshot(agent_prompt_id);
-        if let Some(model) = self
-            .prompt_coordination
-            .prompt_runtime
-            .models
-            .remove(agent_prompt_id)
+        if operation.map(|operation| operation.0)
+            != Some(tau_proto::PromptOperation::StandaloneCompaction)
+            && let Some(model) = self
+                .prompt_coordination
+                .prompt_runtime
+                .models
+                .remove(agent_prompt_id)
         {
             self.session_runtime
                 .current_session_state
@@ -1821,6 +1862,7 @@ impl Harness {
                 sync_head_for.as_ref(),
                 &event,
                 tau_core::AgentEventParent::from_head(batch_parent),
+                source,
             );
             self.emit_info("retaining branch-owned publication until its exact parent is selected");
             return;
@@ -1931,7 +1973,12 @@ impl Harness {
                 self.retain_rejected_ui_compaction_start(&event);
                 self.clear_rejected_eager_compaction_start(&event);
                 self.rollback_failed_wait_compaction_terminal(&event);
-                self.retain_rejected_agent_publish(sync_head_for.as_ref(), &event, parent_for_fold);
+                self.retain_rejected_agent_publish(
+                    sync_head_for.as_ref(),
+                    &event,
+                    parent_for_fold,
+                    source,
+                );
                 if !matches!(
                     sync_head_for
                         .as_ref()
@@ -2020,6 +2067,12 @@ impl Harness {
                 .agent_registry
                 .roster_ever_loaded
                 .insert(loaded.agent_id.clone());
+            if !loaded.ephemeral {
+                self.agent_runtime
+                    .agent_registry
+                    .roster_durable_ever_loaded
+                    .insert(loaded.agent_id.clone());
+            }
         } else if let Event::SessionAgentUnloaded(unloaded) = &event
             && unloaded.session_id == self.session_runtime.current_session_id
         {

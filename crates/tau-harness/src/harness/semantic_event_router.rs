@@ -88,6 +88,8 @@ fn is_persistence_exception(event: &Event) -> bool {
     matches!(
         event,
         Event::AgentPromptStarted(_)
+            | Event::ProviderStandaloneExecutionAccounted(_)
+            | Event::ProviderStandaloneExecutionAccountingCorrected(_)
             | Event::ProviderToolResult(_)
             | Event::ProviderToolError(_)
             | Event::ToolCancelled(_)

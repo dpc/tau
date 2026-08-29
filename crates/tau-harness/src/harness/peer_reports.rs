@@ -368,6 +368,8 @@ impl Harness {
             Event::ProviderPromptSubmitted(_)
                 | Event::ProviderResponseUpdated(_)
                 | Event::ProviderResponseFinished(_)
+                | Event::ProviderStandaloneExecutionAccounted(_)
+                | Event::ProviderStandaloneExecutionAccountingCorrected(_)
                 | Event::ProviderCacheMissDiagnostic(_)
                 | Event::ProviderCacheRefreshFinished(_)
                 | Event::AgentCacheRefreshRequested(_)
@@ -1552,23 +1554,60 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         updated: &tau_proto::ProviderResponseUpdated,
     ) {
+        if !self.provider_prompt_owner_matches(
+            source_id,
+            &updated.agent_prompt_id,
+            tau_proto::EventName::PROVIDER_RESPONSE_UPDATED_REPORTED,
+        ) {
+            return;
+        }
+        let accounting_cid = self
+            .agent_id_for_prompt(&updated.agent_prompt_id)
+            .or_else(|| {
+                self.prompt_coordination
+                    .standalone_accounting
+                    .owners
+                    .get(&updated.agent_prompt_id)
+                    .map(|owner| owner.cid.clone())
+            });
+        let rejected_retry_status = self
+            .prompt_coordination
+            .standalone_accounting
+            .awaiting_corrections
+            .contains_key(&updated.agent_prompt_id)
+            || updated
+                .status
+                .as_ref()
+                .and_then(|status| status.retry.as_ref())
+                .is_some_and(|retry| retry.attempt > tau_proto::MAX_STANDALONE_RETRY_ATTEMPTS);
+        if let Some(retry) = updated
+            .status
+            .as_ref()
+            .and_then(|status| status.retry.clone())
+            && let Some(cid) = accounting_cid.as_ref()
+        {
+            self.publish_unknown_standalone_retry_accounting(
+                cid,
+                &updated.agent_prompt_id,
+                retry.attempt,
+                Some(source_id),
+            );
+        }
         if self
             .prompt_coordination
             .canceled_prompts
             .contains(&updated.agent_prompt_id)
-            || !self.provider_prompt_owner_matches(
-                source_id,
-                &updated.agent_prompt_id,
-                tau_proto::EventName::PROVIDER_RESPONSE_UPDATED_REPORTED,
-            )
         {
             return;
         }
-        let Some(agent_id) = self.agent_id_for_prompt(&updated.agent_prompt_id) else {
+        let Some(agent_id) = accounting_cid else {
             return;
         };
         let mut updated = updated.clone();
         updated.agent_id = agent_id;
+        if rejected_retry_status && let Some(status) = updated.status.as_mut() {
+            status.retry = None;
+        }
         if !updated.deltas.is_empty() {
             self.prompt_coordination
                 .prompt_runtime

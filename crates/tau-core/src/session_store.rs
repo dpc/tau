@@ -452,6 +452,8 @@ struct ManagedSessionProjection {
     membership: SessionMembership,
     /// Same-daemon ordinary replay, including asynchronous suffix.
     events: Vec<PersistedSessionEvent>,
+    /// Predecessor prefix hidden only from a fresh runtime's ordinary replay.
+    hidden_predecessor_events: Vec<PersistedSessionEvent>,
     /// Same-daemon restore replay, including asynchronous suffix.
     restore_events: Vec<PersistedSessionEvent>,
     /// Durable restore sequence cursor, independent of fresh-runtime
@@ -675,6 +677,11 @@ impl SessionStore {
             ManagedSessionProjection {
                 membership,
                 events: visible_events,
+                hidden_predecessor_events: if fresh_runtime {
+                    prepared.events
+                } else {
+                    Vec::new()
+                },
                 restore_events: visible_restore_events,
                 restore_next_seq: PersistedSessionEventSeq::new(
                     prepared.restore_events.len() as u64
@@ -1145,6 +1152,26 @@ impl SessionStore {
         let session_id = validate_session_id(session_id)?;
         if let Some(projection) = self.managed.get(&session_id) {
             return Ok(projection.events.clone());
+        }
+        let events = load_session_events(&self.session_dir(&session_id).join("events.cbor"))?;
+        SessionMembership::try_from_events(session_id, &events)?;
+        Ok(events)
+    }
+
+    /// Returns complete validated durable history even when a New binding hides
+    /// its predecessor prefix from runtime replay.
+    pub fn durable_session_history(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
+        if self.mode.is_ephemeral() {
+            return self.session_events(session_id);
+        }
+        let session_id = validate_session_id(session_id)?;
+        if let Some(projection) = self.managed.get(&session_id) {
+            let mut events = projection.hidden_predecessor_events.clone();
+            events.extend(projection.events.iter().cloned());
+            return Ok(events);
         }
         let events = load_session_events(&self.session_dir(&session_id).join("events.cbor"))?;
         SessionMembership::try_from_events(session_id, &events)?;
