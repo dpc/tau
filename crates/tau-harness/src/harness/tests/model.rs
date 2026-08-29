@@ -47,7 +47,7 @@ fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
         id,
         display_name: None,
         tags: Vec::new(),
-        supported_tool_types: vec![],
+        supported_tool_types: vec![tau_proto::ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
@@ -1704,7 +1704,7 @@ fn provider_model_metadata_drives_selection_state() {
                 id: model_id.clone(),
                 display_name: None,
                 tags: Vec::new(),
-                supported_tool_types: vec![],
+                supported_tool_types: vec![tau_proto::ToolType::Function],
                 input_modalities: Vec::new(),
                 tool_result_modalities: Vec::new(),
                 supports_parallel_tool_calls: true,
@@ -1750,6 +1750,42 @@ fn provider_model_metadata_drives_selection_state() {
     assert_eq!(selected.context_window, Some(654_321));
 }
 
+/// Omitted tool metadata must remain non-parallel through the harness-authored
+/// canonical update rather than regaining legacy parallel guidance.
+#[test]
+fn omitted_tool_capabilities_canonicalize_to_non_parallel() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    let model: ProviderModelInfo = serde_json::from_value(serde_json::json!({
+        "id": "local/no-tools",
+        "context_window": 4096,
+        "efforts": [],
+        "verbosities": [],
+        "thinking_summaries": [],
+        "supports_compaction": false,
+        "supports_standalone_compaction": false
+    }))
+    .expect("omitted tool metadata");
+
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsDeclared(ProviderModelsDeclared {
+            models: vec![model],
+        })),
+    )
+    .expect("canonical model update");
+
+    let canonical = h
+        .provider_runtime
+        .model_info
+        .get(&"local/no-tools".parse().expect("model id"))
+        .expect("canonical model");
+    assert!(canonical.supported_tool_types.is_empty());
+    assert!(!canonical.supports_parallel_tool_calls);
+}
+
 /// Selected role params come from the role, then clamp against provider-owned
 /// metadata for the resolved model. This keeps runtime selection role-centric
 /// while still respecting each provider's supported knob levels.
@@ -1762,7 +1798,7 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             id: openai.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -1787,7 +1823,7 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             id: local.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -1902,7 +1938,7 @@ fn role_without_effort_picks_middle_provider_effort() {
             id: openai.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -1933,7 +1969,7 @@ fn role_without_effort_picks_middle_provider_effort() {
             id: local.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -2104,7 +2140,7 @@ fn role_missing_fields_use_model_defaults() {
         id: selected.clone(),
         display_name: None,
         tags: Vec::new(),
-        supported_tool_types: vec![],
+        supported_tool_types: vec![tau_proto::ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
@@ -2141,7 +2177,7 @@ fn role_without_verbosity_picks_low_when_supported() {
             id: openai.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -2166,7 +2202,7 @@ fn role_without_verbosity_picks_low_when_supported() {
             id: local.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -2624,7 +2660,7 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             id: custom.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -2649,7 +2685,7 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             id: local.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -2723,7 +2759,7 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             id: gpt.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -2748,7 +2784,7 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             id: locked.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -2801,7 +2837,7 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             id: gpt.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -2826,7 +2862,7 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             id: local.clone(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: vec![],
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -2880,7 +2916,7 @@ fn selected_params_use_runtime_role_fields() {
         id: model.clone(),
         display_name: None,
         tags: Vec::new(),
-        supported_tool_types: vec![],
+        supported_tool_types: vec![tau_proto::ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,

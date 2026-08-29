@@ -76,6 +76,12 @@ usage member. OpenRouter selects the documented OpenAI-compatible read/write
 shape, but its selected upstream can vary; those observations have unknown
 residency and never establish a cache policy, renewal, or keepalive operation.
 
+The exact attempt compatibility independently controls `tool_choice`. When the
+route omits that control, Auto still sends native tool definitions and relies on
+the route's default, while None removes the definitions and selector together.
+Parallel-call control is emitted only when the route supports it and the final
+request still contains tools.
+
 ## Function-call argument replay identity
 
 Chat Completions providers expose function-call arguments as JSON text. The
@@ -162,7 +168,8 @@ asynchronous transport and immutable policy, but is not a logical prompt attempt
 
 Chat Completions publishes Function-only model tool support. Request conversion
 is fallible and rejects any non-Function definition as an invariant violation;
-it must never silently omit one.
+it must never silently omit one. Configured model capability is exactly empty or
+Function-only, and parallel support is valid only for a Function-capable model.
 
 ## Typed image tool-result lowering
 

@@ -12,6 +12,111 @@ use super::*;
 /// One valid bounded OpenRouter response used by cache tests.
 const MODELS: &str = r#"{"data":[{"id":"vendor/model","name":"Fixture","context_length":1234,"supported_parameters":["reasoning"]}]}"#;
 
+/// Exact OpenRouter parameter memberships must remain independent, including
+/// conservative handling of absent, null, and empty metadata.
+#[test]
+fn discovery_maps_exact_tool_parameter_capabilities() {
+    let server = ScriptedHttpServer::spawn(
+        200,
+        r#"{"data":[
+            {"id":"vendor/all","context_length":1,"supported_parameters":["tools","tool_choice","parallel_tool_calls"]},
+            {"id":"vendor/auto-only","context_length":2,"supported_parameters":["tools"]},
+            {"id":"vendor/controls-without-tools","context_length":3,"supported_parameters":["tool_choice","parallel_tool_calls"]},
+            {"id":"vendor/empty","context_length":4,"supported_parameters":[]},
+            {"id":"vendor/null","context_length":5,"supported_parameters":null},
+            {"id":"vendor/missing","context_length":6},
+            {"id":"vendor/near-match","context_length":7,"supported_parameters":["Tools","tools ","tool-choice","parallel_tool_call"]}
+        ]}"#,
+    );
+
+    let models =
+        fetch_openrouter_models_from("", &network(), &server.url(), None).expect("discovery");
+    let capabilities = models
+        .iter()
+        .map(|model| {
+            let compat = model.compat.expect("discovered compatibility");
+            (
+                model.id.as_str(),
+                model.supported_tool_types.as_slice(),
+                compat.tool_choice,
+                compat.parallel_tool_calls,
+                model.supports_parallel_tool_calls,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        capabilities,
+        vec![
+            (
+                "vendor/all",
+                &[tau_proto::ToolType::Function][..],
+                true,
+                true,
+                true
+            ),
+            (
+                "vendor/auto-only",
+                &[tau_proto::ToolType::Function][..],
+                false,
+                false,
+                false
+            ),
+            ("vendor/controls-without-tools", &[][..], true, false, false),
+            ("vendor/empty", &[][..], false, false, false),
+            ("vendor/null", &[][..], false, false, false),
+            ("vendor/missing", &[][..], false, false, false),
+            ("vendor/near-match", &[][..], false, false, false),
+        ]
+    );
+    server.finish();
+}
+
+/// Conflicting duplicate discovery rows cannot split publication from backend
+/// lookup by assigning different exact capabilities to one model id.
+#[test]
+fn discovery_rejects_duplicate_model_ids() {
+    let server = ScriptedHttpServer::spawn(
+        200,
+        r#"{"data":[
+            {"id":"vendor/duplicate","context_length":1,"supported_parameters":["tools"]},
+            {"id":"vendor/duplicate","context_length":1,"supported_parameters":[]}
+        ]}"#,
+    );
+
+    fetch_openrouter_models_from("", &network(), &server.url(), None)
+        .expect_err("duplicate discovery rows must fail closed");
+
+    server.finish();
+}
+
+/// Explicit OpenRouter profiles use the same exact Function-only and identity
+/// invariants as fresh discovery and cached discovery.
+#[test]
+fn explicit_profiles_reject_invalid_tool_capabilities_and_duplicates() {
+    let model = |id, supported_tool_types, supports_parallel_tool_calls| {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "supported_tool_types": supported_tool_types,
+            "supports_parallel_tool_calls": supports_parallel_tool_calls
+        }))
+        .expect("model")
+    };
+    let invalid_tools = OpenRouterProfile {
+        api_key: String::new(),
+        models: vec![model("vendor/custom", serde_json::json!(["custom"]), false)],
+    };
+    assert!(invalid_tools.validate().is_err());
+    let duplicates = OpenRouterProfile {
+        api_key: String::new(),
+        models: vec![
+            model("vendor/duplicate", serde_json::json!(["function"]), true),
+            model("vendor/duplicate", serde_json::json!([]), false),
+        ],
+    };
+    assert!(duplicates.validate().is_err());
+}
+
 /// Builds a direct-only provider policy without ambient discovery.
 fn network() -> tau_provider::OutboundNetworkPolicy {
     tau_provider::OutboundNetworkPolicy::from_environment(
@@ -46,9 +151,10 @@ fn authenticated_discovery_normalizes_models_and_refreshes_cache() {
     let request = server.finish();
     assert!(request.starts_with("GET /models HTTP/1.1\r\n"));
     assert!(request.contains("authorization: Bearer openrouter-key-canary\r\n"));
-    let cached: Vec<ChatCompletionsModel> =
+    let cached: CachedOpenRouterModels =
         serde_json::from_reader(fs::File::open(cache).expect("cache file")).expect("cache JSON");
-    assert_eq!(cached.len(), 1);
+    assert_eq!(cached.version, OPENROUTER_MODELS_CACHE_VERSION);
+    assert_eq!(cached.models.len(), 1);
 }
 
 /// Ensures discovery keeps known root context lengths while dropping entries
@@ -120,6 +226,10 @@ fn openrouter_conversion_strips_upstream_cache_contract() {
     .to_chat_completions();
 
     assert!(provider.compat.stream_options);
+    assert!(
+        provider.extra_body.is_empty(),
+        "OpenRouter must not force provider.require_parameters"
+    );
     assert_eq!(provider.compat.cache_usage, CacheUsageCompat::OpenAi);
     assert_eq!(provider.models[0].cache_contract, None);
     let compat = provider.models[0]
@@ -241,4 +351,55 @@ fn cache_policy_preserves_last_good_data_across_failure_classes() {
     fetch_openrouter_models_from("", &network(), &status.url(), Some(&cache))
         .expect_err("malformed cache is ineligible");
     status.finish();
+}
+
+/// Pre-capability cache rows omit exact discovery evidence and must never
+/// regain legacy Function support during offline fallback.
+#[test]
+fn unversioned_cache_is_ineligible_for_offline_fallback() {
+    let directory = tempfile::tempdir().expect("cache directory");
+    let cache = directory.path().join("models.json");
+    fs::write(&cache, r#"[{"id":"vendor/legacy","context_window":1234}]"#).expect("legacy cache");
+    let status = ScriptedHttpServer::spawn(503, "{}");
+
+    fetch_openrouter_models_from("", &network(), &status.url(), Some(&cache))
+        .expect_err("unversioned cache must fail closed");
+
+    status.finish();
+}
+
+/// A current cache wrapper does not authorize impossible Chat Completions tool
+/// combinations; semantic profile validation still applies during fallback.
+#[test]
+fn versioned_cache_rejects_incoherent_tool_capabilities() {
+    for model in [
+        serde_json::json!({
+            "id": "vendor/custom",
+            "supported_tool_types": ["custom"],
+            "supports_parallel_tool_calls": false
+        }),
+        serde_json::json!({
+            "id": "vendor/parallel-without-tools",
+            "supported_tool_types": [],
+            "supports_parallel_tool_calls": true
+        }),
+    ] {
+        let directory = tempfile::tempdir().expect("cache directory");
+        let cache = directory.path().join("models.json");
+        fs::write(
+            &cache,
+            serde_json::to_vec(&serde_json::json!({
+                "version": OPENROUTER_MODELS_CACHE_VERSION,
+                "models": [model]
+            }))
+            .expect("cache JSON"),
+        )
+        .expect("cache");
+        let status = ScriptedHttpServer::spawn(503, "{}");
+
+        fetch_openrouter_models_from("", &network(), &status.url(), Some(&cache))
+            .expect_err("incoherent cache must fail closed");
+
+        status.finish();
+    }
 }

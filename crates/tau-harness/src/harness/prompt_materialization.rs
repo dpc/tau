@@ -1268,9 +1268,10 @@ impl Harness {
                     .map(|entry| entry.name.to_string()),
             )
             .with_parallel_tool_calls(
-                model
-                    .and_then(|model| self.provider_runtime.model_info.get(model))
-                    .is_none_or(|info| info.supports_parallel_tool_calls),
+                !tool_specs.is_empty()
+                    && model
+                        .and_then(|model| self.provider_runtime.model_info.get(model))
+                        .is_none_or(|info| info.supports_parallel_tool_calls),
             ),
         )
     }
@@ -1512,13 +1513,8 @@ impl Harness {
             .all_tool_providers()
             .into_iter()
             .filter(|provider| {
-                let provider_supports_type = supported_tool_types.is_none_or(|supported| {
-                    if supported.is_empty() {
-                        provider.tool.tool_type == tau_proto::ToolType::Function
-                    } else {
-                        supported.contains(&provider.tool.tool_type)
-                    }
-                });
+                let provider_supports_type = supported_tool_types
+                    .is_none_or(|supported| supported.contains(&provider.tool.tool_type));
                 let requires_image_content = provider
                     .tool
                     .tags

@@ -49,7 +49,7 @@ fn provider_models_declaration(model: &str, context_window: u64) -> Event {
             id: model.into(),
             display_name: None,
             tags: Vec::new(),
-            supported_tool_types: Vec::new(),
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,

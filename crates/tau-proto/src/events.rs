@@ -31,10 +31,6 @@ use crate::{
     ToolTag,
 };
 
-fn default_true() -> bool {
-    true
-}
-
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(b: &bool) -> bool {
     !*b
@@ -3198,8 +3194,7 @@ pub struct ProviderModelInfo {
     pub tags: Vec<ModelTag>,
     /// Tool definition kinds this model's provider can deliver upstream.
     ///
-    /// An empty list preserves compatibility with older providers and means
-    /// function tools only; custom tools require explicit publication.
+    /// An empty list means this route supports no native tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_tool_types: Vec<ToolType>,
     /// Input modalities accepted by the exact provider/model route.
@@ -3216,7 +3211,7 @@ pub struct ProviderModelInfo {
     /// Whether the exact published route supports multiple tool calls in one
     /// model response. This is an effective route capability, not merely an
     /// abstract model capability.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub supports_parallel_tool_calls: bool,
     /// Provider-published preference for becoming the implicit default model
     /// when the selected role does not name one. Higher values win; ties are

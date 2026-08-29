@@ -6046,8 +6046,8 @@ fn tool_spec_examples_round_trip() {
 
     assert_eq!(decoded, spec);
 }
-/// Provider tool-type metadata remains backward compatible when omitted while
-/// preserving explicit Function+Custom publication.
+/// Provider tool-type metadata fails closed when omitted while preserving
+/// explicit Function+Custom publication.
 #[test]
 fn provider_model_supported_tool_types_json_roundtrip() {
     let mut value = serde_json::json!({
@@ -6059,12 +6059,12 @@ fn provider_model_supported_tool_types_json_roundtrip() {
         "supports_compaction": false,
         "supports_standalone_compaction": false
     });
-    let legacy: ProviderModelInfo =
-        serde_json::from_value(value.clone()).expect("legacy model metadata");
-    assert!(legacy.supported_tool_types.is_empty());
-    assert!(legacy.input_modalities.is_empty());
-    assert!(legacy.tool_result_modalities.is_empty());
-    assert!(legacy.supports_parallel_tool_calls);
+    let omitted: ProviderModelInfo =
+        serde_json::from_value(value.clone()).expect("omitted model metadata");
+    assert!(omitted.supported_tool_types.is_empty());
+    assert!(omitted.input_modalities.is_empty());
+    assert!(omitted.tool_result_modalities.is_empty());
+    assert!(!omitted.supports_parallel_tool_calls);
 
     value["supported_tool_types"] = serde_json::json!(["function", "custom"]);
     value["input_modalities"] = serde_json::json!(["text", "image"]);

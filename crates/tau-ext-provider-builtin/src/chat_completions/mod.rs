@@ -59,6 +59,12 @@ pub struct ChatCompletionsModel {
     /// Model-specific tags.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<tau_proto::ModelTag>,
+    /// Tool definition kinds accepted by this exact configured route.
+    #[serde(
+        default = "function_tool_types",
+        skip_serializing_if = "is_function_tool_types"
+    )]
+    pub supported_tool_types: Vec<tau_proto::ToolType>,
     /// Input modalities accepted by this exact configured route.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_modalities: Vec<tau_proto::InputModality>,
@@ -175,7 +181,7 @@ fn builtin_estimated_prices(
 }
 
 /// Serialized OpenAI-compatible request controls.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatCompletionsCompat {
     /// Request streamed usage.
@@ -184,6 +190,9 @@ pub struct ChatCompletionsCompat {
     /// Emit `parallel_tool_calls` when tools exist.
     #[serde(default, skip_serializing_if = "is_false")]
     pub parallel_tool_calls: bool,
+    /// Emit `tool_choice` when Tau must select automatic or disabled tool use.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub tool_choice: bool,
     /// Exact OpenAI prompt-cache controls accepted by this route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_prompt_cache: Option<OpenAiPromptCache>,
@@ -206,6 +215,12 @@ pub struct ChatCompletionsCompat {
     /// Explicit provider cache usage response schema, requiring streamed usage.
     #[serde(default, skip_serializing_if = "CacheUsageCompat::is_none")]
     pub cache_usage: CacheUsageCompat,
+}
+
+impl Default for ChatCompletionsCompat {
+    fn default() -> Self {
+        Self::without_optional_controls()
+    }
 }
 
 /// Exact reasoning efforts and extended-level spelling accepted by one route.
@@ -392,6 +407,17 @@ impl ChatCompletionsProvider {
             {
                 return Err("Chat Completions model ids must be unique");
             }
+            if !matches!(
+                model.supported_tool_types.as_slice(),
+                [] | [tau_proto::ToolType::Function]
+            ) {
+                return Err(
+                    "Chat Completions supported_tool_types must be omitted, empty, or [function]",
+                );
+            }
+            if model.supports_parallel_tool_calls && model.supported_tool_types.is_empty() {
+                return Err("parallel tool calls require Function tool support");
+            }
             for modalities in [&model.input_modalities, &model.tool_result_modalities] {
                 if !matches!(
                     modalities.as_slice(),
@@ -424,12 +450,28 @@ impl ChatCompletionsProvider {
 }
 
 impl ChatCompletionsCompat {
+    /// Compatibility defaults for routes without optional OpenAI controls.
+    const fn without_optional_controls() -> Self {
+        Self {
+            stream_options: false,
+            parallel_tool_calls: false,
+            tool_choice: true,
+            openai_prompt_cache: None,
+            reasoning_effort: None,
+            reasoning_replay: ChatCompletionsReasoningReplay::ReasoningContent,
+            single_initial_system_message: false,
+            max_completion_tokens: false,
+            cache_usage: CacheUsageCompat::None,
+        }
+    }
+
     /// Controls used for OpenAI-compatible public endpoints.
     #[must_use]
     pub const fn openai_defaults() -> Self {
         Self {
             stream_options: true,
             parallel_tool_calls: true,
+            tool_choice: true,
             openai_prompt_cache: None,
             reasoning_effort: Some(ChatCompletionsReasoningEffort {
                 efforts: ChatCompletionsReasoningEfforts::open_ai(),
@@ -466,6 +508,12 @@ impl ChatCompletionsCompat {
 
 const fn default_context_window() -> u64 {
     DEFAULT_CONTEXT_WINDOW
+}
+fn function_tool_types() -> Vec<tau_proto::ToolType> {
+    vec![tau_proto::ToolType::Function]
+}
+fn is_function_tool_types(tool_types: &Vec<tau_proto::ToolType>) -> bool {
+    tool_types.as_slice() == [tau_proto::ToolType::Function]
 }
 const fn default_max_output_tokens() -> u32 {
     tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS

@@ -11,6 +11,67 @@ use std::{io as path_std_io, time as path_std_time};
 use super::sampling::{RESPONSE_UPDATE_INTERVAL, ResponseSampler};
 use super::*;
 
+/// Rust construction and omitted serialized compatibility must retain the
+/// historical selector behavior; only an explicit false disables it.
+#[test]
+fn chat_completions_compat_tool_choice_defaults_are_canonical() {
+    assert!(ChatCompletionsCompat::default().tool_choice);
+    let omitted: ChatCompletionsCompat =
+        serde_json::from_value(serde_json::json!({})).expect("omitted compatibility");
+    assert!(omitted.tool_choice);
+    let disabled: ChatCompletionsCompat =
+        serde_json::from_value(serde_json::json!({"tool_choice": false}))
+            .expect("explicit compatibility");
+    assert!(!disabled.tool_choice);
+    let openai = ChatCompletionsCompat::openai_defaults();
+    assert!(openai.tool_choice);
+    assert_eq!(
+        serde_json::to_value(openai)
+            .expect("OpenAI compatibility")
+            .get("tool_choice"),
+        None,
+        "the true default remains omitted from serialized profiles"
+    );
+}
+
+/// Function-only lowering requires exact model publication: Custom types and
+/// parallel-without-Function declarations fail at profile validation.
+#[test]
+fn chat_completions_model_tool_capabilities_are_coherent() {
+    let profile = |supported_tool_types, supports_parallel_tool_calls| {
+        let mut provider = ChatCompletionsProvider::default();
+        let mut model: ChatCompletionsModel = serde_json::from_value(serde_json::json!({
+            "id": "route/model",
+            "supported_tool_types": supported_tool_types,
+            "supports_parallel_tool_calls": supports_parallel_tool_calls
+        }))
+        .expect("model");
+        model.compat = None;
+        provider.models.push(model);
+        provider
+    };
+
+    assert!(
+        profile(serde_json::json!(["function"]), true)
+            .validate()
+            .is_ok()
+    );
+    assert!(profile(serde_json::json!([]), false).validate().is_ok());
+    assert_eq!(
+        profile(serde_json::json!(["custom"]), false).validate(),
+        Err("Chat Completions supported_tool_types must be omitted, empty, or [function]")
+    );
+    assert_eq!(
+        profile(serde_json::json!([]), true).validate(),
+        Err("parallel tool calls require Function tool support")
+    );
+    let published = models_for_provider(
+        &tau_proto::ProviderName::new("route"),
+        &profile(serde_json::json!([]), true),
+    );
+    assert!(!published[0].supports_parallel_tool_calls);
+}
+
 /// Qwen3.8 profiles publish only the model's exact selectable thinking levels
 /// and retain literal `xhigh` lowering plus its first-system-only template
 /// constraint through provider/model resolution.
@@ -299,6 +360,7 @@ fn cache_usage_requires_stream_options() {
             ..ChatCompletionsCompat::default()
         }),
         tags: Vec::new(),
+        supported_tool_types: vec![tau_proto::ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
@@ -456,6 +518,7 @@ fn openrouter_defaults_to_telemetry_without_cache_policy() {
         context_window: 128_000,
         compat: None,
         tags: Vec::new(),
+        supported_tool_types: vec![tau_proto::ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
@@ -784,6 +847,7 @@ fn unpriced_local_model_uses_central_fallback() {
             context_window: 4096,
             compat: None,
             tags: Vec::new(),
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -843,6 +907,7 @@ fn known_model_without_explicit_prices_uses_builtin_default() {
             context_window: 4096,
             compat: None,
             tags: Vec::new(),
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: true,
@@ -927,6 +992,7 @@ fn parallel_capability_false_is_independent_from_request_compatibility() {
                 ..ChatCompletionsCompat::default()
             }),
             tags: Vec::new(),
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
             supports_parallel_tool_calls: false,

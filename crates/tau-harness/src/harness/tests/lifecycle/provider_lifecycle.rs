@@ -1147,7 +1147,8 @@ fn provider_model_parallel_capability_flows_into_prompt_rendering() {
     let mut h = quiet_provider_harness(&sp).expect("start");
     let model: tau_proto::ModelId = "test/model".parse().expect("model id");
     let mut info = staged_provider_model("test/model");
-    info.supports_parallel_tool_calls = false;
+    info.supported_tool_types.clear();
+    info.supports_parallel_tool_calls = true;
     h.provider_runtime.model_info.insert(model.clone(), info);
     h.config.selected_model = Some(model);
 

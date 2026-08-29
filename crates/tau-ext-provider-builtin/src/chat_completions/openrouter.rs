@@ -18,6 +18,7 @@ use super::{ChatCompletionsCompat, ChatCompletionsModel, ChatCompletionsProvider
 
 const OPENROUTER_DISCOVERY_TIMEOUT: std::time::Duration = path_std_time::Duration::from_secs(30);
 const MAX_OPENROUTER_MODELS_BODY_BYTES: usize = 4 * 1024 * 1024;
+const OPENROUTER_MODELS_CACHE_VERSION: u8 = 1;
 
 /// OpenRouter's wire representation for one discoverable model.
 #[derive(Deserialize)]
@@ -37,6 +38,16 @@ struct OpenRouterModelEntry {
 struct OpenRouterModelsResponse {
     /// Model entries returned by the discovery endpoint.
     data: Vec<OpenRouterModelEntry>,
+}
+
+/// Versioned local cache containing capability-complete discovered models.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CachedOpenRouterModels {
+    /// Exact cache schema version.
+    version: u8,
+    /// Models normalized from one successful discovery response.
+    models: Vec<ChatCompletionsModel>,
 }
 
 /// Bounded, credential-safe OpenRouter discovery failure.
@@ -126,6 +137,7 @@ impl OpenRouterProfile {
             compat: ChatCompletionsCompat {
                 stream_options: true,
                 parallel_tool_calls: false,
+                tool_choice: true,
                 openai_prompt_cache: None,
                 reasoning_effort: ChatCompletionsCompat::openai_defaults().reasoning_effort,
                 reasoning_replay: super::ChatCompletionsReasoningReplay::ReasoningContent,
@@ -139,8 +151,8 @@ impl OpenRouterProfile {
         }
     }
 
-    /// Reject model overrides that select cache telemetry without requesting
-    /// streamed usage.
+    /// Reject models that violate shared Chat Completions identity, modality,
+    /// Function-only, parallel-call, or compatibility invariants.
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         for model in &self.models {
             if model
@@ -156,7 +168,7 @@ impl OpenRouterProfile {
                 compat.validate()?;
             }
         }
-        Ok(())
+        self.to_chat_completions().validate()
     }
 }
 
@@ -291,31 +303,42 @@ async fn read_openrouter_models(
     }
     let parsed: OpenRouterModelsResponse =
         serde_json::from_slice(&bytes).map_err(|_| OpenRouterDiscoveryError::InvalidResponse)?;
-    Ok(parsed
+    let models = parsed
         .data
         .into_iter()
         .filter_map(openrouter_model)
-        .collect())
+        .collect::<Vec<_>>();
+    let profile = OpenRouterProfile {
+        api_key: String::new(),
+        models,
+    };
+    profile
+        .validate()
+        .map_err(|_| OpenRouterDiscoveryError::InvalidResponse)?;
+    Ok(profile.models)
 }
 
 fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel> {
     let id = ModelName::try_new(entry.id).ok()?;
     let context_window = entry.context_length?;
-    let supports_reasoning = entry
-        .supported_parameters
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .any(|parameter| parameter == "reasoning");
+    let supported_parameters = entry.supported_parameters.as_deref().unwrap_or_default();
+    let supports = |expected| {
+        supported_parameters
+            .iter()
+            .any(|parameter| parameter == expected)
+    };
+    let supports_tools = supports("tools");
+    let supports_parallel_tool_calls = supports_tools && supports("parallel_tool_calls");
     Some(ChatCompletionsModel {
         id,
         display_name: entry.name,
         context_window,
         compat: Some(ChatCompletionsCompat {
             stream_options: true,
-            parallel_tool_calls: false,
+            parallel_tool_calls: supports_parallel_tool_calls,
+            tool_choice: supports("tool_choice"),
             openai_prompt_cache: None,
-            reasoning_effort: supports_reasoning.then(|| {
+            reasoning_effort: supports("reasoning").then(|| {
                 ChatCompletionsCompat::openai_defaults()
                     .reasoning_effort
                     .expect("OpenAI defaults publish reasoning effort")
@@ -326,9 +349,13 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
             cache_usage: super::CacheUsageCompat::OpenAi,
         }),
         tags: Vec::new(),
+        supported_tool_types: supports_tools
+            .then_some(tau_proto::ToolType::Function)
+            .into_iter()
+            .collect(),
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
-        supports_parallel_tool_calls: true,
+        supports_parallel_tool_calls,
         local_summary_compaction: None,
         cache_contract: None,
         est_uncached_input_cost_1m_usd: None,
@@ -346,13 +373,25 @@ fn cache_openrouter_models(models: &[ChatCompletionsModel], path: Option<&Path>)
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(bytes) = serde_json::to_vec(models) {
+    let cached = CachedOpenRouterModels {
+        version: OPENROUTER_MODELS_CACHE_VERSION,
+        models: models.to_vec(),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&cached) {
         let _ = tau_config::atomic::atomic_write_following_symlink(path, &bytes, None);
     }
 }
 
 fn cached_openrouter_models(path: Option<&Path>) -> Option<Vec<ChatCompletionsModel>> {
     let file = fs::File::open(path?).ok()?;
-    let cached: Vec<ChatCompletionsModel> = serde_json::from_reader(file).ok()?;
-    (!cached.is_empty()).then_some(cached)
+    let cached: CachedOpenRouterModels = serde_json::from_reader(file).ok()?;
+    if cached.version != OPENROUTER_MODELS_CACHE_VERSION || cached.models.is_empty() {
+        return None;
+    }
+    let profile = OpenRouterProfile {
+        api_key: String::new(),
+        models: cached.models,
+    };
+    profile.validate().ok()?;
+    Some(profile.models)
 }

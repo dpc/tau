@@ -44,6 +44,14 @@ cache-control request behavior. OpenRouter can select a different upstream
 provider for a request, so its counters cannot establish an upstream cache
 mechanism, residency, privacy posture, renewal operation, or lifecycle.
 
+OpenRouter model discovery maps exact `supported_parameters` memberships rather
+than assuming the normalized Chat Completions shape is universally native.
+`tools`, `tool_choice`, and `parallel_tool_calls` remain independent; parallel
+support additionally requires tools. Missing or empty metadata grants no
+capability. The persisted discovery cache is versioned so rows written before
+exact capability metadata cannot regain legacy Function support while offline.
+Tau does not force strict OpenRouter parameter routing.
+
 Chat Completions compatibility also owns the exact non-empty set of published
 reasoning efforts and OpenAI-compatible, extended-literal, or omitted wire
 lowering. Omitted lowering publishes one exact effective effort while relying on

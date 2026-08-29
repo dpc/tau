@@ -129,7 +129,7 @@ pub(crate) fn model(provider: &str) -> ProviderModelInfo {
         id: format!("{provider}/model").parse().expect("model"),
         display_name: None,
         tags: Vec::new(),
-        supported_tool_types: Vec::new(),
+        supported_tool_types: vec![tau_proto::ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,

@@ -184,10 +184,10 @@ subscribe-time catch-up is not durable replay or restart reconstruction.
 ## Provider tool-type metadata
 
 `ProviderModelInfo.supported_tool_types` is provider-published capability
-metadata. Omitted or empty metadata is legacy-compatible Function-only support;
-Custom tools require explicit publication. The harness may narrow this set with
+metadata. Omitted or empty metadata means no native tool support; every supported
+tool type requires explicit publication. The harness may narrow this set with
 policy but must not widen it. Changes require coordinated provider, harness,
-wire-compatibility, and serialization tests.
+wire-contract, and serialization tests.
 
 `ProviderModelInfo.input_modalities` and `tool_result_modalities` describe the
 exact composite model/route capability. Omitted legacy fields mean text-only.
@@ -207,8 +207,8 @@ reason about the outcome without parsing the bounded human-readable `error` fiel
 `ProviderModelInfo.supports_parallel_tool_calls` describes whether the exact
 published provider/model route can generate multiple direct tool calls in one
 response. It is an effective route capability, not abstract model metadata.
-Legacy publishers that omit it decode as `true`; publishers serialize their
-effective value explicitly.
+Omission decodes as `false`, and an empty supported-tool-type list forces the
+canonical effective value to `false`.
 
 `ProviderModelInfo.standalone_compaction_prefix_budget` is an optional nonzero
 model/operation-specific bound in bytes of the canonical JSON-serialized

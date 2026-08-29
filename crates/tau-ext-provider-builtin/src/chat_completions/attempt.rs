@@ -29,10 +29,13 @@ pub fn models_for_provider(
                 id: tau_proto::ModelId::new(provider_name.clone(), model.id.clone()),
                 display_name: model.display_name.clone(),
                 tags,
-                supported_tool_types: vec![tau_proto::ToolType::Function],
+                supported_tool_types: model.supported_tool_types.clone(),
                 input_modalities: model.input_modalities.clone(),
                 tool_result_modalities: model.tool_result_modalities.clone(),
-                supports_parallel_tool_calls: model.supports_parallel_tool_calls,
+                supports_parallel_tool_calls: model.supports_parallel_tool_calls
+                    && model
+                        .supported_tool_types
+                        .contains(&tau_proto::ToolType::Function),
                 default_affinity: 0,
                 context_window: tau_proto::TokenCount::new(model.context_window),
                 efforts: compat.reasoning_effort.as_ref().map_or_else(
@@ -251,6 +254,7 @@ fn lower_compat(
     tau_provider_chat_completions::AttemptCompat {
         stream_options: compat.stream_options,
         parallel_tool_calls: compat.parallel_tool_calls,
+        tool_choice: compat.tool_choice,
         prompt_cache: compat.openai_prompt_cache.map(|cache| match cache.key {
             crate::OpenAiPromptCacheKey::Agent => match cache.policy {
                 super::OpenAiPromptCachePolicy::Legacy { retention } => {

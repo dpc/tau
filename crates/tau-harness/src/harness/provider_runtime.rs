@@ -22,15 +22,16 @@ pub(super) struct ProviderQuotaTombstone {
 }
 
 impl Harness {
-    /// Reject malformed model entries independently and publish one structured
-    /// diagnostic for every rejected entry.
+    /// Validate model entries independently, publish one diagnostic per
+    /// rejected entry, and narrow accepted no-tool routes to non-parallel
+    /// capability.
     pub(super) fn validate_provider_models_declaration(
         &mut self,
         publisher_extension_id: &tau_proto::ExtensionName,
         declaration: tau_proto::ProviderModelsDeclared,
     ) -> tau_proto::ProviderModelsDeclared {
         let mut accepted = Vec::with_capacity(declaration.models.len());
-        for model in declaration.models {
+        for mut model in declaration.models {
             let mut issues = Vec::new();
             if model.context_window == tau_proto::TokenCount::ZERO {
                 issues.push(tau_proto::ProviderModelDeclarationIssue::ContextWindowZero);
@@ -58,6 +59,9 @@ impl Harness {
                 issues.push(
                     tau_proto::ProviderModelDeclarationIssue::StandaloneCompactionPrefixBudgetZero,
                 );
+            }
+            if model.supported_tool_types.is_empty() {
+                model.supports_parallel_tool_calls = false;
             }
             if issues.is_empty() {
                 accepted.push(model);

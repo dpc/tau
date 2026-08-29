@@ -259,6 +259,8 @@ pub struct AttemptCompat {
     pub stream_options: bool,
     /// Send `parallel_tool_calls` when tools are present.
     pub parallel_tool_calls: bool,
+    /// Send `tool_choice` when Tau requests automatic or disabled tool use.
+    pub tool_choice: bool,
     /// Typed OpenAI prompt-cache controls explicitly selected for this route.
     pub prompt_cache: Option<PromptCache>,
     /// Send the selected reasoning effort with this route's spelling policy.
@@ -1846,15 +1848,23 @@ fn build_request_after_prefix_admission(
             &mut messages,
         );
     }
-    let tools = prompt
+    let mut tools = prompt
         .tools
         .iter()
         .map(convert_tool_definition)
         .collect::<Result<Vec<_>, _>>()?;
-    let tool_choice = match (prompt.tool_choice, tools.is_empty()) {
-        (ToolChoice::None, _) => Some("none"),
-        (ToolChoice::Auto, false) => Some("auto"),
-        (ToolChoice::Auto, true) => None,
+    let tool_choice = match (
+        provider.compat.tool_choice,
+        prompt.tool_choice,
+        tools.is_empty(),
+    ) {
+        (true, ToolChoice::None, _) => Some("none"),
+        (true, ToolChoice::Auto, false) => Some("auto"),
+        (true, ToolChoice::Auto, true) | (false, ToolChoice::Auto, _) => None,
+        (false, ToolChoice::None, _) => {
+            tools.clear();
+            None
+        }
     };
     let (max_tokens, max_completion_tokens) = summary_config.map_or_else(
         || output_token_cap_fields(provider),

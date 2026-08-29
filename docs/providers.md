@@ -195,8 +195,19 @@ URL parts, as accepted by llama.cpp. Do not set these fields merely because a
 model name suggests vision support; the exact endpoint and loaded projector
 must accept that wire shape.
 
+`supported_tool_types` also describes the exact route. An omitted or empty list
+means no native tool support; providers must publish `function` or `custom`
+explicitly. The harness owns tool definitions and execution and only exposes
+definitions whose types appear in this list.
+
+The built-in Chat Completions adapter is Function-only: its configured model
+value must be `[]` or `["function"]`. A model without Function support must also
+set `supports_parallel_tool_calls: false`.
+
 `supports_parallel_tool_calls` is the effective route capability used to make
 system-prompt guidance truthful; it is not merely abstract model metadata.
+Omission defaults to false, and the harness forces it false when no tool type or
+no effective tool definition is available.
 Publishing a model means it is available; no separate `enabled` flag is needed initially.
 
 The optional `est_*_cost_1m_usd` fields publish USD prices for ordinary input,
@@ -614,6 +625,13 @@ several values would imply a choice the wire cannot convey.
 assistant history. The default is `reasoning_content`.
 `single_initial_system_message: true` retains Tau's leading system prompt but
 rejects any later System or Developer transcript message before dispatch.
+`tool_choice: false` omits that optional selector. Auto still sends configured
+Function definitions and relies on the endpoint default; None omits the
+definitions too, so disabling tool calls remains effective. It defaults to
+`true` for ordinary configured Chat Completions routes. Models default
+`supported_tool_types` to `["function"]`; set it to `[]` only for a route that
+has no native Function interface, and set `supports_parallel_tool_calls: false`
+with it.
 
 ### Qwen3.8 text-only local profile
 
@@ -703,6 +721,15 @@ DeepSeek nor OpenRouter observations schedule a keepalive. Any future
 latency-oriented keepalive needs a separate explicit operator budget with
 privacy and quota visibility; it cannot infer a cadence from eviction or a
 recent cache hit.
+
+OpenRouter discovery also treats `supported_parameters` as exact, independent
+route metadata. `tools` publishes Function support, `tool_choice` controls
+whether Tau sends that selector, and `parallel_tool_calls` enables parallel
+requests only when `tools` is also present. With tools but no `tool_choice`, Auto
+sends definitions and relies on OpenRouter's documented default; None omits both
+definitions and selector. Missing, null, and empty metadata grant no capability.
+Tau leaves OpenRouter's `provider.require_parameters` at its default so unrelated
+optional request fields do not unnecessarily remove endpoints.
 
 Generic OpenAI-compatible routes may opt into typed cache request controls only
 when the exact configured route supports them. Tau never infers these controls

@@ -21,6 +21,18 @@ fn cache_usage_capability_lowers_explicitly() {
         tau_provider_chat_completions::CacheUsageCompat::None
     );
 }
+
+/// An explicit route-level selector omission reaches request lowering without
+/// being replaced by the ordinary Chat Completions default.
+#[test]
+fn tool_choice_capability_lowers_explicitly() {
+    let compat: super::super::ChatCompletionsCompat =
+        serde_json::from_value(serde_json::json!({"tool_choice": false}))
+            .expect("selector compatibility");
+
+    assert!(!lower_compat(compat).tool_choice);
+    assert!(lower_compat(Default::default()).tool_choice);
+}
 use crate::chat_completions::{
     LocalSummaryCompactionConfig, LocalSummaryCompactionSerializationProfile,
 };

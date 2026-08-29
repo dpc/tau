@@ -325,6 +325,7 @@ fn provider() -> TestProvider {
         compat: AttemptCompat {
             stream_options: true,
             parallel_tool_calls: true,
+            tool_choice: true,
             prompt_cache: None,
             reasoning_effort: Some(ReasoningEffortWire::OpenAi),
             reasoning_replay: ReasoningReplay::ReasoningContent,
@@ -2401,6 +2402,44 @@ fn parallel_tool_request_field_follows_compatibility_and_tool_presence() {
             "compatibility={compatibility}, has_tools={has_tools}"
         );
     }
+}
+
+/// Routes without native `tool_choice` keep automatic tools enabled by the
+/// documented default, while `None` removes the tools that could permit a call.
+#[test]
+fn omitted_tool_choice_preserves_auto_and_enforces_none() {
+    let mut provider = provider();
+    provider.compat.tool_choice = false;
+    provider.compat.parallel_tool_calls = true;
+    let config = resolved_provider(&provider);
+    let model = &provider.models[0];
+    let mut created = prompt();
+    created.tools.push(tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("lookup"),
+        model_visible_name: None,
+        description: Some("lookup".to_owned()),
+        parameters: Some(serde_json::json!({"type": "object"})),
+        format: None,
+        tool_type: ToolType::Function,
+    });
+
+    let automatic = build_request(&config, model, &created);
+    assert_eq!(automatic.tools.len(), 1);
+    assert_eq!(automatic.tool_choice, None);
+    assert_eq!(automatic.parallel_tool_calls, Some(true));
+    assert!(
+        serde_json::to_value(&automatic)
+            .expect("request JSON")
+            .get("provider")
+            .is_none(),
+        "optional tool controls must not force OpenRouter require_parameters"
+    );
+
+    created.tool_choice = ToolChoice::None;
+    let disabled = build_request(&config, model, &created);
+    assert!(disabled.tools.is_empty());
+    assert_eq!(disabled.tool_choice, None);
+    assert_eq!(disabled.parallel_tool_calls, None);
 }
 #[test]
 fn tool_result_text_uses_structured_status_headers() {

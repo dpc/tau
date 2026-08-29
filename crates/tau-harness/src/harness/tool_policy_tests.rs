@@ -63,7 +63,7 @@ fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
         id: model.clone(),
         display_name: None,
         tags: tags.iter().map(|tag| ModelTag::new(*tag)).collect(),
-        supported_tool_types: vec![],
+        supported_tool_types: vec![ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,
@@ -702,10 +702,21 @@ fn provider_supported_tool_types_filter_effective_snapshot() {
         .selected_model
         .clone()
         .expect("selected model");
+    policy
+        .harness
+        .provider_runtime
+        .model_info
+        .get_mut(&model)
+        .expect("model info")
+        .supported_tool_types
+        .clear();
     let specs = policy
         .harness
         .gather_effective_tool_specs_for_role_model(ROLE, Some(&model));
-    assert!(!specs.iter().any(|spec| spec.name.as_str() == "custom_text"));
+    assert!(
+        specs.is_empty(),
+        "an empty capability list must expose neither Function nor Custom tools"
+    );
 
     policy
         .harness

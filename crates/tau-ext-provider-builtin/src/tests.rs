@@ -2553,6 +2553,7 @@ fn test_chat_model(id: &str) -> ChatCompletionsModel {
         context_window: 128_000,
         compat: None,
         tags: Vec::new(),
+        supported_tool_types: vec![tau_proto::ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
         supports_parallel_tool_calls: true,

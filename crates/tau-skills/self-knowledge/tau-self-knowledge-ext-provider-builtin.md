@@ -156,8 +156,22 @@ does not mutate or migrate the rejected settings.
 
 The profile kinds route to three deliberately separate wire backends.
 `chat_completions` and `openrouter` use the OpenAI-compatible HTTP/SSE
-`/chat/completions` adapter, including Function tools and semantic transcript
-replay; this is the supported route for local servers such as llama.cpp.
+`/chat/completions` adapter, including route-declared Function tools and semantic
+transcript replay; this is the supported route for local servers such as
+llama.cpp. Generic Chat Completions models accept only `[]` or `["function"]`
+for `supported_tool_types`; parallel support requires Function support.
+OpenRouter discovery instead derives Function, selector, and parallel support
+from the independent exact `tools`, `tool_choice`, and `parallel_tool_calls`
+memberships in each model's `supported_parameters`. Missing, null, empty, or
+unversioned cached discovery metadata grants no support.
+
+For an OpenRouter model with `tools` but no `tool_choice`, automatic mode sends
+the Function definitions and relies on the documented default. Disabled mode
+omits both definitions and selector so the model cannot call them. Parallel
+control requires both `tools` and `parallel_tool_calls`. The extension does not
+force `provider.require_parameters`; optional request fields therefore do not
+unnecessarily narrow OpenRouter routing. Tau still owns all tool definitions,
+authorization, and execution.
 `chatgpt` uses the private ChatGPT OAuth/Codex Responses adapter. Its ordinary
 inference is WebSocket-only with no HTTP/SSE fallback. HTTPS is retained only for
 OAuth, quota acquisition, and unary standalone compaction. It is not a public

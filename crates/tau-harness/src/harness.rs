@@ -1660,7 +1660,7 @@ where
                 id: "echo/model".into(),
                 display_name: Some("Echo".to_owned()),
                 tags: Vec::new(),
-                supported_tool_types: vec![],
+                supported_tool_types: vec![tau_proto::ToolType::Function],
                 input_modalities: Vec::new(),
                 tool_result_modalities: Vec::new(),
                 supports_parallel_tool_calls: true,
