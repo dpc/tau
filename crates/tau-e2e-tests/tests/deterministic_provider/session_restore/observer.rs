@@ -339,19 +339,23 @@ impl SessionRestoreObserver {
         Ok(())
     }
 
-    /// Waits for one exact assistant terminal marker.
+    /// Waits for one exact assistant terminal marker and returns its provider
+    /// prompt identity.
     pub(super) fn wait_for_marker(
         &mut self,
         marker: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.recv_until(|observed| {
+    ) -> Result<tau_proto::AgentPromptId, Box<dyn std::error::Error>> {
+        let observed = self.recv_until(|observed| {
             matches!(
                 &observed.event,
                 Event::ProviderResponseFinished(finished)
                     if provider_response_contains(finished, marker)
             )
-        })
-        .map(|_| ())
+        })?;
+        let Event::ProviderResponseFinished(finished) = observed.event else {
+            unreachable!("matching predicate requires a provider terminal");
+        };
+        Ok(finished.agent_prompt_id)
     }
 
     /// Waits for one exact agent-owned assistant marker, including deliveries

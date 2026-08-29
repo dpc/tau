@@ -70,6 +70,49 @@ pub(super) fn wait_for_durable_dispatch(
     }
 }
 
+/// Waits until one exact provider terminal is readable from the authoritative
+/// agent journal while the daemon remains live.
+///
+/// A live `provider.response_finished` delivery can precede completion of its
+/// asynchronous durable append. Restart tests must wait for this cut before
+/// choosing which other dispatch remains intentionally uncertain.
+pub(super) fn wait_for_durable_response(
+    fixture: &DeterministicFixture,
+    session_id: &SessionId,
+    agent_id: &AgentId,
+    prompt_id: &AgentPromptId,
+) -> Result<DurableSessionSnapshot, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_error = None;
+    loop {
+        match DurableSessionSnapshot::load(fixture.harness_state_dir(), session_id) {
+            Ok(snapshot)
+                if snapshot.agent_events.get(agent_id).is_some_and(|events| {
+                    events.iter().any(|record| {
+                        matches!(
+                            &record.event,
+                            Event::ProviderResponseFinished(finished)
+                                if &finished.agent_prompt_id == prompt_id
+                        )
+                    })
+                }) =>
+            {
+                return Ok(snapshot);
+            }
+            Ok(_) => {}
+            Err(error) => last_error = Some(error.to_string()),
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "durable provider terminal did not become readable: {}",
+                last_error.as_deref().unwrap_or("terminal absent")
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Waits for the fake's exact prompt-correlated live hold readiness record.
 pub(super) fn wait_for_hold_readiness(
     fixture: &DeterministicFixture,

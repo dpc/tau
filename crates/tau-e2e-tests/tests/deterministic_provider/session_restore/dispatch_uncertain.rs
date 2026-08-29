@@ -80,18 +80,19 @@ fn cold_resume_fails_closed_for_dispatch_uncertain_worker() -> Result<(), Box<dy
     let mut observer_a = SessionRestoreObserver::connect(&socket_a)?;
     observer_a.create_main("s5-main", "start the held deterministic worker")?;
     observer_a.wait_for_agent_role("deterministic-worker")?;
-    observer_a.wait_for_marker("held worker start accepted")?;
+    let main_terminal_prompt = observer_a.wait_for_marker("held worker start accepted")?;
     let identities = BootIdentities::from_events(&observer_a.events)?;
     let boot_a_subscription_id =
         initial_live_watch_subscription_id(&observer_a.events, &identities, &session_id)?;
     let dispatch = interruption::wait_for_worker_dispatch(&mut observer_a, &identities.worker)?;
-    let durable_a = interruption::wait_for_durable_dispatch(
+    interruption::wait_for_durable_dispatch(&fixture, &session_id, &identities.worker, &dispatch)?;
+    interruption::wait_for_hold_readiness(&fixture, &dispatch.agent_prompt_id)?;
+    let durable_a = interruption::wait_for_durable_response(
         &fixture,
         &session_id,
-        &identities.worker,
-        &dispatch,
+        &identities.main,
+        &main_terminal_prompt,
     )?;
-    interruption::wait_for_hold_readiness(&fixture, &dispatch.agent_prompt_id)?;
     assert_fake_checkpoint(&fixture, &scenario, &identities, [2, 1])?;
     interruption::assert_unfinished_worker_dispatch(&durable_a, &identities.worker, &dispatch)?;
     assert_provider_turn_counts(
