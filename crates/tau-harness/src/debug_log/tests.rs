@@ -715,6 +715,62 @@ fn published_binary_free_events_borrow_and_match_legacy_json() {
     }
 }
 
+/// Provider projections compact large borrowed strings before the JSON tree
+/// owns them while preserving the former byte-exact bounded representation.
+#[test]
+fn provider_projection_compacts_borrowed_unicode_and_raw_sidecars_byte_exactly() {
+    let middle_canary = "PROVIDER-PRIVATE-MIDDLE-CANARY";
+    let large = format!(
+        "prefix🙂{}{}終端",
+        middle_canary,
+        "reasoning\\\"\n🙂".repeat(1_000)
+    );
+    let raw = serde_json::json!({
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": large.clone()}],
+    })
+    .to_string();
+    let opaque =
+        tau_proto::OpaqueProviderItem::from_raw_json(raw).expect("valid opaque reasoning fixture");
+    let updated = Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: AgentPromptId::parse("sp-large-update").expect("prompt id"),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: vec![ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: large.clone(),
+            phase: None,
+        }],
+        compaction: None,
+        status: None,
+        response_stats: None,
+        originator: PromptOriginator::User,
+    });
+    let finished = Event::ProviderResponseFinished(debug_provider_finished(vec![
+        tau_proto::ContextItem::Reasoning(opaque),
+        tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: ReasoningTextKind::Summary,
+            text: large,
+        }),
+    ]));
+
+    for event in [&updated, &finished] {
+        let current = debug_event_json(event);
+        let current_bytes = serde_json::to_vec(&current).expect("serialize current projection");
+        assert_eq!(
+            current_bytes,
+            compacted_json_bytes(legacy_debug_event_json(event)),
+            "borrowed Provider projection changed legacy bytes for {}",
+            event.name()
+        );
+        let rendered = String::from_utf8(current_bytes).expect("JSON is UTF-8");
+        assert!(
+            !rendered.contains(middle_canary),
+            "large Provider content crossed the bounded projection"
+        );
+        assert!(rendered.contains("┄total "));
+    }
+}
+
 /// Every event shape selected by the shared image classifier takes the owned
 /// path and clears bytes before published JSON serialization, matching the
 /// former clone-and-redact projection exactly.

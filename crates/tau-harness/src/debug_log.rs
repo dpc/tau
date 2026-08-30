@@ -32,6 +32,7 @@ pub(crate) enum DebugEventSensitivity {
     BootstrapPrompt,
 }
 
+mod projection;
 mod writer;
 #[cfg(not(test))]
 use writer::enqueue;
@@ -702,6 +703,24 @@ fn debug_harness_input_json(message: &tau_proto::HarnessInputMessage) -> serde_j
             });
         }
         tau_proto::HarnessInputMessage::Emit(emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ProviderResponseUpdated(_)
+                    | Event::ProviderResponseUpdatedReported(_)
+                    | Event::ProviderResponseFinished(_)
+                    | Event::ProviderResponseFinishedReported(_)
+            ) =>
+        {
+            let event = emit.event.as_ref();
+            return serde_json::json!({
+                "message": "emit",
+                "payload": {
+                    "event": provider_debug_event_json(event),
+                    "persist": emit.persist,
+                },
+            });
+        }
+        tau_proto::HarnessInputMessage::Emit(emit)
             if matches!(emit.event.as_ref(), Event::AgentPromptCreated(_)) =>
         {
             let Event::AgentPromptCreated(prompt) = emit.event.as_ref() else {
@@ -731,6 +750,25 @@ fn debug_harness_input_json(message: &tau_proto::HarnessInputMessage) -> serde_j
                         "action": {
                             "kind": "pass",
                             "value": provider_retry_debug_projection(event.name(), updated),
+                        },
+                    },
+                });
+            }
+            if let tau_proto::InterceptAction::Pass(Some(event)) = &reply.action
+                && matches!(
+                    event.as_ref(),
+                    Event::ProviderResponseUpdated(_)
+                        | Event::ProviderResponseUpdatedReported(_)
+                        | Event::ProviderResponseFinished(_)
+                        | Event::ProviderResponseFinishedReported(_)
+                )
+            {
+                return serde_json::json!({
+                    "message": "intercept_reply",
+                    "payload": {
+                        "action": {
+                            "kind": "pass",
+                            "value": provider_debug_event_json(event),
                         },
                     },
                 });
@@ -870,7 +908,33 @@ fn debug_event_json(event: &Event) -> serde_json::Value {
     {
         return provider_retry_debug_projection(event.name(), updated);
     }
+    if matches!(
+        event,
+        Event::ProviderResponseUpdated(_)
+            | Event::ProviderResponseUpdatedReported(_)
+            | Event::ProviderResponseFinished(_)
+            | Event::ProviderResponseFinishedReported(_)
+    ) {
+        return provider_debug_event_json(event);
+    }
     debug_event_projection(event).into_json()
+}
+
+/// Serializes a borrowed Provider update or terminal into its bounded debug
+/// event shape.
+fn provider_debug_event_json(event: &Event) -> serde_json::Value {
+    let projection = match event {
+        Event::ProviderResponseUpdated(updated)
+        | Event::ProviderResponseUpdatedReported(updated) => {
+            projection::ProviderEvent::Updated(updated)
+        }
+        Event::ProviderResponseFinished(finished)
+        | Event::ProviderResponseFinishedReported(finished) => {
+            projection::ProviderEvent::Finished(finished)
+        }
+        _ => unreachable!("caller selected a Provider response event"),
+    };
+    projection::provider_event_value(event.name(), projection)
 }
 
 /// The borrowed or binary-redacted published event selected for debug JSON
