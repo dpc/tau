@@ -1039,7 +1039,7 @@ agents:
       candidates:
         external:
           enable: true
-          priority: 10
+          priority: 20
           kind: tool
           tool: websearch_hybrid_fetch
 ```

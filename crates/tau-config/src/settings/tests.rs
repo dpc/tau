@@ -33,7 +33,9 @@ fn built_in_web_tools_policy_matches_native_first_contract() {
         .expect("external fetch");
     assert!(matches!(
         fetch,
-        WebToolCandidate::Tool { tool, .. }
+        WebToolCandidate::Tool {
+            priority: 20, tool, ..
+        }
             if tool.as_str() == "websearch_hybrid_fetch"
     ));
     let encoded = serde_json::to_value(policy).expect("serialize effective policy");
