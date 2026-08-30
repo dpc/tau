@@ -88,11 +88,12 @@ fn configured_extension_request_precedes_canonical_fact() {
 
 /// A metadata request active in interception at rollover keeps its raw
 /// observation but cannot mutate replacement-session metadata from stale
-/// admission.
+/// admission. The memory-only fixture keeps this oracle on the rollover
+/// generation cut instead of coupling it to asynchronous filesystem scheduling.
 #[test]
 fn rollover_metadata_request_is_observation_only() {
     let tmp = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let mut h = quiet_provider_harness_memory_only(tmp.path()).expect("harness");
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     connect_ready_configured_extension(

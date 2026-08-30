@@ -1438,6 +1438,18 @@ fn quiet_provider_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, Harn
     )
 }
 
+/// Builds the quiet-provider fixture without persistent session or agent stores
+/// for tests whose assertions do not cover durability.
+fn quiet_provider_harness_memory_only(
+    state_dir: impl Into<PathBuf>,
+) -> Result<Harness, HarnessError> {
+    quiet_provider_harness_with_start_reason_and_storage_mode(
+        state_dir,
+        tau_proto::SessionStartReason::Initial,
+        crate::HarnessStorageMode::MemoryOnly,
+    )
+}
+
 fn quiet_provider_harness_with_start_reason(
     state_dir: impl Into<PathBuf>,
     start_reason: tau_proto::SessionStartReason,
