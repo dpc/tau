@@ -15,6 +15,176 @@ fn strict_tool(parameters: serde_json::Value) -> ToolSpec {
     }
 }
 
+/// Runs the production validator while retaining its exact semantic object
+/// indexing and lookup work for complexity assertions.
+fn validate_with_object_work(
+    tool: &ToolSpec,
+    arguments: &CborValue,
+) -> (
+    Result<(), ToolArgumentValidationError>,
+    ObjectValidationWork,
+) {
+    let mut work = ObjectValidationWork::default();
+    let result = validate_json_schema_with_work(
+        tool.parameters.as_ref().expect("strict tool schema"),
+        arguments,
+        "$",
+        &mut work,
+    );
+    (result, work)
+}
+
+/// Reproduces the previous object-member rescans as a differential oracle,
+/// while delegating unchanged non-object schema semantics to production.
+fn legacy_validate_json_schema(
+    schema: &serde_json::Value,
+    value: &CborValue,
+    path: &str,
+) -> Result<(), ToolArgumentValidationError> {
+    match schema {
+        serde_json::Value::Bool(true) => return Ok(()),
+        serde_json::Value::Bool(false) => {
+            return Err(ToolArgumentValidationError::new(
+                path,
+                "value is rejected by schema",
+            ));
+        }
+        _ => {}
+    }
+    let Some(schema) = schema.as_object() else {
+        return Ok(());
+    };
+    if let Some(type_schema) = schema.get("type")
+        && !schema_type_matches(type_schema, value)
+    {
+        return Err(type_error(path, type_schema, value));
+    }
+    if let Some(enum_values) = schema.get("enum").and_then(serde_json::Value::as_array)
+        && !enum_values
+            .iter()
+            .any(|allowed| tau_proto::json_to_cbor(allowed) == *value)
+    {
+        return Err(enum_error(path, enum_values, value));
+    }
+    match value {
+        CborValue::Map(entries) => legacy_validate_object_schema(schema, entries, path),
+        _ => validate_json_schema(&serde_json::Value::Object(schema.clone()), value, path),
+    }
+}
+
+/// Implements the exact pre-index object algorithm retained as a test oracle.
+fn legacy_validate_object_schema(
+    schema: &serde_json::Map<String, serde_json::Value>,
+    entries: &[(CborValue, CborValue)],
+    path: &str,
+) -> Result<(), ToolArgumentValidationError> {
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object);
+    if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
+        let missing = required
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|required_name| {
+                !entries
+                    .iter()
+                    .any(|(key, _)| matches!(key, CborValue::Text(key) if key == *required_name))
+            })
+            .take(MAX_DIAGNOSTIC_ITEMS + 1)
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(missing_required_error(path, &missing));
+        }
+    }
+    if matches!(
+        schema.get("additionalProperties"),
+        Some(serde_json::Value::Bool(false))
+    ) {
+        let unknown = entries
+            .iter()
+            .filter_map(|(key, _)| match key {
+                CborValue::Text(field_name)
+                    if properties.is_none_or(|properties| !properties.contains_key(field_name)) =>
+                {
+                    Some(field_name.as_str())
+                }
+                _ => None,
+            })
+            .take(MAX_DIAGNOSTIC_ITEMS + 1)
+            .collect::<Vec<_>>();
+        if !unknown.is_empty() {
+            let mut allowed = properties
+                .into_iter()
+                .flat_map(serde_json::Map::keys)
+                .map(String::as_str)
+                .take(MAX_DIAGNOSTIC_ITEMS + 1)
+                .collect::<Vec<_>>();
+            allowed.sort_unstable();
+            return Err(unexpected_properties_error(path, &unknown, &allowed));
+        }
+    }
+    for (key, field_value) in entries {
+        let CborValue::Text(field_name) = key else {
+            return Err(ToolArgumentValidationError::new(
+                path,
+                "object keys must be strings",
+            ));
+        };
+        if let Some(field_schema) = properties.and_then(|properties| properties.get(field_name)) {
+            legacy_validate_json_schema(field_schema, field_value, &child_path(path, field_name))?;
+            continue;
+        }
+        if let Some(additional_schema @ serde_json::Value::Object(_)) =
+            schema.get("additionalProperties")
+        {
+            legacy_validate_json_schema(
+                additional_schema,
+                field_value,
+                &child_path(path, field_name),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Builds a deterministic closed schema with every generated field required.
+fn wide_required_schema(field_count: usize) -> serde_json::Value {
+    let properties = (0..field_count)
+        .map(|idx| {
+            (
+                format!("field-{idx:04}"),
+                serde_json::json!({"type": "integer"}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let required = (0..field_count)
+        .map(|idx| serde_json::Value::String(format!("field-{idx:04}")))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false
+    })
+}
+
+/// Builds ordered valid arguments for [`wide_required_schema`].
+fn wide_arguments(field_count: usize) -> Vec<(CborValue, CborValue)> {
+    (0..field_count)
+        .map(|idx| {
+            (
+                CborValue::Text(format!("field-{idx:04}")),
+                CborValue::Integer((idx as i64).into()),
+            )
+        })
+        .collect()
+}
+
+/// Converts validation outcomes into directly comparable wire diagnostics.
+fn rendered_validation(result: Result<(), ToolArgumentValidationError>) -> Result<(), String> {
+    result.map_err(|error| error.to_string())
+}
+
 /// Ensures type mismatches identify the exact schema path, expected type,
 /// and actual supplied type so a model can fix the argument mechanically.
 #[test]
@@ -269,6 +439,155 @@ fn validation_error_reports_unknown_and_allowed_fields() {
         error.to_string(),
         "unexpected argument(s): `foo`, `bar`; allowed fields: `edits`, `path`"
     );
+}
+
+/// Proves the production object-key index stays differential-equivalent to the
+/// previous rescanning algorithm while its counted work scales with field
+/// count rather than required-field × argument-field count.
+#[test]
+fn wide_required_validation_is_linear_and_differentially_equivalent() {
+    for field_count in [100, 500, 1_000, 2_000] {
+        let schema = wide_required_schema(field_count);
+        let tool = strict_tool(schema.clone());
+        let valid_entries = wide_arguments(field_count);
+        let valid_arguments = CborValue::Map(valid_entries.clone());
+
+        let (actual, work) = validate_with_object_work(&tool, &valid_arguments);
+        let legacy = legacy_validate_json_schema(&schema, &valid_arguments, "$");
+        assert_eq!(rendered_validation(actual), rendered_validation(legacy));
+        assert_eq!(work.indexed_entries, field_count);
+        assert_eq!(work.required_lookups, field_count);
+        assert_eq!(work.closed_key_visits, field_count);
+        assert!(
+            work.indexed_entries + work.required_lookups + work.closed_key_visits
+                <= field_count * 3
+        );
+
+        let mut missing_entries = valid_entries.iter().skip(20).cloned().collect::<Vec<_>>();
+        missing_entries.push((
+            CborValue::Text("field-0020".to_owned()),
+            CborValue::Integer(20.into()),
+        ));
+        let missing_arguments = CborValue::Map(missing_entries);
+        let (actual, work) = validate_with_object_work(&tool, &missing_arguments);
+        let legacy = legacy_validate_json_schema(&schema, &missing_arguments, "$");
+        assert_eq!(rendered_validation(actual), rendered_validation(legacy));
+        assert_eq!(work.indexed_entries, field_count - 19);
+        assert_eq!(work.required_lookups, MAX_DIAGNOSTIC_ITEMS + 1);
+        assert_eq!(work.closed_key_visits, 0);
+        let error = validate_tool_arguments(&tool, &missing_arguments)
+            .expect_err("first twenty authored required names are missing")
+            .to_string();
+        for idx in 0..MAX_DIAGNOSTIC_ITEMS {
+            assert!(error.contains(&format!("`field-{idx:04}`")));
+        }
+        assert!(error.ends_with("… and more"));
+
+        let mut unknown_entries = valid_entries.clone();
+        unknown_entries.extend((0..20).map(|idx| {
+            (
+                CborValue::Text(format!("unknown-{idx:02}")),
+                CborValue::Bool(true),
+            )
+        }));
+        let unknown_arguments = CborValue::Map(unknown_entries);
+        let (actual, work) = validate_with_object_work(&tool, &unknown_arguments);
+        let legacy = legacy_validate_json_schema(&schema, &unknown_arguments, "$");
+        assert_eq!(rendered_validation(actual), rendered_validation(legacy));
+        assert_eq!(work.indexed_entries, field_count + 20);
+        assert_eq!(work.required_lookups, field_count);
+        assert_eq!(
+            work.closed_key_visits,
+            field_count + MAX_DIAGNOSTIC_ITEMS + 1
+        );
+        let error = validate_tool_arguments(&tool, &unknown_arguments)
+            .expect_err("twenty unknown names exceed the diagnostic cap")
+            .to_string();
+        for idx in 0..MAX_DIAGNOSTIC_ITEMS {
+            assert!(error.contains(&format!("`unknown-{idx:02}`")));
+        }
+        assert!(error.contains("… and more"));
+
+        let mut duplicate_entries = valid_entries.clone();
+        duplicate_entries.insert(
+            1,
+            (
+                CborValue::Text("field-0000".to_owned()),
+                CborValue::Text("invalid duplicate".to_owned()),
+            ),
+        );
+        let duplicate_arguments = CborValue::Map(duplicate_entries);
+        let (actual, work) = validate_with_object_work(&tool, &duplicate_arguments);
+        let legacy = legacy_validate_json_schema(&schema, &duplicate_arguments, "$");
+        let actual = rendered_validation(actual);
+        assert_eq!(actual, rendered_validation(legacy));
+        assert_eq!(
+            actual,
+            Err("$.field-0000: expected integer, got string".to_owned())
+        );
+        assert_eq!(work.indexed_entries, field_count + 1);
+        assert_eq!(work.required_lookups, field_count);
+        assert_eq!(work.closed_key_visits, field_count + 1);
+
+        let mut non_string_entries = valid_entries;
+        non_string_entries.push((CborValue::Integer(7.into()), CborValue::Null));
+        let non_string_arguments = CborValue::Map(non_string_entries);
+        let (actual, work) = validate_with_object_work(&tool, &non_string_arguments);
+        let legacy = legacy_validate_json_schema(&schema, &non_string_arguments, "$");
+        let actual = rendered_validation(actual);
+        assert_eq!(actual, rendered_validation(legacy));
+        assert_eq!(actual, Err("object keys must be strings".to_owned()));
+        assert_eq!(work.indexed_entries, field_count + 1);
+        assert_eq!(work.required_lookups, field_count);
+        assert_eq!(work.closed_key_visits, field_count);
+    }
+}
+
+/// Ensures nested wide objects reuse the same linear key-view path and that
+/// optional-null repair still revalidates against the differential oracle.
+#[test]
+fn nested_wide_validation_and_repair_preserve_linear_work() {
+    for field_count in [100, 500, 1_000, 2_000] {
+        let inner_schema = wide_required_schema(field_count);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"nested": inner_schema},
+            "required": ["nested"],
+            "additionalProperties": false
+        });
+        let tool = strict_tool(schema.clone());
+        let arguments = CborValue::Map(vec![(
+            CborValue::Text("nested".to_owned()),
+            CborValue::Map(wide_arguments(field_count)),
+        )]);
+        let (actual, work) = validate_with_object_work(&tool, &arguments);
+        let legacy = legacy_validate_json_schema(&schema, &arguments, "$");
+        assert_eq!(rendered_validation(actual), rendered_validation(legacy));
+        assert_eq!(work.indexed_entries, field_count + 1);
+        assert_eq!(work.required_lookups, field_count + 1);
+        assert_eq!(work.closed_key_visits, field_count + 1);
+
+        let mut repair_schema = wide_required_schema(field_count);
+        repair_schema["required"]
+            .as_array_mut()
+            .expect("required array")
+            .pop();
+        let repair_tool = strict_tool(repair_schema.clone());
+        let mut repair_entries = wide_arguments(field_count);
+        repair_entries[field_count - 1].1 = CborValue::Null;
+        let repair = repair_tool_arguments(&repair_tool, &CborValue::Map(repair_entries))
+            .expect("optional invalid null is removed");
+        let (actual, repair_work) = validate_with_object_work(&repair_tool, &repair.arguments);
+        let legacy = legacy_validate_json_schema(&repair_schema, &repair.arguments, "$");
+        assert_eq!(rendered_validation(actual), rendered_validation(legacy));
+        assert_eq!(
+            repair.arguments,
+            CborValue::Map(wide_arguments(field_count - 1))
+        );
+        assert_eq!(repair_work.indexed_entries, field_count - 1);
+        assert_eq!(repair_work.required_lookups, field_count - 1);
+        assert_eq!(repair_work.closed_key_visits, field_count - 1);
+    }
 }
 
 #[test]

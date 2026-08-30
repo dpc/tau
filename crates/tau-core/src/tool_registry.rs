@@ -919,6 +919,94 @@ fn validate_json_schema(
     value: &CborValue,
     path: &str,
 ) -> Result<(), ToolArgumentValidationError> {
+    validate_json_schema_with_work(schema, value, path, &mut ObjectValidationWork::default())
+}
+
+/// Exact object-validation work observed by focused complexity tests.
+#[derive(Default)]
+struct ObjectValidationWork {
+    /// Argument map entries visited while building borrowed key views.
+    #[cfg(test)]
+    indexed_entries: usize,
+    /// Required property names tested against borrowed key views.
+    #[cfg(test)]
+    required_lookups: usize,
+    /// Argument string keys visited by closed-object checks.
+    #[cfg(test)]
+    closed_key_visits: usize,
+}
+
+impl ObjectValidationWork {
+    /// Records one argument map entry indexed by the production path.
+    fn indexed_entry(&mut self) {
+        #[cfg(test)]
+        {
+            self.indexed_entries += 1;
+        }
+    }
+
+    /// Records one required-name membership lookup by the production path.
+    fn required_lookup(&mut self) {
+        #[cfg(test)]
+        {
+            self.required_lookups += 1;
+        }
+    }
+
+    /// Records one ordered argument key visited by a closed-object check.
+    fn closed_key_visit(&mut self) {
+        #[cfg(test)]
+        {
+            self.closed_key_visits += 1;
+        }
+    }
+}
+
+/// Borrowed exact-name index plus the original argument order for one object.
+struct ObjectKeyView<'a> {
+    /// Original entries retained for ordered closed-object diagnostics.
+    entries: &'a [(CborValue, CborValue)],
+    /// Distinct string keys used for required-name membership checks.
+    string_keys: path_std_collections::HashSet<&'a str>,
+}
+
+impl<'a> ObjectKeyView<'a> {
+    /// Builds one borrowed key index with work linear in the argument map
+    /// width.
+    fn new(entries: &'a [(CborValue, CborValue)], work: &mut ObjectValidationWork) -> Self {
+        let mut string_keys = path_std_collections::HashSet::with_capacity(entries.len());
+        for (key, _) in entries {
+            work.indexed_entry();
+            if let CborValue::Text(key) = key {
+                string_keys.insert(key.as_str());
+            }
+        }
+        Self {
+            entries,
+            string_keys,
+        }
+    }
+
+    /// Tests exact membership without changing duplicate-key semantics.
+    fn contains(&self, key: &str) -> bool {
+        self.string_keys.contains(key)
+    }
+
+    /// Visits string keys in authored argument order, including duplicates.
+    fn string_keys_in_input_order(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.entries.iter().filter_map(|(key, _)| match key {
+            CborValue::Text(key) => Some(key.as_str()),
+            _ => None,
+        })
+    }
+}
+
+fn validate_json_schema_with_work(
+    schema: &serde_json::Value,
+    value: &CborValue,
+    path: &str,
+    work: &mut ObjectValidationWork,
+) -> Result<(), ToolArgumentValidationError> {
     match schema {
         serde_json::Value::Bool(true) => return Ok(()),
         serde_json::Value::Bool(false) => {
@@ -949,8 +1037,8 @@ fn validate_json_schema(
     }
 
     match value {
-        CborValue::Map(entries) => validate_object_schema(schema, entries, path),
-        CborValue::Array(values) => validate_array_schema(schema, values, path),
+        CborValue::Map(entries) => validate_object_schema(schema, entries, path, work),
+        CborValue::Array(values) => validate_array_schema(schema, values, path, work),
         CborValue::Text(text) => validate_string_schema(schema, text, path),
         CborValue::Integer(_) | CborValue::Float(_) => validate_number_schema(schema, value, path),
         _ => Ok(()),
@@ -1043,19 +1131,28 @@ fn validate_object_schema(
     schema: &serde_json::Map<String, serde_json::Value>,
     entries: &[(CborValue, CborValue)],
     path: &str,
+    work: &mut ObjectValidationWork,
 ) -> Result<(), ToolArgumentValidationError> {
     let properties = schema
         .get("properties")
         .and_then(serde_json::Value::as_object);
+    let required = schema.get("required").and_then(serde_json::Value::as_array);
+    let closed = matches!(
+        schema.get("additionalProperties"),
+        Some(serde_json::Value::Bool(false))
+    );
+    let key_view = (required.is_some() || closed).then(|| ObjectKeyView::new(entries, work));
 
-    if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
+    if let Some(required) = required {
+        let key_view = key_view
+            .as_ref()
+            .expect("required object schema builds an argument key view");
         let missing = required
             .iter()
             .filter_map(serde_json::Value::as_str)
             .filter(|required_name| {
-                !entries
-                    .iter()
-                    .any(|(key, _)| cbor_key_matches(key, required_name))
+                work.required_lookup();
+                !key_view.contains(required_name)
             })
             .take(MAX_DIAGNOSTIC_ITEMS + 1)
             .collect::<Vec<_>>();
@@ -1064,19 +1161,14 @@ fn validate_object_schema(
         }
     }
 
-    if matches!(
-        schema.get("additionalProperties"),
-        Some(serde_json::Value::Bool(false))
-    ) {
-        let unknown = entries
-            .iter()
-            .filter_map(|(key, _)| match key {
-                CborValue::Text(field_name)
-                    if properties.is_none_or(|properties| !properties.contains_key(field_name)) =>
-                {
-                    Some(field_name.as_str())
-                }
-                _ => None,
+    if closed {
+        let unknown = key_view
+            .as_ref()
+            .expect("closed object schema builds an argument key view")
+            .string_keys_in_input_order()
+            .filter(|field_name| {
+                work.closed_key_visit();
+                properties.is_none_or(|properties| !properties.contains_key(*field_name))
             })
             .take(MAX_DIAGNOSTIC_ITEMS + 1)
             .collect::<Vec<_>>();
@@ -1100,16 +1192,22 @@ fn validate_object_schema(
             ));
         };
         if let Some(field_schema) = properties.and_then(|properties| properties.get(field_name)) {
-            validate_json_schema(field_schema, field_value, &child_path(path, field_name))?;
+            validate_json_schema_with_work(
+                field_schema,
+                field_value,
+                &child_path(path, field_name),
+                work,
+            )?;
             continue;
         }
         match schema.get("additionalProperties") {
             Some(serde_json::Value::Bool(false)) => {}
             Some(additional_schema @ serde_json::Value::Object(_)) => {
-                validate_json_schema(
+                validate_json_schema_with_work(
                     additional_schema,
                     field_value,
                     &child_path(path, field_name),
+                    work,
                 )?;
             }
             Some(serde_json::Value::Bool(true)) | None => {}
@@ -1118,10 +1216,6 @@ fn validate_object_schema(
     }
 
     Ok(())
-}
-
-fn cbor_key_matches(key: &CborValue, expected: &str) -> bool {
-    matches!(key, CborValue::Text(text) if text == expected)
 }
 
 fn child_path(parent: &str, field: &str) -> String {
@@ -1196,6 +1290,7 @@ fn validate_array_schema(
     schema: &serde_json::Map<String, serde_json::Value>,
     values: &[CborValue],
     path: &str,
+    work: &mut ObjectValidationWork,
 ) -> Result<(), ToolArgumentValidationError> {
     if let Some(min_items) = schema
         .get("minItems")
@@ -1221,7 +1316,7 @@ fn validate_array_schema(
     }
     if let Some(item_schema) = schema.get("items") {
         for (idx, item) in values.iter().enumerate() {
-            validate_json_schema(item_schema, item, &item_path(path, idx))?;
+            validate_json_schema_with_work(item_schema, item, &item_path(path, idx), work)?;
         }
     }
     Ok(())
