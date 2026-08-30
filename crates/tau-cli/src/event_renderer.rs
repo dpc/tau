@@ -1906,6 +1906,12 @@ impl EventRenderer {
         self.resources.handle.redraw_request_count()
     }
 
+    /// Returns exact output-block replacements for focused rendering tests.
+    #[cfg(test)]
+    pub(crate) fn block_replacement_count_for_test(&self) -> u64 {
+        self.resources.handle.block_replacement_count()
+    }
+
     /// Returns the exact raw text retained for the latest submitted user
     /// prompt.
     #[cfg(test)]
@@ -8156,6 +8162,9 @@ impl EventRenderer {
                         duration,
                         state.effective_shell_timeout,
                     );
+                }
+                if state.live_display.as_ref() == Some(&display) {
+                    return;
                 }
                 state.live_display = Some(display.clone());
                 update = Some((block_id, display));

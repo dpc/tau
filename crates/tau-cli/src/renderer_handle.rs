@@ -39,6 +39,9 @@ pub(crate) struct RendererHandle {
     /// Renderer-owned redraw requests observed by unit tests.
     #[cfg(test)]
     redraw_request_count: Arc<AtomicU64>,
+    /// Output-block replacements observed by focused renderer tests.
+    #[cfg(test)]
+    block_replacement_count: Cell<u64>,
 }
 
 impl RendererHandle {
@@ -56,6 +59,8 @@ impl RendererHandle {
             selected_delivery_suppressed: Cell::new(false),
             #[cfg(test)]
             redraw_request_count: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            block_replacement_count: Cell::new(0),
         }
     }
 
@@ -114,6 +119,9 @@ impl RendererHandle {
         id: tau_cli_term::BlockId,
         block: impl Into<tau_cli_term::StyledBlock>,
     ) {
+        #[cfg(test)]
+        self.block_replacement_count
+            .set(self.block_replacement_count.get() + 1);
         if let Some(output) = &self.detached {
             output.lock().expect(MUTEX_POISONED).set_block(id, block);
         } else {
@@ -314,6 +322,12 @@ impl RendererHandle {
     #[cfg(test)]
     pub(crate) fn redraw_request_count(&self) -> u64 {
         self.redraw_request_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns output-block replacements without inferring them from redraws.
+    #[cfg(test)]
+    pub(crate) fn block_replacement_count(&self) -> u64 {
+        self.block_replacement_count.get()
     }
 
     /// Invalidates the screen cache only when the current target is visible.

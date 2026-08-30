@@ -3869,6 +3869,56 @@ fn tool_progress_display_replaces_live_state_generically() {
     assert!(vt.screen_contains(80, "waiting"));
 }
 
+/// An exact canonical progress replacement must not rebuild the live block or
+/// wake the terminal, while the next visible state change does each once.
+#[test]
+fn exact_tool_progress_noop_skips_block_replacement_and_redraw() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.apply_setting("show-tools", "full");
+    renderer.handle(&tool_started("call-1", "read", CborValue::Map(vec![])));
+
+    let progress = |status_text: &str| {
+        Event::ToolProgress(tau_proto::ToolProgress {
+            call_id: "call-1".into(),
+            tool_name: tau_proto::ToolName::new("read"),
+            message: Some("still running".to_owned()),
+            progress: None,
+            display: Some(tau_proto::ToolUseState {
+                args: "src/main.rs".into(),
+                status: tau_proto::ToolUseStatus::InProgress,
+                status_text: status_text.to_owned(),
+                payload: Some(tau_proto::ToolUsePayload::Text {
+                    text: "line 1\nline 2".into(),
+                }),
+                ..Default::default()
+            }),
+        })
+    };
+
+    renderer.handle(&progress("reading"));
+    sync(&handle);
+    let replacements = renderer.block_replacement_count_for_test();
+    let redraws = renderer.redraw_request_count_for_test();
+
+    renderer.handle(&progress("reading"));
+    assert_eq!(renderer.block_replacement_count_for_test(), replacements);
+    assert_eq!(renderer.redraw_request_count_for_test(), redraws);
+
+    renderer.handle(&progress("checking"));
+    assert_eq!(
+        renderer.block_replacement_count_for_test(),
+        replacements + 1
+    );
+    assert_eq!(renderer.redraw_request_count_for_test(), redraws + 1);
+    sync(&handle);
+    assert!(vt.screen_contains(80, "checking"));
+}
+
 #[test]
 fn backgrounded_tool_stays_visibly_running_until_background_result() {
     let (_term, handle, vt) = setup(80, 24);

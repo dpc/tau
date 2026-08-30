@@ -404,7 +404,7 @@ fn rounded_units(value: u64, unit: u64) -> u64 {
 }
 
 /// Semantic style for one compact tool-line segment.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) enum ToolStatus {
     Success,
     Warning,
@@ -437,7 +437,7 @@ pub(crate) enum CompactionStatus {
 }
 
 /// One generic compact header segment, renderable before or after tool fields.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct ToolLineSegment {
     pub(crate) text: String,
     pub(crate) status: ToolStatus,
@@ -451,7 +451,7 @@ pub(crate) struct ToolLineSegment {
 /// Decomposed compact tool-block label, painted as themed spans:
 /// `<status_prefix> <tool_name> <leading...> <mode> <args> <range>
 /// <suffix...>`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct ToolCallDisplay {
     /// Optional atomic semantic status rendered before the stable identity.
     pub(crate) status_prefix: Option<(String, ToolStatus)>,
