@@ -384,7 +384,7 @@ fn late_attached_public_pty_stages_current_state_before_completed_turn()
     drop(catch_up_observer);
     drop(observer);
     attached.finish()?;
-    original.finish()?;
+    original.finish_exited()?;
     fixture.require_boot_gone(session_id.as_str())?;
     fixture.complete();
     Ok(())
@@ -549,7 +549,7 @@ fn live_attached_public_ptys_share_selected_agent_and_cancellation_settlement()
     )?;
     drop(observer);
     attached.finish()?;
-    original.finish()?;
+    original.finish_exited()?;
     fixture.require_boot_gone(session_id.as_str())?;
     fixture.complete();
     Ok(())

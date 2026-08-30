@@ -432,7 +432,7 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
     )?;
     drop(observer);
     second.finish()?;
-    first.finish()?;
+    first.finish_exited()?;
     fixture.require_boot_gone(session_id.as_str())?;
     let trace_after_presentation = fixture.trace()?;
     if trace_after_presentation != trace_before_presentation {

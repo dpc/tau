@@ -503,7 +503,8 @@ impl PtyProcess {
         self.reap_naturally()
     }
 
-    /// Reaps a one-shot process naturally and returns bytes after reader drain.
+    /// Reaps a process expected to exit naturally and returns bytes after
+    /// reader drain.
     pub(super) fn finish_exited(mut self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         self.reap_naturally()?;
         self.raw()

@@ -350,7 +350,7 @@ fn finish_pair(
 ) -> Result<(), Box<dyn std::error::Error>> {
     drop(observer);
     attached.finish()?;
-    original.finish()?;
+    original.finish_exited()?;
     fixture.require_boot_gone(session_id.as_str())?;
     fixture.complete();
     Ok(())
