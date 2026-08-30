@@ -23,6 +23,7 @@ use scripted_tcp_server::ScriptedTcpServer;
 use test_ca::TestCa;
 use test_server::{ServerScript, TestWsServer};
 
+use super::super::BorrowedContextItem;
 use super::*;
 
 fn outbound_error(result: Result<WsConn, LlmError>) -> tau_provider::OutboundError {
@@ -182,7 +183,7 @@ fn compact_turn_validates_shape_while_reporting_private_progress() {
     let observed_fingerprint_pointer = Rc::clone(&fingerprint_sidecar_pointer);
     let result = super::super::with_fingerprint_item_observer(
         move |item| {
-            if let tau_proto::ContextItem::Compaction(item) = item {
+            if let BorrowedContextItem::Context(tau_proto::ContextItem::Compaction(item)) = item {
                 *observed_fingerprint_pointer.borrow_mut() = Some(item.raw_json().as_ptr());
             }
         },

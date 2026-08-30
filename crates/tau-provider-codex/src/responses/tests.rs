@@ -1111,6 +1111,138 @@ fn response_anchor_fingerprint_distinguishes_cbor_map_key_types() {
     );
 }
 
+/// The allocation-free streaming encoder must preserve the original
+/// count-and-length-framed CBOR identity for every context-item family and for
+/// the borrowed tool-result wrapper used by grouped tool blocks.
+#[test]
+fn response_anchor_streaming_fingerprint_matches_owned_reference_for_all_item_variants() {
+    fn reference(items: &[ContextItem]) -> blake3::Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(CachedResponseAnchor::FINGERPRINT_DOMAIN);
+        hasher.update(
+            &u64::try_from(items.len())
+                .expect("fixture item count")
+                .to_le_bytes(),
+        );
+        for item in items {
+            let encoded = tau_proto::encode_message_to_vec(item).expect("reference CBOR");
+            hasher.update(
+                &u64::try_from(encoded.len())
+                    .expect("fixture encoded length")
+                    .to_le_bytes(),
+            );
+            hasher.update(&encoded);
+        }
+        hasher.finalize()
+    }
+
+    let tool_result = restored_internal_tool_error("call-result", "tool output");
+    let variants = vec![
+        user_text("message"),
+        assistant_tool_call(
+            "call",
+            "shell",
+            tau_proto::ToolType::Function,
+            tau_proto::CborValue::Map(vec![(
+                tau_proto::CborValue::Integer(7.into()),
+                tau_proto::CborValue::Array(vec![tau_proto::CborValue::Text("nested".to_owned())]),
+            )]),
+        ),
+        tool_result.clone(),
+        ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Summary,
+            text: "reasoning summary".to_owned(),
+        }),
+        ContextItem::LocalCompactionNarrative(tau_proto::LocalCompactionNarrativeItem {
+            narrative: "private narrative".to_owned(),
+        }),
+        reasoning_item(r#"{"type":"reasoning","summary":[{"text":"opaque"}]}"#),
+        ContextItem::CompactionTrigger,
+        ContextItem::Compaction(
+            OpaqueProviderItem::from_raw_json(r#"{"type":"compaction","summary":"old"}"#)
+                .expect("valid compaction"),
+        ),
+        ContextItem::UnknownProviderItem(
+            OpaqueProviderItem::from_raw_json(r#"{"type":"future_item","deep":[[1,2]]}"#)
+                .expect("valid unknown provider item"),
+        ),
+    ];
+
+    let streamed = CachedResponseAnchor::fingerprint_items(
+        variants.len(),
+        variants.iter().map(BorrowedContextItem::Context),
+    )
+    .expect("streamed variant fingerprint");
+    assert_eq!(streamed, reference(&variants));
+
+    let ContextItem::ToolResult(tool_result) = &tool_result else {
+        panic!("tool-result fixture")
+    };
+    let context = tau_proto::PromptContext {
+        blocks: vec![
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock { items: variants }),
+            tau_proto::ContextBlock::ToolResults(tau_proto::ToolResultsBlock {
+                items: vec![tool_result.clone()],
+            }),
+        ],
+    };
+    let owned = context.flatten();
+    let streamed =
+        CachedResponseAnchor::fingerprint_items(owned.len(), borrowed_context_items(&context))
+            .expect("streamed block fingerprint");
+    assert_eq!(streamed, reference(&owned));
+}
+
+/// A deep warm prefix is hashed exactly once at the item level while request
+/// lowering visits only the one-item suffix. This is a deterministic work-count
+/// benchmark: growing `PREFIX_ITEMS` must not grow the serialized request
+/// input.
+#[test]
+fn response_anchor_large_prefix_work_is_bounded_to_hash_depth_and_suffix_lowering() {
+    const PREFIX_ITEMS: usize = 4_096;
+
+    let mut before = Vec::with_capacity(PREFIX_ITEMS);
+    before.extend((0..PREFIX_ITEMS).map(|index| user_text(&format!("prefix-{index}"))));
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context_with_response_id(
+            "resp_large",
+            before,
+            vec![assistant_text("anchored response")],
+            vec![user_text("one suffix")],
+        ),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::parse("large-prefix").expect("session id"),
+        agent_id: &tau_proto::AgentId::parse("large-prefix-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let anchor =
+        response_anchor_from_context(request.context, "resp_large").expect("response anchor");
+    let fingerprint_visits = path_std_sync::Arc::new(path_std_sync_atomic::AtomicUsize::new(0));
+    let observed_visits = path_std_sync::Arc::clone(&fingerprint_visits);
+    let body = with_fingerprint_item_observer(
+        move |_| {
+            observed_visits.fetch_add(1, path_std_sync_atomic::Ordering::Relaxed);
+        },
+        || serde_json::to_value(build_request(&chain_test_config(), &request, Some(&anchor))),
+    )
+    .expect("serialize request");
+
+    assert_eq!(
+        fingerprint_visits.load(path_std_sync_atomic::Ordering::Relaxed),
+        PREFIX_ITEMS + 1,
+        "the anchor prefix contains every prior input plus the assistant response",
+    );
+    let input = body["input"].as_array().expect("request input");
+    assert_eq!(input.len(), 1, "only the selected suffix is lowered");
+    assert_eq!(input[0]["content"][0]["text"], "one suffix");
+}
+
 /// A response containing provider compaction output must remain ineligible as a
 /// chain anchor even when its causal-prefix fingerprint matches. This preserves
 /// the established workaround for Codex rebuilding compaction history wrongly.

@@ -9,7 +9,9 @@ mod compact_failure_capture;
 mod compact_stream;
 
 use std::time::{Duration, Instant, SystemTime};
-use std::{sync as path_std_sync, thread as path_std_thread, time as path_std_time};
+use std::{
+    io as path_std_io, sync as path_std_sync, thread as path_std_thread, time as path_std_time,
+};
 
 use base64::{Engine as _, engine as path_base64_engine};
 use serde::{Deserialize, Serialize};
@@ -32,7 +34,7 @@ use crate::{TurnAbort, attempt_failure as path_crate_attempt_failure};
 
 #[cfg(test)]
 /// Test callback that observes one item at canonical anchor serialization.
-type FingerprintItemObserver = Box<dyn FnMut(&ContextItem)>;
+type FingerprintItemObserver = Box<dyn for<'a> FnMut(BorrowedContextItem<'a>)>;
 
 #[cfg(test)]
 thread_local! {
@@ -47,7 +49,7 @@ thread_local! {
 /// Runs one production anchor path while observing the exact items presented to
 /// canonical fingerprint serialization.
 fn with_fingerprint_item_observer<R>(
-    observer: impl FnMut(&ContextItem) + 'static,
+    observer: impl for<'a> FnMut(BorrowedContextItem<'a>) + 'static,
     run: impl FnOnce() -> R,
 ) -> R {
     struct ObserverGuard(Option<FingerprintItemObserver>);
@@ -2213,6 +2215,103 @@ struct ContextManagementRequest {
     compact_threshold: Option<tau_proto::TokenCount>,
 }
 
+/// One borrowed item in the canonical provider-visible context timeline.
+#[derive(Clone, Copy)]
+enum BorrowedContextItem<'a> {
+    /// An item already stored in a user-input or assistant-response block.
+    Context(&'a ContextItem),
+    /// A tool-result block item viewed through its canonical context wrapper.
+    ToolResult(&'a ToolResultItem),
+}
+
+impl BorrowedContextItem<'_> {
+    /// Returns whether this item is an opaque provider compaction item.
+    fn is_compaction(self) -> bool {
+        matches!(self, Self::Context(ContextItem::Compaction(_)))
+    }
+
+    /// Returns whether this item is a harness compaction trigger.
+    fn is_compaction_trigger(self) -> bool {
+        matches!(self, Self::Context(ContextItem::CompactionTrigger))
+    }
+}
+
+impl Serialize for BorrowedContextItem<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+        enum ToolResultContextItemRef<'a> {
+            /// A borrowed tool result with the canonical `ContextItem` wrapper.
+            ToolResult(&'a ToolResultItem),
+        }
+
+        match self {
+            Self::Context(item) => item.serialize(serializer),
+            Self::ToolResult(item) => {
+                ToolResultContextItemRef::ToolResult(item).serialize(serializer)
+            }
+        }
+    }
+}
+
+/// Iterator over the items borrowed from one semantic context block.
+#[derive(Clone)]
+enum BorrowedBlockItems<'a> {
+    /// User-input or assistant-response context items.
+    Context(std::slice::Iter<'a, ContextItem>),
+    /// Tool-result items that need a borrowed `ContextItem` view.
+    ToolResults(std::slice::Iter<'a, ToolResultItem>),
+}
+
+impl<'a> Iterator for BorrowedBlockItems<'a> {
+    type Item = BorrowedContextItem<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Context(items) => items.next().map(BorrowedContextItem::Context),
+            Self::ToolResults(items) => items.next().map(BorrowedContextItem::ToolResult),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Context(items) => items.size_hint(),
+            Self::ToolResults(items) => items.size_hint(),
+        }
+    }
+}
+
+impl DoubleEndedIterator for BorrowedBlockItems<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Context(items) => items.next_back().map(BorrowedContextItem::Context),
+            Self::ToolResults(items) => items.next_back().map(BorrowedContextItem::ToolResult),
+        }
+    }
+}
+
+impl ExactSizeIterator for BorrowedBlockItems<'_> {}
+
+/// Iterates over a prompt context without cloning its canonical items.
+fn borrowed_context_items<'a>(
+    context: &'a tau_proto::PromptContext,
+) -> impl Clone + DoubleEndedIterator<Item = BorrowedContextItem<'a>> {
+    context.blocks.iter().flat_map(|block| match block {
+        tau_proto::ContextBlock::UserInput(block) => {
+            BorrowedBlockItems::Context(block.items.iter())
+        }
+        tau_proto::ContextBlock::AssistantResponse(block) => {
+            BorrowedBlockItems::Context(block.output_items.iter())
+        }
+        tau_proto::ContextBlock::ToolResults(block) => {
+            BorrowedBlockItems::ToolResults(block.items.iter())
+        }
+    })
+}
+
 /// Connection-local response id plus proof of the exact context it represents.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CachedResponseAnchor {
@@ -2235,11 +2334,12 @@ impl CachedResponseAnchor {
     /// Encoding failure makes the response ineligible for chaining; callers
     /// keep serving the prompt by sending full context instead.
     fn new(response_id: String, represented_prefix: &[ContextItem]) -> Option<Self> {
-        Some(Self {
+        Self::new_with_input_tokens_from_items(
             response_id,
-            represented_prefix_fingerprint: Self::fingerprint(represented_prefix)?,
-            prompt_input_tokens: None,
-        })
+            represented_prefix.len(),
+            represented_prefix.iter().map(BorrowedContextItem::Context),
+            None,
+        )
     }
 
     /// Captures an anchor and its provider-token input length.
@@ -2258,7 +2358,7 @@ impl CachedResponseAnchor {
     fn new_with_input_tokens_from_items<'a>(
         response_id: String,
         item_count: usize,
-        represented_prefix: impl IntoIterator<Item = &'a ContextItem>,
+        represented_prefix: impl IntoIterator<Item = BorrowedContextItem<'a>>,
         prompt_input_tokens: Option<u64>,
     ) -> Option<Self> {
         Some(Self {
@@ -2282,20 +2382,28 @@ impl CachedResponseAnchor {
         Self::new_with_input_tokens_from_items(
             response_id,
             represented_prefix.len().checked_add(1)?,
-            represented_prefix.iter().chain(std::iter::once(suffix)),
+            represented_prefix
+                .iter()
+                .map(BorrowedContextItem::Context)
+                .chain(std::iter::once(BorrowedContextItem::Context(suffix))),
             prompt_input_tokens,
         )
     }
 
     /// Reconstructs the latest transcript-derived anchor for VCR matching.
     fn latest_from_context(context: &tau_proto::PromptContext) -> Option<Self> {
-        let context_items = context.flatten();
-        let mut prefix_len = context_items.len();
+        let item_count = borrowed_context_items(context).count();
+        let mut prefix_len = item_count;
         for block in context.blocks.iter().rev() {
             match block {
                 tau_proto::ContextBlock::AssistantResponse(response) => {
                     if let Some(response_id) = response.provider_response_id.clone() {
-                        return Self::new(response_id, &context_items[..prefix_len]);
+                        return Self::new_with_input_tokens_from_items(
+                            response_id,
+                            prefix_len,
+                            borrowed_context_items(context).take(prefix_len),
+                            None,
+                        );
                     }
                     prefix_len = prefix_len.saturating_sub(response.output_items.len());
                 }
@@ -2312,19 +2420,17 @@ impl CachedResponseAnchor {
 
     /// Checks an exact ordered prefix using type-preserving CBOR item encoding.
     fn matches(&self, represented_prefix: &[ContextItem]) -> bool {
-        Self::fingerprint(represented_prefix)
-            .is_some_and(|fingerprint| fingerprint == self.represented_prefix_fingerprint)
-    }
-
-    /// Digests item count followed by each CBOR item's byte length and bytes.
-    fn fingerprint(items: &[ContextItem]) -> Option<blake3::Hash> {
-        Self::fingerprint_items(items.len(), items)
+        Self::fingerprint_items(
+            represented_prefix.len(),
+            represented_prefix.iter().map(BorrowedContextItem::Context),
+        )
+        .is_some_and(|fingerprint| fingerprint == self.represented_prefix_fingerprint)
     }
 
     /// Digests a known number of borrowed items without collecting them.
     fn fingerprint_items<'a>(
         item_count: usize,
-        items: impl IntoIterator<Item = &'a ContextItem>,
+        items: impl IntoIterator<Item = BorrowedContextItem<'a>>,
     ) -> Option<blake3::Hash> {
         let mut hasher = blake3::Hasher::new();
         hasher.update(Self::FINGERPRINT_DOMAIN);
@@ -2336,11 +2442,38 @@ impl CachedResponseAnchor {
                     observer(item);
                 }
             });
-            let encoded = tau_proto::encode_message_to_vec(item).ok()?;
-            hasher.update(&u64::try_from(encoded.len()).ok()?.to_le_bytes());
-            hasher.update(&encoded);
+            let mut encoded_len = 0_u64;
+            tau_proto::encode_message(
+                ByteCountWriter {
+                    encoded_len: &mut encoded_len,
+                },
+                &item,
+            )
+            .ok()?;
+            hasher.update(&encoded_len.to_le_bytes());
+            tau_proto::encode_message(&mut hasher, &item).ok()?;
         }
         Some(hasher.finalize())
+    }
+}
+
+/// Allocation-free writer that counts encoded canonical bytes.
+struct ByteCountWriter<'a> {
+    /// Accumulated encoded byte length.
+    encoded_len: &'a mut u64,
+}
+
+impl path_std_io::Write for ByteCountWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> path_std_io::Result<usize> {
+        *self.encoded_len = self
+            .encoded_len
+            .checked_add(u64::try_from(bytes.len()).map_err(path_std_io::Error::other)?)
+            .ok_or_else(|| path_std_io::Error::other("canonical item byte length overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
     }
 }
 
@@ -2359,9 +2492,9 @@ fn build_request(
     // the cached response is exactly what that response represented upstream.
     // Async input may commit before an in-flight response even though the
     // response did not observe it, so response-id identity alone is insufficient.
-    let context_items: Vec<_> = request.context.flatten_iter().collect();
+    let context_item_count = borrowed_context_items(request.context).count();
     let previous_response = cached_response_anchor.and_then(|anchor| {
-        let mut next_item_index = context_items.len();
+        let mut next_item_index = context_item_count;
         for block in request.context.blocks.iter().rev() {
             match block {
                 tau_proto::ContextBlock::AssistantResponse(response) => {
@@ -2382,7 +2515,14 @@ fn build_request(
                         {
                             return None;
                         }
-                        if !anchor.matches(&context_items[..next_item_index]) {
+                        let matches = CachedResponseAnchor::fingerprint_items(
+                            next_item_index,
+                            borrowed_context_items(request.context).take(next_item_index),
+                        )
+                        .is_some_and(|fingerprint| {
+                            fingerprint == anchor.represented_prefix_fingerprint
+                        });
+                        if !matches {
                             return None;
                         }
                         return Some((anchor.response_id.as_str(), next_item_index));
@@ -2399,20 +2539,22 @@ fn build_request(
         }
         None
     });
-    let (input_items, previous_response_id): (&[ContextItem], Option<String>) =
-        match previous_response {
-            Some((id, next_item_index)) if next_item_index <= context_items.len() => {
-                (&context_items[next_item_index..], Some(id.to_owned()))
-            }
-            _ => (context_items.as_slice(), None),
-        };
+    let (input_start, previous_response_id) = match previous_response {
+        Some((id, next_item_index)) if next_item_index <= context_item_count => {
+            (next_item_index, Some(id.to_owned()))
+        }
+        _ => (0, None),
+    };
 
     let responses_lite = config.mode.is_lite_compatibility();
     let preserve_compaction_trigger = request.compaction.is_none()
-        && matches!(input_items.last(), Some(ContextItem::CompactionTrigger));
+        && borrowed_context_items(request.context)
+            .skip(input_start)
+            .last()
+            .is_some_and(BorrowedContextItem::is_compaction_trigger);
     let mut input = build_input_items(
         config,
-        input_items,
+        borrowed_context_items(request.context).skip(input_start),
         responses_lite,
         preserve_compaction_trigger,
     );
@@ -2535,16 +2677,21 @@ fn provider_default_compaction_threshold(
     tau_proto::TokenCount::new((raw_context_window.get() * 9 / 10).max(1000))
 }
 
-fn build_input_items(
+fn build_input_items<'a>(
     config: &ResponsesConfig,
-    input_items: &[ContextItem],
+    input_items: impl Clone + Iterator<Item = BorrowedContextItem<'a>>,
     responses_lite: bool,
     preserve_compaction_trigger: bool,
 ) -> Vec<ResponsesInputItem> {
-    let input_items = if config.supports_compaction {
-        trim_before_latest_compaction(input_items)
-    } else {
+    let input_start = if config.supports_compaction {
         input_items
+            .clone()
+            .enumerate()
+            .filter_map(|(index, item)| item.is_compaction().then_some(index))
+            .last()
+            .unwrap_or(0)
+    } else {
+        0
     };
     let mut input = Vec::new();
     let mut image_budget = ImageRequestBudget {
@@ -2553,23 +2700,13 @@ fn build_input_items(
         image_bytes: 0,
         data_url_bytes: 0,
     };
-    for item in input_items {
-        if responses_lite
-            && !preserve_compaction_trigger
-            && matches!(item, ContextItem::CompactionTrigger)
-        {
+    for item in input_items.skip(input_start) {
+        if responses_lite && !preserve_compaction_trigger && item.is_compaction_trigger() {
             continue;
         }
-        convert_context_item(item, config.supports_phase, &mut image_budget, &mut input);
+        convert_borrowed_context_item(item, config.supports_phase, &mut image_budget, &mut input);
     }
     input
-}
-
-fn trim_before_latest_compaction(input_items: &[ContextItem]) -> &[ContextItem] {
-    input_items
-        .iter()
-        .rposition(|item| matches!(item, ContextItem::Compaction(_)))
-        .map_or(input_items, |index| &input_items[index..])
 }
 
 /// WebSocket wrapper around a Responses request. The OpenAI WS guide requires
@@ -2766,6 +2903,29 @@ fn convert_context_item(
     image_budget: &mut ImageRequestBudget,
     out: &mut Vec<ResponsesInputItem>,
 ) {
+    convert_borrowed_context_item(
+        BorrowedContextItem::Context(item),
+        supports_phase,
+        image_budget,
+        out,
+    );
+}
+
+/// Lowers one borrowed canonical context item without materializing its
+/// wrapper.
+fn convert_borrowed_context_item(
+    item: BorrowedContextItem<'_>,
+    supports_phase: bool,
+    image_budget: &mut ImageRequestBudget,
+    out: &mut Vec<ResponsesInputItem>,
+) {
+    let BorrowedContextItem::Context(item) = item else {
+        let BorrowedContextItem::ToolResult(result) = item else {
+            unreachable!("borrowed context item variants are exhaustive")
+        };
+        convert_tool_result_item(result, image_budget, out);
+        return;
+    };
     match item {
         ContextItem::Message(msg) if msg.role == ContextRole::User => {
             convert_user_message(msg, out);
