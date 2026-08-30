@@ -1546,6 +1546,140 @@ fn agent_id_for_event_resolves_shell_progress_from_learned_metadata() {
     );
 }
 
+/// Prompt ownership must retain protocol identifiers through live routing,
+/// duplicate replacement, late terminals, hidden-agent selection, cold replay,
+/// unknown prompt fallback, and session reset without rebuilding IDs from text.
+#[test]
+fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
+    let agent_a = agent_id("agent-a");
+    let agent_b = agent_id("agent-b");
+    let prompt_one = tau_proto::AgentPromptId::parse("prompt-one").expect("valid prompt id");
+    let prompt_two = tau_proto::AgentPromptId::parse("prompt-two").expect("valid prompt id");
+    let unknown_prompt =
+        tau_proto::AgentPromptId::parse("prompt-unknown").expect("valid prompt id");
+    let prompt_started = |agent_prompt_id: tau_proto::AgentPromptId,
+                          agent_id: tau_proto::AgentId| {
+        tau_proto::Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            agent_prompt_id,
+            agent_id,
+            session_id: tau_proto::SessionId::parse("session-one").expect("valid session id"),
+            model: "test/model".parse().expect("valid model id"),
+            model_params: Some(tau_proto::ModelParams::default()),
+            outer_turn_id: None,
+            operation: tau_proto::PromptOperation::Inference,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        })
+    };
+    let response_update = |agent_prompt_id: tau_proto::AgentPromptId,
+                           agent_id: tau_proto::AgentId| {
+        tau_proto::Event::ProviderResponseUpdated(tau_proto::ProviderResponseUpdated {
+            agent_prompt_id,
+            agent_id,
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
+            response_stats: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+    let prompt_terminated = |agent_prompt_id: tau_proto::AgentPromptId,
+                             agent_id: tau_proto::AgentId| {
+        tau_proto::Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+            agent_id,
+            agent_prompt_id,
+            reason: tau_proto::AgentPromptTerminationReason::Stale,
+            originator: tau_proto::PromptOriginator::User,
+            automatic_compaction_decision: None,
+        })
+    };
+
+    let first_start = prompt_started(prompt_one.clone(), agent_a.clone());
+    let second_start = prompt_started(prompt_two.clone(), agent_b.clone());
+    let replacement_start = prompt_started(prompt_one.clone(), agent_b.clone());
+    let late_terminal = prompt_terminated(prompt_one.clone(), agent_b.clone());
+    let stale_update = response_update(prompt_one.clone(), agent_a.clone());
+    let unknown_submission =
+        tau_proto::Event::ProviderPromptSubmitted(tau_proto::ProviderPromptSubmitted {
+            agent_prompt_id: unknown_prompt.clone(),
+            originator: tau_proto::PromptOriginator::User,
+        });
+
+    let mut live = renderer_for_agent_id_tests();
+    live.switch_agent(agent_a.to_string());
+    live.handle(&first_start);
+    live.switch_agent(agent_b.to_string());
+    live.handle(&second_start);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&tau_proto::Event::ProviderPromptSubmitted(
+            tau_proto::ProviderPromptSubmitted {
+                agent_prompt_id: prompt_one.clone(),
+                originator: tau_proto::PromptOriginator::User,
+            },
+        )),
+        Some(agent_a.to_string()),
+        "the hidden first prompt stays with agent A after selecting agent B"
+    );
+
+    live.handle(&replacement_start);
+    live.handle(&stale_update);
+    assert_eq!(
+        live.event_owners.prompt_agents.get(&prompt_one),
+        Some(&agent_b),
+        "the later typed lifecycle fact keeps the existing replacement winner"
+    );
+    assert_eq!(
+        live.agent_id_for_event_for_test(&stale_update),
+        Some(agent_b.to_string()),
+        "a no-content update cannot steal the replacement owner's transcript"
+    );
+
+    live.handle(&late_terminal);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&late_terminal),
+        Some(agent_b.to_string()),
+        "a late terminal still routes through its retained typed owner"
+    );
+    assert_eq!(
+        live.agent_id_for_event_for_test(&unknown_submission),
+        Some(agent_b.to_string()),
+        "an unknown typed prompt retains the existing user-originator fallback"
+    );
+    live.handle(&unknown_submission);
+    assert!(
+        !live
+            .event_owners
+            .prompt_agents
+            .contains_key(&unknown_prompt),
+        "unknown prompt routing must not synthesize a string or ownership record"
+    );
+
+    let mut cold_replay = renderer_for_agent_id_tests();
+    for event in [
+        first_start.clone(),
+        second_start.clone(),
+        replacement_start.clone(),
+        late_terminal.clone(),
+    ] {
+        cold_replay.handle(&event);
+    }
+    assert_eq!(
+        cold_replay.event_owners.prompt_agents, live.event_owners.prompt_agents,
+        "cold replay preserves the live typed ownership winners"
+    );
+
+    live.handle(&tau_proto::Event::SessionStarted(
+        tau_proto::SessionStarted {
+            session_id: tau_proto::SessionId::parse("session-two").expect("valid session id"),
+            reason: tau_proto::SessionStartReason::New,
+        },
+    ));
+    assert!(
+        live.event_owners.prompt_agents.is_empty(),
+        "new-session reset clears every typed prompt owner"
+    );
+}
+
 /// UI I/O status values are compact because they live in the status bar.
 /// Zero stays bare for the idle `io ↑0 ↓0` display, while nonzero byte
 /// rates carry short binary unit suffixes.

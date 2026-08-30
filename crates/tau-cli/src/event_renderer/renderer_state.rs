@@ -115,7 +115,7 @@ pub(super) struct EventOwnershipState {
     /// Side-query owners.
     pub(super) query_agents: HashMap<String, String>,
     /// Provider-prompt owners.
-    pub(super) prompt_agents: HashMap<String, String>,
+    pub(super) prompt_agents: HashMap<tau_proto::AgentPromptId, tau_proto::AgentId>,
     /// Tool-call owners.
     pub(super) tool_agents: HashMap<String, String>,
     /// User-shell owners.

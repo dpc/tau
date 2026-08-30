@@ -2479,17 +2479,17 @@ impl EventRenderer {
 
     fn mark_known_agent_prompt_active(
         &mut self,
-        agent_prompt_id: &str,
+        agent_prompt_id: &tau_proto::AgentPromptId,
         originator: &tau_proto::PromptOriginator,
     ) {
         if let Some(agent_id) = self
             .event_owners
             .prompt_agents
             .get(agent_prompt_id)
-            .cloned()
+            .map(ToString::to_string)
             .or_else(|| self.agent_id_for_originator(originator))
         {
-            self.mark_agent_prompt_active(&agent_id, agent_prompt_id);
+            self.mark_agent_prompt_active(&agent_id, agent_prompt_id.as_str());
         }
     }
 
@@ -5407,16 +5407,15 @@ impl EventRenderer {
     fn learn_deferred_routing_metadata(&mut self, event: &Event) {
         match event {
             Event::ProviderResponseUpdated(update) => {
-                self.event_owners.prompt_agents.insert(
-                    update.agent_prompt_id.to_string(),
-                    update.agent_id.to_string(),
-                );
+                self.event_owners
+                    .prompt_agents
+                    .insert(update.agent_prompt_id.clone(), update.agent_id.clone());
             }
             Event::ProviderResponseFinished(finished) => {
                 let agent_id = finished.agent_id.to_string();
                 self.event_owners
                     .prompt_agents
-                    .insert(finished.agent_prompt_id.to_string(), agent_id.clone());
+                    .insert(finished.agent_prompt_id.clone(), finished.agent_id.clone());
                 for call in tool_calls_from_output_items(&finished.output_items) {
                     self.event_owners
                         .tool_agents
@@ -5424,16 +5423,14 @@ impl EventRenderer {
                 }
             }
             Event::AgentPromptCreated(prompt) => {
-                self.event_owners.prompt_agents.insert(
-                    prompt.agent_prompt_id.to_string(),
-                    prompt.agent_id.to_string(),
-                );
+                self.event_owners
+                    .prompt_agents
+                    .insert(prompt.agent_prompt_id.clone(), prompt.agent_id.clone());
             }
             Event::AgentPromptStarted(prompt) => {
-                self.event_owners.prompt_agents.insert(
-                    prompt.agent_prompt_id.to_string(),
-                    prompt.agent_id.to_string(),
-                );
+                self.event_owners
+                    .prompt_agents
+                    .insert(prompt.agent_prompt_id.clone(), prompt.agent_id.clone());
             }
             Event::ToolStarted(started) => {
                 self.event_owners
@@ -5569,14 +5566,13 @@ impl EventRenderer {
             }
             Event::ProviderPromptSubmitted(submitted) => {
                 self.mark_known_agent_prompt_active(
-                    submitted.agent_prompt_id.as_str(),
+                    &submitted.agent_prompt_id,
                     &submitted.originator,
                 );
                 true
             }
             Event::ProviderResponseUpdated(update) => {
                 let agent_id = update.agent_id.to_string();
-                let agent_prompt_id = update.agent_prompt_id.as_str();
                 if self.is_stale_terminal_stats_only_update(update) {
                     self.clear_main_agent_turn_active_everywhere();
                     return true;
@@ -5585,12 +5581,12 @@ impl EventRenderer {
                     || !self
                         .event_owners
                         .prompt_agents
-                        .contains_key(agent_prompt_id)
+                        .contains_key(&update.agent_prompt_id)
                 {
                     self.event_owners
                         .prompt_agents
-                        .insert(agent_prompt_id.to_owned(), agent_id.clone());
-                    self.mark_agent_prompt_active(&agent_id, agent_prompt_id);
+                        .insert(update.agent_prompt_id.clone(), update.agent_id.clone());
+                    self.mark_agent_prompt_active(&agent_id, update.agent_prompt_id.as_str());
                 }
                 true
             }
@@ -5613,7 +5609,7 @@ impl EventRenderer {
         self.mark_agent_live(agent_id_string.clone());
         self.event_owners
             .prompt_agents
-            .insert(agent_prompt_id.to_string(), agent_id_string);
+            .insert(agent_prompt_id.clone(), agent_id.clone());
         self.mark_agent_prompt_active(agent_id.as_str(), agent_prompt_id.as_str());
     }
 
@@ -5638,7 +5634,7 @@ impl EventRenderer {
                 self.mark_agent_live(agent_id.clone());
                 self.event_owners
                     .prompt_agents
-                    .insert(finished.agent_prompt_id.to_string(), agent_id.clone());
+                    .insert(finished.agent_prompt_id.clone(), finished.agent_id.clone());
                 for call in requested_tools {
                     self.event_owners
                         .tool_agents
@@ -5932,24 +5928,21 @@ impl EventRenderer {
             Event::AgentPromptStarted(prompt) => {
                 EventAgentIdResolution::Agent(prompt.agent_id.to_string())
             }
-            Event::AgentPromptTerminated(terminated) => {
-                EventAgentIdResolution::from_agent_id(self.agent_id_for_prompt(
-                    terminated.agent_prompt_id.as_str(),
-                    &terminated.originator,
-                ))
-            }
+            Event::AgentPromptTerminated(terminated) => EventAgentIdResolution::from_agent_id(
+                self.agent_id_for_prompt(&terminated.agent_prompt_id, &terminated.originator),
+            ),
             Event::ProviderPromptSubmitted(submitted) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .prompt_agents
-                    .get(submitted.agent_prompt_id.as_str())
-                    .cloned()
+                    .get(&submitted.agent_prompt_id)
+                    .map(ToString::to_string)
                     .or_else(|| self.agent_id_for_originator(&submitted.originator)),
             ),
             Event::ProviderResponseUpdated(update) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .prompt_agents
-                    .get(update.agent_prompt_id.as_str())
-                    .cloned()
+                    .get(&update.agent_prompt_id)
+                    .map(ToString::to_string)
                     .or_else(|| Some(update.agent_id.to_string())),
             ),
             Event::ProviderResponseFinished(finished) => {
@@ -5961,13 +5954,13 @@ impl EventRenderer {
 
     fn agent_id_for_prompt(
         &self,
-        agent_prompt_id: &str,
+        agent_prompt_id: &tau_proto::AgentPromptId,
         originator: &tau_proto::PromptOriginator,
     ) -> Option<String> {
         self.event_owners
             .prompt_agents
             .get(agent_prompt_id)
-            .cloned()
+            .map(ToString::to_string)
             .or_else(|| self.agent_id_for_originator(originator))
     }
 
@@ -7491,8 +7484,8 @@ impl EventRenderer {
         let spid = update.agent_prompt_id.as_str();
         self.event_owners
             .prompt_agents
-            .entry(spid.to_owned())
-            .or_insert_with(|| update.agent_id.to_string());
+            .entry(update.agent_prompt_id.clone())
+            .or_insert_with(|| update.agent_id.clone());
         if self
             .transcript
             .runtime
@@ -7509,8 +7502,8 @@ impl EventRenderer {
             && self
                 .event_owners
                 .prompt_agents
-                .get(spid)
-                .is_some_and(|agent_id| agent_id != update.agent_id.as_str())
+                .get(&update.agent_prompt_id)
+                .is_some_and(|agent_id| agent_id != &update.agent_id)
         {
             return;
         }
