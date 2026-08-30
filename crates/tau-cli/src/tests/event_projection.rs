@@ -538,7 +538,7 @@ fn message_facts_route_to_owned_ui_snapshots_end_to_end() {
         .agent_navigation()
         .lock()
         .expect("agent navigation lock")
-        .mark_live("loaded-agent");
+        .mark_live(agent_id("loaded-agent"));
     renderer.switch_agent("selected-agent".to_owned());
     renderer.handle(&message_fact(
         "loaded-agent",
@@ -642,7 +642,7 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
             .agent_navigation()
             .lock()
             .expect("agent navigation")
-            .mode("worker-1"),
+            .mode(&agent_id("worker-1")),
         AgentNavigationState::ActiveAuto,
     );
     apply_test_navigation_mode(&mut renderer, tau_proto::AgentNavigationMode::Active);
@@ -652,7 +652,7 @@ fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
             .agent_navigation()
             .lock()
             .expect("agent navigation")
-            .mode("worker-1"),
+            .mode(&agent_id("worker-1")),
         AgentNavigationState::Active,
     );
 }

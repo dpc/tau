@@ -9,16 +9,18 @@ fn routing_state(
 ) -> InputRoutingState {
     let mut navigation = AgentNavigation::default();
     for agent_id in live.lock().expect("live agents lock").iter() {
+        let agent_id = tau_proto::AgentId::parse(agent_id).expect("valid agent id");
         navigation.mark_live(agent_id.clone());
         navigation.apply_stats(
-            agent_id,
+            &agent_id,
             tau_proto::AgentNavigationMode::Active,
             tau_proto::AgentRuntimeState::Idle,
         );
     }
     for agent_id in suspended.lock().expect("suspended agents lock").iter() {
+        let agent_id = tau_proto::AgentId::parse(agent_id).expect("valid agent id");
         navigation.apply_stats(
-            agent_id,
+            &agent_id,
             tau_proto::AgentNavigationMode::Suspended,
             tau_proto::AgentRuntimeState::Idle,
         );
@@ -177,9 +179,10 @@ fn agent_mention_completer_offers_only_active_agents() {
 #[test]
 fn active_auto_completion_follows_runtime_state() {
     let mut navigation = AgentNavigation::default();
-    navigation.mark_live("helper");
+    let helper_id = tau_proto::AgentId::parse("helper").expect("valid agent id");
+    navigation.mark_live(helper_id.clone());
     navigation.apply_stats(
-        "helper",
+        &helper_id,
         tau_proto::AgentNavigationMode::ActiveAuto,
         tau_proto::AgentRuntimeState::Idle,
     );
@@ -197,7 +200,7 @@ fn active_auto_completion_follows_runtime_state() {
     assert_eq!(agents(&["resume", ""])[0].value, "helper");
 
     navigation.lock().expect("agent navigation").apply_stats(
-        "helper",
+        &helper_id,
         tau_proto::AgentNavigationMode::ActiveAuto,
         tau_proto::AgentRuntimeState::Running,
     );
@@ -207,7 +210,7 @@ fn active_auto_completion_follows_runtime_state() {
     assert!(agents(&["resume", ""]).is_empty());
 
     navigation.lock().expect("agent navigation").apply_stats(
-        "helper",
+        &helper_id,
         tau_proto::AgentNavigationMode::ActiveAuto,
         tau_proto::AgentRuntimeState::Idle,
     );

@@ -40,7 +40,7 @@ fn role_cycling_only_enabled_without_selected_agent() {
 #[test]
 fn agent_switching_cycles_active_agents_and_skips_suspended() {
     let known_agents = vec!["alpha".to_owned(), "bravo".to_owned(), "charlie".to_owned()];
-    let active_agents = HashSet::from(["alpha".to_owned(), "charlie".to_owned()]);
+    let active_agents = HashSet::from([agent_id("alpha"), agent_id("charlie")]);
 
     assert_eq!(
         next_agent_cycle_selection(Some("alpha"), &known_agents, &active_agents, 1).as_deref(),
@@ -61,7 +61,7 @@ fn agent_switching_cycles_active_agents_and_skips_suspended() {
 #[test]
 fn agent_switching_without_selection_starts_at_edge_for_direction() {
     let known_agents = vec!["alpha".to_owned(), "bravo".to_owned()];
-    let active_agents = HashSet::from(["alpha".to_owned(), "bravo".to_owned()]);
+    let active_agents = HashSet::from([agent_id("alpha"), agent_id("bravo")]);
 
     assert_eq!(
         next_agent_cycle_selection(None, &known_agents, &active_agents, 1).as_deref(),
@@ -77,7 +77,7 @@ fn agent_switching_without_selection_starts_at_edge_for_direction() {
 #[test]
 fn agent_switching_without_active_agents_stays_on_overview() {
     let known_agents = vec!["suspended".to_owned()];
-    let active_agents = HashSet::new();
+    let active_agents = HashSet::<tau_proto::AgentId>::new();
 
     assert_eq!(
         next_agent_cycle_selection(None, &known_agents, &active_agents, 1),
@@ -1032,7 +1032,7 @@ fn navigation_mode_results_do_not_mutate_cache() {
                 .agent_navigation()
                 .lock()
                 .expect("navigation")
-                .mode("worker-1"),
+                .mode(&agent_id("worker-1")),
             tau_proto::AgentNavigationMode::Suspended
         );
     }
@@ -1042,7 +1042,7 @@ fn navigation_mode_results_do_not_mutate_cache() {
             .agent_navigation()
             .lock()
             .expect("navigation")
-            .mode("worker-1"),
+            .mode(&agent_id("worker-1")),
         tau_proto::AgentNavigationMode::Active
     );
 }
@@ -1138,7 +1138,7 @@ fn delayed_navigation_refresh_cannot_resurrect_unloaded_agent() {
             .agent_navigation()
             .lock()
             .expect("agent navigation")
-            .is_live("worker-1")
+            .is_live(&agent_id("worker-1"))
     );
 
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
@@ -1147,8 +1147,11 @@ fn delayed_navigation_refresh_cannot_resurrect_unloaded_agent() {
     }));
     let navigation = renderer.agent_navigation();
     let navigation = navigation.lock().expect("agent navigation");
-    assert_eq!(navigation.mode("worker-1"), AgentNavigationState::Active);
-    assert!(!navigation.is_active("worker-1"));
+    assert_eq!(
+        navigation.mode(&agent_id("worker-1")),
+        AgentNavigationState::Active
+    );
+    assert!(!navigation.is_active(&agent_id("worker-1")));
 }
 
 #[test]

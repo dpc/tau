@@ -11,16 +11,17 @@ fn effective_activity_truth_table_requires_stats() {
         AgentNavigationState::Suspended,
     ] {
         let mut navigation = AgentNavigation::default();
-        navigation.mark_live("worker");
-        assert!(!navigation.is_active("worker"));
-        navigation.apply_stats("worker", mode, tau_proto::AgentRuntimeState::Idle);
+        let agent_id = tau_proto::AgentId::parse("worker").expect("valid agent id");
+        navigation.mark_live(agent_id.clone());
+        assert!(!navigation.is_active(&agent_id));
+        navigation.apply_stats(&agent_id, mode, tau_proto::AgentRuntimeState::Idle);
         assert_eq!(
-            navigation.is_active("worker"),
+            navigation.is_active(&agent_id),
             mode == AgentNavigationState::Active
         );
-        navigation.apply_stats("worker", mode, tau_proto::AgentRuntimeState::Running);
+        navigation.apply_stats(&agent_id, mode, tau_proto::AgentRuntimeState::Running);
         assert_eq!(
-            navigation.is_active("worker"),
+            navigation.is_active(&agent_id),
             mode != AgentNavigationState::Suspended
         );
     }
@@ -31,23 +32,24 @@ fn effective_activity_truth_table_requires_stats() {
 #[test]
 fn unload_removes_all_navigation_facts() {
     let mut navigation = AgentNavigation::default();
-    navigation.mark_live("worker");
+    let agent_id = tau_proto::AgentId::parse("worker").expect("valid agent id");
+    navigation.mark_live(agent_id.clone());
     navigation.apply_stats(
-        "worker",
+        &agent_id,
         AgentNavigationState::Suspended,
         tau_proto::AgentRuntimeState::Running,
     );
-    navigation.unload("worker");
-    assert!(!navigation.is_live("worker"));
-    assert!(!navigation.is_active("worker"));
+    navigation.unload(&agent_id);
+    assert!(!navigation.is_live(&agent_id));
+    assert!(!navigation.is_active(&agent_id));
 
-    navigation.mark_live("worker");
-    assert!(!navigation.is_active("worker"));
+    navigation.mark_live(agent_id.clone());
+    assert!(!navigation.is_active(&agent_id));
     navigation.apply_stats(
-        "worker",
+        &agent_id,
         AgentNavigationState::ActiveAuto,
         tau_proto::AgentRuntimeState::Idle,
     );
-    assert_eq!(navigation.mode("worker"), AgentNavigationState::ActiveAuto);
-    assert!(!navigation.is_active("worker"));
+    assert_eq!(navigation.mode(&agent_id), AgentNavigationState::ActiveAuto);
+    assert!(!navigation.is_active(&agent_id));
 }

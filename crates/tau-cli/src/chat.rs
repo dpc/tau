@@ -2296,14 +2296,14 @@ impl InputRoutingState {
             .unwrap_or_default()
     }
 
-    fn active_agents(&self) -> std::collections::HashSet<String> {
+    fn active_agents(&self) -> std::collections::HashSet<tau_proto::AgentId> {
         self.agent_navigation
             .lock()
             .map(|navigation| navigation.active_agents())
             .unwrap_or_default()
     }
 
-    fn live_agents(&self) -> std::collections::HashSet<String> {
+    fn live_agents(&self) -> std::collections::HashSet<tau_proto::AgentId> {
         self.agent_navigation
             .lock()
             .map(|navigation| navigation.live_agents())
@@ -2327,7 +2327,7 @@ impl InputRoutingState {
     fn agent_is_active(&self, agent_id: &str) -> bool {
         self.agent_navigation
             .lock()
-            .map(|navigation| navigation.is_active(agent_id))
+            .map(|navigation| navigation.active_agents().contains(agent_id))
             .unwrap_or(false)
     }
 
@@ -4164,12 +4164,12 @@ pub(crate) fn role_cycling_enabled(current_agent_state: &Arc<Mutex<Option<String
 pub(crate) fn next_agent_cycle_selection(
     current: Option<&str>,
     known_agents: &[String],
-    active_agent_ids: &std::collections::HashSet<String>,
+    active_agent_ids: &std::collections::HashSet<tau_proto::AgentId>,
     delta: isize,
 ) -> Option<String> {
     let active_agents = known_agents
         .iter()
-        .filter(|agent| active_agent_ids.contains(*agent))
+        .filter(|agent| active_agent_ids.contains(agent.as_str()))
         .collect::<Vec<_>>();
     let cycle_len = active_agents.len() as isize + 1;
     let current_index = current
@@ -4376,7 +4376,7 @@ fn build_agent_mention_completer(routing: InputRoutingState) -> tau_cli_term::Ar
         let needle = args[0].to_lowercase();
         known
             .into_iter()
-            .filter(|agent| active.contains(agent))
+            .filter(|agent| active.contains(agent.as_str()))
             .filter(|agent| completion_matches(agent, &needle))
             .map(|agent| CompletionItem::new(agent, "agent"))
             .collect()
@@ -4391,29 +4391,31 @@ fn completion_matches(candidate: &str, needle: &str) -> bool {
 fn agent_completion_candidates(
     subcommand: &str,
     known_agents: Vec<String>,
-    live_agents: std::collections::HashSet<String>,
-    active_agents: std::collections::HashSet<String>,
+    live_agents: std::collections::HashSet<tau_proto::AgentId>,
+    active_agents: std::collections::HashSet<tau_proto::AgentId>,
 ) -> Vec<String> {
     match subcommand {
         "switch" => {
             let mut agents: Vec<String> = known_agents
                 .into_iter()
-                .filter(|agent| active_agents.contains(agent))
+                .filter(|agent| active_agents.contains(agent.as_str()))
                 .collect();
             agents.insert(0, "none".to_owned());
             agents
         }
         "suspend" => known_agents
             .into_iter()
-            .filter(|agent| active_agents.contains(agent))
+            .filter(|agent| active_agents.contains(agent.as_str()))
             .collect(),
         "resume" => known_agents
             .into_iter()
-            .filter(|agent| live_agents.contains(agent) && !active_agents.contains(agent))
+            .filter(|agent| {
+                live_agents.contains(agent.as_str()) && !active_agents.contains(agent.as_str())
+            })
             .collect(),
         "auto" => known_agents
             .into_iter()
-            .filter(|agent| live_agents.contains(agent))
+            .filter(|agent| live_agents.contains(agent.as_str()))
             .collect(),
         "name" => known_agents,
         _ => Vec::new(),

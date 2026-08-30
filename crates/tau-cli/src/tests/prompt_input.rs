@@ -520,7 +520,7 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
             .agent_navigation()
             .lock()
             .expect("agent navigation")
-            .is_live("engineer_abc12345")
+            .is_live(&agent_id("engineer_abc12345"))
     );
     assert!(vt.screen_contains(80, "hello"));
 }

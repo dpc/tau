@@ -1892,7 +1892,7 @@ fn compact_message_fact_wraps_at_narrow_width_with_code_styled_publisher() {
         .agent_navigation()
         .lock()
         .expect("agent navigation lock")
-        .mark_live("selected-agent");
+        .mark_live(agent_id("selected-agent"));
     renderer.switch_agent("selected-agent".to_owned());
     renderer.handle(&Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::parse("fedi-slack")
@@ -3338,10 +3338,10 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
     let navigation = renderer.agent_navigation();
     let navigation = navigation.lock().expect("agent navigation");
     assert_eq!(
-        navigation.mode("worker-1"),
+        navigation.mode(&agent_id("worker-1")),
         AgentNavigationState::ActiveAuto
     );
-    assert!(navigation.is_active("worker-1"));
+    assert!(navigation.is_active(&agent_id("worker-1")));
     drop(navigation);
 
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
@@ -3358,8 +3358,11 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
     }));
     let navigation = renderer.agent_navigation();
     let navigation = navigation.lock().expect("agent navigation");
-    assert_eq!(navigation.mode("worker-1"), AgentNavigationState::Active);
-    assert!(navigation.is_active("worker-1"));
+    assert_eq!(
+        navigation.mode(&agent_id("worker-1")),
+        AgentNavigationState::Active
+    );
+    assert!(navigation.is_active(&agent_id("worker-1")));
 }
 
 #[test]

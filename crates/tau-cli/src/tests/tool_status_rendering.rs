@@ -405,7 +405,7 @@ fn delegated_agent_effectiveness_follows_stats_not_start_result() {
         navigation
             .lock()
             .expect("agent navigation")
-            .is_active("worker-1")
+            .is_active(&agent_id("worker-1"))
     );
 }
 

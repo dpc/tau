@@ -2251,7 +2251,7 @@ impl EventRenderer {
         }
         if let Ok(mut navigation) = self.discovery.agent_navigation.lock() {
             navigation.apply_stats(
-                updated.agent_id.as_str(),
+                &updated.agent_id,
                 updated.navigation_mode,
                 updated.runtime_state,
             );
@@ -2615,7 +2615,12 @@ impl EventRenderer {
                         .lock()
                         .ok()
                         .map(|navigation| {
-                            (navigation.mode(agent_id), navigation.is_active(agent_id))
+                            navigation.live_agents().get(agent_id).map_or(
+                                (tau_proto::AgentNavigationMode::default(), false),
+                                |agent_id| {
+                                    (navigation.mode(agent_id), navigation.is_active(agent_id))
+                                },
+                            )
                         })
                 });
         self.resources
@@ -2789,8 +2794,8 @@ impl EventRenderer {
         }
     }
 
-    fn mark_agent_live(&mut self, agent_id: String) {
-        self.remember_agent(agent_id.clone());
+    fn mark_agent_live(&mut self, agent_id: tau_proto::AgentId) {
+        self.remember_agent(agent_id.to_string());
         if let Ok(mut navigation) = self.discovery.agent_navigation.lock() {
             navigation.mark_live(agent_id);
         }
@@ -4345,11 +4350,10 @@ impl EventRenderer {
                 .agent_activity
                 .mark_optimistic_submission(),
             Event::AgentCompactionTriggered(triggered) => {
-                let agent_id = triggered.agent_id.to_string();
                 if triggered.originator.is_user() {
-                    self.mark_agent_live(agent_id);
+                    self.mark_agent_live(triggered.agent_id.clone());
                 } else {
-                    self.remember_agent(agent_id);
+                    self.remember_agent(triggered.agent_id.to_string());
                 }
             }
             Event::AgentPromptCreated(prompt) => {
@@ -5468,7 +5472,7 @@ impl EventRenderer {
             }
             Event::AgentStarted(started) => {
                 let agent_id = started.agent_id.to_string();
-                self.mark_agent_live(agent_id.clone());
+                self.mark_agent_live(started.agent_id.clone());
                 if started.ephemeral {
                     self.remember_agent_ephemeral(&agent_id);
                 }
@@ -5498,7 +5502,7 @@ impl EventRenderer {
             }
             Event::SessionAgentUnloaded(unloaded) => {
                 if let Ok(mut navigation) = self.discovery.agent_navigation.lock() {
-                    navigation.unload(unloaded.agent_id.as_str());
+                    navigation.unload(&unloaded.agent_id);
                 }
                 self.remove_agent_watch_endpoint(unloaded.agent_id.as_str());
                 self.watches.agent_models.remove(unloaded.agent_id.as_str());
@@ -5528,7 +5532,7 @@ impl EventRenderer {
                 true
             }
             Event::AgentPromptQueued(queued) => {
-                self.mark_agent_live(queued.agent_id.to_string());
+                self.mark_agent_live(queued.agent_id.clone());
                 true
             }
             Event::AgentPromptSubmitted(prompt) => {
@@ -5538,18 +5542,17 @@ impl EventRenderer {
                     self.event_owners
                         .query_agents
                         .insert(query_id.clone(), agent_id.clone());
-                    self.mark_agent_live(agent_id);
+                    self.mark_agent_live(prompt.agent_id.clone());
                 } else {
-                    self.mark_agent_live(agent_id);
+                    self.mark_agent_live(prompt.agent_id.clone());
                 }
                 true
             }
             Event::AgentCompactionTriggered(triggered) => {
-                let agent_id = triggered.agent_id.to_string();
                 if triggered.originator.is_user() {
-                    self.mark_agent_live(agent_id);
+                    self.mark_agent_live(triggered.agent_id.clone());
                 } else {
-                    self.remember_agent(agent_id);
+                    self.remember_agent(triggered.agent_id.to_string());
                 }
                 true
             }
@@ -5570,8 +5573,7 @@ impl EventRenderer {
                 true
             }
             Event::AgentPromptTerminated(terminated) => {
-                let agent_id = terminated.agent_id.to_string();
-                self.mark_agent_live(agent_id);
+                self.mark_agent_live(terminated.agent_id.clone());
                 self.mark_agent_prompt_inactive(
                     terminated.agent_id.as_str(),
                     &terminated.agent_prompt_id,
@@ -5624,7 +5626,7 @@ impl EventRenderer {
         self.watches
             .agent_models
             .insert(agent_id_string.clone(), model.clone());
-        self.mark_agent_live(agent_id_string.clone());
+        self.mark_agent_live(agent_id.clone());
         self.event_owners
             .prompt_agents
             .insert(agent_prompt_id.clone(), agent_id.clone());
@@ -5634,7 +5636,6 @@ impl EventRenderer {
     fn learn_provider_tool_metadata(&mut self, event: &Event) -> bool {
         match event {
             Event::ProviderResponseFinished(finished) => {
-                let agent_id = finished.agent_id.to_string();
                 self.transcript
                     .status
                     .agent_activity
@@ -5649,7 +5650,7 @@ impl EventRenderer {
                     &finished.agent_prompt_id,
                 );
                 let requested_tools = tool_calls_from_output_items(&finished.output_items);
-                self.mark_agent_live(agent_id.clone());
+                self.mark_agent_live(finished.agent_id.clone());
                 self.event_owners
                     .prompt_agents
                     .insert(finished.agent_prompt_id.clone(), finished.agent_id.clone());
@@ -5716,7 +5717,7 @@ impl EventRenderer {
             }
             Event::AgentMessageReceived(message) => {
                 self.remember_agent(message.sender_id.to_string());
-                self.mark_agent_live(message.recipient_id.to_string());
+                self.mark_agent_live(message.recipient_id.clone());
                 if let Some(status) = &message.watch_work_status {
                     self.handle_watched_agent_work_status(message, status);
                 }
@@ -5744,7 +5745,7 @@ impl EventRenderer {
                     .agent_navigation
                     .lock()
                     .expect("agent navigation lock")
-                    .is_live(agent_id.as_str()) =>
+                    .is_live(&agent_id) =>
             {
                 Some(UiSnapshotOwner::Agent(agent_id.to_string()))
             }
