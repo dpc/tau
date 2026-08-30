@@ -21,6 +21,17 @@ use tau_proto::{ConnectionId, Event, UnixMicros};
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 
+/// Sensitivity selected by the owning publication path for diagnostic
+/// projection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum DebugEventSensitivity {
+    /// Preserve the ordinary diagnostic event payload.
+    #[default]
+    Ordinary,
+    /// Remove harness-owned bootstrap prompt text from diagnostic output.
+    BootstrapPrompt,
+}
+
 mod writer;
 #[cfg(not(test))]
 use writer::enqueue;
@@ -70,9 +81,19 @@ impl DebugEventLog {
 
     /// Logs one eligible raw harness event without changing event semantics on
     /// failure.
+    #[cfg(test)]
     pub(crate) fn log_harness_event(
         &mut self,
         harness_event: &HarnessEvent,
+    ) -> Result<(), DebugLogError> {
+        self.log_harness_event_with_sensitivity(harness_event, DebugEventSensitivity::Ordinary)
+    }
+
+    /// Logs one raw harness event with exact publication-owned sensitivity.
+    pub(crate) fn log_harness_event_with_sensitivity(
+        &mut self,
+        harness_event: &HarnessEvent,
+        sensitivity: DebugEventSensitivity,
     ) -> Result<(), DebugLogError> {
         // Stamped on every line — including incoming-frame and
         // lifecycle entries that aren't event-log emissions — so an
@@ -97,6 +118,7 @@ impl DebugEventLog {
                     _ => "<message>".to_owned(),
                 };
                 let mut frame_json = debug_harness_input_json(message.as_ref());
+                redact_sensitive_prompt(&mut frame_json, sensitivity);
                 compact_debug_json_strings(&mut frame_json);
                 serde_json::json!({
                     "type": "from_connection",
@@ -153,7 +175,24 @@ impl DebugEventLog {
         event: &Event,
         recorded_at: UnixMicros,
     ) -> Result<(), DebugLogError> {
+        self.log_published_event_with_sensitivity(
+            source,
+            event,
+            recorded_at,
+            DebugEventSensitivity::Ordinary,
+        )
+    }
+
+    /// Observes one event with harness-owned diagnostic sensitivity context.
+    pub(crate) fn log_published_event_with_sensitivity(
+        &mut self,
+        source: Option<&ConnectionId>,
+        event: &Event,
+        recorded_at: UnixMicros,
+        sensitivity: DebugEventSensitivity,
+    ) -> Result<(), DebugLogError> {
         let mut event_json = debug_event_json(event);
+        redact_sensitive_prompt(&mut event_json, sensitivity);
         redact_debug_event(&mut event_json);
         compact_debug_json_strings(&mut event_json);
         let entry = serde_json::json!({
@@ -266,6 +305,28 @@ impl DebugEventLog {
             fail_truncate: true,
             ..AppendFault::default()
         });
+    }
+}
+
+/// Clears only prompt text selected by harness-owned bootstrap admission.
+fn redact_sensitive_prompt(value: &mut serde_json::Value, sensitivity: DebugEventSensitivity) {
+    if sensitivity != DebugEventSensitivity::BootstrapPrompt {
+        return;
+    }
+    if let Some(text) = value
+        .get_mut("payload")
+        .and_then(|payload| payload.get_mut("text"))
+    {
+        *text = serde_json::Value::String("<bootstrap-prompt-redacted>".to_owned());
+    }
+    if let Some(text) = value
+        .get_mut("payload")
+        .and_then(|payload| payload.get_mut("action"))
+        .and_then(|action| action.get_mut("value"))
+        .and_then(|event| event.get_mut("payload"))
+        .and_then(|payload| payload.get_mut("text"))
+    {
+        *text = serde_json::Value::String("<bootstrap-prompt-redacted>".to_owned());
     }
 }
 

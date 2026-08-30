@@ -423,7 +423,8 @@ impl Harness {
                 RuntimeEventWait::DeadlineElapsed => continue,
                 RuntimeEventWait::Disconnected => break,
             };
-            if matches!(harness_evt, HarnessEvent::Command(HarnessCommand::Shutdown)) {
+            if let HarnessEvent::Command(HarnessCommand::Shutdown(cause)) = harness_evt {
+                self.ui_runtime.shutdown_cause = Some(cause);
                 break;
             }
             self.log_event(&harness_evt);

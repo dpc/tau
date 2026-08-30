@@ -30,6 +30,7 @@ use tau_proto::{
 
 use super::gated_final::GatedFinalDisposition;
 use super::prompt_materialization_timing::PromptMaterializationTiming;
+use crate::debug_log::DebugEventSensitivity;
 use crate::harness::compaction_runtime_state::ManualCompactionRequestKey;
 use crate::harness::prompt_acceptance_timing::PromptAcceptanceTiming;
 use crate::harness::standalone_execution_accounting_state::StandaloneAccountingPublicationKey;
@@ -192,6 +193,36 @@ impl PendingIntercept {
             .as_ref()
             .is_some_and(|extension| extension.shell_report_targets_ephemeral)
     }
+
+    /// Select bootstrap sensitivity only for this interceptor's exact matching
+    /// prompt replacement reply.
+    pub(crate) fn reply_debug_sensitivity(
+        &self,
+        connection_id: &tau_proto::ConnectionId,
+        message: &tau_proto::HarnessInputMessage,
+    ) -> DebugEventSensitivity {
+        if self.source.peer_context.debug_sensitivity != DebugEventSensitivity::BootstrapPrompt
+            || &self.conn_id != connection_id
+        {
+            return DebugEventSensitivity::Ordinary;
+        }
+        let tau_proto::HarnessInputMessage::InterceptReply(reply) = message else {
+            return DebugEventSensitivity::Ordinary;
+        };
+        let tau_proto::InterceptAction::Pass(Some(event)) = &reply.action else {
+            return DebugEventSensitivity::Ordinary;
+        };
+        if event.name() == self.event.name()
+            && matches!(
+                event.as_ref(),
+                Event::AgentPromptQueued(_) | Event::AgentPromptSubmitted(_)
+            )
+        {
+            DebugEventSensitivity::BootstrapPrompt
+        } else {
+            DebugEventSensitivity::Ordinary
+        }
+    }
 }
 
 /// Immutable authenticated configured-extension publication identity.
@@ -251,6 +282,8 @@ pub(crate) enum ActivationDeclarationFamily {
 pub(crate) struct PeerPublicationContext {
     /// Configured extension identity, when this publish came from one.
     pub(crate) extension: Option<AuthenticatedExtensionPublication>,
+    /// Exact diagnostic sensitivity selected at original publication admission.
+    pub(crate) debug_sensitivity: DebugEventSensitivity,
 }
 
 /// Inputs that survive setup until the generic publish dispatcher takes
@@ -266,6 +299,8 @@ struct EnqueuePublishOptions {
     admission: Option<ExtensionFrameAdmission>,
     /// Process-local aggregate timing for one eligible UI prompt.
     prompt_acceptance: Option<PromptAcceptanceTiming>,
+    /// Exact diagnostic sensitivity retained through deferral and interception.
+    debug_sensitivity: DebugEventSensitivity,
 }
 
 /// Source envelope retained through generic interception and commit.
@@ -1601,6 +1636,14 @@ impl Harness {
         semantic_parent: tau_core::AgentEventParent,
         source: Option<&tau_proto::ConnectionId>,
     ) {
+        let debug_sensitivity = match &completion {
+            AgentPublishCompletion::InitialPromptSubmission { correlation }
+                if correlation.bootstrap_prompt =>
+            {
+                DebugEventSensitivity::BootstrapPrompt
+            }
+            _ => DebugEventSensitivity::Ordinary,
+        };
         let notify_watchers = match &completion {
             AgentPublishCompletion::StandaloneContinuation { retry_prompts, .. } => retry_prompts
                 .first()
@@ -1629,7 +1672,10 @@ impl Harness {
         });
         self.commit_event(
             source,
-            &PeerPublicationContext::default(),
+            &PeerPublicationContext {
+                debug_sensitivity,
+                ..PeerPublicationContext::default()
+            },
             event.clone(),
             event.defaults_to_persist(),
             Some(ConversationHeadSync {
@@ -2250,6 +2296,31 @@ impl Harness {
                 sync_head_for,
                 admission: None,
                 prompt_acceptance: None,
+                debug_sensitivity: DebugEventSensitivity::Ordinary,
+            },
+        );
+    }
+
+    /// Enqueue one event with exact harness-owned diagnostic sensitivity.
+    pub(super) fn enqueue_publish_with_debug_sensitivity(
+        &mut self,
+        source: Option<&tau_proto::ConnectionId>,
+        event: Event,
+        persist: bool,
+        must_pass: bool,
+        sync_head_for: Option<ConversationHeadSync>,
+        debug_sensitivity: DebugEventSensitivity,
+    ) {
+        self.enqueue_publish_inner(
+            source,
+            event,
+            EnqueuePublishOptions {
+                persist,
+                must_pass,
+                sync_head_for,
+                admission: None,
+                prompt_acceptance: None,
+                debug_sensitivity,
             },
         );
     }
@@ -2264,6 +2335,21 @@ impl Harness {
         sync_head_for: Option<ConversationHeadSync>,
         prompt_acceptance: PromptAcceptanceTiming,
     ) {
+        let debug_sensitivity = sync_head_for
+            .as_ref()
+            .and_then(|sync| match sync.continuation.as_ref() {
+                Some(PostCommitContinuation::AgentPublish(completion))
+                    if matches!(
+                        completion.as_ref(),
+                        AgentPublishCompletion::InitialPromptSubmission { correlation }
+                            if correlation.bootstrap_prompt
+                    ) =>
+                {
+                    Some(DebugEventSensitivity::BootstrapPrompt)
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
         self.enqueue_publish_inner(
             source,
             event,
@@ -2273,6 +2359,7 @@ impl Harness {
                 sync_head_for,
                 admission: None,
                 prompt_acceptance: Some(prompt_acceptance),
+                debug_sensitivity,
             },
         );
     }
@@ -2296,6 +2383,7 @@ impl Harness {
                 sync_head_for,
                 admission: Some(admission),
                 prompt_acceptance: None,
+                debug_sensitivity: DebugEventSensitivity::Ordinary,
             },
         );
     }
@@ -2312,6 +2400,7 @@ impl Harness {
             sync_head_for,
             admission,
             prompt_acceptance,
+            debug_sensitivity,
         } = options;
         let shell_report_targets_ephemeral = match &event {
             Event::ShellCommandProgressReported(progress) => Some(&progress.command_id),
@@ -2365,6 +2454,7 @@ impl Harness {
                 shell_report_targets_ephemeral,
                 activation_reservation,
             }),
+            debug_sensitivity,
         };
         let mut source = PublicationSource {
             connection_id: source.cloned(),

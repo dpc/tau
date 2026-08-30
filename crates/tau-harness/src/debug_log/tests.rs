@@ -18,6 +18,37 @@ fn read_lines(path: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Bootstrap sensitivity removes exact queued prompt bytes while the ordinary
+/// projection retains them for diagnostics.
+#[test]
+fn bootstrap_prompt_sensitivity_is_narrow_and_content_free() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut log = DebugEventLog::open(td.path()).expect("open debug log");
+    let secret = "bootstrap-secret-7f3cb88b";
+    let event = Event::AgentPromptQueued(tau_proto::AgentPromptQueued {
+        agent_id: tau_proto::AgentId::parse("bootstrap-agent").expect("agent id"),
+        text: secret.to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+    });
+
+    log.log_published_event(None, &event, UnixMicros::now())
+        .expect("write ordinary projection");
+    log.log_published_event_with_sensitivity(
+        None,
+        &event,
+        UnixMicros::now(),
+        DebugEventSensitivity::BootstrapPrompt,
+    )
+    .expect("write sensitive projection");
+
+    let lines = read_lines(log.path());
+    let ordinary = serde_json::to_string(&lines[0]).expect("serialize ordinary row");
+    let sensitive = serde_json::to_string(&lines[1]).expect("serialize sensitive row");
+    assert!(ordinary.contains(secret));
+    assert!(!sensitive.contains(secret));
+    assert!(sensitive.contains("<bootstrap-prompt-redacted>"));
+}
+
 /// Reproduces the former generic input projection for regression comparisons.
 fn legacy_debug_harness_input_json(message: &HarnessInputMessage) -> serde_json::Value {
     let mut redacted = message.clone();

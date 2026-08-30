@@ -10,6 +10,13 @@ discovery socket and metadata available for `tau session list` and
 `tau attach ID`, remain alive across UI disconnects, pin the selected session,
 and reject every in-process session switch.
 
+The paired `--bootstrap-prompt-file PATH --bootstrap-id ID` serve options add one
+post-readiness, at-most-once initial prompt without changing serve ownership.
+The source is read exactly once (`-` means stdin through EOF), submitted
+literally through the ordinary authenticated local UI create path, and never
+printed. Admission ends at correlated `Created` plus `Queued`; the bootstrap UI
+disconnects while the foreground service remains available.
+
 Interactive UI exit and session shutdown are separate. `:quit` exits only the
 invoking UI, leaving session lifetime to the harness's exit-on-disconnect
 policy. Ordinary `tau` launches enable that policy as a foreground convenience;

@@ -73,6 +73,15 @@ policy cannot carry different settings snapshots.
 
 Foreground daemon APIs bind the provided path directly unless socket activation provides a listener.
 
+`tau serve --session ID --create|--existing` can pair
+`--bootstrap-prompt-file PATH` with `--bootstrap-id ID`. After full readiness it
+creates one durable parentless user agent and admits the exact UTF-8 file as a
+literal prompt, then keeps serving without waiting for model output. `PATH=-`
+reads stdin to EOF once. A durable sequence-zero marker makes the id at-most-once
+across restarts: the same id skips before reading the source, while a different
+id explicitly requests a new generation. Use private service credentials rather
+than Nix-store paths for sensitive prompts.
+
 ## Socket activation
 
 Foreground daemon APIs support socket activation via the `listenfd` crate.

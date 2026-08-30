@@ -618,6 +618,269 @@ fn created_session_server_handles_stock_attach_signals_and_strict_resume() {
     }
 }
 
+/// The public serve CLI admits one bootstrap generation, remains attachable,
+/// skips the same id before touching a missing source, and creates a new agent
+/// only when the operator supplies a different id.
+#[test]
+fn serve_bootstrap_is_durable_at_most_once_across_real_restarts() {
+    fn wait_for_agents(environment: &TestEnvironment, session_id: &str, count: usize) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let output = environment
+                .command()
+                .args(["agent", "list", session_id])
+                .output()
+                .expect("list bootstrap agents");
+            let rows = String::from_utf8(output.stdout).expect("UTF-8 agent rows");
+            if output.status.success() && rows.lines().count() == count {
+                return rows;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "bootstrap agent count did not reach {count}: {rows:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn stop_server(
+        environment: &TestEnvironment,
+        server: Child,
+        metadata: &Path,
+        socket: &Path,
+    ) -> std::process::Output {
+        assert!(
+            Command::new("kill")
+                .args(["-TERM", &server.id().to_string()])
+                .status()
+                .expect("signal bootstrap server")
+                .success()
+        );
+        let output = server.wait_with_output().expect("wait bootstrap server");
+        assert!(output.status.success());
+        environment.wait_for_runtime_pair_gone(metadata, socket);
+        output
+    }
+
+    let environment = TestEnvironment::new();
+    let session_id = "serve-bootstrap";
+    let source = environment.temp.path().join("bootstrap.prompt");
+    let secret = "bootstrap-secret-27e8bca041";
+    std::fs::write(&source, secret).expect("write bootstrap prompt");
+    let source_arg = source.to_string_lossy().into_owned();
+
+    let first = environment
+        .command()
+        .args([
+            "serve",
+            "--session",
+            session_id,
+            "--create",
+            "--bootstrap-prompt-file",
+            &source_arg,
+            "--bootstrap-id",
+            "assistant-v1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start bootstrapped server");
+    let first_metadata = environment.wait_for_metadata();
+    let first_socket = first_metadata.with_extension("sock");
+    let first_rows = wait_for_agents(&environment, session_id, 1);
+    let first_output = stop_server(&environment, first, &first_metadata, &first_socket);
+    assert!(!String::from_utf8_lossy(&first_output.stdout).contains(secret));
+    assert!(!String::from_utf8_lossy(&first_output.stderr).contains(secret));
+    let debug_log = environment
+        .state_home
+        .join(format!("tau/sessions/{session_id}/events.jsonl"));
+    let debug_jsonl = std::fs::read_to_string(debug_log).expect("read bootstrap debug JSONL");
+    assert!(!debug_jsonl.contains(secret));
+    assert!(
+        debug_jsonl.contains("\"event_name\":\"agent.prompt_queued\""),
+        "test must force the sensitive queued projection"
+    );
+    let agent_id = first_rows.split('\t').next().expect("bootstrap agent id");
+    let trace = environment
+        .command()
+        .args(["agent", "trace", agent_id, "--format", "tau-jsonl"])
+        .output()
+        .expect("read canonical bootstrap transcript");
+    assert!(
+        trace.status.success(),
+        "agent trace failed: {}",
+        String::from_utf8_lossy(&trace.stderr)
+    );
+    let trace = String::from_utf8(trace.stdout).expect("UTF-8 agent trace");
+    assert!(trace.contains("engineer"), "role was not durable: {trace}");
+    assert!(
+        trace.contains("tau.bootstrap_prompt") && trace.contains("assistant-v1"),
+        "canonical trace lost the bootstrap marker: {trace}"
+    );
+
+    std::fs::remove_file(&source).expect("remove bootstrap source");
+    let restart = environment
+        .command()
+        .args([
+            "serve",
+            "--session",
+            session_id,
+            "--existing",
+            "--bootstrap-prompt-file",
+            &source_arg,
+            "--bootstrap-id",
+            "assistant-v1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("restart bootstrapped server");
+    let restart_metadata = environment.wait_for_metadata();
+    let restart_socket = restart_metadata.with_extension("sock");
+    let restart_rows = wait_for_agents(&environment, session_id, 1);
+    assert_eq!(
+        restart_rows.split('\t').next(),
+        first_rows.split('\t').next(),
+        "same bootstrap id created another agent"
+    );
+    let _ = stop_server(&environment, restart, &restart_metadata, &restart_socket);
+
+    std::fs::write(&source, "Follow your updated instructions.")
+        .expect("write next bootstrap prompt");
+    let next = environment
+        .command()
+        .args([
+            "serve",
+            "--session",
+            session_id,
+            "--existing",
+            "--bootstrap-prompt-file",
+            &source_arg,
+            "--bootstrap-id",
+            "assistant-v2",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start next bootstrap generation");
+    let next_metadata = environment.wait_for_metadata();
+    let next_socket = next_metadata.with_extension("sock");
+    let _ = wait_for_agents(&environment, session_id, 2);
+    let _ = stop_server(&environment, next, &next_metadata, &next_socket);
+}
+
+/// A bootstrap reader waiting for stdin EOF does not own serve lifecycle:
+/// SIGTERM still reaches the event loop and performs ordinary cleanup.
+#[test]
+fn serve_bootstrap_stdin_wait_is_signal_interruptible() {
+    let environment = TestEnvironment::new();
+    let mut server = environment
+        .command()
+        .args([
+            "serve",
+            "--session",
+            "serve-bootstrap-stdin",
+            "--create",
+            "--bootstrap-prompt-file",
+            "-",
+            "--bootstrap-id",
+            "stdin-v1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start stdin bootstrap server");
+    let _stdin_guard = server.stdin.take().expect("retain bootstrap stdin");
+    let metadata = environment.wait_for_metadata();
+    let socket = metadata.with_extension("sock");
+    let probe = environment
+        .command()
+        .args(["agent", "list", "serve-bootstrap-stdin"])
+        .output()
+        .expect("probe stdin bootstrap server");
+    assert!(
+        probe.status.success(),
+        "event loop did not become attachable"
+    );
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &server.id().to_string()])
+            .status()
+            .expect("signal stdin bootstrap server")
+            .success()
+    );
+    let output = server
+        .wait_with_output()
+        .expect("wait stdin bootstrap server");
+    assert!(
+        output.status.success(),
+        "stdin bootstrap signal exit: {:?}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    environment.wait_for_runtime_pair_gone(&metadata, &socket);
+}
+
+/// SIGTERM wins cleanly after the bootstrap worker has read its source and
+/// connected its private client but before any create result can exist.
+#[test]
+fn serve_bootstrap_connected_wait_is_signal_interruptible() {
+    let environment = TestEnvironment::new();
+    let source = environment.temp.path().join("connected.prompt");
+    std::fs::write(&source, "connected-race-secret").expect("write bootstrap prompt");
+    let barrier = environment.temp.path().join("bootstrap-barrier");
+    let connected = barrier.with_extension("connected");
+    let server = environment
+        .command()
+        .args([
+            "serve",
+            "--session",
+            "serve-bootstrap-connected",
+            "--create",
+            "--bootstrap-prompt-file",
+            source.to_str().expect("UTF-8 prompt path"),
+            "--bootstrap-id",
+            "connected-v1",
+        ])
+        .env("TAU_TEST_BOOTSTRAP_CONNECTED_BARRIER", &barrier)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start connected bootstrap server");
+    let metadata = environment.wait_for_metadata();
+    let socket = metadata.with_extension("sock");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !connected.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "bootstrap client did not reach connected barrier"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &server.id().to_string()])
+            .status()
+            .expect("signal connected bootstrap server")
+            .success()
+    );
+    let output = server
+        .wait_with_output()
+        .expect("wait connected bootstrap server");
+    assert!(
+        output.status.success(),
+        "connected bootstrap signal exit: {:?}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    environment.wait_for_runtime_pair_gone(&metadata, &socket);
+}
+
 /// Existing-only startup rejects incompatible one-shot modes and every strict
 /// persistence failure without publishing or leaking runtime discovery files.
 #[test]

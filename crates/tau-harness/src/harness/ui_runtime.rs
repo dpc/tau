@@ -16,6 +16,10 @@ use super::*;
 /// explicitly close a socket writer; the lifecycle owns no join handle or drop
 /// side effect. This state does not own the generic event bus.
 pub(crate) struct UiRuntimeState {
+    /// Harness-authorized bootstrap request ids awaiting ordinary UI admission.
+    pub(super) pending_bootstrap_creates: HashMap<String, String>,
+    /// Cause carried by the command that stopped the central event loop.
+    pub(crate) shutdown_cause: Option<crate::event::ShutdownCause>,
     /// Random stream for opaque provider-side shell route identities.
     ///
     /// This stream stays independent from agent-id generation so shell traffic
@@ -59,6 +63,8 @@ pub(crate) struct UiRuntimeState {
 impl Default for UiRuntimeState {
     fn default() -> Self {
         Self {
+            pending_bootstrap_creates: HashMap::new(),
+            shutdown_cause: None,
             ui_shell_route_rng: StdRng::from_entropy(),
             pending_ui_shell_commands: HashMap::new(),
             ephemeral_ui_shell_route_ids: HashSet::new(),

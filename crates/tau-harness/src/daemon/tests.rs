@@ -13,6 +13,31 @@ use tempfile::TempDir;
 use super::*;
 use crate::harness::Harness;
 
+/// Bootstrap ids accept only the bounded stable ASCII generation grammar.
+#[test]
+fn bootstrap_id_validation_is_strict_and_semantic() {
+    for valid in ["a", "telegram-v1", "telegram_v1", &"a".repeat(128)] {
+        assert!(valid.parse::<BootstrapId>().is_ok(), "{valid}");
+    }
+    for invalid in ["", "contains.dot", "contains space", "é", &"a".repeat(129)] {
+        assert!(invalid.parse::<BootstrapId>().is_err(), "{invalid}");
+    }
+}
+
+/// Bootstrap source loading preserves whitespace and rejects empty or non-UTF-8
+/// input.
+#[test]
+fn bootstrap_source_is_exact_utf8_and_nonempty() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.path().join("prompt");
+    fs::write(&source, b" \n").expect("write whitespace prompt");
+    assert_eq!(read_bootstrap_prompt(&source).expect("read prompt"), " \n");
+    fs::write(&source, []).expect("write empty prompt");
+    assert!(read_bootstrap_prompt(&source).is_err());
+    fs::write(&source, [0xff]).expect("write invalid prompt");
+    assert!(read_bootstrap_prompt(&source).is_err());
+}
+
 /// Ensures the embedded-options seam applies its explicit runtime parent and
 /// restores ambient and nested roots after normal return and early exit.
 #[test]

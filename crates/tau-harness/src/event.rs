@@ -28,7 +28,7 @@ pub(crate) const SUPERVISED_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 /// Commands that mutate harness-owned state from inside the central loop.
 pub(crate) enum HarnessCommand {
     /// Stop the foreground daemon after retiring listener admission.
-    Shutdown,
+    Shutdown(ShutdownCause),
     /// Observe persistence transitions and retry exact retained publications.
     SemanticPersistenceProgress,
     /// Retry exact ordinary activations after the recovery observation returns.
@@ -41,6 +41,15 @@ pub(crate) enum HarnessCommand {
     ExternalMessageAuthCompleted(Box<ExternalMessageAuthCompletedCommand>),
     /// Complete one bounded peer-session discovery tool call.
     SessionDiscoveryCompleted(Box<SessionDiscoveryCompletedCommand>),
+}
+
+/// Owner that requested termination of the central event loop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShutdownCause {
+    /// An operating-system termination signal requested ordinary success.
+    ExternalSignal,
+    /// The harness-owned bootstrap worker failed before admission.
+    BootstrapFailure,
 }
 
 /// Completion payload for asynchronous peer-session discovery.

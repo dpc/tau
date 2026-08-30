@@ -5,6 +5,7 @@
 //! startup protocol.
 
 use super::*;
+use crate::debug_log::DebugEventSensitivity;
 
 impl Harness {
     /// Record the runtime harness metadata path stem owned by the daemon.
@@ -411,8 +412,22 @@ impl Harness {
         if self.debug_harness_event_targets_ephemeral_agent(harness_event) {
             return;
         }
+        let debug_sensitivity = match harness_event {
+            HarnessEvent::FromConnection {
+                connection_id,
+                message,
+                ..
+            } => self
+                .runtime_io
+                .publication
+                .pending_intercept
+                .as_ref()
+                .map(|pending| pending.reply_debug_sensitivity(connection_id, message))
+                .unwrap_or_default(),
+            _ => DebugEventSensitivity::Ordinary,
+        };
         if let Some(log) = &mut self.runtime_io.debug_log {
-            let result = log.log_harness_event(harness_event);
+            let result = log.log_harness_event_with_sensitivity(harness_event, debug_sensitivity);
             self.observe_debug_log_result(result);
         }
     }
@@ -504,7 +519,7 @@ impl Harness {
         command: HarnessCommand,
     ) -> Result<(), HarnessError> {
         match command {
-            HarnessCommand::Shutdown => {}
+            HarnessCommand::Shutdown(_) => {}
             HarnessCommand::SemanticPersistenceProgress => {
                 self.observe_semantic_persistence_progress();
             }

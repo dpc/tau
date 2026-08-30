@@ -435,6 +435,8 @@ pub(crate) struct InitialPromptCorrelation {
     pub(crate) agent_id: tau_proto::AgentId,
     /// Prompt-chain correlation copied from the create request.
     pub(crate) ctx_id: String,
+    /// Whether this exact initial prompt came from private serve bootstrap.
+    pub(crate) bootstrap_prompt: bool,
     /// Exact committed activation watermark owned by this prompt.
     ///
     /// `None` until the initial prompt submission commits.

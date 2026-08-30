@@ -5,6 +5,8 @@
 //! `SPEC-tau-harness-extension-lifecycle`.
 
 use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::Read as _;
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -20,10 +22,61 @@ use tau_proto::{
     ClientKind, ConnectionId, Disconnect, Event, EventName, EventSelector, HarnessInputMessage,
     HarnessOutputMessage, HarnessOutputWriter, Hello, PROTOCOL_VERSION, Subscribe, UiCreateAgent,
 };
+
+/// Validated durable identity for one serve bootstrap generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BootstrapId(String);
+
+impl BootstrapId {
+    /// Return the validated identifier text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for BootstrapId {
+    type Err = InvalidBootstrapId;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.is_empty()
+            || value.len() > 128
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(InvalidBootstrapId);
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+/// Error returned for a bootstrap id outside the public ASCII grammar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidBootstrapId;
+
+impl fmt::Display for InvalidBootstrapId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "bootstrap id must contain 1 through 128 ASCII letters, digits, underscores, or hyphens",
+        )
+    }
+}
+
+impl std::error::Error for InvalidBootstrapId {}
+
+/// Paired source and durable generation identity for one serve bootstrap.
+#[derive(Clone, Copy, Debug)]
+pub struct BootstrapPromptOptions<'a> {
+    /// File containing the exact literal UTF-8 prompt, or `-` for stdin.
+    pub prompt_file: &'a Path,
+    /// Durable generation identity used for at-most-once admission.
+    pub id: &'a BootstrapId,
+}
 use tau_socket::{SocketListener, SocketPeer, SocketReceive};
 
 use crate::error::HarnessError;
-use crate::event::{HarnessCommand, HarnessEvent};
+use crate::event::{HarnessCommand, HarnessEvent, ShutdownCause};
 use crate::format::{format_extension_event, format_tool_progress};
 use crate::harness::{
     Harness, HarnessSessionLaunch, HarnessSessionLaunchMode, HarnessStartupInputs, InitialClient,
@@ -55,7 +108,9 @@ fn spawn_termination_signal_forwarder(
         .spawn(move || {
             let mut received = signals.forever();
             if received.next().is_some() {
-                let _ = tx.send(HarnessEvent::Command(HarnessCommand::Shutdown));
+                let _ = tx.send(HarnessEvent::Command(HarnessCommand::Shutdown(
+                    ShutdownCause::ExternalSignal,
+                )));
             }
             if let Some(signal) = received.next() {
                 let _ = signal_hook::low_level::emulate_default_handler(signal);
@@ -1406,6 +1461,154 @@ fn recv_daemon_message(
     }
 }
 
+/// Read one complete UTF-8 bootstrap source without trimming semantic bytes.
+fn read_bootstrap_prompt(path: &Path) -> Result<String, HarnessError> {
+    let mut bytes = Vec::new();
+    if path == Path::new("-") {
+        path_std_io::stdin().read_to_end(&mut bytes)?;
+    } else {
+        File::open(path)?.read_to_end(&mut bytes)?;
+    }
+    if bytes.is_empty() {
+        return Err(HarnessError::Participant(
+            "bootstrap prompt source is empty".to_owned(),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        HarnessError::Participant("bootstrap prompt source is not valid UTF-8".to_owned())
+    })
+}
+
+/// Admit one bootstrap through the ordinary authenticated socket UI path.
+fn run_bootstrap_client(
+    socket_path: PathBuf,
+    session_id: tau_proto::SessionId,
+    role: String,
+    request_id: String,
+    prompt: String,
+) -> Result<tau_proto::AgentId, HarnessError> {
+    let mut peer = connect_daemon_helper(socket_path, "tau-bootstrap")?;
+    wait_at_bootstrap_connected_test_barrier();
+    peer.send(&HarnessInputMessage::Subscribe(Subscribe {
+        historical_selectors: Vec::new(),
+        live_selectors: vec![EventSelector::Exact(EventName::UI_CREATE_AGENT_RESULT)],
+    }))?;
+    peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
+        UiCreateAgent {
+            request_id: request_id.clone(),
+            session_id,
+            role,
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some(prompt),
+            literal: true,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some(format!("{request_id}-prompt")),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )))?;
+    loop {
+        let Some(message) = recv_daemon_message(&mut peer, Duration::from_secs(1))? else {
+            continue;
+        };
+        let HarnessOutputMessage::Deliver(delivery) = message else {
+            continue;
+        };
+        let Event::UiCreateAgentResult(result) = delivery.into_event() else {
+            continue;
+        };
+        if result.request_id != request_id {
+            continue;
+        }
+        return match result.outcome {
+            tau_proto::UiCreateAgentOutcome::Created {
+                agent_id,
+                initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+            } => Ok(agent_id),
+            tau_proto::UiCreateAgentOutcome::Created { .. } => Err(HarnessError::Participant(
+                "bootstrap create returned without queued prompt admission".to_owned(),
+            )),
+            tau_proto::UiCreateAgentOutcome::Rejected { reason, .. } => Err(
+                HarnessError::Participant(format!("bootstrap create rejected: {reason}")),
+            ),
+        };
+    }
+}
+
+/// Pauses an explicitly instrumented integration test after socket connection
+/// and before the create request; ordinary launches do nothing.
+fn wait_at_bootstrap_connected_test_barrier() {
+    let Some(root) = std::env::var_os("TAU_TEST_BOOTSTRAP_CONNECTED_BARRIER") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let connected = root.with_extension("connected");
+    let release = root.with_extension("release");
+    if std::fs::write(&connected, b"connected").is_err() {
+        return;
+    }
+    while !release.exists() {
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Prepare and spawn the internal bootstrap socket client after publication.
+fn spawn_bootstrap_client(
+    harness: &mut Harness,
+    socket_path: PathBuf,
+    options: BootstrapPromptOptions<'_>,
+) -> Result<mpsc::Receiver<Result<tau_proto::AgentId, HarnessError>>, HarnessError> {
+    if let Some(agent_id) = harness.bootstrap_agent_for_id(options.id.as_str())? {
+        tracing::info!(
+            target: "tau_harness::bootstrap",
+            bootstrap_id = options.id.as_str(),
+            %agent_id,
+            "bootstrap already present; skipped"
+        );
+        let (tx, rx) = mpsc::channel();
+        let _ = tx.send(Ok(agent_id));
+        return Ok(rx);
+    }
+    let request_id = format!(
+        "bootstrap-{:016x}{:016x}",
+        rand::random::<u64>(),
+        rand::random::<u64>()
+    );
+    let session_id = harness.session_runtime.current_session_id.clone();
+    let role = harness.config.selected_role.clone();
+    let bootstrap_id = options.id.as_str().to_owned();
+    let prompt_file = options.prompt_file.to_path_buf();
+    harness.register_bootstrap_create(request_id.clone(), options.id.as_str().to_owned());
+    let shutdown_tx = harness.runtime_io.tx.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("tau-bootstrap-client".to_owned())
+        .spawn(move || {
+            let result = read_bootstrap_prompt(&prompt_file).and_then(|prompt| {
+                run_bootstrap_client(socket_path, session_id, role, request_id, prompt)
+            });
+            if let Ok(agent_id) = &result {
+                tracing::info!(
+                    target: "tau_harness::bootstrap",
+                    %bootstrap_id,
+                    %agent_id,
+                    "bootstrap admitted"
+                );
+            }
+            let failed = result.is_err();
+            let _ = result_tx.send(result);
+            if failed {
+                let _ = shutdown_tx.send(HarnessEvent::Command(HarnessCommand::Shutdown(
+                    ShutdownCause::BootstrapFailure,
+                )));
+            }
+        })
+        .map_err(HarnessError::Io)?;
+    Ok(result_rx)
+}
+
 fn next_render_request_id(prefix: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1418,7 +1621,7 @@ fn next_render_request_id(prefix: &str) -> String {
 }
 
 /// Runtime-path identity and optional initial-client transport for one daemon.
-struct RuntimeHarnessLaunch {
+struct RuntimeHarnessLaunch<'a> {
     /// Random discriminator shared with a spawning CLI when present.
     runtime_instance_id: runtime_dir::HarnessInstanceId,
     /// Initial UI accepted directly over inherited stdio when present.
@@ -1429,6 +1632,8 @@ struct RuntimeHarnessLaunch {
     introduction_notice_eligible: bool,
     /// Signal handlers installed before a supervised foreground startup.
     termination_signals: Option<signal_hook::iterator::Signals>,
+    /// Optional fixed-session bootstrap operation.
+    bootstrap: Option<BootstrapPromptOptions<'a>>,
 }
 
 fn run_harness_daemon_with_internal_tools_and_initial_client(
@@ -1438,7 +1643,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     options: ServeOptions,
     session_launch_mode: HarnessSessionLaunchMode,
     internal_tool_handlers: crate::InternalToolHandlers,
-    launch: RuntimeHarnessLaunch,
+    launch: RuntimeHarnessLaunch<'_>,
 ) -> Result<(), HarnessError> {
     let RuntimeHarnessLaunch {
         runtime_instance_id,
@@ -1446,6 +1651,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         mut initial_client_error_stream,
         introduction_notice_eligible,
         termination_signals,
+        bootstrap,
     } = launch;
     let project_root = canonical_project_root(project_root)?;
     validate_pre_resolved_serve_options(&options, config)?;
@@ -1515,10 +1721,24 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         &mut harness,
         initial_client_id.as_ref(),
     )?;
+    let bootstrap_result = match bootstrap {
+        Some(options) => match spawn_bootstrap_client(&mut harness, socket_path.clone(), options) {
+            Ok(result) => Some(result),
+            Err(error) => {
+                drop(forwarder);
+                drop(listener_handle);
+                let _ = harness.shutdown();
+                harness_paths.cleanup();
+                return Err(error);
+            }
+        },
+        None => None,
+    };
     if introduction_notice_eligible {
         harness.send_introduction_notice_to_initial_client(initial_client_id.as_ref());
     }
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
+    let shutdown_cause = harness.ui_runtime.shutdown_cause;
     drop(forwarder);
     drop(listener_handle);
     let admission_retirement = verify_listener_admission_retired(&socket_path);
@@ -1526,6 +1746,18 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     harness_paths.cleanup();
     admission_retirement?;
     shutdown?;
+    if shutdown_cause == Some(ShutdownCause::BootstrapFailure) {
+        let receiver = bootstrap_result.expect("bootstrap failure owns a result receiver");
+        return match receiver.recv() {
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(_)) => Err(HarnessError::Participant(
+                "bootstrap failure shutdown carried a successful result".to_owned(),
+            )),
+            Err(_) => Err(HarnessError::Participant(
+                "bootstrap failure shutdown lost its result".to_owned(),
+            )),
+        };
+    }
     result
 }
 
@@ -1599,6 +1831,8 @@ pub struct FixedSessionServeOptions<'a> {
     pub harness_config_overrides: &'a [tau_config::settings::HarnessConfigCliOverride],
     /// Harness-owned internal tool handlers installed before rehydration.
     pub internal_tool_handlers: crate::InternalToolHandlers,
+    /// Optional at-most-once prompt admitted after full daemon readiness.
+    pub bootstrap: Option<BootstrapPromptOptions<'a>>,
 }
 
 /// Complete inputs for one supported foreground existing-session launch.
@@ -1650,6 +1884,7 @@ fn run_fixed_session_component_with_internal_tools(
         role_cli_overrides,
         harness_config_overrides,
         internal_tool_handlers,
+        bootstrap,
     } = options;
     let termination_signals = prepare_termination_signals()?;
     let config = crate::settings::resolve_config_with_cli_overrides(
@@ -1680,6 +1915,7 @@ fn run_fixed_session_component_with_internal_tools(
             initial_client_error_stream: None,
             introduction_notice_eligible: false,
             termination_signals: Some(termination_signals),
+            bootstrap,
         },
     )
     .map_err(Into::into)
@@ -1816,6 +2052,7 @@ fn run_component_with_internal_tools_and_initial_client(
                 introduction_notice_eligible: std::env::var_os(INITIAL_UI_INTRODUCTION_NOTICE_ENV)
                     .is_some(),
                 termination_signals: None,
+                bootstrap: None,
             },
         )
         .map_err(Into::into)

@@ -67,6 +67,8 @@ fn serve_requires_exactly_one_explicit_session_mode() {
             session,
             create: false,
             existing: true,
+            bootstrap_prompt_file: None,
+            bootstrap_id: None,
         }) if session.as_str() == "s1"
     ));
     let parsed = Cli::parse_from(["tau", "serve", "--session", "s2", "--create"]);
@@ -76,8 +78,44 @@ fn serve_requires_exactly_one_explicit_session_mode() {
             session,
             create: true,
             existing: false,
+            bootstrap_prompt_file: None,
+            bootstrap_id: None,
         }) if session.as_str() == "s2"
     ));
+}
+
+/// Serve bootstrap options are paired and accept only the durable id grammar.
+#[test]
+fn serve_bootstrap_requires_paired_source_and_valid_id() {
+    let base = ["tau", "serve", "--session", "s1", "--existing"];
+    assert!(
+        Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--bootstrap-prompt-file", "prompt.md"])
+        )
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from(base.into_iter().chain(["--bootstrap-id", "telegram-v1"])).is_err()
+    );
+    assert!(
+        Cli::try_parse_from(base.into_iter().chain([
+            "--bootstrap-prompt-file",
+            "-",
+            "--bootstrap-id",
+            "telegram_v1",
+        ]))
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from(base.into_iter().chain([
+            "--bootstrap-prompt-file",
+            "-",
+            "--bootstrap-id",
+            "contains.dot",
+        ]))
+        .is_err()
+    );
 }
 
 /// Startup options remain root-owned: callers place them before the target

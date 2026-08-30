@@ -52,3 +52,19 @@ Subsequent prompt failures, provider updates, completions, and prompt
 terminations must match the create request, created agent, prompt `ctx_id`, or
 the bound prompt-id chain as applicable, so unrelated user-originated work on
 the same daemon cannot complete the one-shot invocation.
+
+`tau serve` bootstrap uses the same authenticated local UI request and waits
+only for its correlated `Created` with `Queued`. Before that request, the harness
+registers its private correlation and only that internal registration authorizes
+injection of the reserved non-inheritable bootstrap-id metadata into sequence-zero
+`AgentStarted`; raw public initial metadata cannot claim the key. Presence of an
+exact loaded marker suppresses source reading and submission after restart.
+Marker ambiguity fails closed. No create result or later provider output is
+persisted as bootstrap control state.
+
+The exact accepted bootstrap prompt occurrence retains its ordinary live and
+durable semantic facts, but the debug `events.jsonl` projection removes its text
+from queued, submitted, and matching interceptor-reply rows. Sensitivity follows
+that occurrence through queueing, retained retry, and interception; it does not
+attach to the created agent. Later ordinary prompt diagnostics for that agent
+retain their text.

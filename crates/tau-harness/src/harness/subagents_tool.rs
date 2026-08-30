@@ -214,6 +214,9 @@ const MAX_ACCEPTED_PEER_INPUTS_PER_MINUTE: usize = 60;
 const PEER_AUTO_START_QUERY_PREFIX: &str = "peer-auto-start-";
 /// Durable non-inheritable metadata key identifying peer-created endpoints.
 pub(crate) const PEER_ENTRYPOINT_AGENT_METADATA_KEY: &str = "tau.peer_entrypoint_endpoint";
+/// Durable non-inheritable metadata key identifying a serve bootstrap
+/// generation.
+pub(crate) const BOOTSTRAP_PROMPT_AGENT_METADATA_KEY: &str = "tau.bootstrap_prompt";
 const INTER_SESSION_UNAVAILABLE: &str = "target session is unavailable for inter-session messaging";
 
 /// Internal bare-entrypoint resolution error.

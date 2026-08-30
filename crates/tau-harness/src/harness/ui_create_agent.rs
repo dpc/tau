@@ -4,7 +4,9 @@ use tau_proto::{AgentId, AgentPromptQueued, Event, HarnessOutputMessage};
 
 use super::{Harness, user_skill_invocation};
 use crate::agent::{InitialPromptCorrelation, PendingPrompt};
+use crate::debug_log::DebugEventSensitivity;
 use crate::error::HarnessError;
+use crate::harness::subagents_tool::BOOTSTRAP_PROMPT_AGENT_METADATA_KEY;
 
 const CREATE_AGENT_DIAGNOSTIC_MAX_CHARS: usize = 512;
 
@@ -32,9 +34,74 @@ struct CreatedInitialPrompt {
     originator: tau_proto::PromptOriginator,
     /// Whether skill expansion waits until dispatch.
     defer_skill_expansion: bool,
+    /// Whether this exact prompt came from private serve bootstrap.
+    bootstrap_prompt: bool,
 }
 
 impl Harness {
+    /// Find a sequence-zero bootstrap marker in the loaded durable agent set.
+    pub(crate) fn bootstrap_agent_for_id(
+        &self,
+        bootstrap_id: &str,
+    ) -> Result<Option<tau_proto::AgentId>, HarnessError> {
+        let mut found = None;
+        for agent_id in &self.agent_runtime.agent_registry.session_loaded {
+            let events = self
+                .session_runtime
+                .agent_store
+                .agent_events(agent_id.as_str())?;
+            let Some(first) = events.first() else {
+                continue;
+            };
+            let Event::AgentStarted(started) = &first.event else {
+                continue;
+            };
+            if first.seq.get() != 0 {
+                continue;
+            }
+            let mut marker = None;
+            for metadata in &started.metadata {
+                if metadata.key.as_str() != BOOTSTRAP_PROMPT_AGENT_METADATA_KEY {
+                    continue;
+                }
+                if marker.is_some() {
+                    return Err(HarnessError::Participant(
+                        "durable agent has multiple bootstrap markers".to_owned(),
+                    ));
+                }
+                if metadata.inheritable {
+                    return Err(HarnessError::Participant(
+                        "durable bootstrap marker has invalid inheritance".to_owned(),
+                    ));
+                }
+                let tau_proto::CborValue::Text(value) = &metadata.value else {
+                    return Err(HarnessError::Participant(
+                        "durable bootstrap marker has invalid value".to_owned(),
+                    ));
+                };
+                value.parse::<crate::daemon::BootstrapId>().map_err(|_| {
+                    HarnessError::Participant(
+                        "durable bootstrap marker has invalid identifier".to_owned(),
+                    )
+                })?;
+                marker = Some(value.as_str());
+            }
+            if marker == Some(bootstrap_id) && found.replace(started.agent_id.clone()).is_some() {
+                return Err(HarnessError::Participant(
+                    "multiple durable agents claim the bootstrap id".to_owned(),
+                ));
+            }
+        }
+        Ok(found)
+    }
+
+    /// Reserve one request id for harness-owned bootstrap marker injection.
+    pub(crate) fn register_bootstrap_create(&mut self, request_id: String, bootstrap_id: String) {
+        self.ui_runtime
+            .pending_bootstrap_creates
+            .insert(request_id, bootstrap_id);
+    }
+
     /// Validate and execute one attached-UI create-agent request.
     pub(crate) fn handle_ui_create_agent_from(
         &mut self,
@@ -67,11 +134,23 @@ impl Harness {
         } else {
             tau_core::AgentPersistenceMode::Durable
         };
+        let mut metadata = req.metadata;
+        let bootstrap_id = self
+            .ui_runtime
+            .pending_bootstrap_creates
+            .remove(&request_id);
+        if let Some(bootstrap_id) = bootstrap_id.as_ref() {
+            metadata.push(tau_proto::AgentInitialMetadata {
+                key: tau_proto::AgentMetadataKey::new(BOOTSTRAP_PROMPT_AGENT_METADATA_KEY),
+                value: tau_proto::CborValue::Text(bootstrap_id.clone()),
+                inheritable: false,
+            });
+        }
         let cid = match self.try_create_user_agent_with_parent(
             req.session_id.clone(),
             &req.role,
             parent_cid,
-            req.metadata,
+            metadata,
             persistence,
         ) {
             Ok(cid) => cid,
@@ -92,6 +171,7 @@ impl Harness {
             .target_agent_id_for_agent(&cid)
             .map(crate::parse_agent_id)
             .expect("new UI agent has a durable id");
+        let bootstrap_prompt = bootstrap_id.is_some();
         if is_user_initial_prompt
             && let Some(agent_id) = self.target_agent_id_for_agent(&cid)
             && let Err(error) = self.record_accepted_visible_user_interaction(&agent_id)
@@ -126,6 +206,7 @@ impl Harness {
                     message_class: req.message_class,
                     originator: req.originator,
                     defer_skill_expansion: defer_initial_skill_expansion,
+                    bootstrap_prompt,
                 },
             );
         } else {
@@ -156,6 +237,7 @@ impl Harness {
             message_class,
             originator,
             defer_skill_expansion,
+            bootstrap_prompt,
         } = admission;
         if !message_class.is_internal() {
             self.preempt_blocking_ext_side_agents(&session_id);
@@ -173,6 +255,7 @@ impl Harness {
             request_id: request_id.clone(),
             agent_id: agent_id.clone(),
             ctx_id: ctx_id.clone(),
+            bootstrap_prompt,
             activation_through: None,
         });
         self.ensure_prompt_activation_observed(cid, &mut prompt);
@@ -187,13 +270,18 @@ impl Harness {
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
                 conv.dispatch.pending_prompts.push_back(prompt.clone());
             }
-            self.publish_event(
+            self.publish_event_with_debug_sensitivity(
                 None,
                 Event::AgentPromptQueued(AgentPromptQueued {
                     agent_id: agent_id.clone(),
                     text: prompt.text,
                     message_class: prompt.message_class,
                 }),
+                if bootstrap_prompt {
+                    DebugEventSensitivity::BootstrapPrompt
+                } else {
+                    DebugEventSensitivity::Ordinary
+                },
             );
             self.try_advance_queue();
             return;
@@ -206,6 +294,7 @@ impl Harness {
                         request_id,
                         agent_id,
                         ctx_id,
+                        bootstrap_prompt,
                         activation_through: None,
                     },
                     tau_proto::AgentPromptFailureStage::Preprocessing,
@@ -223,6 +312,7 @@ impl Harness {
                     request_id,
                     agent_id,
                     ctx_id,
+                    bootstrap_prompt,
                     activation_through: None,
                 },
                 tau_proto::AgentPromptFailureStage::Submission,

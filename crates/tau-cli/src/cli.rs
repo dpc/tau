@@ -177,6 +177,26 @@ pub enum Command {
         /// Require and strictly resume valid existing session state.
         #[arg(long, required_unless_present = "create", conflicts_with = "create")]
         existing: bool,
+
+        /// Read one literal bootstrap prompt from this UTF-8 file after
+        /// startup.
+        ///
+        /// `-` reads stdin through EOF once. The paired bootstrap id makes this
+        /// submission durable and at-most-once across restarts.
+        #[arg(
+            long = "bootstrap-prompt-file",
+            value_name = "PATH",
+            requires = "bootstrap_id"
+        )]
+        bootstrap_prompt_file: Option<PathBuf>,
+
+        /// Durable bootstrap generation id.
+        #[arg(
+            long = "bootstrap-id",
+            value_name = "ID",
+            requires = "bootstrap_prompt_file"
+        )]
+        bootstrap_id: Option<tau_harness::BootstrapId>,
     },
 
     /// Inspect sessions.

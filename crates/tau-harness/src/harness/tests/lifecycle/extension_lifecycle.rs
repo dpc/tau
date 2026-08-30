@@ -3,7 +3,7 @@
 use super::super::super::{MAX_EXTENSION_ACTIVATION_BYTES, MAX_EXTENSION_ACTIVATION_MESSAGES};
 use super::super::dispatch::provider_text_response;
 use super::*;
-use crate::event::HarnessCommand;
+use crate::event::{HarnessCommand, ShutdownCause};
 
 /// Session rollover resets only budget exhaustion; a peer disabled by
 /// configuration policy remains disabled.
@@ -1436,7 +1436,9 @@ fn termination_command_wakes_idle_event_loop() {
     let mut h = echo_harness(td.path().join("state")).expect("start");
     h.runtime_io
         .tx
-        .send(HarnessEvent::Command(HarnessCommand::Shutdown))
+        .send(HarnessEvent::Command(HarnessCommand::Shutdown(
+            ShutdownCause::ExternalSignal,
+        )))
         .expect("queue termination command");
 
     h.run_event_loop(None, false)

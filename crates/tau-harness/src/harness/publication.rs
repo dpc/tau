@@ -8,6 +8,7 @@ use tau_proto::ToolResultStatus;
 use super::prompt_acceptance_timing::{PromptAcceptanceTerminal, PromptAcceptanceTiming};
 use super::prompt_materialization_timing::MaterializationStage;
 use super::*;
+use crate::debug_log::DebugEventSensitivity;
 
 impl Harness {
     /// Agent id that owns a given in-flight prompt, if any.
@@ -745,6 +746,25 @@ impl Harness {
         self.enqueue_publish(source.as_ref(), event, persist, false, None);
     }
 
+    /// Publish one event with exact harness-owned diagnostic sensitivity.
+    pub(super) fn publish_event_with_debug_sensitivity(
+        &mut self,
+        source: Option<&tau_proto::ConnectionId>,
+        event: Event,
+        debug_sensitivity: DebugEventSensitivity,
+    ) {
+        let source = self.resolved_publish_source(source);
+        let persist = event.defaults_to_persist();
+        self.enqueue_publish_with_debug_sensitivity(
+            source.as_ref(),
+            event,
+            persist,
+            false,
+            None,
+            debug_sensitivity,
+        );
+    }
+
     pub(super) fn resolved_publish_source(
         &self,
         source: Option<&tau_proto::ConnectionId>,
@@ -941,6 +961,17 @@ impl Harness {
                     .map(tau_core::AgentEventParent::from_head)
             });
         persist |= matches!(event, Event::AgentPromptTerminated(_)) && fold_parent.is_some();
+        let debug_sensitivity = completion
+            .as_ref()
+            .and_then(|completion| match completion {
+                AgentPublishCompletion::InitialPromptSubmission { correlation }
+                    if correlation.bootstrap_prompt =>
+                {
+                    Some(DebugEventSensitivity::BootstrapPrompt)
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
         let sync = Some(ConversationHeadSync {
             cid: cid.clone(),
             agent_id,
@@ -962,7 +993,14 @@ impl Harness {
                 prompt_acceptance,
             );
         } else {
-            self.enqueue_publish(source.as_ref(), event, persist, must_pass, sync);
+            self.enqueue_publish_with_debug_sensitivity(
+                source.as_ref(),
+                event,
+                persist,
+                must_pass,
+                sync,
+                debug_sensitivity,
+            );
         }
     }
 
@@ -2049,7 +2087,12 @@ impl Harness {
             .is_some_and(|extension| extension.shell_report_targets_ephemeral)
             || self.event_targets_ephemeral_agent(&event, sync_head_for.as_ref());
         if !skip_debug_log && let Some(log) = &mut self.runtime_io.debug_log {
-            let result = log.log_published_event(source_id.as_ref(), &event, recorded_at);
+            let result = log.log_published_event_with_sensitivity(
+                source_id.as_ref(),
+                &event,
+                recorded_at,
+                peer_context.debug_sensitivity,
+            );
             self.observe_debug_log_result(result);
         }
         commit_timing.debug_log = debug_log_started.elapsed();

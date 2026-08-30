@@ -32,6 +32,14 @@ prompts, answers, identifiers, and collections remain size-validated inputs.
 
 Tau is early-stage software, but security issues are important. Please report suspected vulnerabilities through GitHub private vulnerability reporting for `dpc/tau` (<https://github.com/dpc/tau/security/advisories/new>) when available. If that path is unavailable, contact the maintainer privately first and avoid filing a public issue with exploit details.
 
+Foreground serve bootstrap sources are local configuration authority and may
+contain secrets. Tau reads the selected file only after readiness and never logs
+its contents, but the path can appear in process metadata or operational errors.
+Use owner-private service-manager credentials rather than Nix-store paths.
+Bootstrap submission reuses the authenticated same-user local UI boundary; a
+harness-private request registration alone may create the reserved durable
+bootstrap marker, and public metadata producers cannot set or inherit it.
+
 For technical trust boundaries, start with [ARCH-external-message-boundary](specs/ARCH-external-message-boundary.md) and the applicable project and component records under `specs/` and `crates/*/specs/`.
 
 ### Harness configuration authority selection

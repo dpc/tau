@@ -531,7 +531,11 @@ impl Harness {
         &self,
         key: &tau_proto::AgentMetadataKey,
     ) -> Result<(), String> {
-        if key.as_str() == path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY {
+        if matches!(
+            key.as_str(),
+            path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY
+                | path_crate_harness::subagents_tool::BOOTSTRAP_PROMPT_AGENT_METADATA_KEY
+        ) {
             return Err("agent metadata key is reserved for harness lifecycle state".to_owned());
         }
         if key.as_str().is_empty() {

@@ -2,6 +2,17 @@
 
 ## Semantic persistence lifecycle
 
+A fixed-session serve bootstrap begins only after extension/session readiness,
+runtime discovery metadata publication, and listener forwarding. The harness
+checks loaded agents' exact sequence-zero `AgentStarted` facts before reading the
+source. An unseen id is registered as harness-owned runtime authority, then an
+internal worker attaches through the ordinary authenticated socket UI and sends
+`UiCreateAgent`; admission injects a reserved, non-inheritable text marker and
+otherwise follows normal durable parentless user-agent creation. `Created` plus
+`Queued` releases the worker without waiting for output. Once the marker commits,
+restart skips that id even after an indeterminate failure, preserving at-most-once
+rather than exactly-once semantics.
+
 One Harness-owned `SemanticPersistenceOwner` prepares every durable agent,
 ordinary-session, and restore stream. Startup and switch prepare `New` or strict
 `Resume` authority before exposing runtime state. Switch closes the complete old

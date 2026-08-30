@@ -873,6 +873,7 @@ fn randomized_streaming_runnable_selection_matches_collecting_reference() {
                             request_id: format!("request-{case}-{index}"),
                             agent_id: durable_agent_id.clone(),
                             ctx_id: format!("ctx-{case}-{index}"),
+                            bootstrap_prompt: false,
                             activation_through: None,
                         });
                 }

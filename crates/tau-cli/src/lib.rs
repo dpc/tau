@@ -1254,6 +1254,8 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 session,
                 create,
                 existing: _,
+                bootstrap_prompt_file,
+                bootstrap_id,
             }) => {
                 ui_logging::init_stderr_from_env("tau_harness=info,tau_cli=info,warn");
                 let options = tau_harness::FixedSessionServeOptions {
@@ -1265,6 +1267,13 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     role_cli_overrides: &role_cli_overrides,
                     harness_config_overrides: &harness_config_overrides,
                     internal_tool_handlers: tau_harness_tools::builtin_handlers(),
+                    bootstrap: bootstrap_prompt_file
+                        .as_deref()
+                        .zip(bootstrap_id.as_ref())
+                        .map(|(prompt_file, id)| tau_harness::BootstrapPromptOptions {
+                            prompt_file,
+                            id,
+                        }),
                 };
                 if create {
                     tau_harness::run_create_session_component_with_internal_tools(options)

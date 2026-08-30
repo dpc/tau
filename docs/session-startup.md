@@ -31,6 +31,29 @@ signal's default termination and can interrupt that cleanup.
 After a graceful `--create` stop, use the same command with `--existing` for
 normal service restarts.
 
+`serve` can admit one literal prompt after complete readiness:
+
+```text
+tau serve --session SESSION --existing \
+  --bootstrap-prompt-file /run/credentials/tau-bootstrap \
+  --bootstrap-id telegram-v1
+```
+
+Both bootstrap options are required together. The id contains 1–128 ASCII
+letters, digits, underscores, or hyphens. `PATH=-` reads stdin through EOF once;
+stdin EOF never stops the service. A missing, unreadable, empty, non-UTF-8 source
+fails before durable bootstrap creation; whitespace is content.
+
+The harness creates one parentless durable user agent with the selected/default
+role and admits the bytes as a literal prompt through the normal local UI path.
+It waits only for `Created` plus `Queued`, not model output, then stays alive.
+The new agent's sequence-zero creation fact stores a reserved non-inheritable
+marker. A restart with the same id skips without reading the source; a different
+id starts a new generation. This is deliberately at-most-once: once the marker
+commits, any ambiguous later failure remains skipped. Attach to inspect/recover,
+or choose a new id only to request another attempt. Keep prompt files out of the
+Nix store and use service-manager credentials for secrets.
+
 Startup options remain root options and precede the target command, for example
 `tau --prompt-stdin resume SESSION`. They are not repeated after `attach` or
 `resume`.

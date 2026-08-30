@@ -94,38 +94,41 @@ fn agent_metadata_validation_rejects_bad_key_size_value_and_unknown_target() {
             .contains("unknown agent metadata target")
     );
 
-    let reserved_key = tau_proto::AgentMetadataKey::new(
+    for key in [
         path_crate_harness::subagents_tool::PEER_ENTRYPOINT_AGENT_METADATA_KEY,
-    );
-    let reserved_set = tau_proto::AgentMetadataSet {
-        agent_id: agent_id.clone(),
-        key: reserved_key.clone(),
-        value: CborValue::Bool(false),
-        mutation_id: None,
-        inheritable: false,
-    };
-    assert!(
-        h.validate_agent_metadata_set(&reserved_set)
-            .expect_err("reserved set rejected")
-            .contains("reserved")
-    );
-    assert!(
-        h.validate_agent_metadata_unset(&tau_proto::AgentMetadataUnset {
+        path_crate_harness::subagents_tool::BOOTSTRAP_PROMPT_AGENT_METADATA_KEY,
+    ] {
+        let reserved_key = tau_proto::AgentMetadataKey::new(key);
+        let reserved_set = tau_proto::AgentMetadataSet {
             agent_id: agent_id.clone(),
             key: reserved_key.clone(),
-        })
-        .expect_err("reserved unset rejected")
-        .contains("reserved")
-    );
-    assert!(
-        h.validate_initial_agent_metadata(&[tau_proto::AgentInitialMetadata {
-            key: reserved_key,
-            value: CborValue::Bool(true),
+            value: CborValue::Bool(false),
+            mutation_id: None,
             inheritable: false,
-        }])
-        .expect_err("reserved initial metadata rejected")
-        .contains("reserved")
-    );
+        };
+        assert!(
+            h.validate_agent_metadata_set(&reserved_set)
+                .expect_err("reserved set rejected")
+                .contains("reserved")
+        );
+        assert!(
+            h.validate_agent_metadata_unset(&tau_proto::AgentMetadataUnset {
+                agent_id: agent_id.clone(),
+                key: reserved_key.clone(),
+            })
+            .expect_err("reserved unset rejected")
+            .contains("reserved")
+        );
+        assert!(
+            h.validate_initial_agent_metadata(&[tau_proto::AgentInitialMetadata {
+                key: reserved_key,
+                value: CborValue::Bool(true),
+                inheritable: false,
+            }])
+            .expect_err("reserved initial metadata rejected")
+            .contains("reserved")
+        );
+    }
 
     h.shutdown().expect("shutdown");
 }

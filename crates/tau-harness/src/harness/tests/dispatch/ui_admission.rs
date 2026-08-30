@@ -1,7 +1,11 @@
 //! Tests for ui admission behavior.
 
+use std::collections::HashSet;
+
 use super::super::super::ui_shell_provider_ids;
 use super::*;
+use crate::debug_log::DebugEventLog;
+use crate::event::HarnessEvent;
 
 /// Live navigation must restore the same selected-branch provider usage that a
 /// cold restart derives, including after leaving and reselecting the branch.
@@ -231,6 +235,391 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
         "accepted immediate initial prompt records exactly one interaction fact"
     );
 
+    h.shutdown().expect("shutdown");
+}
+
+/// Only a harness-registered create correlation may install the durable,
+/// non-inheritable sequence-zero bootstrap marker used by restart suppression.
+#[test]
+fn registered_bootstrap_create_installs_exact_restart_marker() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("harness");
+    let request_id = "bootstrap-test-request";
+    let prompt_text = "literal bootstrap\nwith exact bytes";
+    let requester = connect_test_client(&mut h, "bootstrap-ui", tau_proto::ClientKind::Ui);
+    h.session_runtime.turn_state = TurnState::InitializingSession {
+        session_id: h.session_runtime.current_session_id.clone(),
+        reason: tau_proto::SessionStartReason::Initial,
+        waiting_on: HashSet::from([crate::test_connection_id("blocked-readiness")]),
+    };
+    h.register_bootstrap_create(request_id.to_owned(), "telegram-v1".to_owned());
+
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("bootstrap-ui"),
+        tau_proto::UiCreateAgent {
+            request_id: request_id.to_owned(),
+            session_id: h.session_runtime.current_session_id.clone(),
+            role: h.config.selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some(prompt_text.to_owned()),
+            literal: true,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("bootstrap-test-prompt".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("admit bootstrap create");
+
+    let agent_id = h
+        .bootstrap_agent_for_id("telegram-v1")
+        .expect("scan markers")
+        .expect("bootstrap marker");
+    let records = h
+        .session_runtime
+        .agent_store
+        .agent_events(agent_id.as_str())
+        .expect("agent records");
+    assert_eq!(records[0].seq.get(), 0);
+    let Event::AgentStarted(started) = &records[0].event else {
+        panic!("sequence zero must be AgentStarted");
+    };
+    assert!(started.parent_agent.is_none());
+    assert_eq!(started.role, h.config.selected_role);
+    assert!(started.metadata.iter().any(|metadata| {
+        metadata.key.as_str()
+            == path_crate_harness::subagents_tool::BOOTSTRAP_PROMPT_AGENT_METADATA_KEY
+            && metadata.value == CborValue::Text("telegram-v1".to_owned())
+            && !metadata.inheritable
+    }));
+    assert!(
+        h.bootstrap_agent_for_id("telegram-v2")
+            .expect("scan different generation")
+            .is_none()
+    );
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptQueued(prompt)
+            if prompt.agent_id == agent_id
+                && prompt.text == prompt_text
+                && prompt.message_class == tau_proto::PromptMessageClass::User
+    )));
+    let result = requester
+        .lock()
+        .expect("bootstrap requester frames")
+        .iter()
+        .find_map(|frame| match peel_inner_event(&frame.frame) {
+            Some(Event::UiCreateAgentResult(result)) => Some(result.clone()),
+            _ => None,
+        })
+        .expect("bootstrap create result");
+    assert!(matches!(
+        result.outcome,
+        tau_proto::UiCreateAgentOutcome::Created {
+            agent_id: ref result_agent,
+            initial_prompt: tau_proto::UiCreateAgentInitialPrompt::Queued,
+        } if result_agent == &agent_id
+    ));
+    h.shutdown().expect("shutdown first harness");
+    drop(h);
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("resume harness");
+    assert_eq!(
+        resumed
+            .bootstrap_agent_for_id("telegram-v1")
+            .expect("cold marker scan"),
+        Some(agent_id),
+        "cold replay must preserve the same marker owner"
+    );
+    resumed.shutdown().expect("shutdown resumed harness");
+}
+
+/// Immediate bootstrap admission preserves exact user text and role in both the
+/// live durable journal and a cold-reopened agent store.
+#[test]
+fn bootstrap_prompt_exact_content_and_role_survive_cold_replay() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let prompt_text = "exact bootstrap bytes\nsecond line";
+    let mut h = echo_harness(&state).expect("harness");
+    let request_id = "bootstrap-cold-content";
+    h.register_bootstrap_create(request_id.to_owned(), "content-v1".to_owned());
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("bootstrap-content-ui"),
+        tau_proto::UiCreateAgent {
+            request_id: request_id.to_owned(),
+            session_id: h.session_runtime.current_session_id.clone(),
+            role: h.config.selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some(prompt_text.to_owned()),
+            literal: true,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("bootstrap-content-prompt".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("admit bootstrap prompt");
+    let agent_id = h
+        .bootstrap_agent_for_id("content-v1")
+        .expect("scan live marker")
+        .expect("live marker owner");
+    let assert_journal = |h: &Harness| {
+        let records = h
+            .session_runtime
+            .agent_store
+            .agent_events(agent_id.as_str())
+            .expect("bootstrap journal");
+        let Event::AgentStarted(started) = &records[0].event else {
+            panic!("sequence zero must be AgentStarted");
+        };
+        assert_eq!(started.role, "engineer");
+        assert!(records.iter().any(|record| matches!(
+            &record.event,
+            Event::AgentPromptSubmitted(submitted)
+                if submitted.text == prompt_text
+                    && submitted.message_class == tau_proto::PromptMessageClass::User
+                    && submitted.originator == tau_proto::PromptOriginator::User
+        )));
+    };
+    assert_journal(&h);
+    h.shutdown().expect("shutdown live harness");
+    drop(h);
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &state, tau_proto::SessionStartReason::Resume)
+            .expect("cold reopen");
+    assert_journal(&resumed);
+    resumed.shutdown().expect("shutdown cold harness");
+}
+
+/// Bootstrap sensitivity follows only the accepted initial prompt through a
+/// replacement reply; later diagnostics for the same agent remain visible.
+#[test]
+fn bootstrap_prompt_debug_sensitivity_is_exact_through_interception() {
+    let td = TempDir::new().expect("tempdir");
+    let debug_dir = td.path().join("debug");
+    let mut h = echo_harness(td.path().join("state")).expect("harness");
+    h.runtime_io.debug_log = Some(DebugEventLog::open(&debug_dir).expect("open debug log"));
+    let interceptor = connect_test_tool(&mut h, "bootstrap-interceptor");
+    h.handle_extension_event(
+        "bootstrap-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register bootstrap interceptor");
+    h.register_bootstrap_create(
+        "bootstrap-sensitive-request".to_owned(),
+        "sensitive-v1".to_owned(),
+    );
+    let bootstrap_secret = "BOOTSTRAP-EXACT-SECRET-8f6c";
+    h.handle_ui_create_agent_from(
+        &crate::test_connection_id("bootstrap-ui"),
+        tau_proto::UiCreateAgent {
+            request_id: "bootstrap-sensitive-request".to_owned(),
+            session_id: h.session_runtime.current_session_id.clone(),
+            role: h.config.selected_role.clone(),
+            model_override: None,
+            metadata: Vec::new(),
+            initial_prompt: Some(bootstrap_secret.to_owned()),
+            literal: true,
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("bootstrap-sensitive-prompt".to_owned()),
+            parent_agent: None,
+            ephemeral: false,
+        },
+    )
+    .expect("park bootstrap submission");
+    let (mut replacement, _) = super::super::intercepted_payload(&interceptor);
+    let interceptor_secret = "INTERCEPTOR-REPLACEMENT-SECRET-a41d";
+    let Event::AgentPromptSubmitted(submitted) = &mut replacement else {
+        panic!("bootstrap prompt must park as submitted");
+    };
+    submitted.text = interceptor_secret.to_owned();
+    let reply = InterceptReply {
+        action: InterceptAction::Pass(Some(Box::new(replacement))),
+    };
+    h.log_event(&HarnessEvent::from_connection_for_test(
+        crate::test_connection_id("bootstrap-interceptor"),
+        tau_proto::HarnessInputMessage::InterceptReply(reply.clone()),
+    ));
+    h.handle_extension_event(
+        "bootstrap-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(reply)),
+    )
+    .expect("resolve bootstrap interceptor");
+
+    let agent_id = h
+        .bootstrap_agent_for_id("sensitive-v1")
+        .expect("scan marker")
+        .expect("bootstrap agent");
+    h.handle_disconnect(&crate::test_connection_id("bootstrap-interceptor"));
+    let ordinary_queued = "LATER-ORDINARY-QUEUED-5bc1";
+    h.publish_event(
+        None,
+        Event::AgentPromptQueued(tau_proto::AgentPromptQueued {
+            agent_id: agent_id.clone(),
+            text: ordinary_queued.to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+        }),
+    );
+    let ordinary_submitted = "LATER-ORDINARY-SUBMITTED-12d0";
+    h.publish_event(
+        None,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id,
+            text: ordinary_submitted.to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+            display_name: None,
+            ctx_id: Some("later-ordinary-prompt".to_owned()),
+        }),
+    );
+
+    let jsonl = std::fs::read_to_string(debug_dir.join("events.jsonl")).expect("read debug log");
+    assert!(!jsonl.contains(bootstrap_secret));
+    assert!(!jsonl.contains(interceptor_secret));
+    assert!(jsonl.contains(ordinary_queued));
+    assert!(jsonl.contains(ordinary_submitted));
+    h.shutdown().expect("shutdown");
+}
+
+/// Marker validation fails closed for every malformed reserved metadata shape,
+/// including two individually valid markers on one sequence-zero start.
+#[test]
+fn bootstrap_marker_validation_rejects_malformed_and_ambiguous_metadata() {
+    let key = || {
+        tau_proto::AgentMetadataKey::new(
+            path_crate_harness::subagents_tool::BOOTSTRAP_PROMPT_AGENT_METADATA_KEY,
+        )
+    };
+    let cases = [
+        vec![tau_proto::AgentInitialMetadata {
+            key: key(),
+            value: CborValue::Bool(true),
+            inheritable: false,
+        }],
+        vec![tau_proto::AgentInitialMetadata {
+            key: key(),
+            value: CborValue::Text("telegram-v1".to_owned()),
+            inheritable: true,
+        }],
+        vec![tau_proto::AgentInitialMetadata {
+            key: key(),
+            value: CborValue::Text("invalid bootstrap id!".to_owned()),
+            inheritable: false,
+        }],
+        vec![
+            tau_proto::AgentInitialMetadata {
+                key: key(),
+                value: CborValue::Text("telegram-v1".to_owned()),
+                inheritable: false,
+            },
+            tau_proto::AgentInitialMetadata {
+                key: key(),
+                value: CborValue::Text("telegram-v2".to_owned()),
+                inheritable: false,
+            },
+        ],
+    ];
+
+    for (index, metadata) in cases.into_iter().enumerate() {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = echo_harness(td.path()).expect("harness");
+        h.try_create_durable_user_agent_with_parent(
+            h.session_runtime.current_session_id.clone(),
+            &h.config.selected_role.clone(),
+            None,
+            metadata,
+        )
+        .expect("seed malformed durable marker");
+        assert!(
+            h.bootstrap_agent_for_id("telegram-v1").is_err(),
+            "malformed marker case {index} did not fail closed"
+        );
+        h.shutdown().expect("shutdown");
+    }
+
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    for _ in 0..2 {
+        h.try_create_durable_user_agent_with_parent(
+            h.session_runtime.current_session_id.clone(),
+            &h.config.selected_role.clone(),
+            None,
+            vec![tau_proto::AgentInitialMetadata {
+                key: key(),
+                value: CborValue::Text("telegram-v1".to_owned()),
+                inheritable: false,
+            }],
+        )
+        .expect("seed one valid durable marker owner");
+    }
+    assert!(
+        h.bootstrap_agent_for_id("telegram-v1").is_err(),
+        "two separate durable agents claiming one valid bootstrap id must fail closed"
+    );
+    h.shutdown().expect("shutdown duplicate-owner harness");
+}
+
+/// A durable sequence-zero marker suppresses retry even at the crash cut before
+/// any prompt fact can commit.
+#[test]
+fn bootstrap_marker_before_prompt_cut_suppresses_retry() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let marker = tau_proto::AgentInitialMetadata {
+        key: tau_proto::AgentMetadataKey::new(
+            path_crate_harness::subagents_tool::BOOTSTRAP_PROMPT_AGENT_METADATA_KEY,
+        ),
+        value: CborValue::Text("telegram-v1".to_owned()),
+        inheritable: false,
+    };
+    let cid = h
+        .try_create_durable_user_agent_with_parent(
+            h.session_runtime.current_session_id.clone(),
+            &h.config.selected_role.clone(),
+            None,
+            vec![marker],
+        )
+        .expect("commit marker-only crash cut");
+    let agent_id = h.agent_runtime.agent_registry.agents[&cid]
+        .identity
+        .agent_id
+        .clone()
+        .expect("durable agent id");
+
+    assert_eq!(
+        h.bootstrap_agent_for_id("telegram-v1")
+            .expect("scan marker-only cut"),
+        Some(crate::parse_agent_id(&agent_id))
+    );
+    let records = h
+        .session_runtime
+        .agent_store
+        .agent_events(&agent_id)
+        .expect("marker-only journal");
+    assert!(matches!(records[0].event, Event::AgentStarted(_)));
+    assert!(records.iter().all(|record| !matches!(
+        record.event,
+        Event::AgentPromptQueued(_) | Event::AgentPromptSubmitted(_) | Event::AgentPromptCreated(_)
+    )));
     h.shutdown().expect("shutdown");
 }
 
