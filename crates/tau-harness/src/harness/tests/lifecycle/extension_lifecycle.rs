@@ -5,6 +5,10 @@ use super::super::dispatch::provider_text_response;
 use super::*;
 use crate::event::{HarnessCommand, ShutdownCause};
 use crate::harness::STARTUP_TIMEOUT;
+use crate::harness::extension_activation::{
+    ToolStartedSubscriptionWork, reset_tool_started_subscription_work,
+    tool_started_subscription_work,
+};
 
 /// Session rollover resets only budget exhaustion; a peer disabled by
 /// configuration policy remains disabled.
@@ -4594,6 +4598,201 @@ fn handshaking_tool_register_is_not_active_before_ready() {
     h.shutdown().expect("shutdown");
 }
 
+/// Installed exact subscriptions must avoid every replacement allocation, while
+/// missing exact selectors preserve the legacy order and duplicate semantics.
+#[test]
+fn tool_started_subscription_fast_path_is_allocation_free_and_differentially_equivalent() {
+    fn legacy_result(
+        historical: &[EventSelector],
+        live: &[EventSelector],
+    ) -> (Vec<EventSelector>, Vec<EventSelector>) {
+        let selector = EventSelector::Exact(tau_proto::EventName::TOOL_STARTED);
+        let mut rebuilt_live = live.to_vec();
+        if rebuilt_live.contains(&selector) {
+            return (historical.to_vec(), rebuilt_live);
+        }
+        rebuilt_live.push(selector);
+        (historical.to_vec(), rebuilt_live)
+    }
+
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let cases = [
+        (
+            "exact-first",
+            vec![EventSelector::Exact(tau_proto::EventName::TOOL_STARTED)],
+            1,
+            0,
+            0,
+        ),
+        (
+            "exact-after-overlap",
+            vec![
+                EventSelector::Prefix("tool.".to_owned()),
+                EventSelector::Exact(tau_proto::EventName::TOOL_REQUEST),
+                EventSelector::Exact(tau_proto::EventName::TOOL_STARTED),
+                EventSelector::Exact(tau_proto::EventName::TOOL_STARTED),
+            ],
+            3,
+            0,
+            0,
+        ),
+        (
+            "overlap-without-exact",
+            vec![
+                EventSelector::Prefix("tool.".to_owned()),
+                EventSelector::Exact(tau_proto::EventName::TOOL_REQUEST),
+                EventSelector::Exact(tau_proto::EventName::TOOL_REQUEST),
+            ],
+            3,
+            5,
+            1,
+        ),
+        ("empty", Vec::new(), 0, 2, 1),
+    ];
+    for (name, live, expected_visits, expected_clones, expected_attempts) in cases {
+        let connection_id = crate::test_connection_id(name);
+        connect_test_tool(&mut h, name);
+        let historical = vec![
+            EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
+            EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
+        ];
+        h.runtime_io
+            .bus
+            .set_subscriptions(&connection_id, historical.clone(), live.clone())
+            .expect("install initial selectors");
+        let expected = legacy_result(&historical, &live);
+
+        reset_tool_started_subscription_work();
+        h.ensure_tool_started_subscription(&connection_id);
+
+        assert_eq!(
+            h.runtime_io.bus.historical_subscriptions(&connection_id),
+            Some(expected.0.as_slice()),
+            "{name}: historical selectors"
+        );
+        assert_eq!(
+            h.runtime_io.bus.live_subscriptions(&connection_id),
+            Some(expected.1.as_slice()),
+            "{name}: live selectors"
+        );
+        let work = tool_started_subscription_work();
+        assert_eq!(work.selector_visits, expected_visits, "{name}: visits");
+        assert_eq!(work.selector_clones, expected_clones, "{name}: clones");
+        assert_eq!(
+            work.replacement_attempts, expected_attempts,
+            "{name}: replacements"
+        );
+        if expected_attempts == 0 {
+            assert_eq!(work.vector_allocations, 0, "{name}: allocations");
+        }
+    }
+    h.shutdown().expect("shutdown");
+}
+
+/// Selector visits must scale exactly with the borrowed live slice, and only a
+/// missing exact selector may clone either replacement vector.
+#[test]
+fn tool_started_subscription_work_scales_with_borrowed_selector_visits() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let connection_id = crate::test_connection_id("subscription-scaling");
+    connect_test_tool(&mut h, connection_id.as_str());
+    let historical = vec![EventSelector::Exact(tau_proto::EventName::SESSION_STARTED)];
+    let mut live = (0..128)
+        .map(|index| {
+            EventSelector::Exact(
+                format!("demo.subscription_{index}")
+                    .parse()
+                    .expect("custom event name"),
+            )
+        })
+        .collect::<Vec<_>>();
+    h.runtime_io
+        .bus
+        .set_subscriptions(&connection_id, historical.clone(), live.clone())
+        .expect("install wide missing selector set");
+
+    reset_tool_started_subscription_work();
+    h.ensure_tool_started_subscription(&connection_id);
+    assert_eq!(
+        tool_started_subscription_work(),
+        ToolStartedSubscriptionWork {
+            selector_visits: 128,
+            vector_allocations: 3,
+            selector_clones: 129,
+            replacement_attempts: 1,
+        }
+    );
+
+    live.push(EventSelector::Exact(tau_proto::EventName::TOOL_STARTED));
+    h.runtime_io
+        .bus
+        .set_subscriptions(&connection_id, historical, live)
+        .expect("install wide exact selector set");
+    reset_tool_started_subscription_work();
+    h.ensure_tool_started_subscription(&connection_id);
+    assert_eq!(
+        tool_started_subscription_work(),
+        ToolStartedSubscriptionWork {
+            selector_visits: 129,
+            ..ToolStartedSubscriptionWork::default()
+        }
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A rejected registration must leave the installed selectors unchanged and
+/// never enter either subscription-repair path.
+#[test]
+fn invalid_tool_registration_does_not_repair_or_replace_subscriptions() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let connection_id = crate::test_connection_id("invalid-subscription-owner");
+    connect_handshaking_tool(&mut h, connection_id.as_str());
+    h.handle_extension_message(&connection_id, TestMessage::Ready(Default::default()))
+        .expect("activate extension");
+    let historical = vec![EventSelector::Exact(tau_proto::EventName::SESSION_STARTED)];
+    let live = vec![EventSelector::Prefix("tool.".to_owned())];
+    h.runtime_io
+        .bus
+        .set_subscriptions(&connection_id, historical.clone(), live.clone())
+        .expect("install initial selectors");
+
+    reset_tool_started_subscription_work();
+    h.handle_extension_event(
+        connection_id.as_str(),
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_invalid_tool_spec("invalid_subscription_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
+    )
+    .expect("commit rejected registration");
+
+    assert_eq!(
+        tool_started_subscription_work(),
+        ToolStartedSubscriptionWork::default()
+    );
+    assert_eq!(
+        h.runtime_io.bus.historical_subscriptions(&connection_id),
+        Some(historical.as_slice())
+    );
+    assert_eq!(
+        h.runtime_io.bus.live_subscriptions(&connection_id),
+        Some(live.as_slice())
+    );
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("invalid_subscription_tool")
+            .is_empty()
+    );
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
     // Ready is the activation boundary: the staged tool and its prompt fragment
@@ -4634,6 +4833,7 @@ fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
     )
     .expect("stage extension prompt fragment");
 
+    reset_tool_started_subscription_work();
     h.handle_extension_message(
         &crate::test_connection_id(conn_id),
         TestMessage::Ready(tau_proto::Ready {
@@ -4642,6 +4842,14 @@ fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
     )
     .expect("ready");
 
+    assert_eq!(
+        tool_started_subscription_work(),
+        ToolStartedSubscriptionWork {
+            vector_allocations: 1,
+            replacement_attempts: 1,
+            ..ToolStartedSubscriptionWork::default()
+        }
+    );
     assert_eq!(
         h.tool_routing.registry.providers_for("staged_tool").len(),
         1
@@ -4657,6 +4865,91 @@ fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
     );
     assert!(prompt.system_prompt.contains("STAGED EXTENSION PROMPT"));
 
+    h.shutdown().expect("shutdown");
+}
+
+/// A replacement connection generation must keep its replay selectors and use
+/// the allocation-free path when it already declared exact live observation.
+#[test]
+fn restarted_tool_generation_preserves_replay_selectors_and_exact_live_subscription() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let name = "restarted-subscription-owner";
+    let connection_id = crate::test_connection_id(name);
+    connect_handshaking_tool(&mut h, name);
+    h.handle_extension_event(
+        name,
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("first_generation_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
+    )
+    .expect("stage first generation");
+    h.handle_extension_message(&connection_id, TestMessage::Ready(Default::default()))
+        .expect("activate first generation");
+    h.handle_disconnect(&connection_id);
+
+    connect_handshaking_tool(&mut h, name);
+    let historical = vec![
+        EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
+        EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
+    ];
+    let live = vec![
+        EventSelector::Prefix("tool.".to_owned()),
+        EventSelector::Exact(tau_proto::EventName::TOOL_STARTED),
+        EventSelector::Exact(tau_proto::EventName::TOOL_STARTED),
+    ];
+    h.runtime_io
+        .bus
+        .set_subscriptions(&connection_id, historical.clone(), live.clone())
+        .expect("install replacement generation selectors");
+    h.handle_extension_event(
+        name,
+        TestProtocolItem::Event(Event::ToolRegistrationDeclared(
+            tau_proto::ToolRegistrationDeclared {
+                tool: staged_tool_spec("second_generation_tool"),
+                tool_group: None,
+                prompt_fragment: None,
+            },
+        )),
+    )
+    .expect("stage replacement generation");
+
+    reset_tool_started_subscription_work();
+    h.handle_extension_message(&connection_id, TestMessage::Ready(Default::default()))
+        .expect("activate replacement generation");
+
+    assert_eq!(
+        tool_started_subscription_work(),
+        ToolStartedSubscriptionWork {
+            selector_visits: 2,
+            ..ToolStartedSubscriptionWork::default()
+        }
+    );
+    assert_eq!(
+        h.runtime_io.bus.historical_subscriptions(&connection_id),
+        Some(historical.as_slice())
+    );
+    assert_eq!(
+        h.runtime_io.bus.live_subscriptions(&connection_id),
+        Some(live.as_slice())
+    );
+    assert!(
+        h.tool_routing
+            .registry
+            .providers_for("first_generation_tool")
+            .is_empty()
+    );
+    assert_eq!(
+        h.tool_routing
+            .registry
+            .providers_for("second_generation_tool")
+            .len(),
+        1
+    );
     h.shutdown().expect("shutdown");
 }
 

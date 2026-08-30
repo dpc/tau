@@ -3,8 +3,56 @@
 //! The activation barrier and interface authority are governed by the
 //! persistence and extension-interface gate.
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use super::compaction_runtime::RollingCompactionPass;
 use super::*;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct ToolStartedSubscriptionWork {
+    /// Borrowed live selectors examined before deciding whether repair is
+    /// needed.
+    pub(super) selector_visits: usize,
+    /// Selector vectors allocated while rebuilding a missing subscription.
+    pub(super) vector_allocations: usize,
+    /// Existing selectors cloned into replacement vectors.
+    pub(super) selector_clones: usize,
+    /// Atomic subscription replacement attempts.
+    pub(super) replacement_attempts: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Production-path work retained for deterministic allocation and scaling tests.
+    static TOOL_STARTED_SUBSCRIPTION_WORK: Cell<ToolStartedSubscriptionWork> =
+        const { Cell::new(ToolStartedSubscriptionWork {
+            selector_visits: 0,
+            vector_allocations: 0,
+            selector_clones: 0,
+            replacement_attempts: 0,
+        }) };
+}
+
+#[cfg(test)]
+fn record_tool_started_subscription_work(update: impl FnOnce(&mut ToolStartedSubscriptionWork)) {
+    TOOL_STARTED_SUBSCRIPTION_WORK.with(|work| {
+        let mut current = work.get();
+        update(&mut current);
+        work.set(current);
+    });
+}
+
+#[cfg(test)]
+pub(super) fn reset_tool_started_subscription_work() {
+    TOOL_STARTED_SUBSCRIPTION_WORK.with(|work| work.set(ToolStartedSubscriptionWork::default()));
+}
+
+#[cfg(test)]
+pub(super) fn tool_started_subscription_work() -> ToolStartedSubscriptionWork {
+    TOOL_STARTED_SUBSCRIPTION_WORK.with(Cell::get)
+}
 
 impl Harness {
     pub(super) fn send_agent_prompt_created_result(
@@ -287,21 +335,50 @@ impl Harness {
     }
 
     pub(super) fn ensure_tool_started_subscription(&mut self, source_id: &tau_proto::ConnectionId) {
-        let selector = EventSelector::Exact(tau_proto::EventName::TOOL_STARTED);
-        let mut selectors = self
+        let already_installed = self
             .runtime_io
             .bus
             .live_subscriptions(source_id)
-            .map_or_else(Vec::new, |s| s.to_vec());
-        if selectors.iter().any(|existing| existing == &selector) {
+            .is_some_and(|selectors| {
+                selectors.iter().any(|existing| {
+                    #[cfg(test)]
+                    record_tool_started_subscription_work(|work| work.selector_visits += 1);
+                    matches!(
+                        existing,
+                        EventSelector::Exact(name)
+                            if *name == tau_proto::EventName::TOOL_STARTED
+                    )
+                })
+            });
+        if already_installed {
             return;
         }
-        selectors.push(selector);
-        let historical = self
-            .runtime_io
-            .bus
-            .historical_subscriptions(source_id)
-            .map_or_else(Vec::new, |s| s.to_vec());
+
+        let live = self.runtime_io.bus.live_subscriptions(source_id);
+        #[cfg(test)]
+        record_tool_started_subscription_work(|work| {
+            let len = live.map_or(0, <[EventSelector]>::len);
+            work.selector_clones += len;
+            work.vector_allocations += usize::from(len != 0);
+        });
+        let mut selectors = live.map_or_else(Vec::new, <[EventSelector]>::to_vec);
+        #[cfg(test)]
+        record_tool_started_subscription_work(|work| {
+            work.vector_allocations += usize::from(selectors.len() == selectors.capacity());
+        });
+        selectors.push(EventSelector::Exact(tau_proto::EventName::TOOL_STARTED));
+
+        let historical = {
+            let historical = self.runtime_io.bus.historical_subscriptions(source_id);
+            #[cfg(test)]
+            record_tool_started_subscription_work(|work| {
+                let len = historical.map_or(0, <[EventSelector]>::len);
+                work.selector_clones += len;
+                work.vector_allocations += usize::from(len != 0);
+                work.replacement_attempts += 1;
+            });
+            historical.map_or_else(Vec::new, <[EventSelector]>::to_vec)
+        };
         if let Err(error) = self
             .runtime_io
             .bus
