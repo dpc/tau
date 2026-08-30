@@ -9,6 +9,39 @@ use tau_proto::{Event, HarnessInputMessage, NoticeLevel, ToolProgress};
 #[cfg(test)]
 pub(crate) static SATURATION_HOOK: Mutex<Option<(String, mpsc::Sender<()>)>> = Mutex::new(None);
 
+#[cfg(test)]
+/// Outcome observed when the selected terminal reaches its test gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolTerminalGateOutcome {
+    /// The selected call completed successfully.
+    Success,
+    /// The selected call completed with an error.
+    Error,
+    /// The selected call was cancelled.
+    Cancelled,
+}
+
+#[cfg(test)]
+/// Lifecycle event distinguishing gate arrival from an early dispatch exit.
+pub(crate) enum ToolTerminalGateEvent {
+    /// The selected terminal reached the gate.
+    Reached(ToolTerminalGateOutcome),
+    /// Dispatch exited before reaching the selected terminal gate.
+    DispatchFinished,
+}
+
+#[cfg(test)]
+/// Per-output gate that forces an asynchronous publication ahead of one tool
+/// terminal.
+struct ToolTerminalGate {
+    /// Tool-call correlation selected by the test.
+    call_id: String,
+    /// One-shot notification that terminal publication is paused.
+    lifecycle: mpsc::Sender<ToolTerminalGateEvent>,
+    /// One-shot release for the paused terminal publication.
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
 /// Sticky mandatory-output failure that wakes the owning manual protocol loop.
 struct OutputFailure {
     /// Whether a mandatory publication has failed.
@@ -61,6 +94,9 @@ impl OutputFailure {
 pub(crate) struct Output {
     /// Private transport and sticky-failure representation.
     kind: OutputKind,
+    #[cfg(test)]
+    /// Optional deterministic gate for output-ordering regressions.
+    tool_terminal_gate: Arc<Mutex<Option<Arc<ToolTerminalGate>>>>,
 }
 
 /// Private representation keeps failure signaling inside this subsystem.
@@ -81,6 +117,8 @@ impl From<mpsc::Sender<HarnessInputMessage>> for Output {
     fn from(tx: mpsc::Sender<HarnessInputMessage>) -> Self {
         Self {
             kind: OutputKind::Channel(tx),
+            #[cfg(test)]
+            tool_terminal_gate: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -92,11 +130,37 @@ impl From<ClientHandle> for Output {
                 handle,
                 failure: Arc::new(OutputFailure::new()),
             },
+            #[cfg(test)]
+            tool_terminal_gate: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 impl Output {
+    /// Pause the selected tool terminal until a test explicitly releases it.
+    #[cfg(test)]
+    pub(crate) fn gate_tool_terminal_for_test(
+        &self,
+        call_id: &str,
+    ) -> (
+        mpsc::Receiver<ToolTerminalGateEvent>,
+        mpsc::Sender<ToolTerminalGateEvent>,
+        mpsc::Sender<()>,
+    ) {
+        let (lifecycle_tx, lifecycle_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let gate = Arc::new(ToolTerminalGate {
+            call_id: call_id.to_owned(),
+            lifecycle: lifecycle_tx.clone(),
+            release: Mutex::new(release_rx),
+        });
+        *self
+            .tool_terminal_gate
+            .lock()
+            .expect("tool terminal gate lock") = Some(Arc::clone(&gate));
+        (lifecycle_rx, lifecycle_tx, release_tx)
+    }
+
     /// Exhaust the real detached FIFO at a correlated mandatory-output
     /// boundary.
     #[cfg(test)]
@@ -162,6 +226,36 @@ impl Output {
     /// Submit one terminal tool report through the typed client helper or the
     /// equivalent explicit transient channel frame.
     pub(crate) fn report_tool_terminal(&self, event: Event) -> ClientResult<()> {
+        #[cfg(test)]
+        {
+            let (call_id, outcome) = match &event {
+                Event::ToolResult(result) => (
+                    Some(result.call_id.as_str()),
+                    ToolTerminalGateOutcome::Success,
+                ),
+                Event::ToolError(error) => {
+                    (Some(error.call_id.as_str()), ToolTerminalGateOutcome::Error)
+                }
+                Event::ToolCancelled(cancelled) => (
+                    Some(cancelled.call_id.as_str()),
+                    ToolTerminalGateOutcome::Cancelled,
+                ),
+                _ => (None, ToolTerminalGateOutcome::Error),
+            };
+            let gate = self
+                .tool_terminal_gate
+                .lock()
+                .expect("tool terminal gate lock")
+                .take_if(|gate| Some(gate.call_id.as_str()) == call_id);
+            if let Some(gate) = gate {
+                let _ = gate.lifecycle.send(ToolTerminalGateEvent::Reached(outcome));
+                let _ = gate
+                    .release
+                    .lock()
+                    .expect("tool terminal release lock")
+                    .recv();
+            }
+        }
         #[cfg(test)]
         if let Event::ToolResult(result) = &event {
             self.saturate_for_test(result.call_id.as_str());

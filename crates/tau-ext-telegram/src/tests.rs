@@ -13,6 +13,7 @@ use super::gateway_supervisor::{
 };
 use super::*;
 use crate::gateway_client::test_support::authenticate_test_gateway;
+use crate::output::{ToolTerminalGateEvent, ToolTerminalGateOutcome};
 
 static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -804,6 +805,28 @@ fn expect_correlated_tool_error(
                 }
                 Event::ToolResultReported(result) if result.call_id.as_str() == call_id => {
                     panic!("expected correlated tool error, received tool result");
+                }
+                _ => {}
+            }
+        }
+        interleaved.push(message);
+    }
+}
+
+/// Wait for one exact successful tool terminal while retaining every
+/// asynchronous frame that overtakes it.
+fn expect_correlated_tool_success(
+    rx: &mpsc::Receiver<HarnessInputMessage>,
+    call_id: &str,
+    interleaved: &mut Vec<HarnessInputMessage>,
+) {
+    loop {
+        let message = rx.recv().expect("correlated tool terminal");
+        if let HarnessInputMessage::Emit(emit) = &message {
+            match emit.event.as_ref() {
+                Event::ToolResultReported(result) if result.call_id.as_str() == call_id => return,
+                Event::ToolErrorReported(error) if error.call_id.as_str() == call_id => {
+                    panic!("expected correlated tool result, received error: {error:?}");
                 }
                 _ => {}
             }
@@ -5705,7 +5728,9 @@ fn run_legacy_tool_namespace_is_rejected() {
 
 /// Initial backlog drain must be a non-long-poll request. Otherwise a fresh
 /// message arriving during the first long poll after registration could be
-/// mistaken for stale backlog and dropped.
+/// mistaken for stale backlog and dropped. The poller may publish that fresh
+/// message before the registration terminal, so the fixture must retain and
+/// correlate interleaved output instead of assigning meaning by frame position.
 #[test]
 fn initial_empty_drain_then_fresh_message_routes() {
     let (tx, rx) = mpsc::channel();
@@ -5722,21 +5747,87 @@ fn initial_empty_drain_then_fresh_message_routes() {
             }),
         }],
     ]);
-    let ext = test_extension(client.clone(), tx);
+    let ext = Arc::new(test_extension(client.clone(), tx));
     ext.apply_config(cfg(), Some(temp_state_dir()))
         .expect("apply config");
-    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
-    let _progress = rx.recv().expect("progress");
-    let _result = rx.recv().expect("result");
+    let call_id = format!("call-{REGISTER_TOOL_NAME}");
+    let (terminal_lifecycle, lifecycle_tx, terminal_release) =
+        ext.output.gate_tool_terminal_for_test(&call_id);
+    let terminal_release = BlockedWriterRelease::new(terminal_release);
+    let registering_ext = Arc::clone(&ext);
+    let registration = std::thread::spawn(move || {
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registering_ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+        }))
+        .is_err();
+        let _ = lifecycle_tx.send(ToolTerminalGateEvent::DispatchFinished);
+        panicked
+    });
 
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("fresh prompt") else {
-        panic!("emit")
-    };
-    let Event::MessageDeliveredReported(report) = *emit.event else {
-        panic!("message.delivered_reported event")
-    };
+    match terminal_lifecycle.recv().expect("registration lifecycle") {
+        ToolTerminalGateEvent::Reached(ToolTerminalGateOutcome::Success) => {}
+        ToolTerminalGateEvent::Reached(outcome) => {
+            terminal_release.release();
+            let _ = registration.join().expect("registration thread");
+            panic!("registration reached unexpected terminal: {outcome:?}");
+        }
+        ToolTerminalGateEvent::DispatchFinished => {
+            terminal_release.release();
+            let panicked = registration.join().expect("registration thread");
+            panic!("registration exited before reaching its terminal gate; panicked={panicked}");
+        }
+    }
+
+    let mut interleaved = Vec::new();
+    loop {
+        let message = rx
+            .recv()
+            .expect("fresh prompt before registration terminal");
+        let found_fresh_report = matches!(
+            &message,
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::MessageDeliveredReported(report)
+                    if report.text == "fresh")
+        );
+        interleaved.push(message);
+        if found_fresh_report {
+            break;
+        }
+    }
+    terminal_release.release();
+    assert!(
+        !registration.join().expect("registration thread"),
+        "registration dispatch panicked after reaching its terminal gate"
+    );
+    expect_correlated_tool_success(&rx, &call_id, &mut interleaved);
+
+    let report = interleaved
+        .iter()
+        .find_map(|message| {
+            let HarnessInputMessage::Emit(emit) = message else {
+                return None;
+            };
+            let Event::MessageDeliveredReported(report) = emit.event.as_ref() else {
+                return None;
+            };
+            Some(report)
+        })
+        .expect("message.delivered_reported event");
     assert_eq!(report.text, "fresh");
+    assert!(
+        interleaved.iter().any(|message| matches!(
+            message,
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::ToolProgressReported(progress)
+                    if progress.call_id.as_str() == call_id)
+        )),
+        "registration progress must retain exact tool-call correlation"
+    );
     assert_eq!(client.poll_timeouts.lock().expect("lock")[0], 0);
+    assert!(
+        rx.try_recv().is_err(),
+        "forced cut must account for every interleaved output frame"
+    );
 }
 
 /// Switching to a different Telegram bot token changes the update stream, so
