@@ -1108,25 +1108,45 @@ fn response_report_canonical_handoff_moves_large_payload_allocations() {
     let ownership = provider_report_ownership::take_snapshot();
     assert_eq!(ownership.update_handoffs, 1);
     assert_eq!(ownership.finished_handoffs, 1);
+    assert!(ownership.update_input.is_some());
     assert!(ownership.update_raw_projection.is_some());
     assert_eq!(
-        ownership.update_raw_projection, ownership.update_canonical,
+        ownership.update_input, ownership.update_canonical,
         "canonical update must receive the original delta vector"
     );
+    assert_ne!(
+        ownership.update_input, ownership.update_raw_projection,
+        "raw update projection must own an independent delta vector"
+    );
+    assert!(ownership.update_text_input.is_some());
     assert!(ownership.update_text_raw_projection.is_some());
     assert_eq!(
-        ownership.update_text_raw_projection, ownership.update_text_canonical,
+        ownership.update_text_input, ownership.update_text_canonical,
         "canonical update must receive the original large text allocation"
     );
+    assert_ne!(
+        ownership.update_text_input, ownership.update_text_raw_projection,
+        "raw update projection must own an independent large text allocation"
+    );
+    assert!(ownership.finished_input.is_some());
     assert!(ownership.finished_raw_projection.is_some());
     assert_eq!(
-        ownership.finished_raw_projection, ownership.finished_canonical,
+        ownership.finished_input, ownership.finished_canonical,
         "canonical terminal must receive the original output vector"
     );
+    assert_ne!(
+        ownership.finished_input, ownership.finished_raw_projection,
+        "raw terminal projection must own an independent output vector"
+    );
+    assert!(ownership.finished_text_input.is_some());
     assert!(ownership.finished_text_raw_projection.is_some());
     assert_eq!(
-        ownership.finished_text_raw_projection, ownership.finished_text_canonical,
+        ownership.finished_text_input, ownership.finished_text_canonical,
         "canonical terminal must receive the original large text allocation"
+    );
+    assert_ne!(
+        ownership.finished_text_input, ownership.finished_text_raw_projection,
+        "raw terminal projection must own an independent large text allocation"
     );
 
     let events = committed_events(&harness);
@@ -1144,11 +1164,6 @@ fn response_report_canonical_handoff_moves_large_payload_allocations() {
             _ => None,
         })
         .expect("canonical update");
-    assert_ne!(
-        provider_report_ownership::AllocationIdentity::of_slice(&raw_update.deltas),
-        ownership.update_canonical,
-        "runtime observation must retain an independent payload"
-    );
     assert_eq!(
         serde_json::to_vec(&raw_update.deltas).expect("encode raw update payload"),
         serde_json::to_vec(&canonical_update.deltas).expect("encode canonical update payload"),
@@ -1169,11 +1184,6 @@ fn response_report_canonical_handoff_moves_large_payload_allocations() {
             _ => None,
         })
         .expect("canonical terminal");
-    assert_ne!(
-        provider_report_ownership::AllocationIdentity::of_slice(&raw_finished.output_items),
-        ownership.finished_canonical,
-        "runtime observation must retain an independent terminal payload"
-    );
     assert_eq!(
         serde_json::to_vec(&raw_finished.output_items).expect("encode raw terminal output"),
         serde_json::to_vec(&canonical_finished.output_items)

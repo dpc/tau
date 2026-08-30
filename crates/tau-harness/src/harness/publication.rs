@@ -2079,12 +2079,16 @@ impl Harness {
         };
         let seq = self.runtime_io.event_log.reserve_seq();
         #[cfg(test)]
-        self.runtime_io.event_log.record_for_test(
-            seq,
-            recorded_at,
-            source_id.clone(),
-            event.clone(),
-        );
+        {
+            let raw_observer_projection = event.clone();
+            provider_report_ownership::observe_raw_projection(&event, &raw_observer_projection);
+            self.runtime_io.event_log.record_for_test(
+                seq,
+                recorded_at,
+                source_id.clone(),
+                raw_observer_projection,
+            );
+        }
         #[cfg(not(test))]
         let _ = seq;
         let debug_log_started = Instant::now();
@@ -2106,8 +2110,6 @@ impl Harness {
         if let Some(timing) = prompt_acceptance.as_mut() {
             timing.set_debug_record_admission(commit_timing.debug_log);
         }
-        #[cfg(test)]
-        provider_report_ownership::observe_before_raw_projection(&event);
         if let Event::SessionAgentLoaded(loaded) = &event
             && loaded.session_id == self.session_runtime.current_session_id
         {

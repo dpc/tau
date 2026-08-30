@@ -30,23 +30,34 @@ impl AllocationIdentity {
     }
 }
 
-/// Allocation identities observed before raw projection and after the owned
+/// Allocation identities observed during raw projection and after the owned
 /// canonical handoff.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct ProviderReportOwnershipSnapshot {
-    /// Update delta-vector allocation before raw observer projection.
+    /// Provider-owned update delta-vector allocation at raw projection.
+    pub(super) update_input: Option<AllocationIdentity>,
+    /// Independently cloned update delta-vector allocation stored for
+    /// observers.
     pub(super) update_raw_projection: Option<AllocationIdentity>,
     /// Update delta-vector allocation received by canonical derivation.
     pub(super) update_canonical: Option<AllocationIdentity>,
-    /// First update text allocation before raw observer projection.
+    /// Provider-owned first update text allocation at raw projection.
+    pub(super) update_text_input: Option<AllocationIdentity>,
+    /// Independently cloned first update text allocation stored for observers.
     pub(super) update_text_raw_projection: Option<AllocationIdentity>,
     /// First update text allocation received by canonical derivation.
     pub(super) update_text_canonical: Option<AllocationIdentity>,
-    /// Terminal output-vector allocation before raw observer projection.
+    /// Provider-owned terminal output-vector allocation at raw projection.
+    pub(super) finished_input: Option<AllocationIdentity>,
+    /// Independently cloned terminal output-vector allocation stored for
+    /// observers.
     pub(super) finished_raw_projection: Option<AllocationIdentity>,
     /// Terminal output-vector allocation received by canonical derivation.
     pub(super) finished_canonical: Option<AllocationIdentity>,
-    /// First terminal text allocation before raw observer projection.
+    /// Provider-owned first terminal text allocation at raw projection.
+    pub(super) finished_text_input: Option<AllocationIdentity>,
+    /// Independently cloned first terminal text allocation stored for
+    /// observers.
     pub(super) finished_text_raw_projection: Option<AllocationIdentity>,
     /// First terminal text allocation received by canonical derivation.
     pub(super) finished_text_canonical: Option<AllocationIdentity>,
@@ -62,19 +73,30 @@ thread_local! {
         Cell::new(ProviderReportOwnershipSnapshot::default());
 }
 
-/// Record allocation identities immediately before the raw observer projection.
-pub(super) fn observe_before_raw_projection(event: &Event) {
+/// Record the provider-owned event and its independently cloned raw projection
+/// while both allocations are simultaneously live.
+pub(super) fn observe_raw_projection(input: &Event, projection: &Event) {
     SNAPSHOT.with(|snapshot| {
         let mut value = snapshot.get();
-        match event {
-            Event::ProviderResponseUpdatedReported(updated) => {
-                value.update_raw_projection = AllocationIdentity::of_slice(&updated.deltas);
-                value.update_text_raw_projection = update_text_ptr(updated);
+        match (input, projection) {
+            (
+                Event::ProviderResponseUpdatedReported(input),
+                Event::ProviderResponseUpdatedReported(projection),
+            ) => {
+                value.update_input = AllocationIdentity::of_slice(&input.deltas);
+                value.update_raw_projection = AllocationIdentity::of_slice(&projection.deltas);
+                value.update_text_input = update_text_ptr(input);
+                value.update_text_raw_projection = update_text_ptr(projection);
             }
-            Event::ProviderResponseFinishedReported(finished) => {
+            (
+                Event::ProviderResponseFinishedReported(input),
+                Event::ProviderResponseFinishedReported(projection),
+            ) => {
+                value.finished_input = AllocationIdentity::of_slice(&input.output_items);
                 value.finished_raw_projection =
-                    AllocationIdentity::of_slice(&finished.output_items);
-                value.finished_text_raw_projection = output_text_ptr(&finished.output_items);
+                    AllocationIdentity::of_slice(&projection.output_items);
+                value.finished_text_input = output_text_ptr(&input.output_items);
+                value.finished_text_raw_projection = output_text_ptr(&projection.output_items);
             }
             _ => return,
         }
