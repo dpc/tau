@@ -4854,10 +4854,11 @@ fn disconnect_detaches_blocked_local_report() {
     let runner_client: Arc<dyn TelegramClient> = client.clone();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
     std::thread::scope(|scope| {
         let release = BlockedWriterRelease::new(release_tx);
-        let runner = scope.spawn(move || {
-            run_with_client_observing_disconnect(
+        scope.spawn(move || {
+            let result = run_with_client_observing_disconnect(
                 extension_input,
                 BlockingReportWriter {
                     entered: entered_tx,
@@ -4866,7 +4867,8 @@ fn disconnect_detaches_blocked_local_report() {
                 runner_client,
                 disconnect_tx,
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string());
+            let _ = result_tx.send(result);
         });
         let mut input = tau_proto::HarnessOutputWriter::new(harness_input);
         let mut secrets = BTreeMap::new();
@@ -4913,7 +4915,7 @@ fn disconnect_detaches_blocked_local_report() {
         disconnect_rx
             .recv()
             .expect("manual runtime observed disconnect");
-        let result = runner.join().expect("prompt runner thread");
+        let result = result_rx.recv().expect("prompt runner result");
         release.release();
         result.expect("disconnect");
     });
