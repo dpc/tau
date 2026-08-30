@@ -494,6 +494,7 @@ fn agent_id(text: &str) -> AgentId {
 
 fn tool(name: &str, agent: &str, args: CborValue) -> ToolStarted {
     ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: format!("call-{name}").into(),
         tool_name: tau_proto::ToolName::new(name),
         arguments: args,
@@ -867,7 +868,10 @@ fn dynamic_dm_message_facts_omit_synthesized_conversation_alias() {
         .expect("valid projection");
     let (ContentPart::Text { text }
     | ContentPart::SyntheticCompactionSummary { text }
-    | ContentPart::HarnessInternalText { text }) = &projection.item.content[0];
+    | ContentPart::HarnessInternalText { text }) = &projection.item.content[0]
+    else {
+        panic!("projection must contain text")
+    };
     assert!(!text.contains(" conversation="), "{text}");
     assert!(!text.contains(DYNAMIC_DM_LABEL), "{text}");
 
@@ -889,7 +893,10 @@ fn dynamic_dm_message_facts_omit_synthesized_conversation_alias() {
         .expect("valid projection");
     let (ContentPart::Text { text }
     | ContentPart::SyntheticCompactionSummary { text }
-    | ContentPart::HarnessInternalText { text }) = &projection.item.content[0];
+    | ContentPart::HarnessInternalText { text }) = &projection.item.content[0]
+    else {
+        panic!("projection must contain text")
+    };
     assert!(!text.contains(" conversation="), "{text}");
     assert!(!text.contains(DYNAMIC_DM_LABEL), "{text}");
 }
@@ -3354,7 +3361,10 @@ fn successful_send_uses_local_reply_selector() {
         .expect("valid projection");
     let (ContentPart::Text { text }
     | ContentPart::SyntheticCompactionSummary { text }
-    | ContentPart::HarnessInternalText { text }) = &projection.item.content[0];
+    | ContentPart::HarnessInternalText { text }) = &projection.item.content[0]
+    else {
+        panic!("projection must contain text")
+    };
     assert!(text.contains(" recipient_ref=\"slack-sender:"), "{text}");
     assert!(text.contains(" conversation=\"team\""), "{text}");
     assert!(!text.contains(" sender_ref="), "{text}");

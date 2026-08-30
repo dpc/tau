@@ -348,6 +348,7 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
             cache_usage: super::CacheUsageCompat::OpenAi,
         }),
         tags: Vec::new(),
+        hosted_tool_capabilities: Vec::new(),
         supported_tool_types: supports_tools
             .then_some(tau_proto::ToolType::Function)
             .into_iter()

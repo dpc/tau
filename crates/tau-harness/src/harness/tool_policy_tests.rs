@@ -63,6 +63,7 @@ fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
         id: model.clone(),
         display_name: None,
         tags: tags.iter().map(|tag| ModelTag::new(*tag)).collect(),
+        hosted_tool_capabilities: Vec::new(),
         supported_tool_types: vec![ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),

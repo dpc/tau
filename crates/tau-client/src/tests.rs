@@ -1046,6 +1046,7 @@ fn disconnect(reason: &str) -> HarnessOutputMessage {
 
 fn tool_started(name: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: format!("call-{name}").into(),
         tool_name: ToolName::new(name),
         arguments: CborValue::Map(Vec::new()),

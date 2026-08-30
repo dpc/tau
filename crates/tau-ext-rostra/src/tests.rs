@@ -931,6 +931,7 @@ fn runtime_shutdown_is_bounded() {
 /// Construct a minimal authenticated tool invocation.
 fn signed_invoke(name: &str, arguments: serde_json::Value) -> tau_proto::ToolStarted {
     tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: format!("call-{name}").into(),
         tool_name: tau_proto::ToolName::new(name),
         arguments: tau_proto::json_to_cbor(&arguments),

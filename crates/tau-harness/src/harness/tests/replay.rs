@@ -1039,7 +1039,10 @@ fn agent_message_fact_replay_rebuilds_uncovered_wake() {
     };
     let (tau_proto::ContentPart::Text { text }
     | tau_proto::ContentPart::SyntheticCompactionSummary { text }
-    | tau_proto::ContentPart::HarnessInternalText { text }) = &item.content[0];
+    | tau_proto::ContentPart::HarnessInternalText { text }) = &item.content[0]
+    else {
+        panic!("expected narrative text")
+    };
     assert_eq!(
         text,
         "<message event=\"created\" publisher=\"bridge\" message_ref=\"m1\" sender_ref=\"u1\" sender_display=\"Alice\" sender_auth=\"verified_allowlisted\" conversation=\"general\" content_trust=\"external\">persisted message</message>"
@@ -2938,6 +2941,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
             context: tau_proto::PromptContext { blocks: Vec::new() }, // Vec::new(),
             tools: Vec::new(),
             tools_ref: None,
+            hosted_tools: Vec::new(),
             model: "test/model".parse().expect("model id"),
             model_params: Default::default(),
             tool_choice: Default::default(),

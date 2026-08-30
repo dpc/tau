@@ -6,6 +6,243 @@ use tempfile::TempDir;
 use super::*;
 use crate::settings as path_crate_settings;
 
+/// Built-in logical web policy selects cached exact-route search first and
+/// keeps caller-directed fetch external.
+#[test]
+fn built_in_web_tools_policy_matches_native_first_contract() {
+    let settings = HarnessSettings::built_in();
+    let policy = &settings.roles["engineer"].web_tools;
+    let (_, native) = policy
+        .search()
+        .candidates()
+        .find(|(name, _)| *name == "native")
+        .expect("native");
+    assert!(matches!(
+        native,
+        WebToolCandidate::ModelProvider {
+            priority: 10,
+            access: WebSearchAccess::Cached,
+            context_size: None,
+            ..
+        }
+    ));
+    let (_, fetch) = policy
+        .fetch()
+        .candidates()
+        .find(|(name, _)| *name == "external")
+        .expect("external fetch");
+    assert!(matches!(
+        fetch,
+        WebToolCandidate::Tool { tool, .. }
+            if tool.as_str() == "websearch_hybrid_fetch"
+    ));
+    let encoded = serde_json::to_value(policy).expect("serialize effective policy");
+    let decoded: WebToolsPolicy =
+        serde_json::from_value(encoded).expect("deserialize validated effective policy");
+    assert_eq!(&decoded, policy);
+}
+
+/// Candidate maps merge field-by-field through agent, group, and role layers;
+/// explicit null clears inherited context size and domain restrictions.
+#[test]
+fn web_tools_role_merge_preserves_named_candidate_null_semantics() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  web_tools:
+    allowed_domains: [rust-lang.org]
+    search:
+      candidates:
+        native: { access: live }
+  role_groups:
+    engineer:
+      web_tools:
+        search:
+          candidates:
+            native: { context_size: high }
+      roles:
+        engineer:
+          web_tools:
+            allowed_domains: null
+            search:
+              candidates:
+                native: { context_size: null }
+"#,
+    )
+    .expect("write config");
+    let settings = load_harness_settings_in(&dirs_with_config(td.path())).expect("load config");
+    let policy = &settings.roles["engineer"].web_tools;
+    assert_eq!(policy.allowed_domains(), None);
+    let (_, native) = policy
+        .search()
+        .candidates()
+        .find(|(name, _)| *name == "native")
+        .expect("native");
+    assert!(matches!(
+        native,
+        WebToolCandidate::ModelProvider {
+            priority: 10,
+            access: WebSearchAccess::Live,
+            context_size: None,
+            ..
+        }
+    ));
+}
+
+/// Domain and candidate validation rejects unsafe or ambiguous policy at the
+/// authored path rather than discovering it during provider delivery.
+#[test]
+fn web_tools_reject_malformed_domains_and_candidate_shapes() {
+    let cases = vec![
+        (
+            "allowed_domains: [https://example.com]".to_owned(),
+            "expected a lowercase DNS domain name",
+        ),
+        (
+            "allowed_domains: [example.com, example.com]".to_owned(),
+            "duplicate domain `example.com`",
+        ),
+        (
+            format!(
+                "allowed_domains: [{}]",
+                (0..101)
+                    .map(|index| format!("d{index}.example"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "at most 100 domains",
+        ),
+        (
+            "search:\n      candidates:\n        broken: { enable: true, priority: 1 }".to_owned(),
+            "broken.kind: field is required",
+        ),
+        (
+            "search:\n      candidates:\n        broken: { enable: true, priority: 1, kind: tool, tool: read, access: live }".to_owned(),
+            "tool candidates cannot set access or context_size",
+        ),
+        (
+            "fetch:\n      candidates:\n        broken: { enable: true, priority: 1, kind: model_provider }".to_owned(),
+            "model_provider does not implement logical fetch",
+        ),
+        (
+            "search:\n      candidates: {}".to_owned(),
+            "candidate map must not be empty",
+        ),
+    ];
+    for (policy, expected) in cases {
+        let td = TempDir::new().expect("tempdir");
+        std::fs::write(
+            td.path().join("harness.yaml"),
+            format!("agents:\n  web_tools:\n    {policy}\n"),
+        )
+        .expect("write config");
+        let error =
+            load_harness_settings_in(&dirs_with_config(td.path())).expect_err("invalid web policy");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
+}
+
+/// Profile replay merges same-name candidates left-to-right; disabled
+/// candidates remain disabled and equal priorities retain deterministic names.
+#[test]
+fn web_tools_profiles_merge_candidates_and_disable_native() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+profiles:
+  restricted:
+    agents:
+      web_tools:
+        allowed_domains: [example.com]
+        search:
+          candidates:
+            native: { enable: false }
+            zeta: { enable: true, priority: 20, kind: tool, tool: alternate_search }
+"#,
+    )
+    .expect("write profile");
+    let selection = profile_selection("restricted");
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        Some(&selection),
+        &[],
+        &[],
+    )
+    .expect("load selected profile");
+    let policy = &settings.roles["engineer"].web_tools;
+    assert_eq!(
+        policy.allowed_domains(),
+        Some(["example.com".to_owned()].as_slice())
+    );
+    let candidates = policy.search().candidates().collect::<Vec<_>>();
+    assert!(matches!(
+        candidates.iter().find(|(name, _)| *name == "native"),
+        Some((_, WebToolCandidate::ModelProvider { enable: false, .. }))
+    ));
+    assert!(candidates.windows(2).all(|pair| pair[0].0 < pair[1].0));
+}
+
+/// File and dotted CLI camel-case aliases normalize before duplicate detection
+/// and preserve explicit nested values.
+#[test]
+fn web_tools_camel_case_aliases_work_in_files_and_cli_paths() {
+    assert_eq!(
+        normalize_harness_config_override_key(
+            "agents.roleGroups.engineer.roles.engineer.webTools.search.candidates.native.contextSize"
+        ),
+        "agents.role_groups.engineer.roles.engineer.web_tools.search.candidates.native.context_size"
+    );
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  roleGroups:
+    engineer:
+      roles:
+        engineer:
+          webTools:
+            allowedDomains: [example.com]
+            search:
+              candidates:
+                native:
+                  contextSize: low
+"#,
+    )
+    .expect("write aliases");
+    let cli = [HarnessConfigCliOverride::from_str(
+        "agents.roleGroups.engineer.roles.engineer.webTools.search.candidates.native.contextSize=high",
+    )
+    .expect("CLI alias")];
+    let settings = load_harness_settings_with_profile_and_cli_overrides_in(
+        &dirs_with_config(td.path()),
+        None,
+        &[],
+        &cli,
+    )
+    .expect("load aliases");
+    let native = settings.roles["engineer"]
+        .web_tools
+        .search()
+        .candidates()
+        .find(|(name, _)| *name == "native")
+        .expect("native")
+        .1;
+    assert!(matches!(
+        native,
+        WebToolCandidate::ModelProvider {
+            context_size: Some(tau_proto::WebSearchContextSize::High),
+            ..
+        }
+    ));
+}
+
 /// Provider and model aliases resolve independently after agent/group/role
 /// replay, including exact model suffixes that themselves contain slashes.
 #[test]

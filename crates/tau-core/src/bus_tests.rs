@@ -383,6 +383,7 @@ fn lazy_event_broadcast_skips_payload_without_candidate() {
             context: Default::default(),
             tools: Vec::new(),
             tools_ref: None,
+            hosted_tools: Vec::new(),
             model: "test/model".parse().expect("model"),
             model_params: Default::default(),
             tool_choice: Default::default(),
@@ -511,6 +512,7 @@ fn lazy_event_broadcast_rejects_mismatched_built_event() {
 
     bus.publish_event_from_excluding_kinds_lazy_without_report(None, notice(), &[], || {
         HarnessOutputMessage::deliver(Event::ToolStarted(tau_proto::ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: tau_proto::ToolCallId::from("call-mismatch"),
             agent_id: tau_proto::AgentId::parse("agent-mismatch").expect("agent id"),
             tool_name: tau_proto::ToolName::new("mismatch"),

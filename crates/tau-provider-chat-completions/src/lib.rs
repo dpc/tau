@@ -2728,6 +2728,7 @@ fn message_text(message: &tau_proto::MessageItem) -> String {
             | ContentPart::HarnessInternalText { text: part } => {
                 text.push_str(part);
             }
+            ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => {}
         }
     }
     text

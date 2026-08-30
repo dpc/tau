@@ -1619,6 +1619,7 @@ fn content_part_text(part: &ContentPart) -> &str {
         ContentPart::Text { text }
         | ContentPart::SyntheticCompactionSummary { text }
         | ContentPart::HarnessInternalText { text } => text,
+        ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
     }
 }
 

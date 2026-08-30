@@ -1488,6 +1488,7 @@ impl PromptFixture {
         PromptPayload {
             system_prompt: "",
             context: &self.context,
+            hosted_tools: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),

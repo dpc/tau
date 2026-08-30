@@ -1657,6 +1657,7 @@ impl ToolRegistry {
         Ok(ToolRouteReport {
             target,
             invoke: ToolStarted {
+                invocation_policy: tau_proto::ToolInvocationPolicy::default(),
                 call_id: request.call_id,
                 tool_name,
                 arguments: request.arguments,

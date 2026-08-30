@@ -1395,6 +1395,17 @@ fn model_info(
             ModelTag::new("shell:chatgpt"),
             ModelTag::new("tools:custom-text"),
         ],
+        hosted_tool_capabilities: (!mode.is_lite_compatibility())
+            .then_some(tau_proto::ProviderHostedToolCapability::WebSearch {
+                access_modes: vec![
+                    tau_proto::ProviderWebSearchAccess::Cached,
+                    tau_proto::ProviderWebSearchAccess::Live,
+                ],
+                supports_allowed_domains: true,
+                supports_context_size: true,
+            })
+            .into_iter()
+            .collect(),
         supported_tool_types: vec![tau_proto::ToolType::Function, tau_proto::ToolType::Custom],
         input_modalities: if is_gpt_5_6(model) {
             vec![

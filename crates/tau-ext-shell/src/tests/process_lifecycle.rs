@@ -348,6 +348,7 @@ fn model_shell_surfaces_enforce_allowlist_before_spawn() {
     ] {
         writer
             .write_event(&Event::ToolStarted(ToolStarted {
+                invocation_policy: tau_proto::ToolInvocationPolicy::default(),
                 call_id: call_id.into(),
                 tool_name: tau_proto::ToolName::new(tool_name),
                 arguments: cbor_map(vec![
@@ -621,6 +622,7 @@ fn shell_tool_reports_progress_and_success() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -663,6 +665,7 @@ fn gpt_shell_tool_reports_progress_and_success() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-gpt-shell".into(),
             tool_name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -1675,6 +1678,7 @@ fn shell_tool_reports_failures_with_details() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -1889,6 +1893,7 @@ fn shell_tool_cancel_request_stops_running_command_quickly() {
     let call_id = tau_proto::ToolCallId::new("cancel-shell-call");
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: call_id.clone(),
             tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             arguments: CborValue::Map(vec![(

@@ -193,9 +193,16 @@ array replacement:
   preserving named siblings.
 - Patch fields distinguish absent, explicit `null`, and concrete values. `null`
   clears nullable/scalar fields; replacement lists can be cleared with `[]`.
-  `tools` is a nullable replacement list: `tools: null` clears an inherited
+- `tools` is a nullable replacement list: `tools: null` clears an inherited
   allow-list back to default behavior, while `tools: []` sets an explicit empty
   allow-list.
+
+- `agents.web_tools` follows the same agent-default, role-group, and role
+  inheritance. Logical search and fetch candidates are keyed maps whose
+  same-named fields merge across layers; `(priority, name)` gives deterministic
+  selection order. `allowed_domains: null` clears an inherited restriction while
+  `[]` denies every web domain, and candidate `context_size: null` delegates to
+  the provider default.
 - Disabled roles are removed only after all file, drop-in, and CLI layers have
   been merged.
 - After role merging, provider aliases rewrite only the provider component and

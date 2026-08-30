@@ -139,6 +139,7 @@ fn curated_provider_vcr_replay_only_lane() {
         let request = PromptPayload {
             system_prompt: "",
             context: &context,
+            hosted_tools: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),

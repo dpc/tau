@@ -9,6 +9,20 @@ no single implementation area can own the complete external-content contract.
 Provider calls send model-supplied tool arguments to external hosted MCP or
 REST services. Provider output is untrusted web content that can contain prompt
 injection, misleading text, or large payloads before it re-enters model context.
+For prompt-correlated calls, the harness may attach a model-hidden
+`allowed_web_domains` invocation policy to `tool.started`. The extension never
+accepts this authority from model-visible arguments or `tool.request`.
+
+Fetch validates and normalizes the requested absolute HTTP(S) target before
+permit acquisition, provider selection, or extractor contact. It rejects
+userinfo, IP literals, and hosts outside the exact-or-subdomain allowlist. This
+is a requested-target gate, not a network sandbox: an extractor can follow
+redirects or load subresources outside the allowlist.
+
+Restricted search is eligible only for adapters whose declaration promises
+provider-side per-call filtering. Filtering returned results is not an egress
+control. When no configured adapter declares enforcement, the logical search
+candidate is unavailable and performs zero network activity.
 Each anonymous You.com attempt performs the MCP initialize/initialized
 handshake before `tools/call`, sends the negotiated protocol header only after
 initialization, requires the server's tools capability, and returns any

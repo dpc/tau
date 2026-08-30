@@ -225,6 +225,7 @@ pub fn models_for_provider(
                 id: tau_proto::ModelId::new(provider_name.clone(), model.id.clone()),
                 display_name: model.display_name.clone(),
                 tags,
+                hosted_tool_capabilities: Vec::new(),
                 supported_tool_types: vec![tau_proto::ToolType::Function],
                 input_modalities: Vec::new(),
                 tool_result_modalities: Vec::new(),

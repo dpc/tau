@@ -18,6 +18,7 @@ fn capture_record(
     let request = crate::Prompt {
         system_prompt: "",
         context: &context,
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -210,6 +211,7 @@ fn compact_capture_uses_exact_attempt_dispatch_and_observed_provider_projection(
     let request = crate::Prompt {
         system_prompt: "",
         context: &context,
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),

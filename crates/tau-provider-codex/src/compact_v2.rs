@@ -91,6 +91,7 @@ fn content_text(part: &ContentPart) -> Option<&str> {
         ContentPart::Text { text }
         | ContentPart::SyntheticCompactionSummary { text }
         | ContentPart::HarnessInternalText { text } => Some(text),
+        ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => None,
     }
 }
 
@@ -98,10 +99,14 @@ fn truncate_message(mut message: MessageItem, max_bytes: usize) -> Option<Messag
     let mut remaining = max_bytes;
     let mut content = Vec::new();
     for mut part in message.content {
-        let text = match &mut part {
+        let Some(text) = (match &mut part {
             ContentPart::Text { text }
             | ContentPart::SyntheticCompactionSummary { text }
-            | ContentPart::HarnessInternalText { text } => text,
+            | ContentPart::HarnessInternalText { text } => Some(text),
+            ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => None,
+        }) else {
+            content.push(part);
+            continue;
         };
         if remaining == 0 {
             continue;

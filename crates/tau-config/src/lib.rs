@@ -16,3 +16,9 @@ pub mod provider_debug_capture;
 pub mod provider_settings;
 pub mod secret_sources;
 pub mod settings;
+mod web_tools;
+
+pub use web_tools::{
+    LogicalWebToolPolicy, WebSearchAccess, WebToolCandidate, WebToolUnavailablePolicy,
+    WebToolsPolicy,
+};

@@ -16,6 +16,99 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+#[path = "prompt_materialization_web_tools_tests.rs"]
+mod web_tools_tests;
+
+/// Logical web operation selected independently at prompt materialization.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LogicalWebOperation {
+    /// Search for web sources.
+    Search,
+    /// Fetch one caller-selected page.
+    Fetch,
+}
+
+impl LogicalWebOperation {
+    /// Stable diagnostic name.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Fetch => "fetch",
+        }
+    }
+
+    /// Required model-visible tool alias.
+    const fn model_alias(self) -> &'static str {
+        match self {
+            Self::Search => "web_search",
+            Self::Fetch => "web_fetch",
+        }
+    }
+
+    /// Neutral operation metadata tag.
+    const fn operation_tag(self) -> &'static str {
+        match self {
+            Self::Search => tau_proto::WEB_SEARCH_TOOL_TAG,
+            Self::Fetch => tau_proto::WEB_FETCH_TOOL_TAG,
+        }
+    }
+
+    /// Required domain-enforcement metadata tag.
+    const fn enforcement_tag(self) -> &'static str {
+        match self {
+            Self::Search => tau_proto::WEB_PROVIDER_FILTER_DOMAIN_ENFORCEMENT_TAG,
+            Self::Fetch => tau_proto::WEB_REQUESTED_TARGET_DOMAIN_ENFORCEMENT_TAG,
+        }
+    }
+}
+
+/// Result of compiling logical web policy against one exact route.
+struct CompiledWebTools {
+    /// Selected provider-hosted definitions.
+    hosted_tools: Vec<tau_proto::HostedToolDefinition>,
+    /// Selected ordinary internal tool names.
+    retained_tools: HashSet<ToolName>,
+    /// Hidden policy for selected ordinary tools.
+    invocation_policies: HashMap<ToolName, tau_proto::ToolInvocationPolicy>,
+}
+
+fn suppress_declared_web_candidates(
+    policy: &tau_config::WebToolsPolicy,
+    specs: &mut Vec<tau_proto::ToolSpec>,
+) {
+    let declared_candidates = policy.declared_tool_names().collect::<HashSet<_>>();
+    specs.retain(|spec| !declared_candidates.contains(&spec.name));
+}
+
+fn hosted_web_search_collides(
+    hosted_tools: &[tau_proto::HostedToolDefinition],
+    specs: &[tau_proto::ToolSpec],
+) -> bool {
+    !hosted_tools.is_empty()
+        && specs.iter().any(|spec| {
+            spec.model_visible_name
+                .as_ref()
+                .unwrap_or(&spec.name)
+                .as_str()
+                == "web_search"
+        })
+}
+
+/// Fully compiled provider-visible prompt surface.
+struct MaterializedPromptSurface {
+    /// Authorized and selected ordinary tool metadata.
+    tool_specs: Vec<tau_proto::ToolSpec>,
+    /// Provider-facing ordinary tool definitions.
+    tool_definitions: Vec<ToolDefinition>,
+    /// Provider-facing hosted tool definitions.
+    hosted_tools: Vec<tau_proto::HostedToolDefinition>,
+    /// Hidden policies for ordinary invocations.
+    invocation_policies: HashMap<ToolName, tau_proto::ToolInvocationPolicy>,
+    /// Rendered system prompt based on the selected surface.
+    system_prompt: String,
+}
+
 /// Reset the deterministic dispatch provider-sort work counter.
 #[cfg(test)]
 pub(super) fn reset_dispatch_provider_sort_count() {
@@ -36,6 +129,8 @@ pub(super) enum PromptSurfaceError {
     DuplicateToolName(String),
     /// Strict Handlebars rendering failure.
     Render(handlebars::RenderError),
+    /// Logical web policy required a capability unavailable on the exact route.
+    WebUnavailable(String),
 }
 
 /// Count serialized JSON bytes without retaining schema content.
@@ -57,6 +152,137 @@ fn serialized_json_len(value: &serde_json::Value) -> usize {
 
     let mut counter = ByteCounter(0);
     serde_json::to_writer(&mut counter, value).map_or(0, |()| counter.0)
+}
+
+/// Compile role policy against one exact route and one authorized tool
+/// snapshot.
+fn compile_web_tools(
+    policy: &tau_config::WebToolsPolicy,
+    model: &tau_proto::ProviderModelInfo,
+    specs: &[tau_proto::ToolSpec],
+) -> Result<CompiledWebTools, String> {
+    let allowed_domains = policy.allowed_domains().map(<[String]>::to_vec);
+    let domains_available = allowed_domains
+        .as_ref()
+        .is_none_or(|domains| !domains.is_empty());
+    let native_capability = model
+        .hosted_tool_capabilities
+        .iter()
+        .map(|capability| {
+            let tau_proto::ProviderHostedToolCapability::WebSearch {
+                access_modes,
+                supports_allowed_domains,
+                supports_context_size,
+            } = capability;
+            (
+                access_modes.as_slice(),
+                *supports_allowed_domains,
+                *supports_context_size,
+            )
+        })
+        .next();
+    let mut retained = HashSet::new();
+    let mut invocation_policies = HashMap::new();
+    let mut hosted = Vec::new();
+
+    for (operation, logical) in [
+        (LogicalWebOperation::Search, policy.search()),
+        (LogicalWebOperation::Fetch, policy.fetch()),
+    ] {
+        let mut candidates = logical.candidates().collect::<Vec<_>>();
+        candidates.sort_by(|(left_name, left), (right_name, right)| {
+            left.priority()
+                .cmp(&right.priority())
+                .then_with(|| left_name.cmp(right_name))
+        });
+        let winner = candidates.into_iter().find(|(_, candidate)| {
+            if !candidate.enabled() || !domains_available {
+                return false;
+            }
+            match candidate {
+                tau_config::WebToolCandidate::ModelProvider {
+                    access,
+                    context_size,
+                    ..
+                } => {
+                    operation == LogicalWebOperation::Search
+                        && native_capability.is_some_and(|(access_modes, domains, context)| {
+                            let requested_access = if *access == tau_config::WebSearchAccess::Live {
+                                tau_proto::ProviderWebSearchAccess::Live
+                            } else {
+                                tau_proto::ProviderWebSearchAccess::Cached
+                            };
+                            access_modes.contains(&requested_access)
+                                && (allowed_domains.is_none() || domains)
+                                && (context_size.is_none() || context)
+                        })
+                }
+                tau_config::WebToolCandidate::Tool { tool, .. } => specs.iter().any(|spec| {
+                    spec.name == *tool
+                        && spec.tool_type == tau_proto::ToolType::Function
+                        && spec
+                            .model_visible_name
+                            .as_ref()
+                            .unwrap_or(&spec.name)
+                            .as_str()
+                            == operation.model_alias()
+                        && spec
+                            .tags
+                            .iter()
+                            .any(|tag| tag.as_str() == operation.operation_tag())
+                        && (allowed_domains.is_none()
+                            || spec
+                                .tags
+                                .iter()
+                                .any(|tag| tag.as_str() == operation.enforcement_tag()))
+                }),
+            }
+        });
+        match winner {
+            Some((
+                _,
+                tau_config::WebToolCandidate::ModelProvider {
+                    access,
+                    context_size,
+                    ..
+                },
+            )) => {
+                hosted.push(tau_proto::HostedToolDefinition::WebSearch {
+                    access: if *access == tau_config::WebSearchAccess::Live {
+                        tau_proto::ProviderWebSearchAccess::Live
+                    } else {
+                        tau_proto::ProviderWebSearchAccess::Cached
+                    },
+                    context_size: *context_size,
+                    allowed_domains: allowed_domains.clone().unwrap_or_default(),
+                });
+            }
+            Some((_, tau_config::WebToolCandidate::Tool { tool, .. })) => {
+                retained.insert(tool.clone());
+                if allowed_domains.is_some() {
+                    invocation_policies.insert(
+                        tool.clone(),
+                        tau_proto::ToolInvocationPolicy {
+                            allowed_web_domains: allowed_domains.clone(),
+                        },
+                    );
+                }
+            }
+            None if logical.unavailable() == tau_config::WebToolUnavailablePolicy::Error => {
+                return Err(format!(
+                    "logical web {} is unavailable for exact route `{}`",
+                    operation.as_str(),
+                    model.id,
+                ));
+            }
+            None => {}
+        }
+    }
+    Ok(CompiledWebTools {
+        hosted_tools: hosted,
+        retained_tools: retained,
+        invocation_policies,
+    })
 }
 
 impl Harness {
@@ -804,23 +1030,19 @@ impl Harness {
             ));
             return None;
         };
-        // Non-tool extension side agents (`std-notifications`'
-        // idle summary, etc.) must not execute tools — their whole
-        // job is to produce a one-line summary, and unfettered tool
-        // access has historically caused destructive `edit` calls. Do NOT
-        // enforce that by flipping the provider `tool_choice` to `none`:
-        // `tool_choice` is serialized on the
-        // wire and changing it breaks the request-body equivalence the
-        // `previous_response_id` cache relies on. Keep the wire
-        // request identical to the parent (`Auto`) and enforce the
-        // no-tools rule locally before dispatching any returned tool
-        // calls.
+        // Non-tool extension side agents (`std-notifications`' idle summary,
+        // etc.) must not execute tools. Provider `tool_choice: none` is the
+        // upstream authority; local rejection alone cannot contain hosted tools.
         let is_non_tool_ext_query = matches!(
             conv.identity.originator,
             tau_proto::PromptOriginator::Extension { .. }
         ) && conv.identity.parent_tool_call_id.is_none()
             && !conv.identity.restored_tool_backed_start;
-        let tool_choice = tau_proto::ToolChoice::Auto;
+        let tool_choice = if is_non_tool_ext_query {
+            tau_proto::ToolChoice::None
+        } else {
+            tau_proto::ToolChoice::Auto
+        };
         // Legacy cache-sharing hint for older provider implementations. The
         // first-party ChatGPT/Codex provider now derives cache keys only from
         // base URL and target agent id, so prompt originator and this flag do
@@ -930,16 +1152,15 @@ impl Harness {
         }
         let operation = owned_operation;
         let durable_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
-        let (tool_specs, tools, system_prompt) = match self
-            .prepare_prompt_surface_for_dispatch_timed(
-                &role_name,
-                durable_agent_id.as_ref(),
-                durable_agent_id.as_ref(),
-                &model,
-                is_non_tool_ext_query,
-                contains_payload_envelope_provenance_projection,
-                timing,
-            ) {
+        let surface = match self.prepare_prompt_surface_for_dispatch_timed(
+            &role_name,
+            durable_agent_id.as_ref(),
+            durable_agent_id.as_ref(),
+            &model,
+            is_non_tool_ext_query,
+            contains_payload_envelope_provenance_projection,
+            timing,
+        ) {
             Ok(surface) => surface,
             Err(PromptSurfaceError::DuplicateToolName(name)) => {
                 let message = format!(
@@ -956,7 +1177,19 @@ impl Harness {
                 self.terminalize_owned_dispatch_error(cid, message);
                 return None;
             }
+            Err(PromptSurfaceError::WebUnavailable(message)) => {
+                self.emit_harness_failure(&message);
+                self.terminalize_owned_dispatch_error(cid, message);
+                return None;
+            }
         };
+        let MaterializedPromptSurface {
+            tool_specs,
+            tool_definitions: tools,
+            hosted_tools,
+            invocation_policies: tool_invocation_policies,
+            system_prompt,
+        } = surface;
         let durable_agent_id = agent_id_for_tree.as_deref().unwrap_or(cid.as_ref());
         let agent_prompt_id = reserved_compact_prompt_id
             .or_else(|| checkpointed_inference.map(|(prompt_id, _)| prompt_id))
@@ -1045,6 +1278,10 @@ impl Harness {
             .prompt_runtime
             .tool_specs
             .insert(agent_prompt_id.clone(), tool_specs);
+        self.prompt_coordination
+            .prompt_runtime
+            .tool_invocation_policies
+            .insert(agent_prompt_id.clone(), tool_invocation_policies);
         let session_id = self
             .agent_runtime
             .agent_registry
@@ -1098,6 +1335,7 @@ impl Harness {
             context,
             tools,
             tools_ref: None,
+            hosted_tools,
             model,
             model_params: prompt_params,
             tool_choice,
@@ -1146,22 +1384,6 @@ impl Harness {
             );
             return false;
         }
-        let specs = self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model));
-        if let Some(name) = duplicate_model_visible_tool_name(&specs) {
-            self.emit_harness_failure(&format!(
-                "cannot dispatch prompt for role `{role_name}`: effective tool surface contains duplicate model-visible name `{name}`"
-            ));
-            self.fail_initial_prompt_materialization(
-                cid,
-                "failed to validate initial prompt tool surface",
-            );
-            return false;
-        }
-        let capability_specs = if is_non_tool_ext_query {
-            &[][..]
-        } else {
-            specs.as_slice()
-        };
         let durable_agent_id = conv.identity.agent_id.as_deref().map(crate::parse_agent_id);
         let contains_payload_envelope_provenance_projection = conv
             .identity
@@ -1175,22 +1397,30 @@ impl Harness {
                 )
             })
             .unwrap_or(false);
-        match self.try_build_system_prompt_for_role_and_agent(
+        match self.prepare_prompt_surface_for_dispatch_timed(
             &role_name,
             durable_agent_id.as_ref(),
             durable_agent_id.as_ref(),
-            capability_specs,
-            Some(&model),
+            &model,
+            is_non_tool_ext_query,
             contains_payload_envelope_provenance_projection,
+            None,
         ) {
             Ok(_) => true,
             Err(error) => {
-                self.emit_harness_failure(&format!(
-                    "cannot dispatch prompt for role `{role_name}` until its template is repaired: {error}"
-                ));
+                let message = match error {
+                    PromptSurfaceError::DuplicateToolName(name) => format!(
+                        "cannot dispatch prompt for role `{role_name}`: effective tool surface contains duplicate model-visible name `{name}`"
+                    ),
+                    PromptSurfaceError::Render(error) => format!(
+                        "cannot dispatch prompt for role `{role_name}` until its template is repaired: {error}"
+                    ),
+                    PromptSurfaceError::WebUnavailable(message) => message,
+                };
+                self.emit_harness_failure(&message);
                 self.fail_initial_prompt_materialization(
                     cid,
-                    "failed to render initial prompt template",
+                    "failed to validate initial prompt tool surface",
                 );
                 false
             }
@@ -1319,7 +1549,7 @@ impl Harness {
         hide_tool_capabilities: bool,
         contains_payload_envelope_provenance_projection: bool,
     ) -> Result<(Vec<tau_proto::ToolSpec>, Vec<ToolDefinition>, String), PromptSurfaceError> {
-        self.prepare_prompt_surface_for_dispatch_timed(
+        let surface = self.prepare_prompt_surface_for_dispatch_timed(
             role_name,
             agent_id,
             context_agent_id,
@@ -1327,7 +1557,12 @@ impl Harness {
             hide_tool_capabilities,
             contains_payload_envelope_provenance_projection,
             None,
-        )
+        )?;
+        Ok((
+            surface.tool_specs,
+            surface.tool_definitions,
+            surface.system_prompt,
+        ))
     }
 
     /// Timed form of prompt-surface preparation used only by live provider
@@ -1342,22 +1577,68 @@ impl Harness {
         hide_tool_capabilities: bool,
         contains_payload_envelope_provenance_projection: bool,
         timing: Option<&PromptMaterializationTiming>,
-    ) -> Result<(Vec<tau_proto::ToolSpec>, Vec<ToolDefinition>, String), PromptSurfaceError> {
+    ) -> Result<MaterializedPromptSurface, PromptSurfaceError> {
         let stage_started = stage_start(timing);
         let providers = self.sorted_prompt_tool_providers();
-        let specs = self.gather_effective_tool_specs_for_role_model_from_providers(
+        let mut specs = self.gather_effective_tool_specs_for_role_model_from_providers(
             role_name,
             Some(model),
             &providers,
         );
+        let mut hosted_tools = Vec::new();
+        let mut invocation_policies = HashMap::new();
+        if let Some(policy) = self
+            .config
+            .available_roles
+            .get(role_name)
+            .map(|role| &role.web_tools)
+            && hide_tool_capabilities
+        {
+            suppress_declared_web_candidates(policy, &mut specs);
+        } else if let (Some(policy), Some(model_info)) = (
+            self.config
+                .available_roles
+                .get(role_name)
+                .map(|role| &role.web_tools),
+            self.provider_runtime.model_info.get(model),
+        ) {
+            let compiled = compile_web_tools(policy, model_info, &specs)
+                .map_err(PromptSurfaceError::WebUnavailable)?;
+            let declared_candidates = policy.declared_tool_names().collect::<HashSet<_>>();
+            specs.retain(|spec| {
+                !declared_candidates.contains(&spec.name)
+                    || compiled.retained_tools.contains(&spec.name)
+            });
+            hosted_tools = compiled.hosted_tools;
+            invocation_policies = compiled.invocation_policies;
+        }
+        if hosted_web_search_collides(&hosted_tools, &specs) {
+            return Err(PromptSurfaceError::DuplicateToolName(
+                "web_search".to_owned(),
+            ));
+        }
         if let Some(name) = duplicate_model_visible_tool_name(&specs) {
             return Err(PromptSurfaceError::DuplicateToolName(name.to_string()));
         }
-        let capability_specs = if hide_tool_capabilities {
-            &[][..]
+        let mut capability_specs = if hide_tool_capabilities {
+            Vec::new()
         } else {
-            specs.as_slice()
+            specs.clone()
         };
+        if !hide_tool_capabilities && !hosted_tools.is_empty() {
+            capability_specs.push(tau_proto::ToolSpec {
+                name: ToolName::new("web_search"),
+                model_visible_name: None,
+                description: Some("Search the web through the exact model provider.".to_owned()),
+                tool_type: tau_proto::ToolType::Function,
+                parameters: None,
+                format: None,
+                tags: vec![tau_proto::ToolTag::new(tau_proto::WEB_SEARCH_TOOL_TAG)],
+                enabled_by_default: true,
+                background_support: None,
+                examples: Vec::new(),
+            });
+        }
         let effective_tool_names = capability_specs
             .iter()
             .map(|spec| spec.name.clone())
@@ -1376,7 +1657,7 @@ impl Harness {
                 role_name,
                 agent_id,
                 context_agent_id,
-                capability_specs,
+                &capability_specs,
                 Some(model),
                 contains_payload_envelope_provenance_projection,
                 &providers,
@@ -1384,7 +1665,13 @@ impl Harness {
                 timing,
             )
             .map_err(PromptSurfaceError::Render)?;
-        Ok((specs, tools, prompt))
+        Ok(MaterializedPromptSurface {
+            tool_specs: specs,
+            tool_definitions: tools,
+            hosted_tools,
+            invocation_policies,
+            system_prompt: prompt,
+        })
     }
 
     pub(super) fn try_build_system_prompt_for_role_and_agent(

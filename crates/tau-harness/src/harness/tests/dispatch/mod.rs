@@ -394,6 +394,7 @@ fn text_part(item: &ContextItem) -> Option<&str> {
             ContentPart::Text { text }
             | ContentPart::SyntheticCompactionSummary { text }
             | ContentPart::HarnessInternalText { text } => text.as_str(),
+            ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
         }),
         ContextItem::ToolResult(result) => match &result.output.raw {
             CborValue::Text(text) => Some(text.as_str()),
@@ -1246,6 +1247,7 @@ fn provider_model_info(
         id,
         display_name: None,
         tags: Vec::new(),
+        hosted_tool_capabilities: Vec::new(),
         supported_tool_types: vec![tau_proto::ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
@@ -1622,6 +1624,7 @@ pub(super) fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             id: "test/model".into(),
             display_name: None,
             tags: Vec::new(),
+            hosted_tool_capabilities: Vec::new(),
             supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),

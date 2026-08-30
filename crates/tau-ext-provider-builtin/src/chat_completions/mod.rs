@@ -65,6 +65,9 @@ pub struct ChatCompletionsModel {
         skip_serializing_if = "is_function_tool_types"
     )]
     pub supported_tool_types: Vec<tau_proto::ToolType>,
+    /// Provider-hosted capabilities configured for this exact route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosted_tool_capabilities: Vec<tau_proto::ProviderHostedToolCapability>,
     /// Input modalities accepted by this exact configured route.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_modalities: Vec<tau_proto::InputModality>,

@@ -478,6 +478,7 @@ fn model_snapshot(capabilities: FakeModelCapabilities) -> ProviderModelsDeclared
             id: FAKE_MODEL_ID.into(),
             display_name: Some("Deterministic test model".to_owned()),
             tags: Vec::new(),
+            hosted_tool_capabilities: Vec::new(),
             supported_tool_types: vec![ToolType::Function],
             input_modalities: if capabilities.typed_image {
                 vec![InputModality::Text, InputModality::Image]
@@ -2620,6 +2621,7 @@ impl FakeState {
                                     ContentPart::Text { text }
                                     | ContentPart::SyntheticCompactionSummary { text }
                                     | ContentPart::HarnessInternalText { text } => text.contains(message),
+                                    ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => false,
                                 })
                         )
                     })
@@ -3621,6 +3623,7 @@ fn prompt_text_occurrences(prompt: &tau_proto::AgentPromptCreated, expected: &st
                     ContentPart::Text { text }
                     | ContentPart::SyntheticCompactionSummary { text }
                     | ContentPart::HarnessInternalText { text } => text.contains(expected),
+                    ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => false,
                 })
                 .count(),
             _ => 0,
@@ -3859,6 +3862,9 @@ fn provider_user_texts(prompt: &tau_proto::AgentPromptCreated) -> Vec<String> {
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
                         | ContentPart::HarnessInternalText { text } => text,
+                        ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => {
+                            String::new()
+                        }
                     })
                     .collect::<String>(),
             ),
@@ -3912,6 +3918,7 @@ fn validate_output_length_continuation_context(
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
                         | ContentPart::HarnessInternalText { text } => text.as_str(),
+                        ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
                     }).collect::<String>()
                         == project_fixture_human_ui_user_prompt(user_text)
         )
@@ -3935,6 +3942,7 @@ fn validate_output_length_continuation_context(
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
                         | ContentPart::HarnessInternalText { text } => text.as_str(),
+                        ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
                     }).collect::<String>() == instruction_text
         )
     });
@@ -3997,6 +4005,7 @@ fn context_has_text(
                 ContentPart::Text { text }
                 | ContentPart::SyntheticCompactionSummary { text }
                 | ContentPart::HarnessInternalText { text } => text.as_str(),
+                ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
             })
             .collect::<String>();
         if role == ContextRole::User {

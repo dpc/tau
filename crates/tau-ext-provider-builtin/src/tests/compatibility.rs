@@ -208,6 +208,7 @@ fn responses_event_snapshot() -> Vec<Event> {
         system_prompt: "",
         context: &prompt.context,
         tools: &prompt.tools,
+        hosted_tools: &prompt.hosted_tools,
         params: prompt.model_params,
         tool_choice: prompt.tool_choice,
         compaction: prompt.compaction,
@@ -229,11 +230,15 @@ fn responses_event_snapshot() -> Vec<Event> {
     let mut bytes = Vec::new();
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        let parsed_prompt_id = tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+            .expect("test prompt id");
+        let target = ResponseUpdateTarget {
+            agent_prompt_id: &parsed_prompt_id,
+            agent_id: &prompt.agent_id,
+            originator: &prompt.originator,
+        };
         let emitted = emit_chatgpt_stream_update(
-            &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
-                .expect("test prompt id"),
-            &prompt.agent_id,
-            &prompt.originator,
+            &target,
             &state,
             &mut CodexStreamDeltaEmitter::default(),
             ProviderResponseStats {
@@ -244,6 +249,7 @@ fn responses_event_snapshot() -> Vec<Event> {
                 },
                 first_semantic_output_elapsed_micros: None,
             },
+            None,
             &mut writer,
         );
         assert!(emitted, "compatibility update must cross the output seam");

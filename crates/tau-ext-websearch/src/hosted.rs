@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use super::{
     DEFAULT_BRAVE_ENDPOINT, DEFAULT_FIRECRAWL_ENDPOINT, DEFAULT_TAVILY_ENDPOINT,
     DEFAULT_YOU_ENDPOINT, HTTP_TOO_MANY_REQUESTS, MCP_PROTOCOL_VERSION, RATE_LIMITED_ERROR,
-    WebAdapter, WebOperation, decode_mcp_text_result, limit_tool_output, parse_sse_or_json,
-    provider_http_agent, read_capped, read_success_body, sanitize_endpoint_error,
+    WebAdapter, decode_mcp_text_result, limit_tool_output, parse_sse_or_json, provider_http_agent,
+    read_capped, read_success_body, sanitize_endpoint_error,
 };
 
 const YOU_SEARCH_TOOL: &str = "you-search";
@@ -34,22 +34,34 @@ pub(super) struct HostedConfig {
 /// Provider seam used by the composite scheduler.
 pub(super) trait HostedClient: Send + Sync + 'static {
     /// Issue one normalized search or fetch request.
-    fn call(&self, provider: WebAdapter, request: HostedRequest<'_>) -> Result<String, String>;
+    fn call(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> Result<String, String>;
 
     /// Apply a fully validated runtime configuration.
     fn configure(&self, _config: HostedConfig) {}
 }
 
-/// One scheduler-owned request passed to an additional hosted adapter.
-pub(super) struct HostedRequest<'a> {
-    /// Requested search or fetch capability.
-    pub(super) operation: WebOperation,
-    /// Validated search query, empty for fetch.
-    pub(super) query: &'a str,
-    /// Validated requested search result count.
-    pub(super) count: u32,
-    /// Validated fetch URL, empty for search.
-    pub(super) url: &'a str,
+/// Validated operation-specific provider request.
+pub(super) enum HostedRequest<'a> {
+    /// Search query with optional provider-side domain enforcement.
+    Search {
+        /// Validated natural-language query.
+        query: &'a str,
+        /// Validated requested result count.
+        count: u32,
+        /// Harness-authored upstream domain restriction.
+        allowed_domains: Option<&'a [String]>,
+    },
+    /// Caller-directed page extraction.
+    Fetch {
+        /// Validated absolute HTTP(S) target.
+        url: &'a str,
+    },
+}
+
+/// One scheduler-owned attempt passed through every adapter boundary.
+pub(super) struct HostedAttempt<'a> {
+    /// Valid operation-specific request.
+    pub(super) request: HostedRequest<'a>,
     /// Remaining scheduler-owned attempt budget.
     pub(super) timeout: Duration,
     /// Cooperative cancellation flag for multi-request adapters.
@@ -104,53 +116,62 @@ impl Default for HttpHostedClient {
 }
 
 impl HostedClient for HttpHostedClient {
-    fn call(&self, provider: WebAdapter, request: HostedRequest<'_>) -> Result<String, String> {
-        let HostedRequest {
-            operation,
-            query,
-            count,
-            url,
-            timeout,
-            cancelled,
-        } = request;
+    fn call(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> Result<String, String> {
         let config = self
             .config
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        match (provider, operation) {
-            (WebAdapter::You, WebOperation::Search) => {
-                call_you(&config.you_endpoint, query, count, timeout, cancelled)
-            }
-            (WebAdapter::Brave, WebOperation::Search) => call_brave(
+        match (provider, &attempt.request) {
+            (
+                WebAdapter::You,
+                HostedRequest::Search {
+                    query,
+                    count,
+                    allowed_domains: _,
+                },
+            ) => call_you(
+                &config.you_endpoint,
+                query,
+                *count,
+                attempt.timeout,
+                attempt.cancelled,
+            ),
+            (
+                WebAdapter::Brave,
+                HostedRequest::Search {
+                    query,
+                    count,
+                    allowed_domains: _,
+                },
+            ) => call_brave(
                 &config.brave_endpoint,
                 required_key(&config.brave_api_key, "brave")?,
                 query,
-                count,
-                timeout,
+                *count,
+                attempt.timeout,
             ),
-            (WebAdapter::Tavily, operation) => call_tavily(
+            (WebAdapter::Tavily, _) => call_tavily(
                 &config.tavily_endpoint,
                 required_key(&config.tavily_api_key, "tavily")?,
-                operation,
-                query,
-                count,
-                url,
-                timeout,
+                &attempt,
             ),
-            (WebAdapter::Firecrawl, operation) => call_firecrawl(
+            (WebAdapter::Firecrawl, _) => call_firecrawl(
                 &config.firecrawl_endpoint,
                 required_key(&config.firecrawl_api_key, "firecrawl")?,
-                operation,
-                query,
-                count,
-                url,
-                timeout,
+                &attempt,
             ),
             _ => Err(format!(
                 "{} does not support {}",
                 provider.as_str(),
-                operation.as_str()
+                match attempt.request {
+                    HostedRequest::Search {
+                        query: _,
+                        count: _,
+                        allowed_domains: _,
+                    } => "search",
+                    HostedRequest::Fetch { url: _ } => "fetch",
+                }
             )),
         }
     }
@@ -332,56 +353,77 @@ fn call_brave(
     normalize_response(response, "brave", endpoint, key, &["web", "results"])
 }
 
-fn call_tavily(
-    base: &str,
-    key: &str,
-    operation: WebOperation,
-    query: &str,
-    count: u32,
-    url: &str,
-    timeout: Duration,
-) -> Result<String, String> {
-    let (endpoint, body, path): (String, serde_json::Value, &[&str]) = match operation {
-        WebOperation::Search => (
-            endpoint_path(base, "search")?,
+fn call_tavily(base: &str, key: &str, attempt: &HostedAttempt<'_>) -> Result<String, String> {
+    let (path, mut body, projection): (&str, serde_json::Value, &[&str]) = match &attempt.request {
+        HostedRequest::Search {
+            query,
+            count,
+            allowed_domains: _,
+        } => (
+            "search",
             serde_json::json!({
                 "query": query,
-                "max_results": count.min(20),
+                "max_results": (*count).min(20),
                 "search_depth": "basic",
             }),
             &["results"],
         ),
-        WebOperation::Fetch => (
-            endpoint_path(base, "extract")?,
+        HostedRequest::Fetch { url } => (
+            "extract",
             serde_json::json!({"urls": [url], "format": "markdown"}),
             &["results"],
         ),
     };
-    post_json(&endpoint, key, "tavily", body, timeout, path)
+    if let HostedRequest::Search {
+        query: _,
+        count: _,
+        allowed_domains: Some(domains),
+    } = &attempt.request
+    {
+        body.as_object_mut()
+            .expect("object literal")
+            .insert("include_domains".to_owned(), serde_json::json!(domains));
+    }
+    let endpoint = endpoint_path(base, path)?;
+    post_json(&endpoint, key, "tavily", body, attempt.timeout, projection)
 }
 
-fn call_firecrawl(
-    base: &str,
-    key: &str,
-    operation: WebOperation,
-    query: &str,
-    count: u32,
-    url: &str,
-    timeout: Duration,
-) -> Result<String, String> {
-    let (endpoint, body, path): (String, serde_json::Value, &[&str]) = match operation {
-        WebOperation::Search => (
-            endpoint_path(base, "search")?,
+fn call_firecrawl(base: &str, key: &str, attempt: &HostedAttempt<'_>) -> Result<String, String> {
+    let (path, mut body, projection): (&str, serde_json::Value, &[&str]) = match &attempt.request {
+        HostedRequest::Search {
+            query,
+            count,
+            allowed_domains: _,
+        } => (
+            "search",
             serde_json::json!({"query": query, "limit": count}),
             &["data", "web"],
         ),
-        WebOperation::Fetch => (
-            endpoint_path(base, "scrape")?,
+        HostedRequest::Fetch { url } => (
+            "scrape",
             serde_json::json!({"url": url, "formats": [{"type": "markdown"}]}),
             &["data", "markdown"],
         ),
     };
-    post_json(&endpoint, key, "firecrawl", body, timeout, path)
+    if let HostedRequest::Search {
+        query: _,
+        count: _,
+        allowed_domains: Some(domains),
+    } = &attempt.request
+    {
+        body.as_object_mut()
+            .expect("object literal")
+            .insert("includeDomains".to_owned(), serde_json::json!(domains));
+    }
+    let endpoint = endpoint_path(base, path)?;
+    post_json(
+        &endpoint,
+        key,
+        "firecrawl",
+        body,
+        attempt.timeout,
+        projection,
+    )
 }
 
 fn endpoint_path(base: &str, path: &str) -> Result<String, String> {

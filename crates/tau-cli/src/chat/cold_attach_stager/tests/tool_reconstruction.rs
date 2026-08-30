@@ -6,6 +6,7 @@ use super::*;
 /// never create reconstructed pending UI.
 fn tool_started(call_id: &str) -> Event {
     Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new("fixture"),
         arguments: tau_proto::CborValue::Null,

@@ -19,6 +19,7 @@ fn extension_finds_files() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(FIND_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -175,6 +176,7 @@ fn extension_reads_file() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(READ_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -210,6 +212,7 @@ fn extension_read_missing_file_reports_error() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(READ_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -288,6 +291,7 @@ fn extension_edit_creates_file() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: edit_arguments(
@@ -329,6 +333,7 @@ fn extension_edit_rejects_oversized_existing_file_before_mutation() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-oversized-edit".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: edit_arguments(&file_path, vec![context_half_open_edit(1, 1, "x", "")]),
@@ -367,6 +372,7 @@ fn extension_edit_missing_parent_reports_short_error() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: edit_arguments(&file_path, vec![context_half_open_edit(1, 1, "x", "")]),
@@ -398,6 +404,7 @@ fn extension_edit_directory_reports_short_error() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: edit_arguments(
@@ -434,6 +441,7 @@ fn extension_edit_creates_directories() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: edit_arguments(
@@ -477,6 +485,7 @@ fn extension_apply_patch_updates_file() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-1".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -530,6 +539,7 @@ fn extension_apply_patch_reports_context_mismatch_without_writing() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-2".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -578,6 +588,7 @@ fn extension_apply_patch_escapes_control_characters_in_paths() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-escaped-success".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -619,6 +630,7 @@ fn extension_apply_patch_escapes_control_characters_in_paths() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-escaped-partial".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -674,6 +686,7 @@ fn extension_apply_patch_escapes_control_characters_in_paths() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-escaped-io-error".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -700,6 +713,7 @@ fn extension_apply_patch_escapes_control_characters_in_paths() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-escaped-invalid-op".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(
@@ -751,6 +765,7 @@ fn extension_apply_patch_move_renames_file() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-3".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -800,6 +815,7 @@ fn extension_apply_patch_move_rejects_existing_destination() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-move-existing".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -844,6 +860,7 @@ fn extension_apply_patch_applies_multiple_operations() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-4".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -925,6 +942,7 @@ fn extension_apply_patch_applies_multiple_chunks() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-5".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -965,6 +983,7 @@ fn extension_apply_patch_failure_after_partial_success_leaves_changes() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-5b".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1051,6 +1070,7 @@ fn extension_apply_patch_rejects_oversized_update_before_mutation() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-oversized-patch".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1091,6 +1111,7 @@ fn extension_apply_patch_requires_existing_file_for_update() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-6".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1140,6 +1161,7 @@ fn extension_apply_patch_add_rejects_existing_file() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-7".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1184,6 +1206,7 @@ fn extension_apply_patch_update_appends_trailing_newline() {
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-patch-8".into(),
             tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
             arguments: CborValue::Text(patch),
@@ -1217,6 +1240,7 @@ fn extension_lists_directory_contents() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(LS_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -1433,6 +1457,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
         .expect("configure");
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             arguments: CborValue::Map(vec![(

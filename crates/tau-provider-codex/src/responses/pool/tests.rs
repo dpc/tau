@@ -155,6 +155,7 @@ fn pool_routes_each_thread_to_its_own_socket_and_reuses_them() {
         let request = PromptPayload {
             system_prompt: "sys",
             context: context(&[]),
+            hosted_tools: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
@@ -208,6 +209,7 @@ fn local_websocket_usage_window_contract_returns_typed_retry() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -521,6 +523,7 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
             let request = PromptPayload {
                 system_prompt: "sys",
                 context: context(&[]),
+                hosted_tools: &[],
                 tools: &[],
                 params: tau_proto::ModelParams::default(),
                 tool_choice: tau_proto::ToolChoice::default(),
@@ -599,6 +602,7 @@ fn shared_prewarm_silent_peer_cancels_and_releases_reservation() {
             let request = PromptPayload {
                 system_prompt: "sys",
                 context: context(&[]),
+                hosted_tools: &[],
                 tools: &[],
                 params: tau_proto::ModelParams::default(),
                 tool_choice: tau_proto::ToolChoice::default(),
@@ -828,6 +832,7 @@ fn shared_prewarm_socket_is_reused_by_real_turn() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -861,6 +866,7 @@ fn shared_prewarm_connect_failure_releases_reservation() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -900,6 +906,7 @@ fn already_canceled_cached_prewarm_sends_no_request() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1103,6 +1110,7 @@ fn ws_turn_captures_response_id_for_chain_continuation() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1319,6 +1327,7 @@ fn ws_upgrade_thread_headers_match_prompt_cache_key() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1369,6 +1378,7 @@ fn prewarm_chains_exact_prefix_on_same_socket() {
     let prior = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1392,6 +1402,7 @@ fn prewarm_chains_exact_prefix_on_same_socket() {
     let prewarm = PromptPayload {
         system_prompt: "sys",
         context: context(&prewarmed_messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1461,6 +1472,7 @@ fn prewarm_fingerprint_divergence_discards_chain_anchor() {
     let prewarm = PromptPayload {
         system_prompt: "old instructions",
         context: context(&prefix),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1544,6 +1556,7 @@ fn fresh_open_with_previous_response_rebuilds_ws_warmth() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1593,6 +1606,7 @@ fn fresh_open_with_previous_response_preserves_compacted_items() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1653,6 +1667,7 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
     let req1 = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1684,6 +1699,7 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
     let req2 = PromptPayload {
         system_prompt: "sys",
         context: context_after_response(&prev_id, first_output, vec![user_msg("second turn")]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1775,6 +1791,7 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
     let req1 = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1805,6 +1822,7 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
     let req2 = PromptPayload {
         system_prompt: "sys",
         context: context_after_response(&prev_id, first_output, vec![user_msg("second turn")]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -2137,6 +2155,7 @@ fn compact_shared_pool_does_not_forward_semantic_updates() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -2509,6 +2528,7 @@ fn pool_key_for(
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -2555,6 +2575,7 @@ fn run_context_turn(
     let request = PromptPayload {
         system_prompt: "sys",
         context: prompt_context,
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -2589,6 +2610,7 @@ fn run_turn_for_agent(
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -2638,6 +2660,7 @@ fn run_shared_turn_with_abort(
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -2695,6 +2718,7 @@ fn pool_key_separates_responses_modes() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: prompt_context,
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),

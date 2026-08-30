@@ -574,6 +574,7 @@ fn command_without_args(command: &str) -> CborValue {
 
 fn tool_started(command: &str, args: Vec<(&str, CborValue)>) -> ToolStarted {
     ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::from("call-1"),
         tool_name: tau_proto::ToolName::new(TOOL_NAME),
         arguments: command_args(command, args),
@@ -584,6 +585,7 @@ fn tool_started(command: &str, args: Vec<(&str, CborValue)>) -> ToolStarted {
 
 fn split_tool_started(tool_name: &str, args: Vec<(&str, CborValue)>) -> ToolStarted {
     ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::from("call-1"),
         tool_name: tau_proto::ToolName::new(tool_name),
         arguments: cbor_map(args),

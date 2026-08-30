@@ -1205,6 +1205,10 @@ impl Harness {
             .remove(agent_prompt_id);
         self.prompt_coordination
             .prompt_runtime
+            .tool_invocation_policies
+            .remove(agent_prompt_id);
+        self.prompt_coordination
+            .prompt_runtime
             .tool_call_prompts
             .retain(|_, prompt_id| prompt_id != agent_prompt_id);
     }
@@ -1306,6 +1310,10 @@ impl Harness {
             self.prompt_coordination
                 .prompt_runtime
                 .tool_specs
+                .remove(&prompt_id);
+            self.prompt_coordination
+                .prompt_runtime
+                .tool_invocation_policies
                 .remove(&prompt_id);
         }
     }

@@ -43,6 +43,7 @@ fn compatibility_request_snapshot(mode: ResponsesMode) -> serde_json::Value {
                 responses_raw_json: None,
             }),
         ]),
+        hosted_tools: &[],
         tools: &tools,
         params: tau_proto::ModelParams {
             effort: tau_proto::Effort::High,
@@ -109,6 +110,7 @@ fn compatibility_compact_request_snapshot(mode: ResponsesMode) -> serde_json::Va
             }),
             ContextItem::CompactionTrigger,
         ]),
+        hosted_tools: &[],
         tools: &tools,
         params: tau_proto::ModelParams {
             effort: tau_proto::Effort::High,

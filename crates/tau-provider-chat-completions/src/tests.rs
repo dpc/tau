@@ -1174,6 +1174,7 @@ fn prompt() -> tau_proto::AgentPromptCreated {
         },
         tools: Vec::new(),
         tools_ref: None,
+        hosted_tools: Vec::new(),
         model: "test/model".parse().expect("model id"),
         model_params: tau_proto::ModelParams::default(),
         tool_choice: ToolChoice::Auto,

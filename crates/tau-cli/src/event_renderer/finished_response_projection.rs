@@ -561,7 +561,7 @@ impl EventRenderer {
             .output_items
             .iter()
             .filter_map(|item| match item {
-                ContextItem::Message(message) => assistant_text_from_message_item(
+                ContextItem::Message(message) => assistant_text_with_citations(
                     message,
                     #[cfg(test)]
                     &mut message_concat_allocations,
@@ -790,4 +790,103 @@ impl EventRenderer {
             },
         );
     }
+}
+
+/// Project assistant text while turning validated semantic citation ranges into
+/// ordinary Markdown links consumed by the existing OSC8-safe renderer.
+pub(super) fn assistant_text_with_citations<'a>(
+    message: &'a tau_proto::MessageItem,
+    #[cfg(test)] allocations: &mut u64,
+) -> Option<Cow<'a, str>> {
+    let text = assistant_text_from_message_item(
+        message,
+        #[cfg(test)]
+        allocations,
+    )?;
+    let mut invalid_metadata = message
+        .content
+        .iter()
+        .any(|part| matches!(part, tau_proto::ContentPart::CitationMetadataInvalid));
+    let mut citations = message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            tau_proto::ContentPart::UrlCitation { citation } => Some((
+                citation.start() as usize,
+                citation.end() as usize,
+                citation.url(),
+                citation.title(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if citations.is_empty() && !invalid_metadata {
+        return Some(text);
+    }
+    citations.sort_by_key(|(start, end, _, _)| (*start, *end));
+    let chars = text.chars().collect::<Vec<_>>();
+    let (valid_citations, invalid_citations): (Vec<_>, Vec<_>) = citations
+        .into_iter()
+        .partition(|(start, end, _, _)| *start < *end && *end <= chars.len());
+    invalid_metadata |= !invalid_citations.is_empty();
+    let overlaps = valid_citations.windows(2).any(|pair| pair[1].0 < pair[0].1);
+    if overlaps {
+        let mut rendered = text.into_owned();
+        rendered.push_str("\n\nSources:");
+        for (start, end, url, title) in valid_citations {
+            rendered.push_str("\n- [");
+            let label = if title.is_empty() {
+                chars[start..end].iter().collect::<String>()
+            } else {
+                title.to_owned()
+            };
+            push_markdown_link_label(&mut rendered, &label);
+            rendered.push_str("](");
+            push_markdown_link_destination(&mut rendered, url);
+            rendered.push(')');
+        }
+        if invalid_metadata {
+            rendered.push_str("\n\ncitation metadata invalid");
+        }
+        return Some(Cow::Owned(rendered));
+    }
+
+    let mut cursor = 0;
+    let mut rendered = String::with_capacity(text.len().saturating_add(valid_citations.len() * 32));
+    for (start, end, url, _title) in valid_citations {
+        rendered.extend(&chars[cursor..start]);
+        rendered.push('[');
+        for character in &chars[start..end] {
+            if matches!(character, '\\' | '[' | ']') {
+                rendered.push('\\');
+            }
+            rendered.push(*character);
+        }
+        rendered.push_str("](");
+        push_markdown_link_destination(&mut rendered, url);
+        rendered.push(')');
+        cursor = end;
+    }
+    rendered.extend(&chars[cursor..]);
+    if invalid_metadata {
+        rendered.push_str("\n\ncitation metadata invalid");
+    }
+    Some(Cow::Owned(rendered))
+}
+
+fn push_markdown_link_label(output: &mut String, label: &str) {
+    for character in label.chars() {
+        if matches!(character, '\\' | '[' | ']') {
+            output.push('\\');
+        }
+        output.push(character);
+    }
+}
+
+fn push_markdown_link_destination(output: &mut String, url: &str) {
+    // CommonMark angle destinations preserve URL semantics while containing
+    // literal parentheses as syntax rather than rewriting reserved delimiters.
+    output.push('<');
+    output.push_str(url);
+    output.push('>');
 }

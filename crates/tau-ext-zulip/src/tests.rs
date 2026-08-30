@@ -1075,6 +1075,7 @@ fn checkpoint_wait_uses_echo_predicate_without_polling() {
 
 fn tool(name: &str, fields: Vec<(&str, CborValue)>) -> ToolStarted {
     ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: format!("call-{name}").into(),
         tool_name: tau_proto::ToolName::new(name),
         arguments: CborValue::Map(

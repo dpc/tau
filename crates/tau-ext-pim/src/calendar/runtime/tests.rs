@@ -2126,6 +2126,7 @@ fn command_args(command: &str, args: Vec<(&str, CborValue)>) -> CborValue {
 
 fn tool_started(tool_name: &str, args: Vec<(&str, CborValue)>) -> ToolStarted {
     ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::from("call-1"),
         tool_name: tau_proto::ToolName::new(tool_name),
         arguments: cbor_map(args),

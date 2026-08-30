@@ -1505,6 +1505,19 @@ pub struct ToolStarted {
     /// is for the main agent or a sub-agent.
     #[serde(default)]
     pub originator: PromptOriginator,
+    /// Harness-authored hidden invocation restrictions. Model arguments and
+    /// extension `tool.request` inputs cannot select or relax this policy.
+    #[serde(default)]
+    pub invocation_policy: ToolInvocationPolicy,
+}
+
+/// Hidden harness policy frozen with one accepted ordinary tool invocation.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolInvocationPolicy {
+    /// Allowed web target/result domains. `None` is unrestricted and an empty
+    /// list denies every domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_web_domains: Option<Vec<String>>,
 }
 
 /// Broadcast by the harness when a tool request is rejected before any
@@ -3180,6 +3193,63 @@ pub enum InputModality {
     Image,
 }
 
+/// A provider-hosted tool capability available on one exact model route.
+///
+/// Hosted tools execute inside provider inference. They are not registered Tau
+/// tools, never produce `tool.request`, and never accept Tau tool results.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderHostedToolCapability {
+    /// Provider-hosted web search.
+    WebSearch {
+        /// Hosted access modes accepted by the exact route.
+        access_modes: Vec<ProviderWebSearchAccess>,
+        /// Whether the route accepts provider-side allowed-domain filters.
+        supports_allowed_domains: bool,
+        /// Whether the route accepts qualitative search-context sizing.
+        supports_context_size: bool,
+    },
+}
+
+/// Provider-hosted web-search source access supported by one exact route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderWebSearchAccess {
+    /// Cached/indexed web material.
+    Cached,
+    /// Current external web access.
+    Live,
+}
+
+/// One provider-hosted tool selected for a materialized prompt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HostedToolDefinition {
+    /// Provider-hosted web search selected for this prompt.
+    WebSearch {
+        /// Hosted source access selected for this prompt.
+        access: ProviderWebSearchAccess,
+        /// Optional qualitative amount of search context.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_size: Option<WebSearchContextSize>,
+        /// Optional provider-side allowed-domain restriction.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        allowed_domains: Vec<String>,
+    },
+}
+
+/// Qualitative provider-hosted web-search context size.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchContextSize {
+    /// Favor lower latency and cost.
+    Low,
+    /// Use a balanced context amount.
+    Medium,
+    /// Favor more retrieved context.
+    High,
+}
+
 /// Metadata for one model currently served by a provider extension.
 ///
 /// Raw [`ProviderModelsDeclared`] entries preserve numeric values that the
@@ -3202,6 +3272,9 @@ pub struct ProviderModelInfo {
     /// An empty list means this route supports no native tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_tool_types: Vec<ToolType>,
+    /// Provider-hosted tools supported by this exact route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosted_tool_capabilities: Vec<ProviderHostedToolCapability>,
     /// Input modalities accepted by the exact provider/model route.
     ///
     /// Omitted legacy metadata means text-only.
@@ -5164,6 +5237,9 @@ pub struct AgentPromptCreated {
     /// Optional reference to full tool definitions from an earlier prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools_ref: Option<PromptToolsRef>,
+    /// Provider-hosted tools selected once for this materialized prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosted_tools: Vec<HostedToolDefinition>,
     /// Currently selected model as `"provider/model_id"`.
     pub model: ModelId,
     /// Per-prompt model knobs (reasoning effort, output verbosity,

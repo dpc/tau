@@ -2,6 +2,136 @@ use std::io as path_std_io;
 
 use super::*;
 
+/// Typed citation semantics and opaque hosted-call replay remain identical
+/// across live fold, journal decode, and a restart cut. The hosted item never
+/// becomes a Tau tool call.
+#[test]
+fn hosted_search_citations_and_opaque_call_survive_live_cold_restart() {
+    fn record(tree: &AgentTree, index: u8, event: Event) -> PersistedAgentEvent {
+        PersistedAgentEvent {
+            observation_id: tau_proto::ObservationId::from_bytes([index; 16]),
+            seq: tree.next_event_seq(),
+            source: None,
+            event,
+            parent: AgentEventParent::InheritHead,
+            fold_semantics: AgentJournalFoldSemantics::Legacy,
+            recorded_at: UnixMicros::new(u64::from(index)),
+        }
+    }
+
+    let mut live = AgentTree::from_events(agent_id(), &[]);
+    let submitted = record(
+        &live,
+        1,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id(),
+            text: "find source".to_owned(),
+            trusted_internal_spans: Vec::new(),
+            message_class: tau_proto::PromptMessageClass::User,
+            internal_kind: None,
+            originator: PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    live.apply_persisted_record(&submitted).expect("live input");
+    let opaque = tau_proto::OpaqueProviderItem::from_raw_json(
+        r#"{"type":"web_search_call","id":"ws_1","status":"completed"}"#,
+    )
+    .expect("opaque hosted item");
+    assert!(
+        tau_proto::UrlCitation::try_new(4, 10, "https://example.com/a b", "Example").is_err(),
+        "raw whitespace must be rejected"
+    );
+    let message = tau_proto::MessageItem {
+        role: tau_proto::ContextRole::Assistant,
+        content: vec![
+            tau_proto::ContentPart::Text {
+                text: "See source".to_owned(),
+            },
+            tau_proto::ContentPart::UrlCitation {
+                citation: tau_proto::UrlCitation::try_new(
+                    4,
+                    10,
+                    "https://example.com/a%20b",
+                    "Example",
+                )
+                .expect("canonical citation"),
+            },
+        ],
+        phase: None,
+        responses_raw_json: Some(
+            r#"{"type":"message","content":[{"type":"output_text","text":"See source"}]}"#
+                .to_owned(),
+        ),
+    };
+    let finished = record(
+        &live,
+        2,
+        Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+            automatic_compaction_decision: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            agent_prompt_id: "ap-hosted-replay".parse().expect("prompt id"),
+            agent_id: agent_id(),
+            output_items: vec![
+                tau_proto::ContextItem::UnknownProviderItem(opaque),
+                tau_proto::ContextItem::Message(message),
+            ],
+            stop_reason: tau_proto::ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            usage: None,
+            originator: PromptOriginator::User,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: Some("response-hosted".to_owned()),
+            ws_pool_delta: None,
+        }),
+    );
+    live.apply_persisted_record(&finished)
+        .expect("live provider response");
+
+    let records = vec![submitted, finished.clone()];
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&records, &mut encoded).expect("encode journal");
+    let decoded: Vec<PersistedAgentEvent> =
+        ciborium::from_reader(encoded.as_slice()).expect("decode journal");
+    let cold = AgentTree::try_from_events(agent_id(), &decoded).expect("cold replay");
+    let mut restarted =
+        AgentTree::try_from_events(agent_id(), &decoded[..1]).expect("restart prefix");
+    restarted
+        .apply_persisted_record(&finished)
+        .expect("post-restart terminal");
+
+    assert_eq!(live.current_branch(), cold.current_branch());
+    assert_eq!(live.current_branch(), restarted.current_branch());
+    let AgentEntry::AssistantResponse { output_items, .. } =
+        live.current_branch().last().expect("assistant")
+    else {
+        panic!("assistant response")
+    };
+    assert!(matches!(
+        output_items.as_slice(),
+        [
+            tau_proto::ContextItem::UnknownProviderItem(_),
+            tau_proto::ContextItem::Message(_)
+        ]
+    ));
+    assert!(
+        !output_items
+            .iter()
+            .any(|item| matches!(item, tau_proto::ContextItem::ToolCall(_)))
+    );
+}
+
 fn reference_active_provider_window(
     tree: &AgentTree,
     head: Option<NodeId>,
@@ -7430,6 +7560,7 @@ fn persisted_full_prompt_record_is_explicitly_unsupported() {
         context: tau_proto::PromptContext::default(),
         tools: Vec::new(),
         tools_ref: None,
+        hosted_tools: Vec::new(),
         model: "provider/model".into(),
         model_params: Default::default(),
         tool_choice: Default::default(),

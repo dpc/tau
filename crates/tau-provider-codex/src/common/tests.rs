@@ -137,6 +137,7 @@ fn into_output_items_moves_message_and_raw_sidecar_buffers() {
             text,
             phase: Some(tau_proto::MessagePhase::FinalAnswer),
             responses_raw_json: Some(raw),
+            citations: Vec::new(),
         }));
 
     let items = state.into_output_items();
@@ -453,6 +454,7 @@ fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> Strin
     let payload = PromptPayload {
         system_prompt: "sys",
         context: &context,
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),

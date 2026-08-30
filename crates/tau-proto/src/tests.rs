@@ -1202,6 +1202,7 @@ fn representative_events() -> Vec<Event> {
             tool_name: ToolName::new("old_echo"),
         }),
         Event::ToolStarted(ToolStarted {
+            invocation_policy: ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
             arguments: CborValue::Text("hello".to_owned()),
@@ -1653,6 +1654,7 @@ fn representative_events() -> Vec<Event> {
                 format: None,
             }],
             tools_ref: None,
+            hosted_tools: Vec::new(),
             model: "test/model".parse().expect("model id"),
             model_params: ModelParams::default(),
             tool_choice: ToolChoice::default(),
@@ -1970,6 +1972,7 @@ fn representative_events() -> Vec<Event> {
                 id: "openai/gpt-4.1".parse().expect("model id"),
                 display_name: Some("GPT-4.1".to_owned()),
                 tags: Vec::new(),
+                hosted_tool_capabilities: Vec::new(),
                 supported_tool_types: vec![],
                 input_modalities: Vec::new(),
                 tool_result_modalities: Vec::new(),
@@ -4156,6 +4159,7 @@ fn ui_session_admission_wire_round_trip() {
 #[test]
 fn event_wire_form_uses_dotted_event_tag() {
     let event = Event::ToolStarted(ToolStarted {
+        invocation_policy: ToolInvocationPolicy::default(),
         call_id: "call-1".into(),
         tool_name: ToolName::new("echo"),
         arguments: CborValue::Text("hi".to_owned()),

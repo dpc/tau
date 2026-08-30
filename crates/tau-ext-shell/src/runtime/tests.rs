@@ -370,6 +370,7 @@ fn schedule_tool_paused_before_active_registration(
         .pause_before_active_registration(reached_tx, resume_rx);
     let call_id = tau_proto::ToolCallId::new(call_id);
     let invoke = tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: call_id.clone(),
         tool_name: tau_proto::ToolName::new(tool_name),
         arguments,
@@ -392,6 +393,7 @@ fn schedule_runtime_tool(
     agent_id: tau_proto::AgentId,
 ) {
     let invoke = tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id,
         tool_name: tau_proto::ToolName::new(tool_name),
         arguments,
@@ -807,6 +809,7 @@ fn shutdown_clears_reserved_workdir_setter_without_extension_terminal() {
     );
     let agent_id = tau_proto::AgentId::parse("agent-reserved-setter").expect("agent id");
     let invoke = tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::new("reserved-setter"),
         tool_name: tau_proto::ToolName::new(crate::tools::WORKDIR_TOOL_NAME),
         arguments: CborValue::Map(Vec::new()),
@@ -840,6 +843,7 @@ fn workdir_reservation_commit_phase_is_linearized() {
     );
     let agent_id = tau_proto::AgentId::parse("agent-linearized-setter").expect("agent id");
     let invoke = tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::new("x".repeat(1024)),
         tool_name: tau_proto::ToolName::new(crate::tools::WORKDIR_TOOL_NAME),
         arguments: CborValue::Map(Vec::new()),
@@ -915,6 +919,7 @@ fn awaiting_workdir_cancel_terminalizes_at_correlated_commit() {
     );
     let agent_id = tau_proto::AgentId::parse("agent-cancel-setter").expect("agent id");
     let invoke = tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::new("cancel-setter"),
         tool_name: tau_proto::ToolName::new(crate::tools::WORKDIR_TOOL_NAME),
         arguments: CborValue::Map(Vec::new()),

@@ -157,6 +157,7 @@ pub(super) fn project_provider_item(
                     ContentPart::Text { text }
                     | ContentPart::SyntheticCompactionSummary { text }
                     | ContentPart::HarnessInternalText { text } => text.as_str(),
+                    ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
                 })
                 .collect::<String>();
             Some(SemanticProjection {

@@ -4,12 +4,14 @@
 //! `SPEC-tau-proto-provider-data`.
 
 mod arc_bytes;
+mod url_citation;
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::sync::Arc;
 
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+pub use url_citation::UrlCitation;
 
 use crate::events::{ProviderBackend, ToolFormat, ToolType};
 use crate::{CborValue, ProviderTokenUsage, ToolCallId, ToolName};
@@ -56,6 +58,16 @@ pub enum ContentPart {
         /// Raw harness-authored body.
         text: String,
     },
+    /// Bounded semantic URL citation attached to an assistant text part.
+    ///
+    /// This metadata never contributes provider-visible narrative text. The raw
+    /// Responses sidecar remains the exact replay authority.
+    UrlCitation {
+        /// Validated bounded citation value.
+        citation: UrlCitation,
+    },
+    /// One or more provider URL-citation annotations were malformed or unsafe.
+    CitationMetadataInvalid,
 }
 
 /// The outer transcript family of one opaque provider-owned item.

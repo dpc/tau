@@ -127,6 +127,8 @@ fn output_text_ptr(items: &[ContextItem]) -> Option<AllocationIdentity> {
                 tau_proto::ContentPart::Text { text }
                 | tau_proto::ContentPart::SyntheticCompactionSummary { text }
                 | tau_proto::ContentPart::HarnessInternalText { text } => text.as_str(),
+                tau_proto::ContentPart::UrlCitation { .. }
+                | tau_proto::ContentPart::CitationMetadataInvalid => "",
             })
         })
         .and_then(AllocationIdentity::of_str)

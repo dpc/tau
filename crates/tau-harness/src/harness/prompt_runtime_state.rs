@@ -53,6 +53,9 @@ pub(crate) struct PromptRuntimeState {
     pub(super) operations: HashMap<AgentPromptId, (tau_proto::PromptOperation, bool)>,
     /// Effective tool specifications captured for each prompt.
     pub(super) tool_specs: HashMap<AgentPromptId, Vec<tau_proto::ToolSpec>>,
+    /// Hidden ordinary-tool invocation policies frozen with each prompt.
+    pub(super) tool_invocation_policies:
+        HashMap<AgentPromptId, HashMap<ToolName, tau_proto::ToolInvocationPolicy>>,
     /// Prompt snapshot owner for each provider-emitted tool call.
     pub(crate) tool_call_prompts: HashMap<ToolCallId, AgentPromptId>,
     /// Branch-local tool repair examples already shown to the model.

@@ -293,6 +293,7 @@ fn daemon_trace_correlation_requires_created_agent_and_binds_once() {
             context: tau_proto::PromptContext::default(),
             tools: Vec::new(),
             tools_ref: None,
+            hosted_tools: Vec::new(),
             model: "test/model".parse().expect("model id"),
             model_params: tau_proto::ModelParams::default(),
             tool_choice: Default::default(),

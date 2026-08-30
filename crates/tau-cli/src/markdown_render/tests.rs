@@ -476,6 +476,25 @@ fn markdown_links_can_disable_osc8_and_leave_invalid_syntax_literal() {
     );
 }
 
+/// Angle-delimited link destinations preserve reserved URL parentheses while
+/// producing the exact canonical target in OSC 8 metadata.
+#[test]
+fn markdown_angle_link_destination_preserves_exact_parentheses() {
+    let theme = markdown_test_theme();
+    let target = "https://example.test/a)b(c";
+    let source = format!("[label](<{target}>)");
+    let block = markdown_block_with_osc8(&theme, names::AGENT_RESPONSE, &source, true);
+    assert_eq!(rendered_text(&block), "label");
+    assert_eq!(
+        block
+            .content
+            .spans()
+            .iter()
+            .find_map(|span| span.hyperlink.as_deref()),
+        Some(target)
+    );
+}
+
 /// Bare URLs require token boundaries and useful bodies, while autolinks reject
 /// whitespace instead of turning malformed angle-bracket text into a link.
 #[test]

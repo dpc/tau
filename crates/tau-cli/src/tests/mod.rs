@@ -415,6 +415,7 @@ fn agent_prompt_created(agent_prompt_id: &str, session_id: &str) -> AgentPromptC
         context: tau_proto::PromptContext::default(),
         tools: Vec::new(),
         tools_ref: None,
+        hosted_tools: Vec::new(),
         model: "test/model".parse().expect("model id"),
         model_params: tau_proto::ModelParams::default(),
         tool_choice: Default::default(),
@@ -636,6 +637,7 @@ fn render_submitted_prompt_projections(theme: tau_themes::Theme) -> VtWriter {
 
 fn tool_started(call_id: &str, tool_name: &str, arguments: CborValue) -> Event {
     Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new(tool_name),
         arguments,

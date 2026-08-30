@@ -34,6 +34,29 @@ tool_policy:
         - shell:lock
 agents:
   default_role: engineer
+  web_tools:
+    allowed_domains: null
+    search:
+      unavailable: omit
+      candidates:
+        native:
+          enable: true
+          priority: 10
+          kind: model_provider
+          access: cached
+        external:
+          enable: true
+          priority: 20
+          kind: tool
+          tool: websearch_hybrid_search
+    fetch:
+      unavailable: omit
+      candidates:
+        external:
+          enable: true
+          priority: 20
+          kind: tool
+          tool: websearch_hybrid_fetch
   compactions:
     default:
       threshold: context_limit_safe

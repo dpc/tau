@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use base64::engine as path_base64_engine;
@@ -28,6 +28,8 @@ pub struct PromptPayload<'a> {
     pub context: &'a PromptContext,
     /// Effective client-executed tool definitions.
     pub tools: &'a [ToolDefinition],
+    /// Provider-hosted tools selected for this materialized prompt.
+    pub hosted_tools: &'a [tau_proto::HostedToolDefinition],
     /// Per-prompt model knobs (effort / verbosity / thinking-summary).
     /// Each field is honored only when the backend's config reports
     /// support for the corresponding provider feature.
@@ -465,6 +467,8 @@ pub struct MessageAccumulator {
     pub phase: Option<tau_proto::MessagePhase>,
     /// Raw Responses assistant message item used for replay fidelity.
     pub responses_raw_json: Option<String>,
+    /// Validated semantic citation metadata for the accumulated text.
+    pub citations: Vec<ContentPart>,
 }
 
 /// Accumulated streaming state shared by both backends.
@@ -474,6 +478,9 @@ pub struct StreamState {
     /// Production mutation must use this type's indexed helpers so the cached
     /// aggregate fields remain coherent.
     pub(crate) output_items: Vec<OutputItemAccumulator>,
+    /// Output indices with a provider-hosted web search in progress. This is
+    /// transient display state and never enters replay payload accounting.
+    active_web_searches: std::collections::BTreeSet<usize>,
     /// Cumulative UTF-8 bytes across all assistant message slots.
     assistant_text_bytes: u64,
     /// Cumulative UTF-8 bytes across all non-visible tool input slots.
@@ -789,6 +796,7 @@ impl OutputItemAccumulator {
                     message.text.clone(),
                     message.phase,
                     message.responses_raw_json.clone(),
+                    message.citations.clone(),
                 )
             }),
             OutputItemAccumulator::ToolCall(call) => call.context_item(),
@@ -811,6 +819,7 @@ impl OutputItemAccumulator {
                     message.text,
                     message.phase,
                     message.responses_raw_json,
+                    message.citations,
                 )
             }),
             Self::ToolCall(call) => call.into_context_item(),
@@ -860,6 +869,7 @@ impl StreamState {
     pub(crate) fn new() -> Self {
         Self {
             output_items: Vec::new(),
+            active_web_searches: BTreeSet::new(),
             assistant_text_bytes: 0,
             non_visible_output_bytes: 0,
             semantic_output_items: 0,
@@ -1154,6 +1164,15 @@ impl StreamState {
         self.message_at_mut(output_index).responses_raw_json = raw_json.map(str::to_owned);
     }
 
+    /// Replace one message slot's validated semantic citation metadata.
+    pub(crate) fn set_message_citations_at(
+        &mut self,
+        output_index: usize,
+        citations: Vec<ContentPart>,
+    ) {
+        self.message_at_mut(output_index).citations = citations;
+    }
+
     pub(crate) fn tool_call_at_mut(
         &mut self,
         output_index: usize,
@@ -1227,6 +1246,20 @@ impl StreamState {
             output_index,
             OutputItemAccumulator::UnknownProviderItem(opaque_item_from_value(item, raw_json)),
         );
+    }
+
+    pub(crate) fn set_web_search_active(&mut self, output_index: usize, active: bool) {
+        if active {
+            self.active_web_searches.insert(output_index);
+        } else {
+            self.active_web_searches.remove(&output_index);
+        }
+    }
+
+    /// Whether at least one provider-hosted web search is currently active.
+    #[must_use]
+    pub fn web_search_active(&self) -> bool {
+        !self.active_web_searches.is_empty()
     }
 
     /// Appends displayable reasoning-summary text at the provider output index
@@ -1620,7 +1653,7 @@ pub fn assistant_text_item_with_phase(
     text: impl Into<String>,
     phase: Option<tau_proto::MessagePhase>,
 ) -> ContextItem {
-    assistant_text_item_with_phase_and_raw(text, phase, None)
+    assistant_text_item_with_phase_and_raw(text, phase, None, Vec::new())
 }
 
 /// Builds an assistant text item with optional Responses replay sidecar.
@@ -1628,10 +1661,13 @@ pub fn assistant_text_item_with_phase_and_raw(
     text: impl Into<String>,
     phase: Option<tau_proto::MessagePhase>,
     responses_raw_json: Option<String>,
+    citations: Vec<ContentPart>,
 ) -> ContextItem {
+    let mut content = vec![ContentPart::Text { text: text.into() }];
+    content.extend(citations);
     ContextItem::Message(MessageItem {
         role: ContextRole::Assistant,
-        content: vec![ContentPart::Text { text: text.into() }],
+        content,
         phase,
         responses_raw_json,
     })

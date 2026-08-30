@@ -21,6 +21,8 @@ use tau_proto::{
     ModelId, ModelName, ModelTag, PromptContent, PromptPriority, ProviderName, ToolName, ToolTag,
 };
 
+use crate::web_tools::*;
+
 // ---------------------------------------------------------------------------
 // Built-in configuration resources
 //
@@ -1092,6 +1094,9 @@ struct AgentsSettings {
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
     #[serde(default, alias = "roleGroups")]
     role_groups: RawRoleGroups,
+    /// Logical web capability defaults applied to every role.
+    #[serde(default, alias = "webTools")]
+    web_tools: RawWebToolsPolicy,
 }
 
 impl<'de> Deserialize<'de> for HarnessSettings {
@@ -1144,6 +1149,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         settings
             .validate_context_size_alerts()
             .map_err(D::Error::custom)?;
+        settings.validate_web_tools().map_err(D::Error::custom)?;
         Ok(settings)
     }
 }
@@ -1439,6 +1445,9 @@ struct HarnessProfileAgentOverrides {
     /// Global named context-size alert patches.
     #[serde(alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
+    /// Logical web capability policy patch.
+    #[serde(default, alias = "webTools")]
+    web_tools: Option<RawWebToolsPolicy>,
 }
 
 impl From<HarnessProfileAgentOverrides> for HarnessAgentRoleOverrides {
@@ -1458,6 +1467,7 @@ impl From<HarnessProfileAgentOverrides> for HarnessAgentRoleOverrides {
             inference_compaction: profile.inference_compaction,
             compactions: profile.compactions,
             context_size_alerts: profile.context_size_alerts,
+            web_tools: profile.web_tools,
         }
     }
 }
@@ -1538,6 +1548,9 @@ struct HarnessAgentRoleOverrides {
     /// merging.
     #[serde(alias = "contextSizeAlerts")]
     context_size_alerts: BTreeMap<String, ContextSizeAlertPatch>,
+    /// Agent-global logical web capability policy patch.
+    #[serde(default, alias = "webTools")]
+    web_tools: Option<RawWebToolsPolicy>,
 }
 
 impl AgentsSettings {
@@ -1554,6 +1567,7 @@ impl AgentsSettings {
             compaction: self.compaction,
             inference_compaction: self.inference_compaction,
             compactions: self.compactions.clone(),
+            web_tools: Some(self.web_tools.clone()),
             ..AgentRolePatch::default()
         }
     }
@@ -1573,6 +1587,7 @@ impl HarnessAgentRoleOverrides {
             compaction: self.compaction,
             inference_compaction: self.inference_compaction,
             compactions: self.compactions.clone(),
+            web_tools: self.web_tools.clone(),
             ..AgentRolePatch::default()
         }
     }
@@ -1683,6 +1698,9 @@ struct RawRoleGroup {
     enable_tools: Option<Vec<ToolName>>,
     #[serde(alias = "requiredSkills")]
     required_skills: Option<Vec<tau_proto::SkillName>>,
+    /// Group-default logical web capability policy patch.
+    #[serde(alias = "webTools")]
+    web_tools: Option<RawWebToolsPolicy>,
     roles: IndexMap<String, AgentRolePatch>,
 }
 
@@ -1792,7 +1810,7 @@ impl<T: RelativeRoleSettingValue> ConfiguredRoleSetting<T> {
     }
 }
 
-fn present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(super) fn present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
@@ -1861,6 +1879,9 @@ struct AgentRolePatch {
     enable_tools: Option<Vec<ToolName>>,
     #[serde(alias = "requiredSkills")]
     required_skills: Option<Vec<tau_proto::SkillName>>,
+    /// Logical web capability policy patch.
+    #[serde(alias = "webTools")]
+    web_tools: Option<RawWebToolsPolicy>,
 }
 
 impl AgentRolePatch {
@@ -1908,6 +1929,7 @@ impl RawRoleGroup {
             disable_tools: self.disable_tools.clone(),
             enable_tools: self.enable_tools.clone(),
             required_skills: self.required_skills.clone(),
+            web_tools: self.web_tools.clone(),
         }
     }
 }
@@ -2189,6 +2211,16 @@ impl HarnessSettings {
                     ),
                 )));
             }
+        }
+        Ok(())
+    }
+
+    /// Validate every effective role's logical web policy after inheritance.
+    fn validate_web_tools(&mut self) -> Result<(), SettingsError> {
+        for (role_name, role) in &mut self.roles {
+            role.web_tools
+                .finalize(&format!("agents.roles.{role_name}.web_tools"))
+                .map_err(|message| SettingsError::Config(config::ConfigError::Message(message)))?;
         }
         Ok(())
     }
@@ -2651,6 +2683,9 @@ pub struct AgentRole {
     /// use their own default enablement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolName>>,
+    /// Logical web capability policy compiled at prompt materialization.
+    #[serde(default, alias = "webTools")]
+    pub web_tools: WebToolsPolicy,
     /// Tool tag patterns disabled after global policy and before role-level tag
     /// enables.
     #[serde(
@@ -3218,6 +3253,9 @@ impl AgentRole {
         }
         if let Some(enable_tools) = &patch.enable_tools {
             self.enable_tools = enable_tools.clone();
+        }
+        if let Some(web_tools) = &patch.web_tools {
+            self.web_tools.apply_patch(web_tools);
         }
         if let Some(required_skills) = &patch.required_skills {
             for skill in required_skills {
@@ -3917,6 +3955,7 @@ pub fn load_harness_settings_with_profile_and_cli_overrides_in(
     role_settings.validate_inter_session_roles()?;
     role_settings.apply_agent_globals_to_roles();
     role_settings.validate_context_size_alerts()?;
+    role_settings.validate_web_tools()?;
     settings.prompt_fragments = role_settings.prompt_fragments;
     settings.required_skills = role_settings.required_skills;
     settings.context_size_alerts = role_settings.context_size_alerts;
@@ -4080,6 +4119,10 @@ fn normalize_role_config_keys(
     normalize_alias_key(map, "disableTools", "disable_tools", source, path)?;
     normalize_alias_key(map, "enableTools", "enable_tools", source, path)?;
     normalize_alias_key(map, "requiredSkills", "required_skills", source, path)?;
+    normalize_alias_key(map, "webTools", "web_tools", source, path)?;
+    if let Some(web_tools) = map.get_mut("web_tools") {
+        normalize_web_tools_keys(web_tools, source, &format!("{path}.web_tools"))?;
+    }
     normalize_alias_key(
         map,
         "contextSizeAlerts",
@@ -4099,6 +4142,38 @@ fn normalize_role_config_keys(
         for alert in alerts.values_mut() {
             if let serde_json::Value::Object(alert) = alert {
                 normalize_context_policy_value(alert.get_mut("when"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Normalize nested logical-web aliases while rejecting duplicate spellings.
+fn normalize_web_tools_keys(
+    value: &mut serde_json::Value,
+    source: &str,
+    path: &str,
+) -> Result<(), SettingsError> {
+    let serde_json::Value::Object(map) = value else {
+        return Ok(());
+    };
+    normalize_alias_key(map, "allowedDomains", "allowed_domains", source, path)?;
+    for logical in ["search", "fetch"] {
+        let Some(serde_json::Value::Object(logical_map)) = map.get_mut(logical) else {
+            continue;
+        };
+        let Some(serde_json::Value::Object(candidates)) = logical_map.get_mut("candidates") else {
+            continue;
+        };
+        for (candidate_name, candidate) in candidates {
+            if let serde_json::Value::Object(candidate_map) = candidate {
+                normalize_alias_key(
+                    candidate_map,
+                    "contextSize",
+                    "context_size",
+                    source,
+                    &format!("{path}.{logical}.candidates.{candidate_name}"),
+                )?;
             }
         }
     }
@@ -4266,6 +4341,10 @@ fn normalize_harness_config_value(
             "agents",
         )?;
         normalize_alias_key(agents, "serviceTier", "service_tier", source, "agents")?;
+        normalize_alias_key(agents, "webTools", "web_tools", source, "agents")?;
+        if let Some(web_tools) = agents.get_mut("web_tools") {
+            normalize_web_tools_keys(web_tools, source, "agents.web_tools")?;
+        }
         normalize_alias_key(agents, "roleGroups", "role_groups", source, "agents")?;
     }
     let Some(serde_json::Value::Object(agents)) = map.get_mut("agents") else {
@@ -4561,13 +4640,22 @@ fn normalize_harness_config_override_key(key: &str) -> String {
     }
     if parts[0] == "agents" && parts.len() > 1 {
         parts[1] = canonical_agents_key(parts[1]);
+        if parts[1] == "web_tools" {
+            canonicalize_web_override_parts(&mut parts, 2);
+        }
         if parts[1] == "role_groups" && parts.len() > 3 {
             if parts[3] == "roles" {
                 if parts.len() > 5 {
                     parts[5] = canonical_role_key(parts[5]);
+                    if parts[5] == "web_tools" {
+                        canonicalize_web_override_parts(&mut parts, 6);
+                    }
                 }
             } else {
                 parts[3] = canonical_role_key(parts[3]);
+                if parts[3] == "web_tools" {
+                    canonicalize_web_override_parts(&mut parts, 4);
+                }
             }
         }
     }
@@ -4575,6 +4663,20 @@ fn normalize_harness_config_override_key(key: &str) -> String {
         parts[3] = canonical_tool_policy_rule_key(parts[3]);
     }
     parts.join(".")
+}
+
+/// Canonicalize aliases below one `web_tools` CLI override segment.
+fn canonicalize_web_override_parts(parts: &mut [&str], start: usize) {
+    if parts.len() > start && parts[start] == "allowedDomains" {
+        parts[start] = "allowed_domains";
+    }
+    if parts.len() > start + 3
+        && matches!(parts[start], "search" | "fetch")
+        && parts[start + 1] == "candidates"
+        && parts[start + 3] == "contextSize"
+    {
+        parts[start + 3] = "context_size";
+    }
 }
 
 fn canonical_top_level_key(key: &str) -> &str {
@@ -4599,6 +4701,7 @@ fn canonical_agents_key(key: &str) -> &str {
         "promptFragments" => "prompt_fragments",
         "requiredSkills" => "required_skills",
         "contextSizeAlerts" => "context_size_alerts",
+        "webTools" => "web_tools",
         "thinkingSummary" => "thinking_summary",
         "serviceTier" => "service_tier",
         "inferenceCompaction" => "inference_compaction",
@@ -4624,6 +4727,7 @@ fn canonical_role_key(key: &str) -> &str {
         "disableTools" => "disable_tools",
         "requiredSkills" => "required_skills",
         "contextSizeAlerts" => "context_size_alerts",
+        "webTools" => "web_tools",
         _ => key,
     }
 }
@@ -4659,12 +4763,17 @@ fn load_yaml_layer_files<T: for<'de> Deserialize<'de>>(
     yaml_layer_paths(dir, name)?
         .into_iter()
         .map(|path| {
+            let text = std::fs::read_to_string(&path).map_err(|error| {
+                SettingsError::Config(config::ConfigError::Message(format!(
+                    "failed to read {}: {error}",
+                    path.display()
+                )))
+            })?;
             config::Config::builder()
-                .add_source(
-                    config::File::from(path)
-                        .format(config::FileFormat::Yaml)
-                        .required(true),
-                )
+                .add_source(normalized_harness_yaml_source(
+                    &text,
+                    &path.display().to_string(),
+                )?)
                 .build()?
                 .try_deserialize()
                 .map_err(SettingsError::from)

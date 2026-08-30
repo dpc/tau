@@ -518,11 +518,19 @@ fn build_compact_request(
                 && !(item["type"] == "message" && item["role"] == "developer")
         });
     }
-    let tools = request
+    let mut tools = request
         .tools
         .iter()
         .map(convert_tool_definition)
         .collect::<Vec<_>>();
+    if !config.mode.is_lite_compatibility() {
+        tools.extend(
+            request
+                .hosted_tools
+                .iter()
+                .map(convert_hosted_tool_definition),
+        );
+    }
     if !tools.is_empty() {
         input.insert(
             0,
@@ -1887,8 +1895,87 @@ fn apply_output_item_message(
     }
     if kind.is_done() {
         state.set_message_responses_raw_json_at(output_index, raw_item_json);
+        state.set_message_citations_at(output_index, citations_from_message_item(item));
     }
     Ok(true)
+}
+
+/// Convert untrusted Responses citation annotations into bounded semantic
+/// metadata over the concatenated Tau assistant text.
+fn citations_from_message_item(item: &serde_json::Value) -> Vec<tau_proto::ContentPart> {
+    const MAX_CITATIONS: usize = 32;
+
+    let mut citations = Vec::new();
+    let mut invalid_metadata = false;
+    let mut scalar_prefix = 0_u32;
+    for part in item
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(text) = responses_text_part_text(part) else {
+            continue;
+        };
+        let scalar_len = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
+        for annotation in part
+            .get("annotations")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if annotation.get("type").and_then(serde_json::Value::as_str) != Some("url_citation") {
+                continue;
+            }
+            if citations.len() >= MAX_CITATIONS {
+                invalid_metadata = true;
+                continue;
+            }
+            let (Some(start), Some(end), Some(url), Some(title)) = (
+                annotation
+                    .get("start_index")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok()),
+                annotation
+                    .get("end_index")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok()),
+                annotation.get("url").and_then(serde_json::Value::as_str),
+                annotation.get("title").and_then(serde_json::Value::as_str),
+            ) else {
+                invalid_metadata = true;
+                continue;
+            };
+            if end <= start || scalar_len < end {
+                invalid_metadata = true;
+                continue;
+            }
+            let Some(combined_start) = scalar_prefix.checked_add(start) else {
+                invalid_metadata = true;
+                continue;
+            };
+            let Some(combined_end) = scalar_prefix.checked_add(end) else {
+                invalid_metadata = true;
+                continue;
+            };
+            let Ok(citation) =
+                tau_proto::UrlCitation::try_new(combined_start, combined_end, url, title)
+            else {
+                invalid_metadata = true;
+                continue;
+            };
+            citations.push(tau_proto::ContentPart::UrlCitation { citation });
+        }
+        let Some(next_scalar_prefix) = scalar_prefix.checked_add(scalar_len) else {
+            invalid_metadata = true;
+            break;
+        };
+        scalar_prefix = next_scalar_prefix;
+    }
+    if invalid_metadata {
+        citations.push(tau_proto::ContentPart::CitationMetadataInvalid);
+    }
+    citations
 }
 
 fn apply_output_item_reasoning(
@@ -1957,11 +2044,20 @@ fn apply_output_item_unknown(
     if is_known_output_item_type(item_type) {
         return false;
     }
+    let hosted_web_search = item_type == "web_search_call";
     match kind {
-        OutputItemEventKind::Added => state.reserve_output_item_at(output_index),
+        OutputItemEventKind::Added => {
+            state.reserve_output_item_at(output_index);
+            if hosted_web_search {
+                state.set_web_search_active(output_index, true);
+            }
+        }
         OutputItemEventKind::Done => {
             let item_json = raw_item_json.expect("completed opaque item raw JSON checked above");
             state.set_unknown_provider_item_at(output_index, item, item_json.to_owned());
+            if hosted_web_search {
+                state.set_web_search_active(output_index, false);
+            }
         }
     }
     true
@@ -2655,7 +2751,16 @@ fn build_request(
         preserve_compaction_trigger,
     );
 
-    let tools: Vec<serde_json::Value> = request.tools.iter().map(convert_tool_definition).collect();
+    let mut tools: Vec<serde_json::Value> =
+        request.tools.iter().map(convert_tool_definition).collect();
+    if !responses_lite {
+        tools.extend(
+            request
+                .hosted_tools
+                .iter()
+                .map(convert_hosted_tool_definition),
+        );
+    }
 
     let tool_choice = match (request.tool_choice, tools.is_empty()) {
         // Harness-forced no-tools-this-turn: explicit `none` works
@@ -2956,6 +3061,34 @@ fn convert_tool_definition(tool: &tau_proto::ToolDefinition) -> serde_json::Valu
     }
 }
 
+/// Lower one separately namespaced provider-hosted tool without making it a
+/// client-executed Function or Custom definition.
+fn convert_hosted_tool_definition(tool: &tau_proto::HostedToolDefinition) -> serde_json::Value {
+    match tool {
+        tau_proto::HostedToolDefinition::WebSearch {
+            access,
+            context_size,
+            allowed_domains,
+        } => {
+            let mut value = serde_json::json!({
+                "type": "web_search",
+                "external_web_access": matches!(access, tau_proto::ProviderWebSearchAccess::Live),
+            });
+            if let Some(context_size) = context_size {
+                value["search_context_size"] = serde_json::json!(match context_size {
+                    tau_proto::WebSearchContextSize::Low => "low",
+                    tau_proto::WebSearchContextSize::Medium => "medium",
+                    tau_proto::WebSearchContextSize::High => "high",
+                });
+            }
+            if !allowed_domains.is_empty() {
+                value["filters"] = serde_json::json!({ "allowed_domains": allowed_domains });
+            }
+            value
+        }
+    }
+}
+
 fn serialize_tool_format(format: &tau_proto::ToolFormat) -> serde_json::Value {
     match format {
         tau_proto::ToolFormat::Text => serde_json::json!({
@@ -3064,15 +3197,14 @@ fn convert_user_message(msg: &MessageItem, out: &mut Vec<ResponsesInputItem>) {
     let text_items: Vec<serde_json::Value> = msg
         .content
         .iter()
-        .map(|block| match block {
+        .filter_map(|block| match block {
             ContentPart::Text { text }
             | ContentPart::SyntheticCompactionSummary { text }
-            | ContentPart::HarnessInternalText { text } => {
-                serde_json::json!({
-                    "type": "input_text",
-                    "text": text,
-                })
-            }
+            | ContentPart::HarnessInternalText { text } => Some(serde_json::json!({
+                "type": "input_text",
+                "text": text,
+            })),
+            ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => None,
         })
         .collect();
     if !text_items.is_empty() {
@@ -3112,10 +3244,11 @@ fn convert_assistant_message(
 fn assistant_message_text_parts(msg: &MessageItem) -> Vec<&str> {
     msg.content
         .iter()
-        .map(|block| match block {
+        .filter_map(|block| match block {
             ContentPart::Text { text }
             | ContentPart::SyntheticCompactionSummary { text }
-            | ContentPart::HarnessInternalText { text } => text.as_str(),
+            | ContentPart::HarnessInternalText { text } => Some(text.as_str()),
+            ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => None,
         })
         .collect()
 }

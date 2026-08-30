@@ -49,6 +49,7 @@ fn compact_finalizer_emits_merged_attempt_observation_once() {
     let request = crate::Prompt {
         system_prompt: "",
         context: &context,
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),

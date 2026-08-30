@@ -2317,6 +2317,11 @@ fn append_text(message: &mut MessageItem, text: &str) {
                 text: text.to_owned(),
             });
         }
+        Some(ContentPart::UrlCitation { .. }) | Some(ContentPart::CitationMetadataInvalid) => {
+            message.content.push(ContentPart::Text {
+                text: text.to_owned(),
+            })
+        }
         None => message.content.push(ContentPart::Text {
             text: text.to_owned(),
         }),
@@ -2586,6 +2591,7 @@ fn lower_borrowed_item(item: BorrowedContextItem<'_>) -> Result<Option<Responses
                     ContentPart::Text { text }
                     | ContentPart::SyntheticCompactionSummary { text }
                     | ContentPart::HarnessInternalText { text } => text.as_str(),
+                    ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -2696,6 +2702,7 @@ fn rebase_assistant_message(value: &mut Value, message: &MessageItem) {
             ContentPart::Text { text }
             | ContentPart::SyntheticCompactionSummary { text }
             | ContentPart::HarnessInternalText { text } => text.as_str(),
+            ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
         })
         .collect::<Vec<_>>()
         .join("\n");

@@ -508,7 +508,12 @@ tags. Calls without one of these tags conservatively classify as manipulator.
   line. It intentionally carries no provider-owned display formatting; the tool
   provider owns argument parsing and presentation. The event is persisted in the
   session restore log, not the agent transcript log; live tool execution
-  handlers must not run for replayed deliveries.
+  handlers must not run for replayed deliveries. Its defaulted
+  `invocation_policy` is harness-authored hidden policy frozen with the prompt;
+  model arguments and extension `tool.request` inputs cannot relax it. Only
+  provider calls correlated with a materialized prompt can carry that frozen
+  policy. Cooperative peer `tool.request` traffic has no prompt snapshot and
+  receives the default empty policy.
 - **`tool.rejected`** *(harness)* — The harness rejected a tool request
   before any tool provider was asked to run it. UIs can display this as a tool
   call rejection.

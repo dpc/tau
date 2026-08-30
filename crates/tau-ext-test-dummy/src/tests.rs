@@ -185,6 +185,7 @@ fn invoke_restart() -> HarnessOutputMessage {
 
 fn invoke_restart_with_id(call_id: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new(RESTART_TEST_DUMMY_TOOL_NAME),
         arguments: tau_proto::CborValue::Map(Vec::new()),
@@ -195,6 +196,7 @@ fn invoke_restart_with_id(call_id: &str) -> HarnessOutputMessage {
 
 fn invoke_typed_image() -> HarnessOutputMessage {
     HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: "typed-image-call".into(),
         tool_name: tau_proto::ToolName::new(TYPED_IMAGE_TEST_DUMMY_TOOL_NAME),
         arguments: tau_proto::CborValue::Map(Vec::new()),
@@ -205,6 +207,7 @@ fn invoke_typed_image() -> HarnessOutputMessage {
 
 fn extension_originated_restart() -> HarnessOutputMessage {
     HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: "extension-call".into(),
         tool_name: tau_proto::ToolName::new(RESTART_TEST_DUMMY_TOOL_NAME),
         arguments: tau_proto::CborValue::Map(Vec::new()),
@@ -221,6 +224,7 @@ fn replayed_restart() -> HarnessOutputMessage {
     HarnessOutputMessage::deliver_replay(
         UnixMicros::new(1_700_000_000_000_000),
         Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(RESTART_TEST_DUMMY_TOOL_NAME),
             arguments: tau_proto::CborValue::Map(Vec::new()),
@@ -277,6 +281,7 @@ fn provider_context_raw_message_config() -> HarnessOutputMessage {
 
 fn invoke_provider_context_raw_message() -> HarnessOutputMessage {
     HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: "raw-message-call".into(),
         tool_name: tau_proto::ToolName::new(PROVIDER_CONTEXT_RAW_MESSAGE_TOOL_NAME),
         arguments: CborValue::Map(vec![

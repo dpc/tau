@@ -210,6 +210,7 @@ fn prompt_event(text: &str) -> Event {
 
 fn tool_started(tool_name: &str, args: CborValue) -> Event {
     Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::new("call_1"),
         tool_name: tau_proto::ToolName::new(tool_name),
         arguments: args,

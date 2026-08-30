@@ -656,6 +656,7 @@ fn agent_id(text: &str) -> AgentId {
 
 fn tool(name: &str, agent: &str, args: CborValue) -> ToolStarted {
     ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: format!("call-{name}").into(),
         tool_name: tau_proto::ToolName::new(name),
         arguments: args,

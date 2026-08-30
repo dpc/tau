@@ -147,6 +147,7 @@ fn edit_uses_original_line_numbers_for_multiple_replacements() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: edit_arguments(
@@ -193,6 +194,7 @@ fn edit_replaces_exact_line_range() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: edit_arguments(&file_path, vec![context_line_edit(2, 2, "cat\n", "fish")]),
@@ -471,6 +473,7 @@ fn edit_rejects_end_line_exclusive_past_end() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: edit_arguments(&file_path, vec![context_half_open_edit(2, 4, "x", "")]),
@@ -2038,6 +2041,7 @@ fn edit_rejects_missing_new_text() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: edit_arguments(
@@ -2077,6 +2081,7 @@ fn edit_rejects_negative_start_line_with_path_args() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             arguments: edit_arguments(&file_path, vec![line_edit(-1, 1, "x")]),

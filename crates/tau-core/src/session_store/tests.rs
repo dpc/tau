@@ -294,6 +294,7 @@ fn restore_request(call_id: &str) -> Event {
 /// Builds one valid restore-stream start.
 fn restore_started(call_id: &str) -> Event {
     Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: ToolCallId::from(call_id),
         tool_name: ToolName::new("demo"),
         arguments: CborValue::Null,

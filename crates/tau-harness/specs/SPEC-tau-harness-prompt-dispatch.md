@@ -23,15 +23,19 @@ journal/checkpoint authority described by
 
 ## Prompt capability snapshot
 
-Prompt capability conditionals use one turn-local snapshot. Tau resolves the
-actual agent model, filters provider-supported and policy-effective tool specs,
-and uses those same specs for provider definitions, authorization, fragments,
-and template capabilities. Enabled configuration and Ready extension runtimes
-are captured at that boundary. Later registration/restart changes affect only
-later turns; raw capability context is not persisted. Non-tool extension side
-queries are the intentional exception: provider definitions remain unchanged
-for cache compatibility, while locally unauthorized tool capabilities and tool
-fragments are empty.
+Prompt capability conditionals use one turn-local materialized surface. Tau
+resolves the actual agent model, filters provider-supported and policy-effective
+ordinary tool specs, and separately selects provider-hosted definitions. The
+same surface supplies provider definitions, authorization, fragments, and
+template capabilities. Enabled configuration and Ready extension runtimes are
+captured at that boundary. Later registration/restart or model declarations
+affect only later turns; raw capability context is not persisted.
+
+Standalone compaction retains the parent's ordinary and hosted definition
+surface for request-cache equivalence while using provider `tool_choice: none`.
+Non-tool extension side queries instead set `tool_choice: none` and suppress
+both ordinary and hosted logical web definitions before provider delivery.
+They also hide tool instructions and locally reject any provider violation.
 
 The same concrete model snapshot supplies the parallel-call capability.
 Templates advertise parallel execution only when the effective provider route
@@ -111,6 +115,26 @@ Policy-exclusive registrations may share a model-visible alias, but snapshot
 construction rejects an effective surface containing two enabled tools with the
 same visible name rather than selecting by registry order. Prompt-owned
 unavailable and near-name diagnostics derive from this snapshot as well.
+
+`agents.web_tools` compiles the logical `web_search` and `web_fetch`
+capabilities before visible-name collision checks and system-prompt rendering.
+Named candidates merge across role/profile layers and are considered in
+`(priority, name)` order. A `model_provider` search candidate is eligible only
+when the exact selected route advertises the requested hosted controls. A
+`tool` candidate must be an authorized Function tool with the expected visible
+alias and shared protocol operation/enforcement tags. The compiler exposes
+exactly one implementation per logical capability. Native search suppresses
+only its configured ordinary fallback by internal name; unrelated alias
+collisions still fail. Selection is frozen for retry and continuation, with no
+native-to-external fallback.
+
+The central domain policy becomes provider-side filters only when the exact
+hosted route advertises them. For ordinary tools, a nonempty policy requires an
+advertised enforcement tag. The harness freezes external fetch domains in
+prompt runtime state and adds them to the durable `tool.started`
+`invocation_policy`; model arguments and `tool.request` cannot author or relax
+it. Peer-originated requests without a prompt snapshot receive the default
+empty invocation policy.
 
 Tool examples are registration metadata, not provider definitions. After a
 failed call, the harness may append one bounded relevant example on the owning

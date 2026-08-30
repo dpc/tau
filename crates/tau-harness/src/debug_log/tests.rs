@@ -1016,6 +1016,7 @@ fn full_prompt_debug_projection_is_fixed_shape_and_content_free() {
             format: None,
         }],
         tools_ref: None,
+        hosted_tools: Vec::new(),
         model: "chatgpt/gpt-5.6-sol".parse().expect("model"),
         model_params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),

@@ -8,6 +8,12 @@ advertise: false
 
 `provider-builtin` is Tau's built-in provider extension. It runs `tau-ext-provider-builtin`, is enabled by default, publishes available models from configured providers, and executes agent turns for built-in provider backends.
 
+ChatGPT/Codex Standard Responses routes advertise provider-hosted web search.
+The harness selects it through each role's `agents.web_tools` policy and uses
+cached search by default. Lite never advertises hosted search. Hosted calls stay
+inside provider inference and never become Tau tool requests; an ambiguous
+transport retry may repeat billable search.
+
 ## Provider retries
 
 Required ChatGPT/Codex Responses, Chat Completions, and OpenRouter inference

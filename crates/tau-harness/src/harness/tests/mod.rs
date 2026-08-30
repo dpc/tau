@@ -1510,6 +1510,7 @@ fn quiet_provider_harness_for_with_start_reason_and_storage_mode(
                         id: "test/model".into(),
                         display_name: Some("Test".to_owned()),
                         tags: Vec::new(),
+                        hosted_tool_capabilities: Vec::new(),
                         supported_tool_types: vec![tau_proto::ToolType::Function],
                         input_modalities: Vec::new(),
                         tool_result_modalities: Vec::new(),

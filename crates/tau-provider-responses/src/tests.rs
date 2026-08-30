@@ -3710,6 +3710,7 @@ fn minimal_prompt() -> tau_proto::AgentPromptCreated {
         context: tau_proto::PromptContext::default(),
         tools: Vec::new(),
         tools_ref: None,
+        hosted_tools: Vec::new(),
         model: "test/model".parse().expect("model id"),
         model_params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,

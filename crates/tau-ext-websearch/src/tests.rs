@@ -17,6 +17,53 @@ use super::composite::{
     classify_provider_error,
 };
 use super::*;
+
+/// Hidden fetch policy accepts exact/subdomain targets and rejects other hosts
+/// before any extractor can be contacted.
+#[test]
+fn fetch_domain_policy_matches_only_exact_or_subdomain_hosts() {
+    let invoke = |url: &str| ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy {
+            allowed_web_domains: Some(vec!["example.com".to_owned()]),
+        },
+        call_id: tau_proto::ToolCallId::new("domain-test"),
+        tool_name: ToolName::new(HYBRID_FETCH_TOOL_NAME),
+        arguments: tau_proto::json_to_cbor(&serde_json::json!({"url": url})),
+        agent_id: tau_proto::AgentId::parse("agent-domain").expect("agent id"),
+        originator: tau_proto::PromptOriginator::User,
+    };
+    assert!(enforce_fetch_domain_policy(&invoke("https://example.com/a")).is_ok());
+    assert!(enforce_fetch_domain_policy(&invoke("https://docs.example.com/a")).is_ok());
+    assert!(enforce_fetch_domain_policy(&invoke("https://notexample.com/a")).is_err());
+    assert!(enforce_fetch_domain_policy(&invoke("https://example.com@evil.test/a")).is_err());
+}
+
+/// The default search pool cannot enforce a hidden domain policy and therefore
+/// fails before contacting even an otherwise successful adapter.
+#[test]
+fn restricted_default_search_pool_fails_without_network_attempt() {
+    let (mut reader, mut writer) = spawn_extension(
+        StubSearcher::ok("must not escape"),
+        StubParallelClient::ok("must not escape"),
+    );
+    drain_startup(&mut reader);
+    let Event::ToolStarted(mut started) = hybrid_search_started("restricted-search", "query")
+    else {
+        panic!("started fixture")
+    };
+    started.invocation_policy.allowed_web_domains = Some(vec!["example.com".to_owned()]);
+    writer
+        .write_event(&Event::ToolStarted(started))
+        .expect("write restricted call");
+    writer.flush().expect("flush");
+    let Event::ToolErrorReported(error) = read_terminal_including_progress(&mut reader) else {
+        panic!("expected pre-contact error")
+    };
+    assert_eq!(
+        error.message,
+        "no configured web search provider can enforce allowed domains"
+    );
+}
 static SATURATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Panic-safe installation of one correlated production saturation hook.
@@ -317,7 +364,7 @@ impl ParallelClient for StubParallelClient {
 struct StubHostedClient;
 
 impl HostedClient for StubHostedClient {
-    fn call(&self, provider: WebAdapter, _request: HostedRequest<'_>) -> Result<String, String> {
+    fn call(&self, provider: WebAdapter, _attempt: HostedAttempt<'_>) -> Result<String, String> {
         Err(format!("{} test provider failure", provider.as_str()))
     }
 }
@@ -496,6 +543,7 @@ fn spawn_with_searcher(
 
 fn exa_started(call_id: &str, query: &str) -> Event {
     Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
         arguments: CborValue::Map(vec![(
@@ -517,6 +565,7 @@ fn hybrid_search_started(call_id: &str, query: &str) -> Event {
 
 fn hybrid_fetch_started(call_id: &str, url: &str) -> Event {
     Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: call_id.into(),
         tool_name: ToolName::new(HYBRID_FETCH_TOOL_NAME),
         arguments: CborValue::Map(vec![(
@@ -628,6 +677,7 @@ fn invalid_and_replayed_hybrid_calls_do_not_advance_cursor() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "hybrid-invalid".into(),
             tool_name: ToolName::new(HYBRID_SEARCH_TOOL_NAME),
             arguments: CborValue::Map(Vec::new()),
@@ -831,6 +881,53 @@ fn provider_reservation_is_bounded_and_rotating() {
     );
 }
 
+/// Restricted search scans the complete circular pool before applying the
+/// attempt cap and never reserves an adapter without upstream enforcement.
+#[test]
+fn restricted_search_reservation_filters_before_attempt_cap() {
+    let mut pool = ProviderPool::new(
+        "fixture",
+        vec![
+            WebAdapter::Exa,
+            WebAdapter::Parallel,
+            WebAdapter::You,
+            WebAdapter::Tavily,
+            WebAdapter::Firecrawl,
+        ],
+    )
+    .expect("pool");
+    assert!(pool.supports_search_domain_enforcement());
+    assert_eq!(
+        pool.reserve_where(WebAdapter::enforces_search_domains)
+            .as_ref(),
+        [WebAdapter::Tavily, WebAdapter::Firecrawl]
+    );
+    assert_eq!(
+        pool.reserve_where(WebAdapter::enforces_search_domains)
+            .as_ref(),
+        [WebAdapter::Tavily, WebAdapter::Firecrawl],
+        "rotation may change eligible order only after passing an eligible primary"
+    );
+    let tags = hybrid_search_tool_spec_for_pool(&pool).tags;
+    assert!(
+        tags.iter()
+            .any(|tag| { tag.as_str() == tau_proto::WEB_PROVIDER_FILTER_DOMAIN_ENFORCEMENT_TAG })
+    );
+
+    let unsupported = ProviderPool::new(
+        "unsupported",
+        vec![WebAdapter::Exa, WebAdapter::Parallel, WebAdapter::You],
+    )
+    .expect("pool");
+    assert!(!unsupported.supports_search_domain_enforcement());
+    assert!(
+        !hybrid_search_tool_spec_for_pool(&unsupported)
+            .tags
+            .iter()
+            .any(|tag| { tag.as_str() == tau_proto::WEB_PROVIDER_FILTER_DOMAIN_ENFORCEMENT_TAG })
+    );
+}
+
 /// Ensures the production extension wiring advances interleaved search and
 /// fetch cursors independently.
 #[test]
@@ -1008,11 +1105,7 @@ fn composite_scheduler_handles_third_provider_and_max_three() {
         fn call(
             &self,
             provider: WebAdapter,
-            _operation: WebOperation,
-            _search: Option<(&str, u32)>,
-            _url: Option<&str>,
-            _timeout: Duration,
-            _cancelled: &AtomicBool,
+            _attempt: HostedAttempt<'_>,
         ) -> Result<String, String> {
             self.calls.lock().expect("calls").push(provider);
             Err("provider failed".to_owned())
@@ -1291,11 +1384,7 @@ fn composite_deadline_attempt_renders_deadline_chip() {
         fn call(
             &self,
             _provider: WebAdapter,
-            _operation: WebOperation,
-            _search: Option<(&str, u32)>,
-            _url: Option<&str>,
-            _timeout: Duration,
-            _cancelled: &AtomicBool,
+            _attempt: HostedAttempt<'_>,
         ) -> Result<String, String> {
             thread::sleep(Duration::from_millis(3));
             Err("late failure".to_owned())
@@ -1396,6 +1485,7 @@ fn exa_fetch_adapter_uses_singular_url_and_fetch_provenance() {
     };
     let event = dispatch_exa_fetch(
         ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "exa-fetch".into(),
             tool_name: ToolName::new(EXA_FETCH_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -1648,6 +1738,7 @@ fn forwards_query_and_num_results_to_exa_searcher_and_returns_text() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -1721,6 +1812,7 @@ fn defaults_num_results_when_omitted() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-2".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -1796,6 +1888,7 @@ fn missing_query_returns_tool_error() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-3".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(Vec::new()),
@@ -1827,6 +1920,7 @@ fn searcher_error_surfaces_as_tool_error() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-4".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -1873,6 +1967,7 @@ fn tool_result_preserves_prompt_originator() {
 
     let event = dispatch_exa(
         ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-originator".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -1902,6 +1997,7 @@ fn rejects_num_results_out_of_range() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-5".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -2318,6 +2414,7 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-6".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_SEARCH_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -2388,6 +2485,7 @@ fn forwards_parallel_fetch_to_web_fetch() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-7".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_FETCH_TOOL_NAME),
             arguments: CborValue::Map(vec![
@@ -2465,6 +2563,7 @@ fn parallel_fetch_error_retains_safe_target_display() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-fetch-error".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_FETCH_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -2514,6 +2613,7 @@ fn parallel_missing_required_argument_is_rejected_before_forwarding() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-missing-query".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_SEARCH_TOOL_NAME),
             arguments: CborValue::Map(Vec::new()),
@@ -2561,6 +2661,7 @@ fn parallel_fetch_invalid_url_is_rejected_before_forwarding() {
     ] {
         let event = dispatch_parallel(
             ToolStarted {
+                invocation_policy: tau_proto::ToolInvocationPolicy::default(),
                 call_id: call_id.into(),
                 tool_name: tau_proto::ToolName::new(PARALLEL_FETCH_TOOL_NAME),
                 arguments,
@@ -2592,6 +2693,7 @@ fn parallel_non_string_argument_keys_are_rejected_before_forwarding() {
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-8".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_SEARCH_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -2803,6 +2905,7 @@ fn post_escape_oversize_result_is_rejected_without_truncation() {
         StubSearcher::ok(WEB_CONTENT_CLOSE.repeat(TOOL_OUTPUT_MAX_BYTES / WEB_CONTENT_CLOSE.len()));
     let event = dispatch_exa(
         ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-expanded-oversize".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -2949,6 +3052,7 @@ fn hosted_mcp_rate_limits_ignore_untrusted_bodies() {
     let parallel = HttpParallelClient::new(endpoint.clone());
     let parallel_event = dispatch_parallel(
         ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "parallel-rate-limit".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_SEARCH_TOOL_NAME),
             arguments: CborValue::Map(vec![(
@@ -3233,6 +3337,7 @@ fn parallel_fetch_adapter_posts_urls_array_without_authorization_header() {
     let client = HttpParallelClient::new(endpoint);
     let event = dispatch_parallel(
         ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "parallel-fetch-wire-shape".into(),
             tool_name: tau_proto::ToolName::new(PARALLEL_FETCH_TOOL_NAME),
             arguments: CborValue::Map(vec![(

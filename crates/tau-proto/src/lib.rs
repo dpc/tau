@@ -987,6 +987,17 @@ pub struct ToolTag(String);
 pub const TURN_MANIPULATOR_TOOL_TAG: &str = "tau:turn:manipulator";
 /// Reserved tool tag for calls that retrieve data without intentional mutation.
 pub const TURN_DATA_FETCH_TOOL_TAG: &str = "tau:turn:data_fetch";
+/// Neutral logical web-search operation tag interpreted by harness policy.
+pub const WEB_SEARCH_TOOL_TAG: &str = "web:search";
+/// Neutral logical caller-directed web-fetch operation tag.
+pub const WEB_FETCH_TOOL_TAG: &str = "web:fetch";
+/// Web-search tool enforces allowed domains at its upstream provider.
+pub const WEB_PROVIDER_FILTER_DOMAIN_ENFORCEMENT_TAG: &str = "web:domains:provider-filter";
+/// Web-fetch tool gates its requested target before extractor contact.
+pub const WEB_REQUESTED_TARGET_DOMAIN_ENFORCEMENT_TAG: &str = "web:domains:requested-target";
+/// Maximum canonical hyperlink target bytes accepted across semantic citations
+/// and terminal OSC 8 rendering.
+pub const MAX_HYPERLINK_TARGET_BYTES: usize = 4_096;
 /// Reserved tool tag for calls whose primary purpose is waiting.
 pub const TURN_WAIT_TOOL_TAG: &str = "tau:turn:wait";
 

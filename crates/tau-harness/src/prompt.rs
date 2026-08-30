@@ -1272,6 +1272,8 @@ fn context_items_contain_payload_envelope_provenance_projection(items: &[Context
             | tau_proto::ContentPart::HarnessInternalText { text } => {
                 is_payload_envelope_provenance_projection(text)
             }
+            tau_proto::ContentPart::UrlCitation { .. }
+            | tau_proto::ContentPart::CitationMetadataInvalid => false,
         }),
         ContextItem::ToolResult(result) => {
             result.presentation == tau_proto::ToolResultPresentation::HarnessDedupPointer
@@ -1863,6 +1865,8 @@ fn project_user_prompt_items(
                         };
                     }
                     tau_proto::ContentPart::SyntheticCompactionSummary { .. } => {}
+                    tau_proto::ContentPart::UrlCitation { .. }
+                    | tau_proto::ContentPart::CitationMetadataInvalid => {}
                     tau_proto::ContentPart::Text { text } => {
                         let body = tau_proto::escape_exact_sentinel_close(
                             text,

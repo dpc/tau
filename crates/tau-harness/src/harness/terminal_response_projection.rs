@@ -60,6 +60,8 @@ impl TerminalResponseProjection {
                             | ContentPart::HarnessInternalText { text } => {
                                 assistant_text.push_str(text);
                             }
+                            ContentPart::UrlCitation { .. }
+                            | ContentPart::CitationMetadataInvalid => {}
                         }
                         contains_private_compaction_output |=
                             matches!(part, ContentPart::SyntheticCompactionSummary { .. });

@@ -1020,7 +1020,10 @@ fn prompt_created_debug_summary(prompt: &tau_proto::AgentPromptCreated) -> serde
                 for part in &message.content {
                     let (tau_proto::ContentPart::Text { text }
                     | tau_proto::ContentPart::SyntheticCompactionSummary { text }
-                    | tau_proto::ContentPart::HarnessInternalText { text }) = part;
+                    | tau_proto::ContentPart::HarnessInternalText { text }) = part
+                    else {
+                        continue;
+                    };
                     counts.text_bytes = counts
                         .text_bytes
                         .saturating_add(u64::try_from(text.len()).unwrap_or(u64::MAX));

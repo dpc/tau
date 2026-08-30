@@ -72,6 +72,7 @@ fn rostra_debug_command_reaches_the_bundled_rostra_target() {
     input
         .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
             ToolStarted {
+                invocation_policy: tau_proto::ToolInvocationPolicy::default(),
                 call_id: "subprocess-log-canary".into(),
                 tool_name: tau_proto::ToolName::new("rostra_post"),
                 arguments: tau_proto::json_to_cbor(&serde_json::json!({

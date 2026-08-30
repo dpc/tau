@@ -172,6 +172,7 @@ fn renderer_learns_agent_from_tool_started_event() {
         cli_test_theme(),
     );
     let event = Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: "hidden-tool".into(),
         tool_name: tau_proto::ToolName::new("read"),
         arguments: CborValue::Null,
@@ -5193,6 +5194,7 @@ fn tool_started_renders_pending_until_provider_progress() {
 
     renderer.handle_recorded_at(
         &Event::ToolStarted(tau_proto::ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("read"),
             arguments: CborValue::Map(vec![(

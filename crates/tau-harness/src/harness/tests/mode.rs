@@ -1169,6 +1169,9 @@ fn daemon_mode_accepts_later_clients() {
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
                         | ContentPart::HarnessInternalText { text } => text.as_str(),
+                        ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => {
+                            ""
+                        }
                     })
                 }
                 _ => None,

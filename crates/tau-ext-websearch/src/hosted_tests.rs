@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use super::hosted::{HostedClient, HostedConfig, HostedRequest, HttpHostedClient};
+use super::hosted::{HostedAttempt, HostedClient, HostedConfig, HostedRequest, HttpHostedClient};
 use super::{WebAdapter, WebOperation};
 
 /// Loopback HTTP server that captures an exact provider request sequence.
@@ -127,12 +127,28 @@ fn request<'a>(
     count: u32,
     url: &'a str,
     cancelled: &'a AtomicBool,
-) -> HostedRequest<'a> {
-    HostedRequest {
-        operation,
-        query,
-        count,
-        url,
+) -> HostedAttempt<'a> {
+    request_with_domains(operation, query, count, url, None, cancelled)
+}
+
+fn request_with_domains<'a>(
+    operation: WebOperation,
+    query: &'a str,
+    count: u32,
+    url: &'a str,
+    allowed_domains: Option<&'a [String]>,
+    cancelled: &'a AtomicBool,
+) -> HostedAttempt<'a> {
+    let request = match operation {
+        WebOperation::Search => HostedRequest::Search {
+            query,
+            count,
+            allowed_domains,
+        },
+        WebOperation::Fetch => HostedRequest::Fetch { url },
+    };
+    HostedAttempt {
+        request,
         timeout: Duration::from_secs(1),
         cancelled,
     }
@@ -393,11 +409,12 @@ fn tavily_search_fixture_is_exact() {
     let output = client
         .call(
             WebAdapter::Tavily,
-            request(
+            request_with_domains(
                 WebOperation::Search,
                 "tau agent",
                 100,
                 "",
+                Some(&["example.com".to_owned()]),
                 &AtomicBool::new(false),
             ),
         )
@@ -419,6 +436,7 @@ fn tavily_search_fixture_is_exact() {
             "query": "tau agent",
             "max_results": 20,
             "search_depth": "basic",
+            "include_domains": ["example.com"],
         })
     );
 }
@@ -440,11 +458,12 @@ fn firecrawl_search_fixture_is_exact() {
     let output = client
         .call(
             WebAdapter::Firecrawl,
-            request(
+            request_with_domains(
                 WebOperation::Search,
                 "tau agent",
                 5,
                 "",
+                Some(&["example.com".to_owned()]),
                 &AtomicBool::new(false),
             ),
         )
@@ -463,7 +482,11 @@ fn firecrawl_search_fixture_is_exact() {
     assert!(request.contains("authorization: Bearer firecrawl-fixture-secret\r\n"));
     assert_eq!(
         request_json(&request),
-        serde_json::json!({"query": "tau agent", "limit": 5})
+        serde_json::json!({
+            "query": "tau agent",
+            "limit": 5,
+            "includeDomains": ["example.com"],
+        })
     );
 }
 

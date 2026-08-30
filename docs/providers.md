@@ -15,10 +15,12 @@ local prompt correlation changes or a newest conversation turn is appended.
 System/developer authority, ordered history, full tool definitions and schemas,
 and supported reasoning/thinking settings remain unchanged; new context follows
 the preceding history. When an existing backend accepts `tool_choice: "none"`,
-Tau retains the full tool-definition list and uses that selector rather than
-removing definitions solely to disable calls for one turn. This preserves tool
-visibility and authorization while presenting stable request structure to
-automatic provider caches.
+standalone compaction and general callers retain the full tool-definition list
+and use that selector rather than removing definitions solely to disable calls.
+Non-tool extension side queries are the deliberate exception: they use `none`
+and remove ordinary and hosted logical web definitions so provider-hosted search
+cannot leak side-query text or incur cost. Other definitions may remain for
+cache structure, but the provider cannot invoke them.
 
 This improves cache eligibility only; each provider controls matching,
 breakpoints, residency, and hits. Model identity, system/developer
@@ -997,6 +999,86 @@ Standard Responses by default and
 explicit Lite compatibility, Function and Custom tools, response-id chaining,
 prompt caching, pool/prewarm reuse, opaque replay items, and provider-owned
 reasoning state. It is not a public API-key OpenAI Responses client.
+
+`agents.web_tools` is inherited through agent defaults, role groups, roles, and
+selected profiles. Named candidates merge by name and select once, in
+`(priority, name)` order, when a prompt is materialized. Capable ChatGPT/Codex
+Standard Responses routes default to cached hosted `web_search`; Lite and exact
+routes without that capability select `websearch_hybrid_search`.
+`websearch_hybrid_fetch` remains external.
+
+`access: cached` means provider index/cache access, not local, offline, private,
+or free search. `access: live` permits current external pages.
+`context_size: low|medium|high` is qualitative; `null` uses the provider
+default. Provider transport retries retain the selected implementation and may
+repeat a paid hosted search after ambiguous failure.
+
+The complete role-policy shape is:
+
+```yaml
+agents:
+  web_tools:
+    # absent inherits; null removes an inherited restriction; [] denies all web
+    allowed_domains: null
+    search:
+      unavailable: omit # or error before provider delivery
+      candidates:
+        native:
+          enable: true
+          priority: 10
+          kind: model_provider
+          access: cached # or live
+          context_size: null # provider default, low, medium, or high
+        external:
+          enable: true
+          priority: 20
+          kind: tool
+          tool: websearch_hybrid_search
+    fetch:
+      unavailable: omit
+      candidates:
+        external:
+          enable: true
+          priority: 10
+          kind: tool
+          tool: websearch_hybrid_fetch
+```
+
+Candidate maps merge by name and candidate fields merge individually. `enable:
+false` disables an inherited candidate. Tool references must be syntactically
+valid, but registration, route support, role authorization, expected aliases,
+and enforcement metadata are checked when each prompt is materialized.
+`unavailable: omit` exposes nothing when every candidate is ineligible;
+`unavailable: error` rejects that prompt before provider delivery. Empty
+candidate maps and malformed or contradictory candidate fields reject
+configuration.
+
+`allowed_domains` uses lowercase DNS names and includes exact hosts plus their
+subdomains. It is not query steering or result post-filtering. Hosted search
+uses provider-side filters only on routes advertising that control. Ordinary
+search requires an adapter that advertises provider-side per-call enforcement.
+The default Exa/Parallel/You pool does not, so restricted external search is
+unavailable unless configured Tavily or Firecrawl is present. External fetch
+gates only its requested target before extractor contact; redirects and
+subresources are outside this control. See
+[Security](../SECURITY.md) and the
+[websearch extension](../crates/tau-ext-websearch/README.md).
+
+```yaml
+profiles:
+  live-research:
+    agents:
+      web_tools:
+        search:
+          candidates:
+            native: { access: live, context_size: high }
+  external-only:
+    agents:
+      web_tools:
+        search:
+          candidates:
+            native: { enable: false }
+```
 
 GPT-5.6 ChatGPT profiles use standard Responses by default. The legacy Lite
 contract is available only as an explicit profile compatibility setting:

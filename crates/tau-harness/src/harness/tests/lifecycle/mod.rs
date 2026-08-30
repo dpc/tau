@@ -79,6 +79,7 @@ fn context_text(item: &ContextItem) -> Option<&str> {
             ContentPart::Text { text }
             | ContentPart::SyntheticCompactionSummary { text }
             | ContentPart::HarnessInternalText { text } => text.as_str(),
+            ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => "",
         }),
         ContextItem::ToolResult(result) => match &result.output.raw {
             CborValue::Text(text) => Some(text.as_str()),
@@ -342,6 +343,7 @@ fn staged_provider_model(id: &str) -> tau_proto::ProviderModelInfo {
         id: id.into(),
         display_name: Some("Staged".to_owned()),
         tags: Vec::new(),
+        hosted_tool_capabilities: Vec::new(),
         supported_tool_types: vec![tau_proto::ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),

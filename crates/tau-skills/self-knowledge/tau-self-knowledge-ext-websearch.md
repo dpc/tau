@@ -8,6 +8,33 @@ advertise: false
 
 `std-websearch` is Tau's built-in generic web search extension. It runs `tau-ext-websearch`, is enabled by default, and adapts hosted web providers into Tau tools.
 
+Harness-level `agents.web_tools` policy may replace ordinary search with an
+exact-route provider-hosted implementation at prompt materialization.
+Caller-directed `web_fetch` remains external, and selection never switches
+mid-turn.
+
+The policy inherits through agent defaults, role groups, roles, and selected
+profiles. `search` and `fetch` each contain named candidates with `enable`,
+`priority`, `kind: model_provider|tool`, and the corresponding hosted
+`access`/`context_size` or internal `tool` name. Candidates select in
+`(priority, name)` order. `unavailable: omit` hides an unavailable capability;
+`error` rejects the prompt before provider delivery. `allowed_domains: null`
+clears an inherited policy, while `[]` denies all web access. The complete
+schema is in `docs/providers.md`.
+
+Cached hosted search still contacts the inference provider and may have cost or
+privacy consequences; `live` additionally permits current external pages.
+Ambiguous provider retry can repeat a paid hosted search. Lite routes never
+infer hosted capability from their name and use the ordinary fallback.
+
+Domain restrictions are not a network sandbox. Hosted filtering is delegated
+to the exact provider route. External fetch gates only the requested target;
+extractor redirects or subresources can leave the allowlist. A nonempty policy
+makes the default external search pool unavailable because its adapters do not
+advertise provider-side per-call enforcement. Configured Tavily or Firecrawl
+can enforce the policy upstream; Tau does not call unsupported adapters and
+post-filter.
+
 
 ## Tools
 

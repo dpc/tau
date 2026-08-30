@@ -4655,13 +4655,12 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
         side_prompt.context.flatten(),
     );
 
-    // Tool execution is blocked locally by the harness. The provider
-    // request must still keep `tool_choice: Auto` so the side query's
-    // non-input fields match the parent conv's cached chain.
+    // Provider-side none contains hosted tools; local rejection remains
+    // defense-in-depth for a provider violation.
     assert_eq!(
         side_prompt.tool_choice,
-        tau_proto::ToolChoice::Auto,
-        "non-tool start-agent request must preserve wire tool_choice for cache compatibility",
+        tau_proto::ToolChoice::None,
+        "non-tool start-agent request must suppress provider tool execution",
     );
 
     // The parent conv's head must not have moved sideways because of
@@ -4685,9 +4684,8 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
 }
 
 /// A non-tool start-agent request (idle-summary path) must not execute
-/// tools, but it also must not mutate provider-visible request fields
-/// to enforce that policy. It must preserve `tool_choice: Auto`; flipping it
-/// to `None` changes the wire request and can defeat provider cache reuse.
+/// tools. Provider-side `tool_choice: none` is required because local rejection
+/// cannot contain provider-hosted tools.
 #[test]
 fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_anchor() {
     let td = TempDir::new().expect("tempdir");
@@ -4777,8 +4775,16 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
 
     assert_eq!(
         side_prompt.tool_choice,
-        tau_proto::ToolChoice::Auto,
-        "idle-summary query must preserve the parent's wire tool_choice; the harness enforces no-tool execution locally",
+        tau_proto::ToolChoice::None,
+        "idle-summary query must suppress provider tool execution",
+    );
+    assert!(
+        side_prompt.hosted_tools.is_empty()
+            && side_prompt
+                .tools
+                .iter()
+                .all(|tool| { !matches!(tool.name.as_str(), "web_search" | "web_fetch") }),
+        "non-tool side query must expose neither hosted nor ordinary logical web tools",
     );
     assert!(
         side_prompt.share_user_cache_key,

@@ -1,5 +1,19 @@
 # Security policy
 
+Provider-hosted web search runs inside the selected inference provider and does
+not cross Tau's registered-tool dispatch boundary. Search queries, actions,
+returned content, URLs, titles, and citation metadata are untrusted external
+data; none grant Tau identity, instruction, authorization, or routing authority.
+Cached hosted access still contacts the provider and is not an offline or
+privacy boundary.
+`allowed_domains` is not a network sandbox. Hosted filtering and model-chosen
+browsing are delegated to the inference provider. External fetch gates only the
+requested target before extractor contact; redirects and subresources may leave
+the allowlist. A nonempty allowlist makes ordinary candidates without declared
+enforcement unavailable. The default external search pool declares no such
+enforcement, so Tau omits it rather than calling and post-filtering; configured
+Tavily or Firecrawl adapters can carry their provider-side filters.
+
 Durable semantic filesystem mutation belongs to one Harness-lifecycle
 `SemanticPersistenceOwner`. Stores pass generation capabilities and staged
 replacements to its sole worker; configured local extensions receive neither

@@ -980,6 +980,10 @@ impl Harness {
         self.prompt_coordination.prompt_runtime.tool_specs.clear();
         self.prompt_coordination
             .prompt_runtime
+            .tool_invocation_policies
+            .clear();
+        self.prompt_coordination
+            .prompt_runtime
             .tool_call_prompts
             .clear();
         self.prompt_coordination

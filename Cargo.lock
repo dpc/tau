@@ -6209,6 +6209,7 @@ dependencies = [
  "serde_json",
  "tau-actions",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -6416,6 +6417,7 @@ version = "0.1.0"
 dependencies = [
  "bon",
  "crossterm",
+ "tau-proto",
  "unicode-segmentation",
  "unicode-width",
  "vt100",

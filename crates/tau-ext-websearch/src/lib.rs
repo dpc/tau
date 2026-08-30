@@ -26,7 +26,7 @@ use composite::{
     CompositeCall, HostedProviderDispatcher, ProviderPool, arbitrate_cancelled_terminal,
 };
 #[cfg(test)]
-use hosted::HostedRequest;
+use hosted::HostedAttempt;
 use hosted::{HostedClient, HostedConfig, HttpHostedClient};
 use tau_client::{ClientError, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
@@ -145,6 +145,10 @@ impl WebAdapter {
             #[cfg(test)]
             Self::Fourth => "fourth",
         }
+    }
+
+    const fn enforces_search_domains(self) -> bool {
+        matches!(self, Self::Tavily | Self::Firecrawl)
     }
 
     const fn display_name(self) -> &'static str {
@@ -506,7 +510,7 @@ where
         fn call(
             &self,
             provider: WebAdapter,
-            _request: HostedRequest<'_>,
+            _attempt: HostedAttempt<'_>,
         ) -> Result<String, String> {
             Err(format!("{} test provider failure", provider.as_str()))
         }
@@ -631,6 +635,16 @@ impl TauExtension for WebsearchExtension {
                 cx.state.hosted_client.configure(cfg.hosted);
                 cx.state.search_pool = cfg.search_pool;
                 cx.state.fetch_pool = cfg.fetch_pool;
+                if cx.state.search_pool.supports_search_domain_enforcement() {
+                    let tool = hybrid_search_tool_spec_for_pool(&cx.state.search_pool);
+                    cx.handle.register_local_tool(
+                        tau_proto::ToolRegistrationDeclared {
+                            tool,
+                            tool_group: None,
+                            prompt_fragment: None,
+                        },
+                    )?;
+                }
                 tracing::info!(
                     target: LOG_TARGET,
                     search_pool = cx.state.search_pool.len(),
@@ -773,6 +787,18 @@ fn hybrid_search_tool_spec() -> ToolSpec {
             .to_owned(),
     );
     spec.enabled_by_default = true;
+    spec.tags
+        .push(tau_proto::ToolTag::new(tau_proto::WEB_SEARCH_TOOL_TAG));
+    spec
+}
+
+fn hybrid_search_tool_spec_for_pool(pool: &ProviderPool) -> ToolSpec {
+    let mut spec = hybrid_search_tool_spec();
+    if pool.supports_search_domain_enforcement() {
+        spec.tags.push(tau_proto::ToolTag::new(
+            tau_proto::WEB_PROVIDER_FILTER_DOMAIN_ENFORCEMENT_TAG,
+        ));
+    }
     spec
 }
 
@@ -800,7 +826,11 @@ fn hybrid_fetch_tool_spec() -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
-        tags: vec![tau_proto::ToolTag::new(tau_proto::TURN_DATA_FETCH_TOOL_TAG)],
+        tags: vec![
+            tau_proto::ToolTag::new(tau_proto::TURN_DATA_FETCH_TOOL_TAG),
+            tau_proto::ToolTag::new(tau_proto::WEB_FETCH_TOOL_TAG),
+            tau_proto::ToolTag::new(tau_proto::WEB_REQUESTED_TARGET_DOMAIN_ENFORCEMENT_TAG),
+        ],
         enabled_by_default: true,
         background_support: None,
         examples: Vec::new(),
@@ -900,6 +930,15 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
         )?;
         return Ok(());
     }
+    if operation == Some(WebOperation::Fetch)
+        && let Err(message) = enforce_fetch_domain_policy(&invoke)
+    {
+        cx.handle().report_tool_terminal(
+            tau_client::ToolTerminalOutcome::try_from(tool_error(invoke, message, display_args))
+                .map_err(|_| ClientError::handler("domain policy returned a non-terminal event"))?,
+        )?;
+        return Ok(());
+    }
 
     let completed_tx = cx.state.completed_tx.clone();
     let waker = cx
@@ -914,10 +953,34 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
     if let Some(permit) = cx.state.sem.try_acquire() {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         let composite_providers = match local_tool_name.as_str() {
-            HYBRID_SEARCH_TOOL_NAME => Some(cx.state.search_pool.reserve()),
+            HYBRID_SEARCH_TOOL_NAME => {
+                if invoke.invocation_policy.allowed_web_domains.is_some() {
+                    Some(
+                        cx.state
+                            .search_pool
+                            .reserve_where(WebAdapter::enforces_search_domains),
+                    )
+                } else {
+                    Some(cx.state.search_pool.reserve())
+                }
+            }
             HYBRID_FETCH_TOOL_NAME => Some(cx.state.fetch_pool.reserve()),
             _ => None,
         };
+        if composite_providers
+            .as_ref()
+            .is_some_and(|providers| providers.is_empty())
+        {
+            cx.handle().report_tool_terminal(
+                tau_client::ToolTerminalOutcome::try_from(tool_error(
+                    invoke,
+                    "no configured web search provider can enforce allowed domains".to_owned(),
+                    display_args,
+                ))
+                .map_err(|_| ClientError::handler("domain policy returned a non-terminal event"))?,
+            )?;
+            return Ok(());
+        }
         let cancelled = Arc::new(AtomicBool::new(false));
         if composite_providers.is_some() {
             cx.state
@@ -986,6 +1049,36 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> Cl
         )?;
     }
     Ok(())
+}
+
+/// Reject a fetch target outside the harness-authored allowlist before
+/// acquiring capacity, rotating providers, or contacting an extractor.
+fn enforce_fetch_domain_policy(invoke: &ToolStarted) -> Result<(), String> {
+    let Some(domains) = &invoke.invocation_policy.allowed_web_domains else {
+        return Ok(());
+    };
+    let url = cbor_text_field(&invoke.arguments, "url")
+        .ok_or_else(|| "web fetch requires a URL".to_owned())?;
+    let parsed = Url::parse(&url).map_err(|_| "web fetch URL is invalid".to_owned())?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err("web fetch URL must be an absolute HTTP(S) URL without userinfo".to_owned());
+    }
+    let host = parsed
+        .host_str()
+        .filter(|host| host.parse::<std::net::IpAddr>().is_err())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "web fetch URL must use a domain host".to_owned())?;
+    if domains
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+    {
+        Ok(())
+    } else {
+        Err("web fetch target is outside the configured allowed domains".to_owned())
+    }
 }
 
 fn operation_for_tool(tool_name: &ToolName) -> Option<WebOperation> {

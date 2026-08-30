@@ -6,6 +6,7 @@ fn quota_model() -> tau_proto::ProviderModelInfo {
         id: "chatgpt/gpt-5.6-sol".into(),
         display_name: None,
         tags: Vec::new(),
+        hosted_tool_capabilities: Vec::new(),
         supported_tool_types: vec![tau_proto::ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),

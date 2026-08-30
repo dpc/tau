@@ -2830,6 +2830,7 @@ fn mixed_live_activity_blocks_keep_category_and_internal_order() {
         let render_tools = |renderer: &mut EventRenderer| {
             for call_id in ["read_one", "read_two"] {
                 renderer.handle(&Event::ToolStarted(tau_proto::ToolStarted {
+                    invocation_policy: tau_proto::ToolInvocationPolicy::default(),
                     call_id: call_id.into(),
                     tool_name: tau_proto::ToolName::new(call_id),
                     arguments: CborValue::Null,

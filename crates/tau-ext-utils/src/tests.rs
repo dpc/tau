@@ -144,6 +144,7 @@ fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {
 
 fn started(call_id: &str, agent: &str, args: CborValue) -> ToolStarted {
     ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::new(call_id),
         tool_name: tau_proto::ToolName::new(TIMER_TOOL_NAME),
         arguments: args,
@@ -1213,6 +1214,7 @@ fn schedule_validation_enforces_message_byte_limit() {
 
 fn papercut_started(call_id: &str, agent: &str, report: &str) -> ToolStarted {
     ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::new(call_id),
         tool_name: tau_proto::ToolName::new(PAPERCUT_TOOL_NAME),
         arguments: cbor_map(vec![("report", CborValue::Text(report.to_owned()))]),

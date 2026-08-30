@@ -2382,6 +2382,7 @@ fn session_restore_log_persists_tool_execution_facts_separately() {
         originator: PromptOriginator::User,
     });
     let started = Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: ToolCallId::from("call-1"),
         tool_name: ToolName::new("demo"),
         arguments: CborValue::Null,
@@ -2425,6 +2426,7 @@ fn ephemeral_session_restore_log_replays_from_memory_only() {
     let sessions_dir = temp_dir("ephemeral-session-restore");
     let mut store = SessionStore::open_ephemeral(&sessions_dir).expect("open ephemeral store");
     let started = Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: ToolCallId::from("call-ephemeral"),
         tool_name: ToolName::new("demo"),
         arguments: CborValue::Null,
@@ -2460,6 +2462,7 @@ fn session_restore_append_rejects_invalid_existing_sequence() {
         seq: PersistedSessionEventSeq::new(7),
         source: None,
         event: Event::ToolStarted(ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: ToolCallId::from("call-bad"),
             tool_name: ToolName::new("demo"),
             arguments: CborValue::Null,
@@ -2499,6 +2502,7 @@ fn session_restore_append_recovers_truncated_existing_log() {
     std::fs::write(&path, 8_u64.to_le_bytes()).expect("write torn header");
     let mut store = SessionStore::open(&sessions_dir).expect("open session store");
     let event = Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: ToolCallId::from("call-torn"),
         tool_name: ToolName::new("demo"),
         arguments: CborValue::Null,
@@ -2541,6 +2545,7 @@ fn session_restore_append_rejects_wrong_existing_event_kind() {
     let bytes_before = std::fs::read(&path).expect("invalid restore journal");
     let mut store = SessionStore::open(&sessions_dir).expect("open session store");
     let event = Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: ToolCallId::from("call-good"),
         tool_name: ToolName::new("demo"),
         arguments: CborValue::Null,

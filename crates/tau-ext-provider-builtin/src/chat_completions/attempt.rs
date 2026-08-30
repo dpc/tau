@@ -30,6 +30,7 @@ pub fn models_for_provider(
                 id: tau_proto::ModelId::new(provider_name.clone(), model.id.clone()),
                 display_name: model.display_name.clone(),
                 tags,
+                hosted_tool_capabilities: model.hosted_tool_capabilities.clone(),
                 supported_tool_types: model.supported_tool_types.clone(),
                 input_modalities: model.input_modalities.clone(),
                 tool_result_modalities: model.tool_result_modalities.clone(),
@@ -344,6 +345,8 @@ pub(crate) fn validate_resolved_narrative_output(
             tau_proto::ContentPart::Text { text }
             | tau_proto::ContentPart::SyntheticCompactionSummary { text }
             | tau_proto::ContentPart::HarnessInternalText { text } => text.as_str(),
+            tau_proto::ContentPart::UrlCitation { .. }
+            | tau_proto::ContentPart::CitationMetadataInvalid => "",
         })
         .collect::<String>();
     if text.trim().is_empty()

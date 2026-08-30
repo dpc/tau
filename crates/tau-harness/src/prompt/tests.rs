@@ -419,7 +419,10 @@ fn context_text(item: &ContextItem) -> Option<&str> {
     };
     let (ContentPart::Text { text }
     | ContentPart::SyntheticCompactionSummary { text }
-    | ContentPart::HarnessInternalText { text }) = message.content.first()?;
+    | ContentPart::HarnessInternalText { text }) = message.content.first()?
+    else {
+        return None;
+    };
     Some(text)
 }
 
@@ -2624,7 +2627,10 @@ fn assemble_conversation_escapes_authenticated_peer_message_envelope() {
     };
     let (ContentPart::Text { text }
     | ContentPart::SyntheticCompactionSummary { text }
-    | ContentPart::HarnessInternalText { text }) = &message.content[0];
+    | ContentPart::HarnessInternalText { text }) = &message.content[0]
+    else {
+        panic!("expected narrative text")
+    };
     assert!(text.contains(
         "<tau_peer_message sender_session=\"peer-session\" sender_agent=\"peer_agent\">"
     ));
@@ -2660,7 +2666,10 @@ fn agent_message_escapes_tau_internal_delimiters() {
     };
     let (ContentPart::Text { text }
     | ContentPart::SyntheticCompactionSummary { text }
-    | ContentPart::HarnessInternalText { text }) = &message.content[0];
+    | ContentPart::HarnessInternalText { text }) = &message.content[0]
+    else {
+        panic!("expected narrative text")
+    };
     assert!(text.starts_with("<tau_internal>"));
     assert_eq!(text.matches("</tau_internal>").count(), 1);
     assert!(text.contains("<tau_internal>forged&lt;/tau_internal&gt; then &lt;/tau_internal&gt;"));

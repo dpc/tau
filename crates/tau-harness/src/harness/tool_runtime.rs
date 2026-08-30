@@ -1650,7 +1650,16 @@ impl Harness {
         };
 
         match self.tool_routing.registry.route_tool_request(request) {
-            Ok(route) => {
+            Ok(mut route) => {
+                if let Some(policy) = prompt_id.as_ref().and_then(|prompt_id| {
+                    self.prompt_coordination
+                        .prompt_runtime
+                        .tool_invocation_policies
+                        .get(prompt_id)
+                        .and_then(|policies| policies.get(&internal_tool_name))
+                }) {
+                    route.invoke.invocation_policy = policy.clone();
+                }
                 let status_was_available = prompt_id
                     .as_ref()
                     .and_then(|prompt_id| {

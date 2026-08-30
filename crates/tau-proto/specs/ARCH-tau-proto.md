@@ -326,3 +326,14 @@ live-only response notice. `ui.navigate_tree` remains a distinct state-changing 
 authenticated-agent-creator total. Both reset with runtime/session state and
 never become journal facts; new decoders synthesize zero when older payloads
 omit the defaulted subtree field.
+
+Provider-hosted tool capabilities and materialized definitions occupy a
+separate namespace from registered Function/Custom tools. Exact-route
+capabilities live in `ProviderModelInfo`; transient `AgentPromptCreated`
+snapshots the selected hosted definition and never turns it into
+`tool.request`. Assistant citation metadata is semantic `MessageItem` content,
+while raw Responses sidecars remain provider replay syntax only.
+
+Harness-authored `ToolStarted.invocation_policy` carries hidden restrictions
+frozen with an ordinary prompt. It is absent from `ToolRequest`, so models and
+configured extensions cannot select or relax it.

@@ -32,6 +32,7 @@ fn record(seq: u64, time: u64, event: Event) -> PersistedAgentEvent {
 
 fn tool_started(id: &str) -> Event {
     Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: id.into(),
         tool_name: ToolName::new("trace_tool"),
         arguments: CborValue::Bytes(vec![0, 255]),

@@ -1408,7 +1408,17 @@ impl<'text> InlineScanner<'text> {
             );
             if ch == ']'
                 && text.as_bytes().get(index + 1) == Some(&b'(')
-                && let Some(close_target) = next_paren
+                && let Some(close_target) = text
+                    .as_bytes()
+                    .get(index + 2)
+                    .is_some_and(|byte| *byte == b'<')
+                    .then(|| {
+                        next_greater
+                            .filter(|greater| text.as_bytes().get(greater + 1) == Some(&b')'))
+                    })
+                    .flatten()
+                    .map(|greater| greater + 1)
+                    .or(next_paren)
                 && index + 2 < close_target
                 && next_whitespace.is_none_or(|found| close_target <= found)
             {
@@ -1458,7 +1468,11 @@ impl<'text> InlineScanner<'text> {
         let open_target = close_label + 1;
         let close_target = start + len - 1;
         let label = &self.text[start + 1..close_label];
-        let target = &self.text[open_target + 1..close_target];
+        let raw_target = &self.text[open_target + 1..close_target];
+        let target = raw_target
+            .strip_prefix('<')
+            .and_then(|target| target.strip_suffix('>'))
+            .unwrap_or(raw_target);
         Some((label, target, len))
     }
 

@@ -324,6 +324,7 @@ fn gpt_5_6_lowers_typed_image_inside_function_output() {
     let request = PromptPayload {
         system_prompt: "",
         context: context(&items),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -429,6 +430,7 @@ fn unaudited_responses_route_omits_typed_image() {
     let request = PromptPayload {
         system_prompt: "",
         context: context(&items),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -628,6 +630,7 @@ fn build_request_includes_prompt_cache_key_when_supported() {
     let request = PromptPayload {
         system_prompt: "system",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -659,6 +662,7 @@ fn debug_request_producer_submits_typed_compressed_capture_job() {
     let request = PromptPayload {
         system_prompt: "system",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -736,6 +740,7 @@ fn build_request_includes_service_tier_when_configured() {
     let request = PromptPayload {
         system_prompt: "system",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams {
             service_tier: Some(tau_proto::ServiceTier::Fast),
@@ -770,6 +775,7 @@ fn build_request_maps_off_effort_to_openai_none() {
     let request = PromptPayload {
         system_prompt: "system",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -832,6 +838,7 @@ fn build_request_omits_prompt_cache_key_without_seed() {
     let request = PromptPayload {
         system_prompt: "system",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -862,6 +869,7 @@ fn build_request_first_turn_replays_full_history_without_chain() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -916,6 +924,7 @@ fn build_request_full_replay_serializes_restored_tool_error_before_next_user_mes
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -988,6 +997,7 @@ fn build_request_full_replay_preserves_raw_function_call_arguments() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1046,6 +1056,7 @@ fn build_request_full_replay_preserves_responses_tool_call_envelope() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1095,6 +1106,7 @@ fn build_request_inference_deferred_placement_sends_exact_suffix_and_previous_re
             vec![assistant_text("first response")],
             vec![user_text("second turn")],
         ),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1276,6 +1288,7 @@ fn response_anchor_large_prefix_work_is_bounded_to_hash_depth_and_suffix_lowerin
             vec![assistant_text("anchored response")],
             vec![user_text("one suffix")],
         ),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1336,6 +1349,7 @@ fn build_request_compaction_response_anchor_falls_back_to_full_replay() {
                 }),
             ],
         })),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1370,6 +1384,7 @@ fn build_request_cached_response_missing_from_context_falls_back_to_full_replay(
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1420,6 +1435,7 @@ fn websocket_vcr_replays_recorded_causal_mismatch_full_request() {
                 }),
             ],
         })),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1479,6 +1495,7 @@ fn websocket_vcr_replays_recorded_compatible_chained_request() {
             vec![assistant_text("R")],
             vec![user_text("suffix")],
         ),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1547,6 +1564,7 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
             vec![assistant_text("first response")],
             vec![user_text("second turn")],
         ),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1587,6 +1605,7 @@ fn build_request_prompt_cache_key_ignores_originator() {
     let user_request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1601,6 +1620,7 @@ fn build_request_prompt_cache_key_ignores_originator() {
     let ext_request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1642,6 +1662,7 @@ fn build_request_share_user_cache_key_does_not_change_agent_bucket() {
     let shared_request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -1702,6 +1723,7 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
     let user_request = PromptPayload {
         system_prompt: "sys",
         context: user_context,
+        hosted_tools: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -1716,6 +1738,7 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
     let ext_request = PromptPayload {
         system_prompt: "sys",
         context: ext_context,
+        hosted_tools: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -1761,6 +1784,7 @@ fn build_request_lite_chain_omits_owned_developer_prefix() {
             vec![assistant_text("answer")],
             vec![user_text("second")],
         ),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -1806,6 +1830,7 @@ fn build_compact_request_uses_lite_schema() {
     let request = PromptPayload {
         system_prompt: "system",
         context: context(&[user_text("compact me"), ContextItem::CompactionTrigger]),
+        hosted_tools: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams {
             service_tier: Some(tau_proto::ServiceTier::Fast),
@@ -1877,6 +1902,7 @@ fn build_compact_request_uses_standard_schema() {
     let request = PromptPayload {
         system_prompt: "system",
         context: context(&[user_text("compact me")]),
+        hosted_tools: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams {
             service_tier: Some(tau_proto::ServiceTier::Fast),
@@ -1917,6 +1943,7 @@ fn build_compact_request_preserves_previous_response_id() {
             vec![assistant_text("answer")],
             vec![user_text("second")],
         ),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -1987,6 +2014,7 @@ fn build_compact_request_serializes_balanced_function_and_custom_rounds() {
     let request = PromptPayload {
         system_prompt: "system",
         context: context(&items),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -2524,11 +2552,11 @@ fn compact_cancellation_joins_worker_before_returning() {
 }
 
 /// `ToolChoice::None` emits `tool_choice: "none"` on the Responses
-/// body while leaving the `tools` array fully declared. That is valid
-/// for callers that intentionally want a different wire request, but
-/// the harness must not use it for cache-sharing side queries because
-/// the field participates in provider request equivalence. Verified
-/// here on a request that carries real tool definitions.
+/// body while leaving the `tools` array fully declared for standalone
+/// compaction and general callers. Non-tool extension side queries deliberately
+/// use this selector and separately suppress ordinary and hosted logical web
+/// definitions to prevent provider egress. Verified here on a request that
+/// carries real tool definitions.
 #[test]
 fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
     let config = chain_test_config();
@@ -2543,6 +2571,7 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::None,
@@ -2592,6 +2621,7 @@ fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
     let request = PromptPayload {
         system_prompt: "system instructions",
         context: context(&[ContextItem::CompactionTrigger, user_text("hello")]),
+        hosted_tools: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -2661,6 +2691,7 @@ fn full_ws_compaction_measurement_matches_exact_fresh_wire_envelope() {
     let request = PromptPayload {
         system_prompt: "stable system",
         context: context(&[user_text("prefix"), ContextItem::CompactionTrigger]),
+        hosted_tools: &[],
         tools: std::slice::from_ref(&tool),
         tool_choice: tau_proto::ToolChoice::None,
         params: tau_proto::ModelParams::default(),
@@ -2743,6 +2774,7 @@ fn build_request_uses_standard_responses_contract_for_gpt_5_6() {
     let request = PromptPayload {
         system_prompt: "system instructions",
         context: context(&[user_text("hello")]),
+        hosted_tools: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -3052,6 +3084,7 @@ fn build_request_sends_compaction_context_management_and_trigger_item() {
     let request = PromptPayload {
         system_prompt: "system",
         context: context(&items),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -3131,6 +3164,7 @@ fn build_request_trims_full_replay_before_latest_compaction_item() {
     let request = PromptPayload {
         system_prompt: "system",
         context: context(&items),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -3201,6 +3235,7 @@ fn basic_prompt_payload() -> PromptPayload<'static> {
     PromptPayload {
         system_prompt: "system",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -3211,6 +3246,153 @@ fn basic_prompt_payload() -> PromptPayload<'static> {
         share_user_cache_key: false,
         debug_provider_requests: false,
     }
+}
+
+/// Standard Responses must lower cached hosted search with exact optional
+/// domain/context controls while preserving ordinary tool order.
+#[test]
+fn standard_responses_lowers_hosted_web_search_exactly() {
+    let hosted = [tau_proto::HostedToolDefinition::WebSearch {
+        access: tau_proto::ProviderWebSearchAccess::Cached,
+        context_size: Some(tau_proto::WebSearchContextSize::High),
+        allowed_domains: vec!["docs.rs".to_owned(), "rust-lang.org".to_owned()],
+    }];
+    let mut request = basic_prompt_payload();
+    request.hosted_tools = &hosted;
+    let body =
+        serde_json::to_value(build_request(&chain_test_config(), &request, None)).expect("request");
+    assert_eq!(
+        body["tools"],
+        serde_json::json!([{
+            "type": "web_search",
+            "external_web_access": false,
+            "search_context_size": "high",
+            "filters": {"allowed_domains": ["docs.rs", "rust-lang.org"]}
+        }])
+    );
+}
+
+/// Citation indices are converted over Unicode scalars, unsafe annotations are
+/// discarded, and exact raw provider syntax remains the replay sidecar.
+#[test]
+fn response_message_retains_bounded_unicode_url_citations() {
+    let mut state = path_crate_common::StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "α source",
+                    "annotations": [
+                        {"type":"url_citation","start_index":2,"end_index":8,
+                         "url":"https://example.com/a","title":"Example"},
+                        {"type":"url_citation","start_index":0,"end_index":1,
+                         "url":"javascript:alert(1)","title":"unsafe"}
+                    ]
+                }]
+            }
+        }),
+        &mut |_| {},
+    )
+    .expect("message done");
+    let items = state.into_output_items();
+    let ContextItem::Message(message) = &items[0] else {
+        panic!("message")
+    };
+    assert!(matches!(
+        &message.content[1],
+        ContentPart::UrlCitation { citation }
+            if citation.start() == 2
+                && citation.end() == 8
+                && citation.url() == "https://example.com/a"
+                && citation.title() == "Example"
+    ));
+    assert_eq!(message.content.len(), 3);
+    assert!(matches!(
+        message.content[2],
+        ContentPart::CitationMetadataInvalid
+    ));
+    assert!(message.responses_raw_json.is_some());
+}
+
+/// Canonical percent-encoding expansion cannot create a semantic citation that
+/// the shared OSC 8 target bound would later render as inert text.
+#[test]
+fn oversized_canonical_citation_url_becomes_invalid_metadata() {
+    let mut state = path_crate_common::StreamState::new();
+    let expanded = format!("https://example.com/{}", "😀".repeat(500));
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "answer",
+                    "annotations": [{
+                        "type":"url_citation", "start_index":0, "end_index":6,
+                        "url":expanded, "title":"expanded"
+                    }]
+                }]
+            }
+        }),
+        &mut |_| {},
+    )
+    .expect("answer survives invalid citation");
+    let ContextItem::Message(message) = &state.into_output_items()[0] else {
+        panic!("message")
+    };
+    assert!(matches!(
+        message.content.as_slice(),
+        [ContentPart::Text { text }, ContentPart::CitationMetadataInvalid]
+            if text == "answer"
+    ));
+}
+
+/// Hosted web-search lifecycle drives transient activity while its completed
+/// item remains opaque provider replay data.
+#[test]
+fn hosted_web_search_activity_is_transient_and_completion_stays_opaque() {
+    let mut state = StreamState::new();
+    apply_parsed_json_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type":"web_search_call","id":"ws_1","status":"in_progress"}
+        }),
+        None,
+        &mut |_| {},
+    )
+    .expect("hosted search added");
+    assert!(state.web_search_active());
+
+    let raw = r#"{"type":"web_search_call","id":"ws_1","status":"completed"}"#;
+    apply_parsed_json_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type":"web_search_call","id":"ws_1","status":"completed"}
+        }),
+        Some(raw),
+        &mut |_| {},
+    )
+    .expect("hosted search done");
+    assert!(!state.web_search_active());
+    let items = state.into_output_items();
+    let ContextItem::UnknownProviderItem(item) = &items[0] else {
+        panic!("opaque hosted completion")
+    };
+    assert_eq!(item.raw_json(), raw);
 }
 
 /// Ensures private Responses appends the newest context after its existing
@@ -3235,6 +3417,7 @@ fn responses_request_appends_context_after_existing_provider_input() {
     let stable_payload = PromptPayload {
         system_prompt: "stable system authority",
         context: stable_context,
+        hosted_tools: &[],
         tools: &tools,
         ..basic_prompt_payload()
     };
@@ -3407,6 +3590,7 @@ fn request_for_items(items: &[ContextItem]) -> PromptPayload<'static> {
     PromptPayload {
         system_prompt: "sys",
         context: context(items),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -3435,6 +3619,7 @@ fn build_request_stamps_phase_on_assistant_messages_when_supported() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -3476,6 +3661,7 @@ fn build_request_omits_phase_when_unsupported() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -3523,6 +3709,7 @@ fn build_request_stamps_phase_on_pre_tool_call_text_flush() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -3618,6 +3805,7 @@ fn build_request_emits_include_when_encrypted_reasoning_supported() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -3645,6 +3833,7 @@ fn build_request_omits_include_when_encrypted_reasoning_unsupported() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -3689,6 +3878,7 @@ fn build_request_replays_reasoning_item_as_top_level_input() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -3962,6 +4152,7 @@ fn build_request_emits_custom_tool_definition_and_round_trips_custom_tool_output
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -4016,6 +4207,7 @@ fn build_request_preserves_existing_provider_tool_call_id_prefixes() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -4060,6 +4252,7 @@ fn build_request_replays_cancelled_tool_result_with_header() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -4161,6 +4354,7 @@ fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
                 }),
             ],
         })),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -4444,6 +4638,7 @@ fn ws_envelope_adds_type_and_drops_stream() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&[]),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -4485,6 +4680,7 @@ fn ws_prewarm_envelope_sets_generate_false_and_drops_previous_response() {
     let request = PromptPayload {
         system_prompt: "sys",
         context: context(&messages),
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),

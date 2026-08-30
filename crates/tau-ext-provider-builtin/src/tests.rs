@@ -2940,6 +2940,7 @@ fn test_chat_model(id: &str) -> ChatCompletionsModel {
         context_window: 128_000,
         compat: None,
         tags: Vec::new(),
+        hosted_tool_capabilities: Vec::new(),
         supported_tool_types: vec![tau_proto::ToolType::Function],
         input_modalities: Vec::new(),
         tool_result_modalities: Vec::new(),
@@ -3392,6 +3393,7 @@ fn minimal_prompt() -> tau_proto::AgentPromptCreated {
         context: tau_proto::PromptContext::default(),
         tools: Vec::new(),
         tools_ref: None,
+        hosted_tools: Vec::new(),
         model: "test/model".parse().expect("model id"),
         model_params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -4590,11 +4592,15 @@ fn chatgpt_stream_update_emits_response_stats_without_text_deltas() {
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         let mut delta_emitter = CodexStreamDeltaEmitter::default();
+        let parsed_prompt_id = tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
+            .expect("test prompt id");
+        let target = ResponseUpdateTarget {
+            agent_prompt_id: &parsed_prompt_id,
+            agent_id: &prompt.agent_id,
+            originator: &prompt.originator,
+        };
         emit_chatgpt_stream_update(
-            &tau_proto::AgentPromptId::parse(prompt.agent_prompt_id.as_str())
-                .expect("test prompt id"),
-            &prompt.agent_id,
-            &prompt.originator,
+            &target,
             &state,
             &mut delta_emitter,
             ProviderResponseStats {
@@ -4605,6 +4611,7 @@ fn chatgpt_stream_update_emits_response_stats_without_text_deltas() {
                 previous: tau_proto::ProviderResponseStatsSample::default(),
                 first_semantic_output_elapsed_micros: None,
             },
+            None,
             &mut writer,
         );
     }

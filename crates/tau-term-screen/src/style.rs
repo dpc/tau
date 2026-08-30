@@ -8,13 +8,12 @@
 use std::sync::Arc;
 
 pub use crossterm::style::Color;
+/// Maximum OSC 8 target length accepted by Tau's terminal renderer.
+pub use tau_proto::MAX_HYPERLINK_TARGET_BYTES;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::TwoLineElision;
-
-/// Maximum OSC 8 target length accepted by Tau's terminal renderer.
-pub const MAX_HYPERLINK_TARGET_BYTES: usize = 4096;
 
 /// Display width of a string in terminal columns, measured by grapheme cluster.
 ///

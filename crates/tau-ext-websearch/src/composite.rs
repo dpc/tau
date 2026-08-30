@@ -10,7 +10,7 @@ use tau_proto::{
     CborValue, Event, ToolProgress, ToolResult, ToolStarted, ToolUseState, ToolUseStatus,
 };
 
-use super::hosted::{HostedClient, HostedRequest};
+use super::hosted::{HostedAttempt, HostedClient, HostedRequest};
 use super::{
     AGGREGATE_ERROR_MAX_BYTES, ATTEMPT_CHIP_MAX_CHARS, MAX_PROVIDER_ATTEMPTS,
     MODEL_VISIBLE_FETCH_TOOL_NAME, MODEL_VISIBLE_SEARCH_TOOL_NAME, PARALLEL_REMOTE_FETCH_TOOL,
@@ -55,16 +55,36 @@ impl ProviderPool {
 
     /// Reserve one circular, bounded attempt order and advance exactly once.
     pub(super) fn reserve(&mut self) -> Box<[WebAdapter]> {
+        self.reserve_where(|_| true)
+    }
+
+    /// Reserve eligible providers from the full circular pool, then apply the
+    /// per-call attempt cap. The cursor advances once even when none qualify.
+    pub(super) fn reserve_where(
+        &mut self,
+        eligible: impl Fn(WebAdapter) -> bool,
+    ) -> Box<[WebAdapter]> {
         let start = self.cursor;
         self.cursor = (start + 1) % self.providers.len();
-        (0..self.providers.len().min(MAX_PROVIDER_ATTEMPTS))
+        (0..self.providers.len())
             .map(|offset| self.providers[(start + offset) % self.providers.len()])
+            .filter(|provider| eligible(*provider))
+            .take(MAX_PROVIDER_ATTEMPTS)
             .collect()
     }
 
     /// Return whether the configured pool contains `provider`.
     pub(super) fn contains(&self, provider: WebAdapter) -> bool {
         self.providers.contains(&provider)
+    }
+
+    /// Whether some configured search adapter can enforce a per-call domain
+    /// policy upstream.
+    pub(super) fn supports_search_domain_enforcement(&self) -> bool {
+        self.providers
+            .iter()
+            .copied()
+            .any(WebAdapter::enforces_search_domains)
     }
 }
 
@@ -196,15 +216,7 @@ pub(super) struct AttemptRecord {
 /// Provider-integration seam consumed by the provider-neutral scheduler.
 pub(super) trait ProviderDispatcher {
     /// Issue one operation-specific provider attempt within the supplied slice.
-    fn call(
-        &self,
-        provider: WebAdapter,
-        operation: WebOperation,
-        search: Option<(&str, u32)>,
-        url: Option<&str>,
-        timeout: Duration,
-        cancelled: &AtomicBool,
-    ) -> Result<String, String>;
+    fn call(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> Result<String, String>;
 }
 
 /// Production adapter registry for the currently integrated hosted providers.
@@ -218,57 +230,47 @@ pub(super) struct HostedProviderDispatcher<'a> {
 }
 
 impl ProviderDispatcher for HostedProviderDispatcher<'_> {
-    fn call(
-        &self,
-        provider: WebAdapter,
-        operation: WebOperation,
-        search: Option<(&str, u32)>,
-        url: Option<&str>,
-        timeout: Duration,
-        cancelled: &AtomicBool,
-    ) -> Result<String, String> {
-        match (provider, operation) {
-            (WebAdapter::Exa, WebOperation::Search) => {
-                let (query, num_results) = search.expect("validated search args");
-                self.searcher
-                    .search_with_timeout(query, num_results, timeout)
-            }
-            (WebAdapter::Exa, WebOperation::Fetch) => self
+    fn call(&self, provider: WebAdapter, attempt: HostedAttempt<'_>) -> Result<String, String> {
+        match (provider, &attempt.request) {
+            (
+                WebAdapter::Exa,
+                HostedRequest::Search {
+                    query,
+                    count,
+                    allowed_domains: _,
+                },
+            ) => self
                 .searcher
-                .fetch_with_timeout(url.expect("validated fetch URL"), timeout),
-            (WebAdapter::Parallel, WebOperation::Search) => {
-                let (query, _) = search.expect("validated search args");
+                .search_with_timeout(query, *count, attempt.timeout),
+            (WebAdapter::Exa, HostedRequest::Fetch { url }) => {
+                self.searcher.fetch_with_timeout(url, attempt.timeout)
+            }
+            (
+                WebAdapter::Parallel,
+                HostedRequest::Search {
+                    query,
+                    count: _,
+                    allowed_domains: _,
+                },
+            ) => self.parallel_client.call_with_timeout(
+                PARALLEL_REMOTE_SEARCH_TOOL,
+                serde_json::json!({"query": query}),
+                attempt.timeout,
+            ),
+            (WebAdapter::Parallel, HostedRequest::Fetch { url }) => {
                 self.parallel_client.call_with_timeout(
-                    PARALLEL_REMOTE_SEARCH_TOOL,
-                    serde_json::json!({"query": query}),
-                    timeout,
+                    PARALLEL_REMOTE_FETCH_TOOL,
+                    serde_json::json!({"urls": [url]}),
+                    attempt.timeout,
                 )
             }
-            (WebAdapter::Parallel, WebOperation::Fetch) => self.parallel_client.call_with_timeout(
-                PARALLEL_REMOTE_FETCH_TOOL,
-                serde_json::json!({"urls": [url.expect("validated fetch URL")]}),
-                timeout,
-            ),
             (
                 provider @ (WebAdapter::You
                 | WebAdapter::Brave
                 | WebAdapter::Tavily
                 | WebAdapter::Firecrawl),
-                operation,
-            ) => {
-                let (query, count) = search.unwrap_or(("", 0));
-                self.hosted_client.call(
-                    provider,
-                    HostedRequest {
-                        operation,
-                        query,
-                        count,
-                        url: url.unwrap_or(""),
-                        timeout,
-                        cancelled,
-                    },
-                )
-            }
+                _,
+            ) => self.hosted_client.call(provider, attempt),
             #[cfg(test)]
             (WebAdapter::Third | WebAdapter::Fourth, _) => {
                 Err("test provider requires an injected dispatcher".to_owned())
@@ -345,16 +347,30 @@ impl CompositeCall<'_> {
                 );
             }
             let before = Instant::now();
-            let search = parsed_search
-                .as_ref()
-                .map(|(query, count)| (query.as_str(), *count));
+            let request = match self.operation {
+                WebOperation::Search => {
+                    let (query, count) = parsed_search.as_ref().expect("validated search args");
+                    HostedRequest::Search {
+                        query,
+                        count: *count,
+                        allowed_domains: self
+                            .invoke
+                            .invocation_policy
+                            .allowed_web_domains
+                            .as_deref(),
+                    }
+                }
+                WebOperation::Fetch => HostedRequest::Fetch {
+                    url: parsed_url.as_deref().expect("validated fetch URL"),
+                },
+            };
             let result = self.dispatcher.call(
                 provider,
-                self.operation,
-                search,
-                parsed_url.as_deref(),
-                attempt_timeout,
-                self.cancelled,
+                HostedAttempt {
+                    request,
+                    timeout: attempt_timeout,
+                    cancelled: self.cancelled,
+                },
             );
             if self.cancelled.load(Ordering::Acquire) {
                 attempts.push(AttemptRecord {

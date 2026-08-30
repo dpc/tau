@@ -519,6 +519,7 @@ fn terminal_worker_cannot_report_successful_tool_results() {
         input_writer
             .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
                 tau_proto::ToolStarted {
+                    invocation_policy: tau_proto::ToolInvocationPolicy::default(),
                     call_id: tau_proto::ToolCallId::new(format!("call-{name}")),
                     tool_name: tau_proto::ToolName::new(name),
                     arguments: tau_proto::json_to_cbor(&arguments),

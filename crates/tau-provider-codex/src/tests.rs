@@ -1076,6 +1076,7 @@ fn test_prompt_payload<'a>(
     common::PromptPayload {
         system_prompt: "",
         context,
+        hosted_tools: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,

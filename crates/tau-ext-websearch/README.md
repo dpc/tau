@@ -5,6 +5,27 @@ search rotates through Exa, Parallel, and anonymous You.com. Default fetch
 rotates through Exa and Parallel. Brave, Tavily, and Firecrawl are optional
 credentialed adapters.
 
+The harness-level `agents.web_tools` policy chooses this ordinary search only
+when the exact model route does not win with provider-hosted search.
+`web_fetch` remains ordinary because OpenAI exposes no caller-directed hosted
+fetch primitive. Native failure never switches implementation mid-turn; an
+ambiguous provider retry may repeat billable hosted search.
+
+When a role supplies `allowed_domains`, the harness freezes that restriction as
+hidden invocation policy rather than exposing it as model arguments. External
+fetch rejects a non-HTTP(S), userinfo, IP-literal, or out-of-allowlist target
+before provider selection or extractor contact. This gates only the requested
+target URL; an extractor may still follow redirects or load subresources, so it
+is not a network sandbox.
+
+The authoritative logical policy schema, inheritance/null semantics, candidate
+selection rules, and disable/override examples are documented in
+[`docs/providers.md`](../../docs/providers.md#chatgptcodex-provider). A
+nonempty allowlist makes the default Exa/Parallel/You search pool unavailable.
+Configured Tavily and Firecrawl searches are eligible because Tau passes their
+documented provider-side domain filters. Tau never presents result
+post-filtering as an egress control.
+
 
 ## Tools
 

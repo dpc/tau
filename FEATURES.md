@@ -225,8 +225,10 @@ authorization explicit:
 - **XMPP:** the disabled-by-default bridge supports fixed recipients or
   per-agent MUC rooms with allowlisted senders and TLS transport. See the
   [XMPP README](crates/tau-ext-xmpp/README.md).
-- **Web search:** the bundled extension rotates search through Exa, Parallel,
-  and anonymous You.com, and fetch through Exa and Parallel, with optional
+- **Web search:** capable ChatGPT/Codex Standard Responses routes use cached
+  provider-hosted search by default. Other routes use the bundled extension,
+  which rotates search through Exa, Parallel, and anonymous You.com, and fetch
+  through Exa and Parallel, with optional
   credentialed Brave, Tavily, and Firecrawl adapters and explicit single-provider
   modes. See the
   [web-search README](crates/tau-ext-websearch/README.md).

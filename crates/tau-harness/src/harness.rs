@@ -1297,6 +1297,9 @@ pub(crate) fn assistant_text_from_output_items(output_items: &[ContextItem]) -> 
                         ContentPart::Text { text }
                         | ContentPart::SyntheticCompactionSummary { text }
                         | ContentPart::HarnessInternalText { text } => text.as_str(),
+                        ContentPart::UrlCitation { .. } | ContentPart::CitationMetadataInvalid => {
+                            ""
+                        }
                     })
                     .collect::<String>(),
             ),
@@ -1739,6 +1742,7 @@ where
                 id: "echo/model".into(),
                 display_name: Some("Echo".to_owned()),
                 tags: Vec::new(),
+                hosted_tool_capabilities: Vec::new(),
                 supported_tool_types: vec![tau_proto::ToolType::Function],
                 input_modalities: Vec::new(),
                 tool_result_modalities: Vec::new(),
@@ -1841,6 +1845,8 @@ where
                                 ContentPart::Text { text }
                                 | ContentPart::SyntheticCompactionSummary { text }
                                 | ContentPart::HarnessInternalText { text } => text.clone(),
+                                ContentPart::UrlCitation { .. }
+                                | ContentPart::CitationMetadataInvalid => String::new(),
                             })
                         }
                         _ => None,

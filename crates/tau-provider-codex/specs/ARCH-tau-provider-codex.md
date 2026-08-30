@@ -177,8 +177,11 @@ request lowering replays the already validated raw JSON directly rather than
 falling back to structured serialization.
 Older models retain inline context management and ignore the profile's Lite
 compatibility flag.
-Hosted Responses tools are not part of either contract; Tau's tools remain
-client-executed definitions.
+Standard ChatGPT/Codex Responses routes additionally advertise provider-hosted
+web search. The harness selects it separately from client-executed Function and
+Custom definitions and snapshots it in each transient provider prompt. Lite
+never advertises or lowers hosted search. Completed hosted-call items remain
+bounded provider-owned opaque replay data and never enter Tau tool dispatch.
 
 ChatGPT model metadata distinguishes the raw provider context window from the
 effective window published to the harness. Standalone compaction thresholds

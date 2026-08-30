@@ -75,6 +75,7 @@ fn rejected_reconfigure_clears_previous_module_state() {
     );
 
     let invoke = tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::new("call-email"),
         tool_name: tau_proto::ToolName::new("email_list_folders"),
         arguments: CborValue::Map(vec![]),
@@ -99,6 +100,7 @@ fn rejected_reconfigure_clears_previous_module_state() {
     );
 
     let invoke = tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::new("call-calendar"),
         tool_name: tau_proto::ToolName::new("calendar_list_calendars"),
         arguments: CborValue::Map(vec![]),
@@ -149,6 +151,7 @@ fn rejected_legacy_fallback_reconfigure_clears_calendar_state() {
     );
 
     let invoke = tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::new("call-calendar"),
         tool_name: tau_proto::ToolName::new("calendar_list_calendars"),
         arguments: CborValue::Map(vec![]),
@@ -575,6 +578,7 @@ fn ignores_tool_started_for_tools_owned_by_other_extensions() {
     let mut runtime = RuntimeState::default();
     for tool_name in ["read", email::TOOL_NAME, calendar::TOOL_NAME] {
         let invoke = tau_proto::ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id: tau_proto::ToolCallId::new(format!("call-{tool_name}")),
             tool_name: tau_proto::ToolName::new(tool_name),
             arguments: CborValue::Map(vec![]),
@@ -873,6 +877,7 @@ fn prefixed_calendar_invocation_uses_logical_dispatch_and_wire_output() {
         writer
             .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(
                 tau_proto::ToolStarted {
+                    invocation_policy: tau_proto::ToolInvocationPolicy::default(),
                     call_id: tau_proto::ToolCallId::new("prefixed-calendar"),
                     tool_name: tau_proto::ToolName::new("work_calendar_list_calendars"),
                     arguments: CborValue::Map(Vec::new()),

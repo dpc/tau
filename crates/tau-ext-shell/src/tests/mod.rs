@@ -540,6 +540,7 @@ fn send_shell_regex_allowlist_config(
 
 fn tool_started(call_id: &str, tool_name: &str, arguments: CborValue, agent_id: &str) -> Event {
     Event::ToolStarted(ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tau_proto::ToolCallId::new(call_id),
         tool_name: tau_proto::ToolName::new(tool_name),
         arguments,

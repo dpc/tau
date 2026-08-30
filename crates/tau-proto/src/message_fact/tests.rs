@@ -208,7 +208,10 @@ fn all_message_facts_project_with_generic_roles_and_escaping() {
         assert_eq!(projection.activates_model, expected_activation);
         let (ContentPart::Text { text }
         | ContentPart::SyntheticCompactionSummary { text }
-        | ContentPart::HarnessInternalText { text }) = &projection.item.content[0];
+        | ContentPart::HarnessInternalText { text }) = &projection.item.content[0]
+        else {
+            panic!("projection must contain narrative text")
+        };
         assert!(text.starts_with("<message event="));
         assert!(text.contains("<hello>") || !matches!(fact, Event::MessageDelivered(_)));
         assert!(!text.contains('\u{202e}'));
@@ -250,7 +253,10 @@ fn message_fact_body_uses_exact_close_framing() {
         .expect("valid projection");
     let (ContentPart::Text { text }
     | ContentPart::SyntheticCompactionSummary { text }
-    | ContentPart::HarnessInternalText { text }) = &projection.item.content[0];
+    | ContentPart::HarnessInternalText { text }) = &projection.item.content[0]
+    else {
+        panic!("projection must contain narrative text")
+    };
 
     assert_eq!(text.matches("</message>").count(), 1);
     assert_eq!(

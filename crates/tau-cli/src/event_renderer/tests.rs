@@ -8,6 +8,7 @@ use std::time::Instant;
 use tau_cli_term_raw::Term;
 use tau_config::settings as path_tau_config_settings;
 
+use super::finished_response_projection::assistant_text_with_citations;
 use super::{
     AgentActivity, MessageRenderMode, QUEUED_PROJECTION_WINDOW_BYTES, RoleCompletionDetails,
     assistant_text_from_message_item, assistant_text_from_output_items, bounded_queued_line_end,
@@ -18,6 +19,86 @@ use crate::chat::{DraftSlot, queue_prompt_draft_snapshot};
 
 fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
+}
+
+/// Finished live and replayed messages use typed citation metadata for links
+/// and retain the fixed visible diagnostic for malformed provider annotations.
+#[test]
+fn typed_url_citations_project_links_and_invalid_diagnostic() {
+    let message = tau_proto::MessageItem {
+        role: tau_proto::ContextRole::Assistant,
+        content: vec![
+            tau_proto::ContentPart::Text {
+                text: "α source".to_owned(),
+            },
+            tau_proto::ContentPart::UrlCitation {
+                citation: tau_proto::UrlCitation::try_new(
+                    2,
+                    8,
+                    "https://example.com/a)b",
+                    "\"] hostile",
+                )
+                .expect("valid citation"),
+            },
+            tau_proto::ContentPart::UrlCitation {
+                citation: tau_proto::UrlCitation::try_new(
+                    3,
+                    7,
+                    "https://overlap.example/",
+                    "overlap",
+                )
+                .expect("valid citation"),
+            },
+            tau_proto::ContentPart::CitationMetadataInvalid,
+        ],
+        phase: None,
+        responses_raw_json: Some("provider replay only".to_owned()),
+    };
+    let mut allocations = 0;
+    let projected =
+        assistant_text_with_citations(&message, &mut allocations).expect("assistant projection");
+    assert_eq!(
+        projected,
+        "α source\n\nSources:\n- [\"\\] hostile](<https://example.com/a)b>)\n- [overlap](<https://overlap.example/>)\n\ncitation metadata invalid"
+    );
+}
+
+/// Rendering uses the canonical URL owned by the validated citation and never
+/// rewrites a backslash into a different authority.
+#[test]
+fn citation_projection_preserves_canonical_url_authority() {
+    let citation = tau_proto::UrlCitation::try_new(
+        0,
+        4,
+        r"https://good.example\@evil.example/path",
+        "hostile ) ] \" title",
+    )
+    .expect("URL parser canonicalizes the provider spelling");
+    let canonical = citation.url().to_owned();
+    let message = tau_proto::MessageItem {
+        role: tau_proto::ContextRole::Assistant,
+        content: vec![
+            tau_proto::ContentPart::Text {
+                text: "link".to_owned(),
+            },
+            tau_proto::ContentPart::UrlCitation { citation },
+        ],
+        phase: None,
+        responses_raw_json: None,
+    };
+    let mut allocations = 0;
+    let projected = assistant_text_with_citations(&message, &mut allocations).expect("projection");
+    let destination = projected
+        .strip_prefix("[link](")
+        .and_then(|value| value.strip_suffix(')'))
+        .expect("single Markdown destination");
+    assert_eq!(
+        destination
+            .strip_prefix('<')
+            .and_then(|value| value.strip_suffix('>')),
+        Some(canonical.as_str())
+    );
+    assert!(tau_proto::UrlCitation::try_new(0, 1, "https://example.com/a b", "space").is_err());
 }
 
 fn renderer_for_agent_id_tests() -> super::EventRenderer {
@@ -897,6 +978,7 @@ fn presentation_mutation_eligibility_covers_every_canonical_fold() {
 
 fn blocker_started(tool_name: &str, call_id: &str, action: &str) -> tau_proto::ToolStarted {
     tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new(tool_name),
         arguments: tau_proto::CborValue::Map(vec![
@@ -1534,6 +1616,7 @@ fn background_terminal_handlers_normalize_status() {
     for call_id in ["background-result", "background-error"] {
         renderer.handle_socket_delivery(
             &tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+                invocation_policy: tau_proto::ToolInvocationPolicy::default(),
                 call_id: call_id.into(),
                 tool_name: tau_proto::ToolName::new("generic"),
                 arguments: tau_proto::CborValue::Map(Vec::new()),
@@ -1628,6 +1711,7 @@ fn transcript_tool_runtime_retains_typed_ids_across_background_and_terminal_even
         },
     ));
     renderer.handle(&tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: call_id.clone(),
         tool_name: tau_proto::ToolName::new("extension_custom"),
         arguments: tau_proto::CborValue::Text("custom input".to_owned()),
@@ -2400,6 +2484,7 @@ fn agent_id_for_event_resolves_tool_metadata_and_started_fallback() {
         .insert("known-call".into(), agent_id("metadata-agent"));
 
     let known_started = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: "known-call".into(),
         tool_name: tau_proto::ToolName::new("read"),
         arguments: tau_proto::CborValue::Null,
@@ -2407,6 +2492,7 @@ fn agent_id_for_event_resolves_tool_metadata_and_started_fallback() {
         originator: tau_proto::PromptOriginator::User,
     });
     let unknown_started = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: "unknown-call".into(),
         tool_name: tau_proto::ToolName::new("read"),
         arguments: tau_proto::CborValue::Null,
@@ -2430,6 +2516,7 @@ fn agent_id_for_event_resolves_tool_metadata_and_started_fallback() {
 fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
     let owner = agent_id("started-agent");
     let user_start = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: "user-call".into(),
         tool_name: tau_proto::ToolName::new("read"),
         arguments: tau_proto::CborValue::Null,
@@ -2462,6 +2549,7 @@ fn reconstructed_tool_start_selection_is_explicit_and_user_scoped() {
     );
 
     let extension_start = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: "extension-call".into(),
         tool_name: tau_proto::ToolName::new("read"),
         arguments: tau_proto::CborValue::Null,
@@ -2554,6 +2642,7 @@ fn shell_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
         };
     let tool_collision: tau_proto::ToolCallId = "shell-one".into();
     let tool_start = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        invocation_policy: tau_proto::ToolInvocationPolicy::default(),
         call_id: tool_collision.clone(),
         tool_name: tau_proto::ToolName::new("generic"),
         arguments: tau_proto::CborValue::Null,
@@ -2857,6 +2946,7 @@ fn tool_ownership_uses_typed_protocol_ids_across_live_lifecycles() {
     let unknown_call: tau_proto::ToolCallId = "call-unknown".into();
     let tool_started = |call_id: tau_proto::ToolCallId, agent_id: tau_proto::AgentId| {
         tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+            invocation_policy: tau_proto::ToolInvocationPolicy::default(),
             call_id,
             tool_name: tau_proto::ToolName::new("generic"),
             arguments: tau_proto::CborValue::Null,

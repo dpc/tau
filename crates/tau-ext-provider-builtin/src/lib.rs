@@ -1749,6 +1749,7 @@ fn parse_chat_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<d
             context_window: 128_000,
             compat: None,
             tags: Vec::new(),
+            hosted_tool_capabilities: Vec::new(),
             supported_tool_types: vec![tau_proto::ToolType::Function],
             input_modalities: Vec::new(),
             tool_result_modalities: Vec::new(),
@@ -8606,6 +8607,7 @@ fn handle_resolved_prewarm(
         system_prompt: &prewarm.system_prompt,
         context: &prewarm.context,
         tools: &prewarm.tools,
+        hosted_tools: &[],
         params: prewarm.model_params,
         tool_choice: prewarm.tool_choice,
         compaction: None,
@@ -9190,6 +9192,7 @@ where
         system_prompt: &prompt.system_prompt,
         context: &prompt.context,
         tools: &prompt.tools,
+        hosted_tools: &prompt.hosted_tools,
         params: prompt.model_params,
         tool_choice: prompt.tool_choice,
         compaction: prompt.compaction,
@@ -9404,6 +9407,8 @@ struct RateLimitedResponseUpdateEmitter {
     /// Immutable elapsed duration captured at the first qualifying parser
     /// state.
     first_semantic_output_elapsed: Option<Duration>,
+    /// Last hosted-search activity state successfully published.
+    web_search_active: Option<bool>,
 }
 
 struct ResponseUpdateTarget<'a> {
@@ -9425,6 +9430,7 @@ impl RateLimitedResponseUpdateEmitter {
             last_stats_sample: tau_proto::ProviderResponseStatsSample::default(),
             emitted_non_empty_sample: false,
             first_semantic_output_elapsed: None,
+            web_search_active: None,
         }
     }
 
@@ -9495,18 +9501,33 @@ impl RateLimitedResponseUpdateEmitter {
         {
             return;
         }
+        let activity_transition = if state.web_search_active() {
+            (self.web_search_active != Some(true)).then_some(true)
+        } else {
+            (self.web_search_active == Some(true)).then_some(false)
+        };
         if emit_chatgpt_stream_update(
-            target.agent_prompt_id,
-            target.agent_id,
-            target.originator,
+            target,
             state,
             &mut self.delta_emitter,
             response_stats,
+            activity_transition.map(|active| ProviderResponseStatusUpdate {
+                text: if active {
+                    "Searching web…".to_owned()
+                } else {
+                    "Web search complete…".to_owned()
+                },
+                clear_response: false,
+                retry: None,
+            }),
             writer,
         ) {
             self.last_stats_sample = response_stats.current;
             self.last_update_emitted_at = Some(now);
             self.emitted_non_empty_sample |= response_stats.current.response_bytes_received > 0;
+            if let Some(active) = activity_transition {
+                self.web_search_active = Some(active);
+            }
         }
     }
 
@@ -9529,12 +9550,11 @@ impl RateLimitedResponseUpdateEmitter {
 }
 
 fn emit_chatgpt_stream_update<S: ProviderReportSink>(
-    agent_prompt_id: &tau_proto::AgentPromptId,
-    agent_id: &tau_proto::AgentId,
-    originator: &tau_proto::PromptOriginator,
+    target: &ResponseUpdateTarget<'_>,
     state: &CodexStreamState,
     delta_emitter: &mut CodexStreamDeltaEmitter,
     response_stats: ProviderResponseStats,
+    status: Option<ProviderResponseStatusUpdate>,
     writer: &mut S,
 ) -> bool {
     // RATE-LIMIT GUARDRAIL — DO NOT CALL THIS DIRECTLY FROM UPSTREAM CHUNKS.
@@ -9550,18 +9570,19 @@ fn emit_chatgpt_stream_update<S: ProviderReportSink>(
     if deltas.is_empty()
         && compaction.is_none()
         && response_stats.current == response_stats.previous
+        && status.is_none()
     {
         return false;
     }
     let Ok(()) = writer.send_report(HarnessInputMessage::emit_transient(
         Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
-            agent_prompt_id: agent_prompt_id.clone(),
-            agent_id: agent_id.clone(),
+            agent_prompt_id: target.agent_prompt_id.clone(),
+            agent_id: target.agent_id.clone(),
             deltas,
             compaction,
-            status: None,
+            status,
             response_stats: Some(response_stats),
-            originator: originator.clone(),
+            originator: target.originator.clone(),
         }),
     )) else {
         return false;
