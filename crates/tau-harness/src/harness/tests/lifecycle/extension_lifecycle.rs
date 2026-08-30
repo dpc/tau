@@ -487,6 +487,7 @@ fn disconnected_tool_is_removed_cleanly() {
             ctx_id: None,
         }),
     );
+
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -718,7 +719,6 @@ fn role_disabled_tool_is_reported_without_dispatch() {
             ctx_id: None,
         }),
     );
-
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
         estimated_api_cost_rates: None,
@@ -5871,6 +5871,8 @@ fn tool_prompt_fragment_heading_uses_model_visible_tool_name() {
     h.shutdown().expect("shutdown");
 }
 
+/// A prompt-owned queued call must retain its payload and provider position
+/// while an exact replacement registration waits behind the Ready barrier.
 #[test]
 fn queued_tool_call_waits_for_staged_provider_until_ready() {
     // Regression: prompt-owned calls must use the prompt's advertised tool
@@ -5945,6 +5947,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
             ctx_id: None,
         }),
     );
+    crate::tool_turn::start_pending_tool_ownership_probe("call-staged");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,
@@ -5966,7 +5969,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
                 call_id: "call-staged".into(),
                 name: ToolName::new("staged_tool"),
                 tool_type: tau_proto::ToolType::Function,
-                arguments: CborValue::Map(Vec::new()),
+                arguments: CborValue::Text("x".repeat(1024 * 1024)),
                 raw_arguments_json: None,
                 responses_envelope: None,
             }),
@@ -6019,6 +6022,13 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
             .map(|provider| provider.as_str()),
         Some("conn-staged-tool")
     );
+    let ownership = crate::tool_turn::finish_pending_tool_ownership_probe("call-staged");
+    assert_eq!(ownership.pending_clones, 0);
+    assert_eq!(ownership.candidate_visits, 3);
+    assert_eq!(ownership.queue_pops, 1);
+    assert_ne!(ownership.admission_text_ptr, 0);
+    assert_eq!(ownership.admission_text_ptr, ownership.popped_text_ptr);
+    assert_eq!(ownership.popped_text_ptr, ownership.execution_text_ptr);
 
     h.handle_extension_event(
         "conn-staged-tool",

@@ -16,6 +16,15 @@ fn call(id: &str) -> AgentToolCall {
     }
 }
 
+/// Builds one invocation whose dominant allocation makes payload ownership
+/// observable without allocator or timing inference.
+fn large_call(id: &str, bytes: usize) -> AgentToolCall {
+    AgentToolCall {
+        arguments: CborValue::Text("x".repeat(bytes)),
+        ..call(id)
+    }
+}
+
 fn push(machine: &mut ToolTurnMachine, cid: &AgentId, id: &str) {
     machine.push(cid.clone(), call(id), BackgroundSupport::Never);
 }
@@ -79,6 +88,103 @@ fn queued_calls_dispatch_in_provider_order_without_global_locking() {
     assert_eq!(pop_id(&mut machine).as_deref(), Some("third"));
     assert_eq!(machine.pending_len(), 0);
     assert_eq!(machine.in_flight_len(), 3);
+}
+
+/// The former clone-first probe is executable beside the borrowed probe. Both
+/// select the same call, but only the former duplicates its multi-megabyte
+/// argument allocation before the queue transfers the original allocation.
+#[test]
+fn borrowed_candidate_probe_eliminates_pending_payload_clone() {
+    for mebibytes in [1, 2, 4, 8] {
+        let bytes = mebibytes * 1024 * 1024;
+        let legacy_id = format!("legacy-{mebibytes}");
+        start_pending_tool_ownership_probe(&legacy_id);
+        let mut legacy = ToolTurnMachine::default();
+        legacy.push(
+            cid("conv"),
+            large_call(&legacy_id, bytes),
+            BackgroundSupport::Never,
+        );
+        let probe = legacy
+            .next_dispatchable()
+            .cloned()
+            .expect("legacy candidate");
+        assert_eq!(probe.invocation.id.as_str(), legacy_id);
+        let (legacy_pending, _) = legacy
+            .pop_dispatchable(Instant::now())
+            .expect("legacy dispatch");
+        assert_eq!(legacy_pending.invocation.id.as_str(), legacy_id);
+        let legacy_work = finish_pending_tool_ownership_probe(&legacy_id);
+
+        let borrowed_id = format!("borrowed-{mebibytes}");
+        start_pending_tool_ownership_probe(&borrowed_id);
+        let mut borrowed = ToolTurnMachine::default();
+        borrowed.push(
+            cid("conv"),
+            large_call(&borrowed_id, bytes),
+            BackgroundSupport::Never,
+        );
+        assert_eq!(
+            borrowed
+                .next_dispatchable()
+                .map(|pending| pending.invocation.id.as_str()),
+            Some(borrowed_id.as_str())
+        );
+        let (borrowed_pending, _) = borrowed
+            .pop_dispatchable(Instant::now())
+            .expect("borrowed dispatch");
+        assert_eq!(borrowed_pending.invocation.id.as_str(), borrowed_id);
+        let borrowed_work = finish_pending_tool_ownership_probe(&borrowed_id);
+
+        assert_eq!(legacy_work.pending_clones, 1);
+        assert_eq!(borrowed_work.pending_clones, 0);
+        assert_eq!(legacy_work.candidate_visits, 1);
+        assert_eq!(borrowed_work.candidate_visits, 1);
+        assert_eq!(legacy_work.queue_pops, 1);
+        assert_eq!(borrowed_work.queue_pops, 1);
+        assert_eq!(legacy_work.admission_text_ptr, legacy_work.popped_text_ptr);
+        assert_eq!(
+            borrowed_work.admission_text_ptr,
+            borrowed_work.popped_text_ptr
+        );
+    }
+}
+
+/// A failed readiness gate can inspect the same front entry repeatedly without
+/// changing its queue position, ownership, or deadline start. Cancellation
+/// still removes that untouched entry without ever marking it in flight.
+#[test]
+fn borrowed_candidate_remains_owned_by_queue_until_pop_or_cancel() {
+    let blocked_id = "blocked-large";
+    start_pending_tool_ownership_probe(blocked_id);
+    let mut machine = ToolTurnMachine::default();
+    machine.push(
+        cid("conv"),
+        large_call(blocked_id, 1024 * 1024),
+        BackgroundSupport::MinForegroundSeconds(5),
+    );
+
+    for _ in 0..3 {
+        assert_eq!(
+            machine
+                .next_dispatchable()
+                .map(|pending| pending.invocation.id.as_str()),
+            Some(blocked_id)
+        );
+    }
+    assert_eq!(machine.pending_len(), 1);
+    assert_eq!(machine.in_flight_len(), 0);
+    assert!(machine.next_background_deadline().is_none());
+
+    let cancelled =
+        machine.cancel_queued_for(&cid("conv"), &HashSet::from([ToolCallId::from(blocked_id)]));
+    assert_eq!(cancelled.len(), 1);
+    let work = finish_pending_tool_ownership_probe(blocked_id);
+    assert_eq!(work.pending_clones, 0);
+    assert_eq!(work.candidate_visits, 3);
+    assert_eq!(work.queue_pops, 0);
+    assert_eq!(work.popped_text_ptr, 0);
+    assert_eq!(work.execution_text_ptr, 0);
 }
 
 #[test]

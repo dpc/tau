@@ -8,6 +8,8 @@
 //! budget before they have actually started.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(test)]
+use std::sync::Mutex;
 use std::time as path_std_time;
 use std::time::Instant;
 
@@ -70,7 +72,7 @@ impl ToolTurnCategories {
 }
 
 /// A tool call emitted by an agent response but not yet completed.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct PendingToolInvocation {
     /// Agent that owns the tool call.
     pub(crate) conversation_id: AgentId,
@@ -82,6 +84,110 @@ pub(crate) struct PendingToolInvocation {
     pub(crate) source: Option<ConnectionId>,
     /// Recognized static activity categories frozen at enqueue time.
     pub(crate) turn_categories: ToolTurnCategories,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PendingToolOwnershipWork {
+    /// Deep clones of the complete queued invocation.
+    pub(crate) pending_clones: usize,
+    /// Borrowed scheduler candidates inspected before removal.
+    pub(crate) candidate_visits: usize,
+    /// Queue entries removed into dispatch ownership.
+    pub(crate) queue_pops: usize,
+    /// Address of the largest queued text allocation at admission.
+    pub(crate) admission_text_ptr: usize,
+    /// Address of that allocation after removal from the queue.
+    pub(crate) popped_text_ptr: usize,
+    /// Address of that allocation on entry to execution.
+    pub(crate) execution_text_ptr: usize,
+}
+
+#[cfg(test)]
+static PENDING_TOOL_OWNERSHIP_PROBES: Mutex<Vec<(String, PendingToolOwnershipWork)>> =
+    Mutex::new(Vec::new());
+
+#[cfg(test)]
+impl Clone for PendingToolInvocation {
+    fn clone(&self) -> Self {
+        record_pending_tool_ownership(&self.invocation.id, |work| {
+            work.pending_clones += 1;
+        });
+        Self {
+            conversation_id: self.conversation_id.clone(),
+            invocation: self.invocation.clone(),
+            background_support: self.background_support,
+            source: self.source.clone(),
+            turn_categories: self.turn_categories,
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn start_pending_tool_ownership_probe(call_id: &str) {
+    let mut probes = PENDING_TOOL_OWNERSHIP_PROBES
+        .lock()
+        .expect("pending tool ownership probe poisoned");
+    assert!(
+        probes.iter().all(|(existing, _)| existing != call_id),
+        "pending tool ownership probe already active for {call_id}"
+    );
+    probes.push((call_id.to_owned(), PendingToolOwnershipWork::default()));
+}
+
+#[cfg(test)]
+pub(crate) fn finish_pending_tool_ownership_probe(call_id: &str) -> PendingToolOwnershipWork {
+    let mut probes = PENDING_TOOL_OWNERSHIP_PROBES
+        .lock()
+        .expect("pending tool ownership probe poisoned");
+    let position = probes
+        .iter()
+        .position(|(existing, _)| existing == call_id)
+        .expect("pending tool ownership probe was started");
+    probes.swap_remove(position).1
+}
+
+#[cfg(test)]
+pub(crate) fn record_pending_tool_execution(call: &AgentToolCall) {
+    record_pending_tool_ownership(&call.id, |work| {
+        work.execution_text_ptr = largest_text_ptr(&call.arguments);
+    });
+}
+
+#[cfg(test)]
+fn record_pending_tool_ownership(
+    call_id: &ToolCallId,
+    update: impl FnOnce(&mut PendingToolOwnershipWork),
+) {
+    let mut probes = PENDING_TOOL_OWNERSHIP_PROBES
+        .lock()
+        .expect("pending tool ownership probe poisoned");
+    if let Some((_, work)) = probes
+        .iter_mut()
+        .find(|(expected, _)| expected == call_id.as_str())
+    {
+        update(work);
+    }
+}
+
+#[cfg(test)]
+fn largest_text_ptr(value: &tau_proto::CborValue) -> usize {
+    fn largest_text(value: &tau_proto::CborValue) -> Option<&str> {
+        match value {
+            tau_proto::CborValue::Text(text) => Some(text),
+            tau_proto::CborValue::Array(values) => values
+                .iter()
+                .filter_map(largest_text)
+                .max_by_key(|text| text.len()),
+            tau_proto::CborValue::Map(entries) => entries
+                .iter()
+                .flat_map(|(key, value)| [largest_text(key), largest_text(value)])
+                .flatten()
+                .max_by_key(|text| text.len()),
+            _ => None,
+        }
+    }
+    largest_text(value).map_or(0, |text| text.as_ptr() as usize)
 }
 
 /// Pure queue and in-flight state for tool dispatch during agent turns.
@@ -140,6 +246,10 @@ impl ToolTurnMachine {
         source: Option<ConnectionId>,
         turn_categories: ToolTurnCategories,
     ) {
+        #[cfg(test)]
+        record_pending_tool_ownership(&invocation.id, |work| {
+            work.admission_text_ptr = largest_text_ptr(&invocation.arguments);
+        });
         self.pending_tool_invocations
             .push_back(PendingToolInvocation {
                 conversation_id,
@@ -154,7 +264,12 @@ impl ToolTurnMachine {
     /// removing it or marking it in flight.
     pub(crate) fn next_dispatchable(&self) -> Option<&PendingToolInvocation> {
         let idx = self.next_dispatchable_index()?;
-        self.pending_tool_invocations.get(idx)
+        let pending = self.pending_tool_invocations.get(idx)?;
+        #[cfg(test)]
+        record_pending_tool_ownership(&pending.invocation.id, |work| {
+            work.candidate_visits += 1;
+        });
+        Some(pending)
     }
 
     /// Select the next dispatchable invocation and mark it in flight.
@@ -167,6 +282,11 @@ impl ToolTurnMachine {
             .pending_tool_invocations
             .remove(idx)
             .expect("index just located");
+        #[cfg(test)]
+        record_pending_tool_ownership(&pending.invocation.id, |work| {
+            work.queue_pops += 1;
+            work.popped_text_ptr = largest_text_ptr(&pending.invocation.arguments);
+        });
         let action = self.record_in_flight(&pending, now);
         Some((pending, action))
     }

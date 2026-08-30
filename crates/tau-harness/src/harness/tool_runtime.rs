@@ -92,21 +92,22 @@ impl Harness {
 
     /// Drain scheduler-selected tool invocations into harness side effects.
     pub(super) fn drain_pending_tool_invocations(&mut self) -> Result<(), HarnessError> {
-        while let Some(next) = self
-            .tool_routing
-            .tool_runtime
-            .tool_turn
-            .next_dispatchable()
-            .cloned()
-        {
-            if self.tool_call_waits_for_staged_registration(
-                &next.conversation_id,
-                &next.invocation.name,
-                self.prompt_coordination
-                    .prompt_runtime
-                    .tool_call_prompts
-                    .get(&next.invocation.id),
-            ) {
+        loop {
+            let waits_for_staged_registration = {
+                let Some(next) = self.tool_routing.tool_runtime.tool_turn.next_dispatchable()
+                else {
+                    break;
+                };
+                self.tool_call_waits_for_staged_registration(
+                    &next.conversation_id,
+                    &next.invocation.name,
+                    self.prompt_coordination
+                        .prompt_runtime
+                        .tool_call_prompts
+                        .get(&next.invocation.id),
+                )
+            };
+            if waits_for_staged_registration {
                 break;
             }
             let Some((
@@ -139,7 +140,7 @@ impl Harness {
             // entry so a retry or clean-up is not wedged on a phantom
             // slot.
             if let Err(error) =
-                self.execute_agent_tool_call_from(&conversation_id, &invocation, source.as_ref())
+                self.execute_agent_tool_call_from(&conversation_id, invocation, source.as_ref())
             {
                 self.tool_routing
                     .tool_runtime
@@ -1468,18 +1469,20 @@ impl Harness {
         cid: &AgentId,
         call: &AgentToolCall,
     ) -> Result<(), HarnessError> {
-        self.execute_agent_tool_call_from(cid, call, None)
+        self.execute_agent_tool_call_from(cid, call.clone(), None)
     }
 
     pub(super) fn execute_agent_tool_call_from(
         &mut self,
         cid: &AgentId,
-        call: &AgentToolCall,
+        call: AgentToolCall,
         source: Option<&tau_proto::ConnectionId>,
     ) -> Result<(), HarnessError> {
+        #[cfg(test)]
+        crate::tool_turn::record_pending_tool_execution(&call);
         let tool_name = call.name.clone();
         let role_name = self.role_name_for_agent_id(cid).to_owned();
-        self.remember_tool_call_loop_signature(cid, call);
+        self.remember_tool_call_loop_signature(cid, &call);
 
         let prompt_id = self
             .prompt_coordination
@@ -1528,7 +1531,7 @@ impl Harness {
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
                 tool_type: call.tool_type,
-                arguments: call.arguments.clone(),
+                arguments: call.arguments,
                 agent_id: owner_agent_id,
                 originator: owner_originator.clone(),
             };
@@ -1556,15 +1559,15 @@ impl Harness {
             .tags
             .iter()
             .any(|tag| tag.as_str() == "provider-content:image");
-        let mut arguments = call.arguments.clone();
+        let mut repaired_arguments = None;
         if self
             .tool_routing
             .registry
             .resolve_provider(&internal_tool_name)
             .is_some()
-            && let Err(error) = validate_tool_arguments(tool_spec, &arguments)
+            && let Err(error) = validate_tool_arguments(tool_spec, &call.arguments)
         {
-            if let Some(repair) = repair_tool_arguments(tool_spec, &arguments)
+            if let Some(repair) = repair_tool_arguments(tool_spec, &call.arguments)
                 && validate_tool_arguments(tool_spec, &repair.arguments).is_ok()
             {
                 let repair_summary = repair.render_summary();
@@ -1584,10 +1587,10 @@ impl Harness {
                         repair_summary
                     ),
                 );
-                arguments = repair.arguments;
+                repaired_arguments = Some(repair.arguments);
             } else {
                 let mut message = format!("invalid arguments for tool `{tool_name}`: {error}");
-                if let Some(hint) = tool_example_hint(tool_spec, &arguments) {
+                if let Some(hint) = tool_example_hint(tool_spec, &call.arguments) {
                     let key = (cid.clone(), visible_tool_name.clone(), hint.clone());
                     if self
                         .prompt_coordination
@@ -1600,7 +1603,7 @@ impl Harness {
                 }
                 self.reject_agent_tool_call_before_dispatch_from(
                     cid,
-                    call,
+                    &call,
                     visible_tool_name,
                     message,
                     source,
@@ -1608,6 +1611,7 @@ impl Harness {
                 return Ok(());
             }
         }
+        let arguments = repaired_arguments.unwrap_or(call.arguments);
 
         let call_id: ToolCallId = call.id.clone();
         let owner_agent_id = self.tool_owner_agent_id(cid);
