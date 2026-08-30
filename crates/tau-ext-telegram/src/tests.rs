@@ -788,6 +788,30 @@ fn expect_tool_error(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
     error.message
 }
 
+/// Wait for one exact tool error without consuming unrelated asynchronous
+/// extension output as if it were that terminal.
+fn expect_correlated_tool_error(
+    rx: &mpsc::Receiver<HarnessInputMessage>,
+    call_id: &str,
+    interleaved: &mut Vec<HarnessInputMessage>,
+) -> String {
+    loop {
+        let message = rx.recv().expect("correlated tool terminal");
+        if let HarnessInputMessage::Emit(emit) = &message {
+            match emit.event.as_ref() {
+                Event::ToolErrorReported(error) if error.call_id.as_str() == call_id => {
+                    return error.message.clone();
+                }
+                Event::ToolResultReported(result) if result.call_id.as_str() == call_id => {
+                    panic!("expected correlated tool error, received tool result");
+                }
+                _ => {}
+            }
+        }
+        interleaved.push(message);
+    }
+}
+
 fn expect_notice(rx: &mpsc::Receiver<HarnessInputMessage>) -> tau_proto::ExtensionNoticeRequest {
     let msg = rx.recv().expect("notice");
     let HarnessInputMessage::ExtensionNoticeRequest(notice) = msg else {
@@ -1540,6 +1564,8 @@ fn assert_stale_ack_response_reconnects(
     let socket_path = dir.path().join("gateway.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind gateway");
     let (final_ack_tx, final_ack_rx) = mpsc::channel();
+    let (send_received_tx, send_received_rx) = mpsc::channel();
+    let (close_send_tx, close_send_rx) = mpsc::channel();
     let server = std::thread::spawn(move || {
         let delivery = serde_json::json!({
             "request_id": GATEWAY_REPORT_1,
@@ -1563,6 +1589,8 @@ fn assert_stale_ack_response_reconnects(
                     serde_json::from_str(&line).expect("original request JSON");
                 if index == 2 {
                     assert_eq!(request["kind"], "send_message");
+                    send_received_tx.send(()).expect("signal received send");
+                    close_send_rx.recv().expect("release failed send");
                     break;
                 }
                 write_gateway_response(
@@ -1674,8 +1702,47 @@ fn assert_stale_ack_response_reconnects(
     let _progress = rx.recv().expect("register progress");
     let original = expect_delivered(&rx);
     let _result = rx.recv().expect("register result");
-    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("disconnect")));
-    assert!(expect_tool_error(&rx).contains("closed"));
+    let send = tool(SEND_TOOL_NAME, "agent-1", message_args("disconnect"));
+    let send_call_id = send.call_id.clone();
+    std::thread::scope(|scope| {
+        let dispatch = scope.spawn(|| ext.dispatch_tool(send));
+        send_received_rx.recv().expect("gateway received send");
+        ext.output.request_notice(
+            "fixture notice interleaved before the send terminal",
+            NoticeLevel::Warning,
+        );
+        close_send_tx.send(()).expect("close failed send");
+        dispatch.join().expect("send dispatch");
+    });
+    let mut interleaved = Vec::new();
+    assert!(
+        expect_correlated_tool_error(&rx, send_call_id.as_str(), &mut interleaved)
+            .contains("closed")
+    );
+    assert_eq!(
+        interleaved
+            .iter()
+            .filter(|message| matches!(
+                message,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(
+                        emit.event.as_ref(),
+                        Event::ToolProgressReported(progress)
+                            if progress.call_id == send_call_id
+                    )
+            ))
+            .count(),
+        1,
+        "the correlated send progress remains observable"
+    );
+    assert!(
+        interleaved.iter().any(|message| matches!(
+            message,
+            HarnessInputMessage::ExtensionNoticeRequest(notice)
+                if notice.message == "fixture notice interleaved before the send terminal"
+        )),
+        "unrelated asynchronous output remains observable"
+    );
     ext.acknowledge_live_delivery(&canonical_delivered(original));
 
     final_ack_rx.recv().expect("automatic final ACK");
