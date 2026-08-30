@@ -1,6 +1,164 @@
 //! Tests for loop guard behavior.
 
+use proptest::prelude::*;
+
 use super::*;
+use crate::harness::tool_runtime::{MAX_UTF8_BYTES_PER_SCALAR, tool_call_loop_signature};
+use crate::harness::{LOOP_GUARD_TOOL_ARGUMENT_CHARS, bounded_loop_text};
+
+fn legacy_tool_call_loop_signature(tool_name: &ToolName, arguments: &CborValue) -> String {
+    format!(
+        "{tool_name}:{}",
+        bounded_loop_text(&format!("{arguments:?}"), LOOP_GUARD_TOOL_ARGUMENT_CHARS)
+    )
+}
+
+fn assert_streamed_signature_matches_legacy(arguments: &CborValue) {
+    let tool_name = ToolName::new("equivalence_tool");
+    let expected = legacy_tool_call_loop_signature(&tool_name, arguments);
+    let (actual, work) = tool_call_loop_signature(&tool_name, arguments);
+    assert_eq!(actual, expected);
+    assert!(
+        work.formatted_scalars <= LOOP_GUARD_TOOL_ARGUMENT_CHARS + 1,
+        "formatter inspected too many scalars: {work:?}"
+    );
+    assert!(
+        work.formatted_bytes
+            <= (LOOP_GUARD_TOOL_ARGUMENT_CHARS + 1).saturating_mul(MAX_UTF8_BYTES_PER_SCALAR),
+        "formatter inspected too many bytes: {work:?}"
+    );
+    assert_eq!(work.output_allocations, 1);
+}
+
+fn arbitrary_cbor_value() -> impl Strategy<Value = CborValue> {
+    let leaf = prop_oneof![
+        Just(CborValue::Null),
+        any::<bool>().prop_map(CborValue::Bool),
+        any::<i64>().prop_map(|value| CborValue::Integer(value.into())),
+        any::<f64>().prop_map(CborValue::Float),
+        proptest::collection::vec(any::<u8>(), 0..32).prop_map(CborValue::Bytes),
+        any::<String>().prop_map(CborValue::Text),
+    ];
+    leaf.prop_recursive(4, 64, 8, |inner| {
+        prop_oneof![
+            proptest::collection::vec(inner.clone(), 0..8).prop_map(CborValue::Array),
+            proptest::collection::vec((inner.clone(), inner.clone()), 0..8)
+                .prop_map(CborValue::Map),
+            (any::<u64>(), inner).prop_map(|(tag, value)| CborValue::Tag(tag, Box::new(value))),
+        ]
+    })
+}
+
+/// The streaming sink must reproduce the legacy Debug-prefix signature for
+/// every CBOR shape, including ordered maps, escapes, tags, and float details.
+#[test]
+fn streamed_tool_loop_signature_matches_legacy_cbor_corpus() {
+    let values = [
+        CborValue::Null,
+        CborValue::Bool(true),
+        CborValue::Integer((-42).into()),
+        CborValue::Float(f64::NAN),
+        CborValue::Bytes(vec![0, 1, 127, 255]),
+        CborValue::Text("quote=\" slash=\\ control=\n unicode=🦀e\u{301}".to_owned()),
+        CborValue::Array(vec![
+            CborValue::Integer(1.into()),
+            CborValue::Text("two".to_owned()),
+        ]),
+        CborValue::Map(vec![
+            (
+                CborValue::Text("z".to_owned()),
+                CborValue::Text("first".to_owned()),
+            ),
+            (
+                CborValue::Text("a".to_owned()),
+                CborValue::Text("second".to_owned()),
+            ),
+        ]),
+        CborValue::Tag(24, Box::new(CborValue::Array(vec![CborValue::Float(-0.0)]))),
+    ];
+
+    for value in values {
+        assert_streamed_signature_matches_legacy(&value);
+    }
+}
+
+/// Debug output immediately below, at, and above the 200-scalar limit must
+/// preserve the old rule that only an omitted scalar adds the ellipsis.
+#[test]
+fn streamed_tool_loop_signature_preserves_exact_truncation_boundary() {
+    let tool_name = ToolName::new("boundary_tool");
+
+    for formatted_scalars in [
+        LOOP_GUARD_TOOL_ARGUMENT_CHARS - 1,
+        LOOP_GUARD_TOOL_ARGUMENT_CHARS,
+        LOOP_GUARD_TOOL_ARGUMENT_CHARS + 1,
+    ] {
+        // `CborValue::Text` Debug adds the eight scalars in `Text("")`.
+        let arguments = CborValue::Text("x".repeat(formatted_scalars - 8));
+        assert_eq!(format!("{arguments:?}").chars().count(), formatted_scalars);
+        let expected = legacy_tool_call_loop_signature(&tool_name, &arguments);
+        let (actual, _) = tool_call_loop_signature(&tool_name, &arguments);
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual.ends_with('…'),
+            formatted_scalars > LOOP_GUARD_TOOL_ARGUMENT_CHARS
+        );
+    }
+}
+
+proptest! {
+    /// Generated nested CBOR values must keep the old signature byte-for-byte;
+    /// this guards formatter chunking and future ciborium Debug changes.
+    #[test]
+    fn streamed_tool_loop_signature_matches_generated_legacy_values(
+        arguments in arbitrary_cbor_value()
+    ) {
+        assert_streamed_signature_matches_legacy(&arguments);
+    }
+}
+
+/// Inputs from 1 KiB through 8 MiB must have input-size-independent formatter
+/// work and one bounded output allocation while retaining exact old signatures.
+#[test]
+fn streamed_tool_loop_signature_bounds_large_input_work_and_allocations() {
+    let cases = [
+        CborValue::Text("x".repeat(1024)),
+        CborValue::Bytes(vec![0x5a; 1024]),
+        CborValue::Text("🦀".repeat((8 * 1024 * 1024) / '🦀'.len_utf8())),
+        CborValue::Bytes(vec![0xa5; 8 * 1024 * 1024]),
+        CborValue::Map(vec![(
+            CborValue::Text("payload".to_owned()),
+            CborValue::Text("m".repeat(8 * 1024 * 1024)),
+        )]),
+        CborValue::Array(vec![CborValue::Tag(
+            42,
+            Box::new(CborValue::Map(vec![(
+                CborValue::Text("nested".to_owned()),
+                CborValue::Text("n".repeat(8 * 1024 * 1024)),
+            )])),
+        )]),
+    ];
+
+    for arguments in cases {
+        assert_streamed_signature_matches_legacy(&arguments);
+    }
+}
+
+/// Arguments that collided after the old 200-scalar truncation must continue
+/// to collide so repetition thresholds and loop-breaking order stay unchanged.
+#[test]
+fn streamed_tool_loop_signature_preserves_truncated_collisions() {
+    let tool_name = ToolName::new("collision_tool");
+    let common = "p".repeat(LOOP_GUARD_TOOL_ARGUMENT_CHARS + 32);
+    let left = CborValue::Text(format!("{common}left"));
+    let right = CborValue::Text(format!("{common}right"));
+
+    let (left, _) = tool_call_loop_signature(&tool_name, &left);
+    let (right, _) = tool_call_loop_signature(&tool_name, &right);
+
+    assert_eq!(left, right);
+    assert!(left.ends_with('…'));
+}
 
 #[test]
 fn loop_guard_repeated_assistant_text_flows_through_provider_responses() {

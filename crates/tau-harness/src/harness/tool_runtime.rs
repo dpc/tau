@@ -4,7 +4,98 @@
 //! The provider terminal remains canonical before this runtime settles tool and
 //! UI continuations.
 
+use std::fmt::{self, Write as _};
+
 use super::*;
+
+/// Maximum UTF-8 width of one Unicode scalar.
+pub(super) const MAX_UTF8_BYTES_PER_SCALAR: usize = 4;
+
+/// Deterministic work performed while streaming one bounded tool-call
+/// signature.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct ToolLoopSignatureFormatWork {
+    /// Debug-formatted Unicode scalars inspected from the arguments.
+    pub(super) formatted_scalars: usize,
+    /// UTF-8 bytes inspected from the Debug-formatted arguments.
+    pub(super) formatted_bytes: usize,
+    /// Output buffers allocated by the formatter.
+    pub(super) output_allocations: usize,
+}
+
+/// A `fmt` sink that retains at most one bounded Unicode-scalar prefix.
+struct ToolLoopSignatureSink {
+    /// Final signature buffer, including the unbounded validated tool name.
+    output: String,
+    /// Argument scalars that may still be retained in `output`.
+    remaining_argument_scalars: usize,
+    /// Whether the sink observed at least one omitted argument scalar.
+    truncated: bool,
+    /// Exact bounded work performed through this production sink.
+    work: ToolLoopSignatureFormatWork,
+}
+
+impl ToolLoopSignatureSink {
+    /// Allocate the final signature once, including worst-case UTF-8 prefix
+    /// space.
+    fn new(tool_name: &ToolName, max_argument_scalars: usize) -> Self {
+        let capacity = tool_name
+            .as_str()
+            .len()
+            .saturating_add(1)
+            .saturating_add(max_argument_scalars.saturating_mul(MAX_UTF8_BYTES_PER_SCALAR))
+            .saturating_add('…'.len_utf8());
+        let mut output = String::with_capacity(capacity);
+        output.push_str(tool_name.as_str());
+        output.push(':');
+        Self {
+            output,
+            remaining_argument_scalars: max_argument_scalars,
+            truncated: false,
+            work: ToolLoopSignatureFormatWork {
+                output_allocations: usize::from(capacity != 0),
+                ..ToolLoopSignatureFormatWork::default()
+            },
+        }
+    }
+
+    /// Finish the signature with the existing truncation marker.
+    fn finish(mut self) -> (String, ToolLoopSignatureFormatWork) {
+        if self.truncated {
+            self.output.push('…');
+        }
+        (self.output, self.work)
+    }
+}
+
+impl fmt::Write for ToolLoopSignatureSink {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        for scalar in text.chars() {
+            self.work.formatted_scalars += 1;
+            self.work.formatted_bytes += scalar.len_utf8();
+            if self.remaining_argument_scalars == 0 {
+                self.truncated = true;
+                return Err(fmt::Error);
+            }
+            self.output.push(scalar);
+            self.remaining_argument_scalars -= 1;
+        }
+        Ok(())
+    }
+}
+
+/// Stream the CBOR Debug representation directly into its bounded final buffer.
+pub(super) fn tool_call_loop_signature(
+    tool_name: &ToolName,
+    arguments: &CborValue,
+) -> (String, ToolLoopSignatureFormatWork) {
+    let mut sink = ToolLoopSignatureSink::new(tool_name, LOOP_GUARD_TOOL_ARGUMENT_CHARS);
+    // `fmt::Error` is the sink's expected early-stop signal after observing the
+    // first omitted scalar. Ciborium's valid `Debug` implementation has no
+    // independent fallible operation.
+    let _ = write!(&mut sink, "{arguments:?}");
+    sink.finish()
+}
 
 #[cfg(test)]
 thread_local! {
@@ -1403,14 +1494,7 @@ impl Harness {
         let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid) else {
             return;
         };
-        let signature = format!(
-            "{}:{}",
-            call.name,
-            bounded_loop_text(
-                &format!("{:?}", call.arguments),
-                LOOP_GUARD_TOOL_ARGUMENT_CHARS
-            )
-        );
+        let (signature, _) = tool_call_loop_signature(&call.name, &call.arguments);
         conv.execution.loop_guard.push_tool_call_signature(
             call.id.clone(),
             signature,
