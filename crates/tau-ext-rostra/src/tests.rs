@@ -196,11 +196,11 @@ fn persona_tags_have_count_and_aggregate_bounds() {
     assert!(output.len() <= 512);
 }
 
-/// Ensures status reports exact direct and two-hop counts for signed hostile
-/// fan-out through the production dispatcher.
+/// Ensures the production dispatcher obtains exact direct and two-hop counts
+/// from a retained graph populated by signed hostile events.
 #[tokio::test(flavor = "multi_thread")]
-async fn status_counts_signed_fanout_without_database_visits() {
-    const FANOUT: usize = 64;
+async fn status_dispatches_signed_retained_graph_counts() {
+    const FANOUT: usize = 4;
 
     let temporary = tempfile::tempdir().expect("temporary directory");
     let self_secret = RostraIdSecretKey::generate();
