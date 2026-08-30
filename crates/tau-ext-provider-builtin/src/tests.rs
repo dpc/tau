@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fs::File;
-use std::sync::atomic as path_std_sync_atomic;
+use std::sync::{Condvar, atomic as path_std_sync_atomic};
 use std::{io as path_std_io, time as path_std_time};
 
 use tau_provider_codex::oauth as path_tau_provider_codex_oauth;
@@ -1237,6 +1237,18 @@ fn production_prompt_secret_replies_preserve_admission_fifo() {
     }
     assert_eq!(submitted, ["fifo-1", "fifo-2"]);
 
+    // Submitted reports precede worker start. Wait for both independently
+    // owned receipt observations before closing the harness; otherwise shutdown
+    // can race the queued second worker and make this trace assertion flaky.
+    assert!(
+        receipt_trace.wait_for_occurrences(
+            b"provider receipt observation",
+            2,
+            path_std_time::Duration::from_secs(2),
+        ),
+        "both receipt observations must publish before shutdown"
+    );
+
     drop(writer);
     drop(reader);
     let result = provider.join().expect("join provider");
@@ -1962,12 +1974,39 @@ fn credential_rotation_retains_shared_alias_compact_negative_evidence() {
 pub(super) struct SharedTraceWriter {
     /// Bytes written by the temporary tracing subscriber.
     bytes: Arc<Mutex<Vec<u8>>>,
+    /// Wakes tests waiting for a causal trace-publication cut.
+    changed: Arc<Condvar>,
 }
 
 impl SharedTraceWriter {
     /// Returns the trace bytes captured by this test sink.
     pub(super) fn bytes(&self) -> Vec<u8> {
         self.bytes.lock().expect("trace writer lock").clone()
+    }
+
+    /// Waits until the trace contains `expected` exact byte-string occurrences.
+    fn wait_for_occurrences(
+        &self,
+        needle: &[u8],
+        expected: usize,
+        timeout: path_std_time::Duration,
+    ) -> bool {
+        let bytes = self.bytes.lock().expect("trace writer lock");
+        let (bytes, _) = self
+            .changed
+            .wait_timeout_while(bytes, timeout, |bytes| {
+                bytes
+                    .windows(needle.len())
+                    .filter(|window| *window == needle)
+                    .count()
+                    < expected
+            })
+            .expect("trace writer wait");
+        expected
+            <= bytes
+                .windows(needle.len())
+                .filter(|window| *window == needle)
+                .count()
     }
 }
 
@@ -1977,6 +2016,7 @@ impl Write for SharedTraceWriter {
             .lock()
             .expect("trace writer lock")
             .extend_from_slice(buffer);
+        self.changed.notify_all();
         Ok(buffer.len())
     }
 
