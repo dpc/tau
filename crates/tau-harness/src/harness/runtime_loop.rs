@@ -4,6 +4,7 @@
 //! invokes them in order.
 
 use super::*;
+use crate::event::StartupFrameKind;
 
 /// Result of waiting for the next runtime-loop event.
 pub(super) enum RuntimeEventWait {
@@ -53,6 +54,7 @@ impl Harness {
                     connection_id,
                     message,
                     frame_bytes,
+                    decoded_at: _,
                 } => {
                     let _ = self.handle_startup_from_connection_with_frame_bytes(
                         &connection_id,
@@ -161,13 +163,25 @@ impl Harness {
         self.extensions.startup_wait_deadline = Some(wait_started_at + STARTUP_TIMEOUT);
         self.ensure_extension_startup_deadlines(wait_started_at);
         while self.extensions.pending_connects != 0 || !self.extensions_all_ready() {
-            self.handle_expired_extension_startup_deadlines(Instant::now())?;
             let deadline = self
                 .next_extension_startup_deadline()
                 .unwrap_or_else(|| Instant::now() + STARTUP_TIMEOUT);
             let harness_evt = if deadline <= Instant::now() {
+                let protected = self.protected_extension_startup_connections();
                 match self.runtime_io.rx.try_recv() {
                     Ok(event) => self.expand_component_ingress_wake(event),
+                    Err(mpsc::TryRecvError::Empty) if !protected.is_empty() => {
+                        self.handle_expired_extension_startup_deadlines_except(
+                            Instant::now(),
+                            &protected,
+                        )?;
+                        let event = self
+                            .runtime_io
+                            .rx
+                            .recv()
+                            .map_err(|_| HarnessError::StartupTimeout)?;
+                        self.expand_component_ingress_wake(event)
+                    }
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
                         return self.handle_extensions_startup_timeout();
                     }
@@ -176,7 +190,11 @@ impl Harness {
                 match self.recv_event_until(deadline) {
                     Ok(event) => event,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        self.handle_expired_extension_startup_deadlines(Instant::now())?;
+                        let protected = self.protected_extension_startup_connections();
+                        self.handle_expired_extension_startup_deadlines_except(
+                            Instant::now(),
+                            &protected,
+                        )?;
                         continue;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -185,14 +203,44 @@ impl Harness {
                 }
             };
             self.log_event(&harness_evt);
-            // Do not allow a frame received just before the deadline to activate
-            // an extension after its own startup deadline.
-            self.handle_expired_extension_startup_deadlines(Instant::now())?;
+            let on_time_ready = matches!(
+                &harness_evt,
+                HarnessEvent::FromConnection {
+                    connection_id,
+                    message,
+                    decoded_at,
+                    ..
+                } if matches!(message.as_ref(), HarnessInputMessage::Ready(_))
+                    && self.extensions.startup_deadlines.get(connection_id)
+                        .is_some_and(|startup| *decoded_at <= startup.deadline)
+                    && self.extensions.entries.get(connection_id)
+                        .is_some_and(|entry| entry.state == ExtensionState::Handshaking)
+            );
+            let authenticating_observed_ready = matches!(
+                &harness_evt,
+                HarnessEvent::FromConnection {
+                    connection_id,
+                    message,
+                    ..
+                } if matches!(message.as_ref(), HarnessInputMessage::Hello(_))
+                    && self.extensions.entries.get(connection_id)
+                        .is_some_and(|entry| entry.state == ExtensionState::Spawning)
+                    && self.has_observed_on_time_extension_ready_for(connection_id)
+            );
+            let mut protected = self.protected_extension_startup_connections();
+            if on_time_ready || authenticating_observed_ready {
+                let HarnessEvent::FromConnection { connection_id, .. } = &harness_evt else {
+                    unreachable!("startup observation candidates are connection events");
+                };
+                protected.insert(connection_id.clone());
+            }
+            self.handle_expired_extension_startup_deadlines_except(Instant::now(), &protected)?;
             match harness_evt {
                 HarnessEvent::FromConnection {
                     connection_id,
                     message,
                     frame_bytes,
+                    decoded_at: _,
                 } => {
                     let _ = self.handle_startup_from_connection_with_frame_bytes(
                         &connection_id,
@@ -221,10 +269,66 @@ impl Harness {
                 }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
+            if on_time_ready {
+                self.handle_expired_extension_startup_deadlines(Instant::now())?;
+            }
             self.ensure_extension_startup_deadlines(wait_started_at);
         }
         self.extensions.startup_wait_deadline = None;
         Ok(())
+    }
+
+    /// Returns exact startup connections whose already-decoded Ready must
+    /// settle before their own deadline can expire.
+    fn protected_extension_startup_connections(&self) -> BTreeSet<tau_proto::ConnectionId> {
+        let observations = self
+            .runtime_io
+            .component_ingress
+            .startup_frame_observations();
+        self.extensions
+            .entries
+            .iter()
+            .filter_map(|(connection_id, entry)| {
+                let ready_is_on_time = observations.iter().any(|observation| {
+                    observation.kind == StartupFrameKind::Ready
+                        && observation.connection_id == *connection_id
+                        && self
+                            .extensions
+                            .startup_deadlines
+                            .get(connection_id)
+                            .is_some_and(|startup| observation.decoded_at <= startup.deadline)
+                });
+                let authentication_is_queued = observations.iter().any(|observation| {
+                    observation.kind == StartupFrameKind::Hello
+                        && observation.connection_id == *connection_id
+                });
+                (ready_is_on_time
+                    && (entry.state == ExtensionState::Handshaking
+                        || (entry.state == ExtensionState::Spawning && authentication_is_queued)))
+                    .then(|| connection_id.clone())
+            })
+            .collect()
+    }
+
+    /// Reports whether bounded ingress owns an on-time Ready for one exact
+    /// startup connection, before phase authentication is considered.
+    fn has_observed_on_time_extension_ready_for(
+        &self,
+        connection_id: &tau_proto::ConnectionId,
+    ) -> bool {
+        self.runtime_io
+            .component_ingress
+            .startup_frame_observations()
+            .iter()
+            .any(|observation| {
+                observation.kind == StartupFrameKind::Ready
+                    && observation.connection_id == *connection_id
+                    && self
+                        .extensions
+                        .startup_deadlines
+                        .get(&observation.connection_id)
+                        .is_some_and(|startup| observation.decoded_at <= startup.deadline)
+            })
     }
 
     /// Assign the general startup deadline only to entries that an external
@@ -275,12 +379,23 @@ impl Harness {
         &mut self,
         now: Instant,
     ) -> Result<(), HarnessError> {
+        self.handle_expired_extension_startup_deadlines_except(now, &BTreeSet::new())
+    }
+
+    /// Applies expired per-extension deadlines except exact connections whose
+    /// already-decoded startup terminals still own classification.
+    fn handle_expired_extension_startup_deadlines_except(
+        &mut self,
+        now: Instant,
+        protected: &BTreeSet<tau_proto::ConnectionId>,
+    ) -> Result<(), HarnessError> {
         let mut expired = self
             .extensions
             .startup_deadlines
             .iter()
             .filter_map(|(connection_id, deadline)| {
-                (deadline.deadline <= now).then_some((connection_id.clone(), deadline.clone()))
+                (deadline.deadline <= now && !protected.contains(connection_id))
+                    .then_some((connection_id.clone(), deadline.clone()))
             })
             .collect::<Vec<_>>();
         expired.sort_by(|(_, left), (_, right)| left.name.cmp(&right.name));
@@ -749,6 +864,7 @@ impl Harness {
                 connection_id,
                 message,
                 frame_bytes,
+                decoded_at: _,
             } => self.handle_runtime_connection_message(
                 connection_id,
                 message,

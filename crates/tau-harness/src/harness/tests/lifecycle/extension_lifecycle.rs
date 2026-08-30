@@ -4,6 +4,7 @@ use super::super::super::{MAX_EXTENSION_ACTIVATION_BYTES, MAX_EXTENSION_ACTIVATI
 use super::super::dispatch::provider_text_response;
 use super::*;
 use crate::event::{HarnessCommand, ShutdownCause};
+use crate::harness::STARTUP_TIMEOUT;
 
 /// Session rollover resets only budget exhaustion; a peer disabled by
 /// configuration policy remains disabled.
@@ -4053,42 +4054,357 @@ fn required_pending_external_extension_deadline_survives_event_churn() {
     ));
 }
 
-/// Ensures a queued Ready frame at the exact deadline cannot activate a
-/// required extension after its initial readiness budget has expired.
+/// Ensures authenticated Ready classification uses its decode observation:
+/// D-minus-epsilon and D are accepted after queued handling, while
+/// D-plus-epsilon remains fail-closed.
 #[test]
-fn ready_at_extension_startup_deadline_is_rejected_before_activation() {
+fn ready_decode_observation_owns_extension_startup_deadline_boundary() {
+    let epsilon = Duration::from_nanos(1);
+    for (name, offset, accepted) in [
+        ("before", Some(epsilon), true),
+        ("at", None, true),
+        ("after", Some(epsilon), false),
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        let connection_id = crate::test_connection_id(format!("deadline-ready-{name}"));
+        let _sink = connect_handshaking_tool(&mut h, connection_id.as_str());
+        let deadline = Instant::now() - Duration::from_secs(1);
+        h.extensions.startup_deadlines.insert(
+            connection_id.clone(),
+            StartupDeadline {
+                deadline,
+                name: crate::test_extension_name(format!("deadline-ready-{name}")),
+                require: true,
+            },
+        );
+        let decoded_at = match (accepted, offset) {
+            (true, Some(offset)) => deadline - offset,
+            (true, None) => deadline,
+            (false, Some(offset)) => deadline + offset,
+            (false, None) => unreachable!("late case has an offset"),
+        };
+        h.runtime_io
+            .tx
+            .send(HarnessEvent::from_connection_observed_at_for_test(
+                connection_id.clone(),
+                HarnessInputMessage::Ready(Default::default()),
+                decoded_at,
+            ))
+            .expect("queue ready");
+
+        let result = h.wait_for_extensions_ready_at(deadline - STARTUP_TIMEOUT);
+        if accepted {
+            result.expect("on-time decoded Ready activates after queued handling");
+            assert_eq!(
+                h.extensions.entries[&connection_id].state,
+                ExtensionState::Ready
+            );
+            assert!(!h.extensions.startup_deadlines.contains_key(&connection_id));
+        } else {
+            assert!(matches!(result, Err(HarnessError::StartupTimeout)));
+            assert_eq!(
+                h.extensions.entries[&connection_id].state,
+                ExtensionState::Handshaking
+            );
+            assert!(!h.extensions.ready_received.contains(&connection_id));
+        }
+    }
+}
+
+/// Ensures an on-time Ready blocked behind its own decoded Hello authenticates
+/// before expiry and then activates through the real bounded ingress lane.
+#[test]
+fn ready_blocked_behind_hello_retains_decode_deadline_authority() {
     let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = quiet_provider_harness(&sp).expect("start");
-    let connection_id = crate::test_connection_id("deadline-ready");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let connection_id = crate::test_connection_id("queued-hello-ready");
     let _sink = connect_handshaking_tool(&mut h, connection_id.as_str());
-    let deadline = Instant::now();
+    h.extensions
+        .entries
+        .get_mut(&connection_id)
+        .expect("extension entry")
+        .state = ExtensionState::Spawning;
+    let deadline = Instant::now() - Duration::from_secs(1);
     h.extensions.startup_deadlines.insert(
         connection_id.clone(),
         StartupDeadline {
             deadline,
-            name: crate::test_extension_name("deadline-ready"),
+            name: crate::test_extension_name("queued-hello-ready"),
             require: true,
         },
     );
+    let (unrelated_server, _unrelated_peer) = UnixStream::pair().expect("unrelated pair");
     h.runtime_io
         .tx
-        .send(HarnessEvent::from_connection_for_test(
+        .send(HarnessEvent::NewClient(unrelated_server))
+        .expect("queue unrelated event ahead of Hello");
+    h.runtime_io
+        .component_ingress_tx
+        .send_for_test(HarnessEvent::from_connection_observed_at_for_test(
             connection_id.clone(),
-            HarnessInputMessage::Ready(Default::default()),
+            HarnessInputMessage::Hello(tau_proto::Hello {
+                protocol_version: tau_proto::PROTOCOL_VERSION,
+                client_name: crate::test_extension_name("queued-hello-ready"),
+                client_kind: tau_proto::ClientKind::Tool,
+                expected_session_id: None,
+                capabilities: Default::default(),
+            }),
+            deadline - Duration::from_nanos(2),
         ))
-        .expect("queue ready");
+        .expect("occupy ingress with Hello");
+    let ready_sender = h.runtime_io.component_ingress_tx.clone();
+    let ready_connection = connection_id.clone();
+    let ready = std::thread::spawn(move || {
+        ready_sender.send_for_test(HarnessEvent::from_connection_observed_at_for_test(
+            ready_connection,
+            HarnessInputMessage::Ready(Default::default()),
+            deadline - Duration::from_nanos(1),
+        ))
+    });
+    h.runtime_io.component_ingress.wait_for_blocked_sender();
 
-    let error = h
-        .wait_for_extensions_ready_at(deadline)
-        .expect_err("Ready at deadline fails startup");
+    h.wait_for_extensions_ready_at(deadline - STARTUP_TIMEOUT)
+        .expect("decoded Hello and Ready retain deadline authority");
 
-    assert!(matches!(error, HarnessError::StartupTimeout));
     assert_eq!(
         h.extensions.entries[&connection_id].state,
+        ExtensionState::Ready
+    );
+    assert!(!h.extensions.startup_deadlines.contains_key(&connection_id));
+    assert_eq!(ready.join().expect("Ready sender joins"), Ok(()));
+}
+
+/// Ensures one pending on-time Ready protects only its exact connection and
+/// cannot defer a silent required peer's earlier independent deadline.
+#[test]
+fn pending_ready_does_not_extend_silent_peer_startup_deadline() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let silent = crate::test_connection_id("silent-required");
+    let pending = crate::test_connection_id("pending-ready");
+    let _silent_sink = connect_handshaking_tool(&mut h, silent.as_str());
+    let _pending_sink = connect_handshaking_tool(&mut h, pending.as_str());
+    let now = Instant::now();
+    h.extensions.startup_deadlines.insert(
+        silent.clone(),
+        StartupDeadline {
+            deadline: now - Duration::from_secs(1),
+            name: crate::test_extension_name("silent-required"),
+            require: true,
+        },
+    );
+    h.extensions.startup_deadlines.insert(
+        pending.clone(),
+        StartupDeadline {
+            deadline: now + Duration::from_secs(10),
+            name: crate::test_extension_name("pending-ready"),
+            require: true,
+        },
+    );
+    let (admitted_rx, wake_release) = h.runtime_io.component_ingress.pause_next_wake_for_test();
+    let pending_sender = h.runtime_io.component_ingress_tx.clone();
+    let pending_connection = pending.clone();
+    let ready = std::thread::spawn(move || {
+        pending_sender.send_for_test(HarnessEvent::from_connection_observed_at_for_test(
+            pending_connection,
+            HarnessInputMessage::Ready(Default::default()),
+            now,
+        ))
+    });
+    admitted_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("pending Ready admitted before wake");
+    let (classified_tx, classified_rx) = mpsc::channel();
+    let release = std::thread::spawn(move || {
+        let classified = classified_rx.recv_timeout(Duration::from_secs(1));
+        wake_release.send(()).expect("release pending Ready wake");
+        classified
+    });
+
+    let result = h.wait_for_extensions_ready_at(now - STARTUP_TIMEOUT);
+    let _ = classified_tx.send(());
+
+    assert!(matches!(result, Err(HarnessError::StartupTimeout)));
+    release
+        .join()
+        .expect("release helper joins")
+        .expect("silent peer classifies before pending Ready wake");
+    assert_eq!(ready.join().expect("Ready sender joins"), Ok(()));
+    assert_eq!(
+        h.extensions.entries[&silent].state,
         ExtensionState::Handshaking
     );
-    assert!(!h.extensions.ready_received.contains(&connection_id));
+    assert_eq!(
+        h.extensions.entries[&pending].state,
+        ExtensionState::Handshaking
+    );
+    assert!(h.extensions.startup_deadlines.contains_key(&pending));
+}
+
+/// Ensures an on-time Ready admitted before its ingress wake still wins when
+/// the startup receive deadline expires while the producer is descheduled.
+#[test]
+fn ready_admitted_before_delayed_wake_retains_decode_deadline_authority() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let connection_id = crate::test_connection_id("ready-before-wake");
+    let _sink = connect_handshaking_tool(&mut h, connection_id.as_str());
+    let deadline = Instant::now() + Duration::from_millis(20);
+    h.extensions.startup_deadlines.insert(
+        connection_id.clone(),
+        StartupDeadline {
+            deadline,
+            name: crate::test_extension_name("ready-before-wake"),
+            require: true,
+        },
+    );
+    let (admitted_rx, wake_release) = h.runtime_io.component_ingress.pause_next_wake_for_test();
+    let (observed_rx, observation_release) = h
+        .runtime_io
+        .component_ingress
+        .pause_next_observation_for_test();
+    let sender = h.runtime_io.component_ingress_tx.clone();
+    let ready = std::thread::spawn(move || {
+        sender.send_for_test(HarnessEvent::from_connection_observed_at_for_test(
+            connection_id,
+            HarnessInputMessage::Ready(Default::default()),
+            deadline - Duration::from_nanos(1),
+        ))
+    });
+    admitted_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("Ready admitted before wake");
+
+    let release = std::thread::spawn(move || {
+        let observed = observed_rx.recv_timeout(Duration::from_secs(1));
+        observation_release
+            .send(())
+            .expect("release startup observation");
+        wake_release.send(()).expect("release ingress wake");
+        observed
+    });
+    let result = h.wait_for_extensions_ready_at(deadline - STARTUP_TIMEOUT);
+
+    release
+        .join()
+        .expect("release helper joins")
+        .expect("waiter rechecks admitted Ready after receive timeout");
+    result.expect("admitted on-time Ready survives delayed wake");
+    assert_eq!(ready.join().expect("Ready sender joins"), Ok(()));
+}
+
+/// Ensures the initial authenticated UI Subscribe uses the same exact decode
+/// boundary without allowing a late Subscribe to revive startup.
+#[test]
+fn initial_ui_subscribe_decode_observation_owns_startup_deadline_boundary() {
+    let epsilon = Duration::from_nanos(1);
+    for (offset, accepted) in [(Some(epsilon), true), (None, true), (Some(epsilon), false)] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        let (server, _client) = UnixStream::pair().expect("initial UI pair");
+        let connection_id = h.accept_client(server).expect("accept initial UI");
+        let started_at = Instant::now() - Duration::from_secs(3);
+        let deadline = started_at + STARTUP_TIMEOUT;
+        h.runtime_io
+            .tx
+            .send(HarnessEvent::from_connection_observed_at_for_test(
+                connection_id.clone(),
+                HarnessInputMessage::Hello(tau_proto::Hello {
+                    protocol_version: tau_proto::PROTOCOL_VERSION,
+                    client_name: crate::test_extension_name("deadline-ui"),
+                    client_kind: tau_proto::ClientKind::Ui,
+                    expected_session_id: None,
+                    capabilities: Default::default(),
+                }),
+                started_at,
+            ))
+            .expect("queue initial UI Hello");
+        let decoded_at = match (accepted, offset) {
+            (true, Some(offset)) => deadline - offset,
+            (true, None) => deadline,
+            (false, Some(offset)) => deadline + offset,
+            (false, None) => unreachable!("late case has an offset"),
+        };
+        h.runtime_io
+            .tx
+            .send(HarnessEvent::from_connection_observed_at_for_test(
+                connection_id,
+                HarnessInputMessage::Subscribe(tau_proto::Subscribe {
+                    historical_selectors: Vec::new(),
+                    live_selectors: Vec::new(),
+                }),
+                decoded_at,
+            ))
+            .expect("queue initial UI Subscribe");
+
+        let result = h.wait_for_initial_ui_subscribe_at(started_at);
+        if accepted {
+            result.expect("on-time decoded Subscribe survives queued handling");
+        } else {
+            assert!(matches!(result, Err(HarnessError::StartupTimeout)));
+        }
+    }
+}
+
+/// Ensures an on-time authenticated initial Subscribe admitted before its
+/// ingress wake still wins when the receive deadline expires first.
+#[test]
+fn initial_subscribe_admitted_before_delayed_wake_retains_decode_authority() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    let (server, _client) = UnixStream::pair().expect("initial UI pair");
+    let connection_id = h.accept_client(server).expect("accept initial UI");
+    assert!(
+        !h.handle_startup_from_connection(
+            &connection_id,
+            HarnessInputMessage::Hello(tau_proto::Hello {
+                protocol_version: tau_proto::PROTOCOL_VERSION,
+                client_name: crate::test_extension_name("subscribe-before-wake"),
+                client_kind: tau_proto::ClientKind::Ui,
+                expected_session_id: None,
+                capabilities: Default::default(),
+            }),
+        )
+        .expect("authenticate initial UI")
+    );
+    let deadline = Instant::now() + Duration::from_millis(20);
+    let (admitted_rx, wake_release) = h.runtime_io.component_ingress.pause_next_wake_for_test();
+    let (observed_rx, observation_release) = h
+        .runtime_io
+        .component_ingress
+        .pause_next_observation_for_test();
+    let sender = h.runtime_io.component_ingress_tx.clone();
+    let subscribe = std::thread::spawn(move || {
+        sender.send_for_test(HarnessEvent::from_connection_observed_at_for_test(
+            connection_id,
+            HarnessInputMessage::Subscribe(tau_proto::Subscribe {
+                historical_selectors: Vec::new(),
+                live_selectors: Vec::new(),
+            }),
+            deadline - Duration::from_nanos(1),
+        ))
+    });
+    admitted_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("Subscribe admitted before wake");
+
+    let release = std::thread::spawn(move || {
+        let observed = observed_rx.recv_timeout(Duration::from_secs(1));
+        observation_release
+            .send(())
+            .expect("release startup observation");
+        wake_release.send(()).expect("release ingress wake");
+        observed
+    });
+    let result = h.wait_for_initial_ui_subscribe_at(deadline - STARTUP_TIMEOUT);
+
+    release
+        .join()
+        .expect("release helper joins")
+        .expect("waiter rechecks admitted Subscribe after receive timeout");
+    result.expect("admitted on-time Subscribe survives delayed wake");
+    assert_eq!(subscribe.join().expect("Subscribe sender joins"), Ok(()));
 }
 
 /// Ensures an optional peer that expires before its queued connect installs is

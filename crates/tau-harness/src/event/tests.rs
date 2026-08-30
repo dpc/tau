@@ -210,6 +210,63 @@ fn component_ingress_capacity_one_saturates_orders_and_closes() {
     assert_eq!(blocked.join().expect("blocked producer joins"), Err(()));
 }
 
+/// Ensures a Ready frame keeps its exact decode observation while its reader
+/// blocks behind the occupied ingress slot implicated in startup deadline
+/// races.
+#[test]
+fn blocked_ready_preserves_decode_observation_until_ingress_consumption() {
+    let (wake_tx, wake_rx) = mpsc::channel();
+    let (ingress, sender) = ComponentIngress::new(wake_tx, ComponentIngressCapacity::One);
+    sender
+        .send(disconnected_event_named("occupied"))
+        .expect("occupy ingress");
+    let ready_connection = crate::test_connection_id("blocked-ready");
+    let decoded_at = Instant::now();
+    let blocked_sender = sender.clone();
+    let blocked_connection = ready_connection.clone();
+    let producer = thread::spawn(move || {
+        blocked_sender.send(HarnessEvent::from_connection_observed_at_for_test(
+            blocked_connection,
+            tau_proto::HarnessInputMessage::Ready(Default::default()),
+            decoded_at,
+        ))
+    });
+
+    ingress.wait_for_blocked_sender();
+    assert!(
+        ingress
+            .startup_frame_observations()
+            .iter()
+            .any(|observation| {
+                observation.connection_id == ready_connection
+                    && observation.kind == StartupFrameKind::Ready
+                    && observation.decoded_at == decoded_at
+            })
+    );
+    assert!(matches!(
+        wake_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ComponentIngressReady)
+    ));
+    let _occupied = ingress.take_ready().expect("consume occupied frame");
+    assert!(matches!(
+        wake_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HarnessEvent::ComponentIngressReady)
+    ));
+    let ready = ingress.take_ready().expect("consume blocked Ready");
+    assert!(matches!(
+        ready,
+        HarnessEvent::FromConnection {
+            connection_id,
+            message,
+            decoded_at: observed_at,
+            ..
+        } if connection_id == ready_connection
+            && matches!(message.as_ref(), tau_proto::HarnessInputMessage::Ready(_))
+            && observed_at == decoded_at
+    ));
+    assert_eq!(producer.join().expect("producer joins"), Ok(()));
+}
+
 /// Closing component ingress during shutdown must wake a rendezvous producer
 /// so joining a reader cannot deadlock after the event loop stops.
 #[test]
@@ -266,6 +323,7 @@ fn extension_reader_waits_for_initialized_ack() {
             connection_id,
             message,
             frame_bytes: _,
+            decoded_at: _,
         } => {
             assert_eq!(connection_id.as_str(), "conn-test");
             assert!(matches!(

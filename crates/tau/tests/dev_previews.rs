@@ -7,6 +7,7 @@ use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::{Arc, Barrier};
 
 use support::isolated_tau_command;
 use tempfile::TempDir;
@@ -388,18 +389,17 @@ fn previews_omit_durable_session_artifacts_across_success_failure_and_concurrenc
     assert!(!failure.status.success());
     assert_no_durable_preview_artifacts(home.path());
 
+    let barrier = Arc::new(Barrier::new(3));
     let mut threads = Vec::new();
-    for index in 0..8 {
+    for command in ["print-prompt", "print-tools"] {
         let home = home.path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
         threads.push(std::thread::spawn(move || {
-            let command = if index % 2 == 0 {
-                "print-prompt"
-            } else {
-                "print-tools"
-            };
+            barrier.wait();
             preview_at(&home, None, &["--role", "engineer", "dev", command])
         }));
     }
+    barrier.wait();
     for thread in threads {
         let output = thread.join().expect("preview thread");
         assert!(output.status.success(), "{:?}", output.stderr);

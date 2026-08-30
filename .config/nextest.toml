@@ -2,6 +2,22 @@
 slow-timeout = { period = "10s", terminate-after = 1 }
 
 [[profile.default.overrides]]
+# Two barrier-synchronized preview stacks each own a CLI, harness, and up to
+# five configured extension children.
+filter = "package(tau) & binary(dev_previews) & test(/^previews_omit_durable_session_artifacts_across_success_failure_and_concurrency$/)"
+threads-required = 8
+
+[[profile.default.overrides]]
+# Ordinary preview tests own one nested CLI/harness/configured-extension stack.
+filter = "package(tau) & binary(dev_previews)"
+threads-required = 4
+
+[[profile.default.overrides]]
+# Each stdio fixture owns one harness plus its configured extension processes.
+filter = "package(tau) & binary(initial_ui_stdio)"
+threads-required = 4
+
+[[profile.default.overrides]]
 filter = "package(tau-e2e-tests) & binary(deterministic_provider)"
 slow-timeout = { period = "60s", terminate-after = 1 }
 

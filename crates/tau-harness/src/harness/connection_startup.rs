@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::debug_log::DebugEventSensitivity;
+use crate::event::StartupFrameKind;
 
 impl Harness {
     /// Record the runtime harness metadata path stem owned by the daemon.
@@ -144,7 +145,16 @@ impl Harness {
     }
 
     pub(super) fn wait_for_initial_ui_subscribe(&mut self) -> Result<(), HarnessError> {
-        let started_at = Instant::now();
+        self.wait_for_initial_ui_subscribe_at(Instant::now())
+    }
+
+    /// Waits for the initial authenticated UI Subscribe using an exact deadline
+    /// anchor supplied by production or deterministic tests.
+    pub(super) fn wait_for_initial_ui_subscribe_at(
+        &mut self,
+        started_at: Instant,
+    ) -> Result<(), HarnessError> {
+        let deadline = started_at + STARTUP_TIMEOUT;
         loop {
             let harness_evt = self
                 .recv_startup_event(started_at)
@@ -155,13 +165,14 @@ impl Harness {
                     connection_id,
                     message,
                     frame_bytes,
+                    decoded_at,
                 } => {
                     if self.handle_startup_from_connection_with_frame_bytes(
                         &connection_id,
                         *message,
                         frame_bytes,
                     )? {
-                        if STARTUP_TIMEOUT <= started_at.elapsed() {
+                        if deadline < decoded_at {
                             return Err(HarnessError::StartupTimeout);
                         }
                         return Ok(());
@@ -197,7 +208,43 @@ impl Harness {
         &mut self,
         started_at: Instant,
     ) -> Result<HarnessEvent, mpsc::RecvTimeoutError> {
-        self.recv_event_until(started_at + STARTUP_TIMEOUT)
+        let deadline = started_at + STARTUP_TIMEOUT;
+        if deadline > Instant::now() {
+            match self.recv_event_until(deadline) {
+                Ok(event) => return Ok(event),
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if self.has_observed_on_time_initial_subscribe(deadline) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        match self.runtime_io.rx.try_recv() {
+            Ok(event) => Ok(self.expand_component_ingress_wake(event)),
+            Err(mpsc::TryRecvError::Empty)
+                if self.has_observed_on_time_initial_subscribe(deadline) =>
+            {
+                self.runtime_io
+                    .rx
+                    .recv()
+                    .map(|event| self.expand_component_ingress_wake(event))
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            }
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
+                Err(mpsc::RecvTimeoutError::Timeout)
+            }
+        }
+    }
+
+    /// Reports whether bounded ingress already owns a Subscribe decoded within
+    /// the initial UI's startup window.
+    fn has_observed_on_time_initial_subscribe(&self, deadline: Instant) -> bool {
+        self.runtime_io
+            .component_ingress
+            .startup_frame_observations()
+            .iter()
+            .any(|observation| {
+                observation.kind == StartupFrameKind::Subscribe
+                    && observation.decoded_at <= deadline
+            })
     }
 
     /// Replaces a non-payload ingress wake with its bounded component payload.
@@ -461,6 +508,7 @@ impl Harness {
             connection_id,
             message,
             frame_bytes: _,
+            decoded_at: _,
         } = harness_event
         else {
             return false;

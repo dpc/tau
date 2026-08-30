@@ -164,6 +164,8 @@ pub(crate) enum HarnessEvent {
         message: Box<HarnessInputMessage>,
         /// Encoded bytes consumed by the real protocol decode.
         frame_bytes: tau_proto::ProtocolMessageBytes,
+        /// Process-local time when the complete transport frame decoded.
+        decoded_at: Instant,
     },
     /// A connection's reader hit clean EOF.
     Disconnected {
@@ -218,10 +220,41 @@ struct ComponentIngressState {
     receiver_alive: bool,
     /// Producers currently waiting behind an occupied one-slot lane.
     blocked_senders: usize,
+    /// Startup-frame observations waiting behind the occupied one-slot lane.
+    blocked_startup_frame_observations: Vec<StartupFrameObservation>,
     /// Next sender-specific acknowledgement ticket.
     next_ticket: IngressTicket,
     /// Greatest ticket whose exact payload the harness consumed.
     consumed_through: Option<IngressTicket>,
+    /// Test-only pause after slot admission and before its wake is sent.
+    #[cfg(test)]
+    before_wake_hook: Option<(Sender<()>, Receiver<()>)>,
+    /// Test-only pause when startup deadline code observes the admitted slot.
+    #[cfg(test)]
+    observation_hook: Option<(Sender<()>, Receiver<()>)>,
+}
+
+/// Kind of decoded frame needed to classify one startup deadline.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum StartupFrameKind {
+    /// Authentication precursor for a later startup terminal.
+    Hello,
+    /// Configured-extension startup terminal.
+    Ready,
+    /// Initial-UI startup terminal.
+    Subscribe,
+}
+
+/// Minimal process-local observation needed to preserve startup deadline
+/// authority.
+#[derive(Clone)]
+pub(crate) struct StartupFrameObservation {
+    /// Connection that supplied the decoded startup frame.
+    pub(crate) connection_id: tau_proto::ConnectionId,
+    /// Kind of startup frame observed.
+    pub(crate) kind: StartupFrameKind,
+    /// Time when the complete startup frame decoded.
+    pub(crate) decoded_at: Instant,
 }
 
 /// Sender-specific identity for one component-ingress payload.
@@ -305,8 +338,13 @@ impl ComponentIngress {
                 slot: None,
                 receiver_alive: true,
                 blocked_senders: 0,
+                blocked_startup_frame_observations: Vec::new(),
                 next_ticket: IngressTicket(1),
                 consumed_through: None,
+                #[cfg(test)]
+                before_wake_hook: None,
+                #[cfg(test)]
+                observation_hook: None,
             }),
             Condvar::new(),
         ));
@@ -380,9 +418,65 @@ impl ComponentIngress {
         changed.notify_all();
     }
 
+    /// Returns decoded startup frames currently admitted to or blocked
+    /// behind the bounded ingress slot.
+    pub(crate) fn startup_frame_observations(&self) -> Vec<StartupFrameObservation> {
+        #[cfg(test)]
+        let mut state = state_lock(&self.state);
+        #[cfg(not(test))]
+        let state = state_lock(&self.state);
+        let mut observations = state.blocked_startup_frame_observations.clone();
+        if let Some(observation) = state
+            .slot
+            .as_ref()
+            .and_then(|pending| pending.event.startup_frame_observation())
+        {
+            observations.push(observation);
+        }
+        #[cfg(test)]
+        let hook = state.observation_hook.take();
+        drop(state);
+        #[cfg(test)]
+        if let Some((observed_tx, release_rx)) = hook {
+            observed_tx.send(()).expect("report startup observation");
+            release_rx.recv().expect("release startup observation");
+        }
+        observations
+    }
+
+    /// Pauses the next admitted payload before its control wake for an exact
+    /// deadline-race test.
+    #[cfg(test)]
+    pub(crate) fn pause_next_wake_for_test(&self) -> (Receiver<()>, Sender<()>) {
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut state = state_lock(&self.state);
+        assert!(
+            state.before_wake_hook.is_none(),
+            "wake hook already installed"
+        );
+        state.before_wake_hook = Some((admitted_tx, release_rx));
+        (admitted_rx, release_tx)
+    }
+
+    /// Pauses the next startup-observation query for an exact deadline-race
+    /// test.
+    #[cfg(test)]
+    pub(crate) fn pause_next_observation_for_test(&self) -> (Receiver<()>, Sender<()>) {
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut state = state_lock(&self.state);
+        assert!(
+            state.observation_hook.is_none(),
+            "observation hook already installed"
+        );
+        state.observation_hook = Some((observed_tx, release_rx));
+        (observed_rx, release_tx)
+    }
+
     /// Waits until one producer demonstrably blocks behind the occupied slot.
     #[cfg(test)]
-    fn wait_for_blocked_sender(&self) {
+    pub(crate) fn wait_for_blocked_sender(&self) {
         let (state, changed) = &*self.state;
         let state = state.lock().expect("component ingress mutex poisoned");
         let (state, timeout) = changed
@@ -396,6 +490,12 @@ impl ComponentIngress {
 }
 
 impl ComponentIngressSender {
+    /// Sends one synthetic event through the real bounded ingress lane.
+    #[cfg(test)]
+    pub(crate) fn send_for_test(&self, event: HarnessEvent) -> Result<(), ()> {
+        self.send(event)
+    }
+
     /// Sends one component frame or lifecycle observation with natural
     /// backpressure from harness consumption.
     fn send(&self, event: HarnessEvent) -> Result<(), ()> {
@@ -403,8 +503,12 @@ impl ComponentIngressSender {
         let (state, changed) = &*self.state;
         let mut state = state.lock().expect("component ingress mutex poisoned");
         let blocked = state.receiver_alive && state.slot.is_some();
+        let blocked_startup_frame = blocked.then(|| event.startup_frame_observation()).flatten();
         if blocked {
             state.blocked_senders = state.blocked_senders.saturating_add(1);
+            if let Some(observation) = blocked_startup_frame.clone() {
+                state.blocked_startup_frame_observations.push(observation);
+            }
             changed.notify_all();
         }
         while state.receiver_alive && state.slot.is_some() {
@@ -414,6 +518,20 @@ impl ComponentIngressSender {
         }
         if blocked {
             state.blocked_senders = state.blocked_senders.saturating_sub(1);
+            if let Some(observation) = &blocked_startup_frame {
+                let position = state
+                    .blocked_startup_frame_observations
+                    .iter()
+                    .position(|candidate| {
+                        candidate.connection_id == observation.connection_id
+                            && candidate.kind == observation.kind
+                            && candidate.decoded_at == observation.decoded_at
+                    })
+                    .expect("blocked startup-frame observation remains registered");
+                state
+                    .blocked_startup_frame_observations
+                    .swap_remove(position);
+            }
         }
         if !state.receiver_alive {
             return Err(());
@@ -429,6 +547,17 @@ impl ComponentIngressSender {
         });
         let blocked_reader_count = state.blocked_senders;
         drop(state);
+        #[cfg(test)]
+        {
+            let hook = {
+                let mut state = state_lock(&self.state);
+                state.before_wake_hook.take()
+            };
+            if let Some((admitted_tx, release_rx)) = hook {
+                admitted_tx.send(()).expect("report ingress admission");
+                release_rx.recv().expect("release ingress wake");
+            }
+        }
         if self
             .wake_tx
             .send(HarnessEvent::ComponentIngressReady)
@@ -487,12 +616,48 @@ fn state_lock(
 }
 
 impl HarnessEvent {
+    /// Returns minimal startup-frame metadata without retaining or copying
+    /// payload data.
+    fn startup_frame_observation(&self) -> Option<StartupFrameObservation> {
+        let Self::FromConnection {
+            connection_id,
+            message,
+            decoded_at,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let kind = match message.as_ref() {
+            HarnessInputMessage::Hello(_) => StartupFrameKind::Hello,
+            HarnessInputMessage::Ready(_) => StartupFrameKind::Ready,
+            HarnessInputMessage::Subscribe(_) => StartupFrameKind::Subscribe,
+            _ => return None,
+        };
+        Some(StartupFrameObservation {
+            connection_id: connection_id.clone(),
+            kind,
+            decoded_at: *decoded_at,
+        })
+    }
+
     /// Build a synthetic connection event while accounting for its actual
     /// encoded fixture size.
     #[cfg(test)]
     pub(crate) fn from_connection_for_test(
         connection_id: tau_proto::ConnectionId,
         message: HarnessInputMessage,
+    ) -> Self {
+        Self::from_connection_observed_at_for_test(connection_id, message, Instant::now())
+    }
+
+    /// Builds a synthetic connection event with an exact process-local decode
+    /// observation for deadline tests.
+    #[cfg(test)]
+    pub(crate) fn from_connection_observed_at_for_test(
+        connection_id: tau_proto::ConnectionId,
+        message: HarnessInputMessage,
+        decoded_at: Instant,
     ) -> Self {
         let frame_bytes = tau_proto::encode_message_to_vec(&message)
             .ok()
@@ -502,6 +667,7 @@ impl HarnessEvent {
             connection_id,
             message: Box::new(message),
             frame_bytes,
+            decoded_at,
         }
     }
 }
@@ -727,6 +893,7 @@ fn spawn_reader_thread_inner(
             let read_started = Instant::now();
             match reader.read_message_with_size() {
                 Ok(Some(decoded)) => {
+                    let decoded_at = Instant::now();
                     let traffic_class = prompt_traffic_class_for_message(&decoded.message);
                     if let Some(traffic_class) = traffic_class {
                         tracing::trace!(
@@ -743,6 +910,7 @@ fn spawn_reader_thread_inner(
                             connection_id: connection_id.clone(),
                             message: Box::new(decoded.message),
                             frame_bytes: decoded.encoded_bytes,
+                            decoded_at,
                         })
                         .is_err()
                     {

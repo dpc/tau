@@ -228,6 +228,7 @@ fn drive_crashed_extension_cleanup(
                 connection_id,
                 message,
                 frame_bytes: _,
+                decoded_at: _,
             } => h
                 .handle_extension_message(&connection_id, *message)
                 .expect("extension message"),

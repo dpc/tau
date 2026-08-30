@@ -58,6 +58,11 @@ frames remain readable before EOF; a slow client may instead observe EOF, reset,
 a partial frame, or no terminal reason. Generic stdio and pipe writers do not
 inherit this socket-specific cancellation guarantee and retain synchronous
 drain behavior where the harness requests a terminal drain.
+Initial UI authentication must complete within the fixed startup deadline. An
+authenticated initial `Subscribe` decoded at or before the deadline succeeds
+even when ingress handling runs later; late, silent, and unauthenticated clients
+remain fail-closed. This process-local observation time never enters protocol,
+logs, or persistence.
 
 Overall harness shutdown closes every in-process extension transport and gives
 all runners one shared cleanup grace to return normally on EOF. A runner that

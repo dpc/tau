@@ -2223,6 +2223,7 @@ impl Harness {
                     connection_id,
                     message,
                     frame_bytes,
+                    decoded_at: _,
                 } => {
                     if let Err(error) = self.handle_extension_message_with_frame_bytes(
                         &connection_id,

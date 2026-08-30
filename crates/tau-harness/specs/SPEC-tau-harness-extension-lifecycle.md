@@ -254,9 +254,13 @@ first `Ready`. Every externally managed or queued entry without such a record
 receives the general deadline from one startup-wait instant, rather than a fresh
 window after each event. Ordinary entries default to two seconds and built-ins
 may select a longer documented default. A required entry that reaches its own
-deadline fails startup closed. An optional entry that reaches its own deadline
-is disabled with the existing mandatory replayable notice, while other entries
-retain their independent deadlines.
+deadline without an authenticated `Ready` frame decoded at or before that exact
+deadline fails startup closed. Complete-frame decode time is process-local
+classification authority, so later ingress handling cannot retroactively reject
+an on-time `Ready`; late, silent, unauthenticated, and wrong-phase peers remain
+fail-closed. An optional entry that reaches its own deadline is disabled with the
+existing mandatory replayable notice, while other entries retain their
+independent deadlines.
 Required extensions preserve startup-fatal behavior for harness-owned init
 failures such as missing commands, missing required declared secrets, spawn
 failure, and pre-Ready timeout. Other pre-Ready disconnect handling follows the

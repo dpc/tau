@@ -154,8 +154,8 @@ fn initial_ui_introduction_notice_requires_conversational_launch() {
                     panic!("initial UI reader exited before startup completed")
                 }
             };
-            if let HarnessOutputMessage::Deliver(delivery) = message {
-                match delivery.event() {
+            match message {
+                HarnessOutputMessage::Deliver(delivery) => match delivery.event() {
                     Event::HarnessNotice(notice)
                         if notice.kind == tau_proto::notice_kind::HARNESS_INTRODUCTION =>
                     {
@@ -163,7 +163,14 @@ fn initial_ui_introduction_notice_requires_conversational_launch() {
                     }
                     Event::SessionReplayComplete(_) => startup_complete = true,
                     _ => {}
+                },
+                HarnessOutputMessage::Disconnect(disconnect) => {
+                    panic!(
+                        "initial UI disconnected before startup completed: {:?}",
+                        disconnect.reason
+                    );
                 }
+                _ => {}
             }
         }
         assert!(startup_complete, "spawned harness did not finish startup");

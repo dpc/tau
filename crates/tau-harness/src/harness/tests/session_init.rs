@@ -21,6 +21,7 @@ fn queue_extension_event(h: &Harness, connection_id: &tau_proto::ConnectionId, e
             connection_id: connection_id.clone(),
             message: Box::new(message),
             frame_bytes,
+            decoded_at: Instant::now(),
         })
         .expect("queue session-init extension event");
 }
