@@ -330,6 +330,7 @@ fn plain_reasoning_streams_displays_and_materializes_for_replay() {
                 kind: ReasoningTextKind::Full,
                 text,
             }),
+            ..
         }] if text == "think "
     ));
 
@@ -397,11 +398,10 @@ fn plain_reasoning_streams_displays_and_materializes_for_replay() {
     ));
 }
 
-/// Ensures per-event progress observations inspect scalar cadence inputs
-/// without cloning a growing public Responses display prefix; one due sample
-/// alone materializes that prefix.
+/// Ensures per-event scalar observations and one due borrowed projection do not
+/// clone a growing public Responses display prefix.
 #[test]
-fn borrowed_progress_defers_display_materialization_until_sample_due() {
+fn borrowed_progress_avoids_display_materialization_when_sample_due() {
     PROGRESS_MATERIALIZATIONS.with(|count| count.set(0));
     let mut state = State::default();
     for index in 0..1_000 {
@@ -419,12 +419,138 @@ fn borrowed_progress_defers_display_materialization_until_sample_due() {
         0,
         "suppressed samples must not clone the growing display prefix"
     );
-    let output = state.progress_view().materialize_output();
+    let mut output = Vec::new();
+    state.progress_view().visit_display_output(|item| {
+        output.push((item.output_index, item.kind, item.text.len()));
+    });
     assert_eq!(output.len(), 1);
     assert_eq!(
         PROGRESS_MATERIALIZATIONS.with(std::cell::Cell::get),
-        1,
-        "a due sample materializes exactly one display snapshot"
+        0,
+        "a due sample borrows the display accumulator"
+    );
+}
+
+/// Cumulative non-append replacements renew the display generation, later
+/// appends retain it, and a missing lower output index hides the projection.
+#[test]
+fn borrowed_display_projection_tracks_replacements_appends_and_gaps() {
+    PROGRESS_MATERIALIZATIONS.with(|count| count.set(0));
+    let mut state = State::default();
+    state
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":1,"delta":"hidden"}"#)
+        .expect("gapped text");
+    let mut displays = Vec::new();
+    state.progress_view().visit_display_output(|output| {
+        displays.push((
+            output.output_index,
+            output.generation,
+            output.text.to_owned(),
+        ));
+    });
+    assert!(displays.is_empty());
+
+    state
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":"old"}"#)
+        .expect("initial contiguous text");
+    let replacement = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "new"}],
+        },
+    });
+    state
+        .apply_event(&replacement.to_string())
+        .expect("valid cumulative replacement");
+    state
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":"雪"}"#)
+        .expect("Unicode append after replacement");
+
+    displays.clear();
+    state.progress_view().visit_display_output(|output| {
+        displays.push((
+            output.output_index,
+            output.generation,
+            output.text.to_owned(),
+        ));
+    });
+    assert_eq!(
+        displays,
+        vec![
+            (0, DisplayGeneration(1), "new雪".to_owned()),
+            (1, DisplayGeneration::default(), "hidden".to_owned()),
+        ]
+    );
+    assert_eq!(PROGRESS_MATERIALIZATIONS.with(std::cell::Cell::get), 0);
+}
+
+/// Authoritative terminal output inherits the streamed slot generation and
+/// renews it before the extension can cursor-slice a non-prefix replacement.
+#[test]
+fn terminal_replacement_renews_borrowed_display_generation() {
+    let mut state = State::default();
+    state
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":"old!"}"#)
+        .expect("streamed text");
+    let terminal = serde_json::json!({
+        "type": "response.completed",
+        "response": {
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "雪 replacement"}],
+            }],
+        },
+    });
+    state
+        .apply_event(&terminal.to_string())
+        .expect("authoritative replacement");
+    let mut display = None;
+    state.progress_view().visit_display_output(|output| {
+        display = Some((output.generation, output.text.to_owned()));
+    });
+    assert_eq!(
+        display,
+        Some((DisplayGeneration(1), "雪 replacement".to_owned()))
+    );
+    assert_eq!(
+        state.progress_items()[0].display_generation,
+        DisplayGeneration(1)
+    );
+}
+
+/// Removing an emitted display channel invalidates its generation so later
+/// unrelated multibyte text cannot reuse the old byte cursor.
+#[test]
+fn display_disappearance_invalidates_later_reappearance() {
+    let mut state = State::default();
+    state
+        .apply_event(r#"{"type":"response.output_text.delta","output_index":0,"delta":"old!"}"#)
+        .expect("streamed text");
+    for text in ["", "雪 replacement"] {
+        let replacement = serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            },
+        });
+        state
+            .apply_event(&replacement.to_string())
+            .expect("accepted cumulative replacement");
+    }
+    let mut display = None;
+    state.progress_view().visit_display_output(|output| {
+        display = Some((output.generation, output.text.to_owned()));
+    });
+    assert_eq!(
+        display,
+        Some((DisplayGeneration(1), "雪 replacement".to_owned()))
     );
 }
 
@@ -1812,9 +1938,8 @@ fn http_sse_attempt_posts_responses_and_completes() {
     assert_eq!(response["raw_events_truncated"], true);
 }
 
-/// Ensures the real SSE callback path reads only borrowed cadence inputs for a
-/// growing stream, materializes once for a due display sample, and separately
-/// materializes the durable terminal progress.
+/// Ensures the real SSE callback path reads borrowed cadence inputs and display
+/// text for a growing stream; only durable terminal output materializes.
 #[test]
 fn sse_suppressed_progress_samples_do_not_materialize_display_slots() {
     PROGRESS_MATERIALIZATIONS.with(|count| count.set(0));
@@ -1864,7 +1989,12 @@ fn sse_suppressed_progress_samples_do_not_materialize_display_slots() {
             std::hint::black_box(progress.response_bytes_received());
             std::hint::black_box(progress.has_timed_semantic_output());
             if due_samples == 0 && progress.has_timed_semantic_output() {
-                assert_eq!(progress.materialize_output().len(), 1);
+                let mut displays = 0;
+                progress.visit_display_output(|output| {
+                    displays += 1;
+                    std::hint::black_box(output.text);
+                });
+                assert_eq!(displays, 1);
                 due_samples += 1;
             }
         },
@@ -1876,8 +2006,8 @@ fn sse_suppressed_progress_samples_do_not_materialize_display_slots() {
     assert_eq!(due_samples, 1);
     assert_eq!(
         PROGRESS_MATERIALIZATIONS.with(std::cell::Cell::get),
-        2,
-        "one due sample and the separate durable terminal must materialize"
+        1,
+        "only the separate durable terminal may materialize"
     );
 }
 
@@ -2932,8 +3062,7 @@ fn run_websocket_messages_captured(
 }
 
 /// Ensures the real WebSocket callback path has the same borrowed suppressed
-/// sampling behavior as SSE, while a due sample and durable terminal retain
-/// their independent display-slot materializations.
+/// and due sampling behavior as SSE; only durable terminal output materializes.
 #[test]
 fn websocket_suppressed_progress_samples_do_not_materialize_display_slots() {
     PROGRESS_MATERIALIZATIONS.with(|count| count.set(0));
@@ -2992,7 +3121,12 @@ fn websocket_suppressed_progress_samples_do_not_materialize_display_slots() {
             std::hint::black_box(progress.response_bytes_received());
             std::hint::black_box(progress.has_timed_semantic_output());
             if due_samples == 0 && progress.has_timed_semantic_output() {
-                assert_eq!(progress.materialize_output().len(), 1);
+                let mut displays = 0;
+                progress.visit_display_output(|output| {
+                    displays += 1;
+                    std::hint::black_box(output.text);
+                });
+                assert_eq!(displays, 1);
                 due_samples += 1;
             }
         },
@@ -3004,8 +3138,8 @@ fn websocket_suppressed_progress_samples_do_not_materialize_display_slots() {
     assert_eq!(due_samples, 1);
     assert_eq!(
         PROGRESS_MATERIALIZATIONS.with(std::cell::Cell::get),
-        2,
-        "one due sample and the separate durable terminal must materialize"
+        1,
+        "only the separate durable terminal may materialize"
     );
 }
 

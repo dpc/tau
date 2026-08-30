@@ -244,6 +244,40 @@ pub struct AttemptOutputItem {
     pub output_index: u32,
     /// Typed semantic item.
     pub item: ContextItem,
+    /// Display replacement generation for cursor-based transient sampling.
+    pub display_generation: DisplayGeneration,
+}
+
+/// Opaque identity for one append-compatible display generation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DisplayGeneration(u64);
+
+impl DisplayGeneration {
+    /// Return the next replacement identity.
+    fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+/// One borrowed display channel from accepted streaming state.
+pub struct DisplayOutput<'a> {
+    /// Stable provider output index.
+    pub output_index: u32,
+    /// Whether this channel is assistant text or full reasoning text.
+    pub kind: DisplayOutputKind,
+    /// Cumulative UTF-8 text accepted for this channel.
+    pub text: &'a str,
+    /// Generation changed by a non-append cumulative replacement.
+    pub generation: DisplayGeneration,
+}
+
+/// Display channel kind exposed to the extension sampler.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisplayOutputKind {
+    /// Assistant narrative text.
+    Message,
+    /// Full reasoning text.
+    Reasoning,
 }
 
 /// Parsed successful Responses attempt.
@@ -279,8 +313,8 @@ pub struct AttemptProgress {
 /// Read-only accumulated progress exposed to the extension-owned sampler.
 ///
 /// This borrows parser state only for the synchronous callback. Callers can
-/// inspect cadence inputs without cloning output items, then materialize the
-/// stable display slots only for a due sample.
+/// inspect cadence inputs and visit stable display slots without cloning output
+/// items. Owned materialization remains available for durable terminal paths.
 pub struct AttemptProgressRef<'a> {
     /// Prompt-local parser state borrowed for this callback invocation.
     state: &'a State,
@@ -292,6 +326,12 @@ impl AttemptProgressRef<'_> {
     #[must_use]
     pub fn materialize_output(&self) -> Vec<AttemptOutputItem> {
         self.state.progress_items()
+    }
+
+    /// Visit the contiguous cumulative display prefix without cloning semantic
+    /// output items.
+    pub fn visit_display_output(&self, mut visit: impl FnMut(DisplayOutput<'_>)) {
+        self.state.visit_display_output(&mut visit);
     }
 
     /// Return cumulative provider response bytes.
@@ -756,6 +796,9 @@ struct Slot {
     state: SlotState,
     /// Provider reasoning identity captured when the item was added.
     reasoning_item_id: Option<ReasoningItemId>,
+    /// Generation changed whenever cumulative display content is not an append
+    /// of the previously accepted content.
+    display_generation: DisplayGeneration,
 }
 
 /// Validated provider identity for one plain reasoning output item.
@@ -839,6 +882,7 @@ impl Slot {
             reasoning_parts: BTreeMap::new(),
             state: SlotState::Empty,
             reasoning_item_id: None,
+            display_generation: DisplayGeneration::default(),
         }
     }
 
@@ -1248,17 +1292,51 @@ impl State {
                     .map(|item| AttemptOutputItem {
                         output_index: slot.index,
                         item: ContextItem::ReasoningText(item),
+                        display_generation: slot.display_generation,
                     });
                 reasoning_text.into_iter().chain(
                     (!matches!(slot.item, ContextItem::UnknownProviderItem(_))).then(|| {
                         AttemptOutputItem {
                             output_index: slot.index,
                             item: slot.item.clone(),
+                            display_generation: slot.display_generation,
                         }
                     }),
                 )
             })
             .collect()
+    }
+
+    /// Visit the contiguous display prefix without cloning typed items.
+    fn visit_display_output(&self, visit: &mut impl FnMut(DisplayOutput<'_>)) {
+        for slot in self.contiguous_slots() {
+            if let Some(reasoning) = slot
+                .reasoning_text
+                .as_ref()
+                .filter(|reasoning| !reasoning.text.is_empty())
+            {
+                visit(DisplayOutput {
+                    output_index: slot.index,
+                    kind: DisplayOutputKind::Reasoning,
+                    text: &reasoning.text,
+                    generation: slot.display_generation,
+                });
+            }
+            if let ContextItem::Message(message) = &slot.item {
+                for part in &message.content {
+                    if let ContentPart::Text { text } = part
+                        && !text.is_empty()
+                    {
+                        visit(DisplayOutput {
+                            output_index: slot.index,
+                            kind: DisplayOutputKind::Message,
+                            text,
+                            generation: slot.display_generation,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     /// Borrow parser state for one synchronous extension sampling callback.
@@ -1402,6 +1480,7 @@ impl State {
         let previous = self.items.iter().find(|slot| slot.index == index).cloned();
         let mut candidate = previous.clone().unwrap_or_else(|| Slot::new(index));
         let qualifying_progress = update(&mut candidate)?;
+        update_display_generation(previous.as_ref(), &mut candidate);
         self.validate_repetition(previous.as_ref(), &candidate)?;
         if let Some(slot) = self.items.iter_mut().find(|slot| slot.index == index) {
             *slot = candidate;
@@ -1663,6 +1742,10 @@ impl State {
                                 .and_then(|items| items.get(position))
                                 .copied(),
                         )?;
+                        update_display_generation(
+                            self.items.iter().find(|previous| previous.index == index),
+                            &mut slot,
+                        );
                         terminal_items.push(slot);
                     }
                     let reasoning_disagrees = self.items.iter().any(|slot| {
@@ -1705,6 +1788,46 @@ impl State {
             self.semantic_progress_revision = self.semantic_progress_revision.saturating_add(1);
         }
         Ok(previous_revision < self.semantic_progress_revision)
+    }
+}
+
+/// Borrow the single cumulative display channel owned by a slot.
+fn slot_display_text(slot: &Slot) -> Option<(DisplayOutputKind, &str)> {
+    if let Some(reasoning) = slot
+        .reasoning_text
+        .as_ref()
+        .filter(|reasoning| !reasoning.text.is_empty())
+    {
+        return Some((DisplayOutputKind::Reasoning, &reasoning.text));
+    }
+    let ContextItem::Message(message) = &slot.item else {
+        return None;
+    };
+    message.content.iter().find_map(|part| match part {
+        ContentPart::Text { text } if !text.is_empty() => {
+            Some((DisplayOutputKind::Message, text.as_str()))
+        }
+        _ => None,
+    })
+}
+
+/// Carry forward the previous generation and renew it for a non-append display
+/// replacement.
+fn update_display_generation(previous: Option<&Slot>, candidate: &mut Slot) {
+    let Some(previous) = previous else {
+        return;
+    };
+    candidate.display_generation = previous.display_generation;
+    let previous_display = slot_display_text(previous);
+    let candidate_display = slot_display_text(candidate);
+    if matches!((previous_display, candidate_display), (Some(_), None))
+        || matches!(
+            (previous_display, candidate_display),
+            (Some((previous_kind, previous_text)), Some((kind, text)))
+                if previous_kind != kind || !text.starts_with(previous_text)
+        )
+    {
+        candidate.display_generation = candidate.display_generation.next();
     }
 }
 

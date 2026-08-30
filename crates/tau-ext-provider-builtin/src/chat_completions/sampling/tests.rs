@@ -2,7 +2,101 @@
 
 use std::{io as path_std_io, time as path_std_time};
 
-use super::{RESPONSE_UPDATE_INTERVAL, ResponseSampler};
+use super::{RESPONSE_UPDATE_INTERVAL, ResponseSampler, SamplingProgress};
+
+/// Minimal borrowed projection used to exercise the production sampler seam.
+struct FakeProgress<'a> {
+    /// Cumulative byte count.
+    bytes: u64,
+    /// Assistant text.
+    message: &'a str,
+    /// Reasoning text.
+    reasoning: &'a str,
+}
+
+impl SamplingProgress for FakeProgress<'_> {
+    fn response_bytes_received(&self) -> u64 {
+        self.bytes
+    }
+
+    fn has_timed_semantic_output(&self) -> bool {
+        true
+    }
+
+    fn visit_display_output(
+        &self,
+        visit: &mut dyn FnMut(
+            u32,
+            tau_provider_chat_completions::DisplayOutputKind,
+            &str,
+            tau_provider_chat_completions::DisplayGeneration,
+        ),
+    ) {
+        visit(
+            0,
+            tau_provider_chat_completions::DisplayOutputKind::Message,
+            self.message,
+            Default::default(),
+        );
+        visit(
+            1,
+            tau_provider_chat_completions::DisplayOutputKind::Reasoning,
+            self.reasoning,
+            Default::default(),
+        );
+    }
+}
+
+/// The production due-sample seam publishes borrowed message/reasoning
+/// projections and slices multibyte suffixes from byte cursors.
+#[test]
+fn due_borrowed_projection_publishes_initial_and_unicode_suffix_deltas() {
+    let prompt = crate::openai_tests::prompt();
+    let mut sampler = ResponseSampler::new();
+    let mut bytes = Vec::new();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        sampler.emit_if_due_from(
+            &prompt.agent_prompt_id,
+            &prompt,
+            &FakeProgress {
+                bytes: 2,
+                message: "a",
+                reasoning: "r",
+            },
+            &mut writer,
+        );
+        sampler.last_emitted_at = Some(path_std_time::Instant::now() - RESPONSE_UPDATE_INTERVAL);
+        sampler.emit_if_due_from(
+            &prompt.agent_prompt_id,
+            &prompt,
+            &FakeProgress {
+                bytes: 7,
+                message: "a雪",
+                reasoning: "rλ",
+            },
+            &mut writer,
+        );
+    }
+    let updates = decode_updates(&bytes);
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0].deltas.len(), 2);
+    assert_eq!(
+        updates[1].deltas,
+        vec![
+            tau_proto::ProviderResponseTextDelta::Message {
+                output_index: 0,
+                text: "雪".to_owned(),
+                phase: None,
+            },
+            tau_proto::ProviderResponseTextDelta::ReasoningText {
+                output_index: 1,
+                kind: tau_proto::ReasoningTextKind::Full,
+                text: "λ".to_owned(),
+            },
+        ]
+    );
+}
 
 /// Standalone local summaries retain semantic parser state privately while
 /// publishing the existing content-free progress sample.
@@ -14,6 +108,7 @@ fn standalone_summary_progress_is_stats_only() {
     sampler.latest_items = vec![
         tau_provider_chat_completions::AttemptOutputItem {
             output_index: 0,
+            display_generation: Default::default(),
             item: tau_proto::ContextItem::Message(tau_proto::MessageItem {
                 role: tau_proto::ContextRole::Assistant,
                 content: vec![tau_proto::ContentPart::Text {
@@ -25,6 +120,7 @@ fn standalone_summary_progress_is_stats_only() {
         },
         tau_provider_chat_completions::AttemptOutputItem {
             output_index: 1,
+            display_generation: Default::default(),
             item: tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
                 kind: tau_proto::ReasoningTextKind::Full,
                 text: "private reasoning".to_owned(),

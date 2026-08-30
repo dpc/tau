@@ -5,6 +5,64 @@ use std::time as path_std_time;
 
 use crate::report_sink::ProviderReportSink;
 
+/// Borrowed cadence and display inputs consumed by the sampler.
+pub(super) trait SamplingProgress {
+    /// Return cumulative provider response bytes.
+    fn response_bytes_received(&self) -> u64;
+    /// Return whether semantic timing has qualified.
+    fn has_timed_semantic_output(&self) -> bool;
+    /// Visit accepted display channels.
+    fn visit_display_output(
+        &self,
+        visit: &mut dyn FnMut(
+            u32,
+            tau_provider_responses::DisplayOutputKind,
+            &str,
+            tau_provider_responses::DisplayGeneration,
+        ),
+    );
+}
+
+impl SamplingProgress for tau_provider_responses::AttemptProgressRef<'_> {
+    fn response_bytes_received(&self) -> u64 {
+        self.response_bytes_received()
+    }
+
+    fn has_timed_semantic_output(&self) -> bool {
+        self.has_timed_semantic_output()
+    }
+
+    fn visit_display_output(
+        &self,
+        visit: &mut dyn FnMut(
+            u32,
+            tau_provider_responses::DisplayOutputKind,
+            &str,
+            tau_provider_responses::DisplayGeneration,
+        ),
+    ) {
+        self.visit_display_output(|output| {
+            visit(
+                output.output_index,
+                output.kind,
+                output.text,
+                output.generation,
+            );
+        });
+    }
+}
+
+/// Emission cursor for one stable display channel.
+struct DisplayCursor {
+    /// Accepted replacement generation.
+    generation: tau_provider_responses::DisplayGeneration,
+    /// UTF-8 byte offset already emitted.
+    bytes: usize,
+    /// Exact emitted prefix retained because public Responses permits
+    /// cumulative replacements that can later recover this prefix.
+    emitted_prefix: String,
+}
+
 pub(super) const RESPONSE_UPDATE_INTERVAL: std::time::Duration =
     path_std_time::Duration::from_secs(1);
 
@@ -21,14 +79,16 @@ pub(super) struct ResponsesResponseSampler {
     /// Immutable elapsed duration captured at the first qualifying parser
     /// state.
     first_semantic_output_elapsed: Option<std::time::Duration>,
-    /// Stable indexed semantic items materialized only when sampling is due.
+    /// Stable indexed semantic items installed only for terminal fallback.
     pub(super) latest_items: Vec<tau_provider_responses::AttemptOutputItem>,
-    /// Cumulative provider response bytes for `latest_items`.
+    /// Latest cumulative provider response bytes observed by the sampler.
     pub(super) latest_bytes: u64,
-    /// Previously emitted assistant text keyed by stable output index.
-    pub(super) emitted_text: BTreeMap<usize, String>,
-    /// Previously emitted reasoning text keyed by stable output index.
-    pub(super) emitted_reasoning: BTreeMap<usize, String>,
+    /// Assistant-text emission cursors keyed by stable output index.
+    emitted_text: BTreeMap<usize, DisplayCursor>,
+    /// Reasoning-text emission cursors keyed by stable output index.
+    emitted_reasoning: BTreeMap<usize, DisplayCursor>,
+    /// Deltas derived from the current borrowed progress view.
+    pending_deltas: Vec<tau_proto::ProviderResponseTextDelta>,
 }
 
 impl ResponsesResponseSampler {
@@ -48,6 +108,7 @@ impl ResponsesResponseSampler {
             latest_bytes: 0,
             emitted_text: BTreeMap::new(),
             emitted_reasoning: BTreeMap::new(),
+            pending_deltas: Vec::new(),
         }
     }
 
@@ -59,11 +120,11 @@ impl ResponsesResponseSampler {
         }
     }
 
-    pub(super) fn emit_if_due<S: ProviderReportSink>(
+    pub(super) fn emit_if_due_from<S: ProviderReportSink>(
         &mut self,
         apid: &tau_proto::AgentPromptId,
         prompt: &tau_proto::AgentPromptCreated,
-        progress: tau_provider_responses::AttemptProgressRef<'_>,
+        progress: &impl SamplingProgress,
         writer: &mut S,
     ) {
         let now = path_std_time::Instant::now();
@@ -72,9 +133,36 @@ impl ResponsesResponseSampler {
         if !self.is_due(now, bytes, false) {
             return;
         }
-        self.latest_items = progress.materialize_output();
         self.latest_bytes = bytes;
+        if prompt.operation != tau_proto::PromptOperation::StandaloneCompaction {
+            progress.visit_display_output(&mut |output_index, kind, text, generation| {
+                let map = match kind {
+                    tau_provider_responses::DisplayOutputKind::Message => &mut self.emitted_text,
+                    tau_provider_responses::DisplayOutputKind::Reasoning => {
+                        &mut self.emitted_reasoning
+                    }
+                };
+                append_delta(
+                    &mut self.pending_deltas,
+                    map,
+                    output_index,
+                    text,
+                    generation,
+                    kind,
+                );
+            });
+        }
         self.emit_at(apid, prompt, writer, now, false);
+    }
+
+    pub(super) fn emit_if_due<S: ProviderReportSink>(
+        &mut self,
+        apid: &tau_proto::AgentPromptId,
+        prompt: &tau_proto::AgentPromptCreated,
+        progress: tau_provider_responses::AttemptProgressRef<'_>,
+        writer: &mut S,
+    ) {
+        self.emit_if_due_from(apid, prompt, &progress, writer);
     }
 
     /// Capture the first qualifying synchronous state observation before
@@ -127,7 +215,9 @@ impl ResponsesResponseSampler {
         let deltas = if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
             Vec::new()
         } else {
-            self.deltas()
+            let mut deltas = std::mem::take(&mut self.pending_deltas);
+            deltas.extend(self.deltas());
+            deltas
         };
         if deltas.is_empty() && current == self.last_sample {
             return;
@@ -171,8 +261,7 @@ impl ResponsesResponseSampler {
     pub(super) fn deltas(&mut self) -> Vec<tau_proto::ProviderResponseTextDelta> {
         let mut out = Vec::new();
         for output in &self.latest_items {
-            let index = output.output_index as usize;
-            let (map, text, reasoning) = match &output.item {
+            let (map, text, kind) = match &output.item {
                 tau_proto::ContextItem::Message(message) => (
                     &mut self.emitted_text,
                     message
@@ -184,37 +273,74 @@ impl ResponsesResponseSampler {
                             | tau_proto::ContentPart::HarnessInternalText { text } => text.as_str(),
                         })
                         .collect::<String>(),
-                    false,
+                    tau_provider_responses::DisplayOutputKind::Message,
                 ),
-                tau_proto::ContextItem::ReasoningText(reasoning) => {
-                    (&mut self.emitted_reasoning, reasoning.text.clone(), true)
-                }
+                tau_proto::ContextItem::ReasoningText(reasoning) => (
+                    &mut self.emitted_reasoning,
+                    reasoning.text.clone(),
+                    tau_provider_responses::DisplayOutputKind::Reasoning,
+                ),
                 _ => continue,
             };
-            let previous = map.entry(index).or_default();
-            if let Some(suffix) = text
-                .strip_prefix(previous.as_str())
-                .filter(|suffix| !suffix.is_empty())
-            {
-                let suffix = suffix.to_owned();
-                previous.push_str(&suffix);
-                out.push(if reasoning {
-                    tau_proto::ProviderResponseTextDelta::ReasoningText {
-                        output_index: output.output_index,
-                        kind: tau_proto::ReasoningTextKind::Full,
-                        text: suffix,
-                    }
-                } else {
-                    tau_proto::ProviderResponseTextDelta::Message {
-                        output_index: output.output_index,
-                        text: suffix,
-                        phase: None,
-                    }
-                });
-            }
+            append_delta(
+                &mut out,
+                map,
+                output.output_index,
+                &text,
+                output.display_generation,
+                kind,
+            );
         }
         out
     }
+}
+
+fn append_delta(
+    out: &mut Vec<tau_proto::ProviderResponseTextDelta>,
+    cursors: &mut BTreeMap<usize, DisplayCursor>,
+    output_index: u32,
+    text: &str,
+    generation: tau_provider_responses::DisplayGeneration,
+    kind: tau_provider_responses::DisplayOutputKind,
+) {
+    let cursor = cursors
+        .entry(output_index as usize)
+        .or_insert_with(|| DisplayCursor {
+            generation,
+            bytes: 0,
+            emitted_prefix: String::new(),
+        });
+    if cursor.generation != generation {
+        if !text.starts_with(&cursor.emitted_prefix) {
+            return;
+        }
+        cursor.generation = generation;
+        cursor.bytes = cursor.emitted_prefix.len();
+    }
+    if cursor.bytes > text.len() {
+        return;
+    }
+    let Some(suffix) = text.get(cursor.bytes..).filter(|suffix| !suffix.is_empty()) else {
+        return;
+    };
+    cursor.bytes = text.len();
+    cursor.emitted_prefix.push_str(suffix);
+    out.push(match kind {
+        tau_provider_responses::DisplayOutputKind::Reasoning => {
+            tau_proto::ProviderResponseTextDelta::ReasoningText {
+                output_index,
+                kind: tau_proto::ReasoningTextKind::Full,
+                text: suffix.to_owned(),
+            }
+        }
+        tau_provider_responses::DisplayOutputKind::Message => {
+            tau_proto::ProviderResponseTextDelta::Message {
+                output_index,
+                text: suffix.to_owned(),
+                phase: None,
+            }
+        }
+    });
 }
 
 fn duration_micros(duration: std::time::Duration) -> u64 {

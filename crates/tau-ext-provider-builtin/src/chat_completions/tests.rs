@@ -1419,6 +1419,7 @@ fn stable_output_indices_prevent_duplicate_text_after_late_tool_metadata() {
     sampler.latest_items = vec![
         tau_provider_chat_completions::AttemptOutputItem {
             output_index: 0,
+            display_generation: Default::default(),
             item: tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
                 call_id: "call-1".into(),
                 name: tau_proto::ToolName::new("lookup"),
@@ -1522,6 +1523,7 @@ fn reasoning_multi_index_and_non_prefix_correction_are_stable() {
         assistant_message(1, "hello"),
         tau_provider_chat_completions::AttemptOutputItem {
             output_index: 3,
+            display_generation: Default::default(),
             item: tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
                 kind: tau_proto::ReasoningTextKind::Full,
                 text: "why".to_owned(),
@@ -1530,10 +1532,12 @@ fn reasoning_multi_index_and_non_prefix_correction_are_stable() {
     ];
     let first = sampler.deltas();
     assert_eq!(first.len(), 2);
+    let replacement = assistant_message(1, "no");
     sampler.latest_items = vec![
-        assistant_message(1, "replacement"),
+        replacement,
         tau_provider_chat_completions::AttemptOutputItem {
             output_index: 3,
+            display_generation: Default::default(),
             item: tau_proto::ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
                 kind: tau_proto::ReasoningTextKind::Full,
                 text: "why now".to_owned(),
@@ -1556,6 +1560,7 @@ fn assistant_message(
 ) -> tau_provider_chat_completions::AttemptOutputItem {
     tau_provider_chat_completions::AttemptOutputItem {
         output_index,
+        display_generation: Default::default(),
         item: tau_proto::ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::Assistant,
             content: vec![tau_proto::ContentPart::Text {

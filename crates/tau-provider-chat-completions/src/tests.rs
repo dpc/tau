@@ -3785,8 +3785,8 @@ fn progress_materialization_preserves_incomplete_tool_slot_indices() {
     );
 }
 
-/// Ensures semantic tracking at chunk cadence is constant-time and does not
-/// materialize/reparse the growing output until the extension sampler asks.
+/// Ensures scalar and borrowed display sampling at chunk cadence never
+/// materializes or reparses the growing tool output.
 #[test]
 fn semantic_progress_checks_do_not_materialize_growing_output() {
     OUTPUT_MATERIALIZATIONS.with(|count| count.set(0));
@@ -3798,10 +3798,37 @@ fn semantic_progress_checks_do_not_materialize_growing_output() {
         let progress = AttemptProgress { state: &state };
         assert_eq!(progress.semantic_progress(), SemanticProgress::Parsed);
         let _ = progress.response_bytes_received();
+        progress.visit_display_output(|_| panic!("tool input is not display output"));
     }
     assert_eq!(OUTPUT_MATERIALIZATIONS.with(std::cell::Cell::get), 0);
-    let _ = AttemptProgress { state: &state }.materialize_output();
+    let _ = state.indexed_output_items();
     assert_eq!(OUTPUT_MATERIALIZATIONS.with(std::cell::Cell::get), 1);
+}
+
+/// Borrowed due-sample projections preserve reasoning/message interleave and
+/// multibyte text without creating a typed snapshot.
+#[test]
+fn borrowed_display_projection_preserves_interleave_and_unicode() {
+    OUTPUT_MATERIALIZATIONS.with(|count| count.set(0));
+    let mut state = StreamState::new();
+    state
+        .append_reasoning_delta("why 雪")
+        .expect("reasoning delta");
+    state
+        .append_assistant_text_delta("answer λ")
+        .expect("assistant delta");
+    let mut display = Vec::new();
+    AttemptProgress { state: &state }.visit_display_output(|output| {
+        display.push((output.output_index, output.kind, output.text.to_owned()));
+    });
+    assert_eq!(
+        display,
+        vec![
+            (0, DisplayOutputKind::Reasoning, "why 雪".to_owned()),
+            (1, DisplayOutputKind::Message, "answer λ".to_owned()),
+        ]
+    );
+    assert_eq!(OUTPUT_MATERIALIZATIONS.with(std::cell::Cell::get), 0);
 }
 
 /// Ensures buffered think-tag prefixes and incomplete tool metadata count as

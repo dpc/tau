@@ -595,6 +595,33 @@ pub struct AttemptOutputItem {
     pub output_index: u32,
     /// Current semantic item value for this slot.
     pub item: ContextItem,
+    /// Display replacement generation for cursor-based transient sampling.
+    pub display_generation: DisplayGeneration,
+}
+
+/// Opaque identity for one append-compatible display generation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DisplayGeneration(u64);
+
+/// One borrowed display channel from accepted streaming state.
+pub struct DisplayOutput<'a> {
+    /// Stable provider output index.
+    pub output_index: u32,
+    /// Whether this channel is assistant text or full reasoning text.
+    pub kind: DisplayOutputKind,
+    /// Cumulative UTF-8 text accepted for this channel.
+    pub text: &'a str,
+    /// Replacement generation; Chat Completions channels are append-only.
+    pub generation: DisplayGeneration,
+}
+
+/// Display channel kind exposed to the extension sampler.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisplayOutputKind {
+    /// Assistant narrative text.
+    Message,
+    /// Full reasoning text.
+    Reasoning,
 }
 
 /// Typed terminal backend failure.
@@ -719,6 +746,26 @@ impl AttemptProgress<'_> {
     #[must_use]
     pub fn materialize_output(&self) -> Vec<AttemptOutputItem> {
         self.state.indexed_output_items()
+    }
+
+    /// Visit cumulative display channels without cloning or parsing semantic
+    /// output items.
+    pub fn visit_display_output(&self, mut visit: impl FnMut(DisplayOutput<'_>)) {
+        for (index, item) in self.state.output_items.iter().enumerate() {
+            let (kind, text) = match item {
+                OutputItemAccumulator::Message(text) => (DisplayOutputKind::Message, text),
+                OutputItemAccumulator::Reasoning(text) => (DisplayOutputKind::Reasoning, text),
+                OutputItemAccumulator::ToolCall(_) => continue,
+            };
+            if !text.is_empty() {
+                visit(DisplayOutput {
+                    output_index: index.try_into().unwrap_or(u32::MAX),
+                    kind,
+                    text,
+                    generation: DisplayGeneration::default(),
+                });
+            }
+        }
     }
 
     /// Return cumulative provider response bytes.
@@ -972,6 +1019,7 @@ impl StreamState {
                 Some(AttemptOutputItem {
                     output_index: index.try_into().unwrap_or(u32::MAX),
                     item: item.context_item()?,
+                    display_generation: DisplayGeneration::default(),
                 })
             })
             .collect()
