@@ -1,6 +1,8 @@
 //! Injection point for harness-internal tools owned by higher crates.
 
 use std::borrow::Cow;
+#[cfg(test)]
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -34,9 +36,11 @@ pub trait InternalToolHandler: Send + Sync {
     /// React to a committed event.
     ///
     /// Internal tools observe the same durable lifecycle events as external
-    /// extensions. A handler should filter for events it owns, such as
-    /// `ToolStarted` for its registered tools or later correlation events like
-    /// `StartAgentResult`.
+    /// extensions. The harness sends `ToolStarted` only to handlers whose
+    /// [`Self::handles`] predicate accepts the resolved internal name. Later
+    /// correlation events such as `StartAgentResult` remain broadcast in
+    /// handler registration order, so each handler must filter those events
+    /// itself.
     fn handle_event(
         &self,
         host: &mut InternalToolHost<'_>,
@@ -50,6 +54,47 @@ pub trait InternalToolHandler: Send + Sync {
 
 /// Shared reference-counted internal tool handler.
 pub type InternalToolHandlers = Vec<Arc<dyn InternalToolHandler>>;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct InternalToolDispatchWork {
+    /// Ownership predicates evaluated while selecting a started tool's handler.
+    pub(crate) ownership_predicate_visits: usize,
+    /// Handlers invoked after event-specific selection.
+    pub(crate) handler_invocations: usize,
+    /// Deep argument clones made while materializing an internal call.
+    pub(crate) argument_clones: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Production-path work retained for deterministic dispatch tests.
+    static INTERNAL_TOOL_DISPATCH_WORK: Cell<InternalToolDispatchWork> =
+        const { Cell::new(InternalToolDispatchWork {
+            ownership_predicate_visits: 0,
+            handler_invocations: 0,
+            argument_clones: 0,
+        }) };
+}
+
+#[cfg(test)]
+fn record_internal_tool_dispatch_work(update: impl FnOnce(&mut InternalToolDispatchWork)) {
+    INTERNAL_TOOL_DISPATCH_WORK.with(|work| {
+        let mut current = work.get();
+        update(&mut current);
+        work.set(current);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn reset_internal_tool_dispatch_work() {
+    INTERNAL_TOOL_DISPATCH_WORK.with(|work| work.set(InternalToolDispatchWork::default()));
+}
+
+#[cfg(test)]
+pub(crate) fn internal_tool_dispatch_work() -> InternalToolDispatchWork {
+    INTERNAL_TOOL_DISPATCH_WORK.with(Cell::get)
+}
 
 /// Public snapshot of one skill known to the harness.
 #[derive(Clone)]
@@ -576,16 +621,20 @@ impl<'a> InternalToolHost<'a> {
             .tool_routing
             .tool_runtime
             .pending_tools
-            .get(&started.call_id)?
-            .clone();
+            .get(&started.call_id)?;
+        let internal_name = pending.internal_name.clone();
+        let tool_type = pending.tool_type;
+        let visible_name = pending.name.clone();
+        #[cfg(test)]
+        record_internal_tool_dispatch_work(|work| work.argument_clones += 1);
         let call = AgentToolCall {
             call_ref: self.harness.wait_tool_call_ref(&started.call_id),
             id: started.call_id.clone(),
-            name: pending.internal_name,
-            tool_type: pending.tool_type,
+            name: internal_name,
+            tool_type,
             arguments: started.arguments.clone(),
         };
-        Some((cid, call, pending.name))
+        Some((cid, call, visible_name))
     }
 
     /// Resolve a committed internal-tool start only when its validated runtime
@@ -606,19 +655,23 @@ impl<'a> InternalToolHost<'a> {
             .tool_routing
             .tool_runtime
             .pending_tools
-            .get(&started.call_id)?
-            .clone();
+            .get(&started.call_id)?;
+        let internal_name = pending.internal_name.clone();
+        let tool_type = pending.tool_type;
+        let visible_name = pending.name.clone();
+        #[cfg(test)]
+        record_internal_tool_dispatch_work(|work| work.argument_clones += 1);
         let call = AgentToolCall {
             call_ref: self.harness.wait_tool_call_ref(&started.call_id),
             id: started.call_id.clone(),
-            name: pending.internal_name,
-            tool_type: pending.tool_type,
+            name: internal_name,
+            tool_type,
             arguments: started.arguments.clone(),
         };
         Some(AgentOwnedInternalToolCall {
             conversation_id: cid,
             call,
-            visible_tool_name: pending.name,
+            visible_tool_name: visible_name,
         })
     }
 
@@ -1040,8 +1093,35 @@ impl Harness {
         &mut self,
         event: &Event,
     ) -> Result<(), HarnessError> {
-        let handlers = self.tool_routing.internal_tool_handlers.clone();
+        let handlers = match event {
+            Event::ToolStarted(started) => {
+                let Some(internal_name) = self
+                    .tool_routing
+                    .tool_runtime
+                    .pending_tools
+                    .get(&started.call_id)
+                    .map(|pending| &pending.internal_name)
+                else {
+                    return Ok(());
+                };
+                self.tool_routing
+                    .internal_tool_handlers
+                    .iter()
+                    .filter(|handler| {
+                        #[cfg(test)]
+                        record_internal_tool_dispatch_work(|work| {
+                            work.ownership_predicate_visits += 1;
+                        });
+                        handler.handles(internal_name)
+                    })
+                    .cloned()
+                    .collect()
+            }
+            _ => self.tool_routing.internal_tool_handlers.clone(),
+        };
         for handler in handlers {
+            #[cfg(test)]
+            record_internal_tool_dispatch_work(|work| work.handler_invocations += 1);
             let mut host = InternalToolHost::new(self);
             handler.handle_event(&mut host, event)?;
         }

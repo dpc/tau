@@ -2764,6 +2764,7 @@ mod compaction_strict;
 mod compaction_threshold;
 mod configuration;
 mod extension_routing;
+mod internal_tool_dispatch;
 mod loop_guard;
 mod prompt_lifecycle;
 mod provider_responses;
