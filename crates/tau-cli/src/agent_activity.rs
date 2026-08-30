@@ -56,29 +56,59 @@ impl AgentActivity {
         agent_prompt_id: &AgentPromptId,
         output_items: &[ContextItem],
     ) {
-        if self.finish_active_prompt(agent_prompt_id, output_items) {
+        if self.finish_active_prompt(
+            agent_prompt_id,
+            tool_call_ids_from_output_items(output_items),
+        ) {
+            return;
+        }
+        self.optimistic_submissions = self.optimistic_submissions.saturating_sub(1);
+    }
+
+    /// Finishes a provider prompt using call ids from an existing terminal
+    /// projection.
+    pub(crate) fn finish_prompt_with_tool_call_ids<'a>(
+        &mut self,
+        agent_prompt_id: &AgentPromptId,
+        call_ids: impl IntoIterator<Item = &'a ToolCallId>,
+    ) {
+        if self.finish_active_prompt(agent_prompt_id, call_ids) {
             return;
         }
         self.optimistic_submissions = self.optimistic_submissions.saturating_sub(1);
     }
 
     /// Finishes a provider prompt only if this snapshot already tracks it.
+    #[cfg(test)]
     pub(crate) fn finish_prompt_if_active(
         &mut self,
         agent_prompt_id: &AgentPromptId,
         output_items: &[ContextItem],
     ) {
-        let _ = self.finish_active_prompt(agent_prompt_id, output_items);
+        let _ = self.finish_active_prompt(
+            agent_prompt_id,
+            tool_call_ids_from_output_items(output_items),
+        );
     }
 
-    fn finish_active_prompt(
+    /// Finishes a tracked provider prompt using an existing terminal
+    /// projection.
+    pub(crate) fn finish_prompt_if_active_with_tool_call_ids<'a>(
         &mut self,
         agent_prompt_id: &AgentPromptId,
-        output_items: &[ContextItem],
+        call_ids: impl IntoIterator<Item = &'a ToolCallId>,
+    ) {
+        let _ = self.finish_active_prompt(agent_prompt_id, call_ids);
+    }
+
+    fn finish_active_prompt<'a>(
+        &mut self,
+        agent_prompt_id: &AgentPromptId,
+        call_ids: impl IntoIterator<Item = &'a ToolCallId>,
     ) -> bool {
         if self.active_prompts.remove(agent_prompt_id) {
-            for call_id in tool_call_ids_from_output_items(output_items) {
-                self.active_tools.insert(call_id);
+            for call_id in call_ids {
+                self.active_tools.insert(call_id.clone());
             }
             true
         } else {
@@ -129,9 +159,9 @@ impl AgentActivity {
 
 fn tool_call_ids_from_output_items(
     output_items: &[ContextItem],
-) -> impl Iterator<Item = ToolCallId> + '_ {
+) -> impl Iterator<Item = &ToolCallId> {
     output_items.iter().filter_map(|item| match item {
-        ContextItem::ToolCall(call) => Some(call.call_id.clone()),
+        ContextItem::ToolCall(call) => Some(&call.call_id),
         _ => None,
     })
 }

@@ -12,6 +12,10 @@ pub(super) struct FinishedResponseProjection {
     editor_last_response: Option<String>,
     /// Settled durable items in provider output order.
     items: Vec<FinishedContextProjection>,
+    /// Number of declared calls, including length-truncated calls.
+    declared_tool_calls: usize,
+    /// Number of calls admitted for placeholder execution.
+    admitted_tool_calls: usize,
     /// Optional settled response placeholder.
     placeholder: Option<tau_cli_term::StyledBlock>,
     /// Turn latency sampled before the short publication commit.
@@ -28,8 +32,11 @@ enum FinishedContextProjection {
     Message(tau_cli_term::StyledBlock),
     /// Tool placeholder retained until its lifecycle starts.
     ToolCall {
-        /// Canonical call retained once for placeholder publication.
-        call: ToolCallItem,
+        /// Call id retained for placeholder publication and lifecycle
+        /// correlation.
+        call_id: tau_proto::ToolCallId,
+        /// Tool name retained for generic placeholder classification.
+        name: tau_proto::ToolName,
         /// Whether the stop reason permits an executable placeholder.
         admitted: bool,
     },
@@ -55,6 +62,7 @@ impl EventRenderer {
     pub(super) fn handle_provider_response_finished(
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
+        terminal_tool_calls: &TerminalToolCalls,
     ) {
         let is_standalone = self
             .transcript
@@ -80,7 +88,7 @@ impl EventRenderer {
         let projection = self
             .staged_finished_response
             .take()
-            .unwrap_or_else(|| self.stage_finished_response(finished));
+            .unwrap_or_else(|| self.stage_finished_response(finished, terminal_tool_calls));
         self.commit_finished_response(finished, projection);
     }
 
@@ -89,6 +97,7 @@ impl EventRenderer {
     pub(super) fn stage_finished_response(
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
+        terminal_tool_calls: &TerminalToolCalls,
     ) -> FinishedResponseProjection {
         use tau_themes::names;
 
@@ -124,8 +133,8 @@ impl EventRenderer {
             .is_user()
             .then(|| assistant_text.clone())
             .flatten();
-        let items = self.stage_finished_context_items(finished);
-        let placeholder = self.stage_finished_placeholder(finished);
+        let items = self.stage_finished_context_items(finished, terminal_tool_calls);
+        let placeholder = self.stage_finished_placeholder(finished, terminal_tool_calls);
         let turn_stats = finished.usage.clone().map(|usage| {
             let mut cumulative = self.transcript.status.cumulative_agent_token_usage;
             Self::add_finished_token_usage(&mut cumulative, &usage);
@@ -152,17 +161,14 @@ impl EventRenderer {
             };
             (usage, block)
         });
-        let admitted_tool_calls = items
-            .iter()
-            .filter(|item| {
-                matches!(
-                    item,
-                    FinishedContextProjection::ToolCall { admitted: true, .. }
-                )
-            })
-            .count();
-        let status_block =
-            self.stage_finished_status_block(finished, admitted_tool_calls, turn_latency);
+        let declared_tool_calls = terminal_tool_calls.len();
+        let admitted_tool_calls = terminal_tool_calls.admitted_len();
+        let status_block = self.stage_finished_status_block(
+            finished,
+            terminal_tool_calls,
+            admitted_tool_calls,
+            turn_latency,
+        );
         #[cfg(test)]
         if let Some(hook) = &self.finished_staging_hook {
             hook();
@@ -172,6 +178,8 @@ impl EventRenderer {
             assistant_text,
             editor_last_response,
             items,
+            declared_tool_calls,
+            admitted_tool_calls,
             placeholder,
             turn_latency,
             turn_stats,
@@ -183,6 +191,7 @@ impl EventRenderer {
     pub(super) fn stage_finished_status_block(
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
+        terminal_tool_calls: &TerminalToolCalls,
         admitted_tool_calls: usize,
         turn_latency: Option<Duration>,
     ) -> tau_cli_term::StyledBlock {
@@ -192,15 +201,15 @@ impl EventRenderer {
         self.transcript
             .status
             .agent_activity
-            .finish_prompt(&finished.agent_prompt_id, &finished.output_items);
+            .finish_prompt_with_tool_call_ids(
+                &finished.agent_prompt_id,
+                terminal_tool_calls.call_ids(),
+            );
         self.watches.active_agent_prompts.retain(|_, prompts| {
             prompts.remove(&finished.agent_prompt_id);
             !prompts.is_empty()
         });
-        self.transcript.status.main_agent_turn_active = finished
-            .output_items
-            .iter()
-            .any(|item| matches!(item, ContextItem::ToolCall(_)))
+        self.transcript.status.main_agent_turn_active = !terminal_tool_calls.is_empty()
             || !self.transcript.status.main_backgrounded_tools.is_empty();
         self.transcript.status.main_tools_total += admitted_tool_calls as u64;
         self.transcript.status.main_tools_visible = admitted_tool_calls != 0;
@@ -225,6 +234,7 @@ impl EventRenderer {
     pub(super) fn stage_standalone_finished_status_block(
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
+        terminal_tool_calls: &TerminalToolCalls,
     ) -> tau_cli_term::StyledBlock {
         let original_status = self.transcript.status.clone();
         let original_active_prompts = self.watches.active_agent_prompts.clone();
@@ -232,7 +242,10 @@ impl EventRenderer {
         self.transcript
             .status
             .agent_activity
-            .finish_prompt(&finished.agent_prompt_id, &finished.output_items);
+            .finish_prompt_with_tool_call_ids(
+                &finished.agent_prompt_id,
+                terminal_tool_calls.call_ids(),
+            );
         self.watches.active_agent_prompts.retain(|_, prompts| {
             prompts.remove(&finished.agent_prompt_id);
             !prompts.is_empty()
@@ -252,10 +265,7 @@ impl EventRenderer {
         finished: &tau_proto::ProviderResponseFinished,
         mut projection: FinishedResponseProjection,
     ) {
-        let has_output_tool_calls = projection
-            .items
-            .iter()
-            .any(|item| matches!(item, FinishedContextProjection::ToolCall { .. }));
+        let has_output_tool_calls = projection.declared_tool_calls != 0;
         if finished.originator.is_user() && !has_output_tool_calls {
             self.clear_main_agent_turn_active_everywhere();
         }
@@ -443,20 +453,8 @@ impl EventRenderer {
             }
             return;
         }
-        let tool_call_count = projection
-            .items
-            .iter()
-            .filter(|item| {
-                matches!(
-                    item,
-                    FinishedContextProjection::ToolCall { admitted: true, .. }
-                )
-            })
-            .count();
-        let has_declared_tool_call = projection
-            .items
-            .iter()
-            .any(|item| matches!(item, FinishedContextProjection::ToolCall { .. }));
+        let tool_call_count = projection.admitted_tool_calls;
+        let has_declared_tool_call = projection.declared_tool_calls != 0;
         self.transcript.status.main_agent_turn_active =
             has_declared_tool_call || !self.transcript.status.main_backgrounded_tools.is_empty();
         self.transcript.status.main_tools_total += tool_call_count as u64;
@@ -482,10 +480,12 @@ impl EventRenderer {
     fn stage_finished_context_items(
         &self,
         finished: &tau_proto::ProviderResponseFinished,
+        terminal_tool_calls: &TerminalToolCalls,
     ) -> Vec<FinishedContextProjection> {
         use tau_themes::names;
 
-        finished
+        let mut projected_calls = terminal_tool_calls.iter();
+        let items = finished
             .output_items
             .iter()
             .filter_map(|item| match item {
@@ -500,10 +500,16 @@ impl EventRenderer {
                         ))
                     })
                 }
-                ContextItem::ToolCall(call) => Some(FinishedContextProjection::ToolCall {
-                    call: call.clone(),
-                    admitted: finished.stop_reason != tau_proto::ProviderStopReason::Length,
-                }),
+                ContextItem::ToolCall(_) => {
+                    let call = projected_calls
+                        .next()
+                        .expect("terminal projection preserves tool-call order");
+                    Some(FinishedContextProjection::ToolCall {
+                        call_id: call.call_id.clone(),
+                        name: call.name.clone(),
+                        admitted: call.admitted,
+                    })
+                }
                 ContextItem::Compaction(_) => Some(FinishedContextProjection::Compaction(
                     render_compaction_block(
                         &self.resources.theme,
@@ -516,13 +522,18 @@ impl EventRenderer {
                 )),
                 _ => None,
             })
-            .collect()
+            .collect();
+        let projected_calls_exhausted = projected_calls.next().is_none();
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
+        debug_assert!(projected_calls_exhausted);
+        items
     }
 
     /// Renders the optional empty or output-length terminal placeholder.
     fn stage_finished_placeholder(
         &self,
         finished: &tau_proto::ProviderResponseFinished,
+        terminal_tool_calls: &TerminalToolCalls,
     ) -> Option<tau_cli_term::StyledBlock> {
         use tau_themes::names;
 
@@ -538,11 +549,7 @@ impl EventRenderer {
             tau_proto::OutputLengthDisposition::ContinuationPlanned { .. }
         ) {
             "Output limit reached; continuing once from retained reasoning."
-        } else if finished
-            .output_items
-            .iter()
-            .any(|item| matches!(item, ContextItem::ToolCall(_)))
-        {
+        } else if !terminal_tool_calls.is_empty() {
             "Model reached its output-token limit while producing a tool call. The incomplete call was not executed."
         } else if finished
             .output_items
@@ -654,10 +661,11 @@ impl EventRenderer {
                 self.resources.handle.print_output("agent-response", block);
             }
             FinishedContextProjection::ToolCall {
-                call,
+                call_id,
+                name,
                 admitted: true,
             } => {
-                self.render_tool_call_placeholder(&call, summary_block_id);
+                self.render_tool_call_placeholder(&call_id, &name, summary_block_id);
             }
             FinishedContextProjection::ToolCall {
                 admitted: false, ..
@@ -672,28 +680,24 @@ impl EventRenderer {
 
     fn render_tool_call_placeholder(
         &mut self,
-        call: &ToolCallItem,
+        call_id: &tau_proto::ToolCallId,
+        name: &tau_proto::ToolName,
         summary_block_id: Option<tau_cli_term::BlockId>,
     ) {
-        if self
-            .transcript
-            .runtime
-            .tool_calls
-            .contains_key(&call.call_id)
-        {
+        if self.transcript.runtime.tool_calls.contains_key(call_id) {
             return;
         }
         let history_id = self.resources.handle.new_block(
-            format!("tool-call-history:{}:{}", call.name, call.call_id),
+            format!("tool-call-history:{name}:{call_id}"),
             Self::empty_block(),
         );
         self.resources.handle.push_history(history_id);
         self.transcript.runtime.tool_calls.insert(
-            call.call_id.clone(),
+            call_id.clone(),
             ToolCallState {
                 history_block_id: Some(history_id),
                 summary_block_id,
-                is_main_delegate: call.name.as_str() == AGENT_START_TOOL_NAME,
+                is_main_delegate: name.as_str() == AGENT_START_TOOL_NAME,
                 ..ToolCallState::default()
             },
         );

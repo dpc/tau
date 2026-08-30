@@ -77,7 +77,7 @@ pub(super) struct AgentDiscoveryState {
     pub(super) initialized_discovery_epochs:
         HashSet<(tau_proto::AgentId, tau_proto::AgentInitializationId)>,
     /// Discovery events awaiting initial transcript adoption.
-    pub(super) pending_initial_discovery: HashMap<String, Vec<(Event, UnixMicros)>>,
+    pub(super) pending_initial_discovery: HashMap<String, Vec<DeferredRendererEvent>>,
     /// Agent ids offered by completion.
     pub(super) known_agents: Arc<Mutex<Vec<String>>>,
     /// Authoritative local display names.

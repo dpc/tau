@@ -2378,6 +2378,94 @@ fn tool_ownership_uses_typed_protocol_ids_across_live_lifecycles() {
     );
 }
 
+/// Initial-discovery deferral reuses one measured lightweight projection even
+/// when the existing deferred event payload contains 8 MiB arguments.
+#[test]
+fn deferred_large_tool_terminal_reuses_one_lightweight_projection() {
+    use std::sync::{Arc, Mutex};
+
+    use tau_proto::{CborValue, ContentPart, ContextItem, ContextRole, MessageItem, ToolCallItem};
+
+    use super::terminal_tool_calls::{TerminalToolCallWork, with_terminal_tool_call_work_observer};
+
+    let large_unicode = "🦀".repeat(2 * 1024 * 1024);
+    let large_raw = format!("{{\"payload\":\"{large_unicode}\"}}");
+    let event = tau_proto::Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+        automatic_compaction_decision: None,
+        estimated_api_cost_rates: None,
+        estimated_api_cost_increment: None,
+        agent_prompt_id: tau_proto::AgentPromptId::parse("large-deferred-prompt")
+            .expect("valid prompt id"),
+        agent_id: agent_id("large-agent"),
+        output_items: vec![
+            ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::HarnessInternalText {
+                    text: "mixed-item".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "large-deferred-call".into(),
+                name: tau_proto::ToolName::new("custom_internal"),
+                tool_type: tau_proto::ToolType::Custom,
+                arguments: CborValue::Text(large_unicode),
+                raw_arguments_json: Some(large_raw),
+                responses_envelope: Some(tau_proto::ResponsesToolCallEnvelope {
+                    item_id: Some("provider-item".to_owned()),
+                    status: Some("completed".to_owned()),
+                    extra_fields: Some(CborValue::Text("raw-sidecar-🦀".repeat(512))),
+                }),
+            }),
+        ],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        failure_kind: None,
+        context_limit_telemetry: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        output_length_disposition: tau_proto::OutputLengthDisposition::None,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_output_tokens: None,
+        backend: None,
+        provider_attempt: Default::default(),
+        provider_response_id: None,
+        ws_pool_delta: None,
+    });
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let observed_work = Arc::clone(&observed);
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer
+        .discovery
+        .pending_initial_discovery
+        .insert("large-agent".to_owned(), Vec::new());
+    with_terminal_tool_call_work_observer(
+        move |work| observed_work.lock().expect("work observations").push(work),
+        || {
+            renderer.handle(&event);
+            renderer.show_agent_transcript("large-agent".to_owned());
+            renderer.flush_pending_initial_discovery();
+        },
+    );
+
+    assert_eq!(
+        *observed.lock().expect("work observations"),
+        [TerminalToolCallWork {
+            output_items_visited: 2,
+            metadata_buffers_allocated: 1,
+            metadata_slots_reserved: 1,
+            metadata_fields_cloned: 2,
+        }]
+    );
+    assert_eq!(
+        renderer.event_owners.tool_agents["large-deferred-call"],
+        agent_id("large-agent")
+    );
+    assert_eq!(renderer.test_active_tool_count(), 1);
+}
+
 /// Initial-discovery deferral must retain a provider-declared typed tool owner
 /// until publication, so a later hidden progress event routes to that owner
 /// rather than to the selected transcript.

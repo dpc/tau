@@ -18,11 +18,13 @@ use tau_cli_term::RendererDeliveryId;
 use tau_config::settings as path_tau_config_settings;
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem,
-    ProviderResponseCompactionStatus, ProviderResponseTextDelta, ToolCallItem, UnixMicros,
+    ProviderResponseCompactionStatus, ProviderResponseTextDelta, UnixMicros,
 };
 
 const MAX_SUBMITTED_PROMPT_CORRELATIONS: usize = 64;
 
+use self::prepared_renderer_event::{DeferredRendererEvent, PreparedRendererEvent};
+use self::terminal_tool_calls::TerminalToolCalls;
 use crate::action_commands::ActionCommandState;
 use crate::agent_activity::AgentActivity;
 use crate::agent_navigation::AgentNavigation;
@@ -1564,16 +1566,6 @@ fn assistant_text_from_message_item(message: &MessageItem) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<ToolCallItem> {
-    output_items
-        .iter()
-        .filter_map(|item| match item {
-            ContextItem::ToolCall(call) => Some(call.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// Semantic state of one visible projected watched-agent row.
 pub(crate) enum WatchedAgentActivity<'a> {
     /// The selected predecessor edge is idle with no running descendant.
@@ -2101,24 +2093,30 @@ impl EventRenderer {
         let Some(events) = self.discovery.pending_initial_discovery.remove(agent_id) else {
             return;
         };
-        for (event, recorded_at) in events {
-            if let Event::HarnessAgentContextInitialized(initialized) = &event {
-                self.print_agent_context_initialized(initialized);
-            } else {
-                self.handle_deferred_visible_event(&event, recorded_at);
-            }
+        for deferred in events {
+            deferred.with_prepared(|prepared, recorded_at| {
+                if let Event::HarnessAgentContextInitialized(initialized) = prepared.event() {
+                    self.print_agent_context_initialized(initialized);
+                } else if prepared.finished().is_some() {
+                    self.handle_deferred_provider_finished(&prepared, recorded_at);
+                } else {
+                    self.learn_agent_metadata(&prepared);
+                    self.handle_recorded_at_for_visible_agent(&prepared, recorded_at);
+                }
+            });
         }
         self.update_agent_in_progress();
     }
 
-    /// Publishes one metadata-deferred event after transcript
-    /// adoption.
-    fn handle_deferred_visible_event(&mut self, event: &Event, recorded_at: UnixMicros) {
-        let Event::ProviderResponseFinished(finished) = event else {
-            self.learn_agent_metadata(event);
-            self.handle_recorded_at_for_visible_agent(event, recorded_at);
-            return;
-        };
+    /// Publishes one provider terminal with its original metadata projection.
+    fn handle_deferred_provider_finished(
+        &mut self,
+        prepared: &PreparedRendererEvent<'_>,
+        recorded_at: UnixMicros,
+    ) {
+        let (finished, terminal_tool_calls) = prepared
+            .finished()
+            .expect("deferred provider terminal preserves projection");
         let is_standalone = self
             .transcript
             .runtime
@@ -2127,15 +2125,16 @@ impl EventRenderer {
             .is_some_and(|state| state.is_standalone_compaction);
         if is_standalone {
             self.staged_finished_status =
-                Some(self.stage_standalone_finished_status_block(finished));
+                Some(self.stage_standalone_finished_status_block(finished, terminal_tool_calls));
         } else {
-            self.staged_finished_response = Some(self.stage_finished_response(finished));
+            self.staged_finished_response =
+                Some(self.stage_finished_response(finished, terminal_tool_calls));
         }
         let handle = self.resources.handle.terminal_handle();
         self.final_publication_in_progress = true;
         handle.with_redraw_suppressed(|| {
-            self.learn_agent_metadata(event);
-            self.handle_recorded_at_for_visible_agent(event, recorded_at);
+            self.learn_agent_metadata(prepared);
+            self.handle_recorded_at_for_visible_agent(prepared, recorded_at);
         });
         self.final_publication_in_progress = false;
         // ast-grep-ignore: debug-assert-expression-must-not-mutate
@@ -4342,7 +4341,8 @@ impl EventRenderer {
             .any(|state| state.is_main_delegate && !state.is_sub_agent)
     }
 
-    fn sync_agent_activity_for_lifecycle(&mut self, event: &Event) {
+    fn sync_agent_activity_for_lifecycle(&mut self, prepared: &PreparedRendererEvent<'_>) {
+        let event = prepared.event();
         match event {
             Event::UiPromptSubmitted(_) => self
                 .transcript
@@ -4383,10 +4383,16 @@ impl EventRenderer {
                 }
             }
             Event::ProviderResponseFinished(finished) => {
+                let (_, calls) = prepared
+                    .finished()
+                    .expect("provider terminal preserves projection");
                 self.transcript
                     .status
                     .agent_activity
-                    .finish_prompt_if_active(&finished.agent_prompt_id, &finished.output_items);
+                    .finish_prompt_if_active_with_tool_call_ids(
+                        &finished.agent_prompt_id,
+                        calls.call_ids(),
+                    );
             }
             Event::AgentCompacted(compacted) => {
                 if let Some(prompt_id) = &compacted.compact_prompt_id {
@@ -4484,7 +4490,11 @@ impl EventRenderer {
         }
     }
 
-    fn sync_main_tools_visibility_for_prompt_lifecycle(&mut self, event: &Event) {
+    fn sync_main_tools_visibility_for_prompt_lifecycle(
+        &mut self,
+        prepared: &PreparedRendererEvent<'_>,
+    ) {
+        let event = prepared.event();
         match event {
             Event::AgentPromptSubmitted(prompt)
                 if prompt.inference_activation && prompt.originator.is_user() =>
@@ -4516,7 +4526,12 @@ impl EventRenderer {
             }
             Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
                 self.clear_accepted_submission_indicator();
-                if tool_calls_from_output_items(&finished.output_items).is_empty() {
+                if prepared
+                    .finished()
+                    .expect("provider terminal preserves projection")
+                    .1
+                    .is_empty()
+                {
                     self.clear_main_agent_turn_active_everywhere();
                 }
             }
@@ -4840,10 +4855,25 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         delivery_id: Option<RendererDeliveryId>,
     ) {
+        let prepared = PreparedRendererEvent::new(event);
+        if let Some((_, calls)) = prepared.finished() {
+            let work = calls.work();
+            tracing::trace!(
+                target: "tau_cli::frontend_progress",
+                output_items_visited = work.output_items_visited,
+                metadata_buffers_allocated = work.metadata_buffers_allocated,
+                metadata_slots_reserved = work.metadata_slots_reserved,
+                metadata_fields_cloned = work.metadata_fields_cloned,
+                "projected terminal tool-call metadata"
+            );
+        }
         let observation = delivery_id
             .zip(presentation_fact(event))
             .filter(|_| self.resources.handle.presentation_observation_interest());
         if let Event::ProviderResponseFinished(finished) = event {
+            let (_, calls) = prepared
+                .finished()
+                .expect("prepared provider terminal preserves projection");
             let selected = self.selection.displayed_agent_id.as_deref()
                 == Some(finished.agent_id.as_str())
                 || self.selection.current_agent_id.as_deref() == Some(finished.agent_id.as_str());
@@ -4856,14 +4886,14 @@ impl EventRenderer {
                     .is_some_and(|state| state.is_standalone_compaction);
                 if is_standalone {
                     self.staged_finished_status =
-                        Some(self.stage_standalone_finished_status_block(finished));
+                        Some(self.stage_standalone_finished_status_block(finished, calls));
                 }
                 self.staged_finished_response =
-                    (!is_standalone).then(|| self.stage_finished_response(finished));
+                    (!is_standalone).then(|| self.stage_finished_response(finished, calls));
                 let handle = self.resources.handle.terminal_handle();
                 self.final_publication_in_progress = true;
                 handle.with_redraw_suppressed(|| {
-                    self.handle_recorded_delivery_inner(event, recorded_at, observation);
+                    self.handle_recorded_delivery_inner(prepared, recorded_at, observation);
                 });
                 self.final_publication_in_progress = false;
                 // ast-grep-ignore: debug-assert-expression-must-not-mutate
@@ -4874,7 +4904,7 @@ impl EventRenderer {
             }
             self.final_publication_in_progress = true;
             self.hidden_finalization_in_progress = true;
-            self.handle_recorded_delivery_inner(event, recorded_at, observation);
+            self.handle_recorded_delivery_inner(prepared, recorded_at, observation);
             self.hidden_finalization_in_progress = false;
             self.final_publication_in_progress = false;
             return;
@@ -4883,10 +4913,10 @@ impl EventRenderer {
         if invalidates_pending {
             let handle = self.resources.handle.terminal_handle();
             handle.with_redraw_suppressed(|| {
-                self.handle_recorded_delivery_inner(event, recorded_at, observation);
+                self.handle_recorded_delivery_inner(prepared, recorded_at, observation);
             });
         } else {
-            self.handle_recorded_delivery_inner(event, recorded_at, observation);
+            self.handle_recorded_delivery_inner(prepared, recorded_at, observation);
         }
     }
 
@@ -4894,7 +4924,7 @@ impl EventRenderer {
     /// entered.
     fn handle_recorded_delivery_inner(
         &mut self,
-        event: &Event,
+        prepared: PreparedRendererEvent<'_>,
         recorded_at: UnixMicros,
         observation: Option<(RendererDeliveryId, PresentationFactClass)>,
     ) {
@@ -4902,7 +4932,7 @@ impl EventRenderer {
             .handle
             .begin_selected_delivery(observation.is_some());
         self.handle_recorded_delivery_routed(
-            event,
+            prepared,
             recorded_at,
             observation.map(|(delivery_id, _)| delivery_id),
         );
@@ -4919,10 +4949,11 @@ impl EventRenderer {
     /// Routes one delivery while retaining its process-local timing context.
     fn handle_recorded_delivery_routed(
         &mut self,
-        event: &Event,
+        prepared: PreparedRendererEvent<'_>,
         recorded_at: UnixMicros,
         delivery_id: Option<RendererDeliveryId>,
     ) {
+        let event = prepared.event();
         let event_name = event.name();
         tracing::trace!(
             target: "tau_cli::frontend_progress",
@@ -4950,9 +4981,9 @@ impl EventRenderer {
                         .contains_key(target_agent_id)
             });
         if deferred_metadata_target.is_none() {
-            self.learn_agent_metadata(event);
+            self.learn_agent_metadata(&prepared);
         } else {
-            self.learn_deferred_routing_metadata(event);
+            self.learn_deferred_routing_metadata(&prepared);
         }
         if let Event::HarnessAgentContextInitialized(initialized) = event
             && self.selection.current_agent_id.is_none()
@@ -4968,24 +4999,24 @@ impl EventRenderer {
                     .pending_initial_discovery
                     .entry(initialized.agent_id.to_string())
                     .or_default()
-                    .push((event.clone(), recorded_at));
+                    .push(prepared.deferred(recorded_at));
             }
             return;
         }
         let inter_agent_message = Self::is_inter_agent_message(event);
         self.project_agent_message_to_overview(event);
         if let Some(owner) = self.extension_lifecycle_owner(event) {
-            self.handle_recorded_at_for_snapshot_owner(event, recorded_at, owner);
+            self.handle_recorded_at_for_snapshot_owner(&prepared, recorded_at, owner);
             self.update_agent_in_progress();
             return;
         }
         if let Some(owner) = self.take_action_completion_owner(event) {
-            self.handle_recorded_at_for_snapshot_owner(event, recorded_at, owner);
+            self.handle_recorded_at_for_snapshot_owner(&prepared, recorded_at, owner);
             self.update_agent_in_progress();
             return;
         }
         if let Some(owner) = self.message_fact_snapshot_owner(event) {
-            self.handle_recorded_at_for_snapshot_owner(event, recorded_at, owner);
+            self.handle_recorded_at_for_snapshot_owner(&prepared, recorded_at, owner);
             self.update_agent_in_progress();
             return;
         }
@@ -4999,7 +5030,7 @@ impl EventRenderer {
             );
         }
         let Some(target_agent_id) = target_agent_id else {
-            self.handle_recorded_at_for_visible_agent(event, recorded_at);
+            self.handle_recorded_at_for_visible_agent(&prepared, recorded_at);
             self.update_agent_in_progress();
             return;
         };
@@ -5009,7 +5040,7 @@ impl EventRenderer {
                 .pending_initial_discovery
                 .get_mut(&target_agent_id)
         {
-            events.push((event.clone(), recorded_at));
+            events.push(prepared.deferred(recorded_at));
             return;
         }
         if self.selection.current_agent_id.is_none() {
@@ -5022,7 +5053,7 @@ impl EventRenderer {
                 self.refresh_prompt_placeholder();
                 self.render_model_status();
                 self.flush_pending_initial_discovery();
-                self.handle_recorded_at_for_visible_agent(event, recorded_at);
+                self.handle_recorded_at_for_visible_agent(&prepared, recorded_at);
                 self.update_agent_in_progress();
                 return;
             }
@@ -5032,7 +5063,7 @@ impl EventRenderer {
             ) && !inter_agent_message
                 && self.agent_message_visible_on_empty_screen(&target_agent_id)
             {
-                self.handle_recorded_at_for_visible_agent(event, recorded_at);
+                self.handle_recorded_at_for_visible_agent(&prepared, recorded_at);
                 self.update_agent_in_progress();
                 return;
             }
@@ -5045,21 +5076,21 @@ impl EventRenderer {
                     .agents_ui_state
                     .contains_key(&target_agent_id)
             {
-                self.handle_recorded_at_for_visible_agent(event, recorded_at);
+                self.handle_recorded_at_for_visible_agent(&prepared, recorded_at);
                 self.update_agent_in_progress();
                 return;
             }
-            self.handle_recorded_at_for_hidden_agent(event, recorded_at, target_agent_id);
+            self.handle_recorded_at_for_hidden_agent(&prepared, recorded_at, target_agent_id);
             self.update_agent_in_progress();
             return;
         }
         if self.selection.displayed_agent_id.as_deref() == Some(target_agent_id.as_str()) {
-            self.handle_recorded_at_for_visible_agent(event, recorded_at);
+            self.handle_recorded_at_for_visible_agent(&prepared, recorded_at);
             self.update_agent_in_progress();
             return;
         }
 
-        self.handle_recorded_at_for_hidden_agent(event, recorded_at, target_agent_id);
+        self.handle_recorded_at_for_hidden_agent(&prepared, recorded_at, target_agent_id);
         self.update_agent_in_progress();
     }
 
@@ -5204,23 +5235,24 @@ impl EventRenderer {
 
     fn handle_recorded_at_for_snapshot_owner(
         &mut self,
-        event: &Event,
+        prepared: &PreparedRendererEvent<'_>,
         recorded_at: UnixMicros,
         owner: UiSnapshotOwner,
     ) {
+        let event = prepared.event();
         let is_global_message_fact = crate::message_fact_render::target_agent_id(event).is_some();
         match owner {
             UiSnapshotOwner::Agent(agent_id)
                 if self.selection.displayed_agent_id.as_deref() == Some(agent_id.as_str()) =>
             {
-                self.handle_recorded_at_for_visible_agent(event, recorded_at);
+                self.handle_recorded_at_for_visible_agent(prepared, recorded_at);
             }
             UiSnapshotOwner::NoAgent if self.selection.displayed_agent_id.is_none() => {
                 self.transcript.ownership.contains_global_message_fact |= is_global_message_fact;
-                self.handle_recorded_at_for_visible_agent(event, recorded_at);
+                self.handle_recorded_at_for_visible_agent(prepared, recorded_at);
             }
             UiSnapshotOwner::Agent(agent_id) => {
-                self.handle_recorded_at_for_hidden_agent(event, recorded_at, agent_id);
+                self.handle_recorded_at_for_hidden_agent(prepared, recorded_at, agent_id);
             }
             UiSnapshotOwner::NoAgent => {
                 self.handle_recorded_at_for_hidden_no_agent(
@@ -5234,10 +5266,11 @@ impl EventRenderer {
 
     fn handle_recorded_at_for_hidden_agent(
         &mut self,
-        event: &Event,
+        prepared: &PreparedRendererEvent<'_>,
         recorded_at: UnixMicros,
         target_agent_id: String,
     ) {
+        let event = prepared.event();
         self.resources
             .handle
             .suppress_selected_delivery_observation();
@@ -5259,7 +5292,7 @@ impl EventRenderer {
         self.with_editor_context_publish_suppressed(|this| {
             this.restore_renderer_bookkeeping(target_state);
             this.selection.displayed_agent_id = Some(target_agent_id.clone());
-            this.handle_recorded_at_for_visible_agent(event, recorded_at);
+            this.handle_recorded_at_for_visible_agent(prepared, recorded_at);
         });
         let target_output = self.resources.handle.take_detached();
         tracing::trace!(target: "tau_cli::frontend_progress", agent_id = target_agent_id, blocks = target_output.block_count(), "hidden presentation updated");
@@ -5287,7 +5320,8 @@ impl EventRenderer {
             .suppress_selected_delivery_observation();
         self.update_hidden_no_agent_state(|this| {
             this.transcript.ownership.contains_global_message_fact |= is_global_message_fact;
-            this.handle_recorded_at_for_visible_agent(event, recorded_at);
+            let prepared = PreparedRendererEvent::new(event);
+            this.handle_recorded_at_for_visible_agent(&prepared, recorded_at);
         });
     }
 
@@ -5405,14 +5439,15 @@ impl EventRenderer {
         );
     }
 
-    fn learn_agent_metadata(&mut self, event: &Event) {
+    fn learn_agent_metadata(&mut self, prepared: &PreparedRendererEvent<'_>) {
+        let event = prepared.event();
         if self.learn_agent_lifecycle_metadata(event) {
             return;
         }
         if self.learn_agent_prompt_metadata(event) {
             return;
         }
-        if self.learn_provider_tool_metadata(event) {
+        if self.learn_provider_tool_metadata(prepared) {
             return;
         }
         if self.learn_shell_metadata(event) {
@@ -5423,7 +5458,8 @@ impl EventRenderer {
 
     /// Retains only ownership correlations needed to route later events while
     /// transcript-visible metadata waits for deferred discovery replay.
-    fn learn_deferred_routing_metadata(&mut self, event: &Event) {
+    fn learn_deferred_routing_metadata(&mut self, prepared: &PreparedRendererEvent<'_>) {
+        let event = prepared.event();
         match event {
             Event::ProviderResponseUpdated(update) => {
                 self.event_owners
@@ -5434,10 +5470,13 @@ impl EventRenderer {
                 self.event_owners
                     .prompt_agents
                     .insert(finished.agent_prompt_id.clone(), finished.agent_id.clone());
-                for call in tool_calls_from_output_items(&finished.output_items) {
+                let (_, calls) = prepared
+                    .finished()
+                    .expect("provider terminal preserves projection");
+                for call in calls.iter() {
                     self.event_owners
                         .tool_agents
-                        .insert(call.call_id, finished.agent_id.clone());
+                        .insert(call.call_id.clone(), finished.agent_id.clone());
                 }
             }
             Event::AgentPromptCreated(prompt) => {
@@ -5633,31 +5672,32 @@ impl EventRenderer {
         self.mark_agent_prompt_active(agent_id.as_str(), agent_prompt_id);
     }
 
-    fn learn_provider_tool_metadata(&mut self, event: &Event) -> bool {
+    fn learn_provider_tool_metadata(&mut self, prepared: &PreparedRendererEvent<'_>) -> bool {
+        let event = prepared.event();
         match event {
             Event::ProviderResponseFinished(finished) => {
+                let (_, calls) = prepared
+                    .finished()
+                    .expect("provider terminal preserves projection");
                 self.transcript
                     .status
                     .agent_activity
-                    .finish_prompt(&finished.agent_prompt_id, &finished.output_items);
-                if finished.originator.is_user()
-                    && tool_calls_from_output_items(&finished.output_items).is_empty()
-                {
+                    .finish_prompt_with_tool_call_ids(&finished.agent_prompt_id, calls.call_ids());
+                if finished.originator.is_user() && calls.is_empty() {
                     self.clear_main_agent_turn_active_everywhere();
                 }
                 self.mark_agent_prompt_inactive(
                     finished.agent_id.as_str(),
                     &finished.agent_prompt_id,
                 );
-                let requested_tools = tool_calls_from_output_items(&finished.output_items);
                 self.mark_agent_live(finished.agent_id.clone());
                 self.event_owners
                     .prompt_agents
                     .insert(finished.agent_prompt_id.clone(), finished.agent_id.clone());
-                for call in requested_tools {
+                for call in calls.iter() {
                     self.event_owners
                         .tool_agents
-                        .insert(call.call_id, finished.agent_id.clone());
+                        .insert(call.call_id.clone(), finished.agent_id.clone());
                 }
                 true
             }
@@ -5992,10 +6032,15 @@ impl EventRenderer {
         }
     }
 
-    fn handle_recorded_at_for_visible_agent(&mut self, event: &Event, recorded_at: UnixMicros) {
-        self.sync_agent_activity_for_lifecycle(event);
+    fn handle_recorded_at_for_visible_agent(
+        &mut self,
+        prepared: &PreparedRendererEvent<'_>,
+        recorded_at: UnixMicros,
+    ) {
+        let event = prepared.event();
+        self.sync_agent_activity_for_lifecycle(prepared);
 
-        self.sync_main_tools_visibility_for_prompt_lifecycle(event);
+        self.sync_main_tools_visibility_for_prompt_lifecycle(prepared);
 
         if self.handle_agent_message_event(event) {
             return;
@@ -6010,7 +6055,7 @@ impl EventRenderer {
 
         if self.handle_session_events(event)
             || self.handle_prompt_events(event)
-            || self.handle_provider_response_events(event)
+            || self.handle_provider_response_events(prepared)
             || self.handle_tool_events(event, recorded_at)
             || self.handle_shell_events(event)
             || self.handle_action_events(event)
@@ -7470,7 +7515,8 @@ impl EventRenderer {
         }
     }
 
-    fn handle_provider_response_events(&mut self, event: &Event) -> bool {
+    fn handle_provider_response_events(&mut self, prepared: &PreparedRendererEvent<'_>) -> bool {
+        let event = prepared.event();
         match event {
             Event::ProviderPromptSubmitted(submitted) => {
                 self.handle_provider_prompt_submitted(submitted);
@@ -7481,7 +7527,13 @@ impl EventRenderer {
                 true
             }
             Event::ProviderResponseFinished(finished) => {
-                self.handle_provider_response_finished(finished);
+                self.handle_provider_response_finished(
+                    finished,
+                    prepared
+                        .finished()
+                        .expect("provider terminal preserves projection")
+                        .1,
+                );
                 true
             }
             _ => false,
@@ -8786,7 +8838,8 @@ impl EventRenderer {
         self.session
             .standalone_shell_terminals
             .insert(finished.command_id.clone());
-        self.learn_agent_metadata(&event);
+        let prepared = PreparedRendererEvent::new(&event);
+        self.learn_agent_metadata(&prepared);
         tracing::trace!(
             target: "tau_cli::frontend_progress",
             delivery_id = delivery_id.get(),
@@ -8796,9 +8849,9 @@ impl EventRenderer {
         if let Some(target) = finished.target_agent_id.as_ref()
             && self.selection.displayed_agent_id.as_deref() != Some(target.as_str())
         {
-            self.handle_recorded_at_for_hidden_agent(&event, recorded_at, target.to_string());
+            self.handle_recorded_at_for_hidden_agent(&prepared, recorded_at, target.to_string());
         } else {
-            self.handle_recorded_at_for_visible_agent(&event, recorded_at);
+            self.handle_recorded_at_for_visible_agent(&prepared, recorded_at);
         }
         self.update_agent_in_progress();
     }
@@ -8809,13 +8862,13 @@ impl EventRenderer {
         for start in starts {
             let command_id = &start.command_id;
             for pending in self.discovery.pending_initial_discovery.values_mut() {
-                pending.retain(|(event, _)| {
-                    !matches!(
-                        event,
-                        Event::UiShellCommand(command)
-                            if command.command_id == *command_id
-                                && command.target_agent_id == start.target_agent_id
-                    )
+                pending.retain(|deferred| {
+                    let Some(event) = deferred.ordinary_event() else {
+                        return true;
+                    };
+                    !matches!(event, Event::UiShellCommand(command)
+                        if command.command_id == *command_id
+                            && command.target_agent_id == start.target_agent_id)
                 });
             }
             if start.target_agent_id.is_none() {
@@ -9537,7 +9590,11 @@ impl EventRenderer {
 }
 
 mod finished_response_projection;
+mod prepared_renderer_event;
 mod renderer_state;
+mod terminal_tool_calls;
+#[cfg(test)]
+mod terminal_tool_calls_tests;
 use finished_response_projection::FinishedResponseProjection;
 use renderer_state::AgentUiState;
 pub(crate) use renderer_state::EventRenderer;
