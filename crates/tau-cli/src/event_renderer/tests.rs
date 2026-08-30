@@ -2311,6 +2311,61 @@ fn agent_activity_tracks_side_conversation_prompts() {
     assert!(!activity.is_in_progress());
 }
 
+/// Distinct protocol prompt identities must remain separately active across
+/// duplicate lifecycle observations until each prompt receives its own end.
+#[test]
+fn agent_activity_tracks_distinct_prompt_ids_idempotently() {
+    let mut activity = AgentActivity::default();
+    let first = "side-first"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+    let second = "side-second"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+
+    activity.start_prompt(&first);
+    activity.start_prompt(&first);
+    activity.start_prompt(&second);
+    activity.finish_prompt(&first, &[]);
+    activity.finish_prompt_if_active(&first, &[]);
+
+    assert!(activity.has_active_prompts());
+    assert!(activity.is_in_progress());
+
+    activity.finish_prompt(&second, &[]);
+
+    assert!(!activity.has_active_prompts());
+    assert!(!activity.is_in_progress());
+}
+
+/// Session reset must discard typed prompt identities so a later prompt starts
+/// a fresh activity lifetime instead of retaining stale replay state.
+#[test]
+fn agent_activity_clear_resets_active_prompt_ids() {
+    let mut activity = AgentActivity::default();
+    let stale_prompt = "stale-prompt"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+    let later_prompt = "later-prompt"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+
+    activity.start_prompt(&stale_prompt);
+    activity.clear();
+
+    assert!(!activity.has_active_prompts());
+    assert!(!activity.is_in_progress());
+
+    activity.start_prompt(&later_prompt);
+    assert!(activity.has_active_prompts());
+
+    activity.finish_prompt_if_active(&stale_prompt, &[]);
+    assert!(activity.has_active_prompts());
+
+    activity.finish_prompt(&later_prompt, &[]);
+    assert!(!activity.is_in_progress());
+}
+
 /// Role completion labels retain model controls but omit tool policy fragments,
 /// which add noise without changing the candidate or its role configuration.
 #[test]

@@ -10,7 +10,7 @@ pub(crate) struct AgentActivity {
     /// User submissions seen before the harness assigns a prompt id.
     optimistic_submissions: usize,
     /// Prompt ids currently being processed by any provider conversation.
-    active_prompts: HashSet<String>,
+    active_prompts: HashSet<AgentPromptId>,
     /// Tool call ids emitted by any agent and not finished yet.
     active_tools: HashSet<String>,
     /// Tool call ids whose foreground provider protocol has completed with a
@@ -40,7 +40,7 @@ impl AgentActivity {
     /// Moves one optimistic submission, if present, into an active prompt id.
     pub(crate) fn start_prompt(&mut self, agent_prompt_id: &AgentPromptId) {
         self.optimistic_submissions = self.optimistic_submissions.saturating_sub(1);
-        self.active_prompts.insert(agent_prompt_id.to_string());
+        self.active_prompts.insert(agent_prompt_id.clone());
     }
 
     /// Finishes a provider prompt and keeps the session busy if the response
@@ -70,7 +70,7 @@ impl AgentActivity {
         agent_prompt_id: &AgentPromptId,
         output_items: &[ContextItem],
     ) -> bool {
-        if self.active_prompts.remove(agent_prompt_id.as_str()) {
+        if self.active_prompts.remove(agent_prompt_id) {
             for call_id in tool_call_ids_from_output_items(output_items) {
                 self.active_tools.insert(call_id);
             }
