@@ -177,9 +177,7 @@ pub fn run_prompt_attempt<S: ProviderReportSink>(
                     }
                 }
             }
-            sampler.latest_items = success.progress_items;
-            sampler.latest_bytes = success.response_bytes_received;
-            sampler.flush(agent_prompt_id, prompt, writer);
+            sampler.flush_from(agent_prompt_id, prompt, &success, writer);
             PromptAttemptOutcome::Finished(Box::new(finished(
                 agent_prompt_id,
                 prompt,

@@ -291,11 +291,65 @@ pub struct AttemptSuccess {
     pub usage: Option<ProviderTokenUsage>,
     /// Cumulative response body bytes.
     pub response_bytes_received: u64,
-    /// Stable provider-ordered slots retained from the contiguous progress
-    /// prefix.
-    pub progress_items: Vec<AttemptOutputItem>,
+    /// Lightweight terminal display projection into `output_items`.
+    terminal_display: Vec<TerminalDisplayItem>,
+    /// Exact parser-owned semantic timing qualification at terminal.
+    has_timed_semantic_output: bool,
     /// Response identifier for diagnostics only, never chaining.
     pub provider_response_id: Option<String>,
+}
+
+/// One terminal display channel backed by an owned durable output item.
+#[derive(Clone, Copy, Debug)]
+struct TerminalDisplayItem {
+    /// Position in `AttemptSuccess::output_items`.
+    item_position: usize,
+    /// Provider-owned output index.
+    output_index: u32,
+    /// Replacement generation retained from streaming assembly.
+    display_generation: DisplayGeneration,
+}
+
+impl AttemptSuccess {
+    /// Return whether parser state qualified for first-semantic-output timing.
+    #[must_use]
+    pub fn has_timed_semantic_output(&self) -> bool {
+        self.has_timed_semantic_output
+    }
+
+    /// Visit the terminal display projection without cloning durable items.
+    pub fn visit_display_output(&self, mut visit: impl FnMut(DisplayOutput<'_>)) {
+        for display in &self.terminal_display {
+            let Some(item) = self.output_items.get(display.item_position) else {
+                continue;
+            };
+            match item {
+                ContextItem::Message(message) => {
+                    for part in &message.content {
+                        if let ContentPart::Text { text } = part
+                            && !text.is_empty()
+                        {
+                            visit(DisplayOutput {
+                                output_index: display.output_index,
+                                kind: DisplayOutputKind::Message,
+                                text,
+                                generation: display.display_generation,
+                            });
+                        }
+                    }
+                }
+                ContextItem::ReasoningText(reasoning) if !reasoning.text.is_empty() => {
+                    visit(DisplayOutput {
+                        output_index: display.output_index,
+                        kind: DisplayOutputKind::Reasoning,
+                        text: &reasoning.text,
+                        generation: display.display_generation,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Progress observed while parsing an attempt.
@@ -667,21 +721,21 @@ fn run_attempt_with_capture_and_updates(
         &mut private_trace,
     ));
     match result {
-        Ok(state) if state.terminal.is_some() => {
-            let progress = state.progress();
-            let output_items = state.output_items();
+        Ok(mut state) if state.terminal.is_some() => {
             let stop_reason = match state.terminal.expect("guarded terminal state") {
                 TerminalKind::MaxOutputTokens => ProviderStopReason::Length,
                 TerminalKind::Completed
-                    if output_items
+                    if state
+                        .items
                         .iter()
-                        .any(|item| matches!(item, ContextItem::ToolCall(_))) =>
+                        .any(|slot| matches!(slot.item, ContextItem::ToolCall(_))) =>
                 {
                     ProviderStopReason::ToolCalls
                 }
                 TerminalKind::Completed => ProviderStopReason::EndTurn,
             };
             if state.has_incomplete_reasoning() {
+                let progress = state.progress();
                 finish_private_trace(&mut private_trace, private_trace::Outcome::Failed);
                 debug_capture.submit_error(
                     prompt,
@@ -691,7 +745,8 @@ fn run_attempt_with_capture_and_updates(
                     &progress,
                 );
                 terminal(Error::UnsupportedOutput, progress)
-            } else if output_items.is_empty() && stop_reason != ProviderStopReason::Length {
+            } else if !state.has_output_items() && stop_reason != ProviderStopReason::Length {
+                let progress = state.progress();
                 finish_private_trace(&mut private_trace, private_trace::Outcome::Failed);
                 debug_capture.submit_error(prompt, config, model, &Error::EmptyResponse, &progress);
                 terminal(Error::EmptyResponse, progress)
@@ -700,12 +755,15 @@ fn run_attempt_with_capture_and_updates(
                 state
                     .debug_capture
                     .submit_response(prompt, config, model, &state, stop_reason);
+                let has_timed_semantic_output = state.has_qualifying_stream_progress();
+                let (output_items, terminal_display) = state.take_output_items();
                 AttemptOutcome::Completed(AttemptSuccess {
-                    progress_items: progress.output_items,
                     output_items,
                     stop_reason,
                     usage: state.usage,
                     response_bytes_received: state.bytes,
+                    terminal_display,
+                    has_timed_semantic_output,
                     provider_response_id: state.response_id,
                 })
             }
@@ -1252,6 +1310,16 @@ enum TerminalKind {
 }
 
 impl State {
+    fn has_output_items(&self) -> bool {
+        self.items.iter().any(|slot| {
+            slot.reasoning_text
+                .as_ref()
+                .is_some_and(|reasoning| !reasoning.text.is_empty())
+                || !matches!(slot.item, ContextItem::UnknownProviderItem(_))
+        })
+    }
+
+    #[cfg(test)]
     fn output_items(&self) -> Vec<ContextItem> {
         self.items
             .iter()
@@ -1268,6 +1336,39 @@ impl State {
                 )
             })
             .collect()
+    }
+
+    /// Move the terminal durable projection while retaining only display
+    /// indices.
+    fn take_output_items(&mut self) -> (Vec<ContextItem>, Vec<TerminalDisplayItem>) {
+        #[cfg(test)]
+        PROGRESS_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        let mut output_items = Vec::new();
+        let mut terminal_display = Vec::new();
+        for slot in std::mem::take(&mut self.items) {
+            if let Some(reasoning) = slot
+                .reasoning_text
+                .filter(|reasoning| !reasoning.text.is_empty())
+            {
+                terminal_display.push(TerminalDisplayItem {
+                    item_position: output_items.len(),
+                    output_index: slot.index,
+                    display_generation: slot.display_generation,
+                });
+                output_items.push(ContextItem::ReasoningText(reasoning));
+            }
+            if !matches!(slot.item, ContextItem::UnknownProviderItem(_)) {
+                if matches!(slot.item, ContextItem::Message(_)) {
+                    terminal_display.push(TerminalDisplayItem {
+                        item_position: output_items.len(),
+                        output_index: slot.index,
+                        display_generation: slot.display_generation,
+                    });
+                }
+                output_items.push(slot.item);
+            }
+        }
+        (output_items, terminal_display)
     }
 
     fn progress(&self) -> AttemptProgress {

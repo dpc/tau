@@ -51,6 +51,35 @@ impl SamplingProgress for tau_provider_chat_completions::AttemptProgress<'_> {
     }
 }
 
+impl SamplingProgress for tau_provider_chat_completions::AttemptSuccess {
+    fn response_bytes_received(&self) -> u64 {
+        self.response_bytes_received
+    }
+
+    fn has_timed_semantic_output(&self) -> bool {
+        self.has_timed_semantic_output()
+    }
+
+    fn visit_display_output(
+        &self,
+        visit: &mut dyn FnMut(
+            u32,
+            tau_provider_chat_completions::DisplayOutputKind,
+            &str,
+            tau_provider_chat_completions::DisplayGeneration,
+        ),
+    ) {
+        self.visit_display_output(|output| {
+            visit(
+                output.output_index,
+                output.kind,
+                output.text,
+                output.generation,
+            );
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -171,13 +200,38 @@ impl ResponseSampler {
         }
     }
 
-    pub(super) fn flush<S: ProviderReportSink>(
+    /// Borrow terminal output for the final delta before durable items move.
+    pub(super) fn flush_from<S: ProviderReportSink>(
         &mut self,
         apid: &tau_proto::AgentPromptId,
         prompt: &tau_proto::AgentPromptCreated,
+        progress: &impl SamplingProgress,
         writer: &mut S,
     ) {
-        self.emit_at(apid, prompt, writer, path_std_time::Instant::now(), true);
+        let now = path_std_time::Instant::now();
+        self.observe_progress(now, progress.has_timed_semantic_output());
+        self.latest_bytes = progress.response_bytes_received();
+        if prompt.operation != tau_proto::PromptOperation::StandaloneCompaction {
+            progress.visit_display_output(&mut |output_index, kind, text, generation| {
+                let map = match kind {
+                    tau_provider_chat_completions::DisplayOutputKind::Message => {
+                        &mut self.emitted_text
+                    }
+                    tau_provider_chat_completions::DisplayOutputKind::Reasoning => {
+                        &mut self.emitted_reasoning
+                    }
+                };
+                append_delta(
+                    &mut self.pending_deltas,
+                    map,
+                    output_index,
+                    text,
+                    generation,
+                    kind,
+                );
+            });
+        }
+        self.emit_at(apid, prompt, writer, now, true);
     }
 
     pub(super) fn emit_at<S: ProviderReportSink>(

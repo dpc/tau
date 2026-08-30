@@ -748,6 +748,36 @@ impl ToolCallAccumulator {
                 .then(|| self.responses_envelope.clone()),
         }))
     }
+
+    fn into_context_item(self) -> Option<ContextItem> {
+        if self.name.is_empty() {
+            return None;
+        }
+        let Self {
+            id,
+            name,
+            tool_type,
+            arguments_json,
+            responses_envelope,
+        } = self;
+        let (arguments, raw_arguments_json) = match tool_type {
+            tau_proto::ToolType::Function => {
+                let args: serde_json::Value =
+                    serde_json::from_str(&arguments_json).unwrap_or(serde_json::Value::Null);
+                (json_to_cbor(&args), Some(arguments_json))
+            }
+            tau_proto::ToolType::Custom => (CborValue::Text(arguments_json), None),
+        };
+        let name = tau_proto::ToolName::try_new(name)?;
+        Some(ContextItem::ToolCall(ToolCallItem {
+            call_id: id.into(),
+            name,
+            tool_type,
+            arguments,
+            raw_arguments_json,
+            responses_envelope: (!responses_envelope.is_empty()).then_some(responses_envelope),
+        }))
+    }
 }
 
 impl OutputItemAccumulator {
@@ -770,6 +800,23 @@ impl OutputItemAccumulator {
             OutputItemAccumulator::UnknownProviderItem(item) => {
                 Some(ContextItem::UnknownProviderItem(item.clone()))
             }
+        }
+    }
+
+    fn into_context_item(self) -> Option<ContextItem> {
+        match self {
+            Self::Empty | Self::Compaction(None) => None,
+            Self::Message(message) => (!message.text.is_empty()).then(|| {
+                assistant_text_item_with_phase_and_raw(
+                    message.text,
+                    message.phase,
+                    message.responses_raw_json,
+                )
+            }),
+            Self::ToolCall(call) => call.into_context_item(),
+            Self::Reasoning(item) => Some(ContextItem::Reasoning(item)),
+            Self::Compaction(Some(item)) => Some(ContextItem::Compaction(item)),
+            Self::UnknownProviderItem(item) => Some(ContextItem::UnknownProviderItem(item)),
         }
     }
 
@@ -1444,7 +1491,43 @@ impl StreamState {
     /// downstream would surface as an `invalid_tool` rejection in the
     /// harness even though the model never committed a valid call.
     pub fn into_output_items(self) -> Vec<ContextItem> {
-        self.output_items_snapshot()
+        let aggregate_fallback = (self.assistant_text_bytes != 0
+            && !self
+                .output_items
+                .iter()
+                .any(OutputItemAccumulator::materializes_context_item))
+        .then(|| self.aggregate_assistant_text());
+        let thinking_index = self.thinking_output_index.unwrap_or(0);
+        let mut thinking = self.thinking.filter(|thinking| !thinking.is_empty());
+        let output_items = self
+            .output_items
+            .into_iter()
+            .map(OutputItemAccumulator::into_context_item)
+            .collect::<Vec<_>>();
+        let thinking_len = thinking.as_ref().map(|_| thinking_index + 1).unwrap_or(0);
+        let len = output_items.len().max(thinking_len);
+        let mut items = Vec::new();
+
+        let mut output_items = output_items.into_iter();
+        for index in 0..len {
+            if index == thinking_index
+                && let Some(thinking) = thinking.take()
+            {
+                items.push(ContextItem::ReasoningText(ReasoningTextItem {
+                    kind: ReasoningTextKind::Summary,
+                    text: thinking,
+                }));
+            }
+            if let Some(item) = output_items.next().flatten() {
+                items.push(item);
+            }
+        }
+        if items.is_empty()
+            && let Some(text) = aggregate_fallback
+        {
+            items.push(assistant_text_item(text));
+        }
+        items
     }
 
     /// Extracts exactly one completed compaction item without cloning retained

@@ -2011,6 +2011,75 @@ fn sse_suppressed_progress_samples_do_not_materialize_display_slots() {
     );
 }
 
+/// Terminal materialization must move message and reasoning display buffers
+/// while preserving their shared provider index and ordering.
+#[test]
+fn terminal_projection_moves_owned_display_buffers() {
+    let message = "m".repeat(4_096);
+    let reasoning = "r".repeat(4_096);
+    let message_pointer = message.as_ptr();
+    let reasoning_pointer = reasoning.as_ptr();
+    let mut slot = Slot::new(0);
+    slot.item = ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text { text: message }],
+        phase: None,
+        responses_raw_json: None,
+    });
+    slot.state = SlotState::Message;
+    slot.reasoning_text = Some(ReasoningTextItem {
+        kind: ReasoningTextKind::Full,
+        text: reasoning,
+    });
+    let mut state = State::default();
+    state.items.push(slot);
+
+    let (items, display) = state.take_output_items();
+    assert_eq!(display.len(), 2);
+    assert!(display.iter().all(|item| item.output_index == 0));
+    let ContextItem::ReasoningText(reasoning) = &items[0] else {
+        panic!("reasoning display must precede its durable slot");
+    };
+    let ContextItem::Message(message) = &items[1] else {
+        panic!("message must retain provider order");
+    };
+    let ContentPart::Text { text } = &message.content[0] else {
+        panic!("assistant content must be text");
+    };
+    assert_eq!(reasoning.text.as_ptr(), reasoning_pointer);
+    assert_eq!(text.as_ptr(), message_pointer);
+}
+
+/// An empty assistant message remains durable provider shape but must not
+/// invent first-semantic-output timing during the terminal flush.
+#[test]
+fn empty_message_terminal_preserves_content_free_timing() {
+    let mut slot = Slot::new(0);
+    slot.item = ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: Vec::new(),
+        phase: None,
+        responses_raw_json: None,
+    });
+    slot.state = SlotState::Message;
+    let mut state = State::default();
+    state.items.push(slot);
+    let has_timed_semantic_output = state.has_qualifying_stream_progress();
+    let (output_items, terminal_display) = state.take_output_items();
+    let success = AttemptSuccess {
+        output_items,
+        stop_reason: ProviderStopReason::EndTurn,
+        usage: None,
+        response_bytes_received: 0,
+        terminal_display,
+        has_timed_semantic_output,
+        provider_response_id: None,
+    };
+
+    assert_eq!(success.output_items.len(), 1);
+    assert!(!success.has_timed_semantic_output());
+}
+
 /// Public Responses requests must lower every harness-effective effort to the
 /// exact spelling the API accepts.
 #[test]

@@ -122,6 +122,66 @@ fn into_output_items_drops_nameless_accumulator_artifacts() {
     assert_eq!(call.name.as_str(), "shell");
 }
 
+/// Terminal extraction must move Responses message text and raw replay sidecars
+/// from the accumulator into the canonical durable item.
+#[test]
+fn into_output_items_moves_message_and_raw_sidecar_buffers() {
+    let text = "m".repeat(4_096);
+    let raw = format!(r#"{{"type":"message","value":"{}"}}"#, "r".repeat(4_096));
+    let text_pointer = text.as_ptr();
+    let raw_pointer = raw.as_ptr();
+    let mut state = StreamState::new();
+    state
+        .output_items
+        .push(OutputItemAccumulator::Message(MessageAccumulator {
+            text,
+            phase: Some(tau_proto::MessagePhase::FinalAnswer),
+            responses_raw_json: Some(raw),
+        }));
+
+    let items = state.into_output_items();
+    let ContextItem::Message(message) = &items[0] else {
+        panic!("terminal projection must retain the message");
+    };
+    let tau_proto::ContentPart::Text { text } = &message.content[0] else {
+        panic!("assistant content must be text");
+    };
+    assert_eq!(text.as_ptr(), text_pointer);
+    assert_eq!(
+        message
+            .responses_raw_json
+            .as_deref()
+            .expect("raw Responses sidecar")
+            .as_ptr(),
+        raw_pointer
+    );
+}
+
+/// Custom-tool terminal extraction must move the provider text directly into
+/// the typed CBOR argument instead of retaining a second string allocation.
+#[test]
+fn into_output_items_moves_custom_tool_payload_buffer() {
+    let arguments = "custom payload ".repeat(512);
+    let arguments_pointer = arguments.as_ptr();
+    let mut state = StreamState::new();
+    {
+        let mut call = state.tool_call_at_mut(0, tau_proto::ToolType::Custom);
+        call.id = "custom-1".to_owned();
+        call.name = "shell".to_owned();
+        call.arguments_json = arguments;
+    }
+
+    let items = state.into_output_items();
+    let ContextItem::ToolCall(call) = &items[0] else {
+        panic!("terminal projection must retain the custom tool call");
+    };
+    let tau_proto::CborValue::Text(arguments) = &call.arguments else {
+        panic!("custom tool input must remain typed text");
+    };
+    assert_eq!(arguments.as_ptr(), arguments_pointer);
+    assert!(call.raw_arguments_json.is_none());
+}
+
 /// Ensures Responses function/custom-tool input streams contribute only
 /// content-free bytes to provider-owned response stats.
 #[test]

@@ -3831,6 +3831,48 @@ fn borrowed_display_projection_preserves_interleave_and_unicode() {
     assert_eq!(OUTPUT_MATERIALIZATIONS.with(std::cell::Cell::get), 0);
 }
 
+/// Terminal projection must move assistant and raw tool-argument buffers into
+/// durable items instead of cloning the parser-owned allocations.
+#[test]
+fn terminal_projection_moves_owned_payload_buffers() {
+    let mut state = StreamState::new();
+    state.output_items.push(OutputItemAccumulator::Message(
+        "message payload".repeat(256),
+    ));
+    let call = state.tool_call_at_mut(0);
+    call.id = "call-1".to_owned();
+    call.name = "lookup".to_owned();
+    call.arguments = format!(r#"{{"value":"{}"}}"#, "a".repeat(4_096));
+    let message_pointer = match &state.output_items[0] {
+        OutputItemAccumulator::Message(text) => text.as_ptr(),
+        _ => panic!("first slot must be assistant text"),
+    };
+    let arguments_pointer = match &state.output_items[1] {
+        OutputItemAccumulator::ToolCall(call) => call.arguments.as_ptr(),
+        _ => panic!("second slot must be a tool call"),
+    };
+
+    let (items, indices) = state.into_output_items();
+    assert_eq!(indices, vec![0, 1]);
+    let ContextItem::Message(message) = &items[0] else {
+        panic!("first durable item must be assistant text");
+    };
+    let ContentPart::Text { text } = &message.content[0] else {
+        panic!("assistant content must be text");
+    };
+    let ContextItem::ToolCall(call) = &items[1] else {
+        panic!("second durable item must be a tool call");
+    };
+    assert_eq!(text.as_ptr(), message_pointer);
+    assert_eq!(
+        call.raw_arguments_json
+            .as_deref()
+            .expect("raw function arguments")
+            .as_ptr(),
+        arguments_pointer
+    );
+}
+
 /// Ensures buffered think-tag prefixes and incomplete tool metadata count as
 /// semantic progress even before either can render as a complete output item.
 #[test]

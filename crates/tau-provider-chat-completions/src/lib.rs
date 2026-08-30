@@ -584,8 +584,49 @@ pub struct AttemptSuccess {
     pub usage: Option<ProviderTokenUsage>,
     /// Cumulative transport/semantic response bytes at completion.
     pub response_bytes_received: u64,
-    /// Stable backend output slots used by the terminal sampler flush.
-    pub progress_items: Vec<AttemptOutputItem>,
+    /// Provider output indices parallel to `output_items`.
+    output_indices: Vec<u32>,
+    /// Exact parser-owned semantic timing qualification at terminal.
+    has_timed_semantic_output: bool,
+}
+
+impl AttemptSuccess {
+    /// Return whether parser state qualified for first-semantic-output timing.
+    #[must_use]
+    pub fn has_timed_semantic_output(&self) -> bool {
+        self.has_timed_semantic_output
+    }
+
+    /// Visit the terminal display projection without cloning durable items.
+    pub fn visit_display_output(&self, mut visit: impl FnMut(DisplayOutput<'_>)) {
+        for (&output_index, item) in self.output_indices.iter().zip(&self.output_items) {
+            match item {
+                ContextItem::Message(message) => {
+                    for part in &message.content {
+                        if let ContentPart::Text { text } = part
+                            && !text.is_empty()
+                        {
+                            visit(DisplayOutput {
+                                output_index,
+                                kind: DisplayOutputKind::Message,
+                                text,
+                                generation: DisplayGeneration::default(),
+                            });
+                        }
+                    }
+                }
+                ContextItem::ReasoningText(reasoning) if !reasoning.text.is_empty() => {
+                    visit(DisplayOutput {
+                        output_index,
+                        kind: DisplayOutputKind::Reasoning,
+                        text: &reasoning.text,
+                        generation: DisplayGeneration::default(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// One materialized semantic item with its stable backend output index.
@@ -896,14 +937,22 @@ fn finish_attempt_with_facts(
     facts: AttemptFacts,
 ) -> AttemptOutcome {
     match result {
-        Ok(state) => AttemptOutcome::Completed(AttemptSuccess {
-            facts,
-            progress_items: state.indexed_output_items(),
-            output_items: state.output_items(),
-            stop_reason: state.stop_reason,
-            usage: state.usage(),
-            response_bytes_received: state.response_bytes_received(),
-        }),
+        Ok(state) => {
+            let stop_reason = state.stop_reason;
+            let usage = state.usage();
+            let response_bytes_received = state.response_bytes_received();
+            let has_timed_semantic_output = state.has_timed_semantic_output();
+            let (output_items, output_indices) = state.into_output_items();
+            AttemptOutcome::Completed(AttemptSuccess {
+                facts,
+                output_items,
+                stop_reason,
+                usage,
+                response_bytes_received,
+                output_indices,
+                has_timed_semantic_output,
+            })
+        }
         Err(LlmError::Canceled) => AttemptOutcome::Canceled { progress, facts },
         Err(error) => match error.retry_decision() {
             Some(decision) => AttemptOutcome::Retryable {
@@ -1023,6 +1072,22 @@ impl StreamState {
                 })
             })
             .collect()
+    }
+
+    fn into_output_items(self) -> (Vec<ContextItem>, Vec<u32>) {
+        let indexed = self
+            .output_items
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                Some((
+                    index.try_into().unwrap_or(u32::MAX),
+                    item.into_context_item()?,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let (output_indices, output_items) = indexed.into_iter().unzip();
+        (output_items, output_indices)
     }
 
     fn non_visible_output_bytes(&self) -> u64 {
@@ -1230,6 +1295,19 @@ impl OutputItemAccumulator {
             Self::ToolCall(call) => call.context_item(),
         }
     }
+
+    fn into_context_item(self) -> Option<ContextItem> {
+        match self {
+            Self::Message(text) => (!text.is_empty()).then(|| assistant_text_item(text)),
+            Self::Reasoning(reasoning) => (!reasoning.is_empty()).then_some({
+                ContextItem::ReasoningText(ReasoningTextItem {
+                    kind: ReasoningTextKind::Full,
+                    text: reasoning,
+                })
+            }),
+            Self::ToolCall(call) => call.into_context_item(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1252,6 +1330,22 @@ impl ToolCallAccumulator {
                 .map(|value| json_to_cbor(&value))
                 .unwrap_or(tau_proto::CborValue::Null),
             raw_arguments_json: Some(self.arguments.clone()),
+            responses_envelope: None,
+        }))
+    }
+
+    fn into_context_item(self) -> Option<ContextItem> {
+        if self.name.is_empty() {
+            return None;
+        }
+        Some(ContextItem::ToolCall(ToolCallItem {
+            call_id: self.id.into(),
+            name: tau_proto::ToolName::new(self.name),
+            tool_type: ToolType::Function,
+            arguments: serde_json::from_str::<serde_json::Value>(&self.arguments)
+                .map(|value| json_to_cbor(&value))
+                .unwrap_or(tau_proto::CborValue::Null),
+            raw_arguments_json: Some(self.arguments),
             responses_envelope: None,
         }))
     }
