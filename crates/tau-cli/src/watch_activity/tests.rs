@@ -1,19 +1,26 @@
 use super::*;
 
+fn agent_id(value: &str) -> tau_proto::AgentId {
+    tau_proto::AgentId::parse(value).expect("test agent id")
+}
+
 fn topology(
     edges: &[(&str, &str)],
-) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
-    let mut forward: HashMap<String, Vec<String>> = HashMap::new();
-    let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
+) -> (
+    HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>,
+    HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>,
+) {
+    let mut forward: HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>> = HashMap::new();
+    let mut reverse: HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>> = HashMap::new();
     for (watcher, watched) in edges {
         forward
-            .entry((*watcher).to_owned())
+            .entry(agent_id(watcher))
             .or_default()
-            .push((*watched).to_owned());
+            .push(agent_id(watched));
         reverse
-            .entry((*watched).to_owned())
+            .entry(agent_id(watched))
             .or_default()
-            .push((*watcher).to_owned());
+            .push(agent_id(watcher));
     }
     for targets in forward.values_mut() {
         targets.sort();
@@ -32,16 +39,19 @@ fn projects_a_recursive_chain() {
     let projection = WatchGraphProjection::new(
         &forward,
         &reverse,
-        HashSet::from([("b".to_owned(), "c".to_owned())]),
+        HashSet::from([(agent_id("b"), agent_id("c"))]),
     );
 
-    assert!(projection.watcher_is_active("a"));
-    assert!(projection.watcher_is_active("b"));
+    assert!(projection.watcher_is_active(&agent_id("a")));
+    assert!(projection.watcher_is_active(&agent_id("b")));
     assert_eq!(
         projection.effective_targets,
-        HashSet::from(["b".to_owned(), "c".to_owned()])
+        HashSet::from([agent_id("b"), agent_id("c")])
     );
-    assert_eq!(projection.witness_for("b", &forward).as_deref(), Some("c"));
+    assert_eq!(
+        projection.witness_for(&agent_id("b"), &forward).as_deref(),
+        Some("c")
+    );
 }
 
 /// Equal-depth witnesses must use stable id regardless of edge insertion
@@ -53,12 +63,15 @@ fn selects_a_stable_witness_from_a_fork() {
         &forward,
         &reverse,
         HashSet::from([
-            ("b".to_owned(), "z".to_owned()),
-            ("c".to_owned(), "y".to_owned()),
+            (agent_id("b"), agent_id("z")),
+            (agent_id("c"), agent_id("y")),
         ]),
     );
 
-    assert_eq!(projection.witness_for("a", &forward).as_deref(), Some("y"));
+    assert_eq!(
+        projection.witness_for(&agent_id("a"), &forward).as_deref(),
+        Some("y")
+    );
 }
 
 /// A reconverging diamond must count its shared active descendant only once.
@@ -69,14 +82,14 @@ fn deduplicates_a_shared_diamond_descendant() {
         &forward,
         &reverse,
         HashSet::from([
-            ("b".to_owned(), "d".to_owned()),
-            ("c".to_owned(), "d".to_owned()),
+            (agent_id("b"), agent_id("d")),
+            (agent_id("c"), agent_id("d")),
         ]),
     );
 
     assert_eq!(
         projection.effective_targets,
-        HashSet::from(["b".to_owned(), "c".to_owned(), "d".to_owned()])
+        HashSet::from([agent_id("b"), agent_id("c"), agent_id("d")])
     );
 }
 
@@ -88,11 +101,11 @@ fn does_not_propagate_activity_downward() {
     let projection = WatchGraphProjection::new(
         &forward,
         &reverse,
-        HashSet::from([("parent".to_owned(), "a".to_owned())]),
+        HashSet::from([(agent_id("parent"), agent_id("a"))]),
     );
 
-    assert!(!projection.watcher_is_active("a"));
-    assert!(!projection.watcher_is_active("b"));
+    assert!(!projection.watcher_is_active(&agent_id("a")));
+    assert!(!projection.watcher_is_active(&agent_id("b")));
 }
 
 /// A deep live DAG must be handled iteratively rather than consuming call
@@ -110,10 +123,10 @@ fn projects_a_deep_chain_iteratively() {
     let projection = WatchGraphProjection::new(
         &forward,
         &reverse,
-        HashSet::from([("a2047".to_owned(), "a2048".to_owned())]),
+        HashSet::from([(agent_id("a2047"), agent_id("a2048"))]),
     );
 
-    assert!(projection.watcher_is_active("a0"));
+    assert!(projection.watcher_is_active(&agent_id("a0")));
     assert_eq!(projection.effective_targets.len(), 2_048);
 }
 
@@ -130,11 +143,11 @@ fn visible_rows_switch_from_eight_to_direct_only_at_nine() {
     let edges = (0..9)
         .map(|index| {
             let parent = if index == 0 {
-                "root".to_owned()
+                agent_id("root")
             } else {
-                format!("a{}", index - 1)
+                agent_id(&format!("a{}", index - 1))
             };
-            (parent, format!("a{index}"))
+            (parent, agent_id(&format!("a{index}")))
         })
         .collect::<Vec<_>>();
     let borrowed = edges
@@ -143,13 +156,17 @@ fn visible_rows_switch_from_eight_to_direct_only_at_nine() {
         .collect::<Vec<_>>();
     let (forward, _) = topology(&borrowed);
 
-    let eight =
-        WatchGraphProjection::visible_rows("root", &forward, |agent_id| agent_id != "a8", 8);
+    let eight = WatchGraphProjection::visible_rows(
+        &agent_id("root"),
+        &forward,
+        |agent_id| agent_id.as_str() != "a8",
+        8,
+    );
     assert_eq!(eight.len(), 8);
-    assert_eq!(eight[7].agent_id, "a7");
+    assert_eq!(eight[7].agent_id.as_str(), "a7");
     assert_eq!(eight[7].depth, 8);
 
-    let nine = WatchGraphProjection::visible_rows("root", &forward, |_| true, 8);
+    let nine = WatchGraphProjection::visible_rows(&agent_id("root"), &forward, |_| true, 8);
     assert_eq!(visible_ids(&nine), vec![("a0", 1, None)]);
 }
 
@@ -158,7 +175,7 @@ fn visible_rows_switch_from_eight_to_direct_only_at_nine() {
 #[test]
 fn visible_rows_keep_every_direct_watch_above_limit() {
     let edges = (0..10)
-        .map(|index| ("root".to_owned(), format!("d{index:02}")))
+        .map(|index| (agent_id("root"), format!("d{index:02}")))
         .collect::<Vec<_>>();
     let borrowed = edges
         .iter()
@@ -166,7 +183,7 @@ fn visible_rows_keep_every_direct_watch_above_limit() {
         .collect::<Vec<_>>();
     let (forward, _) = topology(&borrowed);
 
-    let rows = WatchGraphProjection::visible_rows("root", &forward, |_| true, 8);
+    let rows = WatchGraphProjection::visible_rows(&agent_id("root"), &forward, |_| true, 8);
     assert_eq!(rows.len(), 10);
     assert!(rows.iter().all(|row| row.depth == 1 && row.via.is_none()));
 }
@@ -177,7 +194,7 @@ fn visible_rows_keep_every_direct_watch_above_limit() {
 fn visible_rows_are_cycle_safe_and_exclude_root() {
     let (forward, _) = topology(&[("root", "a"), ("a", "b"), ("b", "root")]);
 
-    let rows = WatchGraphProjection::visible_rows("root", &forward, |_| true, 8);
+    let rows = WatchGraphProjection::visible_rows(&agent_id("root"), &forward, |_| true, 8);
     assert_eq!(
         visible_ids(&rows),
         vec![("a", 1, None), ("b", 2, Some("a"))]
@@ -199,15 +216,15 @@ fn visible_rows_choose_shortest_then_lexicographic_paths() {
         ("c", "shared"),
     ]);
 
-    let rows = WatchGraphProjection::visible_rows("root", &forward, |_| true, 8);
+    let rows = WatchGraphProjection::visible_rows(&agent_id("root"), &forward, |_| true, 8);
     let short = rows
         .iter()
-        .find(|row| row.agent_id == "short")
+        .find(|row| row.agent_id.as_str() == "short")
         .expect("shortest-path row");
     assert_eq!((short.depth, short.via.as_deref()), (2, Some("b")));
     let shared = rows
         .iter()
-        .find(|row| row.agent_id == "shared")
+        .find(|row| row.agent_id.as_str() == "shared")
         .expect("equal-depth row");
     assert_eq!((shared.depth, shared.via.as_deref()), (2, Some("b")));
 }
@@ -218,8 +235,12 @@ fn visible_rows_choose_shortest_then_lexicographic_paths() {
 fn visible_rows_traverse_hidden_intermediates_and_keep_missing_stats() {
     let (forward, _) = topology(&[("root", "done"), ("done", "no-stats")]);
 
-    let rows =
-        WatchGraphProjection::visible_rows("root", &forward, |agent_id| agent_id != "done", 8);
+    let rows = WatchGraphProjection::visible_rows(
+        &agent_id("root"),
+        &forward,
+        |agent_id| agent_id.as_str() != "done",
+        8,
+    );
     assert_eq!(visible_ids(&rows), vec![("no-stats", 2, Some("done"))]);
 }
 
@@ -229,7 +250,7 @@ fn visible_rows_traverse_hidden_intermediates_and_keep_missing_stats() {
 fn visible_rows_order_by_depth_then_agent_id() {
     let (forward, _) = topology(&[("root", "z"), ("root", "a"), ("z", "b"), ("a", "c")]);
 
-    let rows = WatchGraphProjection::visible_rows("root", &forward, |_| true, 8);
+    let rows = WatchGraphProjection::visible_rows(&agent_id("root"), &forward, |_| true, 8);
     assert_eq!(
         visible_ids(&rows),
         vec![

@@ -539,7 +539,7 @@ enum UiSnapshotOwner {
     /// The no-agent/global output snapshot owns the output.
     NoAgent,
     /// A concrete agent transcript snapshot owns the output.
-    Agent(String),
+    Agent(tau_proto::AgentId),
 }
 
 /// Bookkeeping for a rendered extension lifecycle block.
@@ -553,11 +553,11 @@ struct ExtensionBlockState {
 enum EventAgentIdResolution {
     Unhandled,
     NoAgent,
-    Agent(String),
+    Agent(tau_proto::AgentId),
 }
 
 impl EventAgentIdResolution {
-    fn from_agent_id(agent_id: Option<String>) -> Self {
+    fn from_agent_id(agent_id: Option<tau_proto::AgentId>) -> Self {
         match agent_id {
             Some(agent_id) => Self::Agent(agent_id),
             None => Self::NoAgent,
@@ -571,9 +571,12 @@ impl EventAgentIdResolution {
         }
     }
 
-    fn into_agent_id(self, current_agent_id: Option<&str>) -> Option<String> {
+    fn into_agent_id(
+        self,
+        current_agent_id: Option<&tau_proto::AgentId>,
+    ) -> Option<tau_proto::AgentId> {
         match self {
-            Self::Unhandled => current_agent_id.map(str::to_owned),
+            Self::Unhandled => current_agent_id.cloned(),
             Self::NoAgent => None,
             Self::Agent(agent_id) => Some(agent_id),
         }
@@ -1918,7 +1921,7 @@ impl EventRenderer {
 
     pub(crate) fn agent_display_names(
         &self,
-    ) -> std::sync::Arc<std::sync::Mutex<HashMap<String, String>>> {
+    ) -> std::sync::Arc<std::sync::Mutex<HashMap<tau_proto::AgentId, String>>> {
         self.discovery.agent_display_names.clone()
     }
 
@@ -1928,7 +1931,9 @@ impl EventRenderer {
         self.watches.agent_estimated_api_costs.clone()
     }
 
-    pub(crate) fn ephemeral_agents(&self) -> std::sync::Arc<std::sync::Mutex<HashSet<String>>> {
+    pub(crate) fn ephemeral_agents(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<HashSet<tau_proto::AgentId>>> {
         self.discovery.ephemeral_agents.clone()
     }
 
@@ -1936,7 +1941,9 @@ impl EventRenderer {
         self.discovery.agent_navigation.clone()
     }
 
-    pub(crate) fn current_agent_state(&self) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
+    pub(crate) fn current_agent_state(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<Option<tau_proto::AgentId>>> {
         self.selection.current_agent_state.clone()
     }
 
@@ -1947,11 +1954,11 @@ impl EventRenderer {
     }
 
     #[cfg(test)]
-    pub(crate) fn agent_id_for_event_for_test(&self, event: &Event) -> Option<String> {
+    pub(crate) fn agent_id_for_event_for_test(&self, event: &Event) -> Option<tau_proto::AgentId> {
         self.agent_id_for_event(event)
     }
 
-    pub(crate) fn switch_agent(&mut self, agent_id: String) {
+    pub(crate) fn switch_agent(&mut self, agent_id: tau_proto::AgentId) {
         self.switch_agent_after_display_update(agent_id, || {});
     }
 
@@ -1961,7 +1968,7 @@ impl EventRenderer {
     /// placeholder.
     pub(crate) fn switch_agent_after_display_update_for_test(
         &mut self,
-        agent_id: String,
+        agent_id: tau_proto::AgentId,
         after_display_update: impl FnOnce(),
     ) {
         self.switch_agent_after_display_update(agent_id, after_display_update);
@@ -1969,7 +1976,7 @@ impl EventRenderer {
 
     fn switch_agent_after_display_update(
         &mut self,
-        agent_id: String,
+        agent_id: tau_proto::AgentId,
         after_display_update: impl FnOnce(),
     ) {
         let handle = self.resources.handle.terminal_handle();
@@ -1978,10 +1985,8 @@ impl EventRenderer {
         // the input thread and is intentionally outside this renderer batch.
         handle.with_redraw_suppressed(|| {
             self.remember_agent(agent_id.clone());
-            let target_changed =
-                self.selection.current_agent_id.as_deref() != Some(agent_id.as_str());
-            let display_changed =
-                self.selection.displayed_agent_id.as_deref() != Some(agent_id.as_str());
+            let target_changed = self.selection.current_agent_id.as_ref() != Some(&agent_id);
+            let display_changed = self.selection.displayed_agent_id.as_ref() != Some(&agent_id);
 
             if display_changed {
                 // Let transcript switching see the previous awaiting flag so it can
@@ -2058,13 +2063,13 @@ impl EventRenderer {
         }
     }
 
-    fn show_agent_transcript(&mut self, agent_id: String) {
+    fn show_agent_transcript(&mut self, agent_id: tau_proto::AgentId) {
         let handle = self.resources.handle.terminal_handle();
         handle.with_output_transaction(|| self.show_agent_transcript_inner(agent_id));
     }
 
     /// Swaps the visible transcript under the caller's output transaction.
-    fn show_agent_transcript_inner(&mut self, agent_id: String) {
+    fn show_agent_transcript_inner(&mut self, agent_id: tau_proto::AgentId) {
         let needs_snapshot_swap = self.selection.displayed_agent_id.is_some()
             || self.selection.agents_ui_state.contains_key(&agent_id)
             || self.visible_no_agent_snapshot_needs_preservation();
@@ -2079,7 +2084,7 @@ impl EventRenderer {
             self.rerender_visible_for_current_settings();
         }
         if !needs_snapshot_swap && self.selection.displayed_agent_id.is_none() {
-            self.adopt_visible_no_agent_owners(agent_id.as_str());
+            self.adopt_visible_no_agent_owners(&agent_id);
         }
         self.selection.displayed_agent_id = Some(agent_id);
     }
@@ -2087,7 +2092,7 @@ impl EventRenderer {
     /// Render initialization summaries deferred while no first agent was
     /// selected.
     fn flush_pending_initial_discovery(&mut self) {
-        let Some(agent_id) = self.selection.displayed_agent_id.as_deref() else {
+        let Some(agent_id) = self.selection.displayed_agent_id.as_ref() else {
             return;
         };
         let Some(events) = self.discovery.pending_initial_discovery.remove(agent_id) else {
@@ -2143,8 +2148,8 @@ impl EventRenderer {
         debug_assert!(self.staged_finished_status.is_none());
     }
 
-    fn adopt_visible_no_agent_owners(&mut self, agent_id: &str) {
-        let owner = UiSnapshotOwner::Agent(agent_id.to_owned());
+    fn adopt_visible_no_agent_owners(&mut self, agent_id: &tau_proto::AgentId) {
+        let owner = UiSnapshotOwner::Agent(agent_id.clone());
         for state in self.session.extension_blocks.values_mut() {
             if matches!(state.owner, UiSnapshotOwner::NoAgent) {
                 state.owner = owner.clone();
@@ -2185,7 +2190,7 @@ impl EventRenderer {
                 .any(|state| matches!(state.owner, UiSnapshotOwner::NoAgent))
     }
 
-    fn set_current_agent_id(&mut self, agent_id: Option<String>, retarget_draft: bool) {
+    fn set_current_agent_id(&mut self, agent_id: Option<tau_proto::AgentId>, retarget_draft: bool) {
         self.selection.current_agent_id = agent_id.clone();
         if let Ok(mut current) = self.selection.current_agent_state.lock() {
             *current = agent_id;
@@ -2205,7 +2210,7 @@ impl EventRenderer {
         {
             return;
         }
-        let watcher_id = updated.watcher_id.to_string();
+        let watcher_id = updated.watcher_id.clone();
         if let Some(previous) = self.watches.watched_agents.get(&watcher_id) {
             for watched_agent_id in previous {
                 if let Some(watchers) = self.watches.agent_watchers.get_mut(watched_agent_id) {
@@ -2220,21 +2225,16 @@ impl EventRenderer {
             let watchers = self
                 .watches
                 .agent_watchers
-                .entry(watched_agent_id.to_string())
+                .entry(watched_agent_id.clone())
                 .or_default();
             if !watchers.iter().any(|candidate| candidate == &watcher_id) {
                 watchers.push(watcher_id.clone());
                 watchers.sort();
             }
         }
-        self.watches.watched_agents.insert(
-            watcher_id,
-            updated
-                .watched_agent_ids
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        );
+        self.watches
+            .watched_agents
+            .insert(watcher_id, updated.watched_agent_ids.to_vec());
         self.render_model_status_if_present();
         self.refresh_watched_agent_blocks();
     }
@@ -2257,7 +2257,7 @@ impl EventRenderer {
         }
         self.watches
             .agent_stats
-            .insert(updated.agent_id.to_string(), updated.clone());
+            .insert(updated.agent_id.clone(), updated.clone());
         self.watches.agent_estimated_api_costs.record(
             updated.agent_id.clone(),
             AgentCostSnapshot::new(
@@ -2266,7 +2266,7 @@ impl EventRenderer {
             ),
         );
         self.render_model_status_if_present();
-        if self.selection.current_agent_id.as_deref() == Some(updated.agent_id.as_str()) {
+        if self.selection.current_agent_id.as_ref() == Some(&updated.agent_id) {
             self.refresh_prompt_placeholder();
             self.resources.handle.redraw();
         }
@@ -2305,11 +2305,11 @@ impl EventRenderer {
             }
         }
         for (index, row) in visible.iter().enumerate() {
-            let edge_watcher = row.via.as_deref().unwrap_or(&current);
+            let edge_watcher = row.via.as_ref().unwrap_or(&current);
             let block = self.watched_agent_block(
                 edge_watcher,
                 &row.agent_id,
-                row.via.as_deref(),
+                row.via.as_ref(),
                 &projection,
             );
             let block_id = if let Some(block_id) = self
@@ -2382,7 +2382,7 @@ impl EventRenderer {
     /// rather than transient turn activity, owns row lifetime so running
     /// and idle transitions can only redraw the existing row. A `Done`
     /// report is the one terminal status that removes the row.
-    fn watched_agent_is_visible(&self, agent_id: &str) -> bool {
+    fn watched_agent_is_visible(&self, agent_id: &tau_proto::AgentId) -> bool {
         !matches!(
             self.watches
                 .watched_agent_work_statuses
@@ -2392,7 +2392,7 @@ impl EventRenderer {
         )
     }
 
-    fn agent_has_active_prompt(&self, agent_id: &str) -> bool {
+    fn agent_has_active_prompt(&self, agent_id: &tau_proto::AgentId) -> bool {
         self.watches
             .active_agent_prompts
             .get(agent_id)
@@ -2403,7 +2403,7 @@ impl EventRenderer {
     ///
     /// Prompt activity is retained as a compatibility/catch-up fallback until
     /// the first complete runtime snapshot for the watched agent is observed.
-    fn watched_agent_is_running(&self, watched_agent_id: &str) -> bool {
+    fn watched_agent_is_running(&self, watched_agent_id: &tau_proto::AgentId) -> bool {
         self.watches.agent_stats.get(watched_agent_id).map_or_else(
             || self.agent_has_active_prompt(watched_agent_id),
             |stats| stats.runtime_state == tau_proto::AgentRuntimeState::Running,
@@ -2449,13 +2449,13 @@ impl EventRenderer {
         }
         self.watches
             .watched_agent_work_statuses
-            .insert(message.sender_id.to_string(), status.clone());
+            .insert(message.sender_id.clone(), status.clone());
         self.refresh_watched_agent_blocks();
     }
 
     fn mark_agent_prompt_active(
         &mut self,
-        agent_id: &str,
+        agent_id: &tau_proto::AgentId,
         agent_prompt_id: &tau_proto::AgentPromptId,
     ) {
         if self
@@ -2480,7 +2480,7 @@ impl EventRenderer {
         self.remove_active_agent_prompt(agent_prompt_id);
         self.watches
             .active_agent_prompts
-            .entry(agent_id.to_owned())
+            .entry(agent_id.clone())
             .or_default()
             .insert(agent_prompt_id.clone());
         self.render_model_status_if_present();
@@ -2496,18 +2496,14 @@ impl EventRenderer {
             .event_owners
             .prompt_agents
             .get(agent_prompt_id)
-            .map(ToString::to_string)
+            .cloned()
             .or_else(|| self.agent_id_for_originator(originator))
         {
             self.mark_agent_prompt_active(&agent_id, agent_prompt_id);
         }
     }
 
-    fn mark_agent_prompt_inactive(
-        &mut self,
-        _agent_id: &str,
-        agent_prompt_id: &tau_proto::AgentPromptId,
-    ) {
+    fn mark_agent_prompt_inactive(&mut self, agent_prompt_id: &tau_proto::AgentPromptId) {
         self.watches
             .terminal_agent_prompts
             .insert(agent_prompt_id.clone());
@@ -2531,7 +2527,7 @@ impl EventRenderer {
     }
 
     /// Retires all cached watch topology and state involving an unloaded agent.
-    fn remove_agent_watch_endpoint(&mut self, agent_id: &str) {
+    fn remove_agent_watch_endpoint(&mut self, agent_id: &tau_proto::AgentId) {
         self.watches.watched_agents.remove(agent_id);
         for watched in self.watches.watched_agents.values_mut() {
             watched.retain(|watched_id| watched_id != agent_id);
@@ -2550,9 +2546,9 @@ impl EventRenderer {
 
     fn watched_agent_block(
         &self,
-        watcher_id: &str,
-        agent_id: &str,
-        via: Option<&str>,
+        watcher_id: &tau_proto::AgentId,
+        agent_id: &tau_proto::AgentId,
+        via: Option<&tau_proto::AgentId>,
         projection: &WatchGraphProjection,
     ) -> tau_cli_term::StyledBlock {
         let display_name = self
@@ -2569,15 +2565,17 @@ impl EventRenderer {
             .flatten();
         let activity = if directly_running {
             WatchedAgentActivity::Running
-        } else if let Some(witness) = witness.as_deref() {
-            WatchedAgentActivity::Watching { witness }
+        } else if let Some(witness) = witness.as_ref() {
+            WatchedAgentActivity::Watching {
+                witness: witness.as_str(),
+            }
         } else {
             WatchedAgentActivity::Idle
         };
         let display = watched_agent_tool_display(
             display_name.as_deref(),
-            agent_id,
-            via,
+            agent_id.as_str(),
+            via.map(tau_proto::AgentId::as_str),
             stats,
             activity,
             work_status,
@@ -2592,9 +2590,7 @@ impl EventRenderer {
         let Ok(session_id) = retargeter.session_id.lock().map(|id| id.clone()) else {
             return;
         };
-        let target_agent_id = self.selection.current_agent_id.as_deref().map(|agent_id| {
-            tau_proto::AgentId::parse(agent_id).expect("renderer stores valid agent ids")
-        });
+        let target_agent_id = self.selection.current_agent_id.clone();
         retarget_prompt_draft_snapshot(
             retargeter.handle.as_ref(),
             session_id,
@@ -2641,7 +2637,7 @@ impl EventRenderer {
     pub(crate) fn record_action_invocation(
         &mut self,
         invocation_id: tau_proto::ActionInvocationId,
-        owner_agent_id: Option<String>,
+        owner_agent_id: Option<tau_proto::AgentId>,
     ) {
         let owner = owner_agent_id
             .map(UiSnapshotOwner::Agent)
@@ -2695,19 +2691,23 @@ impl EventRenderer {
         }
     }
 
-    fn agent_status_description(&self, agent_id: &str) -> Option<String> {
+    fn agent_status_description(&self, agent_id: &tau_proto::AgentId) -> Option<String> {
         self.discovery
             .agent_display_names
             .lock()
             .ok()
             .and_then(|names| names.get(agent_id).cloned())
             .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty() && name != agent_id)
+            .filter(|name| !name.is_empty() && name != agent_id.as_str())
             .map(|name| format!("({name})"))
     }
 
     /// Builds a message-safe label from current local presentation metadata.
-    fn message_agent_display_label(&self, agent_id: &str, use_local_names: bool) -> String {
+    fn message_agent_display_label(
+        &self,
+        agent_id: &tau_proto::AgentId,
+        use_local_names: bool,
+    ) -> String {
         if !use_local_names {
             return format!("@{agent_id}");
         }
@@ -2717,7 +2717,11 @@ impl EventRenderer {
             .lock()
             .ok()
             .and_then(|names| names.get(agent_id).cloned());
-        Self::agent_identity_with_name(&format!("@{agent_id}"), display_name.as_deref(), agent_id)
+        Self::agent_identity_with_name(
+            &format!("@{agent_id}"),
+            display_name.as_deref(),
+            agent_id.as_str(),
+        )
     }
 
     /// Combines an unambiguous routing identity with bounded presentation-only
@@ -2736,26 +2740,26 @@ impl EventRenderer {
             .unwrap_or_else(|| identity.to_owned())
     }
 
-    fn watched_by_status(&self, agent_id: &str) -> Option<String> {
+    fn watched_by_status(&self, agent_id: &tau_proto::AgentId) -> Option<String> {
         let watchers = self.watches.agent_watchers.get(agent_id)?;
         let first = watchers.first()?;
         match watchers.len() {
             0 => None,
-            1 => Some(first.to_owned()),
+            1 => Some(first.to_string()),
             count => Some(format!("{first}, +{} more agents", count.saturating_sub(1))),
         }
     }
 
-    fn remember_agent(&mut self, agent_id: String) {
+    fn remember_agent(&mut self, agent_id: tau_proto::AgentId) {
         if let Ok(mut agents) = self.discovery.known_agents.lock()
-            && !agents.iter().any(|known| known == &agent_id)
+            && !agents.iter().any(|known| known == agent_id.as_str())
         {
-            agents.push(agent_id);
+            agents.push(agent_id.into_string());
             agents.sort();
         }
     }
 
-    fn remember_agent_display_name(&mut self, agent_id: &str, display_name: &str) {
+    fn remember_agent_display_name(&mut self, agent_id: &tau_proto::AgentId, display_name: &str) {
         let mut changed = false;
         if let Ok(mut names) = self.discovery.agent_display_names.lock() {
             let display_name = display_name.trim();
@@ -2763,7 +2767,7 @@ impl EventRenderer {
                 changed = names
                     .get(agent_id)
                     .is_none_or(|known| known != display_name);
-                names.insert(agent_id.to_owned(), display_name.to_owned());
+                names.insert(agent_id.clone(), display_name.to_owned());
             }
         }
         if changed {
@@ -2794,16 +2798,16 @@ impl EventRenderer {
     }
 
     fn mark_agent_live(&mut self, agent_id: tau_proto::AgentId) {
-        self.remember_agent(agent_id.to_string());
+        self.remember_agent(agent_id.clone());
         if let Ok(mut navigation) = self.discovery.agent_navigation.lock() {
             navigation.mark_live(agent_id);
         }
         self.render_model_status_if_present();
     }
 
-    fn remember_agent_ephemeral(&mut self, agent_id: &str) {
+    fn remember_agent_ephemeral(&mut self, agent_id: &tau_proto::AgentId) {
         if let Ok(mut agents) = self.discovery.ephemeral_agents.lock() {
-            agents.insert(agent_id.to_owned());
+            agents.insert(agent_id.clone());
         }
     }
 
@@ -2921,7 +2925,7 @@ impl EventRenderer {
 
     /// Reports whether generic prompt fallback still marks an agent active.
     #[cfg(test)]
-    pub(crate) fn agent_has_active_prompt_for_test(&self, agent_id: &str) -> bool {
+    pub(crate) fn agent_has_active_prompt_for_test(&self, agent_id: &tau_proto::AgentId) -> bool {
         self.watches.active_agent_prompts.contains_key(agent_id)
     }
 
@@ -3926,7 +3930,7 @@ impl EventRenderer {
         let right = PriorityLineAlignment::Right;
 
         match (
-            self.selection.current_agent_id.as_deref(),
+            self.selection.current_agent_id.as_ref(),
             self.role.current_role.as_deref(),
             self.role.current_model.as_ref(),
         ) {
@@ -4094,7 +4098,7 @@ impl EventRenderer {
                 ),
             );
         }
-        if let Some(agent_id) = self.selection.current_agent_id.as_deref() {
+        if let Some(agent_id) = self.selection.current_agent_id.as_ref() {
             let costs = self.watches.agent_stats.get(agent_id).map(|stats| {
                 AgentCostSnapshot::new(
                     stats.estimated_api_cost,
@@ -4208,7 +4212,10 @@ impl EventRenderer {
     }
 
     /// Returns detailed turn activity with a live-prompt fallback before stats.
-    fn selected_agent_turn_activity(&self, agent_id: &str) -> tau_proto::AgentTurnActivity {
+    fn selected_agent_turn_activity(
+        &self,
+        agent_id: &tau_proto::AgentId,
+    ) -> tau_proto::AgentTurnActivity {
         self.watches.agent_stats.get(agent_id).map_or_else(
             || {
                 if self.transcript.status.main_agent_turn_active
@@ -4224,7 +4231,10 @@ impl EventRenderer {
     }
 
     /// Returns the selected-agent work phase and escaped task title.
-    fn selected_agent_work_status(&self, agent_id: &str) -> (&'static str, Option<String>) {
+    fn selected_agent_work_status(
+        &self,
+        agent_id: &tau_proto::AgentId,
+    ) -> (&'static str, Option<String>) {
         let Some(status) = self
             .watches
             .agent_stats
@@ -4266,7 +4276,7 @@ impl EventRenderer {
         let mut watched = HashSet::new();
         for watched_agent_ids in self.watches.watched_agents.values() {
             for agent_id in watched_agent_ids {
-                watched.insert(agent_id.as_str());
+                watched.insert(agent_id);
             }
         }
         let projection = self.watch_activity_projection();
@@ -4276,15 +4286,13 @@ impl EventRenderer {
             .iter()
             .filter(|(agent_id, prompts)| {
                 !prompts.is_empty()
-                    && !watched.contains(agent_id.as_str())
-                    && self.selection.current_agent_id.as_deref() != Some(agent_id.as_str())
+                    && !watched.contains(agent_id)
+                    && self.selection.current_agent_id.as_ref() != Some(agent_id)
             });
         projection
             .effective_targets()
             .iter()
-            .filter(|agent_id| {
-                self.selection.current_agent_id.as_deref() != Some(agent_id.as_str())
-            })
+            .filter(|agent_id| self.selection.current_agent_id.as_ref() != Some(agent_id))
             .count()
             + prompt_only.count()
     }
@@ -4353,7 +4361,7 @@ impl EventRenderer {
                 if triggered.originator.is_user() {
                     self.mark_agent_live(triggered.agent_id.clone());
                 } else {
-                    self.remember_agent(triggered.agent_id.to_string());
+                    self.remember_agent(triggered.agent_id.clone());
                 }
             }
             Event::AgentPromptCreated(prompt) => {
@@ -4837,11 +4845,11 @@ impl EventRenderer {
             && self.selection.current_agent_id.is_none()
             && self.selection.displayed_agent_id.is_none()
             && !self.selection.awaiting_new_agent_selection
-            && self.can_select_target_from_empty(target_agent_id.as_str())
+            && self.can_select_target_from_empty(target_agent_id)
         {
-            self.show_agent_transcript(target_agent_id.to_string());
+            self.show_agent_transcript(target_agent_id.clone());
             self.selection.awaiting_new_agent_selection = false;
-            self.set_current_agent_id(Some(target_agent_id.to_string()), true);
+            self.set_current_agent_id(Some(target_agent_id.clone()), true);
             self.refresh_prompt_placeholder();
             self.render_model_status();
             self.flush_pending_initial_discovery();
@@ -4874,9 +4882,8 @@ impl EventRenderer {
             let (_, calls) = prepared
                 .finished()
                 .expect("prepared provider terminal preserves projection");
-            let selected = self.selection.displayed_agent_id.as_deref()
-                == Some(finished.agent_id.as_str())
-                || self.selection.current_agent_id.as_deref() == Some(finished.agent_id.as_str());
+            let selected = self.selection.displayed_agent_id.as_ref() == Some(&finished.agent_id)
+                || self.selection.current_agent_id.as_ref() == Some(&finished.agent_id);
             if selected {
                 let is_standalone = self
                     .transcript
@@ -4997,7 +5004,7 @@ impl EventRenderer {
             if self.discovery.initialized_discovery_epochs.insert(key) {
                 self.discovery
                     .pending_initial_discovery
-                    .entry(initialized.agent_id.to_string())
+                    .entry(initialized.agent_id.clone())
                     .or_default()
                     .push(prepared.deferred(recorded_at));
             }
@@ -5021,11 +5028,11 @@ impl EventRenderer {
             return;
         }
         let target_agent_id = self.agent_id_for_event(event);
-        if let Some(target_agent_id) = target_agent_id.as_deref() {
+        if let Some(target_agent_id) = target_agent_id.as_ref() {
             tracing::trace!(
                 target: "tau_cli::frontend_progress",
-                agent_id = target_agent_id,
-                selected = self.selection.displayed_agent_id.as_deref() == Some(target_agent_id),
+                agent_id = %target_agent_id,
+                selected = self.selection.displayed_agent_id.as_ref() == Some(target_agent_id),
                 "renderer target resolved"
             );
         }
@@ -5034,7 +5041,7 @@ impl EventRenderer {
             self.update_agent_in_progress();
             return;
         };
-        if deferred_metadata_target.as_deref() == Some(target_agent_id.as_str())
+        if deferred_metadata_target.as_ref() == Some(&target_agent_id)
             && let Some(events) = self
                 .discovery
                 .pending_initial_discovery
@@ -5045,7 +5052,7 @@ impl EventRenderer {
         }
         if self.selection.current_agent_id.is_none() {
             if self.event_selects_agent_from_empty(event, &target_agent_id) {
-                if self.selection.displayed_agent_id.as_deref() != Some(target_agent_id.as_str()) {
+                if self.selection.displayed_agent_id.as_ref() != Some(&target_agent_id) {
                     self.show_agent_transcript(target_agent_id.clone());
                 }
                 self.selection.awaiting_new_agent_selection = false;
@@ -5084,7 +5091,7 @@ impl EventRenderer {
             self.update_agent_in_progress();
             return;
         }
-        if self.selection.displayed_agent_id.as_deref() == Some(target_agent_id.as_str()) {
+        if self.selection.displayed_agent_id.as_ref() == Some(&target_agent_id) {
             self.handle_recorded_at_for_visible_agent(&prepared, recorded_at);
             self.update_agent_in_progress();
             return;
@@ -5243,7 +5250,7 @@ impl EventRenderer {
         let is_global_message_fact = crate::message_fact_render::target_agent_id(event).is_some();
         match owner {
             UiSnapshotOwner::Agent(agent_id)
-                if self.selection.displayed_agent_id.as_deref() == Some(agent_id.as_str()) =>
+                if self.selection.displayed_agent_id.as_ref() == Some(&agent_id) =>
             {
                 self.handle_recorded_at_for_visible_agent(prepared, recorded_at);
             }
@@ -5268,7 +5275,7 @@ impl EventRenderer {
         &mut self,
         prepared: &PreparedRendererEvent<'_>,
         recorded_at: UnixMicros,
-        target_agent_id: String,
+        target_agent_id: tau_proto::AgentId,
     ) {
         let event = prepared.event();
         self.resources
@@ -5295,7 +5302,7 @@ impl EventRenderer {
             this.handle_recorded_at_for_visible_agent(prepared, recorded_at);
         });
         let target_output = self.resources.handle.take_detached();
-        tracing::trace!(target: "tau_cli::frontend_progress", agent_id = target_agent_id, blocks = target_output.block_count(), "hidden presentation updated");
+        tracing::trace!(target: "tau_cli::frontend_progress", agent_id = %target_agent_id, blocks = target_output.block_count(), "hidden presentation updated");
         let target_state = self.take_visible_agent_state_with_output(target_output);
         self.selection
             .agents_ui_state
@@ -5349,12 +5356,16 @@ impl EventRenderer {
         self.publish_editor_conversation_context();
     }
 
-    fn agent_message_visible_on_empty_screen(&self, target_agent_id: &str) -> bool {
+    fn agent_message_visible_on_empty_screen(&self, target_agent_id: &tau_proto::AgentId) -> bool {
         !self.selection.awaiting_new_agent_selection
             || !self.selection.agents_ui_state.contains_key(target_agent_id)
     }
 
-    fn event_selects_agent_from_empty(&self, event: &Event, target_agent_id: &str) -> bool {
+    fn event_selects_agent_from_empty(
+        &self,
+        event: &Event,
+        target_agent_id: &tau_proto::AgentId,
+    ) -> bool {
         match event {
             Event::AgentPromptCreated(prompt) => {
                 prompt.originator.is_user() && self.can_select_target_from_empty(target_agent_id)
@@ -5381,7 +5392,7 @@ impl EventRenderer {
         }
     }
 
-    fn can_select_target_from_empty(&self, target_agent_id: &str) -> bool {
+    fn can_select_target_from_empty(&self, target_agent_id: &tau_proto::AgentId) -> bool {
         // When the UI is in the explicit start-new-agent state (`:agent new` or
         // `:agent switch none`), background activity from the previously visible
         // agent must not steal selection while the user is typing the prompt
@@ -5502,7 +5513,7 @@ impl EventRenderer {
         match event {
             Event::StartAgentRequest(_) => true,
             Event::StartAgentAccepted(accepted) => {
-                let agent_id = accepted.agent_id.to_string();
+                let agent_id = accepted.agent_id.clone();
                 self.event_owners
                     .query_agents
                     .insert(accepted.query_id.clone(), agent_id.clone());
@@ -5510,7 +5521,7 @@ impl EventRenderer {
                 true
             }
             Event::AgentStarted(started) => {
-                let agent_id = started.agent_id.to_string();
+                let agent_id = started.agent_id.clone();
                 self.mark_agent_live(started.agent_id.clone());
                 if started.ephemeral {
                     self.remember_agent_ephemeral(&agent_id);
@@ -5521,10 +5532,10 @@ impl EventRenderer {
                 true
             }
             Event::AgentDisplayNameSet(name) => {
-                let agent_id = name.agent_id.to_string();
+                let agent_id = name.agent_id.clone();
                 self.remember_agent(agent_id.clone());
                 self.remember_agent_display_name(&agent_id, &name.display_name);
-                if self.selection.current_agent_id.as_deref() == Some(agent_id.as_str()) {
+                if self.selection.current_agent_id.as_ref() == Some(&agent_id) {
                     self.render_model_status_if_present();
                 }
                 true
@@ -5535,7 +5546,7 @@ impl EventRenderer {
                 true
             }
             Event::AgentStatsUpdated(updated) => {
-                self.remember_agent(updated.agent_id.to_string());
+                self.remember_agent(updated.agent_id.clone());
                 self.handle_agent_stats_updated(updated);
                 true
             }
@@ -5543,12 +5554,12 @@ impl EventRenderer {
                 if let Ok(mut navigation) = self.discovery.agent_navigation.lock() {
                     navigation.unload(&unloaded.agent_id);
                 }
-                self.remove_agent_watch_endpoint(unloaded.agent_id.as_str());
-                self.watches.agent_models.remove(unloaded.agent_id.as_str());
+                self.remove_agent_watch_endpoint(&unloaded.agent_id);
+                self.watches.agent_models.remove(&unloaded.agent_id);
                 true
             }
             Event::HarnessAgentContextUsageChanged(changed) => {
-                self.remember_agent(changed.agent_id.to_string());
+                self.remember_agent(changed.agent_id.clone());
                 true
             }
             _ => false,
@@ -5558,7 +5569,7 @@ impl EventRenderer {
     fn learn_agent_prompt_metadata(&mut self, event: &Event) -> bool {
         match event {
             Event::UiPromptSubmitted(prompt) => {
-                let agent_id = prompt.agent_id.to_string();
+                let agent_id = prompt.agent_id.clone();
                 // This is only a transient UI request. Activation waits for an
                 // accepted queue or committed submission event from the harness.
                 self.remember_agent(agent_id.clone());
@@ -5575,7 +5586,7 @@ impl EventRenderer {
                 true
             }
             Event::AgentPromptSubmitted(prompt) => {
-                let agent_id = prompt.agent_id.to_string();
+                let agent_id = prompt.agent_id.clone();
                 if let tau_proto::PromptOriginator::Extension { query_id, .. } = &prompt.originator
                 {
                     self.event_owners
@@ -5591,7 +5602,7 @@ impl EventRenderer {
                 if triggered.originator.is_user() {
                     self.mark_agent_live(triggered.agent_id.clone());
                 } else {
-                    self.remember_agent(triggered.agent_id.to_string());
+                    self.remember_agent(triggered.agent_id.clone());
                 }
                 true
             }
@@ -5613,10 +5624,7 @@ impl EventRenderer {
             }
             Event::AgentPromptTerminated(terminated) => {
                 self.mark_agent_live(terminated.agent_id.clone());
-                self.mark_agent_prompt_inactive(
-                    terminated.agent_id.as_str(),
-                    &terminated.agent_prompt_id,
-                );
+                self.mark_agent_prompt_inactive(&terminated.agent_prompt_id);
                 true
             }
             Event::ProviderPromptSubmitted(submitted) => {
@@ -5627,7 +5635,7 @@ impl EventRenderer {
                 true
             }
             Event::ProviderResponseUpdated(update) => {
-                let agent_id = update.agent_id.to_string();
+                let agent_id = update.agent_id.clone();
                 if self.is_stale_terminal_stats_only_update(update) {
                     self.clear_main_agent_turn_active_everywhere();
                     return true;
@@ -5661,15 +5669,15 @@ impl EventRenderer {
         agent_prompt_id: &tau_proto::AgentPromptId,
         model: &tau_proto::ModelId,
     ) {
-        let agent_id_string = agent_id.to_string();
+        let agent_id = agent_id.clone();
         self.watches
             .agent_models
-            .insert(agent_id_string.clone(), model.clone());
+            .insert(agent_id.clone(), model.clone());
         self.mark_agent_live(agent_id.clone());
         self.event_owners
             .prompt_agents
             .insert(agent_prompt_id.clone(), agent_id.clone());
-        self.mark_agent_prompt_active(agent_id.as_str(), agent_prompt_id);
+        self.mark_agent_prompt_active(&agent_id, agent_prompt_id);
     }
 
     fn learn_provider_tool_metadata(&mut self, prepared: &PreparedRendererEvent<'_>) -> bool {
@@ -5686,10 +5694,7 @@ impl EventRenderer {
                 if finished.originator.is_user() && calls.is_empty() {
                     self.clear_main_agent_turn_active_everywhere();
                 }
-                self.mark_agent_prompt_inactive(
-                    finished.agent_id.as_str(),
-                    &finished.agent_prompt_id,
-                );
+                self.mark_agent_prompt_inactive(&finished.agent_prompt_id);
                 self.mark_agent_live(finished.agent_id.clone());
                 self.event_owners
                     .prompt_agents
@@ -5702,7 +5707,7 @@ impl EventRenderer {
                 true
             }
             Event::ToolStarted(started) => {
-                let agent_id = started.agent_id.to_string();
+                let agent_id = started.agent_id.clone();
                 self.remember_agent(agent_id.clone());
                 self.event_owners
                     .tool_agents
@@ -5718,7 +5723,7 @@ impl EventRenderer {
         match event {
             Event::UiShellCommand(command) => {
                 if let Some(agent_id) = command.target_agent_id.as_ref() {
-                    self.remember_agent(agent_id.to_string());
+                    self.remember_agent(agent_id.clone());
                     self.event_owners
                         .shell_agents
                         .insert(command.command_id.clone(), agent_id.clone());
@@ -5727,7 +5732,7 @@ impl EventRenderer {
             }
             Event::ShellCommandProgress(progress) => {
                 if let Some(agent_id) = progress.target_agent_id.as_ref() {
-                    self.remember_agent(agent_id.to_string());
+                    self.remember_agent(agent_id.clone());
                     self.event_owners
                         .shell_agents
                         .insert(progress.command_id.clone(), agent_id.clone());
@@ -5736,7 +5741,7 @@ impl EventRenderer {
             }
             Event::ShellCommandFinished(finished) => {
                 if let Some(agent_id) = finished.target_agent_id.as_ref() {
-                    self.remember_agent(agent_id.to_string());
+                    self.remember_agent(agent_id.clone());
                     self.event_owners
                         .shell_agents
                         .insert(finished.command_id.clone(), agent_id.clone());
@@ -5750,13 +5755,13 @@ impl EventRenderer {
     fn learn_agent_message_metadata(&mut self, event: &Event) {
         match event {
             Event::AgentMessageSent(message) => {
-                self.remember_agent(message.sender_id.to_string());
+                self.remember_agent(message.sender_id.clone());
                 if let Some(agent_id) = Self::agent_message_sent_recipient_agent_id(message) {
-                    self.remember_agent(agent_id.to_owned());
+                    self.remember_agent(agent_id.clone());
                 }
             }
             Event::AgentMessageReceived(message) => {
-                self.remember_agent(message.sender_id.to_string());
+                self.remember_agent(message.sender_id.clone());
                 self.mark_agent_live(message.recipient_id.clone());
                 if let Some(status) = &message.watch_work_status {
                     self.handle_watched_agent_work_status(message, status);
@@ -5766,13 +5771,13 @@ impl EventRenderer {
         }
     }
 
-    fn agent_id_for_event(&self, event: &Event) -> Option<String> {
+    fn agent_id_for_event(&self, event: &Event) -> Option<tau_proto::AgentId> {
         self.tool_event_agent_id(event)
             .or_else(|| Self::agent_message_event_agent_id(event))
             .or_else(|| Self::direct_agent_event_agent_id(event))
             .or_else(|| self.shell_event_agent_id(event))
             .or_else(|| self.prompt_event_agent_id(event))
-            .into_agent_id(self.selection.current_agent_id.as_deref())
+            .into_agent_id(self.selection.current_agent_id.as_ref())
     }
 
     /// Resolve every message fact to its loaded transcript or the no-agent
@@ -5787,7 +5792,7 @@ impl EventRenderer {
                     .expect("agent navigation lock")
                     .is_live(&agent_id) =>
             {
-                Some(UiSnapshotOwner::Agent(agent_id.to_string()))
+                Some(UiSnapshotOwner::Agent(agent_id.clone()))
             }
             path_crate_message_fact_render::MessageFactTarget::Valid(_)
             | path_crate_message_fact_render::MessageFactTarget::Invalid => {
@@ -5799,29 +5804,26 @@ impl EventRenderer {
     fn tool_event_agent_id(&self, event: &Event) -> EventAgentIdResolution {
         match event {
             Event::ToolRequest(request) => EventAgentIdResolution::from_agent_id(
-                self.event_owners
-                    .tool_agents
-                    .get(&request.call_id)
-                    .map(ToString::to_string),
+                self.event_owners.tool_agents.get(&request.call_id).cloned(),
             ),
             Event::ToolStarted(started) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
                     .get(&started.call_id)
-                    .map(ToString::to_string)
-                    .or_else(|| Some(started.agent_id.to_string())),
+                    .cloned()
+                    .or_else(|| Some(started.agent_id.clone())),
             ),
             Event::ToolProgress(progress) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
                     .get(&progress.call_id)
-                    .map(ToString::to_string),
+                    .cloned(),
             ),
             Event::ToolResultDisplay(result) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
                     .get(&result.call_id)
-                    .map(ToString::to_string)
+                    .cloned()
                     .or_else(|| self.agent_id_for_originator(&result.originator)),
             ),
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
@@ -5829,7 +5831,7 @@ impl EventRenderer {
                     self.event_owners
                         .tool_agents
                         .get(&result.call_id)
-                        .map(ToString::to_string)
+                        .cloned()
                         .or_else(|| self.agent_id_for_originator(&result.originator)),
                 )
             }
@@ -5837,32 +5839,23 @@ impl EventRenderer {
                 self.event_owners
                     .tool_agents
                     .get(&error.call_id)
-                    .map(ToString::to_string)
+                    .cloned()
                     .or_else(|| self.agent_id_for_originator(&error.originator)),
             ),
             Event::ToolBackgroundResultDisplay(result) => EventAgentIdResolution::from_agent_id(
-                self.event_owners
-                    .tool_agents
-                    .get(&result.call_id)
-                    .map(ToString::to_string),
+                self.event_owners.tool_agents.get(&result.call_id).cloned(),
             ),
             Event::ToolBackgroundResult(result) => EventAgentIdResolution::from_agent_id(
-                self.event_owners
-                    .tool_agents
-                    .get(&result.call_id)
-                    .map(ToString::to_string),
+                self.event_owners.tool_agents.get(&result.call_id).cloned(),
             ),
             Event::ToolBackgroundError(error) => EventAgentIdResolution::from_agent_id(
-                self.event_owners
-                    .tool_agents
-                    .get(&error.call_id)
-                    .map(ToString::to_string),
+                self.event_owners.tool_agents.get(&error.call_id).cloned(),
             ),
             Event::ToolCancelled(cancelled) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
                     .get(&cancelled.call_id)
-                    .map(ToString::to_string),
+                    .cloned(),
             ),
             _ => EventAgentIdResolution::Unhandled,
         }
@@ -5871,10 +5864,10 @@ impl EventRenderer {
     fn agent_message_event_agent_id(event: &Event) -> EventAgentIdResolution {
         match event {
             Event::AgentMessageSent(message) => {
-                EventAgentIdResolution::Agent(message.sender_id.to_string())
+                EventAgentIdResolution::Agent(message.sender_id.clone())
             }
             Event::AgentMessageReceived(message) => {
-                EventAgentIdResolution::Agent(message.recipient_id.to_string())
+                EventAgentIdResolution::Agent(message.recipient_id.clone())
             }
             _ => EventAgentIdResolution::Unhandled,
         }
@@ -5882,98 +5875,88 @@ impl EventRenderer {
 
     fn direct_agent_event_agent_id(event: &Event) -> EventAgentIdResolution {
         match event {
-            Event::AgentStarted(started) => {
-                EventAgentIdResolution::Agent(started.agent_id.to_string())
-            }
+            Event::AgentStarted(started) => EventAgentIdResolution::Agent(started.agent_id.clone()),
             Event::AgentDisplayNameSet(name) => {
-                EventAgentIdResolution::Agent(name.agent_id.to_string())
+                EventAgentIdResolution::Agent(name.agent_id.clone())
             }
             Event::UiPromptSubmitted(prompt) => {
-                EventAgentIdResolution::Agent(prompt.agent_id.to_string())
+                EventAgentIdResolution::Agent(prompt.agent_id.clone())
             }
             Event::AgentPromptSubmitted(prompt) => {
-                EventAgentIdResolution::Agent(prompt.agent_id.to_string())
+                EventAgentIdResolution::Agent(prompt.agent_id.clone())
             }
             Event::AgentPromptQueued(queued) => {
-                EventAgentIdResolution::Agent(queued.agent_id.to_string())
+                EventAgentIdResolution::Agent(queued.agent_id.clone())
             }
             Event::AgentPromptRecalled(recalled) => {
-                EventAgentIdResolution::Agent(recalled.agent_id.to_string())
+                EventAgentIdResolution::Agent(recalled.agent_id.clone())
             }
             Event::AgentPromptRejected(rejected) => {
-                EventAgentIdResolution::Agent(rejected.agent_id.to_string())
+                EventAgentIdResolution::Agent(rejected.agent_id.clone())
             }
             Event::AgentPromptFailed(failed) => {
-                EventAgentIdResolution::Agent(failed.agent_id.to_string())
+                EventAgentIdResolution::Agent(failed.agent_id.clone())
             }
             Event::AgentPromptSteered(steered) => {
-                EventAgentIdResolution::Agent(steered.agent_id.to_string())
+                EventAgentIdResolution::Agent(steered.agent_id.clone())
             }
             Event::AgentCompactionTriggered(triggered) => {
-                EventAgentIdResolution::Agent(triggered.agent_id.to_string())
+                EventAgentIdResolution::Agent(triggered.agent_id.clone())
             }
             Event::AgentManualCompactionRequested(requested) => {
-                EventAgentIdResolution::Agent(requested.target_agent_id.to_string())
+                EventAgentIdResolution::Agent(requested.target_agent_id.clone())
             }
             Event::AgentManualCompactionRequestFailed(failed) => {
-                EventAgentIdResolution::Agent(failed.target_agent_id.to_string())
+                EventAgentIdResolution::Agent(failed.target_agent_id.clone())
             }
             Event::AgentStandaloneCompactionStarted(started) => {
-                EventAgentIdResolution::Agent(started.agent_id.to_string())
+                EventAgentIdResolution::Agent(started.agent_id.clone())
             }
             Event::AgentStandaloneCompactionFailed(failed) => {
-                EventAgentIdResolution::Agent(failed.agent_id.to_string())
+                EventAgentIdResolution::Agent(failed.agent_id.clone())
             }
             Event::AgentCompacted(compacted) => {
-                EventAgentIdResolution::Agent(compacted.agent_id.to_string())
+                EventAgentIdResolution::Agent(compacted.agent_id.clone())
             }
             Event::HarnessAgentContextUsageChanged(changed) => {
-                EventAgentIdResolution::Agent(changed.agent_id.to_string())
+                EventAgentIdResolution::Agent(changed.agent_id.clone())
             }
             Event::HarnessAgentContextInitialized(initialized) => {
-                EventAgentIdResolution::Agent(initialized.agent_id.to_string())
+                EventAgentIdResolution::Agent(initialized.agent_id.clone())
             }
             Event::ExtensionContextReady(ready) => {
-                EventAgentIdResolution::Agent(ready.agent_id.to_string())
+                EventAgentIdResolution::Agent(ready.agent_id.clone())
             }
-            Event::UiCancelPrompt(cancel) => EventAgentIdResolution::from_agent_id(
-                cancel.target_agent_id.as_ref().map(ToString::to_string),
-            ),
-            Event::UiRecallQueuedPrompt(recall) => EventAgentIdResolution::from_agent_id(
-                recall.target_agent_id.as_ref().map(ToString::to_string),
-            ),
+            Event::UiCancelPrompt(cancel) => {
+                EventAgentIdResolution::from_agent_id(cancel.target_agent_id.as_ref().cloned())
+            }
+            Event::UiRecallQueuedPrompt(recall) => {
+                EventAgentIdResolution::from_agent_id(recall.target_agent_id.as_ref().cloned())
+            }
             _ => EventAgentIdResolution::Unhandled,
         }
     }
 
     fn shell_event_agent_id(&self, event: &Event) -> EventAgentIdResolution {
         match event {
-            Event::UiShellCommand(command) => EventAgentIdResolution::from_agent_id(
-                command.target_agent_id.as_ref().map(ToString::to_string),
-            ),
+            Event::UiShellCommand(command) => {
+                EventAgentIdResolution::from_agent_id(command.target_agent_id.as_ref().cloned())
+            }
             Event::ShellCommandProgress(progress) => EventAgentIdResolution::from_agent_id(
-                progress
-                    .target_agent_id
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .or_else(|| {
-                        self.event_owners
-                            .shell_agents
-                            .get(&progress.command_id)
-                            .map(ToString::to_string)
-                    }),
+                progress.target_agent_id.as_ref().cloned().or_else(|| {
+                    self.event_owners
+                        .shell_agents
+                        .get(&progress.command_id)
+                        .cloned()
+                }),
             ),
             Event::ShellCommandFinished(finished) => EventAgentIdResolution::from_agent_id(
-                finished
-                    .target_agent_id
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .or_else(|| {
-                        self.event_owners
-                            .shell_agents
-                            .get(&finished.command_id)
-                            .map(ToString::to_string)
-                    }),
+                finished.target_agent_id.as_ref().cloned().or_else(|| {
+                    self.event_owners
+                        .shell_agents
+                        .get(&finished.command_id)
+                        .cloned()
+                }),
             ),
             _ => EventAgentIdResolution::Unhandled,
         }
@@ -5982,10 +5965,10 @@ impl EventRenderer {
     fn prompt_event_agent_id(&self, event: &Event) -> EventAgentIdResolution {
         match event {
             Event::AgentPromptCreated(prompt) => {
-                EventAgentIdResolution::Agent(prompt.agent_id.to_string())
+                EventAgentIdResolution::Agent(prompt.agent_id.clone())
             }
             Event::AgentPromptStarted(prompt) => {
-                EventAgentIdResolution::Agent(prompt.agent_id.to_string())
+                EventAgentIdResolution::Agent(prompt.agent_id.clone())
             }
             Event::AgentPromptTerminated(terminated) => EventAgentIdResolution::from_agent_id(
                 self.agent_id_for_prompt(&terminated.agent_prompt_id, &terminated.originator),
@@ -5994,18 +5977,18 @@ impl EventRenderer {
                 self.event_owners
                     .prompt_agents
                     .get(&submitted.agent_prompt_id)
-                    .map(ToString::to_string)
+                    .cloned()
                     .or_else(|| self.agent_id_for_originator(&submitted.originator)),
             ),
             Event::ProviderResponseUpdated(update) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .prompt_agents
                     .get(&update.agent_prompt_id)
-                    .map(ToString::to_string)
-                    .or_else(|| Some(update.agent_id.to_string())),
+                    .cloned()
+                    .or_else(|| Some(update.agent_id.clone())),
             ),
             Event::ProviderResponseFinished(finished) => {
-                EventAgentIdResolution::Agent(finished.agent_id.to_string())
+                EventAgentIdResolution::Agent(finished.agent_id.clone())
             }
             _ => EventAgentIdResolution::Unhandled,
         }
@@ -6015,15 +5998,18 @@ impl EventRenderer {
         &self,
         agent_prompt_id: &tau_proto::AgentPromptId,
         originator: &tau_proto::PromptOriginator,
-    ) -> Option<String> {
+    ) -> Option<tau_proto::AgentId> {
         self.event_owners
             .prompt_agents
             .get(agent_prompt_id)
-            .map(ToString::to_string)
+            .cloned()
             .or_else(|| self.agent_id_for_originator(originator))
     }
 
-    fn agent_id_for_originator(&self, originator: &tau_proto::PromptOriginator) -> Option<String> {
+    fn agent_id_for_originator(
+        &self,
+        originator: &tau_proto::PromptOriginator,
+    ) -> Option<tau_proto::AgentId> {
         match originator {
             tau_proto::PromptOriginator::User => self.selection.current_agent_id.clone(),
             tau_proto::PromptOriginator::Extension { query_id, .. } => {
@@ -6079,7 +6065,7 @@ impl EventRenderer {
                 else {
                     return false;
                 };
-                self.selection.displayed_agent_id.as_deref() == Some(agent_id.as_str())
+                self.selection.displayed_agent_id.as_ref() == Some(&agent_id)
             });
         let target_context = if target_context {
             path_crate_message_fact_render::MessageFactTargetContext::Implied
@@ -6303,8 +6289,7 @@ impl EventRenderer {
     ) -> Vec<(String, bool)> {
         let (sender, recipient, kind, local_sender_id, local_recipient_id) = match event {
             Event::AgentMessageSent(message) => {
-                let sender =
-                    self.message_agent_display_label(message.sender_id.as_str(), use_local_names);
+                let sender = self.message_agent_display_label(&message.sender_id, use_local_names);
                 let sender = (sender, Some(format!("@{}", message.sender_id)));
                 let recipient = self.agent_message_sent_recipient_display(message, use_local_names);
                 let recipient_identity = match &message.recipient {
@@ -6336,8 +6321,8 @@ impl EventRenderer {
                     |session_id| format!("{session_id}/@{}", message.sender_id),
                 ));
                 let sender = (sender, sender_identity);
-                let recipient = self
-                    .message_agent_display_label(message.recipient_id.as_str(), use_local_names);
+                let recipient =
+                    self.message_agent_display_label(&message.recipient_id, use_local_names);
                 let recipient = (recipient, Some(format!("@{}", message.recipient_id)));
                 (
                     sender,
@@ -6497,7 +6482,7 @@ impl EventRenderer {
     ) -> String {
         match &message.recipient {
             tau_proto::AgentMessageRecipient::Agent { agent_id } => {
-                self.message_agent_display_label(agent_id.as_str(), use_local_names)
+                self.message_agent_display_label(agent_id, use_local_names)
             }
             tau_proto::AgentMessageRecipient::ExternalAgent {
                 session_id,
@@ -6514,16 +6499,16 @@ impl EventRenderer {
         use_local_names: bool,
     ) -> String {
         message.sender_session_id.as_ref().map_or_else(
-            || self.message_agent_display_label(message.sender_id.as_str(), use_local_names),
+            || self.message_agent_display_label(&message.sender_id, use_local_names),
             |session_id| format!("{session_id}/@{}", message.sender_id),
         )
     }
 
     fn agent_message_sent_recipient_agent_id(
         message: &tau_proto::AgentMessageSent,
-    ) -> Option<&str> {
+    ) -> Option<&tau_proto::AgentId> {
         match &message.recipient {
-            tau_proto::AgentMessageRecipient::Agent { agent_id } => Some(agent_id.as_str()),
+            tau_proto::AgentMessageRecipient::Agent { agent_id } => Some(agent_id),
             tau_proto::AgentMessageRecipient::ExternalAgent { .. } => None,
         }
     }
@@ -7486,12 +7471,11 @@ impl EventRenderer {
     /// projection and the generic prompt-activity fallback.
     fn complete_standalone_compaction_prompt(
         &mut self,
-        agent_id: &tau_proto::AgentId,
         prompt_id: &tau_proto::AgentPromptId,
         terminal: Option<(&str, CompactionStatus)>,
     ) {
         self.finish_standalone_compaction_prompt(prompt_id, terminal, true);
-        self.mark_agent_prompt_inactive(agent_id.as_str(), prompt_id);
+        self.mark_agent_prompt_inactive(prompt_id);
         self.transcript
             .status
             .agent_activity
@@ -8847,9 +8831,9 @@ impl EventRenderer {
             "routing standalone historical shell terminal"
         );
         if let Some(target) = finished.target_agent_id.as_ref()
-            && self.selection.displayed_agent_id.as_deref() != Some(target.as_str())
+            && self.selection.displayed_agent_id.as_ref() != Some(target)
         {
-            self.handle_recorded_at_for_hidden_agent(&prepared, recorded_at, target.to_string());
+            self.handle_recorded_at_for_hidden_agent(&prepared, recorded_at, target.clone());
         } else {
             self.handle_recorded_at_for_visible_agent(&prepared, recorded_at);
         }
@@ -8902,11 +8886,13 @@ impl EventRenderer {
                 }
                 self.selection.no_agent_ui_state = no_agent;
             }
-            if start.target_agent_id.as_ref().is_some_and(|target| {
-                self.selection.displayed_agent_id.as_deref() != Some(target.as_str())
-            }) {
+            if start
+                .target_agent_id
+                .as_ref()
+                .is_some_and(|target| self.selection.displayed_agent_id.as_ref() != Some(target))
+            {
                 if let Some(target) = start.target_agent_id.as_ref()
-                    && let Some(mut state) = self.selection.agents_ui_state.remove(target.as_str())
+                    && let Some(mut state) = self.selection.agents_ui_state.remove(target)
                 {
                     if let Some(shell) = state.transcript.runtime.shell_blocks.remove(command_id) {
                         self.resources
@@ -8915,9 +8901,7 @@ impl EventRenderer {
                         self.resources.handle.remove_block(shell.block_id);
                         state.output = self.resources.handle.take_detached();
                     }
-                    self.selection
-                        .agents_ui_state
-                        .insert(target.to_string(), state);
+                    self.selection.agents_ui_state.insert(target.clone(), state);
                 }
                 self.event_owners.shell_agents.remove(command_id);
                 continue;
@@ -9297,7 +9281,6 @@ impl EventRenderer {
                         compacted.compaction_output_tokens,
                     );
                     self.complete_standalone_compaction_prompt(
-                        &compacted.agent_id,
                         &prompt_id,
                         Some((&status, CompactionStatus::Success)),
                     );
@@ -9312,7 +9295,6 @@ impl EventRenderer {
                     .remove(&failed.transaction_id)
                 {
                     self.complete_standalone_compaction_prompt(
-                        &failed.agent_id,
                         &prompt_id,
                         Some(("failed", CompactionStatus::Failure)),
                     );

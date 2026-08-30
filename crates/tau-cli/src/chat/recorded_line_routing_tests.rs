@@ -54,7 +54,7 @@ fn action_state_with_email_list() -> ActionCommandState {
 }
 
 fn routing_state_with_selected_agent(selected: Option<&str>) -> InputRoutingState {
-    let current_agent_state = Arc::new(Mutex::new(selected.map(str::to_owned)));
+    let current_agent_state = Arc::new(Mutex::new(selected.map(agent_id)));
     let known_agents = Arc::new(Mutex::new(Vec::new()));
     let agent_navigation = Arc::new(Mutex::new(AgentNavigation::default()));
     let ephemeral_agents = Arc::new(Mutex::new(path_std_collections::HashSet::new()));
@@ -497,9 +497,9 @@ fn dynamic_action_prepare_records_matching_selected_agent_owner() {
         tau_cli_term::CompletionData::new(),
         tau_themes::Theme::new(),
     );
-    renderer.switch_agent("agent-a".to_owned());
+    renderer.switch_agent(agent_id("agent-a"));
     renderer.record_action_invocation(invocation_id, owner_agent_id);
-    renderer.switch_agent("agent-b".to_owned());
+    renderer.switch_agent(agent_id("agent-b"));
     renderer.handle(&Event::ActionResult(tau_proto::ActionResult {
         invocation_id: invoke.invocation_id.clone(),
         action_id: invoke.action_id.clone(),
@@ -510,7 +510,7 @@ fn dynamic_action_prepare_records_matching_selected_agent_owner() {
     handle.redraw_sync();
     assert!(!vt.screen_contains(80, "prepared action output"));
 
-    renderer.switch_agent("agent-a".to_owned());
+    renderer.switch_agent(agent_id("agent-a"));
     handle.redraw_sync();
     assert!(vt.screen_contains(80, "prepared action output"));
 }
@@ -1075,7 +1075,7 @@ fn model_selection_with_selected_agent_emits_targeted_update() {
 /// display-name event shape as the explicit `:agent name` path.
 #[test]
 fn name_alias_with_selected_agent_emits_display_name_update() {
-    let request = name_alias_request(":name Current worker", Some("worker-1".to_owned()), |id| {
+    let request = name_alias_request(":name Current worker", Some(agent_id("worker-1")), |id| {
         id == "worker-1"
     })
     .expect("selected agent request");

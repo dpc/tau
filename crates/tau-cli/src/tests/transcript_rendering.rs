@@ -262,7 +262,7 @@ fn hidden_provider_final_stays_off_screen_without_redraw() {
         query_id: "q-visible-worker".to_owned(),
         agent_id: agent_id("visible-worker"),
     }));
-    renderer.switch_agent("visible-worker".to_owned());
+    renderer.switch_agent(agent_id("visible-worker"));
     sync(&handle);
     let redraw_requests = renderer.redraw_request_count_for_test();
 
@@ -283,7 +283,7 @@ fn hidden_provider_final_stays_off_screen_without_redraw() {
     assert_eq!(renderer.redraw_request_count_for_test(), redraw_requests);
     assert!(!vt.screen_contains(80, "hidden settled answer"));
 
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     sync(&handle);
     assert!(vt.screen_contains(80, "◆ hidden settled answer"));
     assert!(vt.screen_contains(
@@ -441,7 +441,7 @@ fn deferred_initial_discovery_final_uses_atomic_publication_cut() {
         );
     }));
 
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     let final_generation = vt.wait_for_frame_containing_after(generation, "◆ deferred settled");
     let frames = vt.frames.0.lock().expect("frames");
     let mut saw_live = false;
@@ -505,7 +505,7 @@ fn switching_between_displayed_agents_restores_transcripts() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         literal: false,
         session_id: test_session_id("s1"),
@@ -515,7 +515,7 @@ fn switching_between_displayed_agents_restores_transcripts() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
-    renderer.switch_agent("worker-2".to_owned());
+    renderer.switch_agent(agent_id("worker-2"));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         literal: false,
         session_id: test_session_id("s1"),
@@ -530,7 +530,7 @@ fn switching_between_displayed_agents_restores_transcripts() {
     assert!(!vt.screen_contains(80, "worker one transcript"));
     let full_render_count = handle.full_render_count();
 
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
 
     assert!(vt.screen_contains(80, "worker one transcript"));
@@ -550,7 +550,7 @@ fn agent_switch_first_frame_has_matching_transcript_and_placeholder() {
     );
     let generation = vt.frame_generation();
     handle.with_redraw_suppressed(|| {
-        renderer.switch_agent("worker-1".to_owned());
+        renderer.switch_agent(agent_id("worker-1"));
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
             session_id: test_session_id("s1"),
@@ -560,7 +560,7 @@ fn agent_switch_first_frame_has_matching_transcript_and_placeholder() {
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
         }));
-        renderer.switch_agent("worker-2".to_owned());
+        renderer.switch_agent(agent_id("worker-2"));
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
             session_id: test_session_id("s1"),
@@ -572,7 +572,7 @@ fn agent_switch_first_frame_has_matching_transcript_and_placeholder() {
         }));
     });
     let generation = vt.wait_for_frame_containing_after(generation, "worker two transcript");
-    renderer.switch_agent_after_display_update_for_test("worker-1".to_owned(), || {
+    renderer.switch_agent_after_display_update_for_test(agent_id("worker-1"), || {
         handle.redraw_sync();
     });
     let frame = vt.wait_for_frame_after(generation);
@@ -618,7 +618,7 @@ fn randomized_agent_switching_preserves_transcripts_without_snapshot_clones() {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         let index = (seed as usize) % agents.len();
         let agent = agents[index];
-        renderer.switch_agent(agent.to_owned());
+        renderer.switch_agent(agent_id(agent));
         let text = format!("switch-reference-{agent}-{step}");
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
@@ -641,7 +641,7 @@ fn randomized_agent_switching_preserves_transcripts_without_snapshot_clones() {
     }
 
     for (index, agent) in agents.into_iter().enumerate() {
-        renderer.switch_agent(agent.to_owned());
+        renderer.switch_agent(agent_id(agent));
         sync(&handle);
         assert!(
             vt.screen_contains(100, &latest[index]),
@@ -671,7 +671,7 @@ fn benchmark_selection_snapshot_ownership_by_transcript_size() {
             tau_cli_term::CompletionData::new(),
             cli_test_theme(),
         );
-        renderer.switch_agent("source".to_owned());
+        renderer.switch_agent(agent_id("source"));
         for block in 0..block_count {
             renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
                 literal: false,
@@ -683,13 +683,13 @@ fn benchmark_selection_snapshot_ownership_by_transcript_size() {
                 ctx_id: None,
             }));
         }
-        renderer.switch_agent("destination".to_owned());
+        renderer.switch_agent(agent_id("destination"));
         let clones_before = handle.output_snapshot_count();
         let takes_before = handle.output_snapshot_take_count();
         let started = Instant::now();
         for _ in 0..100 {
-            renderer.switch_agent("source".to_owned());
-            renderer.switch_agent("destination".to_owned());
+            renderer.switch_agent(agent_id("source"));
+            renderer.switch_agent(agent_id("destination"));
         }
         std::hint::black_box(&renderer);
         eprintln!(
@@ -736,7 +736,7 @@ fn agent_context_initialization_is_visible_only_in_selected_agent_transcript() {
         })
     };
 
-    renderer.switch_agent("agent-1".to_owned());
+    renderer.switch_agent(agent_id("agent-1"));
     renderer.handle(&initialized(
         "agent-1",
         "foreground-skill",
@@ -754,14 +754,14 @@ fn agent_context_initialization_is_visible_only_in_selected_agent_transcript() {
     assert!(!vt.screen_contains(80, "background-skill"));
     assert!(!vt.screen_contains(80, "/two/AGENTS.md"));
 
-    renderer.switch_agent("agent-2".to_owned());
+    renderer.switch_agent(agent_id("agent-2"));
     sync(&handle);
     assert!(vt.screen_contains(80, "background-skill 1L, 28B"));
     assert!(vt.screen_contains(80, "/two/AGENTS.md 6L, 550B"));
     assert!(!vt.screen_contains(80, "foreground-skill"));
     assert!(!vt.screen_contains(80, "/one/AGENTS.md"));
 
-    renderer.switch_agent("agent-1".to_owned());
+    renderer.switch_agent(agent_id("agent-1"));
     sync(&handle);
     assert!(vt.screen_contains(80, "foreground-skill 1L, 28B"));
     assert!(!vt.screen_contains(80, "background-skill"));
@@ -851,7 +851,7 @@ fn clearing_selected_agent_preserves_previous_transcript() {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         literal: false,
         session_id: test_session_id("s1"),
@@ -866,8 +866,8 @@ fn clearing_selected_agent_preserves_previous_transcript() {
         query_id: "q-helper".to_owned(),
         agent_id: agent_id("helper-1"),
     }));
-    renderer.switch_agent("helper-1".to_owned());
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("helper-1"));
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
 
     assert!(vt.screen_contains(80, "worker transcript survives"));
@@ -885,7 +885,7 @@ fn new_session_resets_agent_transcripts() {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: test_session_id("s2"),
         reason: tau_proto::SessionStartReason::New,
@@ -940,12 +940,12 @@ fn agent_switch_preserves_separate_transcripts() {
     sync(&handle);
     assert!(!vt.screen_contains(80, "worker answer"));
 
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
     assert!(vt.screen_contains(80, "worker answer"));
     assert!(vt.screen_contains(80, "@worker-1"));
 
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     sync(&handle);
     assert!(!vt.screen_contains(80, "worker answer"));
 }
@@ -1127,7 +1127,7 @@ fn compact_mode_reprojects_agent_activity_without_content_leaks() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    live.switch_agent("manager".to_owned());
+    live.switch_agent(agent_id("manager"));
     live.toggle_verbose_mode();
     live.handle(&status);
     live.handle(&message);
@@ -1147,8 +1147,8 @@ fn compact_mode_reprojects_agent_activity_without_content_leaks() {
     assert!(live_vt.screen_contains(120, "COMPACT_SECOND_LINE 🧪"));
 
     live.toggle_verbose_mode();
-    live.switch_agent("other".to_owned());
-    live.switch_agent("manager".to_owned());
+    live.switch_agent(agent_id("other"));
+    live.switch_agent(agent_id("manager"));
     sync(&live_handle);
     assert_compact(&live_vt);
     let compact_live = visible_lines(&live_vt, 120);
@@ -1159,14 +1159,14 @@ fn compact_mode_reprojects_agent_activity_without_content_leaks() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    replay.switch_agent("manager".to_owned());
+    replay.switch_agent(agent_id("manager"));
     replay.toggle_verbose_mode();
     replay.handle_recorded_at(&status, tau_proto::UnixMicros::new(1));
     replay.handle_recorded_at(&message, tau_proto::UnixMicros::new(2));
     replay.handle_recorded_at(&watch_prompt, tau_proto::UnixMicros::new(3));
     replay.handle_recorded_at(&watch_lifecycle, tau_proto::UnixMicros::new(4));
-    replay.switch_agent("other".to_owned());
-    replay.switch_agent("manager".to_owned());
+    replay.switch_agent(agent_id("other"));
+    replay.switch_agent(agent_id("manager"));
     sync(&replay_handle);
     assert_compact(&replay_vt);
     assert_eq!(
@@ -1311,7 +1311,7 @@ fn standalone_compaction_terminals_clear_hidden_watched_activity() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("manager".to_owned());
+    renderer.switch_agent(agent_id("manager"));
     renderer.handle(&Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: test_session_id("s1"),
@@ -1395,7 +1395,7 @@ fn watched_agent_blocks_are_sorted_by_agent_id() {
         cli_test_theme(),
     );
 
-    renderer.switch_agent("parent_1".to_owned());
+    renderer.switch_agent(agent_id("parent_1"));
     renderer.handle(&Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: test_session_id("s1"),
@@ -1452,7 +1452,7 @@ fn turn_stats_and_session_stats_keep_token_scopes_separate() {
         cli_test_theme(),
     );
     renderer.apply_setting("show-turn-stats", "true");
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
 
     let mut first = finished_response_with_usage(
         "worker-1-sp-0",
@@ -1893,7 +1893,7 @@ fn compact_message_fact_wraps_at_narrow_width_with_code_styled_publisher() {
         .lock()
         .expect("agent navigation lock")
         .mark_live(agent_id("selected-agent"));
-    renderer.switch_agent("selected-agent".to_owned());
+    renderer.switch_agent(agent_id("selected-agent"));
     renderer.handle(&Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::parse("fedi-slack")
             .expect("canonical publisher id must satisfy the identifier grammar"),
@@ -1949,7 +1949,7 @@ fn tree_notice_renders_multiline_result_without_reformatting() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     renderer.toggle_verbose_mode();
     renderer.apply_setting("notice-level", "critical");
     let expected = crate::test_support::TREE_PREVIEW_PARITY_NOTICE
@@ -2215,7 +2215,7 @@ fn standalone_compaction_terminal_failures_clear_private_progress() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     renderer.handle(&Event::AgentStandaloneCompactionStarted(
         standalone_compaction_started("ct-failed", "ap-failed"),
     ));
@@ -2237,7 +2237,7 @@ fn standalone_compaction_terminal_failures_clear_private_progress() {
     sync(&handle);
     assert!(vt.screen_contains(100, "compact failed"));
     assert!(!vt.screen_contains(100, "Compacting…"));
-    assert!(!renderer.agent_has_active_prompt_for_test("main"));
+    assert!(!renderer.agent_has_active_prompt_for_test(&agent_id("main")));
     assert!(!renderer.main_agent_turn_active_for_test());
 
     renderer.handle(&Event::AgentPromptStarted(
@@ -2266,7 +2266,7 @@ fn malformed_standalone_lifecycle_does_not_hide_inference_stream() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     let mut malformed = standalone_compaction_started("ct-malformed", "ap-inference");
     malformed.operation = tau_proto::PromptOperation::Inference;
     renderer.handle(&Event::AgentStandaloneCompactionStarted(malformed));
@@ -2357,7 +2357,7 @@ fn mixed_live_activity_blocks_keep_category_and_internal_order() {
             tau_cli_term::CompletionData::new(),
             cli_test_theme(),
         );
-        renderer.switch_agent("parent_1".to_owned());
+        renderer.switch_agent(agent_id("parent_1"));
 
         let render_tools = |renderer: &mut EventRenderer| {
             for call_id in ["read_one", "read_two"] {
@@ -3627,7 +3627,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         cli_test_theme(),
     );
 
-    renderer.switch_agent("parent_1".to_owned());
+    renderer.switch_agent(agent_id("parent_1"));
     renderer.handle(&Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: test_session_id("s1"),
@@ -3882,7 +3882,7 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     renderer.handle(&Event::AgentStandaloneCompactionStarted(
         standalone_compaction_started("ct-private", "ap-private"),
     ));
@@ -3965,7 +3965,7 @@ fn standalone_compaction_stream_is_hidden_from_cli_output() {
     assert!(!vt.screen_contains(100, "private compactor answer"));
     assert!(!vt.screen_contains(100, "private compactor reasoning"));
     assert!(!vt.screen_contains(100, "private checkpoint"));
-    assert!(!renderer.agent_has_active_prompt_for_test("main"));
+    assert!(!renderer.agent_has_active_prompt_for_test(&agent_id("main")));
     assert!(!renderer.main_agent_turn_active_for_test());
     assert!(
         !renderer

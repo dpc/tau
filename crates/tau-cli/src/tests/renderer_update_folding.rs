@@ -146,7 +146,7 @@ fn folded_hidden_agent_output_stays_in_owning_transcript() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("visible".to_owned());
+    renderer.switch_agent(agent_id("visible"));
     let mut prompt = agent_prompt_created("sp-hidden", "s1");
     prompt.agent_id = agent_id("hidden");
     renderer.handle(&Event::AgentPromptCreated(prompt));
@@ -156,7 +156,7 @@ fn folded_hidden_agent_output_stays_in_owning_transcript() {
     sync(&handle);
     assert!(!vt.screen_contains(80, "hidden text"));
 
-    renderer.switch_agent("hidden".to_owned());
+    renderer.switch_agent(agent_id("hidden"));
     sync(&handle);
     assert!(vt.screen_contains(80, "hidden text"));
 }

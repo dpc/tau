@@ -15,7 +15,7 @@ fn verbose_mode_reprojects_streaming_thinking_hidden_agents_and_attach_tools() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
 
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
         "main-live",
@@ -52,7 +52,7 @@ fn verbose_mode_reprojects_streaming_thinking_hidden_agents_and_attach_tools() {
     renderer.handle(&Event::ProviderResponseUpdated(worker_update));
 
     renderer.toggle_verbose_mode();
-    renderer.switch_agent("worker".to_owned());
+    renderer.switch_agent(agent_id("worker"));
     sync(&handle);
     assert!(!vt.screen_contains(100, "worker hidden reasoning"));
     renderer.toggle_verbose_mode();
@@ -224,7 +224,7 @@ fn selected_agent_status_row_renders_phase_and_adapts_task_title() {
             session_id: test_session_id("s1"),
             reason: tau_proto::SessionStartReason::Initial,
         }));
-        renderer.switch_agent("worker".to_owned());
+        renderer.switch_agent(agent_id("worker"));
         renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
             session_id: test_session_id("s1"),
             agent_id: agent_id("worker"),
@@ -342,11 +342,11 @@ fn manual_compaction_lifecycle_status_follows_target_agent_selection() {
     sync(&handle);
     assert!(!vt.screen_contains(100, "compaction request cr-48-0"));
 
-    renderer.switch_agent("unrelated".to_owned());
+    renderer.switch_agent(agent_id("unrelated"));
     sync(&handle);
     assert!(!vt.screen_contains(100, "compaction request cr-48-0"));
 
-    renderer.switch_agent("reviewer-KH50".to_owned());
+    renderer.switch_agent(agent_id("reviewer-KH50"));
     sync(&handle);
     assert!(vt.screen_contains(
         100,
@@ -468,7 +468,7 @@ fn switched_agent_shows_its_tool_usage() {
     sync(&handle);
     assert!(!vt.screen_contains(80, "read src/lib.rs"));
 
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
     assert!(vt.screen_contains(80, "read src/lib.rs"));
 }
@@ -534,7 +534,7 @@ fn no_agent_overview_excludes_structured_current_watch_status() {
     assert!(!vt.screen_contains(100, &provider_status_row));
     assert!(!vt.screen_contains(100, long_wait_row));
 
-    renderer.switch_agent("watcher-agent".to_owned());
+    renderer.switch_agent(agent_id("watcher-agent"));
     sync(&handle);
     assert!(vt.screen_contains(100, &provider_status_row));
     assert!(vt.screen_contains(100, long_wait_row));
@@ -931,7 +931,7 @@ fn status_agent_chip_truncates_multiple_current_agent_watchers() {
         session_id: test_session_id("s1"),
         reason: SessionStartReason::New,
     }));
-    renderer.switch_agent("engineer_child".to_owned());
+    renderer.switch_agent(agent_id("engineer_child"));
     renderer.handle(&Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: test_session_id("s1"),
@@ -1293,7 +1293,7 @@ fn watched_agent_stats_redraws_status_row() {
         session_id: test_session_id("s1"),
         reason: SessionStartReason::New,
     }));
-    renderer.switch_agent("parent_1".to_owned());
+    renderer.switch_agent(agent_id("parent_1"));
     renderer.handle(&Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: test_session_id("s1"),
@@ -1440,7 +1440,7 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
         cli_test_theme(),
     );
 
-    renderer.switch_agent("parent_1".to_owned());
+    renderer.switch_agent(agent_id("parent_1"));
     renderer.handle(&Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: test_session_id("s1"),
@@ -1488,8 +1488,8 @@ fn watched_agent_status_row_does_not_duplicate_after_agent_switch() {
         "❓💤 @engineer_1 %13/13",
     ));
 
-    renderer.switch_agent("other_1".to_owned());
-    renderer.switch_agent("parent_1".to_owned());
+    renderer.switch_agent(agent_id("other_1"));
+    renderer.switch_agent(agent_id("parent_1"));
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: test_session_id("s1"),
         agent_id: agent_id("engineer_1"),
@@ -1535,7 +1535,7 @@ fn watched_agent_response_finished_keeps_status_row() {
         cli_test_theme(),
     );
 
-    renderer.switch_agent("parent_1".to_owned());
+    renderer.switch_agent(agent_id("parent_1"));
     renderer.handle(&Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: test_session_id("s1"),
@@ -1635,7 +1635,7 @@ fn watched_agent_status_row_survives_turn_transitions_until_done() {
         session_id: test_session_id("s1"),
         reason: tau_proto::SessionStartReason::Initial,
     }));
-    renderer.switch_agent("parent_1".to_owned());
+    renderer.switch_agent(agent_id("parent_1"));
     renderer.handle(&Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: test_session_id("s1"),
@@ -1763,7 +1763,7 @@ fn watched_agent_provider_response_update_keeps_status_row_after_terminal() {
         cli_test_theme(),
     );
 
-    renderer.switch_agent("parent_1".to_owned());
+    renderer.switch_agent(agent_id("parent_1"));
     renderer.handle(&Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: test_session_id("s1"),
@@ -2017,13 +2017,13 @@ fn shell_replay_abandonment_covers_renderer_owners_and_collision() {
             reason: tau_proto::SessionStartReason::Initial,
         }));
         if let Some(agent) = initially_selected {
-            renderer.switch_agent(agent.to_owned());
+            renderer.switch_agent(agent_id(agent));
         }
         renderer.handle(&command("shell-x", &format!("{case}-remove-X"), target));
         renderer.handle(&command("shell-y", &format!("{case}-retain-Y"), target));
         renderer.abandon_shell_starts(&[abandoned("shell-x", target)]);
         if let Some(agent) = selected_after {
-            renderer.switch_agent(agent.to_owned());
+            renderer.switch_agent(agent_id(agent));
         }
         sync(&handle);
         assert!(!vt.screen_contains(100, &format!("{case}-remove-X")));
@@ -2056,7 +2056,7 @@ fn shell_replay_abandonment_covers_renderer_owners_and_collision() {
     renderer.handle(&command("shell-x", "deferred-remove-X", Some("worker")));
     renderer.handle(&command("shell-y", "deferred-retain-Y", Some("worker")));
     renderer.abandon_shell_starts(&[abandoned("shell-x", Some("worker"))]);
-    renderer.switch_agent("worker".to_owned());
+    renderer.switch_agent(agent_id("worker"));
     sync(&handle);
     assert!(!vt.screen_contains(100, "deferred-remove-X"));
     assert!(vt.screen_contains(100, "deferred-retain-Y"));
@@ -2302,7 +2302,7 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
         session_id: test_session_id("s1"),
         reason: tau_proto::SessionStartReason::Initial,
     }));
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     renderer.handle(&Event::UiShellCommand(tau_proto::UiShellCommand {
         session_id: test_session_id("s1"),
         command_id: tau_proto::ShellCommandId::parse("ui-sh-1")
@@ -2311,7 +2311,7 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
         include_in_context: false,
         target_agent_id: Some(agent_id("worker-1")),
     }));
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
 
     renderer.handle(&Event::ShellCommandProgress(
         tau_proto::ShellCommandProgress {
@@ -2338,7 +2338,7 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
     sync(&handle);
     assert!(!vt.screen_contains(90, "worker-output"));
 
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
     assert!(vt.screen_contains(90, "worker-output"));
 }
@@ -2355,7 +2355,7 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
         session_id: test_session_id("s1"),
         reason: tau_proto::SessionStartReason::Initial,
     }));
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
 
     // Regression: the durable event's target must own the command even if the
     // selected transcript is main by the time the renderer processes the echo.
@@ -2383,7 +2383,7 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     sync(&handle);
     assert!(!vt.screen_contains(90, "race-output"));
 
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
     assert!(vt.screen_contains(90, "race-output"));
 
@@ -2413,7 +2413,7 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     sync(&handle);
     assert!(!vt.screen_contains(90, "replay-output"));
 
-    replay.switch_agent("worker-1".to_owned());
+    replay.switch_agent(agent_id("worker-1"));
     sync(&handle);
     assert!(vt.screen_contains(90, "replay-output"));
 }
@@ -2528,7 +2528,7 @@ fn self_compaction_reuses_its_tool_row_through_background_completion() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     renderer.apply_setting("show-tools", "compact");
     let mut tool_start = tool_started("call-self", "compact", CborValue::Null);
     let Event::ToolStarted(started) = &mut tool_start else {
@@ -2604,7 +2604,7 @@ fn watched_agent_provider_prompt_terminal_keeps_status_row() {
         cli_test_theme(),
     );
 
-    renderer.switch_agent("parent_1".to_owned());
+    renderer.switch_agent(agent_id("parent_1"));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "delegate-1".to_owned(),
         agent_id: agent_id("engineer_1"),
@@ -3545,7 +3545,7 @@ fn late_self_compaction_tool_start_adopts_retained_lifecycle_status() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     renderer.apply_setting("show-tools", "compact");
     renderer.handle(&Event::AgentManualCompactionRequested(
         self_compaction_requested("cr-late", "call-late"),
@@ -4194,7 +4194,7 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     renderer.apply_setting("show-turn-stats", "true");
 
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
@@ -5963,7 +5963,7 @@ fn self_compaction_failure_and_rejection_reuse_their_tool_rows() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     renderer.apply_setting("show-tools", "compact");
 
     let mut failed_start = tool_started("call-failed", "compact", CborValue::Null);

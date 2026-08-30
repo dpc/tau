@@ -251,14 +251,14 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
         .expect("remote disconnect");
     local_tx
         .send(RendererCmd::SwitchAgent {
-            agent_id: "worker".to_owned(),
+            agent_id: agent_id("worker"),
         })
         .expect("local selection");
     local_tx
         .send(RendererCmd::ActionInvoked {
             invocation_id: tau_proto::ActionInvocationId::parse("action-test")
                 .expect("test identifier must satisfy its grammar"),
-            owner_agent_id: Some("worker".to_owned()),
+            owner_agent_id: Some(agent_id("worker")),
         })
         .expect("local action");
 
@@ -282,14 +282,14 @@ fn renderer_scheduler_preserves_remote_prefix_and_disconnect_order() {
     ));
     assert!(matches!(
         scheduler.recv_timeout(Duration::from_millis(10)),
-        Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id == "worker"
+        Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id.as_str() == "worker"
     ));
     assert!(matches!(
         scheduler.recv_timeout(Duration::from_millis(10)),
         Ok(RendererCmd::ActionInvoked {
             invocation_id,
             owner_agent_id: Some(owner),
-        }) if invocation_id.as_ref() == "action-test" && owner == "worker"
+        }) if invocation_id.as_ref() == "action-test" && owner.as_str() == "worker"
     ));
     assert!(!scheduler.remote_closed());
     drop(remote_tx);
@@ -457,7 +457,7 @@ fn enabled_real_cold_admission_tracks_retention_and_forwarding() {
         literal: false,
         session_id: "session-1".parse().expect("session id"),
         text: "cold".to_owned(),
-        agent_id: "agent-1".parse().expect("agent id"),
+        agent_id: agent_id("agent-1"),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
@@ -515,7 +515,7 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
         renderer_scheduler_channels(2, admitted.clone(), arbiter);
     local_tx
         .send(RendererCmd::SwitchAgent {
-            agent_id: "worker".to_owned(),
+            agent_id: agent_id("worker"),
         })
         .expect("local selection");
     remote_tx
@@ -542,7 +542,7 @@ fn renderer_scheduler_waits_for_reserved_remote_arriving_after_local() {
     ));
     assert!(matches!(
         next(),
-        Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id == "worker"
+        Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id.as_str() == "worker"
     ));
 }
 
@@ -575,7 +575,7 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
         attempting_tx.send(()).expect("local enqueue attempting");
         local_tx
             .send(RendererCmd::SwitchAgent {
-                agent_id: "worker".to_owned(),
+                agent_id: agent_id("worker"),
             })
             .expect("local enqueue");
         done_tx.send(()).expect("local enqueue done");
@@ -604,7 +604,7 @@ fn renderer_scheduler_serializes_local_capture_with_remote_dequeue() {
         .expect("local enqueue completes after remote dequeue");
     assert!(matches!(
         scheduler.recv_timeout(Duration::from_secs(1)),
-        Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id == "worker"
+        Ok(RendererCmd::SwitchAgent { agent_id }) if agent_id.as_str() == "worker"
     ));
     sender.join().expect("local sender");
 }
@@ -863,7 +863,7 @@ fn renderer_scheduler_places_action_before_later_remote_result() {
         .send(RendererCmd::ActionInvoked {
             invocation_id: tau_proto::ActionInvocationId::parse("action-test")
                 .expect("test identifier must satisfy its grammar"),
-            owner_agent_id: Some("worker".to_owned()),
+            owner_agent_id: Some(agent_id("worker")),
         })
         .expect("local action");
     admitted.store(2, Ordering::Release);
@@ -1007,7 +1007,7 @@ fn saturated_remote_admission_keeps_selection_and_cancel_uplink_live() {
         .expect("producer reached byte admission");
     local_tx
         .send(RendererCmd::SwitchAgent {
-            agent_id: "worker".to_owned(),
+            agent_id: agent_id("worker"),
         })
         .expect("local selection");
 

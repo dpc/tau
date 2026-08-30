@@ -626,8 +626,8 @@ fn render_submitted_prompt_projections(theme: tau_themes::Theme) -> VtWriter {
         display_name: None,
         ctx_id: None,
     }));
-    renderer.switch_agent("other".to_owned());
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("other"));
+    renderer.switch_agent(agent_id("main"));
     sync(&handle);
 
     vt

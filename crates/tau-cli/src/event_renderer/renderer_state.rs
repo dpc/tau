@@ -77,34 +77,34 @@ pub(super) struct AgentDiscoveryState {
     pub(super) initialized_discovery_epochs:
         HashSet<(tau_proto::AgentId, tau_proto::AgentInitializationId)>,
     /// Discovery events awaiting initial transcript adoption.
-    pub(super) pending_initial_discovery: HashMap<String, Vec<DeferredRendererEvent>>,
+    pub(super) pending_initial_discovery: HashMap<tau_proto::AgentId, Vec<DeferredRendererEvent>>,
     /// Agent ids offered by completion.
     pub(super) known_agents: Arc<Mutex<Vec<String>>>,
     /// Authoritative local display names.
-    pub(super) agent_display_names: Arc<Mutex<HashMap<String, String>>>,
+    pub(super) agent_display_names: Arc<Mutex<HashMap<tau_proto::AgentId, String>>>,
     /// Atomic navigation modes and membership.
     pub(super) agent_navigation: Arc<Mutex<AgentNavigation>>,
     /// Memory-only transcript owners.
-    pub(super) ephemeral_agents: Arc<Mutex<HashSet<String>>>,
+    pub(super) ephemeral_agents: Arc<Mutex<HashSet<tau_proto::AgentId>>>,
 }
 
 /// Current input target, visible transcript, and detached transcript snapshots.
 pub(super) struct AgentSelectionState {
     /// Agent targeted by prompt input.
-    pub(super) current_agent_id: Option<String>,
+    pub(super) current_agent_id: Option<tau_proto::AgentId>,
     /// Agent whose transcript is visible.
-    pub(super) displayed_agent_id: Option<String>,
+    pub(super) displayed_agent_id: Option<tau_proto::AgentId>,
     /// Whether explicit deselection protects the empty view.
     pub(super) awaiting_new_agent_selection: bool,
     /// Detached no-agent transcript.
     pub(super) no_agent_ui_state: AgentUiState,
     /// Detached per-agent transcripts.
-    pub(super) agents_ui_state: HashMap<String, AgentUiState>,
+    pub(super) agents_ui_state: HashMap<tau_proto::AgentId, AgentUiState>,
     /// Messages already copied to the all-agent overview.
     pub(super) overview_message_ids:
         HashSet<(Option<tau_proto::SessionId>, tau_proto::AgentMessageId)>,
     /// Input-thread mirror of the selected agent.
-    pub(super) current_agent_state: Arc<Mutex<Option<String>>>,
+    pub(super) current_agent_state: Arc<Mutex<Option<tau_proto::AgentId>>>,
     /// Mailbox used to retarget pending drafts.
     pub(super) draft_retargeter: Option<DraftRetargeter>,
 }
@@ -113,7 +113,7 @@ pub(super) struct AgentSelectionState {
 #[derive(Default)]
 pub(super) struct EventOwnershipState {
     /// Side-query owners.
-    pub(super) query_agents: HashMap<String, String>,
+    pub(super) query_agents: HashMap<String, tau_proto::AgentId>,
     /// Provider-prompt owners.
     pub(super) prompt_agents: HashMap<tau_proto::AgentPromptId, tau_proto::AgentId>,
     /// Tool-call owners.
@@ -128,20 +128,20 @@ pub(super) struct EventOwnershipState {
 #[derive(Default)]
 pub(super) struct WatchActivityState {
     /// Watched agents keyed by watcher.
-    pub(super) watched_agents: HashMap<String, Vec<String>>,
+    pub(super) watched_agents: HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>,
     /// Watchers keyed by watched agent.
-    pub(super) agent_watchers: HashMap<String, Vec<String>>,
+    pub(super) agent_watchers: HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>,
     /// Latest generic agent stats.
-    pub(super) agent_stats: HashMap<String, tau_proto::AgentStatsUpdated>,
+    pub(super) agent_stats: HashMap<tau_proto::AgentId, tau_proto::AgentStatsUpdated>,
     /// Cumulative per-agent API costs.
     pub(super) agent_estimated_api_costs: crate::estimated_cost::AgentCostProjection,
     /// Latest dispatched model per agent.
-    pub(super) agent_models: HashMap<String, tau_proto::ModelId>,
+    pub(super) agent_models: HashMap<tau_proto::AgentId, tau_proto::ModelId>,
     /// Latest watched-agent work status.
     pub(super) watched_agent_work_statuses:
-        HashMap<String, tau_proto::AgentWatchWorkStatusNotification>,
+        HashMap<tau_proto::AgentId, tau_proto::AgentWatchWorkStatusNotification>,
     /// Active prompt ids keyed by agent.
-    pub(super) active_agent_prompts: HashMap<String, HashSet<tau_proto::AgentPromptId>>,
+    pub(super) active_agent_prompts: HashMap<tau_proto::AgentId, HashSet<tau_proto::AgentPromptId>>,
     /// Prompt terminals that block stale resurrection.
     pub(super) terminal_agent_prompts: HashSet<tau_proto::AgentPromptId>,
     /// Provider prompts whose final output was rendered.
@@ -165,7 +165,7 @@ pub(super) struct TranscriptState {
 #[derive(Default)]
 pub(super) struct TranscriptRuntimeState {
     /// Visible watched-agent status blocks.
-    pub(super) watched_agent_blocks: HashMap<String, tau_cli_term::BlockId>,
+    pub(super) watched_agent_blocks: HashMap<tau_proto::AgentId, tau_cli_term::BlockId>,
     /// Editor response context for this transcript.
     pub(super) editor_conversation_context: EditorConversationContext,
     /// Prompt lifecycle records.

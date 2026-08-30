@@ -6,16 +6,16 @@ mod tests;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Directed watch edge `(watcher, watched)`.
-pub(crate) type WatchEdge = (String, String);
+pub(crate) type WatchEdge = (tau_proto::AgentId, tau_proto::AgentId);
 
 /// One visible row selected from the watched-agent graph.
 pub(crate) struct VisibleWatchRow {
     /// Stable watched-agent identity.
-    pub(crate) agent_id: String,
+    pub(crate) agent_id: tau_proto::AgentId,
     /// Shortest distance from the viewed root agent.
     pub(crate) depth: usize,
     /// Deterministic immediate predecessor for an indirect row.
-    pub(crate) via: Option<String>,
+    pub(crate) via: Option<tau_proto::AgentId>,
 }
 
 /// Largest visible recursive closure rendered before direct-only fallback.
@@ -26,19 +26,19 @@ pub(crate) const VISIBLE_WATCH_EXPANSION_LIMIT: usize = 8;
 pub(crate) struct WatchGraphProjection {
     /// Watchers that own or can reach a directly running watch edge.
     #[cfg(test)]
-    active_watchers: HashSet<String>,
+    active_watchers: HashSet<tau_proto::AgentId>,
     /// Watch targets effective for the session-wide side-agent count.
-    effective_targets: HashSet<String>,
+    effective_targets: HashSet<tau_proto::AgentId>,
     /// Current edge-scoped direct-running facts.
-    direct_edges: HashMap<String, HashSet<String>>,
+    direct_edges: HashMap<tau_proto::AgentId, HashSet<tau_proto::AgentId>>,
 }
 
 impl WatchGraphProjection {
     /// Computes exact activity by flooding from direct-running edge owners to
     /// their ancestors through the reverse watch index.
     pub(crate) fn new(
-        watched_agents: &HashMap<String, Vec<String>>,
-        agent_watchers: &HashMap<String, Vec<String>>,
+        watched_agents: &HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>,
+        agent_watchers: &HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>,
         direct_edges: HashSet<WatchEdge>,
     ) -> Self {
         let mut active_watchers = HashSet::new();
@@ -76,7 +76,7 @@ impl WatchGraphProjection {
         }));
 
         let direct_edges = direct_edges.into_iter().fold(
-            HashMap::<String, HashSet<String>>::new(),
+            HashMap::<tau_proto::AgentId, HashSet<tau_proto::AgentId>>::new(),
             |mut by_watcher, (watcher, watched)| {
                 by_watcher.entry(watcher).or_default().insert(watched);
                 by_watcher
@@ -91,7 +91,11 @@ impl WatchGraphProjection {
     }
 
     /// Returns whether a direct watch edge is itself running.
-    pub(crate) fn edge_is_directly_running(&self, watcher: &str, watched: &str) -> bool {
+    pub(crate) fn edge_is_directly_running(
+        &self,
+        watcher: &tau_proto::AgentId,
+        watched: &tau_proto::AgentId,
+    ) -> bool {
         self.direct_edges
             .get(watcher)
             .is_some_and(|targets| targets.contains(watched))
@@ -100,12 +104,12 @@ impl WatchGraphProjection {
     /// Returns whether an agent watches a directly or recursively active
     /// target.
     #[cfg(test)]
-    pub(crate) fn watcher_is_active(&self, watcher: &str) -> bool {
+    pub(crate) fn watcher_is_active(&self, watcher: &tau_proto::AgentId) -> bool {
         self.active_watchers.contains(watcher)
     }
 
     /// Returns the unique recursively effective targets for global counting.
-    pub(crate) fn effective_targets(&self) -> &HashSet<String> {
+    pub(crate) fn effective_targets(&self) -> &HashSet<tau_proto::AgentId> {
         &self.effective_targets
     }
 
@@ -116,16 +120,16 @@ impl WatchGraphProjection {
     /// `expansion_limit`, it falls back to every visible direct watch without
     /// truncating that direct set.
     pub(crate) fn visible_rows(
-        root: &str,
-        watched_agents: &HashMap<String, Vec<String>>,
-        visible: impl Fn(&str) -> bool,
+        root: &tau_proto::AgentId,
+        watched_agents: &HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>,
+        visible: impl Fn(&tau_proto::AgentId) -> bool,
         expansion_limit: usize,
     ) -> Vec<VisibleWatchRow> {
         let mut direct = watched_agents
             .get(root)
             .into_iter()
             .flatten()
-            .filter(|agent_id| agent_id.as_str() != root)
+            .filter(|agent_id| *agent_id != root)
             .cloned()
             .collect::<Vec<_>>();
         direct.sort();
@@ -140,10 +144,10 @@ impl WatchGraphProjection {
             })
             .collect::<Vec<_>>();
 
-        let mut visited = HashSet::from([root.to_owned()]);
+        let mut visited = HashSet::from([root.clone()]);
         let mut level = direct
             .into_iter()
-            .map(|agent_id| (agent_id, root.to_owned()))
+            .map(|agent_id| (agent_id, root.clone()))
             .collect::<Vec<_>>();
         let mut rows = Vec::new();
         let mut depth = 1;
@@ -173,7 +177,7 @@ impl WatchGraphProjection {
                     .get(&agent_id)
                     .into_iter()
                     .flatten()
-                    .filter(|child| !visited.contains(child.as_str()))
+                    .filter(|child| !visited.contains(*child))
                     .cloned()
                     .collect::<Vec<_>>();
                 children.sort();
@@ -188,7 +192,7 @@ impl WatchGraphProjection {
             depth += 1;
         }
         rows.sort_by(|left, right| {
-            (left.depth, left.agent_id.as_str()).cmp(&(right.depth, right.agent_id.as_str()))
+            (left.depth, &left.agent_id).cmp(&(right.depth, &right.agent_id))
         });
         rows
     }
@@ -197,21 +201,16 @@ impl WatchGraphProjection {
     /// by stable agent id.
     pub(crate) fn witness_for<'a>(
         &self,
-        root: &'a str,
-        watched_agents: &'a HashMap<String, Vec<String>>,
-    ) -> Option<String> {
+        root: &'a tau_proto::AgentId,
+        watched_agents: &'a HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>,
+    ) -> Option<tau_proto::AgentId> {
         let mut visited = HashSet::from([root]);
         let mut level = vec![root];
         while !level.is_empty() {
             let mut witnesses = Vec::new();
             let mut next = Vec::new();
             for watcher in level {
-                for child in watched_agents
-                    .get(watcher)
-                    .into_iter()
-                    .flatten()
-                    .map(String::as_str)
-                {
+                for child in watched_agents.get(watcher).into_iter().flatten() {
                     if self.edge_is_directly_running(watcher, child) {
                         witnesses.push(child);
                     } else if visited.insert(child) {
@@ -220,7 +219,7 @@ impl WatchGraphProjection {
                 }
             }
             if let Some(witness) = witnesses.into_iter().min() {
-                return Some(witness.to_owned());
+                return Some(witness.clone());
             }
             level = next;
         }

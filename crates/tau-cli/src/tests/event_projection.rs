@@ -181,7 +181,7 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
 
     let (_live_term, live_handle, live_vt) = setup(100, 24);
     let mut live = marker_test_renderer(live_handle.clone());
-    live.switch_agent(agent.as_str().to_owned());
+    live.switch_agent(agent.clone());
     live.handle(&provider_snapshot);
     live.handle(&wrong_kind_provider);
     live.handle(&missing_typed_provider);
@@ -211,8 +211,8 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
     )));
     assert!(!live_text.contains("[tau-internal]: wrong-kind provider body"));
     assert!(!live_text.contains("[tau-internal]: missing-typed provider body"));
-    live.switch_agent("other-agent".to_owned());
-    live.switch_agent(agent.as_str().to_owned());
+    live.switch_agent(agent_id("other-agent"));
+    live.switch_agent(agent.clone());
     sync(&live_handle);
     let reconstructed_live_text = visible_lines(&live_vt, 100).join("\n");
     assert_eq!(reconstructed_live_text.matches("□ watch").count(), 1);
@@ -230,7 +230,7 @@ fn authenticated_internal_notices_are_consistent_live_and_replayed() {
 
     let (_cold_term, cold_handle, cold_vt) = setup(100, 24);
     let mut cold = marker_test_renderer(cold_handle.clone());
-    cold.switch_agent(agent.as_str().to_owned());
+    cold.switch_agent(agent.clone());
     cold.handle_recorded_at(&provider_snapshot, tau_proto::UnixMicros::new(1));
     cold.handle_recorded_at(&wrong_kind_provider, tau_proto::UnixMicros::new(1));
     cold.handle_recorded_at(&missing_typed_provider, tau_proto::UnixMicros::new(1));
@@ -418,7 +418,7 @@ fn delayed_clear_after_new_session_keeps_initial_history_adoptable() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("previous-agent".to_owned());
+    renderer.switch_agent(agent_id("previous-agent"));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s2"),
         reason: SessionStartReason::New,
@@ -434,7 +434,7 @@ fn delayed_clear_after_new_session_keeps_initial_history_adoptable() {
     assert!(vt.screen_contains(80, "extension std-race starting"));
 
     let full_render_count = handle.full_render_count();
-    renderer.switch_agent("fresh-agent".to_owned());
+    renderer.switch_agent(agent_id("fresh-agent"));
     sync(&handle);
     assert!(vt.screen_contains(80, "extension std-race starting"));
     assert_eq!(handle.full_render_count(), full_render_count);
@@ -502,7 +502,7 @@ fn message_facts_route_to_owned_ui_snapshots_end_to_end() {
         ))
     };
 
-    renderer.switch_agent("selected-agent".to_owned());
+    renderer.switch_agent(agent_id("selected-agent"));
     renderer.handle(&message_fact(
         "unavailable-agent",
         "unavailable-message",
@@ -514,14 +514,14 @@ fn message_facts_route_to_owned_ui_snapshots_end_to_end() {
     sync(&handle);
     assert!(vt.screen_contains(100, "unavailable body"));
     assert!(vt.screen_contains(100, "for Tau target unavailable-agent"));
-    renderer.switch_agent("fresh-after-global".to_owned());
+    renderer.switch_agent(agent_id("fresh-after-global"));
     sync(&handle);
     assert!(!vt.screen_contains(100, "unavailable body"));
     renderer.clear_selected_agent();
     sync(&handle);
     assert!(vt.screen_contains(100, "unavailable body"));
 
-    renderer.switch_agent("selected-agent".to_owned());
+    renderer.switch_agent(agent_id("selected-agent"));
     renderer.handle(&message_fact(
         "../invalid",
         "invalid-message",
@@ -539,7 +539,7 @@ fn message_facts_route_to_owned_ui_snapshots_end_to_end() {
         .lock()
         .expect("agent navigation lock")
         .mark_live(agent_id("loaded-agent"));
-    renderer.switch_agent("selected-agent".to_owned());
+    renderer.switch_agent(agent_id("selected-agent"));
     renderer.handle(&message_fact(
         "loaded-agent",
         "loaded-message",
@@ -547,7 +547,7 @@ fn message_facts_route_to_owned_ui_snapshots_end_to_end() {
     ));
     sync(&handle);
     assert!(!vt.screen_contains(100, "loaded body"));
-    renderer.switch_agent("loaded-agent".to_owned());
+    renderer.switch_agent(agent_id("loaded-agent"));
     sync(&handle);
     assert!(vt.screen_contains(100, "loaded body"));
     assert!(!vt.screen_contains(100, "for Tau target loaded-agent"));
@@ -566,13 +566,13 @@ fn action_result_routes_to_invocation_snapshot() {
         cli_test_theme(),
     );
 
-    renderer.switch_agent("agent-a".to_owned());
+    renderer.switch_agent(agent_id("agent-a"));
     renderer.record_action_invocation(
         tau_proto::ActionInvocationId::parse("action-1")
             .expect("test identifier must satisfy its grammar"),
-        Some("agent-a".to_owned()),
+        Some(agent_id("agent-a")),
     );
-    renderer.switch_agent("agent-b".to_owned());
+    renderer.switch_agent(agent_id("agent-b"));
     renderer.handle(&Event::ActionResult(tau_proto::ActionResult {
         invocation_id: tau_proto::ActionInvocationId::parse("action-1")
             .expect("test identifier must satisfy its grammar"),
@@ -584,7 +584,7 @@ fn action_result_routes_to_invocation_snapshot() {
     sync(&handle);
     assert!(!vt.screen_contains(80, "agent a action output"));
 
-    renderer.switch_agent("agent-a".to_owned());
+    renderer.switch_agent(agent_id("agent-a"));
     sync(&handle);
     assert!(vt.screen_contains(80, "agent a action output"));
 }
@@ -897,7 +897,7 @@ fn compact_mode_reprojects_retained_notices_without_hiding_critical_errors() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
 
     for (kind, message, level, purpose) in [
         (
@@ -936,8 +936,8 @@ fn compact_mode_reprojects_retained_notices_without_hiding_critical_errors() {
     }
 
     renderer.toggle_verbose_mode();
-    renderer.switch_agent("worker".to_owned());
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("worker"));
+    renderer.switch_agent(agent_id("main"));
     sync(&handle);
     assert!(!vt.screen_contains(80, "status reminder"));
     assert!(vt.screen_contains(80, "mandatory warning"));
@@ -964,9 +964,9 @@ fn compact_mode_reprojects_hidden_target_manual_compaction_notice() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     renderer.toggle_verbose_mode();
-    renderer.switch_agent("worker".to_owned());
+    renderer.switch_agent(agent_id("worker"));
     renderer.handle(&Event::AgentManualCompactionRequested(
         self_compaction_requested("cr-hidden-notice", "call-hidden-notice"),
     ));
@@ -974,7 +974,7 @@ fn compact_mode_reprojects_hidden_target_manual_compaction_notice() {
     assert!(!vt.screen_contains(100, "accepted compaction request"));
 
     renderer.toggle_verbose_mode();
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     sync(&handle);
     assert!(vt.screen_contains(100, "Agent main accepted compaction request"));
 }
@@ -1009,7 +1009,7 @@ fn compact_mode_reprojects_extension_lifecycle_diagnostic() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     renderer.toggle_verbose_mode();
     renderer.handle(&Event::ExtensionReady(ExtensionReady {
         instance_id: 1.into(),
@@ -1020,8 +1020,8 @@ fn compact_mode_reprojects_extension_lifecycle_diagnostic() {
     sync(&handle);
     assert!(!vt.screen_contains(80, "extension core-shell"));
 
-    renderer.switch_agent("worker".to_owned());
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("worker"));
+    renderer.switch_agent(agent_id("main"));
     renderer.toggle_verbose_mode();
     sync(&handle);
     assert!(vt.screen_contains(80, "extension core-shell"));
@@ -1271,7 +1271,7 @@ fn hidden_provider_response_stats_do_not_update_visible_response_indicator() {
         cli_test_theme(),
     );
 
-    renderer.switch_agent("agent_a".to_owned());
+    renderer.switch_agent(agent_id("agent_a"));
     let mut prompt_a = agent_prompt_created("ap-agent_a-0", "s1");
     prompt_a.agent_id = agent_id("agent_a");
     renderer.handle(&Event::AgentPromptCreated(prompt_a));
@@ -1288,11 +1288,11 @@ fn hidden_provider_response_stats_do_not_update_visible_response_indicator() {
     sync(&handle);
     assert!(vt.screen_contains(80, "… (2s, 4KB, Δ4KB/s, 2KB/s)"));
 
-    renderer.switch_agent("agent_b".to_owned());
+    renderer.switch_agent(agent_id("agent_b"));
     let mut prompt_b = agent_prompt_created("ap-agent_b-0", "s1");
     prompt_b.agent_id = agent_id("agent_b");
     renderer.handle(&Event::AgentPromptCreated(prompt_b));
-    renderer.switch_agent("agent_a".to_owned());
+    renderer.switch_agent(agent_id("agent_a"));
     let mut hidden_update = provider_response_stats_update(
         "ap-agent_b-0",
         agent_id("agent_b"),
@@ -1321,7 +1321,7 @@ fn hidden_provider_response_stats_do_not_update_visible_response_indicator() {
     );
     assert!(!vt.screen_contains(80, "… (820ms,"));
 
-    renderer.switch_agent("agent_b".to_owned());
+    renderer.switch_agent(agent_id("agent_b"));
     sync(&handle);
     assert!(
         vt.screen_contains(80, "… (820ms, 2s, 12KB, Δ8KB/s, 6KB/s)"),
@@ -1547,7 +1547,7 @@ fn mismatched_self_compaction_correlation_fails_open_to_distinct_rows() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     renderer.apply_setting("show-tools", "compact");
 
     let mut tool_start = tool_started("call-mismatch", "compact", CborValue::Null);
@@ -1583,7 +1583,7 @@ fn standalone_compaction_replay_retires_private_progress() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     renderer.handle(&Event::AgentStandaloneCompactionStarted(
         standalone_compaction_started("ct-replay", "ap-replay"),
     ));
@@ -1762,7 +1762,7 @@ fn hidden_self_compaction_rejection_updates_its_target_row() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("manager".to_owned());
+    renderer.switch_agent(agent_id("manager"));
     renderer.apply_setting("show-tools", "compact");
 
     let mut tool_start = tool_started("call-hidden-rejected", "compact", CborValue::Null);
@@ -1783,7 +1783,7 @@ fn hidden_self_compaction_rejection_updates_its_target_row() {
         },
     ));
 
-    renderer.switch_agent("main".to_owned());
+    renderer.switch_agent(agent_id("main"));
     sync(&handle);
     let text = vt.screen_text(100).join("\n");
     assert_eq!(text.matches("err: rejected").count(), 1, "{text}");

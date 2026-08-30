@@ -28,7 +28,7 @@ fn role_cycling_only_enabled_without_selected_agent() {
     let current_agent_state = Arc::new(Mutex::new(None));
     assert!(role_cycling_enabled(&current_agent_state));
 
-    *current_agent_state.lock().expect("current agent") = Some("engineer_abc12345".to_owned());
+    *current_agent_state.lock().expect("current agent") = Some(agent_id("engineer_abc12345"));
     assert!(!role_cycling_enabled(&current_agent_state));
 
     *current_agent_state.lock().expect("current agent") = None;
@@ -180,7 +180,7 @@ fn new_session_initial_history_appends_to_first_agent() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("previous-agent".to_owned());
+    renderer.switch_agent(agent_id("previous-agent"));
     renderer.clear_selected_agent();
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: test_session_id("s2"),
@@ -196,7 +196,7 @@ fn new_session_initial_history_appends_to_first_agent() {
     assert!(vt.screen_contains(80, "extension std-session starting"));
 
     let full_render_count = handle.full_render_count();
-    renderer.switch_agent("fresh-agent".to_owned());
+    renderer.switch_agent(agent_id("fresh-agent"));
     sync(&handle);
     assert!(vt.screen_contains(80, "extension std-session starting"));
     assert_eq!(handle.full_render_count(), full_render_count);
@@ -222,11 +222,11 @@ fn selecting_same_agent_does_not_force_full_redraw() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
     let full_render_count = handle.full_render_count();
 
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
 
     assert_eq!(handle.full_render_count(), full_render_count);
@@ -244,7 +244,7 @@ fn clear_selection_first_frame_has_new_agent_placeholder() {
     );
     let generation = vt.frame_generation();
     handle.with_redraw_suppressed(|| {
-        renderer.switch_agent("worker-1".to_owned());
+        renderer.switch_agent(agent_id("worker-1"));
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             literal: false,
             session_id: test_session_id("s1"),
@@ -290,7 +290,7 @@ fn switching_agents_preserves_estimated_cache_efficiency() {
         cli_test_theme(),
     );
     renderer.apply_setting("show-turn-stats", "true");
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
 
     renderer.handle(&Event::ProviderResponseFinished(
         finished_response_with_usage(
@@ -312,8 +312,8 @@ fn switching_agents_preserves_estimated_cache_efficiency() {
             "second worker response",
         ),
     ));
-    renderer.switch_agent("worker-2".to_owned());
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-2"));
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
 
     assert!(vt.screen_contains(80, "Δ95%? 19k/20k?"));
@@ -333,7 +333,7 @@ fn switching_to_hidden_agent_preserves_estimated_cache_efficiency() {
         cli_test_theme(),
     );
     renderer.apply_setting("show-turn-stats", "true");
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
 
     renderer.handle(&Event::ProviderResponseFinished(
         finished_response_with_usage(
@@ -355,7 +355,7 @@ fn switching_to_hidden_agent_preserves_estimated_cache_efficiency() {
             "hidden second response",
         ),
     ));
-    renderer.switch_agent("worker-2".to_owned());
+    renderer.switch_agent(agent_id("worker-2"));
     sync(&handle);
 
     assert!(vt.screen_contains(80, "Δ95%? 19k/20k?"));
@@ -382,7 +382,7 @@ fn extension_context_ready_routes_to_agent_ui_state() {
     sync(&handle);
     assert!(!vt.screen_contains(80, "context ready"));
 
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
     assert!(vt.screen_contains(80, "agent @worker-1 context ready"));
 }
@@ -497,7 +497,7 @@ fn agent_context_initialization_event_aggregates_session_skills() {
             skills: vec![skill("advertised"), skill("other")],
         },
     ));
-    renderer.switch_agent("agent-1".to_owned());
+    renderer.switch_agent(agent_id("agent-1"));
     renderer.handle(&Event::HarnessAgentContextInitialized(
         tau_proto::HarnessAgentContextInitialized {
             session_id: test_session_id("session-1"),
@@ -591,12 +591,12 @@ fn catch_up_agent_context_initialization_waits_for_agent_selection() {
                 .expect("later context-ready row")
     );
 
-    renderer.switch_agent("background".to_owned());
+    renderer.switch_agent(agent_id("background"));
     sync(&handle);
     assert!(!vt.screen_contains(80, "startup output adopted by first agent"));
     assert!(!vt.screen_contains(80, "/restored/AGENTS.md"));
 
-    renderer.switch_agent("restored".to_owned());
+    renderer.switch_agent(agent_id("restored"));
     sync(&handle);
     assert!(vt.screen_contains(80, "startup output adopted by first agent"));
     assert!(vt.screen_contains(80, "/restored/AGENTS.md 6L, 550B"));
@@ -625,7 +625,7 @@ fn initial_no_agent_extension_lifecycle_appends_to_first_agent() {
     assert!(vt.screen_contains(80, "extension std-global starting"));
 
     let full_render_count = handle.full_render_count();
-    renderer.switch_agent("fresh-agent".to_owned());
+    renderer.switch_agent(agent_id("fresh-agent"));
     sync(&handle);
     assert!(vt.screen_contains(80, "extension std-global starting"));
     assert_eq!(handle.full_render_count(), full_render_count);
@@ -656,7 +656,7 @@ fn explicit_no_agent_extension_lifecycle_routes_to_no_agent_snapshot() {
         cli_test_theme(),
     );
 
-    renderer.switch_agent("previous-agent".to_owned());
+    renderer.switch_agent(agent_id("previous-agent"));
     renderer.clear_selected_agent();
     renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
         instance_id: 8.into(),
@@ -667,7 +667,7 @@ fn explicit_no_agent_extension_lifecycle_routes_to_no_agent_snapshot() {
     sync(&handle);
     assert!(vt.screen_contains(80, "extension std-global starting"));
 
-    renderer.switch_agent("fresh-agent".to_owned());
+    renderer.switch_agent(agent_id("fresh-agent"));
     sync(&handle);
     assert!(!vt.screen_contains(80, "extension std-global starting"));
 
@@ -719,7 +719,7 @@ fn initial_replayed_global_message_fact_survives_first_agent_selection() {
     sync(&handle);
     assert!(vt.screen_contains(100, "initial replay body"));
 
-    renderer.switch_agent("first-fresh-agent".to_owned());
+    renderer.switch_agent(agent_id("first-fresh-agent"));
     sync(&handle);
     assert!(!vt.screen_contains(100, "initial replay body"));
     renderer.clear_selected_agent();
@@ -737,7 +737,7 @@ fn deselected_live_global_message_fact_survives_fresh_agent_selection() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("existing-agent".to_owned());
+    renderer.switch_agent(agent_id("existing-agent"));
     renderer.clear_selected_agent();
     renderer.handle(&Event::MessageDelivered(tau_proto::MessageDelivered::new(
         tau_proto::MessagePublisherId::parse("bridge-main")
@@ -755,7 +755,7 @@ fn deselected_live_global_message_fact_survives_fresh_agent_selection() {
     sync(&handle);
     assert!(vt.screen_contains(100, "deselected live body"));
 
-    renderer.switch_agent("never-cached-agent".to_owned());
+    renderer.switch_agent(agent_id("never-cached-agent"));
     sync(&handle);
     assert!(!vt.screen_contains(100, "deselected live body"));
     renderer.clear_selected_agent();
@@ -780,7 +780,7 @@ fn initial_no_agent_action_error_appends_to_first_agent() {
             .expect("test identifier must satisfy its grammar"),
         None,
     );
-    renderer.switch_agent("fresh-agent".to_owned());
+    renderer.switch_agent(agent_id("fresh-agent"));
     renderer.handle(&Event::ActionError(tau_proto::ActionError {
         invocation_id: tau_proto::ActionInvocationId::parse("action-2")
             .expect("test identifier must satisfy its grammar"),
@@ -804,14 +804,14 @@ fn explicit_no_agent_action_error_routes_to_no_agent_snapshot() {
         cli_test_theme(),
     );
 
-    renderer.switch_agent("previous-agent".to_owned());
+    renderer.switch_agent(agent_id("previous-agent"));
     renderer.clear_selected_agent();
     renderer.record_action_invocation(
         tau_proto::ActionInvocationId::parse("action-2")
             .expect("test identifier must satisfy its grammar"),
         None,
     );
-    renderer.switch_agent("fresh-agent".to_owned());
+    renderer.switch_agent(agent_id("fresh-agent"));
     renderer.handle(&Event::ActionError(tau_proto::ActionError {
         invocation_id: tau_proto::ActionInvocationId::parse("action-2")
             .expect("test identifier must satisfy its grammar"),
@@ -855,7 +855,7 @@ fn initial_no_agent_action_result_appends_to_first_agent() {
     sync(&handle);
     assert!(vt.screen_contains(80, "visible no-agent action output"));
 
-    renderer.switch_agent("fresh-agent".to_owned());
+    renderer.switch_agent(agent_id("fresh-agent"));
     sync(&handle);
     assert!(vt.screen_contains(80, "visible no-agent action output"));
 }
@@ -872,7 +872,7 @@ fn explicit_no_agent_action_result_is_preserved_when_switching_to_fresh_agent() 
         cli_test_theme(),
     );
 
-    renderer.switch_agent("previous-agent".to_owned());
+    renderer.switch_agent(agent_id("previous-agent"));
     renderer.clear_selected_agent();
     renderer.record_action_invocation(
         tau_proto::ActionInvocationId::parse("action-3")
@@ -890,7 +890,7 @@ fn explicit_no_agent_action_result_is_preserved_when_switching_to_fresh_agent() 
     sync(&handle);
     assert!(vt.screen_contains(80, "visible no-agent action output"));
 
-    renderer.switch_agent("fresh-agent".to_owned());
+    renderer.switch_agent(agent_id("fresh-agent"));
     sync(&handle);
     assert!(!vt.screen_contains(80, "visible no-agent action output"));
 
@@ -1085,7 +1085,7 @@ fn selected_hidden_agent_placeholder_distinguishes_modes() {
         creator_subtree_estimated_api_cost: Default::default(),
         work_status: Default::default(),
     }));
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
     assert!(vt.screen_contains(100, "active-auto agent is idle"));
     // Exercise the placeholder-only navigation path: the operation must request
@@ -1247,7 +1247,7 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
     sync(&handle);
     assert!(!vt.screen_contains(90, "❓💤 @engineer_1"));
 
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
     assert!(vt.screen_contains(90, "❓💤 @engineer_1"));
     assert!(vt.screen_contains(90, "%1/2"));
@@ -1300,7 +1300,7 @@ fn old_agent_message_updates_overview_without_selecting_sender() {
         None
     );
 
-    renderer.switch_agent("old-agent".to_owned());
+    renderer.switch_agent(agent_id("old-agent"));
     sync(&handle);
     assert!(vt.screen_contains(80, "hidden old-agent message"));
 }
@@ -1330,7 +1330,7 @@ fn manual_compaction_selects_agent_from_empty_state() {
             .current_agent_state()
             .lock()
             .expect("current agent"),
-        Some("live-agent".to_owned())
+        Some(agent_id("live-agent"))
     );
 }
 
@@ -1526,7 +1526,7 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("sender-agent".to_owned());
+    renderer.switch_agent(agent_id("sender-agent"));
 
     renderer.handle(&agent_message(
         "sender-agent",
@@ -1575,7 +1575,7 @@ fn no_agent_overview_deduplicates_agent_message_projections() {
         None
     );
 
-    renderer.switch_agent("recipient-agent".to_owned());
+    renderer.switch_agent(agent_id("recipient-agent"));
     sync(&handle);
     assert!(vt.screen_contains(96, "overview semantic body"));
 
@@ -1610,9 +1610,9 @@ fn hidden_message_snapshots_reproject_late_agent_names() {
     );
     renderer.apply_setting("show-messages", "all-full");
 
-    renderer.switch_agent("agent-a".to_owned());
+    renderer.switch_agent(agent_id("agent-a"));
     renderer.handle(&agent_message("agent-a", "agent-b", "agent history"));
-    renderer.switch_agent("viewer".to_owned());
+    renderer.switch_agent(agent_id("viewer"));
     renderer.handle(&Event::AgentDisplayNameSet(
         tau_proto::AgentDisplayNameSet {
             agent_id: agent_id("agent-b"),
@@ -1621,7 +1621,7 @@ fn hidden_message_snapshots_reproject_late_agent_names() {
     ));
     sync(&handle);
     let generation = vt.frame_generation();
-    renderer.switch_agent("agent-a".to_owned());
+    renderer.switch_agent(agent_id("agent-a"));
     vt.wait_for_frame_containing_after(
         generation,
         "Message from @agent-a to @agent-b (late worker):",
@@ -1634,7 +1634,7 @@ fn hidden_message_snapshots_reproject_late_agent_names() {
         "agent-c",
         "overview message history",
     ));
-    renderer.switch_agent("viewer".to_owned());
+    renderer.switch_agent(agent_id("viewer"));
     renderer.handle(&Event::AgentDisplayNameSet(
         tau_proto::AgentDisplayNameSet {
             agent_id: agent_id("agent-a"),
@@ -1897,7 +1897,7 @@ fn pending_agent_response_stays_above_watched_agent_rows() {
             tau_cli_term::CompletionData::new(),
             cli_test_theme(),
         );
-        renderer.switch_agent("main".to_owned());
+        renderer.switch_agent(agent_id("main"));
 
         let render_response = |renderer: &mut EventRenderer| {
             renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
@@ -1968,7 +1968,7 @@ fn watched_agent_recursive_rows_keep_via_and_distinct_witness_context() {
         session_id: test_session_id("s1"),
         reason: tau_proto::SessionStartReason::Initial,
     }));
-    renderer.switch_agent("manager".to_owned());
+    renderer.switch_agent(agent_id("manager"));
     for (watcher, watched) in [("manager", "reviewer"), ("reviewer", "worker")] {
         renderer.handle(&Event::AgentWatchesUpdated(
             tau_proto::AgentWatchesUpdated {

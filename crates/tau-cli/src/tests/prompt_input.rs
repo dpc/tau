@@ -463,7 +463,7 @@ fn extension_prompt_with_target_does_not_select_from_empty_state() {
         None
     );
 
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
     assert!(vt.screen_contains(80, "worker answer"));
     assert_eq!(
@@ -779,7 +779,7 @@ fn internal_prompt_toggle_preserves_timer_and_context_alert_special_presentation
 fn replayed_source_aware_prompt_slots_survive_agent_snapshot_switches() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = marker_test_renderer(handle.clone());
-    renderer.switch_agent("replayed-agent".to_owned());
+    renderer.switch_agent(agent_id("replayed-agent"));
     let submitted = Event::AgentPromptSubmitted(AgentPromptSubmitted {
         inference_activation: false,
         agent_id: agent_id("replayed-agent"),
@@ -805,8 +805,8 @@ fn replayed_source_aware_prompt_slots_survive_agent_snapshot_switches() {
     });
     renderer.handle(&submitted);
     renderer.handle(&steered);
-    renderer.switch_agent("other-agent".to_owned());
-    renderer.switch_agent("replayed-agent".to_owned());
+    renderer.switch_agent(agent_id("other-agent"));
+    renderer.switch_agent(agent_id("replayed-agent"));
     renderer.apply_setting("show-internal-prompts", "on");
     sync(&handle);
 
@@ -1083,7 +1083,7 @@ fn hidden_agent_response_does_not_replace_visible_editor_context() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     renderer.handle(&Event::ProviderResponseFinished(
         finished_response_with_usage(
             "worker-1-sp-0",
@@ -1185,7 +1185,7 @@ fn hidden_agent_response_does_not_replace_visible_editor_context() {
         "the hidden fold must republish only when its visible editor response changed"
     );
 
-    renderer.switch_agent("worker-2".to_owned());
+    renderer.switch_agent(agent_id("worker-2"));
 
     let worker_two_context = renderer.editor_context();
     let worker_two_context = worker_two_context.lock().expect("editor context");
@@ -1220,7 +1220,7 @@ fn clearing_selected_agent_clears_response_editor_context() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     renderer.handle(&Event::ProviderResponseFinished(
         finished_response_with_usage(
             "worker-1-sp-0",
@@ -1318,7 +1318,7 @@ fn extension_lifecycle_completion_routes_to_starting_snapshot() {
         cli_test_theme(),
     );
 
-    renderer.switch_agent("agent-a".to_owned());
+    renderer.switch_agent(agent_id("agent-a"));
     renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
         instance_id: 7.into(),
         extension_name: tau_proto::ExtensionName::parse("std-test")
@@ -1328,7 +1328,7 @@ fn extension_lifecycle_completion_routes_to_starting_snapshot() {
     sync(&handle);
     assert!(vt.screen_contains(80, "extension std-test starting"));
 
-    renderer.switch_agent("agent-b".to_owned());
+    renderer.switch_agent(agent_id("agent-b"));
     renderer.handle(&Event::ExtensionReady(ExtensionReady {
         instance_id: 7.into(),
         extension_name: tau_proto::ExtensionName::parse("std-test")
@@ -1339,7 +1339,7 @@ fn extension_lifecycle_completion_routes_to_starting_snapshot() {
     assert!(!vt.screen_contains(80, "extension std-test ready"));
     assert!(!vt.screen_contains(80, "extension std-test starting"));
 
-    renderer.switch_agent("agent-a".to_owned());
+    renderer.switch_agent(agent_id("agent-a"));
     sync(&handle);
     assert!(vt.screen_contains(80, "extension std-test ready"));
     assert!(!vt.screen_contains(80, "extension std-test starting"));
@@ -1481,7 +1481,7 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
     sync(&handle);
     assert!(!vt.screen_contains(80, "worker replay answer"));
 
-    renderer.switch_agent("worker-1".to_owned());
+    renderer.switch_agent(agent_id("worker-1"));
     sync(&handle);
     assert!(vt.screen_contains(80, "worker replay answer"));
     assert!(!vt.screen_contains(80, "&q-worker"));
@@ -1555,7 +1555,7 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
             .current_agent_state()
             .lock()
             .expect("current agent"),
-        Some("new-agent".to_owned())
+        Some(agent_id("new-agent"))
     );
 }
 
@@ -1585,7 +1585,7 @@ fn queued_prompt_selects_agent_from_empty_state() {
             .current_agent_state()
             .lock()
             .expect("current agent"),
-        Some("live-agent".to_owned())
+        Some(agent_id("live-agent"))
     );
 }
 

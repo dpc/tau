@@ -57,6 +57,11 @@ use crate::ui_prompt::{
 };
 use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
 
+#[cfg(test)]
+fn agent_id(value: &str) -> tau_proto::AgentId {
+    tau_proto::AgentId::parse(value).expect("test agent id")
+}
+
 /// Cumulative protocol-I/O accounting shared by UI socket writers and readers.
 pub(crate) type UiIoMeter = tau_client::ProtocolIoMeter;
 type UiIoCumulativeStats = tau_client::ProtocolIoCumulativeStats;
@@ -2157,7 +2162,7 @@ enum RendererCmd {
     /// `:agent switch <agent_id>` — switch visible known agent transcript.
     SwitchAgent {
         /// Stable local agent identity to display.
-        agent_id: String,
+        agent_id: tau_proto::AgentId,
     },
     /// Return to the start-new-agent prompt state.
     ClearSelectedAgent,
@@ -2173,7 +2178,7 @@ enum RendererCmd {
         /// Correlation identity for the later action result.
         invocation_id: tau_proto::ActionInvocationId,
         /// Transcript that owns the action result.
-        owner_agent_id: Option<String>,
+        owner_agent_id: Option<tau_proto::AgentId>,
     },
     /// One decoded harness delivery admitted to the bounded remote FIFO.
     Remote {
@@ -2249,18 +2254,18 @@ struct TerminalInputLoopCtx {
 
 #[derive(Clone)]
 struct InputRoutingState {
-    current_agent_state: Arc<Mutex<Option<String>>>,
+    current_agent_state: Arc<Mutex<Option<tau_proto::AgentId>>>,
     known_agents: Arc<Mutex<Vec<String>>>,
     agent_navigation: Arc<Mutex<AgentNavigation>>,
-    ephemeral_agents: Arc<Mutex<std::collections::HashSet<String>>>,
+    ephemeral_agents: Arc<Mutex<std::collections::HashSet<tau_proto::AgentId>>>,
 }
 
 impl InputRoutingState {
     fn new(
-        current_agent_state: Arc<Mutex<Option<String>>>,
+        current_agent_state: Arc<Mutex<Option<tau_proto::AgentId>>>,
         known_agents: Arc<Mutex<Vec<String>>>,
         agent_navigation: Arc<Mutex<AgentNavigation>>,
-        ephemeral_agents: Arc<Mutex<std::collections::HashSet<String>>>,
+        ephemeral_agents: Arc<Mutex<std::collections::HashSet<tau_proto::AgentId>>>,
     ) -> Self {
         Self {
             current_agent_state,
@@ -2270,7 +2275,7 @@ impl InputRoutingState {
         }
     }
 
-    fn selected_agent_id(&self) -> Option<String> {
+    fn selected_agent_id(&self) -> Option<tau_proto::AgentId> {
         self.current_agent_state
             .lock()
             .ok()
@@ -2278,12 +2283,10 @@ impl InputRoutingState {
     }
 
     fn selected_side_agent_id(&self) -> Option<tau_proto::AgentId> {
-        self.selected_agent_id().map(|agent_id| {
-            tau_proto::AgentId::parse(&agent_id).expect("UI stores valid agent ids")
-        })
+        self.selected_agent_id()
     }
 
-    fn set_selected_agent(&self, agent_id: Option<String>) {
+    fn set_selected_agent(&self, agent_id: Option<tau_proto::AgentId>) {
         if let Ok(mut current) = self.current_agent_state.lock() {
             *current = agent_id;
         }
@@ -2324,14 +2327,14 @@ impl InputRoutingState {
             .unwrap_or(false)
     }
 
-    fn agent_is_active(&self, agent_id: &str) -> bool {
+    fn agent_is_active(&self, agent_id: &tau_proto::AgentId) -> bool {
         self.agent_navigation
             .lock()
             .map(|navigation| navigation.active_agents().contains(agent_id))
             .unwrap_or(false)
     }
 
-    fn agent_is_ephemeral(&self, agent_id: &str) -> bool {
+    fn agent_is_ephemeral(&self, agent_id: &tau_proto::AgentId) -> bool {
         self.ephemeral_agents
             .lock()
             .map(|agents| agents.contains(agent_id))
@@ -2350,35 +2353,30 @@ impl InputRoutingState {
     fn resolve_agent_command_target(
         &self,
         target: Option<&str>,
-        fallback: Option<String>,
+        fallback: Option<tau_proto::AgentId>,
     ) -> Result<Option<tau_proto::AgentId>, String> {
         target
             .map(str::trim)
             .filter(|target| !target.is_empty())
             .map(|target| self.known_agent_reference(target))
             .transpose()
-            .map(|target| {
-                target.or_else(|| {
-                    fallback.map(|agent_id| {
-                        tau_proto::AgentId::parse(agent_id).expect("UI stores valid agent ids")
-                    })
-                })
-            })
+            .map(|target| target.or(fallback))
     }
 
-    fn agent_switch_target(&self, target: Option<&str>) -> Result<Option<String>, String> {
+    fn agent_switch_target(
+        &self,
+        target: Option<&str>,
+    ) -> Result<Option<tau_proto::AgentId>, String> {
         let Some(arg) = target.map(str::trim).filter(|arg| !arg.is_empty()) else {
             return Err(":agent switch <agent_id|none>".to_owned());
         };
         if arg == "none" {
             return Ok(None);
         }
-        self.known_agent_reference(arg)
-            .map(tau_proto::AgentId::into_string)
-            .map(Some)
+        self.known_agent_reference(arg).map(Some)
     }
 
-    fn next_agent_cycle_selection(&self, delta: isize) -> Option<String> {
+    fn next_agent_cycle_selection(&self, delta: isize) -> Option<tau_proto::AgentId> {
         let current = self.selected_agent_id();
         let known = self.known_agents();
         let active = self
@@ -2386,7 +2384,15 @@ impl InputRoutingState {
             .lock()
             .map(|navigation| navigation.active_agents())
             .unwrap_or_default();
-        next_agent_cycle_selection(current.as_deref(), &known, &active, delta)
+        let next = next_agent_cycle_selection(
+            current.as_ref().map(tau_proto::AgentId::as_str),
+            &known,
+            &active,
+            delta,
+        );
+        active
+            .into_iter()
+            .find(|agent_id| next.as_deref() == Some(agent_id.as_str()))
     }
 
     fn role_cycling_enabled(&self) -> bool {
@@ -2738,7 +2744,7 @@ impl AgentDisplayNameRequest {
 
 fn name_alias_request(
     text: &str,
-    selected_agent_id: Option<String>,
+    selected_agent_id: Option<tau_proto::AgentId>,
     agent_is_known: impl FnOnce(&str) -> bool,
 ) -> Result<AgentDisplayNameRequest, String> {
     let display_name = text.strip_prefix(":name").unwrap_or("").trim();
@@ -2755,7 +2761,7 @@ fn name_alias_request(
         return Err(format!("unknown agent: {agent_id}"));
     }
     Ok(AgentDisplayNameRequest {
-        agent_id: tau_proto::AgentId::parse(&agent_id).expect("known agent id is valid"),
+        agent_id,
         display_name: display_name.to_owned(),
     })
 }
@@ -3065,7 +3071,7 @@ impl<'a> TerminalInputSession<'a> {
     fn prompt_line_targets_ephemeral_agent(&self, text: &str) -> bool {
         let selected_agent_id = self.selected_agent_id();
         let selected_agent_is_ephemeral = selected_agent_id
-            .as_deref()
+            .as_ref()
             .is_some_and(|agent_id| self.ctx.routing.agent_is_ephemeral(agent_id));
         prompt_line_targets_ephemeral_agent_state(
             text,
@@ -3403,7 +3409,7 @@ impl<'a> TerminalInputSession<'a> {
                     .ctx
                     .routing
                     .selected_agent_id()
-                    .unwrap_or_else(|| "none".to_owned());
+                    .map_or_else(|| "none".to_owned(), |agent_id| agent_id.to_string());
                 let known_agents = self.ctx.routing.known_agents();
                 let active_count = self.ctx.routing.active_count();
                 self.output.command_feedback(&format!(
@@ -3466,7 +3472,7 @@ impl<'a> TerminalInputSession<'a> {
         self.handle_agent_resume(None);
     }
 
-    fn selected_agent_id(&self) -> Option<String> {
+    fn selected_agent_id(&self) -> Option<tau_proto::AgentId> {
         self.ctx.routing.selected_agent_id()
     }
 
@@ -3492,7 +3498,7 @@ impl<'a> TerminalInputSession<'a> {
         let _ = self.ctx.renderer_tx.send(RendererCmd::ClearSelectedAgent);
     }
 
-    fn apply_agent_switch(&mut self, target: Option<String>) {
+    fn apply_agent_switch(&mut self, target: Option<tau_proto::AgentId>) {
         match target {
             None => {
                 self.ctx.routing.set_selected_agent(None);
@@ -3683,9 +3689,7 @@ impl<'a> TerminalInputSession<'a> {
         self.ctx
             .agent_in_progress
             .store(true, path_std_sync_atomic::Ordering::Relaxed);
-        let event = if let Some(target_agent_id) = selected_agent.map(|agent_id| {
-            tau_proto::AgentId::parse(&agent_id).expect("UI stores valid agent ids")
-        }) {
+        let event = if let Some(target_agent_id) = selected_agent {
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 literal: matches!(command_handling, PromptCommandHandling::LiteralEscape),
                 session_id: self.session_id.clone(),
@@ -3869,15 +3873,15 @@ impl<'a> TerminalInputSession<'a> {
                 return Err(CliError::ForegroundOwnershipUnconfirmed(message));
             }
             AgentPickerResolution::Select(agent_id) => {
-                if self.selected_agent_id().as_deref() != Some(agent_id.as_str()) {
-                    self.switch_to_agent(agent_id.to_string());
+                if self.selected_agent_id().as_ref() != Some(&agent_id) {
+                    self.switch_to_agent(agent_id);
                 }
             }
         }
         Ok(())
     }
 
-    fn switch_to_agent(&mut self, agent_id: String) {
+    fn switch_to_agent(&mut self, agent_id: tau_proto::AgentId) {
         self.pending_new_agent_options.clear();
         self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
         self.dismiss_completion_menu();
@@ -3962,7 +3966,7 @@ impl<'a> TerminalInputSession<'a> {
 enum AgentCommandEffect {
     ShowStatus,
     New,
-    Switch(Option<String>),
+    Switch(Option<tau_proto::AgentId>),
     SetNavigation {
         agent_id: tau_proto::AgentId,
         action: tau_proto::UiAgentNavigationModeAction,
@@ -4038,7 +4042,7 @@ fn agent_command_effect(
 fn agent_navigation_command_effect(
     routing: &InputRoutingState,
     target: Option<&str>,
-    fallback: Option<String>,
+    fallback: Option<tau_proto::AgentId>,
     action: tau_proto::UiAgentNavigationModeAction,
     usage: &str,
 ) -> Result<AgentCommandEffect, String> {
@@ -4153,7 +4157,9 @@ impl SubmittedLineHandlers for TerminalInputSession<'_> {
     }
 }
 
-pub(crate) fn role_cycling_enabled(current_agent_state: &Arc<Mutex<Option<String>>>) -> bool {
+pub(crate) fn role_cycling_enabled(
+    current_agent_state: &Arc<Mutex<Option<tau_proto::AgentId>>>,
+) -> bool {
     current_agent_state
         .lock()
         .ok()
@@ -4192,15 +4198,18 @@ enum AgentCycleAction {
     /// Keep the current input target unchanged.
     KeepSelection,
     /// Select the named active agent.
-    Select(String),
+    Select(tau_proto::AgentId),
     /// Clear the input target and show the all-agent overview.
     ClearSelection,
 }
 
 /// Translate a computed cycle selection into the input-loop operation that
 /// publishes the corresponding renderer command.
-fn agent_cycle_action(current: Option<&str>, next: Option<String>) -> AgentCycleAction {
-    if current == next.as_deref() {
+fn agent_cycle_action(
+    current: Option<&tau_proto::AgentId>,
+    next: Option<tau_proto::AgentId>,
+) -> AgentCycleAction {
+    if current == next.as_ref() {
         AgentCycleAction::KeepSelection
     } else if let Some(next) = next {
         AgentCycleAction::Select(next)
@@ -4218,7 +4227,7 @@ fn dispatch_agent_cycle(
 ) -> AgentCycleAction {
     let current = routing.selected_agent_id();
     let next = routing.next_agent_cycle_selection(delta);
-    let action = agent_cycle_action(current.as_deref(), next);
+    let action = agent_cycle_action(current.as_ref(), next);
     match &action {
         AgentCycleAction::KeepSelection => {}
         AgentCycleAction::Select(agent_id) => {
@@ -4321,7 +4330,7 @@ fn build_session_arg_completer() -> tau_cli_term::ArgCompleter {
 
 fn build_agent_arg_completer(
     routing: InputRoutingState,
-    agent_display_names: Arc<Mutex<HashMap<String, String>>>,
+    agent_display_names: Arc<Mutex<HashMap<tau_proto::AgentId, String>>>,
 ) -> tau_cli_term::ArgCompleter {
     use tau_cli_term::CompletionItem;
 
@@ -4353,7 +4362,7 @@ fn build_agent_arg_completer(
                 .filter(|agent| completion_matches(agent, needle))
                 .map(|agent| {
                     let description = display_names
-                        .get(&agent)
+                        .get(agent.as_str())
                         .cloned()
                         .unwrap_or_else(|| agent.clone());
                     CompletionItem::new(agent, description)

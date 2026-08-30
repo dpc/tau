@@ -257,8 +257,8 @@ fn presentation_mutation_eligibility_excludes_hidden_and_no_change_folds() {
         .resources
         .handle
         .force_selected_delivery_tracking_for_test();
-    renderer.selection.current_agent_id = Some("visible".to_owned());
-    renderer.selection.displayed_agent_id = Some("visible".to_owned());
+    renderer.selection.current_agent_id = Some(agent_id("visible"));
+    renderer.selection.displayed_agent_id = Some(agent_id("visible"));
     let queued = |agent: &str, message_class| {
         tau_proto::Event::AgentPromptQueued(tau_proto::AgentPromptQueued {
             agent_id: agent_id(agent),
@@ -308,8 +308,8 @@ fn presentation_mutation_eligibility_excludes_hidden_and_no_change_folds() {
 #[test]
 fn disabled_presentation_trace_bypasses_registration_seam() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.selection.current_agent_id = Some("visible".to_owned());
-    renderer.selection.displayed_agent_id = Some("visible".to_owned());
+    renderer.selection.current_agent_id = Some(agent_id("visible"));
+    renderer.selection.displayed_agent_id = Some(agent_id("visible"));
     renderer.handle_socket_delivery(
         &tau_proto::Event::AgentPromptQueued(tau_proto::AgentPromptQueued {
             agent_id: agent_id("visible"),
@@ -339,8 +339,8 @@ fn presentation_mutation_eligibility_rejects_same_value_block_updates() {
         .resources
         .handle
         .force_selected_delivery_tracking_for_test();
-    renderer.selection.current_agent_id = Some("visible".to_owned());
-    renderer.selection.displayed_agent_id = Some("visible".to_owned());
+    renderer.selection.current_agent_id = Some(agent_id("visible"));
+    renderer.selection.displayed_agent_id = Some(agent_id("visible"));
     let update = tau_proto::Event::ProviderResponseUpdated(tau_proto::ProviderResponseUpdated {
         agent_prompt_id: tau_proto::AgentPromptId::parse("prompt-no-op").expect("valid prompt id"),
         agent_id: agent_id("visible"),
@@ -399,12 +399,11 @@ fn response_update_activation_is_idempotent_across_routing_shapes() {
     };
 
     let mut live = renderer_for_agent_id_tests();
-    live.selection.current_agent_id = Some(agent_a.to_string());
-    live.selection.displayed_agent_id = Some(agent_a.to_string());
-    live.watches.watched_agents.insert(
-        agent_a.to_string(),
-        vec![agent_b.to_string(), agent_c.to_string()],
-    );
+    live.selection.current_agent_id = Some(agent_a.clone());
+    live.selection.displayed_agent_id = Some(agent_a.clone());
+    live.watches
+        .watched_agents
+        .insert(agent_a.clone(), vec![agent_b.clone(), agent_c.clone()]);
 
     let mut status = response_update(agent_b.clone());
     let tau_proto::Event::ProviderResponseUpdated(status_update) = &mut status else {
@@ -423,7 +422,7 @@ fn response_update_activation_is_idempotent_across_routing_shapes() {
         "a late status update adopts its canonical owner"
     );
     assert_eq!(
-        live.watches.active_agent_prompts.get(agent_b.as_str()),
+        live.watches.active_agent_prompts.get(&agent_b),
         Some(&HashSet::from([prompt_id.clone()])),
         "the selected watcher sees the hidden worker as active"
     );
@@ -484,14 +483,11 @@ fn response_update_activation_is_idempotent_across_routing_shapes() {
         "a visible-content compatibility update rehomes the prompt"
     );
     assert!(
-        !live
-            .watches
-            .active_agent_prompts
-            .contains_key(agent_b.as_str())
+        !live.watches.active_agent_prompts.contains_key(&agent_b)
             && live
                 .watches
                 .active_agent_prompts
-                .get(agent_c.as_str())
+                .get(&agent_c)
                 .is_some_and(|prompts| prompts.contains(&prompt_id)),
         "a rehome removes only the old owner before activating the new one"
     );
@@ -523,12 +519,12 @@ fn response_update_activation_is_idempotent_across_routing_shapes() {
     );
 
     let mut cold_replay = renderer_for_agent_id_tests();
-    cold_replay.selection.current_agent_id = Some(agent_a.to_string());
-    cold_replay.selection.displayed_agent_id = Some(agent_a.to_string());
-    cold_replay.watches.watched_agents.insert(
-        agent_a.to_string(),
-        vec![agent_b.to_string(), agent_c.to_string()],
-    );
+    cold_replay.selection.current_agent_id = Some(agent_a.clone());
+    cold_replay.selection.displayed_agent_id = Some(agent_a.clone());
+    cold_replay
+        .watches
+        .watched_agents
+        .insert(agent_a.clone(), vec![agent_b.clone(), agent_c.clone()]);
     for event in [
         &status,
         &content,
@@ -618,8 +614,8 @@ fn presentation_mutation_eligibility_covers_every_canonical_fold() {
         .resources
         .handle
         .force_selected_delivery_tracking_for_test();
-    renderer.selection.current_agent_id = Some("visible".to_owned());
-    renderer.selection.displayed_agent_id = Some("visible".to_owned());
+    renderer.selection.current_agent_id = Some(agent_id("visible"));
+    renderer.selection.displayed_agent_id = Some(agent_id("visible"));
     let prompt_id = || AgentPromptId::parse("presentation-fold").expect("valid prompt id");
     let queued = tau_proto::Event::AgentPromptQueued(tau_proto::AgentPromptQueued {
         agent_id: agent_id("visible"),
@@ -1090,7 +1086,7 @@ fn transcript_tool_runtime_retains_typed_ids_across_background_and_terminal_even
     let shell_id = tau_proto::ShellCommandId::parse(call_id.as_str()).expect("valid shell id");
     let session_id = tau_proto::SessionId::parse("runtime-session").expect("valid session id");
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.switch_agent(agent.to_string());
+    renderer.switch_agent(agent.clone());
 
     renderer.handle(&tau_proto::Event::UiShellCommand(
         tau_proto::UiShellCommand {
@@ -1494,10 +1490,10 @@ fn watched_agent_stats_keep_running_until_outer_turn_is_idle() {
     };
 
     renderer.handle(&stats(tau_proto::AgentRuntimeState::Running));
-    assert!(renderer.watched_agent_is_running("worker"));
+    assert!(renderer.watched_agent_is_running(&agent_id("worker")));
 
     renderer.handle(&stats(tau_proto::AgentRuntimeState::Idle));
-    assert!(!renderer.watched_agent_is_running("worker"));
+    assert!(!renderer.watched_agent_is_running(&agent_id("worker")));
 }
 
 /// The global side-agent count must include intermediate watched ancestors in a
@@ -1506,24 +1502,130 @@ fn watched_agent_stats_keep_running_until_outer_turn_is_idle() {
 fn watched_agent_count_projects_recursive_activity() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.watches.watched_agents = HashMap::from([
-        ("manager".to_owned(), vec!["reviewer".to_owned()]),
-        ("reviewer".to_owned(), vec!["worker".to_owned()]),
+        (agent_id("manager"), vec![agent_id("reviewer")]),
+        (agent_id("reviewer"), vec![agent_id("worker")]),
     ]);
     renderer.watches.agent_watchers = HashMap::from([
-        ("reviewer".to_owned(), vec!["manager".to_owned()]),
-        ("worker".to_owned(), vec!["reviewer".to_owned()]),
+        (agent_id("reviewer"), vec![agent_id("manager")]),
+        (agent_id("worker"), vec![agent_id("reviewer")]),
     ]);
     renderer.watches.active_agent_prompts.insert(
-        "worker".to_owned(),
+        agent_id("worker"),
         HashSet::from([tau_proto::AgentPromptId::parse("prompt").expect("valid prompt id")]),
     );
 
     assert_eq!(renderer.active_side_agent_count(), 2);
-    renderer.selection.current_agent_id = Some("reviewer".to_owned());
+    renderer.selection.current_agent_id = Some(agent_id("reviewer"));
     assert_eq!(
         renderer.active_side_agent_count(),
         1,
         "the existing selected-agent exclusion remains in force"
+    );
+}
+
+/// Watch, selection, transcript, and display-name state must retain validated
+/// agent ids through live folding, replay, unload, and session reset. A display
+/// name equal to another agent id must remain presentation data rather than
+/// colliding with that agent's renderer state.
+#[test]
+fn renderer_agent_maps_retain_typed_ids_across_watch_lifecycle_boundaries() {
+    fn assert_agent_graph(_: &HashMap<tau_proto::AgentId, Vec<tau_proto::AgentId>>) {}
+    fn assert_agent_snapshots(_: &HashMap<tau_proto::AgentId, super::AgentUiState>) {}
+    fn assert_agent_names(_: &HashMap<tau_proto::AgentId, String>) {}
+
+    let session_one = tau_proto::SessionId::parse("typed-watch-session").expect("session id");
+    let session_two = tau_proto::SessionId::parse("typed-watch-reset").expect("session id");
+    let manager = agent_id("manager");
+    let worker = agent_id("worker");
+    let started = tau_proto::Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: session_one.clone(),
+        reason: tau_proto::SessionStartReason::Initial,
+    });
+    let watches = tau_proto::Event::AgentWatchesUpdated(tau_proto::AgentWatchesUpdated {
+        session_id: session_one.clone(),
+        watcher_id: manager.clone(),
+        watched_agent_ids: vec![worker.clone()],
+        changed_agent_id: Some(worker.clone()),
+        cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    });
+    let colliding_name = tau_proto::Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {
+        agent_id: manager.clone(),
+        display_name: worker.to_string(),
+    });
+
+    let mut live = renderer_for_agent_id_tests();
+    live.handle(&started);
+    live.switch_agent(manager.clone());
+    live.handle(&watches);
+    live.handle(&colliding_name);
+    live.switch_agent(worker.clone());
+    live.switch_agent(manager.clone());
+
+    assert_agent_graph(&live.watches.watched_agents);
+    assert_agent_graph(&live.watches.agent_watchers);
+    assert_agent_snapshots(&live.selection.agents_ui_state);
+    let names = live
+        .discovery
+        .agent_display_names
+        .lock()
+        .expect("display names");
+    assert_agent_names(&names);
+    assert_eq!(
+        names.get(&manager).map(String::as_str),
+        Some(worker.as_str())
+    );
+    assert!(!names.contains_key(&worker));
+    drop(names);
+
+    let mut replay = renderer_for_agent_id_tests();
+    replay.handle(&started);
+    replay.switch_agent(manager.clone());
+    replay.handle(&watches);
+    replay.handle(&colliding_name);
+    replay.switch_agent(worker.clone());
+    replay.switch_agent(manager.clone());
+    assert_eq!(replay.watches.watched_agents, live.watches.watched_agents);
+    assert_eq!(replay.watches.agent_watchers, live.watches.agent_watchers);
+    assert_eq!(
+        replay
+            .selection
+            .agents_ui_state
+            .keys()
+            .collect::<HashSet<_>>(),
+        live.selection
+            .agents_ui_state
+            .keys()
+            .collect::<HashSet<_>>()
+    );
+
+    live.handle(&tau_proto::Event::SessionAgentUnloaded(
+        tau_proto::SessionAgentUnloaded {
+            session_id: session_one,
+            agent_id: worker.clone(),
+        },
+    ));
+    assert!(!live.watches.watched_agents.contains_key(&worker));
+    assert!(
+        live.watches
+            .watched_agents
+            .values()
+            .all(|targets| !targets.contains(&worker))
+    );
+    live.handle(&tau_proto::Event::SessionStarted(
+        tau_proto::SessionStarted {
+            session_id: session_two,
+            reason: tau_proto::SessionStartReason::New,
+        },
+    ));
+    assert!(live.watches.watched_agents.is_empty());
+    assert!(live.watches.agent_watchers.is_empty());
+    assert!(live.selection.agents_ui_state.is_empty());
+    assert!(
+        live.discovery
+            .agent_display_names
+            .lock()
+            .expect("display names")
+            .is_empty()
     );
 }
 
@@ -1687,7 +1789,7 @@ fn generated_multi_agent_load_avoids_hidden_terminal_snapshot_clones() {
         tau_cli_term::CompletionData::new(),
         crate::tests::cli_test_theme(),
     );
-    renderer.switch_agent("worker-0".to_owned());
+    renderer.switch_agent(agent_id("worker-0"));
 
     for agent_index in 0..8 {
         let agent_id = format!("worker-{agent_index}");
@@ -1707,13 +1809,16 @@ fn generated_multi_agent_load_avoids_hidden_terminal_snapshot_clones() {
                 tau_cli_term::StyledBlock::new(format!("{agent_id}:{block_index}")),
             );
         }
-        renderer.selection.agents_ui_state.insert(agent_id, state);
+        renderer.selection.agents_ui_state.insert(
+            tau_proto::AgentId::parse(&agent_id).expect("generated agent id"),
+            state,
+        );
     }
 
     let snapshots_before = handle.output_snapshot_count();
     let blocks_before = (1..8)
         .map(|agent_index| {
-            renderer.selection.agents_ui_state[&format!("worker-{agent_index}")]
+            renderer.selection.agents_ui_state[format!("worker-{agent_index}").as_str()]
                 .output
                 .block_count()
         })
@@ -1729,7 +1834,7 @@ fn generated_multi_agent_load_avoids_hidden_terminal_snapshot_clones() {
     assert_eq!(handle.output_snapshot_count(), snapshots_before);
     for (agent_index, blocks_before) in (1..8).zip(blocks_before) {
         assert_eq!(
-            renderer.selection.agents_ui_state[&format!("worker-{agent_index}")]
+            renderer.selection.agents_ui_state[format!("worker-{agent_index}").as_str()]
                 .output
                 .block_count(),
             blocks_before + 1
@@ -1742,7 +1847,7 @@ fn generated_multi_agent_load_avoids_hidden_terminal_snapshot_clones() {
 #[test]
 fn agent_id_for_event_routes_sent_message_to_sender() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.selection.current_agent_id = Some("current-agent".to_owned());
+    renderer.selection.current_agent_id = Some(agent_id("current-agent"));
 
     let resolved = renderer.agent_id_for_event_for_test(&agent_message(
         "sender-agent",
@@ -1750,7 +1855,7 @@ fn agent_id_for_event_routes_sent_message_to_sender() {
         "visible message",
     ));
 
-    assert_eq!(resolved, Some("sender-agent".to_owned()));
+    assert_eq!(resolved, Some(agent_id("sender-agent")));
 }
 
 /// Tool events may be attributed from prior metadata or from the event's
@@ -1781,11 +1886,11 @@ fn agent_id_for_event_resolves_tool_metadata_and_started_fallback() {
 
     assert_eq!(
         renderer.agent_id_for_event_for_test(&known_started),
-        Some("metadata-agent".to_owned())
+        Some(agent_id("metadata-agent"))
     );
     assert_eq!(
         renderer.agent_id_for_event_for_test(&unknown_started),
-        Some("started-agent".to_owned())
+        Some(agent_id("started-agent"))
     );
 }
 
@@ -1869,7 +1974,7 @@ fn agent_id_for_event_resolves_shell_progress_from_learned_metadata() {
 
     assert_eq!(
         renderer.agent_id_for_event_for_test(&progress),
-        Some("shell-agent".to_owned())
+        Some(agent_id("shell-agent"))
     );
 }
 
@@ -1944,31 +2049,31 @@ fn shell_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
     let unknown_terminal = shell_terminal(unknown_command.clone(), None, true);
 
     let mut live = renderer_for_agent_id_tests();
-    live.switch_agent(agent_a.to_string());
+    live.switch_agent(agent_a.clone());
     live.handle(&first_start);
-    live.switch_agent(agent_b.to_string());
+    live.switch_agent(agent_b.clone());
     live.handle(&second_start);
     assert_eq!(
         live.agent_id_for_event_for_test(&first_output),
-        Some(agent_a.to_string()),
+        Some(agent_a.clone()),
         "the hidden first shell command stays with agent A after selecting agent B"
     );
 
     live.handle(&replacement_start);
     assert_eq!(
         live.agent_id_for_event_for_test(&first_output),
-        Some(agent_b.to_string()),
+        Some(agent_b.clone()),
         "a later shell start replaces its typed owner for later output"
     );
     live.handle(&tool_start);
     assert_eq!(
         live.agent_id_for_event_for_test(&first_output),
-        Some(agent_b.to_string()),
+        Some(agent_b.clone()),
         "a generic tool with the same display text cannot replace shell ownership"
     );
     assert_eq!(
         live.agent_id_for_event_for_test(&tool_progress),
-        Some(agent_a.to_string()),
+        Some(agent_a.clone()),
         "the generic tool retains its separate typed owner"
     );
 
@@ -1989,7 +2094,7 @@ fn shell_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
     for renderer in [&mut live, &mut cold_replay] {
         assert_eq!(
             renderer.agent_id_for_event_for_test(&failed_terminal),
-            Some(agent_b.to_string()),
+            Some(agent_b.clone()),
             "output and failure terminals route through the retained replacement owner"
         );
         renderer.handle(&failed_terminal);
@@ -2014,7 +2119,7 @@ fn shell_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
 
     assert_eq!(
         live.agent_id_for_event_for_test(&cancelled_terminal),
-        Some(agent_b.to_string()),
+        Some(agent_b.clone()),
         "a cancelled terminal retains the second command's typed owner"
     );
     live.handle(&cancelled_terminal);
@@ -2110,7 +2215,7 @@ fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
         });
 
     let mut live = renderer_for_agent_id_tests();
-    live.switch_agent(agent_a.to_string());
+    live.switch_agent(agent_a.clone());
     live.handle(&first_start);
     assert!(
         live.transcript.runtime.prompts.contains_key(&prompt_one),
@@ -2123,7 +2228,7 @@ fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
             .is_some_and(|prompts| prompts.contains(&prompt_one)),
         "the production start path keeps the typed id in the activity guard"
     );
-    live.switch_agent(agent_b.to_string());
+    live.switch_agent(agent_b.clone());
     live.handle(&second_start);
     assert_eq!(
         live.agent_id_for_event_for_test(&tau_proto::Event::ProviderPromptSubmitted(
@@ -2132,7 +2237,7 @@ fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
                 originator: tau_proto::PromptOriginator::User,
             },
         )),
-        Some(agent_a.to_string()),
+        Some(agent_a.clone()),
         "the hidden first prompt stays with agent A after selecting agent B"
     );
 
@@ -2145,7 +2250,7 @@ fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
     );
     assert_eq!(
         live.agent_id_for_event_for_test(&stale_update),
-        Some(agent_b.to_string()),
+        Some(agent_b.clone()),
         "a no-content update cannot steal the replacement owner's transcript"
     );
 
@@ -2157,12 +2262,12 @@ fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
     );
     assert_eq!(
         live.agent_id_for_event_for_test(&late_terminal),
-        Some(agent_b.to_string()),
+        Some(agent_b.clone()),
         "a late terminal still routes through its retained typed owner"
     );
     assert_eq!(
         live.agent_id_for_event_for_test(&unknown_submission),
-        Some(agent_b.to_string()),
+        Some(agent_b.clone()),
         "an unknown typed prompt retains the existing user-originator fallback"
     );
     live.handle(&unknown_submission);
@@ -2317,46 +2422,46 @@ fn tool_ownership_uses_typed_protocol_ids_across_live_lifecycles() {
     let unknown_progress = tool_progress(unknown_call.clone());
 
     let mut live = renderer_for_agent_id_tests();
-    live.switch_agent(agent_a.to_string());
+    live.switch_agent(agent_a.clone());
     live.handle(&first_start);
-    live.switch_agent(agent_b.to_string());
+    live.switch_agent(agent_b.clone());
     live.handle(&second_start);
     assert_eq!(
         live.agent_id_for_event_for_test(&first_progress),
-        Some(agent_a.to_string()),
+        Some(agent_a.clone()),
         "the hidden first tool stays with agent A after selecting agent B"
     );
 
     live.handle(&duplicate_start);
     assert_eq!(
         live.agent_id_for_event_for_test(&first_progress),
-        Some(agent_a.to_string()),
+        Some(agent_a.clone()),
         "a duplicate start retains the original typed owner for later progress"
     );
 
     live.handle(&replacement);
     assert_eq!(
         live.agent_id_for_event_for_test(&first_progress),
-        Some(agent_b.to_string()),
+        Some(agent_b.clone()),
         "provider output replaces later progress ownership with its typed transcript owner"
     );
     for terminal in [&foreground, &background, &late_cancel] {
         assert_eq!(
             live.agent_id_for_event_for_test(terminal),
-            Some(agent_b.to_string()),
+            Some(agent_b.clone()),
             "every foreground, background, and late terminal keeps the replacement owner"
         );
         live.handle(terminal);
     }
     assert_eq!(
         live.agent_id_for_event_for_test(&error),
-        Some(agent_b.to_string()),
+        Some(agent_b.clone()),
         "a generic tool error routes through its typed owner"
     );
     live.handle(&error);
     assert_eq!(
         live.agent_id_for_event_for_test(&unknown_terminal),
-        Some(agent_b.to_string()),
+        Some(agent_b.clone()),
         "an unknown tool retains the existing user-originator fallback"
     );
     live.handle(&unknown_terminal);
@@ -2440,12 +2545,12 @@ fn deferred_large_tool_terminal_reuses_one_lightweight_projection() {
     renderer
         .discovery
         .pending_initial_discovery
-        .insert("large-agent".to_owned(), Vec::new());
+        .insert(agent_id("large-agent"), Vec::new());
     with_terminal_tool_call_work_observer(
         move |work| observed_work.lock().expect("work observations").push(work),
         || {
             renderer.handle(&event);
-            renderer.show_agent_transcript("large-agent".to_owned());
+            renderer.show_agent_transcript(agent_id("large-agent"));
             renderer.flush_pending_initial_discovery();
         },
     );
@@ -2509,8 +2614,8 @@ fn deferred_tool_ownership_routes_later_progress_after_publication() {
             ws_pool_delta: None,
         },
     ));
-    renderer.switch_agent(owner.to_string());
-    renderer.switch_agent("other-agent".to_owned());
+    renderer.switch_agent(owner.clone());
+    renderer.switch_agent(agent_id("other-agent"));
 
     assert_eq!(
         renderer.agent_id_for_event_for_test(&tau_proto::Event::ToolProgress(
@@ -2522,7 +2627,7 @@ fn deferred_tool_ownership_routes_later_progress_after_publication() {
                 display: None,
             },
         )),
-        Some(owner.to_string()),
+        Some(owner.clone()),
         "deferred publication keeps later generic tool routing with its owner"
     );
 }
@@ -2679,12 +2784,14 @@ fn agent_message_names_are_sanitized_and_bounded() {
 
     let message = agent_message("agent-a", "agent-b", "payload");
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.remember_agent_display_name("agent-a", "x)(\\\"");
+    renderer.remember_agent_display_name(&agent_id("agent-a"), "x)(\\\"");
     let summary = renderer.agent_message_summary(&message);
     assert!(summary.contains(r"agent-a (x\u{0029}\u{0028}\u{005C}\u{0022})"));
 
-    renderer
-        .remember_agent_display_name("agent-a", &format!("\n\u{1b}\u{202e}{}", "👩‍🚀".repeat(100)));
+    renderer.remember_agent_display_name(
+        &agent_id("agent-a"),
+        &format!("\n\u{1b}\u{202e}{}", "👩‍🚀".repeat(100)),
+    );
     let summary = renderer.agent_message_summary(&message);
     assert!(summary.contains(r"\u{001B}\u{202E}"));
     assert!(summary.contains('…'));
@@ -2699,8 +2806,8 @@ fn agent_message_names_are_sanitized_and_bounded() {
 fn agent_message_names_do_not_duplicate_agent_ids() {
     let message = agent_message("agent-a", "agent-b", "payload");
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.remember_agent_display_name("agent-a", "agent-a");
-    renderer.remember_agent_display_name("agent-b", "review agent-b task");
+    renderer.remember_agent_display_name(&agent_id("agent-a"), "agent-a");
+    renderer.remember_agent_display_name(&agent_id("agent-b"), "review agent-b task");
 
     assert_eq!(
         renderer.agent_message_summary(&message),
@@ -2712,7 +2819,7 @@ fn agent_message_names_do_not_duplicate_agent_ids() {
 #[test]
 fn peer_message_names_require_endpoint_authority() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.remember_agent_display_name("agent-b", "local worker");
+    renderer.remember_agent_display_name(&agent_id("agent-b"), "local worker");
     let event = tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
         message_id: tau_proto::AgentMessageId::parse("peer-message")
             .expect("test identifier must satisfy its grammar"),
@@ -2767,8 +2874,8 @@ fn late_agent_name_updates_reproject_message_history() {
 #[test]
 fn watch_content_summaries_preserve_wording_with_names() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.remember_agent_display_name("worker", "research task");
-    renderer.remember_agent_display_name("manager", "coordination");
+    renderer.remember_agent_display_name(&agent_id("worker"), "research task");
+    renderer.remember_agent_display_name(&agent_id("manager"), "coordination");
     let cases = [
         (
             tau_proto::AgentMessageKind::WatchResponse,
@@ -2799,9 +2906,9 @@ fn watch_content_summaries_preserve_wording_with_names() {
 #[test]
 fn selected_agent_messages_show_only_the_remote_endpoint() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.remember_agent_display_name("worker", "implementation");
-    renderer.remember_agent_display_name("manager", "coordination");
-    renderer.selection.displayed_agent_id = Some("manager".to_owned());
+    renderer.remember_agent_display_name(&agent_id("worker"), "implementation");
+    renderer.remember_agent_display_name(&agent_id("manager"), "coordination");
+    renderer.selection.displayed_agent_id = Some(agent_id("manager"));
     let inbound = received_agent_message("worker", None, "manager", "inbound body");
     assert_eq!(
         block_text(&renderer.render_agent_message_block(&inbound)),
@@ -2840,7 +2947,7 @@ fn external_message_facts_use_the_message_marker() {
 #[test]
 fn selected_inbound_message_matches_endpoints_with_session_scope() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.selection.displayed_agent_id = Some("same".to_owned());
+    renderer.selection.displayed_agent_id = Some(agent_id("same"));
     let inbound = received_agent_message("same", Some("remote-session"), "same", "remote body");
 
     assert_eq!(
@@ -2857,8 +2964,8 @@ fn selected_inbound_message_matches_endpoints_with_session_scope() {
 #[test]
 fn overview_messages_show_both_endpoint_task_labels() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.remember_agent_display_name("worker", "implementation");
-    renderer.remember_agent_display_name("manager", "coordination");
+    renderer.remember_agent_display_name(&agent_id("worker"), "implementation");
+    renderer.remember_agent_display_name(&agent_id("manager"), "coordination");
     renderer.selection.displayed_agent_id = None;
     let message = agent_message("worker", "manager", "preserved body");
 
@@ -2876,7 +2983,7 @@ fn overview_messages_show_both_endpoint_task_labels() {
 #[test]
 fn watch_work_status_renders_all_reportable_states() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.remember_agent_display_name("worker", "implementation");
+    renderer.remember_agent_display_name(&agent_id("worker"), "implementation");
     renderer.presentation.show_messages = path_tau_config_settings::ShowMessages::None;
     for (phase, label, symbol) in [
         (tau_proto::AgentWorkStatusPhase::Working, "working", "🚀"),
@@ -2925,8 +3032,8 @@ fn initial_watch_work_status_is_cached_without_a_transcript_notification() {
     let mut renderer = renderer_for_agent_id_tests();
     renderer.session.current_session_id =
         Some(tau_proto::SessionId::parse("session-1").expect("valid session ID"));
-    renderer.selection.current_agent_id = Some("manager".to_owned());
-    renderer.selection.displayed_agent_id = Some("manager".to_owned());
+    renderer.selection.current_agent_id = Some(agent_id("manager"));
+    renderer.selection.displayed_agent_id = Some(agent_id("manager"));
     renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: tau_proto::SessionId::parse("session-1").expect("valid session ID"),
@@ -3212,7 +3319,7 @@ fn resumed_session_clears_agent_display_name_authority() {
             reason: tau_proto::SessionStartReason::Initial,
         },
     ));
-    renderer.remember_agent_display_name("agent-b", "session A worker");
+    renderer.remember_agent_display_name(&agent_id("agent-b"), "session A worker");
     assert!(
         renderer
             .agent_message_summary(&message)
@@ -3695,7 +3802,7 @@ fn embedded_tool_continuation_trace_renders_fully_idle() {
         "s1".parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
     );
-    renderer.switch_agent(fixture_agent.to_string());
+    renderer.switch_agent(fixture_agent.clone());
     let mut saw_main_active = false;
     let mut saw_global_active = false;
     for event in &events {
@@ -3711,7 +3818,7 @@ fn embedded_tool_continuation_trace_renders_fully_idle() {
         "s1".parse::<tau_proto::SessionId>()
             .expect("known-safe SessionId must be valid"),
     );
-    watched_renderer.selection.current_agent_id = Some("manager".to_owned());
+    watched_renderer.selection.current_agent_id = Some(agent_id("manager"));
     watched_renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
         tau_proto::AgentWatchesUpdated {
             session_id: "s1"

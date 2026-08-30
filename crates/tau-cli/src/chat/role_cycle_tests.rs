@@ -110,7 +110,7 @@ fn selected_agent_suspend_alias_dispatches_existing_suspend_flow() {
     ])));
     let suspended = Arc::new(Mutex::new(path_std_collections::HashSet::new()));
     let routing = routing_state(known, live.clone(), suspended.clone());
-    routing.set_selected_agent(Some("worker".to_owned()));
+    routing.set_selected_agent(Some(agent_id("worker")));
     let messages = Arc::new(Mutex::new(Vec::new()));
 
     let target = handle_agent_suspend_command(&routing, None, &|message| {
@@ -122,7 +122,7 @@ fn selected_agent_suspend_alias_dispatches_existing_suspend_flow() {
 
     assert!(messages.lock().expect("messages lock poisoned").is_empty());
     assert_eq!(target.as_deref(), Some("worker"));
-    assert!(routing.agent_is_active("worker"));
+    assert!(routing.agent_is_active(&agent_id("worker")));
 }
 
 /// Ensures `:resume` resolves the selected suspended agent without changing the
@@ -137,7 +137,7 @@ fn selected_agent_resume_alias_dispatches_existing_resume_flow() {
         "worker".to_owned()
     ])));
     let routing = routing_state(known, live.clone(), suspended.clone());
-    routing.set_selected_agent(Some("worker".to_owned()));
+    routing.set_selected_agent(Some(agent_id("worker")));
     let messages = Arc::new(Mutex::new(Vec::new()));
 
     let target = handle_agent_resume_command(&routing, None, &|message| {
@@ -149,7 +149,7 @@ fn selected_agent_resume_alias_dispatches_existing_resume_flow() {
 
     assert!(messages.lock().expect("messages lock poisoned").is_empty());
     assert_eq!(target.as_deref(), Some("worker"));
-    assert!(!routing.agent_is_active("worker"));
+    assert!(!routing.agent_is_active(&agent_id("worker")));
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn agent_commands_accept_prefixed_references_in_canonical_effects() {
     for command in [":agent switch helper", ":agent switch @helper"] {
         assert_eq!(
             agent_command_effect(command, &routing).expect("switch effect"),
-            AgentCommandEffect::Switch(Some("helper".to_owned()))
+            AgentCommandEffect::Switch(Some(agent_id("helper")))
         );
     }
     for command in [":agent suspend worker", ":agent suspend @worker"] {
@@ -359,7 +359,7 @@ fn agent_cycle_dispatches_overview_and_agent_transitions() {
         wake_tx,
     );
 
-    routing.set_selected_agent(Some("bravo".to_owned()));
+    routing.set_selected_agent(Some(agent_id("bravo")));
     assert_eq!(
         dispatch_agent_cycle(&routing, &renderer_tx, 1),
         AgentCycleAction::ClearSelection
@@ -372,22 +372,22 @@ fn agent_cycle_dispatches_overview_and_agent_transitions() {
 
     assert_eq!(
         dispatch_agent_cycle(&routing, &renderer_tx, 1),
-        AgentCycleAction::Select("alpha".to_owned())
+        AgentCycleAction::Select(agent_id("alpha"))
     );
     assert_eq!(routing.selected_agent_id().as_deref(), Some("alpha"));
     assert!(matches!(
         renderer_rx.try_recv().expect("agent renderer command"),
-        RendererCmd::SwitchAgent { agent_id } if agent_id == "alpha"
+        RendererCmd::SwitchAgent { agent_id } if agent_id.as_str() == "alpha"
     ));
 
     routing.set_selected_agent(None);
     assert_eq!(
         dispatch_agent_cycle(&routing, &renderer_tx, -1),
-        AgentCycleAction::Select("bravo".to_owned())
+        AgentCycleAction::Select(agent_id("bravo"))
     );
     assert!(matches!(
         renderer_rx.try_recv().expect("reverse renderer command"),
-        RendererCmd::SwitchAgent { agent_id } if agent_id == "bravo"
+        RendererCmd::SwitchAgent { agent_id } if agent_id.as_str() == "bravo"
     ));
 }
 
@@ -397,7 +397,7 @@ fn agent_completer_uses_display_names_as_descriptions() {
     // display name in the completion description so long names remain visible.
     let known = Arc::new(Mutex::new(vec!["worker".to_owned()]));
     let names = Arc::new(Mutex::new(HashMap::from([(
-        "worker".to_owned(),
+        agent_id("worker"),
         "Investigate worker".to_owned(),
     )])));
     let live = Arc::new(Mutex::new(path_std_collections::HashSet::from([
