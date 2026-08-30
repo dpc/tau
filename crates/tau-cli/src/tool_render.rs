@@ -662,7 +662,30 @@ fn normalize_inline_text(text: &str) -> String {
 /// [`format_tool_completion`] for older events that didn't carry a
 /// descriptor.
 pub(crate) fn render_tool_use_state(tool_name: &str, display: &ToolUseState) -> ToolCallDisplay {
-    render_tool_use_state_inner(tool_name, display, true)
+    render_tool_use_state_inner(
+        tool_name,
+        display,
+        true,
+        ToolPayloadProjection::RetainDescriptor,
+    )
+}
+
+/// Renders a tool descriptor while deriving diff counters from a separately
+/// owned payload and omitting that payload from the returned header.
+///
+/// Completed diff history owns the payload separately so settings changes can
+/// re-render its body without retaining a second copy in [`ToolCallDisplay`].
+pub(crate) fn render_tool_use_state_payload_free(
+    tool_name: &str,
+    display: &ToolUseState,
+    payload: &ToolUsePayload,
+) -> ToolCallDisplay {
+    render_tool_use_state_inner(
+        tool_name,
+        display,
+        true,
+        ToolPayloadProjection::BorrowCounters(payload),
+    )
 }
 
 /// Renders shared tool-like fields without fabricating a lifecycle status.
@@ -673,20 +696,36 @@ pub(crate) fn render_tool_use_state_without_status(
     tool_name: &str,
     display: &ToolUseState,
 ) -> ToolCallDisplay {
-    render_tool_use_state_inner(tool_name, display, false)
+    render_tool_use_state_inner(
+        tool_name,
+        display,
+        false,
+        ToolPayloadProjection::RetainDescriptor,
+    )
+}
+
+/// Selects whether a rendered tool display owns its descriptor payload or only
+/// borrows a separately retained payload for header counters.
+#[derive(Clone, Copy)]
+enum ToolPayloadProjection<'a> {
+    /// Clone and retain the descriptor payload in the rendered display.
+    RetainDescriptor,
+    /// Omit the payload while deriving counters from this history-owned value.
+    BorrowCounters(&'a ToolUsePayload),
 }
 
 fn render_tool_use_state_inner(
     tool_name: &str,
     display: &ToolUseState,
     include_status: bool,
+    payload_projection: ToolPayloadProjection<'_>,
 ) -> ToolCallDisplay {
     let mut suffixes: Vec<ToolLineSegment> = Vec::new();
-    let (added, removed) = display
-        .payload
-        .as_ref()
-        .map(diff_payload_counts)
-        .unwrap_or_default();
+    let counter_payload = match payload_projection {
+        ToolPayloadProjection::RetainDescriptor => display.payload.as_ref(),
+        ToolPayloadProjection::BorrowCounters(payload) => Some(payload),
+    };
+    let (added, removed) = counter_payload.map(diff_payload_counts).unwrap_or_default();
     if 0 < added {
         suffixes.push(tool_suffix(format!("+{added}"), ToolStatus::DiffAdded));
     }
@@ -748,7 +787,10 @@ fn render_tool_use_state_inner(
         args: display.args.clone(),
         range: display.range.as_ref().and_then(format_tool_use_range),
         suffixes,
-        payload: display.payload.clone(),
+        payload: match payload_projection {
+            ToolPayloadProjection::RetainDescriptor => display.payload.clone(),
+            ToolPayloadProjection::BorrowCounters(_) => None,
+        },
     }
 }
 

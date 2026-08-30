@@ -974,6 +974,374 @@ fn rendered_tool_block_text(display: &crate::tool_render::ToolCallDisplay) -> St
     format!("{header}{body}")
 }
 
+/// Large changed-file terminals retain one rich payload, preserve the legacy
+/// header exactly, and move that payload unchanged into reprojectable history.
+#[test]
+fn large_diff_terminals_retain_one_payload_with_exact_legacy_header() {
+    fn payload(bytes: usize, path: &str) -> tau_proto::ToolUsePayload {
+        tau_proto::ToolUsePayload::Diffs {
+            files: vec![tau_proto::FileDiffSummary {
+                path: path.to_owned(),
+                diff: tau_proto::DiffSummary {
+                    added: 1,
+                    removed: 1,
+                    hunks: vec![tau_proto::DiffHunk {
+                        old_start: 1,
+                        old_count: 1,
+                        new_start: 1,
+                        new_count: 1,
+                        lines: vec![
+                            tau_proto::DiffLine::Remove {
+                                text: "old".to_owned(),
+                            },
+                            tau_proto::DiffLine::Add {
+                                text: "x".repeat(bytes),
+                            },
+                        ],
+                    }],
+                },
+            }],
+        }
+    }
+
+    fn large_text(payload: &tau_proto::ToolUsePayload) -> &str {
+        let tau_proto::ToolUsePayload::Diffs { files } = payload else {
+            panic!("path-labelled diff");
+        };
+        let tau_proto::DiffLine::Add { text } = &files[0].diff.hunks[0].lines[1] else {
+            panic!("large added line");
+        };
+        text
+    }
+
+    for (bytes, status) in [
+        (1024 * 1024, tau_proto::ToolUseStatus::Warning),
+        (4 * 1024 * 1024, tau_proto::ToolUseStatus::Success),
+    ] {
+        let descriptor = tau_proto::ToolUseState {
+            args: format!("src/{bytes}.rs"),
+            info_chips: vec!["partial-change".to_owned()],
+            status,
+            status_text: if status == tau_proto::ToolUseStatus::Warning {
+                "partial".to_owned()
+            } else {
+                "producer-status-is-normalized".to_owned()
+            },
+            payload: Some(payload(bytes, &format!("src/{bytes}.rs"))),
+            ..Default::default()
+        };
+        let rich_payload = descriptor.payload.as_ref().expect("rich diff");
+        let display = super::EventRenderer::tool_result_display(
+            &tau_proto::ToolName::new("edit"),
+            Some(&descriptor),
+            Some(rich_payload),
+        );
+        {
+            let legacy_descriptor = super::normalize_terminal_tool_use_state(
+                descriptor.clone(),
+                super::TerminalToolOutcome::SuccessResult,
+            );
+            let legacy_display =
+                crate::tool_render::render_tool_use_state("edit", &legacy_descriptor);
+            assert_eq!(
+                rendered_tool_header(&display),
+                rendered_tool_header(&legacy_display),
+                "payload ownership must not alter visible terminal metadata"
+            );
+            for width in [36, 120] {
+                let current = crate::tool_render::render_tool_block(
+                    &crate::tests::cli_test_theme(),
+                    &display,
+                )
+                .priority_line_content()
+                .expect("current header")
+                .layout(width);
+                let legacy = crate::tool_render::render_tool_block(
+                    &crate::tests::cli_test_theme(),
+                    &legacy_display,
+                )
+                .priority_line_content()
+                .expect("legacy header")
+                .layout(width);
+                assert_eq!(current, legacy, "width {width} header cells and styles");
+            }
+        }
+        assert!(
+            display.payload.is_none(),
+            "the lightweight history header must not retain the rich payload"
+        );
+
+        let retained_payload = rich_payload.clone();
+        let expected_pointer = large_text(&retained_payload).as_ptr();
+        let mut renderer = renderer_for_agent_id_tests();
+        renderer.record_tool_result_block(None, display, Some(retained_payload));
+        let entry = renderer
+            .transcript
+            .history
+            .diff_blocks
+            .last()
+            .expect("diff history entry");
+        assert_eq!(
+            large_text(&entry.diff).as_ptr(),
+            expected_pointer,
+            "history must move rather than clone its uniquely owned payload"
+        );
+        assert_eq!(large_text(&entry.diff).len(), bytes);
+        assert!(entry.display.payload.is_none());
+
+        let replacements = renderer.block_replacement_count_for_test();
+        renderer.set_diffs_expanded(true);
+        assert_eq!(
+            renderer.block_replacement_count_for_test(),
+            replacements + 1
+        );
+        let entry = &renderer.transcript.history.diff_blocks[0];
+        let expanded = renderer.render_diff_history_block(&entry.display, &entry.diff);
+        let expanded_text: String = expanded
+            .priority_line_body_content()
+            .expect("expanded diff body")
+            .spans()
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect();
+        assert!(expanded_text.starts_with(&format!("--- src/{bytes}.rs")));
+        assert!(expanded_text.contains(&format!("+{}", "x".repeat(bytes))));
+        renderer.set_diffs_expanded(false);
+        let entry = &renderer.transcript.history.diff_blocks[0];
+        let collapsed = renderer.render_diff_history_block(&entry.display, &entry.diff);
+        assert!(
+            collapsed
+                .priority_line_body_content()
+                .is_none_or(|body| body.spans().is_empty()),
+            "collapsed reprojection omits rich diff rows"
+        );
+        assert_eq!(
+            large_text(&renderer.transcript.history.diff_blocks[0].diff).as_ptr(),
+            expected_pointer,
+            "settings reprojection must continue borrowing the one retained payload"
+        );
+    }
+}
+
+/// Raw background completion dispatch borrows the large presentation DTO,
+/// retains the diff once even while hidden, and keeps it available for later
+/// full and expanded settings reprojection.
+#[test]
+fn hidden_background_diff_moves_through_borrowed_terminal_projection() {
+    let bytes = 2 * 1024 * 1024;
+    let large_line = "b".repeat(bytes);
+    let source_pointer = large_line.as_ptr();
+    let event = tau_proto::Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+        call_id: "large-background-diff".into(),
+        tool_name: tau_proto::ToolName::new("edit"),
+        tool_type: tau_proto::ToolType::Function,
+        result: tau_proto::CborValue::Null,
+        display: Some(tau_proto::ToolUseState {
+            args: "src/background.rs".to_owned(),
+            status: tau_proto::ToolUseStatus::Warning,
+            status_text: "partial".to_owned(),
+            payload: Some(tau_proto::ToolUsePayload::Diff(tau_proto::DiffSummary {
+                added: 1,
+                removed: 0,
+                hunks: vec![tau_proto::DiffHunk {
+                    old_start: 1,
+                    old_count: 0,
+                    new_start: 1,
+                    new_count: 1,
+                    lines: vec![tau_proto::DiffLine::Add { text: large_line }],
+                }],
+            })),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    });
+
+    let observed_pointer = Rc::new(Cell::new(std::ptr::null()));
+    let observed_pointer_for_hook = Rc::clone(&observed_pointer);
+    super::set_tool_terminal_descriptor_observer_for_test(Some(Box::new(
+        move |descriptor, _details| {
+            let Some(tau_proto::ToolUseState {
+                payload: Some(tau_proto::ToolUsePayload::Diff(summary)),
+                ..
+            }) = descriptor
+            else {
+                return;
+            };
+            let tau_proto::DiffLine::Add { text } = &summary.hunks[0].lines[0] else {
+                return;
+            };
+            observed_pointer_for_hook.set(text.as_ptr());
+        },
+    )));
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.set_show_tools(path_tau_config_settings::ShowTools::Off);
+    assert!(renderer.handle_tool_events(&event, tau_proto::UnixMicros::new(7)));
+    super::set_tool_terminal_descriptor_observer_for_test(None);
+    assert_eq!(
+        observed_pointer.get(),
+        source_pointer,
+        "raw background dispatch must pass the event descriptor directly"
+    );
+    assert!(renderer.transcript.history.tool_history.is_empty());
+    assert_eq!(renderer.transcript.history.diff_blocks.len(), 1);
+
+    let entry = &renderer.transcript.history.diff_blocks[0];
+    assert!(entry.display.payload.is_none());
+    assert_eq!(
+        rendered_tool_header(&entry.display),
+        "edit src/background.rs +1 partial"
+    );
+    let tau_proto::ToolUsePayload::Diff(summary) = &entry.diff else {
+        panic!("single-file diff");
+    };
+    let tau_proto::DiffLine::Add { text } = &summary.hunks[0].lines[0] else {
+        panic!("added line");
+    };
+    assert_eq!(text.len(), bytes);
+    assert_ne!(
+        text.as_ptr(),
+        source_pointer,
+        "retained history needs one copy independent of borrowed input"
+    );
+    let retained_pointer = text.as_ptr();
+    drop(event);
+
+    let replacements = renderer.block_replacement_count_for_test();
+    renderer.set_show_tools(path_tau_config_settings::ShowTools::Full);
+    assert_eq!(
+        renderer.block_replacement_count_for_test(),
+        replacements + 1
+    );
+    let entry = &renderer.transcript.history.diff_blocks[0];
+    let collapsed = renderer.render_diff_history_block(&entry.display, &entry.diff);
+    assert!(
+        collapsed
+            .priority_line_body_content()
+            .is_none_or(|body| body.spans().is_empty()),
+        "Off to Full publishes the collapsed header without diff rows"
+    );
+
+    let replacements = renderer.block_replacement_count_for_test();
+    renderer.set_diffs_expanded(true);
+    assert_eq!(
+        renderer.block_replacement_count_for_test(),
+        replacements + 1
+    );
+    assert_eq!(
+        renderer.transcript.history.diff_blocks[0].display.payload,
+        None
+    );
+    let entry = &renderer.transcript.history.diff_blocks[0];
+    let expanded = renderer.render_diff_history_block(&entry.display, &entry.diff);
+    let expanded_text: String = expanded
+        .priority_line_body_content()
+        .expect("expanded background diff body")
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect();
+    assert!(expanded_text.starts_with("@@ -1,0 +1,1 @@"));
+    assert!(expanded_text.contains(&format!("+{}", "b".repeat(bytes))));
+    let tau_proto::ToolUsePayload::Diff(summary) = &renderer.transcript.history.diff_blocks[0].diff
+    else {
+        panic!("single-file diff after reprojection");
+    };
+    let tau_proto::DiffLine::Add { text } = &summary.hunks[0].lines[0] else {
+        panic!("added line after reprojection");
+    };
+    assert_eq!(
+        text.as_ptr(),
+        retained_pointer,
+        "hidden/full/expanded reprojection must borrow retained history"
+    );
+}
+
+/// Cancellation-derived background errors borrow both large DTO fields at
+/// dispatch and preserve exact hidden-to-full error/body reprojection.
+#[test]
+fn large_background_error_borrows_descriptor_and_details() {
+    let payload_text = "p".repeat(1024 * 1024);
+    let payload_pointer = payload_text.as_ptr();
+    let details_text = "d".repeat(2 * 1024 * 1024);
+    let details_pointer = details_text.as_ptr();
+    let event = tau_proto::Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+        call_id: "large-background-error".into(),
+        tool_name: tau_proto::ToolName::new("edit"),
+        tool_type: tau_proto::ToolType::Function,
+        message: "cancelled remotely".to_owned(),
+        details: Some(tau_proto::CborValue::Text(details_text)),
+        display: Some(tau_proto::ToolUseState {
+            args: "src/error.rs".to_owned(),
+            status: tau_proto::ToolUseStatus::Success,
+            status_text: "false-success".to_owned(),
+            payload: Some(tau_proto::ToolUsePayload::Text { text: payload_text }),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    });
+
+    let observed_payload = Rc::new(Cell::new(std::ptr::null()));
+    let observed_details = Rc::new(Cell::new(std::ptr::null()));
+    let observed_payload_for_hook = Rc::clone(&observed_payload);
+    let observed_details_for_hook = Rc::clone(&observed_details);
+    super::set_tool_terminal_descriptor_observer_for_test(Some(Box::new(
+        move |descriptor, details| {
+            let Some(tau_proto::ToolUseState {
+                payload: Some(tau_proto::ToolUsePayload::Text { text }),
+                ..
+            }) = descriptor
+            else {
+                return;
+            };
+            let Some(tau_proto::CborValue::Text(details)) = details else {
+                return;
+            };
+            observed_payload_for_hook.set(text.as_ptr());
+            observed_details_for_hook.set(details.as_ptr());
+        },
+    )));
+
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.set_show_tools(path_tau_config_settings::ShowTools::Off);
+    assert!(renderer.handle_tool_events(&event, tau_proto::UnixMicros::new(9)));
+    super::set_tool_terminal_descriptor_observer_for_test(None);
+    assert_eq!(observed_payload.get(), payload_pointer);
+    assert_eq!(observed_details.get(), details_pointer);
+    assert_eq!(renderer.transcript.history.tool_history.len(), 1);
+    let entry = &renderer.transcript.history.tool_history[0];
+    assert_eq!(
+        rendered_tool_header(&entry.display),
+        "edit src/error.rs err: cancelled remotely"
+    );
+    let Some(tau_proto::ToolUsePayload::Text { text }) = &entry.display.payload else {
+        panic!("retained text payload");
+    };
+    assert_eq!(text.len(), 1024 * 1024);
+    assert_ne!(text.as_ptr(), payload_pointer);
+    drop(event);
+
+    let replacements = renderer.block_replacement_count_for_test();
+    renderer.set_show_tools(path_tau_config_settings::ShowTools::Full);
+    assert_eq!(
+        renderer.block_replacement_count_for_test(),
+        replacements + 1
+    );
+    let block =
+        renderer.render_tool_history_block(&renderer.transcript.history.tool_history[0].display);
+    let body: String = block
+        .priority_line_body_content()
+        .expect("full error text body")
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect();
+    assert_eq!(
+        body,
+        "p".repeat(1024 * 1024),
+        "hidden-to-full reprojection publishes the exact retained body"
+    );
+}
+
 /// Canonical terminal outcomes replace contradictory status hints while
 /// preserving valid warnings, aligned error labels, and unrelated metadata.
 #[test]
@@ -1098,7 +1466,11 @@ fn terminal_builders_render_canonical_status_wording() {
         originator: tau_proto::PromptOriginator::User,
     };
     assert_eq!(
-        rendered_tool_header(&super::EventRenderer::tool_result_display(&result)),
+        rendered_tool_header(&super::EventRenderer::tool_result_display(
+            &result.tool_name,
+            result.display.as_ref(),
+            None,
+        )),
         "generic terminal-args ok"
     );
 
@@ -1118,7 +1490,12 @@ fn terminal_builders_render_canonical_status_wording() {
         originator: tau_proto::PromptOriginator::User,
     };
     assert_eq!(
-        rendered_tool_header(&super::EventRenderer::tool_error_display(&error)),
+        rendered_tool_header(&super::EventRenderer::tool_error_display_fields(
+            &error.tool_name,
+            &error.message,
+            error.details.as_ref(),
+            error.display.as_ref(),
+        )),
         "generic terminal-args err: canonical-failure"
     );
 }
@@ -1139,7 +1516,12 @@ fn delegate_error_fallback_retains_stats_and_canonical_wording() {
     };
 
     assert_eq!(
-        rendered_tool_header(&super::EventRenderer::tool_error_display(&error)),
+        rendered_tool_header(&super::EventRenderer::tool_error_display_fields(
+            &error.tool_name,
+            &error.message,
+            error.details.as_ref(),
+            error.display.as_ref(),
+        )),
         "agent_start 2L, 17B err: canonical-delegate-failure"
     );
 }

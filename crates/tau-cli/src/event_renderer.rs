@@ -46,10 +46,10 @@ use crate::tool_render::{
     format_context_token_count, format_token_count, pending_tool_call_display,
     render_action_output_block, render_compaction_block, render_diff_tool_block,
     render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
-    render_tool_use_state, render_tool_use_state_without_status,
-    render_turn_stats_projection_block, session_status_block, streaming_block,
-    streaming_block_with_indicator_suffix, synthesize_fallback_display, tool_duration_suffix,
-    ui_dir_block,
+    render_tool_use_state, render_tool_use_state_payload_free,
+    render_tool_use_state_without_status, render_turn_stats_projection_block, session_status_block,
+    streaming_block, streaming_block_with_indicator_suffix, synthesize_fallback_display,
+    tool_duration_suffix, ui_dir_block,
 };
 use crate::turn_stats_projection::TurnStatsPresentationProjection;
 use crate::watch_activity::{VISIBLE_WATCH_EXPANSION_LIMIT, WatchGraphProjection};
@@ -71,8 +71,14 @@ static LAST_HANDLER_STALL_WARNING: std::sync::OnceLock<Mutex<Option<Instant>>> =
 type SubmittedPromptParserInputObserver = Box<dyn FnMut(&str)>;
 
 #[cfg(test)]
+type ToolTerminalDescriptorObserver =
+    Box<dyn FnMut(Option<&tau_proto::ToolUseState>, Option<&CborValue>)>;
+
+#[cfg(test)]
 thread_local! {
     static SUBMITTED_PROMPT_PARSER_INPUT_OBSERVER: RefCell<Option<SubmittedPromptParserInputObserver>> =
+        const { RefCell::new(None) };
+    static TOOL_TERMINAL_DESCRIPTOR_OBSERVER: RefCell<Option<ToolTerminalDescriptorObserver>> =
         const { RefCell::new(None) };
 }
 
@@ -92,6 +98,25 @@ fn set_submitted_prompt_parser_input_observer_for_test(
     SUBMITTED_PROMPT_PARSER_INPUT_OBSERVER.with(|slot| *slot.borrow_mut() = observer);
 }
 
+#[cfg(test)]
+fn observe_tool_terminal_descriptor(
+    descriptor: Option<&tau_proto::ToolUseState>,
+    details: Option<&CborValue>,
+) {
+    TOOL_TERMINAL_DESCRIPTOR_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow_mut().as_mut() {
+            observer(descriptor, details);
+        }
+    });
+}
+
+#[cfg(test)]
+fn set_tool_terminal_descriptor_observer_for_test(
+    observer: Option<ToolTerminalDescriptorObserver>,
+) {
+    TOOL_TERMINAL_DESCRIPTOR_OBSERVER.with(|slot| *slot.borrow_mut() = observer);
+}
+
 /// Canonical outcome that owns a terminal tool row's displayed status.
 #[derive(Clone, Copy)]
 enum TerminalToolOutcome<'a> {
@@ -101,6 +126,22 @@ enum TerminalToolOutcome<'a> {
     Error { canonical_message: &'a str },
     /// The terminal event reports cancellation.
     Cancelled,
+}
+
+/// Borrowed fields shared by foreground and background tool-error terminals.
+struct BorrowedToolError<'a> {
+    /// Stable call identity used to finish runtime state.
+    call_id: &'a tau_proto::ToolCallId,
+    /// Generic tool identity rendered in the terminal row.
+    tool_name: &'a tau_proto::ToolName,
+    /// Canonical terminal error message.
+    message: &'a str,
+    /// Optional structured details used by generic delegate fallback rendering.
+    details: Option<&'a CborValue>,
+    /// Optional producer-supplied generic display descriptor.
+    descriptor: Option<&'a tau_proto::ToolUseState>,
+    /// Whether this terminal belongs to the user-facing conversation.
+    originator_is_user: bool,
 }
 
 /// Makes a producer descriptor's status agree with its canonical terminal
@@ -8087,7 +8128,14 @@ impl EventRenderer {
                 true
             }
             Event::ProviderToolResult(result) => {
-                self.handle_tool_result(&tau_proto::ToolResultDisplay::from(result), recorded_at);
+                self.handle_tool_result_fields(
+                    &result.call_id,
+                    &result.tool_name,
+                    result.kind,
+                    result.display.as_ref(),
+                    result.originator.is_user(),
+                    recorded_at,
+                );
                 true
             }
             Event::ProviderToolError(_) => true,
@@ -8096,7 +8144,14 @@ impl EventRenderer {
                 true
             }
             Event::ToolResult(result) => {
-                self.handle_tool_result(&tau_proto::ToolResultDisplay::from(result), recorded_at);
+                self.handle_tool_result_fields(
+                    &result.call_id,
+                    &result.tool_name,
+                    result.kind,
+                    result.display.as_ref(),
+                    result.originator.is_user(),
+                    recorded_at,
+                );
                 true
             }
             Event::ToolError(error) => {
@@ -8108,8 +8163,12 @@ impl EventRenderer {
                 true
             }
             Event::ToolBackgroundResult(result) => {
-                self.handle_tool_background_result(
-                    &tau_proto::ToolBackgroundResultDisplay::from(result),
+                self.handle_tool_result_fields(
+                    &result.call_id,
+                    &result.tool_name,
+                    tau_proto::ToolResultKind::Final,
+                    result.display.as_ref(),
+                    result.originator.is_user(),
                     recorded_at,
                 );
                 true
@@ -8407,25 +8466,48 @@ impl EventRenderer {
         result: &tau_proto::ToolResultDisplay,
         recorded_at: UnixMicros,
     ) {
-        if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
-            self.handle_tool_background_placeholder(&result.call_id);
+        self.handle_tool_result_fields(
+            &result.call_id,
+            &result.tool_name,
+            result.kind,
+            result.display.as_ref(),
+            result.originator.is_user(),
+            recorded_at,
+        );
+    }
+
+    /// Projects borrowed success-terminal fields without constructing another
+    /// complete result DTO around a potentially large display payload.
+    fn handle_tool_result_fields(
+        &mut self,
+        call_id: &tau_proto::ToolCallId,
+        tool_name: &tau_proto::ToolName,
+        kind: tau_proto::ToolResultKind,
+        descriptor: Option<&tau_proto::ToolUseState>,
+        originator_is_user: bool,
+        recorded_at: UnixMicros,
+    ) {
+        #[cfg(test)]
+        observe_tool_terminal_descriptor(descriptor, None);
+        if kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
+            self.handle_tool_background_placeholder(call_id);
             return;
         }
         // Sub-agent tool activity stays out of the user's transcript; generic
         // watched-agent stats provide the live activity signal.
         let Some((prior, known_main_tool)) =
-            self.take_finished_tool_call(&result.call_id, result.originator.is_user())
+            self.take_finished_tool_call(call_id, originator_is_user)
         else {
             return;
         };
-        let is_blocker = prior.is_blocker || is_blocker_tool_name(result.tool_name.as_str());
+        let is_blocker = prior.is_blocker || is_blocker_tool_name(tool_name.as_str());
+        let diff = (!is_blocker)
+            .then(|| Self::tool_result_diff(descriptor))
+            .flatten();
         let mut display = if is_blocker {
-            render_tool_use_state(
-                &result.tool_name,
-                &synthesize_fallback_display(&result.tool_name, None),
-            )
+            render_tool_use_state(tool_name, &synthesize_fallback_display(tool_name, None))
         } else {
-            Self::tool_result_display(result)
+            Self::tool_result_display(tool_name, descriptor, diff.as_ref())
         };
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
@@ -8435,12 +8517,9 @@ impl EventRenderer {
                 prior.effective_shell_timeout,
             );
         }
-        let diff = (!is_blocker)
-            .then(|| Self::tool_result_diff(result))
-            .flatten();
         self.record_tool_summary_result(
             prior.summary_block_id,
-            (!is_blocker).then_some(result.display.as_ref()).flatten(),
+            (!is_blocker).then_some(descriptor).flatten(),
             diff.as_ref(),
             false,
         );
@@ -8468,57 +8547,49 @@ impl EventRenderer {
         result: &tau_proto::ToolBackgroundResultDisplay,
         recorded_at: UnixMicros,
     ) {
-        let result = tau_proto::ToolResultDisplay {
-            call_id: result.call_id.clone(),
-            tool_name: result.tool_name.clone(),
-            tool_type: result.tool_type,
-            kind: tau_proto::ToolResultKind::Final,
-            display: result.display.clone(),
-            originator: result.originator.clone(),
-        };
-        let Some((prior, known_main_tool)) =
-            self.take_finished_tool_call(&result.call_id, result.originator.is_user())
-        else {
-            return;
-        };
-        let is_blocker = prior.is_blocker || is_blocker_tool_name(result.tool_name.as_str());
-        let mut display = if is_blocker {
-            render_tool_use_state(
-                &result.tool_name,
-                &synthesize_fallback_display(&result.tool_name, None),
-            )
-        } else {
-            Self::tool_result_display(&result)
-        };
-        sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
-        if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
-            Self::upsert_tool_duration_suffix(
-                &mut display,
-                duration,
-                prior.effective_shell_timeout,
-            );
-        }
-        let diff = (!is_blocker)
-            .then(|| Self::tool_result_diff(&result))
-            .flatten();
-        self.record_tool_summary_result(
-            prior.summary_block_id,
-            (!is_blocker).then_some(result.display.as_ref()).flatten(),
-            diff.as_ref(),
-            false,
+        self.handle_tool_result_fields(
+            &result.call_id,
+            &result.tool_name,
+            tau_proto::ToolResultKind::Final,
+            result.display.as_ref(),
+            result.originator.is_user(),
+            recorded_at,
         );
-        self.record_tool_result_block(prior.history_block_id, display, diff);
-        self.render_model_status_after_tool_completion(known_main_tool);
     }
 
-    fn tool_result_display(result: &tau_proto::ToolResultDisplay) -> ToolCallDisplay {
-        let descriptor = result
-            .display
-            .clone()
-            .unwrap_or_else(|| synthesize_fallback_display(&result.tool_name, None));
+    fn tool_result_display(
+        tool_name: &tau_proto::ToolName,
+        descriptor: Option<&tau_proto::ToolUseState>,
+        diff: Option<&tau_proto::ToolUsePayload>,
+    ) -> ToolCallDisplay {
+        let descriptor = match (descriptor, diff) {
+            (Some(descriptor), Some(_)) => Self::clone_tool_use_header(descriptor),
+            (Some(descriptor), None) => descriptor.clone(),
+            (None, _) => synthesize_fallback_display(tool_name, None),
+        };
         let descriptor =
             normalize_terminal_tool_use_state(descriptor, TerminalToolOutcome::SuccessResult);
-        render_tool_use_state(&result.tool_name, &descriptor)
+        if let Some(diff) = diff {
+            render_tool_use_state_payload_free(tool_name, &descriptor, diff)
+        } else {
+            render_tool_use_state(tool_name, &descriptor)
+        }
+    }
+
+    /// Clones lightweight terminal metadata without cloning its separately
+    /// retained rich payload.
+    fn clone_tool_use_header(display: &tau_proto::ToolUseState) -> tau_proto::ToolUseState {
+        tau_proto::ToolUseState {
+            args: display.args.clone(),
+            mode: display.mode.clone(),
+            range: display.range.clone(),
+            stats: display.stats,
+            progress_counters: display.progress_counters.clone(),
+            info_chips: display.info_chips.clone(),
+            status: display.status,
+            status_text: display.status_text.clone(),
+            payload: None,
+        }
     }
 
     fn finished_tool_duration(prior: &ToolCallState, finished_at: UnixMicros) -> Option<Duration> {
@@ -8533,9 +8604,9 @@ impl EventRenderer {
     }
 
     fn tool_result_diff(
-        result: &tau_proto::ToolResultDisplay,
+        descriptor: Option<&tau_proto::ToolUseState>,
     ) -> Option<tau_proto::ToolUsePayload> {
-        result.display.as_ref().and_then(|d| match &d.payload {
+        descriptor.and_then(|d| match &d.payload {
             Some(payload) if Self::diff_payload_has_changes(payload) => Some(payload.clone()),
             _ => None,
         })
@@ -8568,19 +8639,42 @@ impl EventRenderer {
     }
 
     fn handle_tool_error(&mut self, error: &tau_proto::ToolError, recorded_at: UnixMicros) {
+        self.handle_tool_error_fields(
+            BorrowedToolError {
+                call_id: &error.call_id,
+                tool_name: &error.tool_name,
+                message: &error.message,
+                details: error.details.as_ref(),
+                descriptor: error.display.as_ref(),
+                originator_is_user: error.originator.is_user(),
+            },
+            recorded_at,
+        );
+    }
+
+    /// Projects borrowed error-terminal fields without constructing another
+    /// complete error DTO around display payloads or structured details.
+    fn handle_tool_error_fields(&mut self, error: BorrowedToolError<'_>, recorded_at: UnixMicros) {
+        #[cfg(test)]
+        observe_tool_terminal_descriptor(error.descriptor, error.details);
         let Some((prior, known_main_tool)) =
-            self.take_finished_tool_call(&error.call_id, error.originator.is_user())
+            self.take_finished_tool_call(error.call_id, error.originator_is_user)
         else {
             return;
         };
         let is_blocker = prior.is_blocker || is_blocker_tool_name(error.tool_name.as_str());
         let mut display = if is_blocker {
             render_tool_use_state(
-                &error.tool_name,
-                &synthesize_fallback_display(&error.tool_name, Some("failed")),
+                error.tool_name,
+                &synthesize_fallback_display(error.tool_name, Some("failed")),
             )
         } else {
-            Self::tool_error_display(error)
+            Self::tool_error_display_fields(
+                error.tool_name,
+                error.message,
+                error.details,
+                error.descriptor,
+            )
         };
         sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
@@ -8592,7 +8686,7 @@ impl EventRenderer {
         }
         self.record_tool_summary_result(
             prior.summary_block_id,
-            (!is_blocker).then_some(error.display.as_ref()).flatten(),
+            (!is_blocker).then_some(error.descriptor).flatten(),
             None,
             true,
         );
@@ -8605,72 +8699,47 @@ impl EventRenderer {
         error: &tau_proto::ToolBackgroundError,
         recorded_at: UnixMicros,
     ) {
-        let error = tau_proto::ToolError {
-            presentation: Default::default(),
-            call_id: error.call_id.clone(),
-            tool_name: error.tool_name.clone(),
-            tool_type: error.tool_type,
-            message: error.message.clone(),
-            details: error.details.clone(),
-            display: error.display.clone(),
-            originator: error.originator.clone(),
-        };
-        let Some((prior, known_main_tool)) =
-            self.take_finished_tool_call(&error.call_id, error.originator.is_user())
-        else {
-            return;
-        };
-        let is_blocker = prior.is_blocker || is_blocker_tool_name(error.tool_name.as_str());
-        let mut display = if is_blocker {
-            render_tool_use_state(
-                &error.tool_name,
-                &synthesize_fallback_display(&error.tool_name, Some("failed")),
-            )
-        } else {
-            Self::tool_error_display(&error)
-        };
-        sanitize_blocker_display(&mut display, is_blocker, prior.blocker_action);
-        if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
-            Self::upsert_tool_duration_suffix(
-                &mut display,
-                duration,
-                prior.effective_shell_timeout,
-            );
-        }
-        self.record_tool_summary_result(
-            prior.summary_block_id,
-            (!is_blocker).then_some(error.display.as_ref()).flatten(),
-            None,
-            true,
+        self.handle_tool_error_fields(
+            BorrowedToolError {
+                call_id: &error.call_id,
+                tool_name: &error.tool_name,
+                message: &error.message,
+                details: error.details.as_ref(),
+                descriptor: error.display.as_ref(),
+                originator_is_user: error.originator.is_user(),
+            },
+            recorded_at,
         );
-        self.record_plain_finished_tool_block(prior.history_block_id, display, "tool-error");
-        self.render_model_status_after_tool_completion(known_main_tool);
     }
 
-    fn tool_error_display(error: &tau_proto::ToolError) -> ToolCallDisplay {
-        let cbor = error.details.as_ref();
-        let descriptor = if error.tool_name.as_str() == AGENT_START_TOOL_NAME {
-            if let Some(descriptor) = &error.display {
+    fn tool_error_display_fields(
+        tool_name: &tau_proto::ToolName,
+        message: &str,
+        details: Option<&CborValue>,
+        display: Option<&tau_proto::ToolUseState>,
+    ) -> ToolCallDisplay {
+        let descriptor = if tool_name.as_str() == AGENT_START_TOOL_NAME {
+            if let Some(descriptor) = display {
                 descriptor.clone()
             } else {
                 build_delegate_completion_display(
                     None,
-                    cbor.unwrap_or(&CborValue::Null),
-                    Some(&error.message),
+                    details.unwrap_or(&CborValue::Null),
+                    Some(message),
                 )
             }
-        } else if let Some(descriptor) = &error.display {
+        } else if let Some(descriptor) = display {
             descriptor.clone()
         } else {
-            synthesize_fallback_display(&error.tool_name, Some(&error.message))
+            synthesize_fallback_display(tool_name, Some(message))
         };
         let descriptor = normalize_terminal_tool_use_state(
             descriptor,
             TerminalToolOutcome::Error {
-                canonical_message: &error.message,
+                canonical_message: message,
             },
         );
-        render_tool_use_state(&error.tool_name, &descriptor)
+        render_tool_use_state(tool_name, &descriptor)
     }
 
     fn handle_tool_cancelled(
