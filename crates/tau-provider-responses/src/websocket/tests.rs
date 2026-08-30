@@ -6,6 +6,70 @@ use tungstenite::protocol::frame::coding::{Data, OpCode};
 use super::*;
 use crate::decoded_event::{reset_test_counts, test_counts};
 
+/// Borrowed WebSocket lowering must preserve the exact bytes produced by the
+/// former typed-body-to-`Value` transformation, including member order,
+/// Unicode, cache controls, tools, and omission of the SSE-only stream flag.
+#[test]
+fn borrowed_request_envelope_matches_value_reference_bytes() {
+    let mut body = RequestBody {
+        model: "模型-🦀".to_owned(),
+        input: vec![
+            super::super::ResponsesInputItem::Json(serde_json::json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": "héllo"}],
+            })),
+            super::super::ResponsesInputItem::Raw(
+                serde_json::value::RawValue::from_string(
+                    r#"{"type":"reasoning","summary":[]}"#.to_owned(),
+                )
+                .expect("raw fixture"),
+            ),
+        ],
+        stream: true,
+        reasoning: super::super::Reasoning { effort: "high" },
+        instructions: Some("system".to_owned()),
+        prompt_cache_key: Some("tau:agent".to_owned()),
+        prompt_cache_retention: Some("24h"),
+        prompt_cache_options: Some(super::super::PromptCacheOptions {
+            mode: "explicit",
+            ttl: "30m",
+        }),
+        max_output_tokens: Some(4096),
+        tools: vec![serde_json::json!({"type": "function", "name": "run"})],
+        tool_choice: Some("auto".to_owned()),
+    };
+    let assert_matches_reference = |body: &RequestBody| {
+        let mut reference = serde_json::to_value(body).expect("reference body");
+        let object = reference.as_object_mut().expect("request object");
+        object.remove("stream");
+        object.insert(
+            "type".to_owned(),
+            Value::String("response.create".to_owned()),
+        );
+        assert_eq!(
+            serde_json::to_vec(&WebSocketRequestBody::try_from(body).expect("borrowed envelope"),)
+                .expect("borrowed envelope JSON"),
+            serde_json::to_vec(&reference).expect("reference envelope"),
+        );
+    };
+
+    assert_matches_reference(&body);
+    body.tool_choice = None;
+    assert_matches_reference(&body);
+    body.tools.clear();
+    assert_matches_reference(&body);
+    body.max_output_tokens = None;
+    assert_matches_reference(&body);
+    body.prompt_cache_options = None;
+    assert_matches_reference(&body);
+    body.prompt_cache_retention = None;
+    assert_matches_reference(&body);
+    body.prompt_cache_key = None;
+    assert_matches_reference(&body);
+    body.instructions = None;
+    assert_matches_reference(&body);
+}
+
 /// Post-upgrade errors must retain bounded codes from every documented
 /// envelope location so callers can distinguish retryable transport/service
 /// failures from terminal request and context failures.

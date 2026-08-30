@@ -2051,6 +2051,51 @@ struct RequestBody {
     tool_choice: Option<String>,
 }
 
+/// One borrowed item in the provider-visible context timeline.
+#[derive(Clone, Copy)]
+enum BorrowedContextItem<'a> {
+    /// An item stored directly in a user-input or assistant-response block.
+    Context(&'a ContextItem),
+    /// A tool result stored without its enclosing `ContextItem` discriminant.
+    ToolResult(&'a tau_proto::ToolResultItem),
+}
+
+/// Iterator over one borrowed semantic context block.
+enum BorrowedBlockItems<'a> {
+    /// Direct context items.
+    Context(std::slice::Iter<'a, ContextItem>),
+    /// Tool-result block items.
+    ToolResults(std::slice::Iter<'a, tau_proto::ToolResultItem>),
+}
+
+impl<'a> Iterator for BorrowedBlockItems<'a> {
+    type Item = BorrowedContextItem<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Context(items) => items.next().map(BorrowedContextItem::Context),
+            Self::ToolResults(items) => items.next().map(BorrowedContextItem::ToolResult),
+        }
+    }
+}
+
+/// Iterates over a prompt context without cloning its complete item payloads.
+fn borrowed_context_items(
+    context: &tau_proto::PromptContext,
+) -> impl Iterator<Item = BorrowedContextItem<'_>> {
+    context.blocks.iter().flat_map(|block| match block {
+        tau_proto::ContextBlock::UserInput(block) => {
+            BorrowedBlockItems::Context(block.items.iter())
+        }
+        tau_proto::ContextBlock::AssistantResponse(block) => {
+            BorrowedBlockItems::Context(block.output_items.iter())
+        }
+        tau_proto::ContextBlock::ToolResults(block) => {
+            BorrowedBlockItems::ToolResults(block.items.iter())
+        }
+    })
+}
+
 /// Public Responses reasoning options for one request.
 #[derive(Serialize)]
 struct Reasoning {
@@ -2083,10 +2128,8 @@ fn build_request(
     config: &AttemptConfig,
     model: &AttemptModel,
 ) -> Result<RequestBody, Error> {
-    let mut input = prompt
-        .context
-        .flatten_iter()
-        .map(|item| lower_item(&item))
+    let mut input = borrowed_context_items(&prompt.context)
+        .map(lower_borrowed_item)
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -2158,7 +2201,13 @@ fn effort_wire(effort: Effort) -> &'static str {
     }
 }
 
-fn lower_item(item: &ContextItem) -> Result<Option<ResponsesInputItem>, Error> {
+fn lower_borrowed_item(item: BorrowedContextItem<'_>) -> Result<Option<ResponsesInputItem>, Error> {
+    let item = match item {
+        BorrowedContextItem::Context(item) => item,
+        BorrowedContextItem::ToolResult(result) => {
+            return lower_tool_result(result);
+        }
+    };
     match item {
         ContextItem::Message(message) => {
             if message.role == ContextRole::Assistant
@@ -2215,14 +2264,8 @@ fn lower_item(item: &ContextItem) -> Result<Option<ResponsesInputItem>, Error> {
         ContextItem::ToolCall(call) if call.tool_type == ToolType::Function => {
             Ok(Some(ResponsesInputItem::Json(lower_call(call))))
         }
-        ContextItem::ToolResult(result) if result.tool_type == ToolType::Function => {
-            Ok(Some(ResponsesInputItem::Json(serde_json::json!({
-                "type": "function_call_output",
-                "call_id": result.call_id,
-                "output": render_tool_result(result),
-            }))))
-        }
-        ContextItem::ToolCall(_) | ContextItem::ToolResult(_) => Err(Error::UnsupportedTool),
+        ContextItem::ToolResult(result) => lower_tool_result(result),
+        ContextItem::ToolCall(_) => Err(Error::UnsupportedTool),
         ContextItem::Reasoning(item) => {
             let value = serde_json::from_str::<Value>(item.raw_json())
                 .map_err(|_| Error::UnsupportedOutput)?;
@@ -2240,6 +2283,27 @@ fn lower_item(item: &ContextItem) -> Result<Option<ResponsesInputItem>, Error> {
             Err(Error::UnsupportedOutput)
         }
     }
+}
+
+/// Test-facing direct-item lowering adapter.
+#[cfg(test)]
+fn lower_item(item: &ContextItem) -> Result<Option<ResponsesInputItem>, Error> {
+    lower_borrowed_item(BorrowedContextItem::Context(item))
+}
+
+/// Lowers one borrowed tool result without constructing a temporary
+/// `ContextItem::ToolResult` wrapper.
+fn lower_tool_result(
+    result: &tau_proto::ToolResultItem,
+) -> Result<Option<ResponsesInputItem>, Error> {
+    if result.tool_type != ToolType::Function {
+        return Err(Error::UnsupportedTool);
+    }
+    Ok(Some(ResponsesInputItem::Json(serde_json::json!({
+        "type": "function_call_output",
+        "call_id": result.call_id,
+        "output": render_tool_result(result),
+    }))))
 }
 
 fn mark_first_input_text(input: &mut [ResponsesInputItem]) -> bool {

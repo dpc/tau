@@ -4,6 +4,7 @@ use std::future::Future;
 use std::time::Instant;
 
 use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::WebSocketStream;
@@ -24,6 +25,206 @@ enum DecodedWebSocketEvent<'a> {
     Apply(DecodedEvent<'a>),
     /// Provider terminal classified before sidecar indexing.
     ProviderError { value: Value, error: Error },
+}
+
+/// Borrowed WebSocket `response.create` envelope.
+///
+/// Field order matches the former `RequestBody -> Value` transformation so
+/// request bytes and debug captures remain stable.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WebSocketRequestBody<'a> {
+    /// Member insertion order used by `serde_json::Map` with `preserve_order`.
+    Insertion(WebSocketRequestInsertionOrder<'a>),
+    /// Lexicographic member order used by serde_json's default map.
+    Sorted(WebSocketRequestSortedOrder<'a>),
+}
+
+/// Borrowed envelope in the original request-struct insertion order.
+struct WebSocketRequestInsertionOrder<'a> {
+    /// Original typed body borrowed for member serialization.
+    body: &'a RequestBody,
+    /// Complete typed transcript.
+    input: Vec<WebSocketInputItem<'a>>,
+}
+
+impl Serialize for WebSocketRequestInsertionOrder<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap as _;
+
+        let body = self.body;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("model", &body.model)?;
+        map.serialize_entry("input", &self.input)?;
+
+        // `Value::as_object_mut().remove("stream")` uses swap removal when
+        // serde_json preserves insertion order, moving the final present
+        // member into stream's former third slot.
+        let swapped = if body.tool_choice.is_some() {
+            "tool_choice"
+        } else if !body.tools.is_empty() {
+            "tools"
+        } else if body.max_output_tokens.is_some() {
+            "max_output_tokens"
+        } else if body.prompt_cache_options.is_some() {
+            "prompt_cache_options"
+        } else if body.prompt_cache_retention.is_some() {
+            "prompt_cache_retention"
+        } else if body.prompt_cache_key.is_some() {
+            "prompt_cache_key"
+        } else if body.instructions.is_some() {
+            "instructions"
+        } else {
+            "reasoning"
+        };
+        serialize_websocket_body_member(&mut map, body, swapped)?;
+        for member in [
+            "reasoning",
+            "instructions",
+            "prompt_cache_key",
+            "prompt_cache_retention",
+            "prompt_cache_options",
+            "max_output_tokens",
+            "tools",
+            "tool_choice",
+        ] {
+            if member != swapped {
+                serialize_websocket_body_member(&mut map, body, member)?;
+            }
+        }
+        map.serialize_entry("type", "response.create")?;
+        map.end()
+    }
+}
+
+/// Serializes one present request member by its stable wire name.
+fn serialize_websocket_body_member<M>(
+    map: &mut M,
+    body: &RequestBody,
+    member: &str,
+) -> Result<(), M::Error>
+where
+    M: serde::ser::SerializeMap,
+{
+    match member {
+        "reasoning" => map.serialize_entry(member, &body.reasoning),
+        "instructions" => body
+            .instructions
+            .as_ref()
+            .map_or(Ok(()), |value| map.serialize_entry(member, value)),
+        "prompt_cache_key" => body
+            .prompt_cache_key
+            .as_ref()
+            .map_or(Ok(()), |value| map.serialize_entry(member, value)),
+        "prompt_cache_retention" => body
+            .prompt_cache_retention
+            .map_or(Ok(()), |value| map.serialize_entry(member, value)),
+        "prompt_cache_options" => body
+            .prompt_cache_options
+            .as_ref()
+            .map_or(Ok(()), |value| map.serialize_entry(member, value)),
+        "max_output_tokens" => body
+            .max_output_tokens
+            .map_or(Ok(()), |value| map.serialize_entry(member, &value)),
+        "tools" if !body.tools.is_empty() => map.serialize_entry(member, &body.tools),
+        "tool_choice" => body
+            .tool_choice
+            .as_ref()
+            .map_or(Ok(()), |value| map.serialize_entry(member, value)),
+        "tools" => Ok(()),
+        _ => unreachable!("fixed WebSocket request member"),
+    }
+}
+
+/// Borrowed envelope in lexicographic member order.
+#[derive(Serialize)]
+struct WebSocketRequestSortedOrder<'a> {
+    /// Complete typed transcript.
+    input: Vec<WebSocketInputItem<'a>>,
+    /// Optional provider instructions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: &'a Option<String>,
+    /// Output-token limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: &'a Option<u32>,
+    /// Upstream model identifier.
+    model: &'a str,
+    /// Optional stable prompt-cache key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: &'a Option<String>,
+    /// Explicit prompt-cache controls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_options: &'a Option<super::PromptCacheOptions>,
+    /// Optional legacy prompt-cache retention.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_retention: &'a Option<&'static str>,
+    /// Reasoning controls.
+    reasoning: &'a super::Reasoning,
+    /// Optional closed tool selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: &'a Option<String>,
+    /// Function tool definitions.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: &'a Vec<Value>,
+    /// WebSocket operation discriminator.
+    #[serde(rename = "type")]
+    ty: &'static str,
+}
+
+/// One WebSocket input item preserving the former `Value` canonicalization.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WebSocketInputItem<'a> {
+    /// Parsed raw replay item; `Value` retains the former object-key order.
+    Raw(Value),
+    /// Borrowed Tau-constructed JSON item.
+    Json(&'a Value),
+}
+
+impl<'a> WebSocketRequestBody<'a> {
+    /// Builds a borrowed envelope, parsing only opaque raw replay items that
+    /// the former whole-request `Value` conversion canonicalized.
+    fn try_from(body: &'a RequestBody) -> serde_json::Result<Self> {
+        let input = body
+            .input
+            .iter()
+            .map(|item| match item {
+                super::ResponsesInputItem::Raw(raw) => {
+                    serde_json::from_str(raw.get()).map(WebSocketInputItem::Raw)
+                }
+                super::ResponsesInputItem::Json(value)
+                | super::ResponsesInputItem::TauInputMessage(value) => {
+                    Ok(WebSocketInputItem::Json(value))
+                }
+            })
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        let mut ordering_probe = serde_json::Map::new();
+        ordering_probe.insert("z".to_owned(), Value::Null);
+        ordering_probe.insert("a".to_owned(), Value::Null);
+        let preserves_insertion = ordering_probe.keys().next().is_some_and(|key| key == "z");
+        if preserves_insertion {
+            return Ok(Self::Insertion(WebSocketRequestInsertionOrder {
+                body,
+                input,
+            }));
+        }
+        Ok(Self::Sorted(WebSocketRequestSortedOrder {
+            input,
+            instructions: &body.instructions,
+            max_output_tokens: &body.max_output_tokens,
+            model: &body.model,
+            prompt_cache_key: &body.prompt_cache_key,
+            prompt_cache_options: &body.prompt_cache_options,
+            prompt_cache_retention: &body.prompt_cache_retention,
+            reasoning: &body.reasoning,
+            tool_choice: &body.tool_choice,
+            tools: &body.tools,
+            ty: "response.create",
+        }))
+    }
 }
 
 fn decode_websocket_event(raw: &str) -> Result<DecodedWebSocketEvent<'_>, Error> {
@@ -138,16 +339,8 @@ pub(super) async fn stream(
         }
     };
     let mut socket = configured_websocket_stream(upgraded).await;
-    let mut envelope =
-        serde_json::to_value(body).map_err(|_| (Error::Json, State::default().progress()))?;
-    let object = envelope
-        .as_object_mut()
-        .ok_or_else(|| (Error::Json, State::default().progress()))?;
-    object.remove("stream");
-    object.insert(
-        "type".to_owned(),
-        Value::String("response.create".to_owned()),
-    );
+    let envelope = WebSocketRequestBody::try_from(body)
+        .map_err(|_| (Error::Json, State::default().progress()))?;
     let serialized =
         serde_json::to_string(&envelope).map_err(|_| (Error::Json, State::default().progress()))?;
     if is_canceled() {

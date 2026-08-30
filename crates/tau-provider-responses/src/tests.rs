@@ -3613,3 +3613,72 @@ fn synthetic_compaction_summary_lowers_as_exact_user_message() {
         })
     );
 }
+
+/// Large prompt blocks must be traversed by borrow rather than cloning their
+/// complete text payloads before provider lowering. The two sizes make this a
+/// descriptive 1 MiB/8 MiB copy-amplification benchmark without allocator-
+/// specific assertions.
+#[test]
+fn borrowed_context_traversal_retains_large_payload_allocations() {
+    const MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+    const TOOL_BYTES: usize = 1024 * 1024;
+
+    let message_text = "m".repeat(MESSAGE_BYTES);
+    let tool_text = "t".repeat(TOOL_BYTES);
+    let context = tau_proto::PromptContext {
+        blocks: vec![
+            tau_proto::ContextBlock::UserInput(tau_proto::UserInputBlock {
+                items: vec![ContextItem::Message(MessageItem {
+                    role: ContextRole::User,
+                    content: vec![ContentPart::Text { text: message_text }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            }),
+            tau_proto::ContextBlock::ToolResults(tau_proto::ToolResultsBlock {
+                items: vec![tau_proto::ToolResultItem {
+                    presentation: Default::default(),
+                    call_id: tau_proto::ToolCallId::new("large-result"),
+                    tool_type: ToolType::Function,
+                    status: ToolResultStatus::Success,
+                    output: tau_proto::ToolResponse {
+                        raw: tau_proto::CborValue::Text(String::new()),
+                        headers: Vec::new(),
+                        body: tool_text,
+                    },
+                    provider_content: Vec::new(),
+                }],
+            }),
+        ],
+    };
+    let tau_proto::ContextBlock::UserInput(message_block) = &context.blocks[0] else {
+        panic!("message block fixture")
+    };
+    let ContextItem::Message(message) = &message_block.items[0] else {
+        panic!("message fixture")
+    };
+    let ContentPart::Text { text: message_text } = &message.content[0] else {
+        panic!("message text fixture")
+    };
+    let original_message = message_text.as_ptr();
+    let tau_proto::ContextBlock::ToolResults(tool_block) = &context.blocks[1] else {
+        panic!("tool-result fixture")
+    };
+    let original_tool = tool_block.items[0].output.body.as_ptr();
+
+    let borrowed = borrowed_context_items(&context).collect::<Vec<_>>();
+    let BorrowedContextItem::Context(ContextItem::Message(message)) = borrowed[0] else {
+        panic!("borrowed message")
+    };
+    let BorrowedContextItem::ToolResult(result) = borrowed[1] else {
+        panic!("borrowed tool result")
+    };
+
+    let ContentPart::Text { text: message_text } = &message.content[0] else {
+        panic!("borrowed message text")
+    };
+    assert_eq!(message_text.as_ptr(), original_message);
+    assert_eq!(result.output.body.as_ptr(), original_tool);
+    assert_eq!(message_text.len(), MESSAGE_BYTES);
+    assert_eq!(result.output.body.len(), TOOL_BYTES);
+}

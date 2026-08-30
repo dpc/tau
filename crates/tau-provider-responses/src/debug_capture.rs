@@ -168,7 +168,7 @@ impl DebugCapture {
         prompt: &tau_proto::AgentPromptCreated,
         config: &AttemptConfig,
         model: &AttemptModel,
-        body: &Value,
+        body: &impl Serialize,
     ) {
         if !self.enabled {
             return;

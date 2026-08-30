@@ -1402,7 +1402,7 @@ fn chat_completions_stream(
         AsyncAttemptContext {
             url: &url,
             provider,
-            body: &body_str,
+            body: body_str,
             prompt,
             capture_raw_events: debug_provider_requests,
         },
@@ -1450,8 +1450,8 @@ struct AsyncAttemptContext<'a> {
     url: &'a str,
     /// Mutable-profile values resolved for this attempt.
     provider: &'a AttemptConfig,
-    /// Serialized request body owned by the synchronous caller.
-    body: &'a str,
+    /// Serialized request body transferred into reqwest without another copy.
+    body: String,
     /// Logical prompt used for diagnostics.
     prompt: &'a tau_proto::AgentPromptCreated,
     /// Whether this attempt should retain raw events for private debug capture.
@@ -1489,7 +1489,7 @@ async fn chat_completions_stream_async(
         .post(context.url)
         .header("content-type", "application/json")
         .header("accept", "text/event-stream")
-        .body(context.body.to_owned());
+        .body(context.body);
     if !context.provider.api_key.trim().is_empty() {
         request = request.bearer_auth(&context.provider.api_key);
     }
