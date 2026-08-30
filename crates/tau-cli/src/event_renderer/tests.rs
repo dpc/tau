@@ -866,7 +866,7 @@ fn transcript_tool_runtime_retains_typed_ids_across_background_and_terminal_even
     renderer.handle(&tau_proto::Event::UiShellCommand(
         tau_proto::UiShellCommand {
             session_id,
-            command_id: shell_id,
+            command_id: shell_id.clone(),
             command: "printf independent".to_owned(),
             include_in_context: true,
             target_agent_id: Some(agent.clone()),
@@ -890,13 +890,9 @@ fn transcript_tool_runtime_retains_typed_ids_across_background_and_terminal_even
     let typed_calls: &HashMap<tau_proto::ToolCallId, super::ToolCallState> =
         &renderer.transcript.runtime.tool_calls;
     assert!(typed_calls.contains_key(&call_id));
-    assert!(
-        renderer
-            .transcript
-            .runtime
-            .shell_blocks
-            .contains_key(call_id.as_str())
-    );
+    let typed_shell_blocks: &HashMap<tau_proto::ShellCommandId, super::ShellBlockState> =
+        &renderer.transcript.runtime.shell_blocks;
+    assert!(typed_shell_blocks.contains_key(&shell_id));
 
     renderer.handle(&tau_proto::Event::ToolResultDisplay(
         tau_proto::ToolResultDisplay {
@@ -944,7 +940,7 @@ fn transcript_tool_runtime_retains_typed_ids_across_background_and_terminal_even
             .transcript
             .runtime
             .shell_blocks
-            .contains_key(call_id.as_str())
+            .contains_key(&shell_id)
     );
     assert_eq!(
         renderer.transcript.history.tool_history.len(),

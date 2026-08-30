@@ -8668,7 +8668,7 @@ impl EventRenderer {
         self.resources.handle.push_above_active(block_id);
         self.resources.handle.redraw();
         self.transcript.runtime.shell_blocks.insert(
-            cmd.command_id.to_string(),
+            cmd.command_id.clone(),
             ShellBlockState {
                 block_id,
                 command: cmd.command.clone(),
@@ -8683,7 +8683,7 @@ impl EventRenderer {
             .transcript
             .runtime
             .shell_blocks
-            .get_mut(progress.command_id.as_str())
+            .get_mut(&progress.command_id)
         {
             state.output.push_str(&progress.chunk);
             let label = Self::shell_running_label(state.include_in_context);
@@ -8702,7 +8702,7 @@ impl EventRenderer {
         if self
             .session
             .standalone_shell_terminals
-            .remove(finished.command_id.as_str())
+            .remove(&finished.command_id)
         {
             let suffix = Self::shell_finished_suffix(finished, finished.include_in_context);
             let block = render_shell_block(
@@ -8718,7 +8718,7 @@ impl EventRenderer {
             .transcript
             .runtime
             .shell_blocks
-            .remove(finished.command_id.as_str())
+            .remove(&finished.command_id)
         {
             // Use the final, post-truncation output from the extension rather
             // than our streaming buffer so the UI matches what the harness
@@ -8752,7 +8752,7 @@ impl EventRenderer {
         let event = Event::ShellCommandFinished(finished.clone());
         self.session
             .standalone_shell_terminals
-            .insert(finished.command_id.to_string());
+            .insert(finished.command_id.clone());
         self.learn_agent_metadata(&event);
         tracing::trace!(
             target: "tau_cli::frontend_progress",
@@ -8794,11 +8794,8 @@ impl EventRenderer {
                     .collect::<Vec<_>>();
                 for agent_id in agent_ids {
                     if let Some(mut state) = self.selection.agents_ui_state.remove(&agent_id) {
-                        if let Some(shell) = state
-                            .transcript
-                            .runtime
-                            .shell_blocks
-                            .remove(command_id.as_str())
+                        if let Some(shell) =
+                            state.transcript.runtime.shell_blocks.remove(command_id)
                         {
                             self.resources
                                 .handle
@@ -8810,12 +8807,7 @@ impl EventRenderer {
                     }
                 }
                 let mut no_agent = std::mem::take(&mut self.selection.no_agent_ui_state);
-                if let Some(shell) = no_agent
-                    .transcript
-                    .runtime
-                    .shell_blocks
-                    .remove(command_id.as_str())
-                {
+                if let Some(shell) = no_agent.transcript.runtime.shell_blocks.remove(command_id) {
                     self.resources
                         .handle
                         .select_detached(std::mem::take(&mut no_agent.output));
@@ -8830,12 +8822,7 @@ impl EventRenderer {
                 if let Some(target) = start.target_agent_id.as_ref()
                     && let Some(mut state) = self.selection.agents_ui_state.remove(target.as_str())
                 {
-                    if let Some(shell) = state
-                        .transcript
-                        .runtime
-                        .shell_blocks
-                        .remove(command_id.as_str())
-                    {
+                    if let Some(shell) = state.transcript.runtime.shell_blocks.remove(command_id) {
                         self.resources
                             .handle
                             .select_detached(std::mem::take(&mut state.output));
@@ -8849,12 +8836,7 @@ impl EventRenderer {
                 self.event_owners.shell_agents.remove(command_id);
                 continue;
             }
-            if let Some(state) = self
-                .transcript
-                .runtime
-                .shell_blocks
-                .remove(command_id.as_str())
-            {
+            if let Some(state) = self.transcript.runtime.shell_blocks.remove(command_id) {
                 self.resources.handle.remove_block(state.block_id);
             }
             self.event_owners.shell_agents.remove(command_id);

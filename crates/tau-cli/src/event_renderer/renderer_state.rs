@@ -185,8 +185,8 @@ pub(super) struct TranscriptRuntimeState {
     pub(super) accepted_submission_block: Option<tau_cli_term::BlockId>,
     /// Tool-call lifecycle records.
     pub(super) tool_calls: HashMap<tau_proto::ToolCallId, ToolCallState>,
-    /// User-shell lifecycle records.
-    pub(super) shell_blocks: HashMap<String, ShellBlockState>,
+    /// User-shell lifecycle records keyed by their protocol identities.
+    pub(super) shell_blocks: HashMap<tau_proto::ShellCommandId, ShellBlockState>,
     /// Persistent model status block.
     pub(super) model_status_block: Option<tau_cli_term::BlockId>,
 }
@@ -269,7 +269,7 @@ pub(super) struct AgentUiState {
 #[derive(Default)]
 pub(super) struct SessionPresentationState {
     /// Historical shell terminals that must not consume current lifecycles.
-    pub(super) standalone_shell_terminals: HashSet<String>,
+    pub(super) standalone_shell_terminals: HashSet<tau_proto::ShellCommandId>,
     /// Live extension blocks.
     pub(super) extension_blocks: HashMap<tau_proto::ExtensionInstanceId, ExtensionBlockState>,
     /// Extensions ready in this daemon.
