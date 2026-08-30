@@ -1949,11 +1949,6 @@ impl EventRenderer {
     }
 
     #[cfg(test)]
-    pub(crate) fn tool_agent_for_test(&self, call_id: &str) -> Option<String> {
-        self.event_owners.tool_agents.get(call_id).cloned()
-    }
-
-    #[cfg(test)]
     /// Removes the status block so tests can exercise placeholder-only redraws.
     pub(crate) fn clear_model_status_for_test(&mut self) {
         self.transcript.runtime.model_status_block = None;
@@ -5412,14 +5407,13 @@ impl EventRenderer {
                     .insert(update.agent_prompt_id.clone(), update.agent_id.clone());
             }
             Event::ProviderResponseFinished(finished) => {
-                let agent_id = finished.agent_id.to_string();
                 self.event_owners
                     .prompt_agents
                     .insert(finished.agent_prompt_id.clone(), finished.agent_id.clone());
                 for call in tool_calls_from_output_items(&finished.output_items) {
                     self.event_owners
                         .tool_agents
-                        .insert(call.call_id.to_string(), agent_id.clone());
+                        .insert(call.call_id, finished.agent_id.clone());
                 }
             }
             Event::AgentPromptCreated(prompt) => {
@@ -5435,7 +5429,7 @@ impl EventRenderer {
             Event::ToolStarted(started) => {
                 self.event_owners
                     .tool_agents
-                    .insert(started.call_id.to_string(), started.agent_id.to_string());
+                    .insert(started.call_id.clone(), started.agent_id.clone());
             }
             _ => {}
         }
@@ -5638,7 +5632,7 @@ impl EventRenderer {
                 for call in requested_tools {
                     self.event_owners
                         .tool_agents
-                        .insert(call.call_id.to_string(), agent_id.clone());
+                        .insert(call.call_id, finished.agent_id.clone());
                 }
                 true
             }
@@ -5647,8 +5641,8 @@ impl EventRenderer {
                 self.remember_agent(agent_id.clone());
                 self.event_owners
                     .tool_agents
-                    .entry(started.call_id.to_string())
-                    .or_insert(agent_id);
+                    .entry(started.call_id.clone())
+                    .or_insert_with(|| started.agent_id.clone());
                 true
             }
             _ => false,
@@ -5742,68 +5736,68 @@ impl EventRenderer {
             Event::ToolRequest(request) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
-                    .get(request.call_id.as_str())
-                    .cloned(),
+                    .get(&request.call_id)
+                    .map(ToString::to_string),
             ),
             Event::ToolStarted(started) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
-                    .get(started.call_id.as_str())
-                    .cloned()
+                    .get(&started.call_id)
+                    .map(ToString::to_string)
                     .or_else(|| Some(started.agent_id.to_string())),
             ),
             Event::ToolProgress(progress) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
-                    .get(progress.call_id.as_str())
-                    .cloned(),
+                    .get(&progress.call_id)
+                    .map(ToString::to_string),
             ),
             Event::ToolResultDisplay(result) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
-                    .get(result.call_id.as_str())
-                    .cloned()
+                    .get(&result.call_id)
+                    .map(ToString::to_string)
                     .or_else(|| self.agent_id_for_originator(&result.originator)),
             ),
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 EventAgentIdResolution::from_agent_id(
                     self.event_owners
                         .tool_agents
-                        .get(result.call_id.as_str())
-                        .cloned()
+                        .get(&result.call_id)
+                        .map(ToString::to_string)
                         .or_else(|| self.agent_id_for_originator(&result.originator)),
                 )
             }
             Event::ToolError(error) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
-                    .get(error.call_id.as_str())
-                    .cloned()
+                    .get(&error.call_id)
+                    .map(ToString::to_string)
                     .or_else(|| self.agent_id_for_originator(&error.originator)),
             ),
             Event::ToolBackgroundResultDisplay(result) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
-                    .get(result.call_id.as_str())
-                    .cloned(),
+                    .get(&result.call_id)
+                    .map(ToString::to_string),
             ),
             Event::ToolBackgroundResult(result) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
-                    .get(result.call_id.as_str())
-                    .cloned(),
+                    .get(&result.call_id)
+                    .map(ToString::to_string),
             ),
             Event::ToolBackgroundError(error) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
-                    .get(error.call_id.as_str())
-                    .cloned(),
+                    .get(&error.call_id)
+                    .map(ToString::to_string),
             ),
             Event::ToolCancelled(cancelled) => EventAgentIdResolution::from_agent_id(
                 self.event_owners
                     .tool_agents
-                    .get(cancelled.call_id.as_str())
-                    .cloned(),
+                    .get(&cancelled.call_id)
+                    .map(ToString::to_string),
             ),
             _ => EventAgentIdResolution::Unhandled,
         }
@@ -7066,16 +7060,21 @@ impl EventRenderer {
         {
             return;
         }
-        let call_id = source.initiating_tool_call_id.to_string();
+        let call_id = source.initiating_tool_call_id.clone();
         if self
             .event_owners
             .tool_agents
-            .get(call_id.as_str())
-            .is_some_and(|owner| owner != source.caller_agent_id.as_str())
+            .get(&call_id)
+            .is_some_and(|owner| owner != &source.caller_agent_id)
         {
             return;
         }
-        match self.transcript.runtime.self_compaction_tools.entry(call_id) {
+        match self
+            .transcript
+            .runtime
+            .self_compaction_tools
+            .entry(call_id.to_string())
+        {
             Entry::Vacant(entry) => {
                 entry.insert(SelfCompactionTool {
                     request_id: requested.request_id.clone(),
@@ -7877,8 +7876,8 @@ impl EventRenderer {
         let call_id = started.call_id.to_string();
         self.event_owners
             .tool_agents
-            .entry(call_id.clone())
-            .or_insert_with(|| started.agent_id.to_string());
+            .entry(started.call_id.clone())
+            .or_insert_with(|| started.agent_id.clone());
         if self
             .transcript
             .runtime

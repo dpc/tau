@@ -1436,7 +1436,7 @@ fn agent_id_for_event_resolves_tool_metadata_and_started_fallback() {
     renderer
         .event_owners
         .tool_agents
-        .insert("known-call".to_owned(), "metadata-agent".to_owned());
+        .insert("known-call".into(), agent_id("metadata-agent"));
 
     let known_started = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
         call_id: "known-call".into(),
@@ -1677,6 +1677,235 @@ fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
     assert!(
         live.event_owners.prompt_agents.is_empty(),
         "new-session reset clears every typed prompt owner"
+    );
+}
+
+/// Tool ownership must retain protocol identifiers through live routing,
+/// replacement, foreground/background terminals, selection changes, unknown
+/// events, and session reset without rebuilding IDs from presentation text.
+#[test]
+fn tool_ownership_uses_typed_protocol_ids_across_live_lifecycles() {
+    let agent_a = agent_id("agent-a");
+    let agent_b = agent_id("agent-b");
+    let call_one: tau_proto::ToolCallId = "call-one".into();
+    let call_two: tau_proto::ToolCallId = "call-two".into();
+    let unknown_call: tau_proto::ToolCallId = "call-unknown".into();
+    let tool_started = |call_id: tau_proto::ToolCallId, agent_id: tau_proto::AgentId| {
+        tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            arguments: tau_proto::CborValue::Null,
+            agent_id,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+    let provider_finished = |agent_id: tau_proto::AgentId, call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ProviderResponseFinished(tau_proto::ProviderResponseFinished {
+            automatic_compaction_decision: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            agent_prompt_id: tau_proto::AgentPromptId::parse("tool-owner-prompt")
+                .expect("valid prompt id"),
+            agent_id,
+            output_items: vec![tool_call(call_id.as_str())],
+            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            originator: tau_proto::PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+    };
+    let foreground_terminal = |call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ToolResultDisplay(tau_proto::ToolResultDisplay {
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            tool_type: tau_proto::ToolType::Function,
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+    let background_terminal = |call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ToolBackgroundResultDisplay(tau_proto::ToolBackgroundResultDisplay {
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            tool_type: tau_proto::ToolType::Function,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+    let tool_progress = |call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ToolProgress(tau_proto::ToolProgress {
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            message: None,
+            progress: None,
+            display: None,
+        })
+    };
+    let tool_error = |call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ToolError(tau_proto::ToolError {
+            presentation: Default::default(),
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "failed".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+    let tool_cancelled = |call_id: tau_proto::ToolCallId| {
+        tau_proto::Event::ToolCancelled(tau_proto::ToolCancelled {
+            presentation: Default::default(),
+            call_id,
+            tool_name: tau_proto::ToolName::new("generic"),
+            tool_type: tau_proto::ToolType::Function,
+            display: None,
+        })
+    };
+
+    let first_start = tool_started(call_one.clone(), agent_a.clone());
+    let second_start = tool_started(call_two.clone(), agent_b.clone());
+    let duplicate_start = tool_started(call_one.clone(), agent_b.clone());
+    let replacement = provider_finished(agent_b.clone(), call_one.clone());
+    let foreground = foreground_terminal(call_one.clone());
+    let background = background_terminal(call_one.clone());
+    let error = tool_error(call_two.clone());
+    let late_cancel = tool_cancelled(call_one.clone());
+    let unknown_terminal = foreground_terminal(unknown_call.clone());
+    let first_progress = tool_progress(call_one.clone());
+    let unknown_progress = tool_progress(unknown_call.clone());
+
+    let mut live = renderer_for_agent_id_tests();
+    live.switch_agent(agent_a.to_string());
+    live.handle(&first_start);
+    live.switch_agent(agent_b.to_string());
+    live.handle(&second_start);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&first_progress),
+        Some(agent_a.to_string()),
+        "the hidden first tool stays with agent A after selecting agent B"
+    );
+
+    live.handle(&duplicate_start);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&first_progress),
+        Some(agent_a.to_string()),
+        "a duplicate start retains the original typed owner for later progress"
+    );
+
+    live.handle(&replacement);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&first_progress),
+        Some(agent_b.to_string()),
+        "provider output replaces later progress ownership with its typed transcript owner"
+    );
+    for terminal in [&foreground, &background, &late_cancel] {
+        assert_eq!(
+            live.agent_id_for_event_for_test(terminal),
+            Some(agent_b.to_string()),
+            "every foreground, background, and late terminal keeps the replacement owner"
+        );
+        live.handle(terminal);
+    }
+    assert_eq!(
+        live.agent_id_for_event_for_test(&error),
+        Some(agent_b.to_string()),
+        "a generic tool error routes through its typed owner"
+    );
+    live.handle(&error);
+    assert_eq!(
+        live.agent_id_for_event_for_test(&unknown_terminal),
+        Some(agent_b.to_string()),
+        "an unknown tool retains the existing user-originator fallback"
+    );
+    live.handle(&unknown_terminal);
+    assert!(
+        live.agent_id_for_event_for_test(&unknown_progress)
+            .is_none(),
+        "unknown tool routing must not synthesize an ownership record"
+    );
+
+    live.handle(&tau_proto::Event::SessionStarted(
+        tau_proto::SessionStarted {
+            session_id: tau_proto::SessionId::parse("session-two").expect("valid session id"),
+            reason: tau_proto::SessionStartReason::New,
+        },
+    ));
+    assert!(
+        live.agent_id_for_event_for_test(&first_progress).is_none(),
+        "new-session reset clears every typed tool owner from later progress routing"
+    );
+}
+
+/// Initial-discovery deferral must retain a provider-declared typed tool owner
+/// until publication, so a later hidden progress event routes to that owner
+/// rather than to the selected transcript.
+#[test]
+fn deferred_tool_ownership_routes_later_progress_after_publication() {
+    let owner = agent_id("deferred-owner");
+    let call_id: tau_proto::ToolCallId = "deferred-tool".into();
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.handle(&tau_proto::Event::HarnessAgentContextInitialized(
+        tau_proto::HarnessAgentContextInitialized {
+            session_id: tau_proto::SessionId::parse("session-one").expect("valid session id"),
+            agent_id: owner.clone(),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("owner-init")
+                .expect("valid initialization id"),
+            listed_skills: Vec::new(),
+            agents_files: Vec::new(),
+        },
+    ));
+    renderer.handle(&tau_proto::Event::ProviderResponseFinished(
+        tau_proto::ProviderResponseFinished {
+            automatic_compaction_decision: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            agent_prompt_id: tau_proto::AgentPromptId::parse("deferred-tool-prompt")
+                .expect("valid prompt id"),
+            agent_id: owner.clone(),
+            output_items: vec![tool_call(call_id.as_str())],
+            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            originator: tau_proto::PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        },
+    ));
+    renderer.switch_agent(owner.to_string());
+    renderer.switch_agent("other-agent".to_owned());
+
+    assert_eq!(
+        renderer.agent_id_for_event_for_test(&tau_proto::Event::ToolProgress(
+            tau_proto::ToolProgress {
+                call_id,
+                tool_name: tau_proto::ToolName::new("generic"),
+                message: None,
+                progress: None,
+                display: None,
+            },
+        )),
+        Some(owner.to_string()),
+        "deferred publication keeps later generic tool routing with its owner"
     );
 }
 

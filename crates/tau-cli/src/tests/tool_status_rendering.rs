@@ -187,7 +187,15 @@ fn renderer_learns_agent_from_tool_started_event() {
     renderer.handle(&event);
 
     assert_eq!(
-        renderer.tool_agent_for_test("hidden-tool").as_deref(),
+        renderer
+            .agent_id_for_event_for_test(&Event::ToolProgress(tau_proto::ToolProgress {
+                call_id: "hidden-tool".into(),
+                tool_name: tau_proto::ToolName::new("read"),
+                message: None,
+                progress: None,
+                display: None,
+            }))
+            .as_deref(),
         Some("agent-b")
     );
     assert!(

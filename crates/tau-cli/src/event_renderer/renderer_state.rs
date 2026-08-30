@@ -117,7 +117,7 @@ pub(super) struct EventOwnershipState {
     /// Provider-prompt owners.
     pub(super) prompt_agents: HashMap<tau_proto::AgentPromptId, tau_proto::AgentId>,
     /// Tool-call owners.
-    pub(super) tool_agents: HashMap<String, String>,
+    pub(super) tool_agents: HashMap<tau_proto::ToolCallId, tau_proto::AgentId>,
     /// User-shell owners.
     pub(super) shell_agents: HashMap<String, String>,
     /// Dynamic-action snapshot owners.
