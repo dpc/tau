@@ -1566,58 +1566,86 @@ fn accepted_ui_prompt_resumes_exact_target_before_queue_or_dispatch() {
 
 /// Rejected, synthetic, internal, and unauthenticated UI-shaped prompt frames
 /// must not gain the visible-human prompt's shared navigation authority.
+#[derive(Clone, Copy)]
+enum RejectedAutoResumeCase {
+    StaleSession,
+    UnknownTarget,
+    TerminatingTarget,
+    InvalidSkill,
+    InternalClass,
+    ExtensionOriginator,
+    ExternalPeer,
+    PromotedExternalPeer,
+    InMemoryUi,
+    SocketTool,
+    ConfiguredExtension,
+    MissingPeer,
+    MissingMembership,
+    MissingMode,
+}
+
+impl RejectedAutoResumeCase {
+    fn name(self) -> &'static str {
+        match self {
+            Self::StaleSession => "stale-session",
+            Self::UnknownTarget => "unknown-target",
+            Self::TerminatingTarget => "terminating-target",
+            Self::InvalidSkill => "invalid-skill",
+            Self::InternalClass => "internal-class",
+            Self::ExtensionOriginator => "extension-originator",
+            Self::ExternalPeer => "external-peer",
+            Self::PromotedExternalPeer => "promoted-external-peer",
+            Self::InMemoryUi => "in-memory-ui",
+            Self::SocketTool => "socket-tool",
+            Self::ConfiguredExtension => "configured-extension",
+            Self::MissingPeer => "missing-peer",
+            Self::MissingMembership => "missing-membership",
+            Self::MissingMode => "missing-mode",
+        }
+    }
+}
+
+/// Invalid, rejected, and internal prompt admissions must not gain the
+/// visible-human prompt's shared navigation authority.
 #[test]
 fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
-    #[derive(Clone, Copy)]
-    enum Case {
-        StaleSession,
-        UnknownTarget,
-        TerminatingTarget,
-        InvalidSkill,
-        InternalClass,
-        ExtensionOriginator,
-        ExternalPeer,
-        PromotedExternalPeer,
-        InMemoryUi,
-        SocketTool,
-        ConfiguredExtension,
-        MissingPeer,
-        MissingMembership,
-        MissingMode,
-    }
+    assert_ui_prompt_auto_resume_rejected_cases(&[
+        RejectedAutoResumeCase::StaleSession,
+        RejectedAutoResumeCase::UnknownTarget,
+        RejectedAutoResumeCase::TerminatingTarget,
+        RejectedAutoResumeCase::InvalidSkill,
+        RejectedAutoResumeCase::InternalClass,
+    ]);
+}
 
-    for case in [
-        Case::StaleSession,
-        Case::UnknownTarget,
-        Case::TerminatingTarget,
-        Case::InvalidSkill,
-        Case::InternalClass,
-        Case::ExtensionOriginator,
-        Case::ExternalPeer,
-        Case::PromotedExternalPeer,
-        Case::InMemoryUi,
-        Case::SocketTool,
-        Case::ConfiguredExtension,
-        Case::MissingPeer,
-        Case::MissingMembership,
-        Case::MissingMode,
-    ] {
-        let case_name = match case {
-            Case::StaleSession => "stale-session",
-            Case::UnknownTarget => "unknown-target",
-            Case::TerminatingTarget => "terminating-target",
-            Case::InvalidSkill => "invalid-skill",
-            Case::InternalClass => "internal-class",
-            Case::ExtensionOriginator => "extension-originator",
-            Case::ExternalPeer => "external-peer",
-            Case::PromotedExternalPeer => "promoted-external-peer",
-            Case::InMemoryUi => "in-memory-ui",
-            Case::SocketTool => "socket-tool",
-            Case::ConfiguredExtension => "configured-extension",
-            Case::MissingPeer => "missing-peer",
-            Case::MissingMembership => "missing-membership",
-            Case::MissingMode => "missing-mode",
-        };
+/// Socket peers and configured extensions must not acquire attached-human UI
+/// authority from UI-shaped prompt frames.
+#[test]
+fn ui_prompt_auto_resume_rejects_nonhuman_sources() {
+    assert_ui_prompt_auto_resume_rejected_cases(&[
+        RejectedAutoResumeCase::ExtensionOriginator,
+        RejectedAutoResumeCase::ExternalPeer,
+        RejectedAutoResumeCase::PromotedExternalPeer,
+        RejectedAutoResumeCase::InMemoryUi,
+        RejectedAutoResumeCase::SocketTool,
+        RejectedAutoResumeCase::ConfiguredExtension,
+    ]);
+}
+
+/// Missing source or target runtime state must fail closed without gaining
+/// prompt auto-resume authority.
+#[test]
+fn ui_prompt_auto_resume_rejects_incomplete_runtime_state() {
+    assert_ui_prompt_auto_resume_rejected_cases(&[
+        RejectedAutoResumeCase::MissingPeer,
+        RejectedAutoResumeCase::MissingMembership,
+        RejectedAutoResumeCase::MissingMode,
+    ]);
+}
+
+fn assert_ui_prompt_auto_resume_rejected_cases(cases: &[RejectedAutoResumeCase]) {
+    for &case in cases {
+        let case_name = case.name();
         let td = TempDir::new().expect("tempdir");
         let mut h = echo_harness(td.path().join(case_name)).expect("harness");
         let cid = ensure_test_user_agent(&mut h);
@@ -1646,7 +1674,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
             .expect("observer subscription");
         observer.lock().expect("observer frames").clear();
         let source_id = match case {
-            Case::ExternalPeer => {
+            RejectedAutoResumeCase::ExternalPeer => {
                 connect_test_client_with_origin(
                     &mut h,
                     "prompt-source",
@@ -1655,7 +1683,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
                 );
                 "prompt-source"
             }
-            Case::PromotedExternalPeer => {
+            RejectedAutoResumeCase::PromotedExternalPeer => {
                 connect_test_client_with_origin(
                     &mut h,
                     "prompt-source",
@@ -1667,7 +1695,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
                     .insert(crate::test_connection_id("prompt-source"));
                 "prompt-source"
             }
-            Case::InMemoryUi => {
+            RejectedAutoResumeCase::InMemoryUi => {
                 connect_test_client_with_origin(
                     &mut h,
                     "prompt-source",
@@ -1676,7 +1704,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
                 );
                 "prompt-source"
             }
-            Case::SocketTool => {
+            RejectedAutoResumeCase::SocketTool => {
                 connect_test_client_with_origin(
                     &mut h,
                     "prompt-source",
@@ -1685,7 +1713,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
                 );
                 "prompt-source"
             }
-            Case::ConfiguredExtension => {
+            RejectedAutoResumeCase::ConfiguredExtension => {
                 connect_ready_configured_extension(
                     &mut h,
                     "prompt-source",
@@ -1694,7 +1722,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
                 );
                 "prompt-source"
             }
-            Case::MissingPeer => "prompt-source",
+            RejectedAutoResumeCase::MissingPeer => "prompt-source",
             _ => {
                 connect_test_client_with_origin(
                     &mut h,
@@ -1705,7 +1733,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
                 "prompt-source"
             }
         };
-        if matches!(case, Case::TerminatingTarget) {
+        if matches!(case, RejectedAutoResumeCase::TerminatingTarget) {
             h.agent_runtime
                 .agent_registry
                 .agents
@@ -1714,39 +1742,39 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
                 .dispatch
                 .terminating = true;
         }
-        if matches!(case, Case::MissingMembership) {
+        if matches!(case, RejectedAutoResumeCase::MissingMembership) {
             h.agent_runtime
                 .agent_registry
                 .session_loaded
                 .remove(&target_id);
         }
-        if matches!(case, Case::MissingMode) {
+        if matches!(case, RejectedAutoResumeCase::MissingMode) {
             h.agent_runtime
                 .agent_registry
                 .navigation_modes
                 .remove(&target_id);
         }
-        let session_id = if matches!(case, Case::StaleSession) {
+        let session_id = if matches!(case, RejectedAutoResumeCase::StaleSession) {
             test_session_id("stale-session")
         } else {
             h.session_runtime.current_session_id.clone()
         };
-        let submitted_agent_id = if matches!(case, Case::UnknownTarget) {
+        let submitted_agent_id = if matches!(case, RejectedAutoResumeCase::UnknownTarget) {
             tau_proto::AgentId::parse("unknown-target").expect("agent id")
         } else {
             target_id.clone()
         };
-        let text = if matches!(case, Case::InvalidSkill) {
+        let text = if matches!(case, RejectedAutoResumeCase::InvalidSkill) {
             ":skill definitely-not-installed".to_owned()
         } else {
             case_name.to_owned()
         };
-        let message_class = if matches!(case, Case::InternalClass) {
+        let message_class = if matches!(case, RejectedAutoResumeCase::InternalClass) {
             tau_proto::PromptMessageClass::Internal
         } else {
             tau_proto::PromptMessageClass::User
         };
-        let originator = if matches!(case, Case::ExtensionOriginator) {
+        let originator = if matches!(case, RejectedAutoResumeCase::ExtensionOriginator) {
             tau_proto::PromptOriginator::Extension {
                 name: crate::test_extension_name("synthetic"),
                 query_id: "side-query".to_owned(),
@@ -1764,7 +1792,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
             originator,
             ctx_id: Some(case_name.to_owned()),
         });
-        if matches!(case, Case::ConfiguredExtension) {
+        if matches!(case, RejectedAutoResumeCase::ConfiguredExtension) {
             h.handle_extension_message(
                 &crate::test_connection_id(source_id),
                 TestMessage::Emit(tau_proto::Emit {
@@ -1778,7 +1806,7 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
                 .expect("UI-shaped prompt frame");
         }
 
-        if matches!(case, Case::MissingMode) {
+        if matches!(case, RejectedAutoResumeCase::MissingMode) {
             assert!(
                 !h.agent_runtime
                     .agent_registry
@@ -1820,7 +1848,10 @@ fn ui_prompt_auto_resume_requires_authenticated_visible_admission() {
             0,
             "{case_name}: no visible-interaction admission marker"
         );
-        let accepted_nonvisible = matches!(case, Case::InternalClass | Case::ExtensionOriginator);
+        let accepted_nonvisible = matches!(
+            case,
+            RejectedAutoResumeCase::InternalClass | RejectedAutoResumeCase::ExtensionOriginator
+        );
         if accepted_nonvisible {
             assert!(
                 event_log_events(&h).iter().any(|event| matches!(
