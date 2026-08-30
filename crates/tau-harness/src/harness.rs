@@ -1413,6 +1413,9 @@ mod session_runtime_state;
 mod side_conversation_terminal_reducer;
 mod standalone_compaction_terminal_reducer;
 mod standalone_execution_accounting_state;
+mod terminal_response_projection;
+#[cfg(test)]
+mod terminal_response_projection_tests;
 mod tool_call_terminal_reducer;
 mod tool_routing_state;
 mod tool_runtime;

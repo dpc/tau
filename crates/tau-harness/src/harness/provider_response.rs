@@ -30,10 +30,6 @@ impl Harness {
         response.context_limit_telemetry = None;
         response.estimated_api_cost_rates = None;
         response.estimated_api_cost_increment = None;
-        let raw_response_contains_tool_calls = response
-            .output_items
-            .iter()
-            .any(|item| matches!(item, ContextItem::ToolCall(_)));
         if self
             .prompt_coordination
             .canceled_prompts
@@ -114,6 +110,12 @@ impl Harness {
             self.discard_finished_response_if_stale(&cid, &response, source);
             return Ok(());
         }
+        // Cancellation, duplicate, and stale ownership checks deliberately run
+        // before this aggregate pass so discarded provider output is never
+        // cloned or concatenated.
+        let mut projection =
+            terminal_response_projection::TerminalResponseProjection::from_response(&response);
+        let raw_response_contains_tool_calls = !projection.tool_calls.is_empty();
         // A tool-bearing response cannot acquire a second foreground round in
         // this AgentTree. Enforce that ownership boundary before attaching
         // telemetry or mutating usage, alerts, provider-watch state, or watcher
@@ -132,17 +134,7 @@ impl Harness {
                 .is_some_and(|operation| {
                     operation.0 == tau_proto::PromptOperation::StandaloneCompaction
                 });
-        let contains_private_compaction_output =
-            response.output_items.iter().any(|item| match item {
-                ContextItem::LocalCompactionNarrative(_) => true,
-                ContextItem::Message(message) => message.content.iter().any(|part| {
-                    matches!(
-                        part,
-                        tau_proto::ContentPart::SyntheticCompactionSummary { .. }
-                    )
-                }),
-                _ => false,
-            });
+        let contains_private_compaction_output = projection.contains_private_compaction_output;
         if contains_private_compaction_output && !active_compaction_response {
             self.emit_harness_failure(
                 "rejecting private local-compaction output outside its active standalone transaction",
@@ -216,6 +208,9 @@ impl Harness {
             .then(|| self.classify_standalone_compaction_terminal(&cid, &response));
         if !standalone_compaction {
             self.clear_malformed_repetition_output(&mut response);
+            if response.output_items.is_empty() {
+                projection.clear_output();
+            }
         }
         normalize_finished_response_cached_usage(&mut response);
         let standalone_success = matches!(
@@ -239,8 +234,8 @@ impl Harness {
                 response.usage.as_ref(),
             );
         }
-        let mut tool_calls = tool_calls_from_output_items(&response.output_items);
-        let assistant_text = assistant_text_from_output_items(&response.output_items);
+        let mut tool_calls = projection.tool_calls;
+        let assistant_text = projection.assistant_text;
         let input_tokens = response
             .usage
             .as_ref()
@@ -291,10 +286,7 @@ impl Harness {
             .get(&response.agent_prompt_id)
             .cloned();
         self.attach_context_limit_telemetry(&mut response);
-        let response_contains_compaction = response
-            .output_items
-            .iter()
-            .any(|item| matches!(item, ContextItem::Compaction(_)));
+        let response_contains_compaction = projection.contains_compaction;
         let response_owner_is_selected = self
             .agent_runtime
             .agent_registry
@@ -478,35 +470,18 @@ impl Harness {
         let is_non_tool_ext_query = self.is_non_tool_extension_query(&cid);
         let mut normalized_tool_calls = NormalizedFinishedToolCalls::default();
         if requested_tool_calls {
+            let declaration = tau_proto::ObservationId::random();
             normalized_tool_calls = self.normalize_finished_response_tool_calls(
                 &mut response,
                 &mut tool_calls,
                 is_non_tool_ext_query,
                 tool_calls_with_non_tool_stop,
+                declaration,
             );
-            let declaration = tau_proto::ObservationId::random();
             self.tool_routing
                 .tool_runtime
                 .pending_declaration_observations
                 .insert(response.agent_prompt_id.clone(), declaration);
-            let item_indices = response
-                .output_items
-                .iter()
-                .enumerate()
-                .filter_map(|(index, item)| match item {
-                    ContextItem::ToolCall(call) => Some((call.call_id.clone(), index)),
-                    _ => None,
-                })
-                .collect::<HashMap<_, _>>();
-            for entry in &mut normalized_tool_calls.calls {
-                entry.call.call_ref = item_indices
-                    .get(&entry.call.id)
-                    .and_then(|index| u32::try_from(*index).ok())
-                    .map(|item_index| tau_proto::ToolCallRef {
-                        declaration,
-                        item_index,
-                    });
-            }
         }
 
         let successful = response.error.is_none()
@@ -639,14 +614,19 @@ impl Harness {
             }
             ProviderTerminalPlan::Other => None,
         };
+        let commit_gated_owns_terminal = completion.is_none()
+            && (response.automatic_compaction_decision.is_some()
+                || continues_for_pending_message_wake);
         let commit_gated_plan =
             Self::classify_automatic_compaction_or_pending_message_wake_terminal(
                 AutomaticCompactionOrPendingMessageWakeClassification {
                     final_status_owned: completion.is_some(),
                     automatic_compaction_owned: response.automatic_compaction_decision.is_some(),
                     continues_for_pending_message_wake,
-                    tool_effect: if requested_tool_calls {
-                        CommittedOutputLengthToolEffect::Dispatch(normalized_tool_calls.clone())
+                    tool_effect: if commit_gated_owns_terminal && requested_tool_calls {
+                        CommittedOutputLengthToolEffect::Dispatch(std::mem::take(
+                            &mut normalized_tool_calls,
+                        ))
                     } else {
                         CommittedOutputLengthToolEffect::None
                     },
@@ -762,7 +742,9 @@ impl Harness {
                         is_non_tool_ext_query,
                         source: source.cloned(),
                         tool_effect: if requested_tool_calls {
-                            CommittedOutputLengthToolEffect::Dispatch(normalized_tool_calls.clone())
+                            CommittedOutputLengthToolEffect::Dispatch(std::mem::take(
+                                &mut normalized_tool_calls,
+                            ))
                         } else {
                             CommittedOutputLengthToolEffect::None
                         },
@@ -3316,6 +3298,7 @@ impl Harness {
         tool_calls: &mut Vec<AgentToolCall>,
         is_non_tool_ext_query: bool,
         tool_calls_with_non_tool_stop: bool,
+        declaration: tau_proto::ObservationId,
     ) -> NormalizedFinishedToolCalls {
         let mut normalization = FinishedToolCallNormalization::new(
             response,
@@ -3323,7 +3306,7 @@ impl Harness {
             is_non_tool_ext_query,
             tool_calls_with_non_tool_stop,
         );
-        let calls = tool_calls
+        let mut calls = tool_calls
             .iter()
             .enumerate()
             .map(|(index, call)| {
@@ -3335,7 +3318,7 @@ impl Harness {
                 )
             })
             .collect::<Vec<_>>();
-        Self::rewrite_finished_response_tool_call_items(response, &calls);
+        Self::rewrite_finished_response_tool_call_items(response, &mut calls, declaration);
         *tool_calls = calls.iter().map(|entry| entry.call.clone()).collect();
         NormalizedFinishedToolCalls {
             invalid_errors: normalization.invalid_errors,
@@ -3371,29 +3354,31 @@ impl Harness {
 
     pub(super) fn rewrite_finished_response_tool_call_items(
         response: &mut ProviderResponseFinished,
-        normalized_calls: &[NormalizedFinishedToolCall],
+        normalized_calls: &mut [NormalizedFinishedToolCall],
+        declaration: tau_proto::ObservationId,
     ) {
-        let mut normalized_calls_iter = normalized_calls.iter();
-        response.output_items = response
-            .output_items
-            .drain(..)
-            .map(|item| match item {
-                ContextItem::ToolCall(original_call) => {
-                    let entry = normalized_calls_iter
-                        .next()
-                        .expect("tool-call normalization count should match output items");
-                    ContextItem::ToolCall(ToolCallItem {
-                        call_id: entry.call.id.clone(),
-                        name: entry.call.name.clone(),
-                        tool_type: entry.call.tool_type,
-                        arguments: entry.call.arguments.clone(),
-                        raw_arguments_json: original_call.raw_arguments_json,
-                        responses_envelope: original_call.responses_envelope,
-                    })
-                }
-                item => item,
-            })
-            .collect();
+        let mut normalized_calls_iter = normalized_calls.iter_mut();
+        for (index, item) in response.output_items.iter_mut().enumerate() {
+            let ContextItem::ToolCall(original_call) = item else {
+                continue;
+            };
+            let entry = normalized_calls_iter
+                .next()
+                .expect("tool-call normalization count should match output items");
+            let item_index =
+                u32::try_from(index).expect("provider output item index must fit protocol bounds");
+            entry.call.call_ref = Some(tau_proto::ToolCallRef {
+                declaration,
+                item_index,
+            });
+            original_call.call_id.clone_from(&entry.call.id);
+            original_call.name.clone_from(&entry.call.name);
+            original_call.tool_type = entry.call.tool_type;
+            original_call.arguments.clone_from(&entry.call.arguments);
+        }
+        let normalization_is_exhausted = normalized_calls_iter.next().is_none();
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
+        debug_assert!(normalization_is_exhausted);
     }
 
     pub(super) fn publish_finished_response_for_agent(

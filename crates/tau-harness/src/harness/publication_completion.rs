@@ -1030,7 +1030,7 @@ impl Harness {
 
     /// Republish one retained completion envelope only on its owning branch.
     pub(super) fn retry_pending_agent_publish_completion(&mut self, cid: &AgentId) {
-        let Some(completion) = self
+        let Some(mut completion) = self
             .prompt_coordination
             .prompt_runtime
             .pending_publish_completions
@@ -1079,8 +1079,7 @@ impl Harness {
                 return;
             }
         }
-        let retained = completion.owned_publication().cloned();
-        if let Some(publication) = retained.as_ref() {
+        if let Some(publication) = completion.owned_publication() {
             let selected = self
                 .selected_head_for_agent(cid)
                 .unwrap_or(tau_proto::AgentHead::Root);
@@ -1111,18 +1110,18 @@ impl Harness {
             }
             _ => None,
         };
-        let retried_approved_publication = retained.is_some();
+        let retained = completion.owned_publication_mut().and_then(Option::take);
         if let Some(publication) = retained {
+            let continuation_after_retry = match &completion {
+                AgentPublishCompletion::StandaloneContinuation { .. } => Some(completion.clone()),
+                _ => None,
+            };
             match publication.retry_policy {
                 OwnedPublicationRetryPolicy::ApprovedEventWithoutInterception => {}
             }
-            let mut approved = completion.clone();
-            *approved
-                .owned_publication_mut()
-                .expect("retained completion must expose publication ownership") = None;
             if let AgentPublishCompletion::StandaloneContinuation {
                 complete_on_commit, ..
-            } = &mut approved
+            } = &mut completion
             {
                 *complete_on_commit = retry_prompts
                     .as_ref()
@@ -1131,7 +1130,7 @@ impl Harness {
             self.commit_approved_agent_retry(
                 cid,
                 *publication.approved_event,
-                approved,
+                completion,
                 publication.semantic_parent,
                 None,
             );
@@ -1146,23 +1145,21 @@ impl Harness {
             {
                 return;
             }
-        }
-
-        let Some(retry_prompts) = retry_prompts else {
-            return;
-        };
-        if retry_prompts.is_empty() {
-            return;
-        }
-        if retried_approved_publication {
-            let mut remaining = completion;
+            let retry_prompts =
+                retry_prompts.expect("only standalone continuation can retain a prompt suffix");
+            let mut remaining = continuation_after_retry
+                .expect("only standalone continuations retain a prompt suffix");
             *remaining
                 .owned_publication_mut()
                 .expect("standalone continuation owns publication") = None;
             self.publish_prompts_as_steered(cid, retry_prompts[1..].to_vec(), Some(remaining));
-        } else {
-            self.publish_prompts_as_steered(cid, retry_prompts, Some(completion));
+            return;
         }
+
+        let Some(retry_prompts) = retry_prompts.filter(|prompts| !prompts.is_empty()) else {
+            return;
+        };
+        self.publish_prompts_as_steered(cid, retry_prompts, Some(completion));
     }
 
     /// Retry retained append-rejected publications when ordinary runtime input

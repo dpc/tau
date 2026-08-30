@@ -1,6 +1,7 @@
 use tau_config::settings::ProviderCacheMaxIdle;
 
 use super::*;
+use crate::harness::terminal_response_projection;
 use crate::provider_cache_residency::{ProviderCacheResidency, tests as cache_fixtures};
 use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
@@ -396,6 +397,56 @@ fn canceled_prompt_still_accepts_owned_cache_diagnostic() {
         canonical_count, 1,
         "a report after route closure must remain observation-only"
     );
+}
+
+/// Canceled terminals must be discarded before the aggregate projection clones
+/// or concatenates potentially large provider output.
+#[test]
+fn canceled_terminal_skips_terminal_output_projection() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    let prompt_id = "prompt-canceled-large"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId");
+    harness
+        .prompt_coordination
+        .canceled_prompts
+        .insert(prompt_id.clone());
+    terminal_response_projection::take_projection_passes();
+
+    harness
+        .handle_provider_response_finished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
+            estimated_api_cost_rates: None,
+            estimated_api_cost_increment: None,
+            agent_prompt_id: prompt_id,
+            agent_id: tau_proto::AgentId::parse("discarded").expect("agent id"),
+            output_items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "large discarded output".repeat(64 * 1024),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            stop_reason: tau_proto::ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            usage: None,
+            originator: tau_proto::PromptOriginator::User,
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_attempt: Default::default(),
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+        .expect("canceled terminal");
+
+    assert_eq!(terminal_response_projection::take_projection_passes(), 0);
 }
 
 /// The exact live Provider owner consumes a refresh terminal and derives one

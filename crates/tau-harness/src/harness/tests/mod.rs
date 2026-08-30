@@ -1809,14 +1809,40 @@ fn rewrite_finished_response_tool_call_items_preserves_provider_replay_sidecars(
             .parse::<tau_proto::AgentPromptId>()
             .expect("known-safe AgentPromptId must be valid"),
         agent_id: crate::parse_agent_id("main"),
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "call-original".into(),
-            name: ToolName::new("shell"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-            raw_arguments_json: Some(raw_arguments.to_owned()),
-            responses_envelope: Some(responses_envelope.clone()),
-        })],
+        output_items: vec![
+            ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "before".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-original".into(),
+                name: ToolName::new("shell"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: Some(raw_arguments.to_owned()),
+                responses_envelope: Some(responses_envelope.clone()),
+            }),
+            ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "after".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-original".into(),
+                name: ToolName::new("shell"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: Some(r#"{"second":true}"#.to_owned()),
+                responses_envelope: None,
+            }),
+        ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
@@ -1832,26 +1858,70 @@ fn rewrite_finished_response_tool_call_items_preserves_provider_replay_sidecars(
         provider_response_id: None,
         ws_pool_delta: None,
     };
-    let normalized_calls = vec![NormalizedFinishedToolCall {
-        turn_categories: ToolTurnCategories::default(),
-        call: AgentToolCall {
-            call_ref: None,
-            id: "call-normalized".into(),
-            name: ToolName::new("shell"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-        },
-        background_support: tau_proto::BackgroundSupport::Never,
-    }];
+    let mut normalized_calls = ["call-normalized", "invalid_tool_call_sp-raw_2"]
+        .into_iter()
+        .map(|id| NormalizedFinishedToolCall {
+            turn_categories: ToolTurnCategories::default(),
+            call: AgentToolCall {
+                call_ref: None,
+                id: id.into(),
+                name: ToolName::new("shell"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            },
+            background_support: tau_proto::BackgroundSupport::Never,
+        })
+        .collect::<Vec<_>>();
+    let output_items_ptr = response.output_items.as_ptr();
+    let output_items_capacity = response.output_items.capacity();
 
-    Harness::rewrite_finished_response_tool_call_items(&mut response, &normalized_calls);
+    let declaration = tau_proto::ObservationId::random();
+    Harness::rewrite_finished_response_tool_call_items(
+        &mut response,
+        &mut normalized_calls,
+        declaration,
+    );
 
-    let ContextItem::ToolCall(call) = &response.output_items[0] else {
+    let ContextItem::ToolCall(call) = &response.output_items[1] else {
         panic!("expected rewritten tool call");
     };
     assert_eq!(call.call_id.as_str(), "call-normalized");
+    assert_eq!(
+        response.output_items.as_ptr(),
+        output_items_ptr,
+        "in-place normalization must retain the canonical output allocation"
+    );
+    assert_eq!(response.output_items.capacity(), output_items_capacity);
+    assert_eq!(
+        normalized_calls[0].call.call_ref,
+        Some(tau_proto::ToolCallRef {
+            declaration,
+            item_index: 1,
+        })
+    );
+    assert_eq!(
+        normalized_calls[1].call.call_ref,
+        Some(tau_proto::ToolCallRef {
+            declaration,
+            item_index: 3,
+        })
+    );
     assert_eq!(call.raw_arguments_json.as_deref(), Some(raw_arguments));
     assert_eq!(call.responses_envelope, Some(responses_envelope));
+    let ContextItem::ToolCall(second_call) = &response.output_items[3] else {
+        panic!("expected second rewritten tool call");
+    };
+    assert_eq!(second_call.call_id.as_str(), "invalid_tool_call_sp-raw_2");
+    assert_eq!(
+        second_call.raw_arguments_json.as_deref(),
+        Some(r#"{"second":true}"#)
+    );
+    assert!(matches!(
+        (&response.output_items[0], &response.output_items[2]),
+        (ContextItem::Message(before), ContextItem::Message(after))
+            if matches!(&before.content[0], ContentPart::Text { text } if text == "before")
+                && matches!(&after.content[0], ContentPart::Text { text } if text == "after")
+    ));
 }
 
 /// Receives the next harness event after exposing the causal wait cut to a
