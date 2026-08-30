@@ -99,7 +99,9 @@ statistics. Completed historical tools and results disappear; each currently
 running tool remains as exactly one payload-free line naming the tool, and that
 line disappears on success, error, or cancellation. User and agent messages,
 direct responses, alerts, critical notices, prompt input, navigation, watched activity, and other
-user-facing UI remain available.
+user-facing UI remain available. `Message` and `WatchResponse` agent activity
+retain only their existing headers; their bodies and typed watched-agent
+status-update transcript rows are hidden. `WatchPrompt` retains its content.
 
 Switching back restores the retained verbose transcript and the prior `:set`
 choices; compact mode does not mutate them or discard transcript data. The mode

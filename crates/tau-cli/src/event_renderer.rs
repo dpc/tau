@@ -6100,6 +6100,9 @@ impl EventRenderer {
         if let Some(summary) =
             self.watch_work_status_summary_with_local_names(event, use_local_names)
         {
+            if !self.presentation.verbose_mode {
+                return Self::empty_block();
+            }
             return self.marked_plain_block(
                 tau_themes::names::SYSTEM_INFO,
                 crate::transcript_markers::STATUS_UPDATE,
@@ -6111,10 +6114,27 @@ impl EventRenderer {
             MessageRenderMode::Summary => {
                 self.submitted_agent_message_block(event, use_local_names, false)
             }
-            MessageRenderMode::Full => {
-                self.submitted_agent_message_block(event, use_local_names, true)
-            }
+            MessageRenderMode::Full => self.submitted_agent_message_block(
+                event,
+                use_local_names,
+                self.presentation.verbose_mode
+                    || !Self::compact_suppresses_agent_message_body(event),
+            ),
         }
+    }
+
+    /// Returns whether compact mode removes the body of this ordinary
+    /// agent-to-agent message while retaining its existing header.
+    fn compact_suppresses_agent_message_body(event: &Event) -> bool {
+        let kind = match event {
+            Event::AgentMessageSent(message) => message.kind,
+            Event::AgentMessageReceived(message) => message.kind,
+            _ => return false,
+        };
+        matches!(
+            kind,
+            tau_proto::AgentMessageKind::Message | tau_proto::AgentMessageKind::WatchResponse
+        )
     }
 
     /// Renders a harness-authored provider-work record as a normalized internal

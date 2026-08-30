@@ -46,6 +46,13 @@ headers. Watch-prompt projections keep their distinct lifecycle wording while
 using the same endpoint formatter. Canonical transport endpoints retain their
 explicit transport and session qualification.
 
+Compact mode retains `Message` and `WatchResponse` headers but suppresses their
+bodies, regardless of whether verbose-mode `show-messages` would otherwise show
+the full body. An explicit `show-messages=none` remains stricter and hides the
+message entirely. Switching back to verbose mode restores the retained body
+without rewriting the semantic message event. `WatchPrompt` and content-free
+`WatchLifecycle` records keep their existing presentation.
+
 ## Watch state and navigation
 
 The CLI derives session-scoped forward and reverse watcher caches from complete
@@ -113,7 +120,9 @@ their compatibility fallback contribution.
 Harness-authored watched-agent `WorkStatus` records are structured
 state rather than ordinary messages. Working, waiting, done, and blocked reports render
 as `▤ Status update from <sender>: <phase-emoji> (<reported task>)`, suppress their
-empty compatibility body, and bypass `show-messages`.
+empty compatibility body, and bypass `show-messages`. Compact mode suppresses
+these status-update transcript rows entirely, including their headers and reported
+task text; verbose mode retains the existing form.
 
 Harness-authored `WatchProviderStatus` records render their compact plain
 payload as `□` notices in the dedicated italic-by-default

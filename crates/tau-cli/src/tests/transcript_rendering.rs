@@ -1029,6 +1029,153 @@ fn agent_messages_render_all_recipients_as_history() {
     ));
 }
 
+/// Compact mode must remove watched work-status rows and message payloads from
+/// live, replayed, and reconstructed terminal transcripts without discarding
+/// the retained verbose projection.
+#[test]
+fn compact_mode_reprojects_agent_activity_without_content_leaks() {
+    let status = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("compact-status").expect("test message id"),
+        sender_id: agent_id("researcher-iDAo"),
+        sender_session_id: None,
+        recipient_id: agent_id("manager"),
+        kind: tau_proto::AgentMessageKind::WatchWorkStatus,
+        watch_provider_status: None,
+        watch_work_status: Some(tau_proto::AgentWatchWorkStatusNotification {
+            session_id: test_session_id("compact-session"),
+            subscription_id: "compact-subscription".to_owned(),
+            status_epoch: tau_proto::AgentWorkStatusEpoch::from_raw(1),
+            phase: tau_proto::AgentWorkStatusPhase::Working,
+            title: Some("COMPACT_STATUS_LEAK".to_owned()),
+            initial: false,
+        }),
+        watch_long_wait: None,
+        watch_lifecycle: None,
+        message: "COMPATIBILITY_STATUS_BODY_LEAK".to_owned(),
+    });
+    let message = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::parse("compact-message").expect("test message id"),
+        sender_id: agent_id("researcher-iDAo"),
+        sender_session_id: None,
+        recipient_id: agent_id("manager"),
+        kind: tau_proto::AgentMessageKind::Message,
+        watch_provider_status: None,
+        watch_work_status: None,
+        watch_long_wait: None,
+        watch_lifecycle: None,
+        message: "COMPACT_MESSAGE_LEAK Δ\nCOMPACT_SECOND_LINE 🧪".to_owned(),
+    });
+    let mut watch_prompt = message.clone();
+    let Event::AgentMessageReceived(watch_prompt_message) = &mut watch_prompt else {
+        unreachable!("cloned message retains its received event variant");
+    };
+    watch_prompt_message.message_id =
+        tau_proto::AgentMessageId::parse("compact-watch-prompt").expect("test message id");
+    watch_prompt_message.kind = tau_proto::AgentMessageKind::WatchPrompt;
+    watch_prompt_message.message = "WATCH_PROMPT_BODY_RETAINS".to_owned();
+
+    let mut watch_lifecycle = message.clone();
+    let Event::AgentMessageReceived(watch_lifecycle_message) = &mut watch_lifecycle else {
+        unreachable!("cloned message retains its received event variant");
+    };
+    watch_lifecycle_message.message_id =
+        tau_proto::AgentMessageId::parse("compact-watch-lifecycle").expect("test message id");
+    watch_lifecycle_message.kind = tau_proto::AgentMessageKind::WatchLifecycle;
+    watch_lifecycle_message.watch_lifecycle = Some(tau_proto::AgentWatchLifecycleNotification {
+        state: tau_proto::AgentWatchLifecycleState::Stopped,
+        reason: tau_proto::AgentWatchLifecycleReason::UnexpectedUnload,
+    });
+    watch_lifecycle_message.message = String::new();
+
+    let assert_compact = |vt: &VtWriter| {
+        let transcript = visible_lines(vt, 120).join("\n");
+        assert!(
+            transcript.contains("■ Message from @researcher-iDAo"),
+            "compact mode must retain the existing message header: {transcript:?}"
+        );
+        for canary in [
+            "Status update from",
+            "COMPACT_STATUS_LEAK",
+            "COMPATIBILITY_STATUS_BODY_LEAK",
+            "COMPACT_MESSAGE_LEAK",
+            "COMPACT_SECOND_LINE",
+        ] {
+            assert!(
+                !vt.scrollback_contains(120, 100, canary),
+                "compact terminal rows and scrollback leaked {canary:?}"
+            );
+        }
+        assert!(
+            transcript.contains("Prompt to @researcher-iDAo observed by @manager:"),
+            "compact mode must preserve watched user-prompt headers: {transcript:?}"
+        );
+        assert!(
+            vt.scrollback_contains(120, 100, "WATCH_PROMPT_BODY_RETAINS"),
+            "compact mode must preserve watched user-prompt content"
+        );
+        assert!(
+            transcript.lines().any(|line| {
+                line.contains("■ Message from @researcher-iDAo") && line.trim_end().ends_with(':')
+            }),
+            "compact mode must preserve the content-free lifecycle form: {transcript:?}"
+        );
+    };
+
+    let (_live_term, live_handle, live_vt) = setup(120, 24);
+    let mut live = EventRenderer::new(
+        live_handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    live.switch_agent("manager".to_owned());
+    live.toggle_verbose_mode();
+    live.handle(&status);
+    live.handle(&message);
+    live.handle(&watch_prompt);
+    live.handle(&watch_lifecycle);
+    sync(&live_handle);
+    assert_compact(&live_vt);
+
+    live.toggle_verbose_mode();
+    sync(&live_handle);
+    assert!(live_vt.screen_contains(
+        120,
+        "▤ Status update from @researcher-iDAo: 🚀 (COMPACT_STATUS_LEAK)"
+    ));
+    assert!(live_vt.screen_contains(120, "■ Message from @researcher-iDAo:"));
+    assert!(live_vt.screen_contains(120, "COMPACT_MESSAGE_LEAK Δ"));
+    assert!(live_vt.screen_contains(120, "COMPACT_SECOND_LINE 🧪"));
+
+    live.toggle_verbose_mode();
+    live.switch_agent("other".to_owned());
+    live.switch_agent("manager".to_owned());
+    sync(&live_handle);
+    assert_compact(&live_vt);
+    let compact_live = visible_lines(&live_vt, 120);
+
+    let (_replay_term, replay_handle, replay_vt) = setup(120, 24);
+    let mut replay = EventRenderer::new(
+        replay_handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    replay.switch_agent("manager".to_owned());
+    replay.toggle_verbose_mode();
+    replay.handle_recorded_at(&status, tau_proto::UnixMicros::new(1));
+    replay.handle_recorded_at(&message, tau_proto::UnixMicros::new(2));
+    replay.handle_recorded_at(&watch_prompt, tau_proto::UnixMicros::new(3));
+    replay.handle_recorded_at(&watch_lifecycle, tau_proto::UnixMicros::new(4));
+    replay.switch_agent("other".to_owned());
+    replay.switch_agent("manager".to_owned());
+    sync(&replay_handle);
+    assert_compact(&replay_vt);
+    assert_eq!(
+        visible_lines(&replay_vt, 120),
+        compact_live,
+        "live and cold replay must project identical compact agent activity"
+    );
+}
+
 /// Cross-session labels retain and emphasize the complete session-qualified
 /// identity for grammar-valid controlled session identifiers.
 #[test]

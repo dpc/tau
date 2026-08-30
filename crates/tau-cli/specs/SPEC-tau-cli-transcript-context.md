@@ -46,7 +46,10 @@ the watcher's transcript. Once the aggregate has an entry, its
 snapshot is protected even on the initial screen, and selecting or creating an
 agent restores that agent's own transcript instead of adopting overview history.
 The original sender and recipient projections remain in their respective agent
-transcripts.
+transcripts. Compact mode reprojects retained `Message` and `WatchResponse`
+entries as headers without bodies and omits retained `WatchWorkStatus`
+transcript entries; the underlying event and hidden transcript state remain
+intact for verbose reprojection.
 
 Internal prompt facts use their typed `submission_source` at the same live or
 replay position. `Extension { name }` renders once as an attributed message;

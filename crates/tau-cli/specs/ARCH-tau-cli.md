@@ -225,7 +225,10 @@ projecting each live tool as one identity/status row without payload. Responses,
 alerts, and critical notices remain visible. Terminal tool outcomes remove the live
 row through the ordinary lifecycle path. Switching modes re-renders retained
 blocks and does not mutate `CliState`, protocol events, journals, or model
-context.
+context. Compact mode also suppresses typed watched-agent `WorkStatus` transcript
+rows and retains `Message` and `WatchResponse` headers without their bodies.
+`WatchPrompt`, `WatchProviderStatus`, and `WatchLongWait` retain their existing
+presentation.
 See [SPEC-tau-cli-notice-filtering](SPEC-tau-cli-notice-filtering.md).
 
 The visible, hidden, and no-agent presentation models and retroactive-render
