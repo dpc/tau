@@ -5652,29 +5652,29 @@ impl EventRenderer {
     fn learn_shell_metadata(&mut self, event: &Event) -> bool {
         match event {
             Event::UiShellCommand(command) => {
-                if let Some(agent_id) = command.target_agent_id.as_deref() {
-                    self.remember_agent(agent_id.to_owned());
+                if let Some(agent_id) = command.target_agent_id.as_ref() {
+                    self.remember_agent(agent_id.to_string());
                     self.event_owners
                         .shell_agents
-                        .insert(command.command_id.to_string(), agent_id.to_owned());
+                        .insert(command.command_id.clone(), agent_id.clone());
                 }
                 true
             }
             Event::ShellCommandProgress(progress) => {
-                if let Some(agent_id) = progress.target_agent_id.as_deref() {
-                    self.remember_agent(agent_id.to_owned());
+                if let Some(agent_id) = progress.target_agent_id.as_ref() {
+                    self.remember_agent(agent_id.to_string());
                     self.event_owners
                         .shell_agents
-                        .insert(progress.command_id.to_string(), agent_id.to_owned());
+                        .insert(progress.command_id.clone(), agent_id.clone());
                 }
                 true
             }
             Event::ShellCommandFinished(finished) => {
-                if let Some(agent_id) = finished.target_agent_id.as_deref() {
-                    self.remember_agent(agent_id.to_owned());
+                if let Some(agent_id) = finished.target_agent_id.as_ref() {
+                    self.remember_agent(agent_id.to_string());
                     self.event_owners
                         .shell_agents
-                        .insert(finished.command_id.to_string(), agent_id.to_owned());
+                        .insert(finished.command_id.clone(), agent_id.clone());
                 }
                 true
             }
@@ -5894,8 +5894,8 @@ impl EventRenderer {
                     .or_else(|| {
                         self.event_owners
                             .shell_agents
-                            .get(progress.command_id.as_str())
-                            .cloned()
+                            .get(&progress.command_id)
+                            .map(ToString::to_string)
                     }),
             ),
             Event::ShellCommandFinished(finished) => EventAgentIdResolution::from_agent_id(
@@ -5906,8 +5906,8 @@ impl EventRenderer {
                     .or_else(|| {
                         self.event_owners
                             .shell_agents
-                            .get(finished.command_id.as_str())
-                            .cloned()
+                            .get(&finished.command_id)
+                            .map(ToString::to_string)
                     }),
             ),
             _ => EventAgentIdResolution::Unhandled,
@@ -8719,9 +8719,7 @@ impl EventRenderer {
             Some(&suffix),
         );
         self.resources.handle.print_output("shell-finished", block);
-        self.event_owners
-            .shell_agents
-            .remove(finished.command_id.as_str());
+        self.event_owners.shell_agents.remove(&finished.command_id);
     }
 
     /// Route one historical shell terminal normally while bypassing active-id
@@ -8829,7 +8827,7 @@ impl EventRenderer {
                         .agents_ui_state
                         .insert(target.to_string(), state);
                 }
-                self.event_owners.shell_agents.remove(command_id.as_str());
+                self.event_owners.shell_agents.remove(command_id);
                 continue;
             }
             if let Some(state) = self
@@ -8840,7 +8838,7 @@ impl EventRenderer {
             {
                 self.resources.handle.remove_block(state.block_id);
             }
-            self.event_owners.shell_agents.remove(command_id.as_str());
+            self.event_owners.shell_agents.remove(command_id);
         }
         if !starts.is_empty() {
             self.resources.handle.redraw();

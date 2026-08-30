@@ -119,7 +119,7 @@ pub(super) struct EventOwnershipState {
     /// Tool-call owners.
     pub(super) tool_agents: HashMap<tau_proto::ToolCallId, tau_proto::AgentId>,
     /// User-shell owners.
-    pub(super) shell_agents: HashMap<String, String>,
+    pub(super) shell_agents: HashMap<tau_proto::ShellCommandId, tau_proto::AgentId>,
     /// Dynamic-action snapshot owners.
     pub(super) action_invocation_owners: HashMap<tau_proto::ActionInvocationId, UiSnapshotOwner>,
 }
