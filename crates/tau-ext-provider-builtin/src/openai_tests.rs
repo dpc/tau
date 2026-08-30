@@ -4116,7 +4116,11 @@ fn shutdown_then_manual_retry_is_terminal_once_without_dispatch() {
             &execution.output_waker,
             WorkerMessage::Retry {
                 job: execution.job,
-                decision: RetryDecision::new(RetryClass::Transport),
+                // Keep scheduler ownership parked until the ordered shutdown
+                // and manual request reach it; wall-clock retry expiry is not
+                // part of this ownership test.
+                decision: RetryDecision::new(RetryClass::Transport)
+                    .with_retry_after(Some(Duration::from_secs(86_400))),
                 live_detail: None,
                 canonical_unauthorized: false,
                 terminal_backend: None,
