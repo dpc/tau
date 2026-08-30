@@ -58,7 +58,11 @@ without blocking shutdown on final Rust teardown; process-backed extensions
 retain their separate supervised signal-and-reap cleanup. See
 [SPEC-tau-harness-extension-lifecycle](SPEC-tau-harness-extension-lifecycle.md#overall-harness-shutdown).
 
-A pinned foreground session installs process-level SIGINT and SIGTERM handling
+Pinned foreground startup selects either exclusive exact-ID creation or strict
+existing-state resume. Exclusive creation atomically claims only an absent
+session directory and never reuses or repairs any existing directory shape;
+strict resume retains the canonical manifest, journal, and lock validation.
+Both modes install process-level SIGINT and SIGTERM handling
 that wakes the central event loop. Coordinated shutdown retires listener
 admission first, then shuts down harness connections and extensions, removes the
 runtime socket and metadata, and returns normally to the supervisor. A second

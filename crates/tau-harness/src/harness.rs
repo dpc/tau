@@ -1534,11 +1534,65 @@ pub(crate) enum InitialClientStartupErrorOutput {
     Stdout,
 }
 
+/// Typed initial-session preparation selected before harness construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HarnessSessionLaunchMode {
+    /// Ordinary fresh runtime, including same-ID history continuation.
+    New,
+    /// Exclusive exact-ID creation requiring complete directory absence.
+    Create,
+    /// Strict existing-state resume.
+    Resume,
+}
+
+impl HarnessSessionLaunchMode {
+    /// Selects the ordinary generic-harness mode from a protocol start reason.
+    pub(crate) const fn from_reason(reason: tau_proto::SessionStartReason) -> Self {
+        match reason {
+            tau_proto::SessionStartReason::Resume => Self::Resume,
+            tau_proto::SessionStartReason::Initial | tau_proto::SessionStartReason::New => {
+                Self::New
+            }
+        }
+    }
+
+    /// Selects the ordinary generic-daemon mode from its public lifecycle
+    /// status.
+    pub(crate) const fn from_status(status: crate::SessionLaunchStatus) -> Self {
+        match status {
+            crate::SessionLaunchStatus::New => Self::New,
+            crate::SessionLaunchStatus::Resumed => Self::Resume,
+        }
+    }
+
+    /// Returns the lifecycle reason announced in `session.started`.
+    pub(crate) const fn reason(self) -> tau_proto::SessionStartReason {
+        match self {
+            Self::New | Self::Create => tau_proto::SessionStartReason::Initial,
+            Self::Resume => tau_proto::SessionStartReason::Resume,
+        }
+    }
+
+    /// Returns the sole-worker durable preparation policy.
+    pub(crate) const fn preparation(self) -> tau_core::SessionPreparationMode {
+        match self {
+            Self::New => tau_core::SessionPreparationMode::New,
+            Self::Create => tau_core::SessionPreparationMode::Create,
+            Self::Resume => tau_core::SessionPreparationMode::Resume,
+        }
+    }
+
+    /// Returns whether startup strictly resumes existing state.
+    pub(crate) const fn is_resume(self) -> bool {
+        matches!(self, Self::Resume)
+    }
+}
+
 /// Session launch policy used while constructing the harness.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HarnessSessionLaunch {
-    /// Lifecycle reason announced in `session.started`.
-    pub(crate) reason: tau_proto::SessionStartReason,
+    /// Typed new, exclusive-create, or resume selection.
+    pub(crate) mode: HarnessSessionLaunchMode,
     /// Harness-wide storage policy selected for this process.
     pub(crate) storage_mode: crate::HarnessStorageMode,
 }
@@ -1547,11 +1601,15 @@ impl HarnessSessionLaunch {
     /// Returns an error if the requested launch mode is internally
     /// inconsistent.
     fn validate(self) -> Result<Self, HarnessError> {
-        if self.storage_mode.is_ephemeral()
-            && matches!(self.reason, tau_proto::SessionStartReason::Resume)
-        {
+        if self.storage_mode.is_ephemeral() && self.mode.is_resume() {
             return Err(HarnessError::Participant(
                 "ephemeral sessions cannot resume persisted session state".to_owned(),
+            ));
+        }
+        if self.storage_mode.is_ephemeral() && matches!(self.mode, HarnessSessionLaunchMode::Create)
+        {
+            return Err(HarnessError::Participant(
+                "exclusive session creation requires durable new-session startup".to_owned(),
             ));
         }
         Ok(self)

@@ -26,7 +26,7 @@ use crate::error::HarnessError;
 use crate::event::{HarnessCommand, HarnessEvent};
 use crate::format::{format_extension_event, format_tool_progress};
 use crate::harness::{
-    Harness, HarnessSessionLaunch, HarnessStartupInputs, InitialClient,
+    Harness, HarnessSessionLaunch, HarnessSessionLaunchMode, HarnessStartupInputs, InitialClient,
     InitialClientStartupErrorOutput, assistant_text_from_output_items,
     tool_calls_from_output_items,
 };
@@ -141,13 +141,6 @@ impl From<SessionLaunchStatus> for tau_proto::SessionDirStatus {
             SessionLaunchStatus::New => Self::New,
             SessionLaunchStatus::Resumed => Self::Resumed,
         }
-    }
-}
-
-fn session_start_reason(status: SessionLaunchStatus) -> tau_proto::SessionStartReason {
-    match status {
-        SessionLaunchStatus::New => tau_proto::SessionStartReason::Initial,
-        SessionLaunchStatus::Resumed => tau_proto::SessionStartReason::Resume,
     }
 }
 
@@ -880,7 +873,7 @@ pub fn run_daemon_with_internal_tools(
         dirs,
         eager_session_id,
         HarnessSessionLaunch {
-            reason: session_start_reason(options.session_status),
+            mode: HarnessSessionLaunchMode::from_status(options.session_status),
             storage_mode: options.storage_mode,
         },
         HarnessStartupInputs {
@@ -971,7 +964,7 @@ fn run_daemon_with_echo_on_listener_handle(
         echo_runner,
         echo_tools(),
         eager_session_id,
-        session_start_reason(options.session_status),
+        HarnessSessionLaunchMode::from_status(options.session_status).reason(),
         options.storage_mode,
     )?;
     disable_echo_tool_context_gate_for_tests(&mut harness);
@@ -1443,6 +1436,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     config: &Config,
     eager_session_id: &str,
     options: ServeOptions,
+    session_launch_mode: HarnessSessionLaunchMode,
     internal_tool_handlers: crate::InternalToolHandlers,
     launch: RuntimeHarnessLaunch,
 ) -> Result<(), HarnessError> {
@@ -1482,7 +1476,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
             dirs,
             eager_session_id,
             HarnessSessionLaunch {
-                reason: session_start_reason(options.session_status),
+                mode: session_launch_mode,
                 storage_mode: options.storage_mode,
             },
             HarnessStartupInputs {
@@ -1587,9 +1581,9 @@ pub fn run_component_with_internal_tools_and_extension_cli_overrides(
     )
 }
 
-/// Complete inputs for one supported foreground existing-session launch.
-pub struct ExistingSessionServeOptions<'a> {
-    /// Persisted session to resume and pin.
+/// Complete inputs for one supported foreground fixed-session launch.
+pub struct FixedSessionServeOptions<'a> {
+    /// Exact session to create or resume and pin.
     pub session_id: &'a tau_proto::SessionId,
     /// Ordered selected configuration profiles.
     pub profile_selection: Option<&'a tau_config::settings::ProfileSelection>,
@@ -1607,6 +1601,11 @@ pub struct ExistingSessionServeOptions<'a> {
     pub internal_tool_handlers: crate::InternalToolHandlers,
 }
 
+/// Complete inputs for one supported foreground existing-session launch.
+pub type ExistingSessionServeOptions<'a> = FixedSessionServeOptions<'a>;
+/// Complete inputs for one supported foreground exact-ID creation.
+pub type CreateSessionServeOptions<'a> = FixedSessionServeOptions<'a>;
+
 /// Serves one strict existing session in the foreground without an initial UI.
 ///
 /// The daemon remains discoverable through the ordinary runtime socket and
@@ -1614,7 +1613,35 @@ pub struct ExistingSessionServeOptions<'a> {
 pub fn run_existing_session_component_with_internal_tools(
     options: ExistingSessionServeOptions<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ExistingSessionServeOptions {
+    run_fixed_session_component_with_internal_tools(
+        options,
+        SessionLaunchStatus::Resumed,
+        HarnessSessionLaunchMode::Resume,
+    )
+}
+
+/// Creates and serves one exact session in the foreground without an initial
+/// UI.
+///
+/// The session directory must be completely absent. Any existing valid,
+/// malformed, or partial state rejects startup without repair or deletion.
+pub fn run_create_session_component_with_internal_tools(
+    options: CreateSessionServeOptions<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_fixed_session_component_with_internal_tools(
+        options,
+        SessionLaunchStatus::New,
+        HarnessSessionLaunchMode::Create,
+    )
+}
+
+/// Runs the common pinned foreground lifecycle for one fixed session.
+fn run_fixed_session_component_with_internal_tools(
+    options: ExistingSessionServeOptions<'_>,
+    session_status: SessionLaunchStatus,
+    session_launch_mode: HarnessSessionLaunchMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let FixedSessionServeOptions {
         session_id,
         profile_selection,
         startup_role,
@@ -1641,10 +1668,11 @@ pub fn run_existing_session_component_with_internal_tools(
         session_id.as_ref(),
         ServeOptions {
             exit_on_disconnect: false,
-            session_status: SessionLaunchStatus::Resumed,
+            session_status,
             pin_session: true,
             ..Default::default()
         },
+        session_launch_mode,
         internal_tool_handlers,
         RuntimeHarnessLaunch {
             runtime_instance_id: runtime_dir::HarnessInstanceId::mint(),
@@ -1779,6 +1807,7 @@ fn run_component_with_internal_tools_and_initial_client(
                 storage_mode,
                 ..Default::default()
             },
+            HarnessSessionLaunchMode::from_status(session_status),
             internal_tool_handlers,
             RuntimeHarnessLaunch {
                 runtime_instance_id,

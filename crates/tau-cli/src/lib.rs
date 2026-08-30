@@ -1252,21 +1252,25 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             }
             DispatchCommand::Other(cli::Command::Serve {
                 session,
+                create,
                 existing: _,
             }) => {
                 ui_logging::init_stderr_from_env("tau_harness=info,tau_cli=info,warn");
-                tau_harness::run_existing_session_component_with_internal_tools(
-                    tau_harness::ExistingSessionServeOptions {
-                        session_id: &session,
-                        profile_selection: selected_profile.as_ref(),
-                        startup_role: harness.role.as_deref(),
-                        environment_extension_names: &environment_extension_names,
-                        extension_cli_overrides: &extension_cli_overrides,
-                        role_cli_overrides: &role_cli_overrides,
-                        harness_config_overrides: &harness_config_overrides,
-                        internal_tool_handlers: tau_harness_tools::builtin_handlers(),
-                    },
-                )
+                let options = tau_harness::FixedSessionServeOptions {
+                    session_id: &session,
+                    profile_selection: selected_profile.as_ref(),
+                    startup_role: harness.role.as_deref(),
+                    environment_extension_names: &environment_extension_names,
+                    extension_cli_overrides: &extension_cli_overrides,
+                    role_cli_overrides: &role_cli_overrides,
+                    harness_config_overrides: &harness_config_overrides,
+                    internal_tool_handlers: tau_harness_tools::builtin_handlers(),
+                };
+                if create {
+                    tau_harness::run_create_session_component_with_internal_tools(options)
+                } else {
+                    tau_harness::run_existing_session_component_with_internal_tools(options)
+                }
                 .map_err(|error| CliError::Participant(error.to_string()))
             }
             DispatchCommand::Other(

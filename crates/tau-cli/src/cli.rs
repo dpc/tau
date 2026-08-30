@@ -159,14 +159,23 @@ pub enum Command {
         session: Option<SessionId>,
     },
 
-    /// Serve one persisted session in the foreground without an initial UI.
+    /// Serve one fixed session in the foreground without an initial UI.
     Serve {
-        /// Persisted session id to serve.
+        /// Exact session id to create or resume.
         #[arg(long)]
         session: SessionId,
 
-        /// Require the session to exist; creation is deliberately unsupported.
-        #[arg(long, required = true)]
+        /// Require the session directory to be completely absent, then create
+        /// it.
+        #[arg(
+            long,
+            required_unless_present = "existing",
+            conflicts_with = "existing"
+        )]
+        create: bool,
+
+        /// Require and strictly resume valid existing session state.
+        #[arg(long, required_unless_present = "create", conflicts_with = "create")]
         existing: bool,
     },
 

@@ -447,18 +447,18 @@ fn owned_cli_eof_stops_daemon_and_removes_discovery_pair() {
     daemon.disarm();
 }
 
-/// The public foreground server remains discoverable across a stock attachment,
-/// then actual SIGINT/SIGTERM requests complete ordered cleanup with exit zero.
+/// Exact-ID creation remains discoverable across a stock attachment, pins
+/// switching, handles real SIGINT/SIGTERM cleanup, and leaves a session that
+/// the unchanged strict-existing mode can subsequently resume.
 #[test]
-fn existing_session_server_handles_stock_attach_and_real_signals() {
+fn created_session_server_handles_stock_attach_signals_and_strict_resume() {
     for signal in ["-INT", "-TERM"] {
         let environment = TestEnvironment::new();
         let session_id = format!("serve-{}", signal.trim_start_matches('-').to_lowercase());
-        environment.provision_session(&session_id);
         let canary = environment.configure_shutdown_canary();
         let mut server = environment
             .command()
-            .args(["serve", "--session", &session_id, "--existing"])
+            .args(["serve", "--session", &session_id, "--create"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -581,6 +581,27 @@ fn existing_session_server_handles_stock_attach_and_real_signals() {
             "signal exit left a supervised extension child"
         );
         environment.assert_runtime_discovery_empty();
+
+        let mut resumed = environment
+            .command()
+            .args(["serve", "--session", &session_id, "--existing"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("strictly resume created session");
+        let resumed_metadata = environment.wait_for_metadata();
+        let resumed_socket = resumed_metadata.with_extension("sock");
+        let signaled = Command::new("kill")
+            .args(["-TERM", &resumed.id().to_string()])
+            .status()
+            .expect("signal resumed foreground server");
+        assert!(signaled.success(), "signal resumed foreground server");
+        let status = resumed.wait().expect("reap resumed foreground server");
+        assert!(status.success(), "strict existing resume failed: {status}");
+        assert!(!resumed_metadata.exists(), "resumed server left metadata");
+        assert!(!resumed_socket.exists(), "resumed server left socket");
+        environment.assert_runtime_discovery_empty();
     }
 }
 
@@ -611,7 +632,14 @@ fn existing_session_server_rejects_invalid_modes_and_strict_state_failures() {
 
     let locked = TestEnvironment::new();
     locked.provision_session("locked");
-    let lock_path = locked.state_home.join("tau/sessions/locked/lock");
+    let locked_session = locked.state_home.join("tau/sessions/locked");
+    let lock_path = locked_session.join("lock");
+    let canonical_before = ["meta.json", "events.cbor", "restore-events.cbor"].map(|name| {
+        (
+            name,
+            std::fs::read(locked_session.join(name)).expect("snapshot locked canonical state"),
+        )
+    });
     let lock = File::options()
         .read(true)
         .write(true)
@@ -625,6 +653,21 @@ fn existing_session_server_rejects_invalid_modes_and_strict_state_failures() {
         .expect("run locked server");
     assert!(!output.status.success());
     locked.assert_runtime_discovery_empty();
+
+    let output = locked
+        .command()
+        .args(["serve", "--session", "locked", "--create"])
+        .output()
+        .expect("reject create over locked session");
+    assert!(!output.status.success());
+    locked.assert_runtime_discovery_empty();
+    for (name, before) in canonical_before {
+        assert_eq!(
+            std::fs::read(locked_session.join(name)).expect("read locked canonical state"),
+            before,
+            "create mode mutated locked {name}"
+        );
+    }
 
     let malformed = TestEnvironment::new();
     malformed.provision_session("malformed");
@@ -642,4 +685,59 @@ fn existing_session_server_rejects_invalid_modes_and_strict_state_failures() {
         .expect("run malformed server");
     assert!(!output.status.success());
     malformed.assert_runtime_discovery_empty();
+}
+
+/// Create mode treats every pre-existing directory shape as authority it must
+/// not claim: valid, malformed, and diagnostic-only state all remain untouched.
+#[test]
+fn create_session_server_requires_complete_absence_without_mutation() {
+    let valid = TestEnvironment::new();
+    valid.provision_session("valid");
+    let valid_meta = valid.state_home.join("tau/sessions/valid/meta.json");
+    let valid_before = std::fs::read(&valid_meta).expect("valid manifest");
+    let output = valid
+        .command()
+        .args(["serve", "--session", "valid", "--create"])
+        .output()
+        .expect("reject valid existing session");
+    assert!(!output.status.success());
+    assert_eq!(
+        std::fs::read(valid_meta).expect("preserved valid manifest"),
+        valid_before
+    );
+    valid.assert_runtime_discovery_empty();
+
+    for (session_id, relative_path, bytes) in [
+        ("malformed-create", "meta.json", b"{not-json".as_slice()),
+        ("partial-create", "events.cbor", b"partial".as_slice()),
+        (
+            "diagnostic-create",
+            "logs/extension.log",
+            b"diagnostic".as_slice(),
+        ),
+    ] {
+        let environment = TestEnvironment::new();
+        let session = environment
+            .state_home
+            .join(format!("tau/sessions/{session_id}"));
+        let artifact = session.join(relative_path);
+        std::fs::create_dir_all(artifact.parent().expect("artifact parent"))
+            .expect("create partial session");
+        std::fs::write(&artifact, bytes).expect("write partial session artifact");
+        let output = environment
+            .command()
+            .args(["serve", "--session", session_id, "--create"])
+            .output()
+            .expect("reject partial session");
+        assert!(
+            !output.status.success(),
+            "{session_id} unexpectedly created"
+        );
+        assert_eq!(
+            std::fs::read(&artifact).expect("preserved partial artifact"),
+            bytes,
+            "{session_id} mutated its existing artifact"
+        );
+        environment.assert_runtime_discovery_empty();
+    }
 }

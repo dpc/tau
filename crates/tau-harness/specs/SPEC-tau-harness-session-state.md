@@ -1,5 +1,12 @@
 # SPEC-tau-harness-session-state: Session State
 
+## Record justification
+
+Session state spans durable session and agent stores, harness cold restoration,
+runtime routing and navigation classification, UI roster projection, and
+extension-owned state, so no component-local owner can describe their shared
+lifecycle and recovery invariants coherently.
+
 Durable session state uses explicit lifecycle preparation. `Resume` requires a
 valid manifest, existing lock, and both strict existing journals. `New` creates
 missing state; valid same-id history is sequence-continued without rehydrating
@@ -7,12 +14,12 @@ the old runtime branch or truncating canonical bytes. Switch relinquishes agent,
 ordinary, and restore leases as one group. Activity is lossy coalesced debt that
 preserves prepared `created_at` and waits for its triggering frame disposition.
 
-## Record justification
-
-Session state spans durable session and agent stores, harness cold restoration,
-runtime routing and navigation classification, UI roster projection, and
-extension-owned state, so no component-local owner can describe their shared
-lifecycle and recovery invariants coherently.
+Exact-ID foreground provisioning uses a narrower exclusive creation mode. It
+atomically creates the session directory and fails when any entry already
+occupies that path, including valid state, a locked session, malformed or
+partial canonical artifacts, and noncanonical diagnostic scaffolding. Failure
+does not inspect, delete, repair, or claim the existing directory. Once created,
+the session uses the ordinary new-session runtime and durable stores.
 
 ## Session and agent stores
 

@@ -50,19 +50,33 @@ fn attach_and_resume_are_subcommands_only() {
     ));
 }
 
-/// The foreground server requires both a fixed session id and the explicit
-/// existing-session guard so it can never become an accidental create path.
+/// The foreground server requires a fixed id and exactly one explicit lifecycle
+/// mode so omission or contradictory provisioning intent cannot reach startup.
 #[test]
-fn serve_requires_an_explicit_existing_session() {
+fn serve_requires_exactly_one_explicit_session_mode() {
     assert!(Cli::try_parse_from(["tau", "serve", "--session", "s1"]).is_err());
     assert!(Cli::try_parse_from(["tau", "serve", "--existing"]).is_err());
+    assert!(
+        Cli::try_parse_from(["tau", "serve", "--session", "s1", "--create", "--existing",])
+            .is_err()
+    );
     let parsed = Cli::parse_from(["tau", "serve", "--session", "s1", "--existing"]);
     assert!(matches!(
         parsed.command,
         Some(super::Command::Serve {
             session,
+            create: false,
             existing: true,
         }) if session.as_str() == "s1"
+    ));
+    let parsed = Cli::parse_from(["tau", "serve", "--session", "s2", "--create"]);
+    assert!(matches!(
+        parsed.command,
+        Some(super::Command::Serve {
+            session,
+            create: true,
+            existing: false,
+        }) if session.as_str() == "s2"
     ));
 }
 

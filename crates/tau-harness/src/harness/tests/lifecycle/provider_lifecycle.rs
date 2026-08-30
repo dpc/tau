@@ -1,6 +1,7 @@
 //! Tests for provider lifecycle behavior.
 
 use super::*;
+use crate::harness::HarnessSessionLaunchMode;
 
 /// Proves a late opaque capture keeps its Provider-supplied durable session
 /// attribution after the harness rolls to a replacement current session.
@@ -273,7 +274,7 @@ fn raw_secret_source_error_prevents_provider_start() {
             },
             "raw-secret-source",
             HarnessSessionLaunch {
-                reason: tau_proto::SessionStartReason::Initial,
+                mode: HarnessSessionLaunchMode::New,
                 storage_mode: crate::HarnessStorageMode::Durable,
             },
             HarnessStartupInputs {

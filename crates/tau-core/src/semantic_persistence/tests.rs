@@ -749,6 +749,36 @@ fn new_session_claims_existing_diagnostic_scaffolding() {
     assert!(session.join("restore-events.cbor").is_file());
 }
 
+/// Exclusive creation fails closed on even noncanonical scaffolding and leaves
+/// every existing byte untouched instead of claiming, repairing, or deleting
+/// it.
+#[test]
+fn exclusive_session_creation_requires_complete_directory_absence() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let sessions = root.path().join("sessions");
+    let session = sessions.join("managed-session");
+    std::fs::create_dir_all(session.join("logs")).expect("diagnostic scaffolding");
+    let diagnostic = session.join("logs/relay.log");
+    std::fs::write(&diagnostic, b"preexisting diagnostic").expect("diagnostic file");
+    let owner =
+        Arc::new(SemanticPersistenceOwner::new(PersistenceCapacity::default()).expect("owner"));
+    let mut store = SessionStore::open_managed(&sessions, owner).expect("store");
+
+    let error = store
+        .prepare_session("managed-session", SessionPreparationMode::Create)
+        .expect_err("exclusive creation must reject any existing directory");
+
+    assert!(error.to_string().contains("already exists"));
+    assert_eq!(
+        std::fs::read(&diagnostic).expect("preserved diagnostic"),
+        b"preexisting diagnostic"
+    );
+    assert!(!session.join("lock").exists());
+    assert!(!session.join("meta.json").exists());
+    assert!(!session.join("events.cbor").exists());
+    assert!(!session.join("restore-events.cbor").exists());
+}
+
 /// New preparation rejects partial canonical state before creating any sibling
 /// artifacts and preserves the existing manifest byte-for-byte.
 #[test]

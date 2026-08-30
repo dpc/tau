@@ -11,6 +11,8 @@ use super::owner::{FrameAdmissionToken, PersistenceAdmissionError};
 pub enum SessionPreparationMode {
     /// Establish a new canonical manifest and empty streams.
     New,
+    /// Establish a new canonical session only when its directory is absent.
+    Create,
     /// Require and validate the existing canonical manifest and streams.
     Resume,
 }

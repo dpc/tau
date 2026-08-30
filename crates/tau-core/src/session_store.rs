@@ -645,7 +645,10 @@ impl SessionStore {
             }
             Err(error) => return Err(SessionStoreError::Persistence(error)),
         };
-        let fresh_runtime = matches!(mode, SessionPreparationMode::New);
+        let fresh_runtime = matches!(
+            mode,
+            SessionPreparationMode::New | SessionPreparationMode::Create
+        );
         let membership = if fresh_runtime {
             SessionMembership {
                 session_id: session_id.clone(),

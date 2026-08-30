@@ -10,6 +10,7 @@ use std::fs::{File, Permissions};
 use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -669,60 +670,68 @@ fn prepare_session(
         .ok_or_else(|| io::Error::other("session journal has no parent"))?;
     let meta_path = directory.join("meta.json");
     let lock_path = directory.join("lock");
-    let (lock, meta, creating) = match shared.backend.open_existing_file(&lock_path) {
-        Ok(lock) => {
-            shared.backend.try_lock(&lock)?;
-            let bytes = shared.backend.read_file(&meta_path)?;
-            let meta = serde_json::from_slice::<crate::SessionMeta>(&bytes)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            (lock, meta, false)
-        }
-        Err(error)
-            if matches!(mode, SessionPreparationMode::New)
-                && error.kind() == io::ErrorKind::NotFound =>
-        {
-            for canonical in [&meta_path, &ordinary_path, &restore_path] {
-                match shared.backend.read_file(canonical) {
-                    Ok(_) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::AlreadyExists,
-                            format!(
-                                "new session canonical artifact already exists: {}",
-                                canonical.display()
-                            ),
-                        ));
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
+    let exclusive_created = if matches!(mode, SessionPreparationMode::Create) {
+        shared
+            .backend
+            .create_owner_directory(directory)
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("session directory already exists: {}", directory.display()),
+                    )
+                } else {
+                    error
                 }
+            })?;
+        Some(initialize_owned_session(shared, directory, &lock_path)?)
+    } else {
+        None
+    };
+    let (lock, meta, creating) = match exclusive_created {
+        Some(created) => created,
+        None => match shared.backend.open_existing_file(&lock_path) {
+            Ok(lock) => {
+                shared.backend.try_lock(&lock)?;
+                let bytes = shared.backend.read_file(&meta_path)?;
+                let meta = serde_json::from_slice::<crate::SessionMeta>(&bytes)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                (lock, meta, false)
             }
-            if let Err(error) = shared.backend.create_owner_directory(directory)
-                && error.kind() != io::ErrorKind::AlreadyExists
+            Err(error)
+                if matches!(mode, SessionPreparationMode::New)
+                    && error.kind() == io::ErrorKind::NotFound =>
             {
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "create new session directory {}: {error}",
-                        directory.display()
-                    ),
-                ));
+                for canonical in [&meta_path, &ordinary_path, &restore_path] {
+                    match shared.backend.read_file(canonical) {
+                        Ok(_) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::AlreadyExists,
+                                format!(
+                                    "new session canonical artifact already exists: {}",
+                                    canonical.display()
+                                ),
+                            ));
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                if let Err(error) = shared.backend.create_owner_directory(directory)
+                    && error.kind() != io::ErrorKind::AlreadyExists
+                {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "create new session directory {}: {error}",
+                            directory.display()
+                        ),
+                    ));
+                }
+                initialize_owned_session(shared, directory, &lock_path)?
             }
-            #[cfg(unix)]
-            {
-                shared
-                    .backend
-                    .set_permissions(directory, Permissions::from_mode(0o700))?;
-            }
-            let now = unix_seconds();
-            let lock = shared.backend.create_new_file(&lock_path)?;
-            shared.backend.try_lock(&lock)?;
-            let meta = crate::SessionMeta {
-                created_at: now,
-                last_touched: now,
-            };
-            (lock, meta, true)
-        }
-        Err(error) => return Err(error),
+            Err(error) => return Err(error),
+        },
     };
     let mut ordinary = match creating {
         true => shared.backend.create_new_file(&ordinary_path)?,
@@ -768,6 +777,30 @@ fn prepare_session(
         },
     );
     Ok((events, restore_events, meta))
+}
+
+/// Initializes canonical lock and manifest authority after claiming a
+/// directory.
+fn initialize_owned_session(
+    shared: &Shared,
+    directory: &Path,
+    lock_path: &Path,
+) -> io::Result<(File, crate::SessionMeta, bool)> {
+    #[cfg(unix)]
+    shared
+        .backend
+        .set_permissions(directory, Permissions::from_mode(0o700))?;
+    let now = unix_seconds();
+    let lock = shared.backend.create_new_file(lock_path)?;
+    shared.backend.try_lock(&lock)?;
+    Ok((
+        lock,
+        crate::SessionMeta {
+            created_at: now,
+            last_touched: now,
+        },
+        true,
+    ))
 }
 
 fn recover_records<T: DeserializeOwned>(
