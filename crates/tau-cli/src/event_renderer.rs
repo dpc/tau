@@ -593,7 +593,7 @@ pub(crate) struct ToolTimerNotifier {
 }
 
 pub(crate) struct ToolTimerState {
-    pub(crate) active_tool_ids: HashSet<String>,
+    pub(crate) active_tool_ids: HashSet<tau_proto::ToolCallId>,
     /// Whether quota pacing currently needs minute-boundary repainting.
     pub(crate) quota_active: bool,
     pub(crate) done: bool,
@@ -617,15 +617,15 @@ impl ToolTimerNotifier {
         self.inner.clone()
     }
 
-    fn tool_started(&self, call_id: &str) {
+    fn tool_started(&self, call_id: &tau_proto::ToolCallId) {
         let (mutex, cv) = &*self.inner;
         if let Ok(mut state) = mutex.lock() {
-            state.active_tool_ids.insert(call_id.to_owned());
+            state.active_tool_ids.insert(call_id.clone());
             cv.notify_all();
         }
     }
 
-    fn tool_finished(&self, call_id: &str) {
+    fn tool_finished(&self, call_id: &tau_proto::ToolCallId) {
         let (mutex, cv) = &*self.inner;
         if let Ok(mut state) = mutex.lock() {
             state.active_tool_ids.remove(call_id);
@@ -7939,7 +7939,7 @@ impl EventRenderer {
         state.started_at = Some(Instant::now());
         state.recorded_started_at = Some(recorded_at);
         if let Some(timer) = &self.activity.tool_timer {
-            timer.tool_started(started.call_id.as_str());
+            timer.tool_started(&started.call_id);
         }
         if let Some((status, status_text)) = self
             .transcript
@@ -8251,10 +8251,10 @@ impl EventRenderer {
 
     fn take_finished_tool_call(
         &mut self,
-        call_id: &str,
+        call_id: &tau_proto::ToolCallId,
         originator_is_user: bool,
     ) -> Option<(ToolCallState, bool)> {
-        let prior = self.transcript.runtime.tool_calls.remove(call_id);
+        let prior = self.transcript.runtime.tool_calls.remove(call_id.as_str());
         let known_main_tool = prior
             .as_ref()
             .is_some_and(|prior| !prior.is_sub_agent && originator_is_user);
@@ -8272,7 +8272,7 @@ impl EventRenderer {
             self.transcript
                 .status
                 .main_backgrounded_tools
-                .remove(call_id);
+                .remove(call_id.as_str());
             self.record_main_tool_completed();
             if self.transcript.status.main_agent_turn_active
                 || !self.transcript.status.main_backgrounded_tools.is_empty()
@@ -8288,15 +8288,14 @@ impl EventRenderer {
         result: &tau_proto::ToolResultDisplay,
         recorded_at: UnixMicros,
     ) {
-        let call_id = result.call_id.as_str();
         if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
-            self.handle_tool_background_placeholder(call_id);
+            self.handle_tool_background_placeholder(result.call_id.as_str());
             return;
         }
         // Sub-agent tool activity stays out of the user's transcript; generic
         // watched-agent stats provide the live activity signal.
         let Some((prior, known_main_tool)) =
-            self.take_finished_tool_call(call_id, result.originator.is_user())
+            self.take_finished_tool_call(&result.call_id, result.originator.is_user())
         else {
             return;
         };
@@ -8359,7 +8358,7 @@ impl EventRenderer {
             originator: result.originator.clone(),
         };
         let Some((prior, known_main_tool)) =
-            self.take_finished_tool_call(result.call_id.as_str(), result.originator.is_user())
+            self.take_finished_tool_call(&result.call_id, result.originator.is_user())
         else {
             return;
         };
@@ -8450,9 +8449,8 @@ impl EventRenderer {
     }
 
     fn handle_tool_error(&mut self, error: &tau_proto::ToolError, recorded_at: UnixMicros) {
-        let call_id = error.call_id.as_str();
         let Some((prior, known_main_tool)) =
-            self.take_finished_tool_call(call_id, error.originator.is_user())
+            self.take_finished_tool_call(&error.call_id, error.originator.is_user())
         else {
             return;
         };
@@ -8499,7 +8497,7 @@ impl EventRenderer {
             originator: error.originator.clone(),
         };
         let Some((prior, known_main_tool)) =
-            self.take_finished_tool_call(error.call_id.as_str(), error.originator.is_user())
+            self.take_finished_tool_call(&error.call_id, error.originator.is_user())
         else {
             return;
         };
@@ -8561,8 +8559,8 @@ impl EventRenderer {
         cancelled: &tau_proto::ToolCancelled,
         recorded_at: UnixMicros,
     ) {
-        let call_id = cancelled.call_id.as_str();
-        let Some((prior, known_main_tool)) = self.take_finished_tool_call(call_id, true) else {
+        let Some((prior, known_main_tool)) = self.take_finished_tool_call(&cancelled.call_id, true)
+        else {
             return;
         };
         let descriptor = cancelled.display.clone().unwrap_or_else(|| {

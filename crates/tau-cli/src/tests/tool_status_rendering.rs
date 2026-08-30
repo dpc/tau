@@ -2,7 +2,7 @@
 
 use tau_cli_term::RendererDeliveryId;
 
-use super::super::event_renderer::{UiIoStats, unix_time_millis};
+use super::super::event_renderer::{ToolTimerNotifier, UiIoStats, unix_time_millis};
 use super::*;
 
 /// Live and attach-reconstructed blocks must use the same mode projection when
@@ -89,6 +89,76 @@ fn verbose_mode_reprojects_streaming_thinking_hidden_agents_and_attach_tools() {
     }));
     sync(&handle);
     assert!(!vt.screen_contains(100, "read pending"));
+}
+
+/// Tool lifecycle events must keep the timer notifier keyed by their canonical
+/// call identities, without allowing duplicate or unknown terminals to change
+/// the active count, and disconnect reset must clear every remaining call.
+#[test]
+fn tool_timer_notifier_tracks_event_lifecycle_with_typed_call_ids() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    let timer = ToolTimerNotifier::new();
+    let timer_state = timer.inner();
+    renderer.set_tool_timer(timer);
+
+    renderer.handle(&tool_started("timer-first", "read", CborValue::Null));
+    renderer.handle(&tool_started("timer-second", "write", CborValue::Null));
+    renderer.handle(&tool_started("timer-first", "read", CborValue::Null));
+    {
+        let (mutex, _) = &*timer_state;
+        let state = mutex.lock().expect("timer state lock");
+        assert_eq!(state.active_tool_ids.len(), 2);
+        assert!(
+            state
+                .active_tool_ids
+                .contains(&tau_proto::ToolCallId::from("timer-first"))
+        );
+        assert!(
+            state
+                .active_tool_ids
+                .contains(&tau_proto::ToolCallId::from("timer-second"))
+        );
+    }
+
+    renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        presentation: Default::default(),
+        call_id: "timer-first".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
+        display: None,
+    }));
+    renderer.handle(&Event::ToolCancelled(ToolCancelled {
+        presentation: Default::default(),
+        call_id: "unknown-timer-call".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
+        display: None,
+    }));
+    {
+        let (mutex, _) = &*timer_state;
+        let state = mutex.lock().expect("timer state lock");
+        assert_eq!(state.active_tool_ids.len(), 1);
+        assert!(
+            !state
+                .active_tool_ids
+                .contains(&tau_proto::ToolCallId::from("timer-first"))
+        );
+        assert!(
+            state
+                .active_tool_ids
+                .contains(&tau_proto::ToolCallId::from("timer-second"))
+        );
+    }
+
+    renderer.handle_disconnect(None);
+    let (mutex, _) = &*timer_state;
+    let state = mutex.lock().expect("timer state lock");
+    assert!(state.active_tool_ids.is_empty());
 }
 
 /// Tool starts carry the owning agent id, so hidden-agent tools must be routed
