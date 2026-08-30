@@ -120,6 +120,17 @@ is done.
   connection-control input; it is not published, intercepted, subscribed, or
   replayed. Other client origins and configured extensions are silently denied.
   The input frame remains visible in local debug JSONL and protocol metering.
+- **`ui_shutdown_request`** — An attached local UI requests unconditional
+  canonical harness shutdown. The empty request is direct lifecycle input, not
+  an event; it is neither published, intercepted, subscribed, nor replayed.
+  Startup retains it for the runtime loop, which then publishes the
+  harness-authored `session.shutdown` terminal, retires all transports, settles
+  persistence, and cleans owned runtime discovery artifacts. Other client
+  origins are silently denied. Configured-extension requests are metered and
+  phase-validated, then legal-phase requests are denied before activation
+  staging while illegal-phase requests retain normal protocol-failure behavior.
+  The input remains visible in local debug JSONL and is metered as
+  `message.ui_shutdown_request`.
 - **`ui_tree_request`** — An attached local UI asks the harness to render one
   agent's prompt rewind anchors. The harness returns exactly one multiline
   `harness.notice` only to the requester, preserving anchor order, selection

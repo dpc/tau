@@ -1306,6 +1306,13 @@ pub struct UiDebugEventStatsRequest {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiDetachRequest {}
 
+/// Dedicated UI input requesting unconditional harness session shutdown.
+///
+/// The harness consumes this lifecycle request directly. It is not a session
+/// fact and must not be broadcast to extensions.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiShutdownRequest {}
+
 /// Dedicated UI input requesting an agent's user-facing prompt rewind anchors.
 ///
 /// The harness consumes this request directly and replies only to the
@@ -1395,6 +1402,7 @@ pub enum HarnessInputMessage {
     GetSessionAgentList(GetSessionAgentList),
     UiDebugEventStatsRequest(UiDebugEventStatsRequest),
     UiDetachRequest(UiDetachRequest),
+    UiShutdownRequest(UiShutdownRequest),
     UiTreeRequest(UiTreeRequest),
     ProviderDebugCapture(ProviderDebugCapture),
     ExtensionDataRequest(ExtensionDataRequest),

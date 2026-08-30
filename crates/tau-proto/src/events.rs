@@ -5094,7 +5094,8 @@ fn default_session_start_reason() -> SessionStartReason {
 }
 
 /// The harness is leaving the current session. Fired before
-/// `SessionStarted` for the next one when the user switches sessions.
+/// `SessionStarted` for the next one when the user switches sessions, or
+/// before final harness teardown.
 /// Extensions that hold per-session state subscribe to flush or drop it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionShutdown {

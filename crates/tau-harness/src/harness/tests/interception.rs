@@ -6099,6 +6099,39 @@ fn interception_replacement_of_session_shutdown_publishes_original() {
     assert_eq!(entry.event, shutdown);
 }
 
+/// Final harness shutdown must force a withheld shutdown intercept through the
+/// must-pass pipeline, and repeated cleanup must not commit another terminal.
+#[test]
+fn final_shutdown_forces_intercepted_terminal_exactly_once() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "shutdown-interceptor");
+    h.handle_extension_event(
+        "shutdown-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.runtime_io.event_log.next_seq();
+
+    h.shutdown_with_in_process_grace(Duration::ZERO)
+        .expect("first shutdown");
+    h.shutdown_with_in_process_grace(Duration::ZERO)
+        .expect("repeated shutdown cleanup");
+
+    let mut cursor = baseline_seq;
+    let mut shutdowns = 0;
+    while let Some(entry) = h.runtime_io.event_log.get_next_from(cursor) {
+        cursor = entry.seq.next();
+        shutdowns += usize::from(matches!(entry.event, Event::SessionShutdown(_)));
+    }
+    assert_eq!(shutdowns, 1);
+    assert!(h.runtime_io.publication.pending_intercept.is_none());
+    assert!(h.runtime_io.publication.deferred.is_empty());
+}
+
 /// Ensures interceptors cannot drop harness-validated sender-side message
 /// projections after recipient validation has already succeeded.
 #[test]

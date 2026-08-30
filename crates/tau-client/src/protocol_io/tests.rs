@@ -51,6 +51,10 @@ fn protocol_io_input_message_keys_use_flat_variant_names() {
             "message.ui_detach_request",
         ),
         (
+            HarnessInputMessage::UiShutdownRequest(tau_proto::UiShutdownRequest::default()),
+            "message.ui_shutdown_request",
+        ),
+        (
             HarnessInputMessage::UiTreeRequest(tau_proto::UiTreeRequest {
                 session_id: "s1"
                     .parse::<tau_proto::SessionId>()

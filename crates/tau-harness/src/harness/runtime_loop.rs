@@ -406,6 +406,9 @@ impl Harness {
         }
         let mut ever_attached = !self.ui_runtime.client_writers.is_empty();
         loop {
+            if self.ui_runtime.shutdown_requested {
+                break;
+            }
             if Self::should_stop_run_loop(
                 max_clients,
                 served_clients,
@@ -811,6 +814,9 @@ impl Harness {
                 if self.is_authorized_ui_detach_request(&connection_id, &message) {
                     *exit_on_disconnect = false;
                 }
+                if self.is_authorized_ui_shutdown_request(&connection_id, &message) {
+                    self.ui_runtime.shutdown_requested = true;
+                }
                 let disposition =
                     self.handle_client_message_disposition(&connection_id, *message)?;
                 let close = match disposition {
@@ -844,6 +850,15 @@ impl Harness {
         message: &HarnessInputMessage,
     ) -> bool {
         matches!(message, HarnessInputMessage::UiDetachRequest(_))
+            && self.is_attached_socket_ui(connection_id)
+    }
+
+    pub(super) fn is_authorized_ui_shutdown_request(
+        &self,
+        connection_id: &tau_proto::ConnectionId,
+        message: &HarnessInputMessage,
+    ) -> bool {
+        matches!(message, HarnessInputMessage::UiShutdownRequest(_))
             && self.is_attached_socket_ui(connection_id)
     }
 

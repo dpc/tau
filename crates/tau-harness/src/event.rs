@@ -17,6 +17,8 @@ use tau_proto::{
     Disconnect, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
 };
 
+#[cfg(test)]
+use crate::event_log::EventLog;
 use crate::extension::ExtensionConnectCommand;
 use crate::harness::SessionGeneration;
 
@@ -539,6 +541,14 @@ pub(crate) struct LiveConsumerHandle {
 }
 
 impl LiveConsumerHandle {
+    /// Builds a deliberately non-advancing consumer for bounded-close tests.
+    #[cfg(test)]
+    pub(crate) fn stalled_for_test() -> Self {
+        let log = EventLog::new();
+        let consumer = log.register_consumer();
+        Self { log, consumer }
+    }
+
     /// Waits until this generation reaches the stream's current tail.
     pub(crate) fn flush(&self) {
         self.log.flush_consumer(self.consumer);

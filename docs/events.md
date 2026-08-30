@@ -135,8 +135,8 @@ membership journal, not a transcript.
   reports `SessionInitTimeout`, not process `StartupTimeout`.
 - **`session.shutdown`** — Must-pass immutable runtime lifecycle fact: the
   harness is leaving the current session, emitted before `session.started` for
-  the next one. Extensions flush or drop per-session state. Interceptors cannot
-  drop or rewrite it.
+  the next one or before final harness teardown. Extensions flush or drop
+  per-session state. Interceptors cannot drop or rewrite it.
 - **`session.agent_loaded`** — Membership fact: a global agent is loaded into
   this session. The first durable membership transition writes this to the
   session log so resume can fold the loaded-agent set. Restored initialization

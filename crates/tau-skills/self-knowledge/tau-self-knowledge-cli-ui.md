@@ -70,7 +70,14 @@ includes currently loaded agents, not messages whose endpoints already unloaded.
 
 ## Commands
 
-Type `:` as the first non-whitespace character to enter command mode and open command/action completion. Type `::text` to submit literal prompt text beginning with `:`, while `/` remains available for absolute and token-level path completion. Built-in commands include session and agent management, model/role switching, `:name <display name>` to rename the currently selected agent, `:skill <name> [args]` for explicit user-invocable skill injection, `:theme <name>` to switch only the current CLI UI's theme for this run, `:set`, `:tree`, `:fast`, `:detach`, and `:quit`. Extension-provided actions can add dynamic commands and argument completions at runtime. `:skill:<name> [args]` is accepted as a compact form; arguments are appended after the skill body without placeholder substitution.
+Type `:` as the first non-whitespace character to enter command mode and open command/action completion. Type `::text` to submit literal prompt text beginning with `:`, while `/` remains available for absolute and token-level path completion. Built-in commands include session and agent management, model/role switching, `:name <display name>` to rename the currently selected agent, `:skill <name> [args]` for explicit user-invocable skill injection, `:theme <name>` to switch only the current CLI UI's theme for this run, `:set`, `:tree`, `:fast`, `:detach`, `:quit`, and `:quit-session`. Extension-provided actions can add dynamic commands and argument completions at runtime. `:skill:<name> [args]` is accepted as a compact form; arguments are appended after the skill body without placeholder substitution.
+
+`:quit` exits only the invoking UI. Session lifetime after that disconnect is
+controlled independently: ordinary `tau` launches stop when their last UI
+disconnects, while supervised, already detached, and otherwise persistent
+sessions keep running. `:detach` exits the UI and disables stop-on-disconnect
+for that daemon. `:quit-session` requests unconditional canonical session
+shutdown and therefore disconnects every attached UI.
 
 `:theme` completion lists built-in selectors (`tau-plain-dark`, `tau-plain-light`, and `tau-dpc`) plus valid user themes from `<config_dir>/themes/*.json5`. It is intentionally not persistent: it does not edit `cli.yaml`, update `cli.json`, or affect another attached UI.
 

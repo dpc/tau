@@ -24,6 +24,8 @@ mod agent;
 mod agent_cost_ledger;
 mod agent_creator_topology;
 mod client_writer_lifecycle;
+#[cfg(test)]
+mod client_writer_lifecycle_tests;
 mod daemon;
 mod debug_log;
 mod dedup;

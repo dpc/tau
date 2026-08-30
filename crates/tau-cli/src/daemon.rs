@@ -19,6 +19,7 @@ const SESSION_ID_SUFFIX_BYTES: usize = 7;
 const SESSION_ID_MAX_BYTES: usize = tau_proto::SESSION_SCOPED_ID_MAX_LEN;
 const OWNED_DAEMON_GRACEFUL_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const OWNED_DAEMON_EXIT_CHECK_INTERVAL: Duration = Duration::from_millis(10);
+pub(crate) const REQUESTED_DAEMON_EXIT_WAIT: Duration = Duration::from_secs(10);
 
 /// How this CLI invocation is related to its harness daemon.
 ///
@@ -106,16 +107,57 @@ impl DaemonHandle {
 
     /// Consume the handle without killing the child.
     ///
-    /// Used by `:detach`: we want the daemon to outlive this CLI,
-    /// whether we spawned it or attached to it. For `Owned` this
+    /// Used after every interactive UI exit: daemon lifetime belongs to harness
+    /// disconnect policy, detach policy, or an explicit shutdown request rather
+    /// than direct client-process ownership. For `Owned` this
     /// `mem::forget`s the `Child` — on Linux its parent becomes init
     /// on our exit, which is exactly what we want for a long-lived
-    /// daemon.
+    /// daemon when policy keeps it running.
     pub(crate) fn leak(mut self) {
         if let Self::Owned { child, .. } = &mut self
             && let Some(child) = child.take()
         {
             std::mem::forget(child);
+        }
+    }
+
+    /// Waits boundedly for an explicit canonical shutdown without ever forcing
+    /// the child to exit.
+    ///
+    /// A child still running after `timeout` is detached so its harness-owned
+    /// cleanup may continue independently.
+    pub(crate) fn wait_requested_exit_or_leak(mut self, timeout: Duration) {
+        let Self::Owned {
+            child,
+            harness_path,
+            initial_ui,
+            cleanup_runtime_pair_after_reap,
+        } = &mut self
+        else {
+            return;
+        };
+        drop(initial_ui.take());
+        let Some(mut child) = child.take() else {
+            return;
+        };
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    if *cleanup_runtime_pair_after_reap {
+                        let _ = std::fs::remove_file(runtime_dir::socket_path(harness_path));
+                        let _ = std::fs::remove_file(runtime_dir::metadata_path(harness_path));
+                    }
+                    return;
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(OWNED_DAEMON_EXIT_CHECK_INTERVAL);
+                }
+                Ok(None) | Err(_) => {
+                    std::mem::forget(child);
+                    return;
+                }
+            }
         }
     }
 }

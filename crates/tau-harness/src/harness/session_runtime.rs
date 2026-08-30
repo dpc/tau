@@ -768,6 +768,23 @@ impl Harness {
         Some((cid, agent_id, head))
     }
 
+    /// Publish the active session binding's terminal fact at most once.
+    ///
+    /// Returns whether this call admitted the terminal publication.
+    pub(super) fn publish_current_session_shutdown(&mut self) -> bool {
+        if self.session_runtime.shutdown_published {
+            return false;
+        }
+        self.session_runtime.shutdown_published = true;
+        self.publish_event(
+            None,
+            Event::SessionShutdown(tau_proto::SessionShutdown {
+                session_id: self.session_runtime.current_session_id.clone(),
+            }),
+        );
+        true
+    }
+
     /// Tear down the current session and bind the harness to a new one.
     ///
     /// Pi-style: emit `SessionShutdown` for the old, drop in-flight
@@ -808,12 +825,7 @@ impl Harness {
         // them. Clearing them before a session id can be selected again makes
         // an old callback fail even after an S -> other -> S rollover.
         self.peer_messaging.pending_external_message_auth.clear();
-        self.publish_event(
-            None,
-            Event::SessionShutdown(tau_proto::SessionShutdown {
-                session_id: old_id.clone(),
-            }),
-        );
+        let _published = self.publish_current_session_shutdown();
         self.fail_all_pending_ui_shell_commands(
             "the session shut down before the shell command completed",
         );
@@ -1201,6 +1213,7 @@ impl Harness {
 
         self.session_runtime.current_session_id = new_session_id.clone();
         self.session_runtime.current_session_start_reason = reason;
+        self.session_runtime.shutdown_published = false;
         self.reset_extension_restart_budgets_at(Instant::now());
         if self.session_runtime.storage_mode.is_durable() {
             let mode = if matches!(reason, tau_proto::SessionStartReason::Resume) {

@@ -2995,6 +2995,7 @@ fn known_static_commands_are_identified_for_history_rendering() {
     assert!(is_known_static_command(":debug-show-ui-event-stats"));
     assert!(is_known_static_command(":debug-show-event-stats std-shell"));
     assert!(is_known_static_command(":quit"));
+    assert!(is_known_static_command(":quit-session"));
     assert!(is_known_static_command(":agent"));
     assert!(is_known_static_command(":agent switch worker-1"));
     assert!(is_known_static_command(":agent suspend"));

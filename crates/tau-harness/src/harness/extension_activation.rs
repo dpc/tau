@@ -1434,6 +1434,7 @@ impl Harness {
                         | HarnessInputMessage::ExtensionDataRequest(_)
                         | HarnessInputMessage::UiDebugEventStatsRequest(_)
                         | HarnessInputMessage::UiDetachRequest(_)
+                        | HarnessInputMessage::UiShutdownRequest(_)
                         | HarnessInputMessage::UiTreeRequest(_)
                 )
             } else {
@@ -1454,6 +1455,7 @@ impl Harness {
                                 | HarnessInputMessage::ExtensionDataRequest(_)
                                 | HarnessInputMessage::UiDebugEventStatsRequest(_)
                                 | HarnessInputMessage::UiDetachRequest(_)
+                                | HarnessInputMessage::UiShutdownRequest(_)
                                 | HarnessInputMessage::UiTreeRequest(_),
                             ExtensionState::Handshaking | ExtensionState::Ready,
                         )
@@ -1473,6 +1475,7 @@ impl Harness {
             &message,
             HarnessInputMessage::UiDebugEventStatsRequest(_)
                 | HarnessInputMessage::UiDetachRequest(_)
+                | HarnessInputMessage::UiShutdownRequest(_)
                 | HarnessInputMessage::UiTreeRequest(_)
         ) && self.extensions.entries.contains_key(source_id)
         {
@@ -1682,6 +1685,7 @@ impl Harness {
             | HarnessInputMessage::GetSessionAgentList(_)
             | HarnessInputMessage::UiDebugEventStatsRequest(_)
             | HarnessInputMessage::UiDetachRequest(_)
+            | HarnessInputMessage::UiShutdownRequest(_)
             | HarnessInputMessage::UiTreeRequest(_)
             | HarnessInputMessage::ExternalAgentMessage(_)
             | HarnessInputMessage::ExternalAgentMessageAuth(_)

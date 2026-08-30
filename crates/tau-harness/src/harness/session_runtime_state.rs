@@ -59,6 +59,8 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) current_session_generation: SessionGeneration,
     /// Reason associated with the active session binding.
     pub(crate) current_session_start_reason: tau_proto::SessionStartReason,
+    /// Whether the active binding's terminal shutdown fact was published.
+    pub(crate) shutdown_published: bool,
     /// Buffered lifecycle messages for the next interaction outcome.
     pub(crate) lifecycle_messages: Vec<String>,
     /// Acceptance order for visible user interactions.

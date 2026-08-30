@@ -78,7 +78,9 @@ use crate::agent::{
 };
 use crate::agent_cost_ledger::AgentCostLedger;
 use crate::agent_creator_topology::{AgentCreatorTopology, RecordCreatorOutcome};
-use crate::client_writer_lifecycle::{ClientWriterLifecycle, STARTUP_DISCONNECT_GRACE};
+use crate::client_writer_lifecycle::{
+    ClientWriterLifecycle, FINAL_UI_DISCONNECT_GRACE, STARTUP_DISCONNECT_GRACE,
+};
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
 use crate::dedup::{
@@ -2425,6 +2427,25 @@ impl Harness {
                 "cannot shut down while standalone accounting remains uncommitted".to_owned(),
             ));
         }
+        if !self.session_runtime.shutdown_published {
+            // Revoke old-session admission before forcing all already accepted
+            // publications through their terminal rollover path.
+            self.session_runtime.current_session_generation = self
+                .session_runtime
+                .current_session_generation
+                .saturating_next();
+            self.cancel_ui_prompt_publications_for_shutdown();
+            self.quiesce_synchronized_publications_for_rollover();
+        }
+        let _published = self.publish_current_session_shutdown();
+        self.quiesce_synchronized_publications_for_rollover();
+        let final_ui_closes = std::mem::take(&mut self.ui_runtime.client_writers)
+            .into_values()
+            .filter_map(|writer| writer.start_bounded_close(FINAL_UI_DISCONNECT_GRACE))
+            .collect::<Vec<_>>();
+        for close in final_ui_closes {
+            let _ = close.join();
+        }
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::Shutdown);
         self.extensions.restart_deadlines.clear();
         self.extensions.cleanup_deadlines.clear();
@@ -2850,6 +2871,9 @@ impl Harness {
             // Connection-control behavior is applied only by startup/runtime
             // routing after exact attached-socket-UI authorization.
             HarnessInputMessage::UiDetachRequest(_) => Ok(ClientMessageDisposition::Continue),
+            // Lifecycle behavior is applied only by runtime routing after exact
+            // attached-socket-UI authorization.
+            HarnessInputMessage::UiShutdownRequest(_) => Ok(ClientMessageDisposition::Continue),
             HarnessInputMessage::UiTreeRequest(request) => {
                 self.handle_ui_tree_request(client_id, request);
                 Ok(ClientMessageDisposition::Continue)

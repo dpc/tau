@@ -10,6 +10,8 @@ use crate::event::LiveConsumerHandle;
 
 /// Grace allowed for a responsive socket to consume a fatal-startup Disconnect.
 pub(crate) const STARTUP_DISCONNECT_GRACE: Duration = Duration::from_millis(100);
+/// Grace allowed for attached UIs to consume their final shutdown terminal.
+pub(crate) const FINAL_UI_DISCONNECT_GRACE: Duration = Duration::from_millis(100);
 
 /// Owns the live cursor and any transport handle capable of canceling its I/O.
 pub(crate) struct ClientWriterLifecycle {
@@ -41,6 +43,36 @@ impl ClientWriterLifecycle {
     /// current tail.
     pub(crate) fn flush(&self) {
         self.consumer.flush();
+    }
+
+    /// Starts bounded best-effort delivery through the current tail.
+    ///
+    /// The returned worker waits at most `grace`, then cancels an owned socket
+    /// so a stalled writer cannot block harness shutdown. Generic transports
+    /// lack cancellation but the worker still returns at the same deadline.
+    pub(crate) fn start_bounded_close(self, grace: Duration) -> Option<thread::JoinHandle<()>> {
+        self.consumer.close_after_current();
+        let consumer = self.consumer;
+        let socket_shutdown = self.socket_shutdown;
+        let fallback_shutdown = socket_shutdown
+            .as_ref()
+            .and_then(|stream| stream.try_clone().ok());
+        match thread::Builder::new()
+            .name("tau-client-final-close".to_owned())
+            .spawn(move || {
+                let _retired = consumer.wait_for_retirement(grace);
+                if let Some(stream) = socket_shutdown {
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+            }) {
+            Ok(handle) => Some(handle),
+            Err(_) => {
+                if let Some(stream) = fallback_shutdown {
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+                None
+            }
+        }
     }
 
     /// Requests terminal delivery, then closes or cancels the owned transport.

@@ -64,7 +64,7 @@ These keys are handled by named actions in the default binding file, with raw fa
 | `Enter` | Insert a newline when not bound; submits by default via the built-in binding. |
 | `C-Enter` | Submit the prompt. |
 | `Shift-Enter`, `Alt-Enter` | Insert a newline. |
-| `C-d` on an empty prompt | Exit Tau when no agent/session work is in progress; otherwise print a notice to use `:quit` and keep the session running. |
+| `C-d` on an empty prompt | Exit this UI when no agent/session work is in progress; otherwise print a notice to use `:quit-session` to terminate the session. |
 | `C-c` on an empty prompt | Arm cancellation and print `Press Ctrl-C again to cancel the current response; use Ctrl-D to exit`; a second consecutive `C-c` cancels. |
 | `C-c` on a non-empty prompt | Clear the prompt; undoable with `prompt-undo`. |
 | `C-a` / `Home` | Move to the beginning of the prompt. |

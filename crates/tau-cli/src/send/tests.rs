@@ -47,8 +47,9 @@ fn prompt_text(text: &str) -> String {
 /// Headless send intentionally treats interactive-only exit commands as
 /// no-ops.
 #[test]
-fn quit_and_detach_are_no_ops() {
+fn quit_session_and_detach_are_no_ops() {
     assert_eq!(event(":quit"), None);
+    assert_eq!(event(":quit-session"), None);
     assert_eq!(event(":detach"), None);
 }
 

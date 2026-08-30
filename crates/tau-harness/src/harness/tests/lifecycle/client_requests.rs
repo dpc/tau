@@ -490,6 +490,96 @@ fn detach_request_controls_runtime_without_publication() {
     assert_eq!(entries[0]["event"]["payload"], serde_json::json!({}));
 }
 
+/// An attached socket UI may request unconditional canonical shutdown without
+/// mutating disconnect policy or publishing the request as a bus event.
+#[test]
+fn shutdown_request_queues_canonical_shutdown_without_publication() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    let (observer_id, mut observer) = connect_socket_ui(&mut h);
+    for connection_id in [&ui_id, &observer_id] {
+        h.runtime_io
+            .bus
+            .set_subscriptions(
+                connection_id,
+                Vec::new(),
+                vec![tau_proto::EventSelector::Exact(
+                    tau_proto::EventName::SESSION_SHUTDOWN,
+                )],
+            )
+            .expect("subscribe to session shutdown");
+    }
+    let baseline_seq = h.runtime_io.event_log.next_seq();
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = false;
+    let mut ever_attached = true;
+
+    h.handle_runtime_event(
+        HarnessEvent::from_connection_for_test(ui_id, shutdown_request()),
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("handle shutdown request");
+
+    assert!(!exit_on_disconnect);
+    assert_eq!(served_clients, 0);
+    assert_eq!(h.runtime_io.event_log.next_seq(), baseline_seq);
+    assert_no_message(&mut ui);
+    assert_no_message(&mut observer);
+    assert!(h.ui_runtime.shutdown_requested);
+
+    h.shutdown().expect("canonical shutdown");
+    for reader in [&mut ui, &mut observer] {
+        let message = reader
+            .read_message()
+            .expect("read session shutdown")
+            .expect("session shutdown frame");
+        assert!(matches!(
+            peel_inner_event(&message),
+            Some(Event::SessionShutdown(shutdown)) if shutdown.session_id.as_str() == "s1"
+        ));
+    }
+}
+
+/// Socket origin without attached-UI identity cannot request shutdown.
+#[test]
+fn shutdown_request_is_silently_denied_for_other_client_origins() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    connect_test_client_with_origin(
+        &mut h,
+        "socket-tool-shutdown",
+        tau_proto::ClientKind::Tool,
+        ConnectionOrigin::Socket,
+    );
+    let connection_id = crate::test_connection_id("socket-tool-shutdown");
+    let baseline_seq = h.runtime_io.event_log.next_seq();
+    let mut served_clients = 0;
+    let mut exit_on_disconnect = true;
+    let mut ever_attached = true;
+
+    h.handle_runtime_event(
+        HarnessEvent::from_connection_for_test(connection_id, shutdown_request()),
+        &mut served_clients,
+        &mut exit_on_disconnect,
+        &mut ever_attached,
+    )
+    .expect("silently deny shutdown request");
+
+    assert!(exit_on_disconnect);
+    assert!(!h.ui_runtime.shutdown_requested);
+    assert_eq!(served_clients, 0);
+    assert_eq!(h.runtime_io.event_log.next_seq(), baseline_seq);
+    assert!(matches!(
+        h.runtime_io.rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+}
+
 /// Startup gating recognizes detach only from an exact attached socket UI.
 /// Socket origin alone must not grant connection-control authority.
 #[test]
@@ -519,6 +609,35 @@ fn detach_request_controls_startup_only_for_attached_socket_ui() {
             .expect("handle attached UI detach")
     );
     assert!(h.ui_runtime.startup_detach_requested);
+    assert_no_message(&mut ui);
+}
+
+/// Startup gating retains an authorized UI shutdown request for the runtime
+/// loop while denying a socket peer without attached-UI identity.
+#[test]
+fn shutdown_request_controls_startup_only_for_attached_socket_ui() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    connect_test_client_with_origin(
+        &mut h,
+        "socket-tool-startup-shutdown",
+        tau_proto::ClientKind::Tool,
+        ConnectionOrigin::Socket,
+    );
+    let tool_id = crate::test_connection_id("socket-tool-startup-shutdown");
+    assert!(
+        !h.handle_startup_from_connection(&tool_id, shutdown_request())
+            .expect("silently deny tool shutdown")
+    );
+    assert!(!h.ui_runtime.shutdown_requested);
+
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    assert!(
+        !h.handle_startup_from_connection(&ui_id, shutdown_request())
+            .expect("retain UI shutdown")
+    );
+    assert!(h.ui_runtime.shutdown_requested);
     assert_no_message(&mut ui);
 }
 

@@ -1381,6 +1381,44 @@ fn detach_command_sends_dedicated_request_frame() {
     }
 }
 
+/// `:quit-session` selects canonical session shutdown and writes exactly one
+/// dedicated lifecycle request rather than an emitted event.
+#[test]
+fn quit_session_command_sends_dedicated_request_frame() {
+    let (ui_stream, harness_stream) = UnixStream::pair().expect("stream pair");
+    harness_stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let writer = Arc::new(Mutex::new(UiWriter::new(ui_stream, UiIoMeter::default())));
+
+    assert_eq!(
+        handle_ui_shutdown_command_text(":quit-session", &writer).expect("send shutdown request"),
+        Some(InputLoopExit::QuitSession)
+    );
+
+    let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(harness_stream));
+    assert_eq!(
+        reader.read_message().expect("read request"),
+        Some(HarnessInputMessage::UiShutdownRequest(
+            tau_proto::UiShutdownRequest {},
+        ))
+    );
+    assert_eq!(
+        InputLoopExit::QuitSession.daemon_disposition(),
+        DaemonDisposition::WaitRequestedOwned
+    );
+}
+
+/// `:quit` exits only the invoking UI and leaves daemon lifetime to the
+/// harness's independently configured disconnect policy.
+#[test]
+fn quit_uses_policy_owned_daemon_disposition() {
+    assert_eq!(
+        InputLoopExit::Quit.daemon_disposition(),
+        DaemonDisposition::KeepRunning
+    );
+}
+
 /// Foreground-ownership fail-stop sends daemon-preservation authorization
 /// before the production shutdown sequence disconnects the affected attachment.
 #[test]

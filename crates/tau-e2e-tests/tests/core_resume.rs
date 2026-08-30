@@ -390,6 +390,73 @@ fn late_attached_public_pty_stages_current_state_before_completed_turn()
     Ok(())
 }
 
+/// Public PTYs attached to a supervised persistent session keep UI exit
+/// separate from session shutdown: `:quit` removes only one attachment, while
+/// `:quit-session` terminates the daemon, every remaining UI, and its runtime
+/// discovery artifacts.
+#[test]
+fn attached_quit_is_local_and_quit_session_is_global() -> Result<(), Box<dyn std::error::Error>> {
+    let scenario = ScenarioV2::new(
+        "attached-ui-session-lifetime",
+        vec![ScenarioLaneV2 {
+            ctx_id: "unused-lifetime-lane".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: "<user>unused lifetime prompt</user>".to_owned(),
+                response: "unused lifetime response".to_owned(),
+            }],
+        }],
+    );
+    let fixture = GateFixture::new(&scenario, Path::new(FAKE_PROVIDER))?;
+    let session_id = SessionId::parse("attached-ui-lifetime")?;
+    let mut serve_command = fixture.command(None);
+    serve_command
+        .arg("serve")
+        .arg("--session")
+        .arg(session_id.as_str())
+        .arg("--create")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut serve = serve_command.spawn()?;
+    let deadline = Instant::now() + DEADLINE;
+    let (socket, discovered_session_id) =
+        discover_daemon(fixture.runtime_home(), Some(&session_id), deadline)?;
+    assert_eq!(discovered_session_id, session_id);
+    let mut observer = SideObserver::connect(
+        &socket,
+        &session_id,
+        fixture.artifact_path("attached-lifetime-observer.json"),
+        deadline,
+    )?;
+    wait_extensions(&mut observer, deadline)?;
+    wait_for_dummy_role_selection(&mut observer, deadline)?;
+
+    let mut quitter = PtyProcess::spawn(fixture.attach_command(session_id.as_str()), false, None)?;
+    let mut shutdown_requester =
+        PtyProcess::spawn(fixture.attach_command(session_id.as_str()), false, None)?;
+    quitter.wait_ready_to_start_role(DUMMY_ROLE, deadline)?;
+    shutdown_requester.wait_ready_to_start_role(DUMMY_ROLE, deadline)?;
+
+    quitter.send_line(":quit")?;
+    quitter.finish_exited()?;
+    let (_still_live_socket, still_live_session) =
+        discover_daemon(fixture.runtime_home(), Some(&session_id), deadline)?;
+    assert_eq!(still_live_session, session_id);
+
+    shutdown_requester.send_line(":quit-session")?;
+    shutdown_requester.finish_exited()?;
+    drop(observer);
+
+    let serve_status = serve.wait()?;
+    assert!(
+        serve_status.success(),
+        "supervised serve exited with {serve_status}"
+    );
+    fixture.require_boot_gone(session_id.as_str())?;
+    fixture.complete();
+    Ok(())
+}
+
 /// Proves a second public CLI attached only after a correlated provider hold is
 /// ready presents the same selected agent, then both terminals settle after one
 /// exact cancellation while typed stats prove the running-to-idle transition.

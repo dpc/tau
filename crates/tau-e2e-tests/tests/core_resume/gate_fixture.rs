@@ -8,10 +8,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use tau_e2e_tests::ScenarioV2;
 use tempfile::TempDir;
+
+use super::DEADLINE;
 
 /// Hermetic filesystem and executable configuration for one Gate 1 run.
 pub(super) struct GateFixture {
@@ -376,17 +379,24 @@ impl GateFixture {
         session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let harnesses = self.runtime_home.join("tau/harnesses");
-        if harnesses.exists()
-            && std::fs::read_dir(&harnesses)?
-                .filter_map(Result::ok)
-                .any(|entry| {
-                    matches!(
-                        entry.path().extension().and_then(|value| value.to_str()),
-                        Some("sock" | "json")
-                    )
-                })
-        {
-            return Err("prior Tau runtime socket metadata survived cleanup".into());
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            let runtime_pair_exists = harnesses.exists()
+                && std::fs::read_dir(&harnesses)?
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        matches!(
+                            entry.path().extension().and_then(|value| value.to_str()),
+                            Some("sock" | "json")
+                        )
+                    });
+            if !runtime_pair_exists {
+                break;
+            }
+            if deadline <= Instant::now() {
+                return Err("prior Tau runtime socket metadata survived cleanup".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
         let lock_path = self
             .tau_state()

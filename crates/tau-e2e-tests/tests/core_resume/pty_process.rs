@@ -496,9 +496,10 @@ impl PtyProcess {
             .clone())
     }
 
-    /// Requests `:quit`, then waits for the owned process tree's natural exit.
+    /// Requests explicit session shutdown, then waits for the owned process
+    /// tree's natural exit.
     pub(super) fn finish(mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.send_line(":quit")?;
+        self.send_line(":quit-session")?;
         self.reap_naturally()
     }
 

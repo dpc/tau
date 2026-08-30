@@ -679,6 +679,10 @@ fn detach_request() -> HarnessInputMessage {
     HarnessInputMessage::UiDetachRequest(tau_proto::UiDetachRequest {})
 }
 
+fn shutdown_request() -> HarnessInputMessage {
+    HarnessInputMessage::UiShutdownRequest(tau_proto::UiShutdownRequest {})
+}
+
 fn tree_request(session_id: &str, target_agent_id: Option<&str>) -> HarnessInputMessage {
     HarnessInputMessage::UiTreeRequest(tau_proto::UiTreeRequest {
         session_id: test_session_id(session_id),

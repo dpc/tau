@@ -610,6 +610,11 @@ embedded/non-socket UIs, dedicated external-message peers, and configured
 extensions are silently denied; they cannot mutate the daemon's
 exit-on-disconnect control. Configured extension attempts retain normal protocol
 phase validation and metering but are denied before activation staging.
+Only an attached socket UI may send the payload-free `ui_shutdown_request` that
+unconditionally enters canonical harness shutdown. Other socket peers,
+embedded/non-socket UIs, dedicated external-message peers, and configured
+extensions are silently denied; they cannot stop the session. The request does
+not alter exit-on-disconnect policy or become a published or persisted event.
 Only an attached socket UI may send `ui_tree_request` and inspect agent prompt
 anchors/previews. The harness returns exactly one requester-directed multiline
 notice and does not publish the request or result. Other client origins and

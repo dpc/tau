@@ -409,6 +409,26 @@ fn send_ui_detach_request(writer: &WriterHandle) -> io::Result<()> {
     )
 }
 
+/// Send the point-to-point lifecycle request used by `:quit-session`.
+fn send_ui_shutdown_request(writer: &WriterHandle) -> io::Result<()> {
+    send_frame(
+        writer,
+        &HarnessInputMessage::UiShutdownRequest(tau_proto::UiShutdownRequest {}),
+    )
+}
+
+/// Consume `:quit-session`, request canonical shutdown, and exit this UI.
+fn handle_ui_shutdown_command_text(
+    text: &str,
+    writer: &WriterHandle,
+) -> Result<Option<InputLoopExit>, io::Error> {
+    if text != ":quit-session" {
+        return Ok(None);
+    }
+    send_ui_shutdown_request(writer)?;
+    Ok(Some(InputLoopExit::QuitSession))
+}
+
 /// Consume `:detach`, send its connection-control request, and select the
 /// daemon-preserving exit path.
 fn handle_ui_detach_command_text(text: &str, writer: &WriterHandle) -> Option<InputLoopExit> {
@@ -654,7 +674,7 @@ fn cycle_role(
 /// to bump its idle deadline.
 const DRAFT_DEBOUNCE: Duration = Duration::from_secs(1);
 const EOF_DURING_AGENT_NOTICE: &str =
-    "An agent is still running; use :quit to terminate the session in progress.";
+    "An agent is still running; use :quit-session to terminate the session in progress.";
 const TREE_NAVIGATION_USAGE: &str = ":tree: use a prompt anchor, `root`, or explicit `node <id>`";
 
 fn parse_agent_picker_command(
@@ -674,7 +694,8 @@ fn parse_agent_picker_command(
 }
 
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
-    (":quit", "Exit the chat session"),
+    (":quit", "Quit this UI"),
+    (":quit-session", "Quit the session and every attached UI"),
     (":cancel", "Cancel the current in-flight prompt"),
     (
         ":retry",
@@ -1976,10 +1997,12 @@ fn await_ui_session_admission(
 /// How the input loop ended. Controls daemon disposition on exit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputLoopExit {
-    /// User typed `:quit`, hit Ctrl-D, or the socket dropped. The
-    /// daemon should be killed (if we own it) or just disconnected
-    /// from (if we were attached).
+    /// User typed `:quit`, hit Ctrl-D, or the socket dropped. Only this UI
+    /// disconnects; the daemon's independent exit-on-disconnect policy decides
+    /// whether the session then stops.
     Quit,
+    /// User typed `:quit-session` and sent the canonical shutdown request.
+    QuitSession,
     /// User typed `:detach`. We leave the daemon running whether we
     /// spawned it or attached to it.
     Detach,
@@ -1993,6 +2016,7 @@ impl InputLoopExit {
     fn reason(self) -> &'static str {
         match self {
             Self::Quit => "quit",
+            Self::QuitSession => "quit-session",
             Self::Detach => "detach",
             Self::ForegroundOwnershipUnconfirmed => "foreground-ownership-unconfirmed",
             Self::TerminalOutputFailed => "terminal-output-failed",
@@ -2002,6 +2026,7 @@ impl InputLoopExit {
     fn harness_disconnect_reason(self) -> &'static str {
         match self {
             Self::Quit => "quit",
+            Self::QuitSession => "quit-session",
             Self::Detach | Self::ForegroundOwnershipUnconfirmed | Self::TerminalOutputFailed => {
                 "detach"
             }
@@ -2010,10 +2035,11 @@ impl InputLoopExit {
 
     fn daemon_disposition(self) -> DaemonDisposition {
         match self {
-            Self::Quit => DaemonDisposition::StopOwned,
-            Self::Detach | Self::ForegroundOwnershipUnconfirmed | Self::TerminalOutputFailed => {
-                DaemonDisposition::KeepRunning
-            }
+            Self::QuitSession => DaemonDisposition::WaitRequestedOwned,
+            Self::Quit
+            | Self::Detach
+            | Self::ForegroundOwnershipUnconfirmed
+            | Self::TerminalOutputFailed => DaemonDisposition::KeepRunning,
         }
     }
 }
@@ -2062,12 +2088,13 @@ fn join_ui_thread(handle: std::thread::JoinHandle<()>, name: &str) {
 }
 
 fn finish_daemon_for_exit(exit: InputLoopExit, daemon: DaemonHandle) {
-    // On detach, we explicitly leak the daemon child (if we own one) so it
-    // outlives this process. `DaemonHandle::Drop` would otherwise kill the
-    // child we spawned; `:detach` is exactly the case where we want it to keep
-    // running.
+    // Ordinary UI quit never directly kills an owned daemon: launch policy
+    // decides. Explicit session quit waits boundedly for requested canonical
+    // shutdown, then detaches rather than forcing it; detach always preserves it.
     match exit.daemon_disposition() {
-        DaemonDisposition::StopOwned => drop(daemon),
+        DaemonDisposition::WaitRequestedOwned => {
+            daemon.wait_requested_exit_or_leak(crate::daemon::REQUESTED_DAEMON_EXIT_WAIT);
+        }
         DaemonDisposition::KeepRunning => daemon.leak(),
     }
 }
@@ -2075,9 +2102,11 @@ fn finish_daemon_for_exit(exit: InputLoopExit, daemon: DaemonHandle) {
 /// Daemon action selected after the terminal input loop ends.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DaemonDisposition {
-    /// Stop a daemon owned by this CLI process.
-    StopOwned,
-    /// Leave the daemon available after this attachment disconnects.
+    /// Wait boundedly for explicitly requested owned-daemon shutdown, then
+    /// leak.
+    WaitRequestedOwned,
+    /// Leave daemon lifetime to harness connection policy or an explicit
+    /// canonical shutdown request.
     KeepRunning,
 }
 
@@ -2454,7 +2483,8 @@ impl LocalTerminalOutput {
 ///
 /// `NotHandled` means the line should become a normal user prompt. `Continue`
 /// means a command consumed the line and the loop should wait for more input.
-/// `Exit` carries the daemon-disposition decision for `:quit` and `:detach`.
+/// `Exit` carries the daemon-disposition decision for UI quit, session quit,
+/// and detach.
 enum CommandOutcome {
     NotHandled,
     Continue,
@@ -2911,7 +2941,7 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
-        // Keep session-lifecycle commands first: `:quit` and `:detach` exit
+        // Keep session-lifecycle commands first: UI/session quit and detach exit
         // immediately, while `:session new` mutates `session_id` for later
         // commands and prompt submission.
         let outcome = self.handle_session_command(text)?;
@@ -3049,6 +3079,9 @@ impl<'a> TerminalInputSession<'a> {
     fn handle_session_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
         if text == ":quit" {
             return Ok(CommandOutcome::Exit(InputLoopExit::Quit));
+        }
+        if let Some(exit) = handle_ui_shutdown_command_text(text, self.writer)? {
+            return Ok(CommandOutcome::Exit(exit));
         }
         if text == ":cancel" {
             self.send_cancel_prompt();
@@ -4672,6 +4705,7 @@ pub(crate) fn is_known_static_command(text: &str) -> bool {
     matches!(
         command,
         ":quit"
+            | ":quit-session"
             | ":cancel"
             | ":retry"
             | ":detach"

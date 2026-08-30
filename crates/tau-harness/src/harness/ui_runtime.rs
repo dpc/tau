@@ -52,6 +52,8 @@ pub(crate) struct UiRuntimeState {
     pub(crate) client_writers: HashMap<tau_proto::ConnectionId, ClientWriterLifecycle>,
     /// Startup-gated detach request awaiting main-loop consumption.
     pub(super) startup_detach_requested: bool,
+    /// Authorized UI request for unconditional canonical harness shutdown.
+    pub(super) shutdown_requested: bool,
 }
 
 impl Default for UiRuntimeState {
@@ -70,6 +72,7 @@ impl Default for UiRuntimeState {
             seen_retry_prompt_request_order: VecDeque::new(),
             client_writers: HashMap::new(),
             startup_detach_requested: false,
+            shutdown_requested: false,
         }
     }
 }

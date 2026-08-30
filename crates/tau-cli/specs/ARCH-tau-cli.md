@@ -10,6 +10,14 @@ discovery socket and metadata available for `tau session list` and
 `tau attach ID`, remain alive across UI disconnects, pin the selected session,
 and reject every in-process session switch.
 
+Interactive UI exit and session shutdown are separate. `:quit` exits only the
+invoking UI, leaving session lifetime to the harness's exit-on-disconnect
+policy. Ordinary `tau` launches enable that policy as a foreground convenience;
+attach and supervised serve do not change it. `:detach` additionally disables
+the policy for the daemon lifetime. `:quit-session` sends an attached-UI-only
+shutdown request, then exits; the harness performs its normal shutdown lifecycle
+and disconnects every other attached UI.
+
 The CLI consumes harness-validated provider-neutral quota snapshots and applies
 the fixed weekly pacing classifier from
 [SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).
@@ -167,7 +175,7 @@ accepted an unknowable frame prefix. The input owner receives that failure and
 uses the ordinary detach/keep-harness route so a fresh UI can reattach; raw-mode
 and feature cleanup remain best-effort.
 The final `Term::Drop` repaint is post-disposition exit cleanup: the input owner
-has already selected quit or detach, so cleanup errors are unreported and do
+has already selected UI quit, session quit, or detach, so cleanup errors are unreported and do
 not retroactively change daemon disposition. If a live redraw already
 fail-stopped, the redraw owner has exited and Drop performs no final repaint or
 normal-frame retry.

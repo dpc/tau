@@ -256,6 +256,27 @@ also silently denied after normal phase validation and metering but before
 activation staging, so repeated requests cannot consume activation quota,
 disconnect the extension, or fail required startup.
 
+UI shutdown is a payload-free `ui_shutdown_request` input message. During
+startup it records a pending shutdown; during the runtime serve loop it requests
+unconditional harness shutdown. The loop then follows the same canonical shutdown path as a
+termination signal: it retires admission, publishes the harness-authored
+`session.shutdown` fact, disconnects all attached UIs and extensions, settles
+semantic persistence, and cleans owned runtime discovery artifacts. The request
+does not alter `exit_on_disconnect` and does not enter publication,
+interception, subscriptions, semantic persistence, or replay. It remains
+visible as a point-to-point input frame in local debug JSONL and is metered as
+`message.ui_shutdown_request`.
+
+After the terminal commits, all attached UI writers receive one concurrent
+100-millisecond best-effort delivery grace. Tau then cancels their socket I/O
+and continues cleanup, so a paused or non-reading UI cannot block shutdown.
+Generic initial-UI transports have no cancellation primitive, but their close
+workers still stop waiting at the same deadline.
+
+Shutdown authority uses the exact `is_attached_socket_ui` classification.
+Other client origins and configured extensions are silently denied under the
+same phase-validation, metering, and activation-staging rules as detach.
+
 UI tree inspection is a flat `ui_tree_request` input message from an attached
 socket UI. The harness preserves the existing session/agent validation, prompt
 anchor ordering, selected-head markers, and diagnostic text. It presents prompt

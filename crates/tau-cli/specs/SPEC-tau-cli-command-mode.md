@@ -8,8 +8,12 @@ so no single owning module can state command ownership and cross-boundary
 behavior coherently.
 
 The terminal input loop has multiple command owners. CLI-owned commands
-such as `:quit`, `:session`, `:agent`, `:name`, `:role`, `:model`, `:set`, and
-`:theme` are handled locally. Dynamic extension actions are parsed against the
+such as `:quit`, `:quit-session`, `:session`, `:agent`, `:name`, `:role`,
+`:model`, `:set`, and `:theme` are handled locally. `:quit` closes only its
+invoking UI; the harness's independently configured exit-on-disconnect policy
+then decides whether the session stops. `:quit-session` sends the dedicated
+shutdown request before closing its UI, causing the harness to run canonical
+session shutdown regardless of that policy. Dynamic extension actions are parsed against the
 current published action schema and dispatched as `ActionInvoke` events.
 Harness-owned prompt commands, currently `:skill <name> ...` and
 `:skill:<name> ...`, are completed and echoed by the CLI but must still be

@@ -110,6 +110,18 @@ impl TestEnvironment {
         }
     }
 
+    /// Waits for policy-driven daemon shutdown to remove one discovery pair.
+    fn wait_for_runtime_pair_gone(&self, metadata: &Path, socket: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while metadata.exists() || socket.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "daemon did not remove its runtime discovery pair"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Provisions one durable session through the real component entrypoint.
     fn provision_session(&self, session_id: &str) {
         let mut child = self
@@ -209,7 +221,7 @@ impl DetachedDaemonGuard {
         Self { pid, armed: true }
     }
 
-    /// Disarms cleanup after a stop-owned exit has already reaped the daemon.
+    /// Disarms cleanup after policy-driven shutdown removed the discovery pair.
     fn disarm(&mut self) {
         self.armed = false;
     }
@@ -424,8 +436,8 @@ fn owned_cli_detaches_and_repeatedly_reattaches_to_same_daemon() {
     metadata_reader.join().expect("concurrent metadata reader");
 }
 
-/// Ctrl-D on the owning initial UI remains a stop-owned exit rather than being
-/// silently reclassified as detach.
+/// Ctrl-D on the owning initial UI disconnects without disabling the launch's
+/// independent exit-on-disconnect policy, which then stops the daemon.
 #[test]
 fn owned_cli_eof_stops_daemon_and_removes_discovery_pair() {
     let environment = TestEnvironment::new();
@@ -441,6 +453,7 @@ fn owned_cli_eof_stops_daemon_and_removes_discovery_pair() {
         .expect("write terminal EOF");
     owner.controller.flush().expect("flush terminal EOF");
     owner.wait_success(&environment.state_home);
+    environment.wait_for_runtime_pair_gone(&metadata, &socket);
 
     assert!(!metadata.exists(), "EOF left harness metadata behind");
     assert!(!socket.exists(), "EOF left harness socket behind");

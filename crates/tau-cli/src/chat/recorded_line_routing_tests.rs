@@ -354,6 +354,21 @@ fn retry_is_static_exact_and_never_falls_through_to_prompt_submission() {
     );
 }
 
+/// UI-only quit and global session quit must both be discoverable with help
+/// that makes their distinct lifetimes explicit.
+#[test]
+fn quit_commands_have_distinct_static_help() {
+    for (name, description_fragment) in [
+        (":quit", "this UI"),
+        (":quit-session", "session and every attached UI"),
+    ] {
+        assert!(BUILTIN_COMMANDS.iter().any(|(candidate, description)| {
+            *candidate == name && description.contains(description_fragment)
+        }));
+        assert!(is_known_static_command(name));
+    }
+}
+
 /// Session token totals are a local command, so completion and command-mode
 /// routing must reserve both its exact spelling and malformed argument forms.
 #[test]

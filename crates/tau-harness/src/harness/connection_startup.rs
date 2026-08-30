@@ -295,9 +295,14 @@ impl Harness {
             Some(ConnectionOrigin::Socket) => {
                 let detach_requested =
                     self.is_authorized_ui_detach_request(connection_id, &message);
+                let shutdown_requested =
+                    self.is_authorized_ui_shutdown_request(connection_id, &message);
                 let subscribed = matches!(&message, HarnessInputMessage::Subscribe(_));
                 if detach_requested {
                     self.ui_runtime.startup_detach_requested = true;
+                }
+                if shutdown_requested {
+                    self.ui_runtime.shutdown_requested = true;
                 }
                 let disposition = self.handle_client_message_disposition(connection_id, message)?;
                 let close = match disposition {

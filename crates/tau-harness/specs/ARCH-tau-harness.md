@@ -98,7 +98,10 @@ UI extension-counter inspection now uses the dedicated
 `ui_debug_event_stats_request` message with attached-socket-UI authority and a
 directed, non-published notice result. UI detach now uses the dedicated
 `ui_detach_request` message with the same authority and direct
-connection-control behavior. UI tree inspection uses `ui_tree_request` and
+connection-control behavior. Unconditional UI-requested shutdown uses the
+payload-free `ui_shutdown_request` with the same attached-socket-UI authority;
+it enters the same canonical lifecycle as signal or policy shutdown and does
+not itself become an event. UI tree inspection uses `ui_tree_request` and
 returns one requester-directed, non-published multiline notice. The
 dedicated attached-UI request row is complete.
 Agent creation accepts `ui.create_agent` only from attached socket UIs and
@@ -494,10 +497,13 @@ listener fds used by accept-forwarder threads, and socket-activated listeners mu
 not be unlinked by the harness.
 
 Discovery is non-destructive because liveness and filesystem identity checks
-cannot be made atomic with PID reuse and listener replacement. An owned CLI
-first closes its initial-client transport and gives the daemon's
-exit-on-disconnect path a bounded grace period to shut down and remove its own
-runtime pair; forced termination is only the fallback. Targeted session lookup
+cannot be made atomic with PID reuse and listener replacement. Before the
+interactive UI owns daemon disposition, CLI error cleanup closes the initial
+transport and gives exit-on-disconnect a bounded grace to remove the runtime
+pair, with forced termination only as fallback. Once the UI runs, every UI exit
+leaves child lifetime to exit-on-disconnect, detach policy, or an explicit
+canonical shutdown request; it does not directly force-terminate the child.
+Targeted session lookup
 may traverse a larger bounded raw catalog than general peer discovery so stale
 unrelated pairs do not consume the much smaller matching-candidate budget.
 Local running-session listing isolates bounded runtime-path traversal, then uses

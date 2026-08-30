@@ -1547,6 +1547,50 @@ impl Harness {
         }
     }
 
+    /// Cancel UI prompt publications whose aggregate timing must end at final
+    /// teardown rather than being accepted by a later lifecycle publication.
+    pub(crate) fn cancel_ui_prompt_publications_for_shutdown(&mut self) {
+        if self
+            .runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .is_some_and(|pending| pending.source.prompt_acceptance.is_some())
+        {
+            let pending = self
+                .runtime_io
+                .publication
+                .pending_intercept
+                .take()
+                .expect("matched pending UI prompt");
+            self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
+            self.rollback_rejected_activation_successor(&pending.event);
+            self.discard_deferred_publish(
+                DeferredPublish {
+                    source: pending.source,
+                    event: pending.event,
+                    persist: pending.persist,
+                    must_pass: pending.must_pass,
+                    sync_head_for: pending.sync_head_for,
+                },
+                "harness shutdown canceled UI prompt publication",
+            );
+        }
+        let mut retained = VecDeque::with_capacity(self.runtime_io.publication.deferred.len());
+        while let Some(deferred) = self.runtime_io.publication.deferred.pop_front() {
+            if deferred.source.prompt_acceptance.is_some() {
+                self.rollback_rejected_activation_successor(&deferred.event);
+                self.discard_deferred_publish(
+                    deferred,
+                    "harness shutdown canceled UI prompt publication",
+                );
+            } else {
+                retained.push_back(deferred);
+            }
+        }
+        self.runtime_io.publication.deferred = retained;
+    }
+
     /// Commit an already interceptor-approved retry event without restarting
     /// the interception chain.
     pub(crate) fn commit_approved_agent_retry(

@@ -2404,6 +2404,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             scope: SessionAgentListScope::History,
         }),
         HarnessInputMessage::UiDetachRequest(UiDetachRequest {}),
+        HarnessInputMessage::UiShutdownRequest(UiShutdownRequest {}),
         HarnessInputMessage::UiTreeRequest(UiTreeRequest {
             session_id: test_session_id("s1"),
             target_agent_id: Some(agent_id("agent-1")),
@@ -3910,6 +3911,24 @@ fn ui_detach_request_uses_dedicated_input_message() {
     let input = HarnessInputMessage::UiDetachRequest(UiDetachRequest {});
     let json = serde_json::to_value(&input).expect("serialize input");
     assert_eq!(json["message"], "ui_detach_request");
+    assert_eq!(json["payload"], serde_json::json!({}));
+
+    let bytes = encode_harness_input_to_vec(&input).expect("encode input");
+    assert_eq!(
+        decode_harness_input_from_slice(&bytes).expect("decode input"),
+        input
+    );
+    assert!(decode_harness_output_from_slice(&bytes).is_err());
+    assert!(decode_message_from_slice::<Event>(&bytes).is_err());
+}
+
+/// UI shutdown uses a flat dedicated input message and cannot decode as an
+/// event or harness output.
+#[test]
+fn ui_shutdown_request_uses_dedicated_input_message() {
+    let input = HarnessInputMessage::UiShutdownRequest(UiShutdownRequest {});
+    let json = serde_json::to_value(&input).expect("serialize input");
+    assert_eq!(json["message"], "ui_shutdown_request");
     assert_eq!(json["payload"], serde_json::json!({}));
 
     let bytes = encode_harness_input_to_vec(&input).expect("encode input");
