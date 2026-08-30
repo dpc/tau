@@ -4877,14 +4877,16 @@ fn disconnect_detaches_blocked_local_report() {
         .write_message(&HarnessOutputMessage::Disconnect(Default::default()))
         .expect("disconnect");
     input.flush().expect("flush disconnect");
-    disconnect_rx
-        .recv()
-        .expect("manual runtime observed disconnect");
-    result_rx
-        .recv()
+    let disconnect = disconnect_rx.recv_timeout(Duration::from_secs(2));
+    let result = disconnect
+        .as_ref()
+        .map(|()| result_rx.recv_timeout(Duration::from_secs(2)));
+    release_tx.send(()).expect("release detached writer");
+    disconnect.expect("manual runtime observed disconnect");
+    result
+        .expect("disconnect observed")
         .expect("prompt runner")
         .expect("disconnect");
-    release_tx.send(()).expect("release detached writer");
 }
 
 /// Disconnect handling must not wait for an in-flight long poll to release its
