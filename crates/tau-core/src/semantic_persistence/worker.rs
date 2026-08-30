@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 
+use super::backend::PersistenceBackend;
 use super::identity::{PersistenceGeneration, StreamIdentity};
 use super::owner::{
     FrameAdmissionToken, PersistenceAdmissionError, PersistenceFailureKind, RetentionCharge,
@@ -270,6 +271,19 @@ enum AppendDisposition {
     Retry,
     Terminal,
     WorkerExit,
+}
+
+/// Outcome of one complete length-prefixed frame write.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum FrameAppendError {
+    /// The journal position could not be read before writing.
+    Open,
+    /// The worker was asked to exit at the write boundary.
+    WorkerExit,
+    /// A failed write was rolled back to the original EOF.
+    RolledBack,
+    /// A failed write could not be rolled back to the original EOF.
+    RollbackFailed,
 }
 
 struct WorkerExitGuard {
@@ -924,9 +938,20 @@ fn append_job(
     if stream.generation != job.generation() {
         return AppendDisposition::Terminal;
     }
-    let start = match shared.backend.seek_end(&mut stream.journal) {
-        Ok(offset) => offset,
-        Err(_) => {
+    let end = match append_frame(
+        shared.backend.as_ref(),
+        &mut stream.journal,
+        &job.payload,
+        || {
+            report_failure(
+                shared,
+                Some(Arc::clone(&job.identity)),
+                PersistenceFailureKind::Write,
+            );
+        },
+    ) {
+        Ok(end) => end,
+        Err(FrameAppendError::Open) => {
             report_failure(
                 shared,
                 Some(Arc::clone(&job.identity)),
@@ -934,34 +959,15 @@ fn append_job(
             );
             return AppendDisposition::Retry;
         }
+        Err(FrameAppendError::WorkerExit) => return AppendDisposition::WorkerExit,
+        Err(FrameAppendError::RolledBack) => return AppendDisposition::Retry,
+        Err(FrameAppendError::RollbackFailed) => {
+            report_rollback_failure_and_poison(shared, Arc::clone(&job.identity));
+            streams.remove(job.stream());
+            return AppendDisposition::Terminal;
+        }
     };
-    let length = u64::try_from(job.payload.len()).expect("usize fits u64");
-    let result = shared
-        .backend
-        .write_all(&mut stream.journal, &length.to_le_bytes())
-        .and_then(|()| shared.backend.write_all(&mut stream.journal, &job.payload));
-    if result
-        .as_ref()
-        .is_err_and(|error| error.kind() == io::ErrorKind::ConnectionAborted)
-    {
-        return AppendDisposition::WorkerExit;
-    }
-    if result.is_err() {
-        report_failure(
-            shared,
-            Some(Arc::clone(&job.identity)),
-            PersistenceFailureKind::Write,
-        );
-        return match restore_eof(shared, &mut stream.journal, start) {
-            Ok(()) => AppendDisposition::Retry,
-            Err(()) => {
-                report_rollback_failure_and_poison(shared, Arc::clone(&job.identity));
-                streams.remove(job.stream());
-                AppendDisposition::Terminal
-            }
-        };
-    }
-    stream.offset = start.saturating_add(8).saturating_add(length);
+    stream.offset = end;
     job.written_end = Some(stream.offset);
     if let Some(candidate) = job.checkpoint_candidate.take() {
         let checkpoint = shared
@@ -1401,11 +1407,41 @@ fn minimum_deadline(
         .min()
 }
 
-fn restore_eof(shared: &Shared, file: &mut File, expected: u64) -> Result<(), ()> {
-    let current = shared.backend.seek_end(file).map_err(|_| ())?;
+/// Writes one journal frame and restores the starting EOF after any ordinary
+/// write error. `report_write_failure` runs after that write error and before
+/// rollback performs its first filesystem operation.
+pub(super) fn append_frame(
+    backend: &dyn PersistenceBackend,
+    file: &mut File,
+    payload: &[u8],
+    report_write_failure: impl FnOnce(),
+) -> Result<u64, FrameAppendError> {
+    let start = backend.seek_end(file).map_err(|_| FrameAppendError::Open)?;
+    let length = u64::try_from(payload.len()).expect("usize fits u64");
+    let result = backend
+        .write_all(file, &length.to_le_bytes())
+        .and_then(|()| backend.write_all(file, payload));
+    if result
+        .as_ref()
+        .is_err_and(|error| error.kind() == io::ErrorKind::ConnectionAborted)
+    {
+        return Err(FrameAppendError::WorkerExit);
+    }
+    if result.is_err() {
+        report_write_failure();
+        return Err(match restore_eof(backend, file, start) {
+            Ok(()) => FrameAppendError::RolledBack,
+            Err(()) => FrameAppendError::RollbackFailed,
+        });
+    }
+    Ok(start.saturating_add(8).saturating_add(length))
+}
+
+fn restore_eof(backend: &dyn PersistenceBackend, file: &mut File, expected: u64) -> Result<(), ()> {
+    let current = backend.seek_end(file).map_err(|_| ())?;
     if current != expected {
-        shared.backend.truncate(file, expected).map_err(|_| ())?;
-        let restored = shared.backend.seek_end(file).map_err(|_| ())?;
+        backend.truncate(file, expected).map_err(|_| ())?;
+        let restored = backend.seek_end(file).map_err(|_| ())?;
         if restored != expected {
             return Err(());
         }

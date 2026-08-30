@@ -1,7 +1,7 @@
 //! Deterministic production-backend persistence failure oracles.
 
 use std::fs::{File, Permissions};
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -33,6 +33,8 @@ struct WriteFaultBackend {
     journal_writes: Mutex<Vec<String>>,
     renames: Mutex<usize>,
     rename_wake: Condvar,
+    seek_call: AtomicUsize,
+    seek_requires_observation: Mutex<Option<(usize, Arc<AtomicBool>)>>,
     write_call: AtomicUsize,
     short_write: Mutex<Option<(usize, usize)>>,
     fail_next_directory_create: AtomicBool,
@@ -85,6 +87,8 @@ impl WriteFaultBackend {
             journal_writes: Mutex::new(Vec::new()),
             renames: Mutex::new(0),
             rename_wake: Condvar::new(),
+            seek_call: AtomicUsize::new(0),
+            seek_requires_observation: Mutex::new(None),
             write_call: AtomicUsize::new(0),
             short_write: Mutex::new(None),
             fail_next_directory_create: AtomicBool::new(false),
@@ -110,6 +114,14 @@ impl WriteFaultBackend {
     fn inject_short_write(&self, call: usize, offset: usize) {
         self.write_call.store(0, Ordering::SeqCst);
         *self.short_write.lock().expect("short-write fault") = Some((call, offset));
+    }
+
+    fn require_observation_before_seek(&self, call: usize, observed: Arc<AtomicBool>) {
+        self.seek_call.store(0, Ordering::SeqCst);
+        *self
+            .seek_requires_observation
+            .lock()
+            .expect("seek observation") = Some((call, observed));
     }
 
     fn wait_until_write_held(&self) {
@@ -164,6 +176,19 @@ impl PersistenceBackend for WriteFaultBackend {
         FilesystemBackend.try_lock(file)
     }
     fn seek_end(&self, file: &mut File) -> io::Result<u64> {
+        let call = self.seek_call.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut required = self
+            .seek_requires_observation
+            .lock()
+            .expect("seek observation");
+        if required.as_ref().is_some_and(|(target, _)| *target == call) {
+            let (_, observed) = required.take().expect("matching seek observation");
+            assert!(
+                observed.load(Ordering::SeqCst),
+                "write failure must be observed before rollback starts"
+            );
+        }
+        drop(required);
         FilesystemBackend.seek_end(file)
     }
     fn write_all(&self, file: &mut File, bytes: &[u8]) -> io::Result<()> {
@@ -1701,82 +1726,91 @@ fn slow_healthy_worker_does_not_amplify_complete_projection_per_frame() {
     store.finish_managed_release();
 }
 
-/// Every length-prefix and payload offset proves exact rollback before the same
-/// FIFO node retries; no offset duplicates or skips the frame. One owner serves
-/// the exhaustive matrix so scheduler load cannot turn fixture setup into the
-/// behavior under test.
+/// Every length-prefix and payload offset proves exact rollback before retry;
+/// no offset duplicates or skips the frame. This exhaustive oracle calls the
+/// production frame primitive directly, while
+/// `exact_prefix_write_failure_retries_without_duplicate_frame` owns the
+/// asynchronous FIFO integration boundary.
 #[test]
 fn every_frame_write_offset_rolls_back_and_retries_exactly_once() {
-    let root = tempfile::tempdir().expect("temporary root");
-    let backend = Arc::new(WriteFaultBackend::new());
-    let owner = Arc::new(
-        SemanticPersistenceOwner::with_test_backend(
-            PersistenceCapacity::default(),
-            backend.clone(),
-        )
-        .expect("owner"),
-    );
-    let sessions = root.path().join("sessions");
-    let mut store = SessionStore::open_managed(&sessions, owner.clone()).expect("store");
+    let backend = WriteFaultBackend::new();
+    let mut journal = tempfile::tempfile().expect("temporary journal");
+    let existing = b"existing-frame";
+    journal.write_all(existing).expect("seed journal");
+    let record = crate::PersistedSessionEvent {
+        seq: crate::PersistedSessionEventSeq::new(0),
+        source: None,
+        event: loaded_event("managed-session"),
+        recorded_at: tau_proto::UnixMicros::new(7),
+    };
+    let mut payload = Vec::new();
+    ciborium::into_writer(&record, &mut payload).expect("encode expected frame");
 
-    let run = |case: usize, write_call: usize, offset: usize, store: &mut SessionStore| {
-        let session_id = format!("managed-session-{case:03}");
-        let event = loaded_event(&session_id);
-        let record = crate::PersistedSessionEvent {
-            seq: crate::PersistedSessionEventSeq::new(0),
-            source: None,
-            event: event.clone(),
-            recorded_at: tau_proto::UnixMicros::new(7),
-        };
-        let mut expected_payload = Vec::new();
-        ciborium::into_writer(&record, &mut expected_payload).expect("encode expected frame");
-
-        store
-            .prepare_session(&session_id, SessionPreparationMode::New)
-            .expect("prepare");
+    let mut run = |write_call: usize, offset: usize| {
+        journal
+            .set_len(u64::try_from(existing.len()).expect("existing length"))
+            .expect("reset journal");
         backend.inject_short_write(write_call, offset);
-        store
-            .append_session_event_at(&session_id, None, event, tau_proto::UnixMicros::new(7))
-            .expect("live append accepted");
-        assert!(
-            owner.wait_for_failure_for_test(PersistenceFailureKind::Write, Duration::from_secs(2),)
-        );
-        owner
-            .release(
-                &store.managed_persistence_leases(&session_id),
-                Duration::from_secs(2),
-            )
-            .expect("retry drains before release");
-        store.finish_managed_release(&session_id);
-        let bytes =
-            std::fs::read(sessions.join(&session_id).join("events.cbor")).expect("journal bytes");
         assert_eq!(
-            u64::from_le_bytes(bytes[..8].try_into().expect("length prefix")) as usize,
-            expected_payload.len()
+            super::worker::append_frame(&backend, &mut journal, &payload, || {}),
+            Err(super::worker::FrameAppendError::RolledBack),
+            "write {write_call} offset {offset} must roll back"
         );
-        assert_eq!(&bytes[8..], expected_payload);
-        expected_payload.len()
+        journal.rewind().expect("rewind rolled-back journal");
+        let mut bytes = Vec::new();
+        journal
+            .read_to_end(&mut bytes)
+            .expect("read rolled-back journal");
+        assert_eq!(bytes, existing);
+
+        let end = super::worker::append_frame(&backend, &mut journal, &payload, || {
+            panic!("successful retry must not report a write failure")
+        })
+        .expect("same frame retries");
+        assert_eq!(
+            end,
+            u64::try_from(existing.len() + 8 + payload.len()).expect("frame end")
+        );
+        journal.rewind().expect("rewind retried journal");
+        bytes.clear();
+        journal
+            .read_to_end(&mut bytes)
+            .expect("read retried journal");
+        assert_eq!(&bytes[..existing.len()], existing);
+        assert_eq!(
+            u64::from_le_bytes(
+                bytes[existing.len()..existing.len() + 8]
+                    .try_into()
+                    .expect("length prefix")
+            ) as usize,
+            payload.len()
+        );
+        assert_eq!(&bytes[existing.len() + 8..], payload);
     };
 
-    let mut case = 0;
     for offset in 0..=8 {
-        run(case, 1, offset, &mut store);
-        case += 1;
+        run(1, offset);
     }
-    let payload_len = {
-        let session_id = format!("managed-session-{case:03}");
-        let record = crate::PersistedSessionEvent {
-            seq: crate::PersistedSessionEventSeq::new(0),
-            source: None,
-            event: loaded_event(&session_id),
-            recorded_at: tau_proto::UnixMicros::new(7),
-        };
-        let mut payload = Vec::new();
-        ciborium::into_writer(&record, &mut payload).expect("encode expected frame");
-        payload.len()
-    };
-    for offset in 0..=payload_len {
-        assert_eq!(run(case, 2, offset, &mut store), payload_len);
-        case += 1;
+    for offset in 0..=payload.len() {
+        run(2, offset);
     }
+}
+
+/// A write failure becomes observable before rollback touches the journal.
+#[test]
+fn frame_write_failure_is_observed_before_rollback() {
+    let backend = WriteFaultBackend::new();
+    let observed = Arc::new(AtomicBool::new(false));
+    backend.require_observation_before_seek(2, Arc::clone(&observed));
+    backend.inject_short_write(1, 3);
+    let mut journal = tempfile::tempfile().expect("temporary journal");
+    let callback_observed = Arc::clone(&observed);
+
+    assert_eq!(
+        super::worker::append_frame(&backend, &mut journal, b"payload", move || {
+            callback_observed.store(true, Ordering::SeqCst);
+        }),
+        Err(super::worker::FrameAppendError::RolledBack)
+    );
+    assert!(observed.load(Ordering::SeqCst));
 }
