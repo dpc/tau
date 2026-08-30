@@ -1,7 +1,7 @@
 use tau_config::settings::ProviderCacheMaxIdle;
 
 use super::*;
-use crate::harness::terminal_response_projection;
+use crate::harness::{provider_report_ownership, terminal_response_projection};
 use crate::provider_cache_residency::{ProviderCacheResidency, tests as cache_fixtures};
 use crate::{event_log as path_crate_event_log, extension as path_crate_extension};
 
@@ -910,6 +910,314 @@ fn canceled_submitted_and_updated_reports_are_observation_only() {
     assert!(events.contains(&tau_proto::EventName::PROVIDER_RESPONSE_UPDATED_REPORTED));
     assert!(!events.contains(&tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED));
     assert!(!events.contains(&tau_proto::EventName::PROVIDER_RESPONSE_UPDATED));
+}
+
+/// A report parked before a pure session rollover may still commit as a raw
+/// observation, but its captured old-session admission cannot reach owned
+/// canonical processing even while the same Provider generation stays live.
+#[test]
+fn parked_update_report_crossing_session_rollover_is_observation_only() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    connect_test_tool(&mut harness, "interceptor");
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::PROVIDER_RESPONSE_UPDATED_REPORTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register interceptor");
+    let prompt_id = "rollover-prompt"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+    harness
+        .provider_runtime
+        .pending_prompts
+        .insert(prompt_id.clone(), crate::test_connection_id("provider"));
+    let _ = provider_report_ownership::take_snapshot();
+
+    harness
+        .handle_extension_event_inner(
+            &crate::test_connection_id("provider"),
+            Event::ProviderResponseUpdatedReported(tau_proto::ProviderResponseUpdated {
+                agent_prompt_id: prompt_id,
+                agent_id: crate::parse_agent_id("spoofed"),
+                deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                    output_index: 0,
+                    text: "old-session update".to_owned(),
+                    phase: None,
+                }],
+                compaction: None,
+                status: None,
+                response_stats: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        )
+        .expect("park update report");
+    harness
+        .switch_session(
+            "replacement-session"
+                .parse::<tau_proto::SessionId>()
+                .expect("known-safe SessionId must be valid"),
+            tau_proto::SessionStartReason::New,
+        )
+        .expect("switch session");
+    assert!(
+        harness
+            .extensions
+            .entries
+            .contains_key(&crate::test_connection_id("provider")),
+        "pure rollover must retain the same configured Provider generation"
+    );
+    harness
+        .handle_extension_event(
+            "interceptor",
+            TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                action: InterceptAction::Pass(None),
+            })),
+        )
+        .expect("release parked report");
+
+    let report_events = committed_events(&harness)
+        .into_iter()
+        .filter(|(_, event)| {
+            matches!(
+                event,
+                Event::ProviderResponseUpdatedReported(_) | Event::ProviderResponseUpdated(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(report_events.len(), 1);
+    assert!(matches!(
+        report_events[0].1,
+        Event::ProviderResponseUpdatedReported(_)
+    ));
+    assert_eq!(
+        provider_report_ownership::take_snapshot().update_handoffs,
+        0,
+        "old-session admission must return before owned canonical processing"
+    );
+}
+
+/// Raw update and terminal observations must remain independently available
+/// while canonical derivation consumes the original large payload allocations
+/// exactly once instead of cloning them at the report boundary.
+#[test]
+fn response_report_canonical_handoff_moves_large_payload_allocations() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut harness = quiet_provider_harness(temp.path()).expect("harness");
+    connect_ready_configured_extension(
+        &mut harness,
+        "provider",
+        "provider",
+        tau_proto::ClientKind::Provider,
+    );
+    let observer = connect_test_client(&mut harness, "observer", tau_proto::ClientKind::Ui);
+    harness
+        .handle_client_event(
+            "observer",
+            TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+                historical_selectors: Vec::new(),
+                live_selectors: vec![
+                    EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_UPDATED_REPORTED),
+                    EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_UPDATED),
+                    EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED_REPORTED),
+                    EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
+                ],
+            })),
+        )
+        .expect("subscribe observer");
+    let cid = ensure_test_user_agent(&mut harness);
+    let prompt_id = "ownership-prompt"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+    seed_agent_thinking(&mut harness, &cid, prompt_id.as_str());
+    harness
+        .prompt_coordination
+        .prompt_runtime
+        .agents
+        .insert(prompt_id.clone(), cid.clone());
+    harness
+        .provider_runtime
+        .pending_prompts
+        .insert(prompt_id.clone(), crate::test_connection_id("provider"));
+    let _ = provider_report_ownership::take_snapshot();
+
+    let update_text = "streaming-update-".repeat(16 * 1024);
+    let update = tau_proto::ProviderResponseUpdated {
+        agent_prompt_id: prompt_id.clone(),
+        agent_id: crate::parse_agent_id("spoofed"),
+        deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: update_text,
+            phase: None,
+        }],
+        compaction: None,
+        status: None,
+        response_stats: None,
+        originator: tau_proto::PromptOriginator::User,
+    };
+    let expected_raw_update =
+        serde_json::to_vec(&Event::ProviderResponseUpdatedReported(update.clone()))
+            .expect("encode expected raw update");
+    harness
+        .handle_extension_event_inner(
+            &crate::test_connection_id("provider"),
+            Event::ProviderResponseUpdatedReported(update),
+        )
+        .expect("updated report");
+
+    let terminal_text = "terminal-output-".repeat(16 * 1024);
+    let mut terminal =
+        super::dispatch::provider_text_response(&prompt_id, crate::parse_agent_id("spoofed"), "");
+    let ContextItem::Message(message) = terminal
+        .output_items
+        .first_mut()
+        .expect("text response output")
+    else {
+        panic!("text response must contain one message");
+    };
+    let tau_proto::ContentPart::Text { text } = message
+        .content
+        .first_mut()
+        .expect("text response message content")
+    else {
+        panic!("text response must contain ordinary text");
+    };
+    *text = terminal_text;
+    let expected_raw_finished =
+        serde_json::to_vec(&Event::ProviderResponseFinishedReported(terminal.clone()))
+            .expect("encode expected raw terminal");
+    harness
+        .handle_extension_event_inner(
+            &crate::test_connection_id("provider"),
+            Event::ProviderResponseFinishedReported(terminal),
+        )
+        .expect("finished report");
+
+    let ownership = provider_report_ownership::take_snapshot();
+    assert_eq!(ownership.update_handoffs, 1);
+    assert_eq!(ownership.finished_handoffs, 1);
+    assert!(ownership.update_raw_projection.is_some());
+    assert_eq!(
+        ownership.update_raw_projection, ownership.update_canonical,
+        "canonical update must receive the original delta vector"
+    );
+    assert!(ownership.update_text_raw_projection.is_some());
+    assert_eq!(
+        ownership.update_text_raw_projection, ownership.update_text_canonical,
+        "canonical update must receive the original large text allocation"
+    );
+    assert!(ownership.finished_raw_projection.is_some());
+    assert_eq!(
+        ownership.finished_raw_projection, ownership.finished_canonical,
+        "canonical terminal must receive the original output vector"
+    );
+    assert!(ownership.finished_text_raw_projection.is_some());
+    assert_eq!(
+        ownership.finished_text_raw_projection, ownership.finished_text_canonical,
+        "canonical terminal must receive the original large text allocation"
+    );
+
+    let events = committed_events(&harness);
+    let raw_update = events
+        .iter()
+        .find_map(|(_, event)| match event {
+            Event::ProviderResponseUpdatedReported(update) => Some(update),
+            _ => None,
+        })
+        .expect("independent raw update observation");
+    let canonical_update = events
+        .iter()
+        .find_map(|(_, event)| match event {
+            Event::ProviderResponseUpdated(update) => Some(update),
+            _ => None,
+        })
+        .expect("canonical update");
+    assert_ne!(
+        provider_report_ownership::AllocationIdentity::of_slice(&raw_update.deltas),
+        ownership.update_canonical,
+        "runtime observation must retain an independent payload"
+    );
+    assert_eq!(
+        serde_json::to_vec(&raw_update.deltas).expect("encode raw update payload"),
+        serde_json::to_vec(&canonical_update.deltas).expect("encode canonical update payload"),
+        "provider-owned update bytes must remain unchanged"
+    );
+
+    let raw_finished = events
+        .iter()
+        .find_map(|(_, event)| match event {
+            Event::ProviderResponseFinishedReported(finished) => Some(finished),
+            _ => None,
+        })
+        .expect("independent raw terminal observation");
+    let canonical_finished = events
+        .iter()
+        .find_map(|(_, event)| match event {
+            Event::ProviderResponseFinished(finished) => Some(finished),
+            _ => None,
+        })
+        .expect("canonical terminal");
+    assert_ne!(
+        provider_report_ownership::AllocationIdentity::of_slice(&raw_finished.output_items),
+        ownership.finished_canonical,
+        "runtime observation must retain an independent terminal payload"
+    );
+    assert_eq!(
+        serde_json::to_vec(&raw_finished.output_items).expect("encode raw terminal output"),
+        serde_json::to_vec(&canonical_finished.output_items)
+            .expect("encode canonical terminal output"),
+        "provider-owned terminal output bytes must remain unchanged"
+    );
+
+    let observer_frames = observer.lock().expect("observer sink");
+    let delivered = observer_frames
+        .iter()
+        .filter_map(|frame| frame.frame.delivered_event())
+        .filter(|event| {
+            matches!(
+                event,
+                Event::ProviderResponseUpdatedReported(_)
+                    | Event::ProviderResponseUpdated(_)
+                    | Event::ProviderResponseFinishedReported(_)
+                    | Event::ProviderResponseFinished(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        delivered
+            .iter()
+            .map(|event| event.name())
+            .collect::<Vec<_>>(),
+        vec![
+            tau_proto::EventName::PROVIDER_RESPONSE_UPDATED_REPORTED,
+            tau_proto::EventName::PROVIDER_RESPONSE_UPDATED,
+            tau_proto::EventName::PROVIDER_RESPONSE_FINISHED_REPORTED,
+            tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+        ],
+        "raw and canonical wire facts must retain their exact relative order"
+    );
+    assert_eq!(
+        serde_json::to_vec(delivered[0]).expect("encode delivered raw update"),
+        expected_raw_update,
+        "raw update wire event must remain byte-equivalent to provider input"
+    );
+    assert_eq!(
+        serde_json::to_vec(delivered[2]).expect("encode delivered raw terminal"),
+        expected_raw_finished,
+        "raw terminal wire event must remain byte-equivalent to provider input"
+    );
 }
 
 /// An update cannot use its provider-claimed agent id when the harness has no

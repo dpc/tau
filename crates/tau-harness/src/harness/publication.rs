@@ -1801,6 +1801,13 @@ impl Harness {
     /// has resolved. After broadcast, it runs captured peer-event consumers
     /// and other post-commit reactions, including deferred agent dispatch
     /// and per-publish conversation `head` synchronization.
+    ///
+    /// Provider execution reports are the explicit exception: after their raw
+    /// observer frame commits, this method moves the remaining event directly
+    /// into canonical report processing and returns. That closed report family
+    /// has no generic reaction match and cannot carry synchronization,
+    /// completion, watch-retirement, or external-receive authority. Keep that
+    /// invariant aligned when adding post-commit behavior for a report event.
     pub(crate) fn commit_event(
         &mut self,
         source: Option<&tau_proto::ConnectionId>,
@@ -2099,6 +2106,8 @@ impl Harness {
         if let Some(timing) = prompt_acceptance.as_mut() {
             timing.set_debug_record_admission(commit_timing.debug_log);
         }
+        #[cfg(test)]
+        provider_report_ownership::observe_before_raw_projection(&event);
         if let Event::SessionAgentLoaded(loaded) = &event
             && loaded.session_id == self.session_runtime.current_session_id
         {
@@ -2459,6 +2468,17 @@ impl Harness {
         }
         if let Err(error) = self.dispatch_internal_tool_event(&event) {
             self.emit_harness_failure(&format!("internal tool event handler failed: {error}"));
+        }
+        if Self::is_provider_execution_report(&event) {
+            // Raw report persistence/debug/observer work above already owns its
+            // independent projection. No generic post-commit reaction below
+            // consumes provider report payloads. Move the remaining event into
+            // canonical derivation so large deltas and terminal output do not
+            // cross this boundary through another deep clone.
+            self.process_committed_provider_execution_report(peer_context, event);
+            commit_timing.post_commit = post_commit_started.elapsed();
+            commit_timing.result = CommitEventTimingResult::Ok;
+            return;
         }
         self.process_committed_peer_event(source, peer_context, &event);
         self.with_derived_publish_source(source.cloned(), |harness| {

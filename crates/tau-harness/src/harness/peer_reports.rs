@@ -826,6 +826,20 @@ impl Harness {
         )
     }
 
+    /// Return whether a committed event is a raw Provider execution report
+    /// whose payload can move into its report-specific canonical consumer.
+    pub(super) fn is_provider_execution_report(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::ProviderPromptSubmittedReported(_)
+                | Event::ProviderResponseUpdatedReported(_)
+                | Event::ProviderResponseFinishedReported(_)
+                | Event::ProviderRetryPromptResultReported(_)
+                | Event::ProviderCacheMissDiagnosticReported(_)
+                | Event::ProviderCacheRefreshFinishedReported(_)
+        )
+    }
+
     /// Process one peer-authored event only after the generic publication path
     /// has committed and broadcast it.
     ///
@@ -918,18 +932,6 @@ impl Harness {
                 | Event::ProviderQuotaClearReported(_)
         ) {
             self.process_committed_provider_quota_report(peer_context, event);
-            return;
-        }
-        if matches!(
-            event,
-            Event::ProviderPromptSubmittedReported(_)
-                | Event::ProviderResponseUpdatedReported(_)
-                | Event::ProviderResponseFinishedReported(_)
-                | Event::ProviderRetryPromptResultReported(_)
-                | Event::ProviderCacheMissDiagnosticReported(_)
-                | Event::ProviderCacheRefreshFinishedReported(_)
-        ) {
-            self.process_committed_provider_execution_report(peer_context, event);
             return;
         }
         if matches!(event, Event::ExtPromptFragmentPublish(_)) {
@@ -1412,8 +1414,18 @@ impl Harness {
     pub(super) fn process_committed_provider_execution_report(
         &mut self,
         peer_context: &interception::PeerPublicationContext,
-        event: &Event,
+        event: Event,
     ) {
+        if peer_context.extension.as_ref().is_some_and(|extension| {
+            extension.admission.session_id != self.session_runtime.current_session_id
+                || extension.admission.session_generation
+                    != self.session_runtime.current_session_generation
+        }) {
+            // The raw report has already committed and remains observable, but
+            // session-bound report semantics cannot cross rollover.
+            self.discard_peer_activation_reservation(peer_context);
+            return;
+        }
         let Some(extension) = peer_context
             .extension
             .as_ref()
@@ -1440,19 +1452,23 @@ impl Harness {
         let source_id = &extension.source;
         match event {
             Event::ProviderRetryPromptResultReported(result) => {
-                self.process_provider_retry_prompt_result_report(source_id, result);
+                self.process_provider_retry_prompt_result_report(source_id, &result);
             }
             Event::ProviderPromptSubmittedReported(submitted) => {
-                self.process_provider_prompt_submitted_report(source_id, submitted);
+                self.process_provider_prompt_submitted_report(source_id, &submitted);
             }
             Event::ProviderResponseUpdatedReported(updated) => {
+                #[cfg(test)]
+                provider_report_ownership::observe_owned_update(&updated);
                 self.process_provider_response_updated_report(source_id, updated);
             }
             Event::ProviderResponseFinishedReported(response) => {
+                #[cfg(test)]
+                provider_report_ownership::observe_owned_finished(&response);
                 self.process_provider_response_finished_report(source_id, response);
             }
             Event::ProviderCacheMissDiagnosticReported(diagnostic) => {
-                self.process_provider_cache_miss_diagnostic_report(source_id, diagnostic);
+                self.process_provider_cache_miss_diagnostic_report(source_id, &diagnostic);
             }
             Event::ProviderCacheRefreshFinishedReported(finished) => {
                 if self
@@ -1549,10 +1565,13 @@ impl Harness {
         }
     }
 
+    /// Consume one committed update report, validate its current prompt owner,
+    /// replace provider-authored harness fields, and publish public canonical
+    /// progress without copying the owned delta payload.
     pub(super) fn process_provider_response_updated_report(
         &mut self,
         source_id: &tau_proto::ConnectionId,
-        updated: &tau_proto::ProviderResponseUpdated,
+        mut updated: tau_proto::ProviderResponseUpdated,
     ) {
         if !self.provider_prompt_owner_matches(
             source_id,
@@ -1603,7 +1622,6 @@ impl Harness {
         let Some(agent_id) = accounting_cid else {
             return;
         };
-        let mut updated = updated.clone();
         updated.agent_id = agent_id;
         if rejected_retry_status && let Some(status) = updated.status.as_mut() {
             status.retry = None;
@@ -1658,10 +1676,13 @@ impl Harness {
         }
     }
 
+    /// Consume one committed terminal report and, for its exact current prompt
+    /// owner, move it into the canonical terminal validation and publication
+    /// pipeline.
     pub(super) fn process_provider_response_finished_report(
         &mut self,
         source_id: &tau_proto::ConnectionId,
-        response: &tau_proto::ProviderResponseFinished,
+        response: tau_proto::ProviderResponseFinished,
     ) {
         if self.provider_prompt_owner_matches(
             source_id,
@@ -1673,7 +1694,7 @@ impl Harness {
                 |harness| {
                     harness.handle_provider_response_finished_from(
                         Some(crate::harness::harness_connection_id()),
-                        response.clone(),
+                        response,
                     )
                 },
             );

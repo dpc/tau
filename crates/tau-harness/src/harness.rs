@@ -1399,6 +1399,8 @@ mod prompt_materialization_timing;
 #[cfg(test)]
 mod prompt_materialization_timing_tests;
 mod prompt_runtime_state;
+#[cfg(test)]
+mod provider_report_ownership;
 mod provider_response;
 mod provider_terminal_plan;
 mod publication;
