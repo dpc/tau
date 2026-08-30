@@ -10,7 +10,7 @@ use tau_proto::{
     HarnessOutputMessage, Hello, SessionAgentListEntry, SessionAgentListResultPayload,
     SessionAgentListScope, SessionId, Subscribe, UnixMicros,
 };
-use tau_socket::{SocketPeer, SocketReceive};
+use tau_socket::{SocketPeer, SocketReceive, SocketTransportError};
 
 const MAX_EVENTS: usize = 4_096;
 const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
@@ -47,7 +47,12 @@ struct RuntimeMetadata {
 }
 
 impl SideObserver {
-    /// Connects to a fully initialized daemon and installs exact selectors.
+    /// Connects and waits for this session's startup replay under one caller
+    /// deadline.
+    ///
+    /// Only socket-establishment failures are retried. Once the socket is
+    /// accepted and subscribed, this retains that exact peer until
+    /// `SessionStarted` arrives or propagates the first terminal receive error.
     pub(super) fn connect(
         socket: &Path,
         expected_session: &SessionId,
@@ -57,7 +62,8 @@ impl SideObserver {
         Self::connect_with_prompt_drafts(socket, expected_session, artifact_path, deadline, false)
     }
 
-    /// Connects with the ordinary selectors plus live UI draft observations.
+    /// Connects under the same single-peer startup contract and also observes
+    /// live UI drafts.
     pub(super) fn connect_observing_prompt_drafts(
         socket: &Path,
         expected_session: &SessionId,
@@ -74,57 +80,72 @@ impl SideObserver {
         deadline: Instant,
         observe_prompt_drafts: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        loop {
-            let mut peer = match SocketPeer::connect(socket) {
-                Ok(peer) => peer,
-                Err(error) if Instant::now() < deadline => {
+        Self::connect_with_prompt_drafts_using_replay_receiver(
+            socket,
+            expected_session,
+            artifact_path,
+            deadline,
+            observe_prompt_drafts,
+            Self::recv_one,
+        )
+    }
+
+    /// Connects one observer through an injectable actual replay receive for
+    /// deterministic lifecycle tests.
+    fn connect_with_prompt_drafts_using_replay_receiver(
+        socket: &Path,
+        expected_session: &SessionId,
+        artifact_path: PathBuf,
+        deadline: Instant,
+        observe_prompt_drafts: bool,
+        mut recv_replay: impl FnMut(
+            &mut Self,
+            Instant,
+        ) -> Result<ObservedEvent, Box<dyn std::error::Error>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut peer = loop {
+            match SocketPeer::connect(socket) {
+                Ok(peer) => break peer,
+                Err(error @ SocketTransportError::Connect { .. }) if Instant::now() < deadline => {
                     let _ = error;
                     thread::yield_now();
-                    continue;
                 }
                 Err(error) => return Err(error.into()),
-            };
-            peer.send(&HarnessInputMessage::Hello(Hello {
-                protocol_version: tau_proto::PROTOCOL_VERSION,
-                client_name: tau_proto::ExtensionName::parse("tau-e2e-side-observer")
-                    .expect("test extension name must satisfy the identifier grammar"),
-                client_kind: ClientKind::Ui,
-                expected_session_id: None,
-                capabilities: Default::default(),
-            }))?;
-            let selectors = selectors(observe_prompt_drafts);
-            peer.send(&HarnessInputMessage::Subscribe(Subscribe {
-                historical_selectors: selectors.clone(),
-                live_selectors: selectors,
-            }))?;
-            let mut observer = Self {
-                peer,
-                events: Vec::new(),
-                artifact_path: artifact_path.clone(),
-                event_bytes: 0,
-            };
-            let attempt_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
-            while Instant::now() < attempt_deadline {
-                match observer.recv_one(attempt_deadline) {
-                    Ok(observed) => {
-                        let initialized = matches!(
-                            &observed.event,
-                            Event::SessionStarted(started)
-                                if &started.session_id == expected_session
-                        );
-                        observer.record(observed)?;
-                        if initialized {
-                            return Ok(observer);
-                        }
-                    }
-                    Err(_) => break,
-                }
             }
-            if Instant::now() >= deadline {
-                return Err(format!(
-                    "side observer never received SessionStarted for `{expected_session}`"
+        };
+        peer.send(&HarnessInputMessage::Hello(Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: tau_proto::ExtensionName::parse("tau-e2e-side-observer")
+                .expect("test extension name must satisfy the identifier grammar"),
+            client_kind: ClientKind::Ui,
+            expected_session_id: None,
+            capabilities: Default::default(),
+        }))?;
+        let selectors = selectors(observe_prompt_drafts);
+        peer.send(&HarnessInputMessage::Subscribe(Subscribe {
+            historical_selectors: selectors.clone(),
+            live_selectors: selectors,
+        }))?;
+        let mut observer = Self {
+            peer,
+            events: Vec::new(),
+            artifact_path,
+            event_bytes: 0,
+        };
+        loop {
+            let observed = recv_replay(&mut observer, deadline).map_err(|error| {
+                format!(
+                    "{error} while waiting for side-observer SessionStarted for \
+                     `{expected_session}`"
                 )
-                .into());
+            })?;
+            let initialized = matches!(
+                &observed.event,
+                Event::SessionStarted(started) if &started.session_id == expected_session
+            );
+            observer.record(observed)?;
+            if initialized {
+                return Ok(observer);
             }
         }
     }
@@ -459,3 +480,7 @@ fn selectors(observe_prompt_drafts: bool) -> Vec<EventSelector> {
     .map(EventSelector::Exact)
     .collect()
 }
+
+#[cfg(test)]
+#[path = "observer/tests.rs"]
+mod tests;
