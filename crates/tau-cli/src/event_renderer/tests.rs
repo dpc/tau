@@ -2289,6 +2289,104 @@ fn agent_activity_stays_busy_until_requested_tools_finish() {
     assert!(!activity.is_in_progress());
 }
 
+/// Finished provider output must retain each distinct typed tool-call id until
+/// its own terminal arrives, rather than collapsing the response into one
+/// generic busy flag.
+#[test]
+fn agent_activity_extracts_distinct_tool_ids_from_finished_output() {
+    let mut activity = AgentActivity::default();
+    let prompt_id = "sp-distinct-tools"
+        .parse::<tau_proto::AgentPromptId>()
+        .expect("known-safe AgentPromptId must be valid");
+    let first: tau_proto::ToolCallId = "call-first".into();
+    let second: tau_proto::ToolCallId = "call-second".into();
+
+    activity.start_prompt(&prompt_id);
+    activity.finish_prompt(
+        &prompt_id,
+        &[tool_call(first.as_str()), tool_call(second.as_str())],
+    );
+    activity.finish_tool(&first);
+
+    assert!(activity.is_in_progress());
+
+    activity.finish_tool(&second);
+    assert!(!activity.is_in_progress());
+}
+
+/// Duplicate tool starts and terminals must be idempotent so replayed
+/// lifecycle events cannot leave the Ctrl-D guard stuck after the sole call
+/// completes.
+#[test]
+fn agent_activity_tool_lifecycle_is_idempotent() {
+    let mut activity = AgentActivity::default();
+    let call_id: tau_proto::ToolCallId = "call-idempotent".into();
+
+    activity.start_tool(&call_id);
+    activity.start_tool(&call_id);
+    activity.finish_tool(&call_id);
+    activity.finish_tool(&call_id);
+
+    assert!(!activity.is_in_progress());
+}
+
+/// A background placeholder must retain the active tool guard through its
+/// foreground terminal, then the real background terminal must remove it.
+#[test]
+fn agent_activity_background_tool_moves_between_active_lifecycles() {
+    let mut activity = AgentActivity::default();
+    let call_id: tau_proto::ToolCallId = "call-background".into();
+
+    activity.start_tool(&call_id);
+    activity.background_tool(&call_id);
+    activity.finish_tool(&call_id);
+
+    assert!(activity.is_in_progress());
+
+    activity.finish_background_tool(&call_id);
+    assert!(!activity.is_in_progress());
+}
+
+/// Each terminal must remove only its matching typed tool-call id, leaving
+/// independently started work active until its own result arrives.
+#[test]
+fn agent_activity_terminal_removes_only_matching_tool() {
+    let mut activity = AgentActivity::default();
+    let first: tau_proto::ToolCallId = "call-terminal-first".into();
+    let second: tau_proto::ToolCallId = "call-terminal-second".into();
+
+    activity.start_tool(&first);
+    activity.start_tool(&second);
+    activity.finish_tool(&first);
+
+    assert!(activity.is_in_progress());
+
+    activity.finish_tool(&second);
+    assert!(!activity.is_in_progress());
+}
+
+/// Resetting activity must discard active and backgrounded typed tool ids so
+/// stale replay terminals cannot affect a fresh local lifecycle.
+#[test]
+fn agent_activity_clear_resets_tool_ids() {
+    let mut activity = AgentActivity::default();
+    let stale: tau_proto::ToolCallId = "call-stale".into();
+    let later: tau_proto::ToolCallId = "call-later".into();
+
+    activity.start_tool(&stale);
+    activity.background_tool(&stale);
+    activity.clear();
+
+    assert!(!activity.is_in_progress());
+
+    activity.finish_background_tool(&stale);
+    activity.start_tool(&later);
+    assert!(activity.is_in_progress());
+
+    activity.finish_tool(&later);
+    assert!(!activity.is_in_progress());
+}
+
 /// Side conversations use the same lifecycle events as the main chat;
 /// the Ctrl-D guard must track them before UI filtering hides their
 /// transcript details.

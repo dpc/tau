@@ -12,10 +12,10 @@ pub(crate) struct AgentActivity {
     /// Prompt ids currently being processed by any provider conversation.
     active_prompts: HashSet<AgentPromptId>,
     /// Tool call ids emitted by any agent and not finished yet.
-    active_tools: HashSet<String>,
+    active_tools: HashSet<ToolCallId>,
     /// Tool call ids whose foreground provider protocol has completed with a
     /// synthetic placeholder, but whose real tool process is still running.
-    backgrounded_tools: HashSet<String>,
+    backgrounded_tools: HashSet<ToolCallId>,
 }
 
 impl AgentActivity {
@@ -82,28 +82,28 @@ impl AgentActivity {
 
     /// Records a tool call that started independently of prompt-finish output.
     pub(crate) fn start_tool(&mut self, call_id: &ToolCallId) {
-        self.active_tools.insert(call_id.to_string());
+        self.active_tools.insert(call_id.clone());
     }
 
     /// Marks a tool as backgrounded while keeping it active for Ctrl-D guard
     /// purposes until its background result arrives.
     pub(crate) fn background_tool(&mut self, call_id: &ToolCallId) {
-        self.backgrounded_tools.insert(call_id.to_string());
-        self.active_tools.insert(call_id.to_string());
+        self.backgrounded_tools.insert(call_id.clone());
+        self.active_tools.insert(call_id.clone());
     }
 
     /// Finishes a foreground tool, leaving backgrounded tools active until the
     /// background completion path explicitly clears them.
     pub(crate) fn finish_tool(&mut self, call_id: &ToolCallId) {
-        if !self.backgrounded_tools.contains(call_id.as_str()) {
-            self.active_tools.remove(call_id.as_str());
+        if !self.backgrounded_tools.contains(call_id) {
+            self.active_tools.remove(call_id);
         }
     }
 
     /// Finishes a backgrounded tool and clears its Ctrl-D guard state.
     pub(crate) fn finish_background_tool(&mut self, call_id: &ToolCallId) {
-        self.backgrounded_tools.remove(call_id.as_str());
-        self.active_tools.remove(call_id.as_str());
+        self.backgrounded_tools.remove(call_id);
+        self.active_tools.remove(call_id);
     }
 
     /// Clears local optimistic submissions that can no longer receive prompt
@@ -123,9 +123,9 @@ impl AgentActivity {
 
 fn tool_call_ids_from_output_items(
     output_items: &[ContextItem],
-) -> impl Iterator<Item = String> + '_ {
+) -> impl Iterator<Item = ToolCallId> + '_ {
     output_items.iter().filter_map(|item| match item {
-        ContextItem::ToolCall(call) => Some(call.call_id.to_string()),
+        ContextItem::ToolCall(call) => Some(call.call_id.clone()),
         _ => None,
     })
 }
