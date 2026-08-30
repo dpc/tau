@@ -406,9 +406,9 @@ struct OneShotOutput {
     /// Lowest prompt counter belonging to this invocation's provider chain.
     initial_prompt_index: Option<u64>,
     /// Streaming reasoning accumulated by provider prompt id.
-    thinking_by_prompt: HashMap<String, String>,
+    thinking_by_prompt: HashMap<tau_proto::AgentPromptId, String>,
     /// Streaming assistant text accumulated by provider prompt id.
-    response_by_prompt: HashMap<String, String>,
+    response_by_prompt: HashMap<tau_proto::AgentPromptId, String>,
     /// Completed reasoning blocks in provider-chain order.
     thinking_blocks: Vec<String>,
     /// Final assistant answer for stdout.
@@ -426,26 +426,25 @@ impl OneShotOutput {
         {
             return;
         }
-        let prompt_id = update.agent_prompt_id.to_string();
         if update
             .status
             .as_ref()
             .is_some_and(|status| status.clear_response)
         {
-            self.thinking_by_prompt.remove(&prompt_id);
-            self.response_by_prompt.remove(&prompt_id);
+            self.thinking_by_prompt.remove(&update.agent_prompt_id);
+            self.response_by_prompt.remove(&update.agent_prompt_id);
         }
         let thinking = reasoning_text_from_update(update);
         if let Some(thinking) = thinking.filter(|thinking| !thinking.is_empty()) {
             self.thinking_by_prompt
-                .entry(prompt_id.clone())
+                .entry(update.agent_prompt_id.clone())
                 .or_default()
                 .push_str(&thinking);
         }
         let text = assistant_text_from_update(update).unwrap_or_default();
         if !text.is_empty() {
             self.response_by_prompt
-                .entry(prompt_id)
+                .entry(update.agent_prompt_id.clone())
                 .or_default()
                 .push_str(&text);
         }
@@ -504,11 +503,8 @@ impl OneShotOutput {
         if !self.owns_finished(finished) {
             return false;
         }
-        if let Some(thinking) =
-            reasoning_text_from_output_items(&finished.output_items).or_else(|| {
-                self.thinking_by_prompt
-                    .remove(finished.agent_prompt_id.as_str())
-            })
+        if let Some(thinking) = reasoning_text_from_output_items(&finished.output_items)
+            .or_else(|| self.thinking_by_prompt.remove(&finished.agent_prompt_id))
         {
             self.thinking_blocks.push(thinking);
         }
@@ -521,11 +517,8 @@ impl OneShotOutput {
         if finished.stop_reason.requests_tool_calls() {
             return false;
         }
-        self.final_response =
-            assistant_text_from_output_items(&finished.output_items).or_else(|| {
-                self.response_by_prompt
-                    .remove(finished.agent_prompt_id.as_str())
-            });
+        self.final_response = assistant_text_from_output_items(&finished.output_items)
+            .or_else(|| self.response_by_prompt.remove(&finished.agent_prompt_id));
         true
     }
 
