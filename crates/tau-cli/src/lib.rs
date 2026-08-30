@@ -36,6 +36,7 @@ mod terminal_text;
 mod theme;
 mod tool_render;
 mod transcript_markers;
+mod turn_stats_projection;
 mod ui_client;
 mod ui_commands;
 mod ui_events;

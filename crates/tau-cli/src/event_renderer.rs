@@ -47,10 +47,11 @@ use crate::tool_render::{
     render_action_output_block, render_compaction_block, render_diff_tool_block,
     render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
     render_tool_use_state, render_tool_use_state_without_status,
-    render_turn_stats_block_with_cumulative_usage, session_status_block, streaming_block,
+    render_turn_stats_projection_block, session_status_block, streaming_block,
     streaming_block_with_indicator_suffix, synthesize_fallback_display, tool_duration_suffix,
     ui_dir_block,
 };
+use crate::turn_stats_projection::TurnStatsPresentationProjection;
 use crate::watch_activity::{VISIBLE_WATCH_EXPANSION_LIMIT, WatchGraphProjection};
 use crate::{
     MUTEX_POISONED, build_banner, message_fact_render as path_crate_message_fact_render,
@@ -1141,15 +1142,8 @@ fn role_command_completions(
 
 struct TurnStatsBlockEntry {
     block_id: tau_cli_term::BlockId,
-    usage: tau_proto::ProviderTokenUsage,
-    /// Owning agent's total at the time this response completed.
-    cumulative_usage: tau_proto::TokenUsageCounts,
-    /// Same-agent previous response usage captured when this block was
-    /// recorded. Re-render paths must use this stored baseline instead of
-    /// recomputing from whichever agent/transcript is currently visible.
-    previous_usage: Option<tau_proto::ProviderTokenUsage>,
-    turn_latency: Option<Duration>,
-    total_latency: Option<Duration>,
+    /// Allocation-free scalar state needed to re-render this block.
+    projection: TurnStatsPresentationProjection,
 }
 
 /// Per-prompt UI state held by [`EventRenderer`]. Lives from the first
@@ -3232,14 +3226,7 @@ impl EventRenderer {
     }
     fn render_turn_stats_entry(&self, entry: &TurnStatsBlockEntry) -> tau_cli_term::StyledBlock {
         if self.presentation.verbose_mode && self.presentation.show_turn_stats {
-            render_turn_stats_block_with_cumulative_usage(
-                &self.resources.theme,
-                &entry.usage,
-                &entry.cumulative_usage,
-                entry.previous_usage.as_ref(),
-                entry.turn_latency,
-                entry.total_latency,
-            )
+            render_turn_stats_projection_block(&self.resources.theme, &entry.projection)
         } else {
             Self::empty_block()
         }

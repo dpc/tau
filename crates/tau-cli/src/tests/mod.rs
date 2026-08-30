@@ -127,8 +127,9 @@ use super::tool_render::{
     CompactionStatus, ToolLineElement, ToolStatus, build_delegate_completion_display,
     format_turn_stats_line, render_action_error_block, render_action_output_block,
     render_compaction_block, render_diff_tool_block, render_harness_notice,
-    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
-    render_turn_stats_block, streaming_block, synthesize_fallback_display,
+    render_multi_diff_tool_block, render_provider_turn_stats_block_with_cumulative_usage,
+    render_shell_block, render_tool_block, render_tool_use_state, render_turn_stats_block,
+    streaming_block, synthesize_fallback_display,
 };
 
 /// Writer that feeds bytes directly into a VT parser and records a screen

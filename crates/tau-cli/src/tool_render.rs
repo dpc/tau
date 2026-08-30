@@ -8,6 +8,11 @@ use std::time::Duration;
 
 use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus};
 
+use crate::turn_stats_projection::{
+    CumulativeTurnUsageProjection, PreviousTurnUsageProjection, TurnStatsPresentationProjection,
+    TurnStatsUsageProjection,
+};
+
 #[cfg(test)]
 pub(crate) fn format_turn_stats_line(
     usage: &tau_proto::ProviderTokenUsage,
@@ -15,7 +20,7 @@ pub(crate) fn format_turn_stats_line(
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> String {
-    turn_stats_parts(
+    turn_stats_parts_from_provider(
         usage,
         &usage.stats.total,
         previous_usage,
@@ -35,7 +40,7 @@ pub(crate) fn render_turn_stats_block(
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> tau_cli_term::StyledBlock {
-    render_turn_stats_block_with_cumulative_usage(
+    render_provider_turn_stats_block_with_cumulative_usage(
         theme,
         usage,
         &usage.stats.total,
@@ -45,12 +50,8 @@ pub(crate) fn render_turn_stats_block(
     )
 }
 
-/// Render a turn-stat block with the supplied owning-agent token total.
-///
-/// The provider payload's embedded total is session-wide. The transcript
-/// renderer supplies its durable per-agent fold here so the Σ token and latency
-/// fields have the same scope.
-pub(crate) fn render_turn_stats_block_with_cumulative_usage(
+#[cfg(test)]
+pub(crate) fn render_provider_turn_stats_block_with_cumulative_usage(
     theme: &tau_themes::Theme,
     usage: &tau_proto::ProviderTokenUsage,
     cumulative_usage: &tau_proto::TokenUsageCounts,
@@ -58,19 +59,49 @@ pub(crate) fn render_turn_stats_block_with_cumulative_usage(
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> tau_cli_term::StyledBlock {
+    render_turn_stats_parts(
+        theme,
+        turn_stats_parts_from_provider(
+            usage,
+            cumulative_usage,
+            previous_usage,
+            turn_latency,
+            total_latency,
+        ),
+    )
+}
+
+/// Renders one retained turn-stat presentation projection.
+///
+/// The projection contains only the scalar current, preceding, and cumulative
+/// values that can affect the block's terminal cells and styles.
+pub(crate) fn render_turn_stats_projection_block(
+    theme: &tau_themes::Theme,
+    projection: &TurnStatsPresentationProjection,
+) -> tau_cli_term::StyledBlock {
+    render_turn_stats_parts(
+        theme,
+        turn_stats_parts(
+            projection.usage,
+            projection.cumulative_usage,
+            projection.previous_usage,
+            projection.turn_latency,
+            projection.total_latency,
+        ),
+    )
+}
+
+fn render_turn_stats_parts(
+    theme: &tau_themes::Theme,
+    parts: Vec<TurnStatsPart>,
+) -> tau_cli_term::StyledBlock {
     use tau_cli_term::resolve::themed_text;
     use tau_themes::{SpanTree, ThemedText, names};
 
     let mut themed = ThemedText::new();
     let root = themed.add_style(names::TOKEN_STATS);
     let mut children = Vec::new();
-    for part in turn_stats_parts(
-        usage,
-        cumulative_usage,
-        previous_usage,
-        turn_latency,
-        total_latency,
-    ) {
+    for part in parts {
         let style = themed.add_style(part.style_name);
         children.push(SpanTree::span(style, vec![SpanTree::text(part.text)]));
     }
@@ -113,9 +144,9 @@ impl TurnStatsPart {
 }
 
 fn turn_stats_parts(
-    usage: &tau_proto::ProviderTokenUsage,
-    cumulative_usage: &tau_proto::TokenUsageCounts,
-    previous_usage: Option<&tau_proto::ProviderTokenUsage>,
+    usage: TurnStatsUsageProjection,
+    cumulative_usage: CumulativeTurnUsageProjection,
+    previous_usage: Option<PreviousTurnUsageProjection>,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> Vec<TurnStatsPart> {
@@ -213,6 +244,25 @@ fn turn_stats_parts(
     parts
 }
 
+#[cfg(test)]
+fn turn_stats_parts_from_provider(
+    usage: &tau_proto::ProviderTokenUsage,
+    cumulative_usage: &tau_proto::TokenUsageCounts,
+    previous_usage: Option<&tau_proto::ProviderTokenUsage>,
+    turn_latency: Option<Duration>,
+    total_latency: Option<Duration>,
+) -> Vec<TurnStatsPart> {
+    turn_stats_parts(
+        TurnStatsUsageProjection::from(usage),
+        CumulativeTurnUsageProjection::from(*cumulative_usage),
+        previous_usage
+            .map(TurnStatsUsageProjection::from)
+            .map(Into::into),
+        turn_latency,
+        total_latency,
+    )
+}
+
 struct StatusBarDuration(Duration);
 
 impl fmt::Display for StatusBarDuration {
@@ -245,8 +295,8 @@ fn cache_hit_style_name(percent: u8) -> &'static str {
 /// Returns the current prompt prefix that can be reused from the preceding
 /// turn.
 fn reusable_prompt_prefix_tokens(
-    usage: &tau_proto::ProviderTokenUsage,
-    previous_usage: Option<&tau_proto::ProviderTokenUsage>,
+    usage: TurnStatsUsageProjection,
+    previous_usage: Option<PreviousTurnUsageProjection>,
 ) -> u64 {
     previous_usage
         .map_or(0, |usage| {
@@ -257,10 +307,7 @@ fn reusable_prompt_prefix_tokens(
         .min(usage.prompt_sent_tokens)
 }
 
-fn cache_efficiency(
-    usage: &tau_proto::ProviderTokenUsage,
-    estimated_ceiling: u64,
-) -> CacheEfficiency {
+fn cache_efficiency(usage: TurnStatsUsageProjection, estimated_ceiling: u64) -> CacheEfficiency {
     let cached = usage.prompt_cached_tokens;
     let sent = usage.prompt_sent_tokens;
     if sent < cached {

@@ -1,7 +1,7 @@
 //! Tests for transcript rendering behavior.
 
 use std::sync::Barrier;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::super::markdown_render::markdown_block;
 use super::*;
@@ -1801,6 +1801,177 @@ fn turn_stats_and_session_stats_keep_token_scopes_separate() {
     renderer.show_session_token_stats();
     sync(&handle);
     assert!(vt.screen_contains(80, "session token totals: ↑670/850 ↓95"));
+}
+
+/// Large per-model maps must die at event admission while the allocation-free
+/// retained projection reproduces the legacy DTO renderer across live, hidden,
+/// toggle, and cold-replay paths.
+#[test]
+fn turn_stats_retain_only_scalar_projection_with_exact_legacy_rendering() {
+    fn usage(
+        sent: u64,
+        cached: u64,
+        ceiling: Option<u64>,
+        received: u64,
+        model_count: usize,
+    ) -> tau_proto::ProviderTokenUsage {
+        let mut usage = tau_proto::ProviderTokenUsage {
+            prompt_sent_tokens: sent,
+            prompt_cached_tokens: cached,
+            prompt_cache_read_ceiling_tokens: ceiling,
+            response_received_tokens: received,
+            stats: tau_proto::TokenUsageStats {
+                total: tau_proto::TokenUsageCounts {
+                    sent_tokens: sent,
+                    cached_tokens: cached,
+                    received_tokens: received,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for index in 0..model_count {
+            usage.stats.by_model.insert(
+                format!("provider/model-{index}")
+                    .parse()
+                    .expect("valid model id"),
+                tau_proto::TokenUsageCounts {
+                    requests: index as u64,
+                    sent_tokens: u64::MAX - index as u64,
+                    in_progress_received_tokens: index as u64,
+                    ..Default::default()
+                },
+            );
+        }
+        usage
+    }
+
+    let first_usage = usage(0, 0, None, 0, 1_024);
+    let second_usage = usage(1_500, 1_000, None, 250, 2_048);
+    let cumulative = tau_proto::TokenUsageCounts {
+        sent_tokens: 1_500,
+        cached_tokens: 1_000,
+        received_tokens: 250,
+        ..Default::default()
+    };
+    let expected_first = render_provider_turn_stats_block_with_cumulative_usage(
+        &cli_test_theme(),
+        &first_usage,
+        &tau_proto::TokenUsageCounts::default(),
+        None,
+        None,
+        Some(Duration::ZERO),
+    );
+    let expected_second = render_provider_turn_stats_block_with_cumulative_usage(
+        &cli_test_theme(),
+        &second_usage,
+        &cumulative,
+        Some(&first_usage),
+        None,
+        Some(Duration::ZERO),
+    );
+
+    let (_term, handle, vt) = setup(100, 30);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent(agent_id("projection-agent"));
+    renderer.apply_setting("show-turn-stats", "true");
+    for (prompt, usage) in [
+        ("projection-first", first_usage.clone()),
+        ("projection-second", second_usage.clone()),
+    ] {
+        let mut finished = finished_response(prompt, Vec::new());
+        finished.agent_id = agent_id("projection-agent");
+        finished.usage = Some(usage);
+        renderer.handle(&Event::ProviderResponseFinished(finished));
+    }
+    let retained = renderer.retained_turn_stats_blocks_for_test();
+    assert_eq!(retained[0].content.spans(), expected_first.content.spans());
+    assert_eq!(retained[1].content.spans(), expected_second.content.spans());
+    let (entries, retained_bytes, entry_needs_drop, projection_bytes, projection_needs_drop) =
+        renderer.turn_stats_retention_evidence_for_test();
+    assert_eq!(entries, 2);
+    assert!(
+        retained_bytes <= 2 * 128,
+        "two complete retained entries must stay within 256 inline bytes, got {retained_bytes}"
+    );
+    assert!(
+        !entry_needs_drop,
+        "complete retained entries must own no heap values"
+    );
+    assert!(
+        projection_bytes <= 120,
+        "the scalar projection must stay within 120 inline bytes, got {projection_bytes}"
+    );
+    assert!(
+        !projection_needs_drop,
+        "retained projections must own no heap values"
+    );
+
+    let themed = tau_themes::Theme::parse(r#"{ styles: { "token.stats.input": { fg: "blue" } } }"#)
+        .expect("turn-stat theme parses");
+    let themed_expected = render_provider_turn_stats_block_with_cumulative_usage(
+        &themed,
+        &second_usage,
+        &cumulative,
+        Some(&first_usage),
+        None,
+        Some(Duration::ZERO),
+    );
+    renderer.apply_theme(themed);
+    assert_eq!(
+        renderer.retained_turn_stats_blocks_for_test()[1]
+            .content
+            .spans(),
+        themed_expected.content.spans()
+    );
+    renderer.switch_agent(agent_id("snapshot-other"));
+    renderer.switch_agent(agent_id("projection-agent"));
+    assert_eq!(
+        renderer.retained_turn_stats_blocks_for_test()[1]
+            .content
+            .spans(),
+        themed_expected.content.spans(),
+        "agent transcript snapshots must retain the same scalar projection"
+    );
+
+    renderer.apply_setting("show-turn-stats", "false");
+    sync(&handle);
+    assert!(!vt.screen_contains(100, "Δ"));
+    renderer.apply_setting("show-turn-stats", "true");
+    sync(&handle);
+    assert!(vt.screen_contains(100, "Δ! 1k/?"));
+
+    let (_cold_term, cold_handle, cold_vt) = setup(100, 30);
+    let mut cold = EventRenderer::new(
+        cold_handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    cold.switch_agent(agent_id("visible-agent"));
+    for (prompt, usage) in [
+        ("projection-first", first_usage),
+        ("projection-second", second_usage),
+    ] {
+        let mut finished = finished_response(prompt, Vec::new());
+        finished.agent_id = agent_id("projection-agent");
+        finished.usage = Some(usage);
+        cold.handle(&Event::ProviderResponseFinished(finished));
+    }
+    cold.switch_agent(agent_id("projection-agent"));
+    cold.apply_setting("show-turn-stats", "true");
+    sync(&cold_handle);
+    assert_eq!(
+        cold.retained_turn_stats_blocks_for_test()[1]
+            .content
+            .spans(),
+        expected_second.content.spans()
+    );
+    assert!(cold_vt.screen_contains(100, "Δ! 1k/?"));
 }
 
 /// Foreground-ownership fail-stop must bypass generic stderr reporting because

@@ -19,8 +19,9 @@ pub(super) struct FinishedResponseProjection {
     placeholder: Option<tau_cli_term::StyledBlock>,
     /// Turn latency sampled before the short publication commit.
     turn_latency: Option<Duration>,
-    /// Optional usage record and its already-rendered settled block.
-    turn_stats: Option<(tau_proto::ProviderTokenUsage, tau_cli_term::StyledBlock)>,
+    /// Optional minimal usage projection and its already-rendered settled
+    /// block.
+    turn_stats: Option<(TurnStatsPresentationProjection, tau_cli_term::StyledBlock)>,
     /// Settled status block built from the projected final logical state.
     status_block: Option<tau_cli_term::StyledBlock>,
 }
@@ -44,6 +45,35 @@ enum FinishedContextProjection {
 }
 
 impl EventRenderer {
+    /// Returns direct layout and ownership evidence for retained turn-stat
+    /// state.
+    #[cfg(test)]
+    pub(crate) fn turn_stats_retention_evidence_for_test(
+        &self,
+    ) -> (usize, usize, bool, usize, bool) {
+        let entries = self.transcript.history.turn_stats_history.len();
+        (
+            entries,
+            entries * std::mem::size_of::<TurnStatsBlockEntry>(),
+            std::mem::needs_drop::<TurnStatsBlockEntry>(),
+            std::mem::size_of::<TurnStatsPresentationProjection>(),
+            std::mem::needs_drop::<TurnStatsPresentationProjection>(),
+        )
+    }
+
+    /// Re-renders retained turn-stat projections for exact differential tests.
+    #[cfg(test)]
+    pub(crate) fn retained_turn_stats_blocks_for_test(&self) -> Vec<tau_cli_term::StyledBlock> {
+        self.transcript
+            .history
+            .turn_stats_history
+            .iter()
+            .map(|entry| {
+                render_turn_stats_projection_block(&self.resources.theme, &entry.projection)
+            })
+            .collect()
+    }
+
     /// Returns placeholder history identities in caller-supplied call order.
     #[cfg(test)]
     pub(crate) fn tool_placeholder_ids_for_test(&self, call_ids: &[&str]) -> Vec<u64> {
@@ -188,31 +218,31 @@ impl EventRenderer {
             .flatten();
         let items = self.stage_finished_context_items(finished, terminal_tool_calls);
         let placeholder = self.stage_finished_placeholder(finished, terminal_tool_calls);
-        let turn_stats = finished.usage.clone().map(|usage| {
+        let turn_stats = finished.usage.as_ref().map(|usage| {
             let mut cumulative = self.transcript.status.cumulative_agent_token_usage;
-            Self::add_finished_token_usage(&mut cumulative, &usage);
+            Self::add_finished_token_usage(&mut cumulative, usage);
             let previous = self
                 .transcript
                 .history
                 .turn_stats_history
                 .last()
-                .map(|entry| entry.usage.clone());
+                .map(|entry| entry.projection.usage.into());
+            let projection = TurnStatsPresentationProjection {
+                usage: usage.into(),
+                cumulative_usage: cumulative.into(),
+                previous_usage: previous,
+                turn_latency,
+                total_latency: Some(
+                    self.transcript.status.cumulative_agent_latency
+                        + turn_latency.unwrap_or_default(),
+                ),
+            };
             let block = if self.presentation.verbose_mode && self.presentation.show_turn_stats {
-                render_turn_stats_block_with_cumulative_usage(
-                    &self.resources.theme,
-                    &usage,
-                    &cumulative,
-                    previous.as_ref(),
-                    turn_latency,
-                    Some(
-                        self.transcript.status.cumulative_agent_latency
-                            + turn_latency.unwrap_or_default(),
-                    ),
-                )
+                render_turn_stats_projection_block(&self.resources.theme, &projection)
             } else {
                 Self::empty_block()
             };
-            (usage, block)
+            (projection, block)
         });
         let declared_tool_calls = terminal_tool_calls.len();
         let admitted_tool_calls = terminal_tool_calls.admitted_len();
@@ -337,7 +367,7 @@ impl EventRenderer {
         }
 
         self.record_finished_assistant_context(projection.editor_response.take());
-        self.record_finished_turn_stats(projection.turn_stats.take(), projection.turn_latency);
+        self.record_finished_turn_stats(projection.turn_stats.take());
         let status_block = projection
             .status_block
             .take()
@@ -435,34 +465,28 @@ impl EventRenderer {
 
     fn record_finished_turn_stats(
         &mut self,
-        staged: Option<(tau_proto::ProviderTokenUsage, tau_cli_term::StyledBlock)>,
-        turn_latency: Option<Duration>,
+        staged: Option<(TurnStatsPresentationProjection, tau_cli_term::StyledBlock)>,
     ) {
-        let Some((usage, block)) = staged else {
+        let Some((projection, block)) = staged else {
             return;
         };
-        Self::add_finished_token_usage(
-            &mut self.transcript.status.cumulative_agent_token_usage,
-            &usage,
-        );
-        let cumulative_usage = self.transcript.status.cumulative_agent_token_usage;
-        let previous_usage = self
-            .transcript
-            .history
-            .turn_stats_history
-            .last()
-            .map(|entry| entry.usage.clone());
+        let total = &mut self.transcript.status.cumulative_agent_token_usage;
+        total.sent_tokens = total
+            .sent_tokens
+            .saturating_add(projection.usage.prompt_sent_tokens);
+        total.cached_tokens = total
+            .cached_tokens
+            .saturating_add(projection.usage.prompt_cached_tokens);
+        total.received_tokens = total
+            .received_tokens
+            .saturating_add(projection.usage.response_received_tokens);
         let bid = self.resources.handle.print_output("turn-stats", block);
         self.transcript
             .history
             .turn_stats_history
             .push(TurnStatsBlockEntry {
                 block_id: bid,
-                usage,
-                cumulative_usage,
-                previous_usage,
-                turn_latency,
-                total_latency: Some(self.transcript.status.cumulative_agent_latency),
+                projection,
             });
     }
 
