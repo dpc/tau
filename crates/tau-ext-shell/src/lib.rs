@@ -47,6 +47,7 @@ mod shell_output_spool;
 mod shell_process;
 mod terminal_frame;
 mod tool_lifecycle;
+mod tool_started_identity;
 mod tools;
 mod truncate;
 mod ui_shell_shutdown_generation;
@@ -1488,27 +1489,37 @@ fn set_cbor_text_field(arguments: &mut CborValue, field: &str, value: String) {
 }
 
 fn schedule_tool_started(
-    (mut invoke, local_tool_name): (tau_proto::ToolStarted, &tau_proto::ToolName),
+    (invoke, local_tool_name): (tau_proto::ToolStarted, &tau_proto::ToolName),
     scheduler: &WorkScheduler,
     tx: &Output,
     config: ExtConfig,
     lock_manager: DirLockManager,
     cancellation: ToolCancellationState,
     cwd_state: CwdState,
-) -> Result<(), Box<(tau_proto::ToolStarted, crate::display::ToolFailure)>> {
-    let wire_invoke = invoke.clone();
-    let tx = tx.scoped_tool(local_tool_name.clone(), invoke.tool_name.clone());
-    invoke.tool_name = local_tool_name.clone();
-    let workdir_snapshot = cwd_state.snapshot(&invoke.agent_id).map_err(|message| {
+) -> Result<
+    (),
+    Box<(
+        tool_started_identity::ToolStartedIdentity,
+        crate::display::ToolFailure,
+    )>,
+> {
+    let (identity, arguments) =
+        tool_started_identity::ToolStartedIdentity::split(invoke, local_tool_name.clone());
+    let tx = tx.scoped_tool(
+        identity.local_tool_name.clone(),
+        identity.wire_tool_name.clone(),
+    );
+    let workdir_snapshot = cwd_state.snapshot(&identity.agent_id).map_err(|message| {
         Box::new((
-            wire_invoke.clone(),
+            identity.clone(),
             path_crate_display::ToolFailure::new(message),
         ))
     })?;
-    if matches!(workdir_snapshot, WorkdirSnapshot::Invalid) && invoke.tool_name != WORKDIR_TOOL_NAME
+    if matches!(workdir_snapshot, WorkdirSnapshot::Invalid)
+        && identity.local_tool_name != WORKDIR_TOOL_NAME
     {
         return Err(Box::new((
-            wire_invoke,
+            identity,
             path_crate_display::ToolFailure::new(
                 "remembered workdir metadata is invalid; repair it with an absolute workdir path",
             ),
@@ -1516,27 +1527,28 @@ fn schedule_tool_started(
     }
     if matches!(workdir_snapshot, WorkdirSnapshot::ReplayFailed) {
         return Err(Box::new((
-            wire_invoke,
+            identity,
             path_crate_display::ToolFailure::new(
                 "workdir replay failed for this agent; reload the agent before retrying",
             ),
         )));
     }
     if matches!(workdir_snapshot, WorkdirSnapshot::Invalid) {
-        let requested = cbor_optional_text(&invoke.arguments, "path");
+        let requested = cbor_optional_text(&arguments, "path");
         if !requested
             .as_deref()
             .is_none_or(|path| Path::new(path).is_absolute())
         {
             return Err(Box::new((
-                wire_invoke,
+                identity,
                 path_crate_display::ToolFailure::new(
                     "remembered workdir metadata is invalid; repair it with an absolute workdir path",
                 ),
             )));
         }
     }
-    let invoke = match &workdir_snapshot {
+    let mut invoke = identity.clone().into_local_started(arguments);
+    invoke = match &workdir_snapshot {
         WorkdirSnapshot::Valid(cwd) => rewrite_invoke_for_cwd(invoke, cwd),
         WorkdirSnapshot::Invalid => invoke,
         WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
@@ -1550,28 +1562,28 @@ fn schedule_tool_started(
             WorkdirSnapshot::ReplayFailed => unreachable!("replay failures return above"),
         };
         let path = path_crate_tools::workdir::target_dir(&invoke.arguments, base)
-            .map_err(|failure| Box::new((wire_invoke.clone(), failure)))?;
+            .map_err(|failure| Box::new((identity.clone(), failure)))?;
         cwd_state
             .start_pending_workdir_result(
                 invoke.agent_id.clone(),
                 path,
-                wire_invoke.clone(),
+                identity.clone(),
                 None,
             )
             .map_err(|_| {
                 Box::new((
-                    wire_invoke.clone(),
+                    identity.clone(),
                     path_crate_display::ToolFailure::new(
                         "another workdir change is already pending for this agent and shell instance",
                     ),
                 ))
             })?;
-        cwd_state.mark_pending_workdir_awaiting_echo(&invoke.agent_id, &wire_invoke.call_id);
+        cwd_state.mark_pending_workdir_awaiting_echo(&invoke.agent_id, &identity.call_id);
         let path = cwd_state
-            .pending_workdir_target(&invoke.agent_id, &wire_invoke.call_id)
+            .pending_workdir_target(&invoke.agent_id, &identity.call_id)
             .expect("newly reserved workdir target");
         let mutation_id =
-            cwd_state.pending_workdir_mutation_id(&invoke.agent_id, &wire_invoke.call_id);
+            cwd_state.pending_workdir_mutation_id(&invoke.agent_id, &identity.call_id);
         if tx
             .send_checked(HarnessInputMessage::emit_transient(
                 Event::AgentMetadataSetRequest(tau_proto::AgentMetadataSet {
@@ -1586,8 +1598,8 @@ fn schedule_tool_started(
         {
             let failure =
                 path_crate_display::ToolFailure::new("failed to request workdir metadata commit");
-            if send_tool_failure(wire_invoke.clone(), failure, &tx).is_ok() {
-                cwd_state.take_pending_workdir_by_call(&wire_invoke.call_id);
+            if send_identity_failure(identity.clone(), failure, &tx).is_ok() {
+                cwd_state.take_pending_workdir_by_call(&identity.call_id);
             }
             return Ok(());
         }
@@ -1599,6 +1611,11 @@ fn schedule_tool_started(
         agent_id: Some(invoke.agent_id.clone()),
         queued_bytes: approximate_tool_bytes(&invoke, scheduler.queued_bytes_limit()),
     };
+    #[cfg(test)]
+    tool_started_identity::ownership_probe::record_queued_bytes(
+        &identity.call_id,
+        meta.queued_bytes,
+    );
     let tx_for_job = tx.clone();
     let lifecycle = cancellation.lifecycles.admit(
         invoke.call_id.clone(),
@@ -1607,7 +1624,7 @@ fn schedule_tool_started(
         tx_for_job.clone(),
     );
     let lifecycle_for_error = lifecycle.clone();
-    let invoke_for_error = wire_invoke;
+    let identity_for_error = identity;
     let cwd_state_for_error = cwd_state.clone();
     scheduler
         .enqueue(priority, meta, move || {
@@ -1672,9 +1689,9 @@ fn schedule_tool_started(
         })
         .map_err(|error| {
             lifecycle_for_error.finish();
-            cwd_state_for_error.take_pending_workdir_by_call(&invoke_for_error.call_id);
+            cwd_state_for_error.take_pending_workdir_by_call(&identity_for_error.call_id);
             Box::new((
-                invoke_for_error,
+                identity_for_error,
                 path_crate_display::ToolFailure::new(error.message),
             ))
         })
@@ -1866,16 +1883,10 @@ fn dispatch_locked_tool_invoke(
         .then_some(ShellCommandMode::visible(ShellAccessMode::ReadWrite));
 
     let lock_wait_started = Instant::now();
-    let wait_invoke = invoke.clone();
-    let wait_dirs = dirs.clone();
-    let wait_shell_command_mode = shell_command_mode;
+    let wait_progress = crate::dir_lock::waiting_progress(&invoke, &dirs, shell_command_mode);
     let wait_tx = tx.clone();
     let on_wait = move || {
-        let _ = wait_tx.report_tool_progress(crate::dir_lock::waiting_progress(
-            &wait_invoke,
-            &wait_dirs,
-            wait_shell_command_mode,
-        ));
+        let _ = wait_tx.report_tool_progress(wait_progress);
     };
     let guard = match if shell_command_mode.is_some() {
         lock_manager.acquire_auto_if_manual_covers(
@@ -1987,8 +1998,8 @@ fn send_ui_shell_saturated_failure(cmd: tau_proto::UiShellCommand, message: Stri
     ));
 }
 
-fn send_tool_failure(
-    invoke: tau_proto::ToolStarted,
+fn send_identity_failure(
+    identity: tool_started_identity::ToolStartedIdentity,
     failure: crate::display::ToolFailure,
     tx: &Output,
 ) -> tau_client::ClientResult<()> {
@@ -1999,14 +2010,22 @@ fn send_tool_failure(
     } = failure;
     tx.report_tool_terminal(Event::ToolError(tau_proto::ToolError {
         presentation: Default::default(),
-        call_id: invoke.call_id,
-        tool_name: invoke.tool_name,
+        call_id: identity.call_id,
+        tool_name: identity.wire_tool_name,
         tool_type: tau_proto::ToolType::Function,
         message,
         details: details.map(|details| *details),
         display: Some(*display),
-        originator: invoke.originator,
+        originator: identity.originator,
     }))
+}
+
+fn send_tool_failure(
+    invoke: tau_proto::ToolStarted,
+    failure: crate::display::ToolFailure,
+    tx: &Output,
+) -> tau_client::ClientResult<()> {
+    send_identity_failure(invoke.into(), failure, tx)
 }
 
 fn reported_lock_wait_duration_seconds(elapsed: Duration) -> Option<u64> {

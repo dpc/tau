@@ -19,7 +19,7 @@ use super::{
     dir_lock_tool_spec, dispatch_action_invoke, dispatch_session_agent_loaded,
     dispatch_session_started, invalid_cwd_context_event, is_shell_tool,
     publish_agent_discovery_snapshot_for, schedule_tool_started, schedule_ui_shell_command,
-    send_tool_failure, send_ui_shell_saturated_failure, with_lock_wait_duration,
+    send_identity_failure, send_ui_shell_saturated_failure, with_lock_wait_duration,
 };
 use crate::Output;
 use crate::config::ExtConfig;
@@ -314,8 +314,8 @@ impl ShellRuntime {
             self.cancellation.clone(),
             self.cwd_state.clone(),
         ) {
-            let (invoke, failure) = *error;
-            let _ = send_tool_failure(invoke, failure, &self.tx);
+            let (identity, failure) = *error;
+            let _ = send_identity_failure(identity, failure, &self.tx);
         }
         Ok(())
     }
@@ -414,12 +414,12 @@ impl ShellRuntime {
         cwd: &Path,
     ) -> tau_client::ClientResult<()> {
         if let Some(pending_workdir) = pending_workdir {
-            let call_id = pending_workdir.invoke.call_id.clone();
+            let call_id = pending_workdir.identity.call_id.clone();
             let event = if pending_workdir.cancel_requested {
                 Event::ToolCancelled(tau_proto::ToolCancelled {
                     presentation: Default::default(),
-                    call_id: pending_workdir.invoke.call_id,
-                    tool_name: pending_workdir.invoke.tool_name,
+                    call_id: pending_workdir.identity.call_id,
+                    tool_name: pending_workdir.identity.wire_tool_name,
                     tool_type: tau_proto::ToolType::Function,
                     display: None,
                 })
@@ -427,20 +427,20 @@ impl ShellRuntime {
                 let output = path_crate_tools::workdir::output(cwd);
                 Event::ToolResult(ToolResult {
                     presentation: Default::default(),
-                    call_id: pending_workdir.invoke.call_id,
-                    tool_name: pending_workdir.invoke.tool_name,
+                    call_id: pending_workdir.identity.call_id,
+                    tool_name: pending_workdir.identity.wire_tool_name,
                     tool_type: tau_proto::ToolType::Function,
                     result: output.result,
                     provider_content: Vec::new(),
                     kind: ToolResultKind::Final,
                     display: Some(output.display),
-                    originator: pending_workdir.invoke.originator,
+                    originator: pending_workdir.identity.originator,
                 })
             } else {
                 Event::ToolError(tau_proto::ToolError {
                     presentation: Default::default(),
-                    call_id: pending_workdir.invoke.call_id,
-                    tool_name: pending_workdir.invoke.tool_name,
+                    call_id: pending_workdir.identity.call_id,
+                    tool_name: pending_workdir.identity.wire_tool_name,
                     tool_type: tau_proto::ToolType::Function,
                     message: format!(
                         "committed cwd metadata did not match requested cwd; cwd changed to {}",
@@ -448,7 +448,7 @@ impl ShellRuntime {
                     ),
                     details: None,
                     display: None,
-                    originator: pending_workdir.invoke.originator,
+                    originator: pending_workdir.identity.originator,
                 })
             };
             self.tx.report_tool_terminal(with_lock_wait_duration(
@@ -526,25 +526,25 @@ impl ShellRuntime {
         pending: crate::cwd_state::CompletedPendingWorkdir,
         message: &str,
     ) -> tau_client::ClientResult<()> {
-        let call_id = pending.invoke.call_id.clone();
+        let call_id = pending.identity.call_id.clone();
         let event = if pending.cancel_requested {
             Event::ToolCancelled(tau_proto::ToolCancelled {
                 presentation: Default::default(),
-                call_id: pending.invoke.call_id,
-                tool_name: pending.invoke.tool_name,
+                call_id: pending.identity.call_id,
+                tool_name: pending.identity.wire_tool_name,
                 tool_type: tau_proto::ToolType::Function,
                 display: None,
             })
         } else {
             Event::ToolError(tau_proto::ToolError {
                 presentation: Default::default(),
-                call_id: pending.invoke.call_id,
-                tool_name: pending.invoke.tool_name,
+                call_id: pending.identity.call_id,
+                tool_name: pending.identity.wire_tool_name,
                 tool_type: tau_proto::ToolType::Function,
                 message: message.to_owned(),
                 details: None,
                 display: None,
-                originator: pending.invoke.originator,
+                originator: pending.identity.originator,
             })
         };
         self.tx.report_tool_terminal(event)?;

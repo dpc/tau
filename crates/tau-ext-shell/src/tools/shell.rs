@@ -103,6 +103,64 @@ pub(crate) fn initial_display(
     }
 }
 
+/// Build a lock-wait display without copying an unbounded command.
+pub(crate) fn bounded_lock_wait_display(
+    arguments: &CborValue,
+    command_mode: ShellCommandMode,
+    max_bytes: usize,
+) -> ToolUseState {
+    let command = borrowed_text_field(arguments, "command").unwrap_or_default();
+    let first_line = command.lines().next().unwrap_or_default();
+    const EDGE_CHARS: usize = 20;
+    let head = first_line.chars().take(EDGE_CHARS).collect::<String>();
+    let tail = first_line
+        .chars()
+        .rev()
+        .take(EDGE_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    let shortened = first_line.chars().take(EDGE_CHARS * 2 + 1).count() > EDGE_CHARS * 2;
+    let args = if shortened {
+        format!("{head}…{tail}")
+    } else {
+        first_line.to_owned()
+    };
+    let payload = (command.contains('\n') || shortened).then(|| ToolUsePayload::Text {
+        text: bounded_utf8_prefix(command, max_bytes),
+    });
+    ToolUseState {
+        args,
+        mode: command_mode.display_label().unwrap_or_default().to_owned(),
+        status: ToolUseStatus::InProgress,
+        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+        payload,
+        ..Default::default()
+    }
+}
+
+fn borrowed_text_field<'a>(arguments: &'a CborValue, field: &str) -> Option<&'a str> {
+    let CborValue::Map(entries) = arguments else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| match (key, value) {
+        (CborValue::Text(key), CborValue::Text(value)) if key == field => Some(value.as_str()),
+        _ => None,
+    })
+}
+
+fn bounded_utf8_prefix(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let mut end = max_bytes.saturating_sub(3).min(text.len());
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{}...", &text[..end])
+}
+
 /// Execute a `shell` tool call.///
 /// **Process outcome semantics.** Commands that start successfully always
 /// produce `ToolResult`, even when they exit non-zero, time out, or terminate

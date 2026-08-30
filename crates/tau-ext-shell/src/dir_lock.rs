@@ -23,6 +23,7 @@ mod fs;
 mod wake_generation;
 
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync as path_std_sync;
@@ -30,6 +31,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use tau_proto::ToolUsePayload;
 use tau_proto::{
     AgentId, CborValue, Event, ToolCallId, ToolCancelled, ToolError, ToolProgress, ToolResult,
     ToolResultKind, ToolStarted, ToolType, ToolUseState, ToolUseStatus,
@@ -45,6 +48,8 @@ use crate::argument::{argument_text, optional_argument_text};
 use crate::config::{DirLockBackendConfig, DirLockConfig};
 use crate::display::{ToolFailure, ok_display};
 use crate::tool_lifecycle::ToolLifecycle;
+#[cfg(test)]
+use crate::tool_started_identity::ownership_probe;
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, GPT_SHELL_TOOL_NAME, REPLACE_TOOL_NAME, SHELL_TOOL_NAME,
 };
@@ -1240,8 +1245,7 @@ fn dispatch_dir_lock_update(
     request: DirLockToolRequest,
     lifecycle: ToolLifecycle,
 ) {
-    let wait_invoke = invoke.clone();
-    let wait_dir = request.dir.clone();
+    let wait_progress = waiting_progress(&invoke, std::slice::from_ref(&request.dir), None);
     let wait_tx = tx.clone();
     let wait_manager = manager.clone();
     let wait_call_id = invoke.call_id.clone();
@@ -1253,7 +1257,7 @@ fn dispatch_dir_lock_update(
         invoke.agent_id.clone(),
         request.dir.clone(),
         move || {
-            let _ = wait_tx.report_tool_progress(waiting_progress(&wait_invoke, &[wait_dir], None));
+            let _ = wait_tx.report_tool_progress(wait_progress);
             if wait_lifecycle.effect_cancel_requested() {
                 wait_manager.cancel_waiting_call(&wait_call_id);
             }
@@ -1472,26 +1476,89 @@ pub(crate) fn waiting_progress(
     dirs: &[PathBuf],
     shell_command_mode: Option<path_crate_tools::shell::ShellCommandMode>,
 ) -> ToolProgress {
-    let dirs_display = display_dirs(dirs);
+    const MAX_WAIT_DISPLAY_BYTES: usize = 4096;
+    let dirs_display = bounded_dirs_display(dirs, MAX_WAIT_DISPLAY_BYTES);
     let mut display = match shell_command_mode {
-        Some(mode) => path_crate_tools::shell::initial_display(&invoke.arguments, mode),
-        None => crate::tools::initial_display(invoke).unwrap_or_else(|| ToolUseState {
-            args: dirs_display.clone(),
-            ..Default::default()
-        }),
+        Some(mode) => path_crate_tools::shell::bounded_lock_wait_display(
+            &invoke.arguments,
+            mode,
+            MAX_WAIT_DISPLAY_BYTES,
+        ),
+        None => ToolUseState::default(),
     };
     display.args = dirs_display.clone();
     display.info_chips.push("dir lock".to_owned());
     display.status = ToolUseStatus::InProgress;
     display.status_text = "waiting".to_owned();
 
-    ToolProgress {
+    let progress = ToolProgress {
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         message: Some(format!("waiting for directory lock: {dirs_display}")),
         progress: None,
         display: Some(display),
+    };
+    #[cfg(test)]
+    ownership_probe::record_wait_snapshot(&invoke.call_id, retained_wait_text_bytes(&progress));
+    progress
+}
+
+/// Format directory paths directly into one bounded UTF-8 wait label.
+pub(crate) fn bounded_dirs_display(dirs: &[PathBuf], max_bytes: usize) -> String {
+    struct BoundedText {
+        text: String,
+        limit: usize,
+        truncated: bool,
     }
+
+    impl std::fmt::Write for BoundedText {
+        fn write_str(&mut self, value: &str) -> std::fmt::Result {
+            let remaining = self.limit.saturating_sub(self.text.len());
+            if value.len() <= remaining {
+                self.text.push_str(value);
+                return Ok(());
+            }
+            let mut end = remaining.min(value.len());
+            while !value.is_char_boundary(end) {
+                end = end.saturating_sub(1);
+            }
+            self.text.push_str(&value[..end]);
+            self.truncated = true;
+            Err(std::fmt::Error)
+        }
+    }
+
+    let mut output = BoundedText {
+        text: String::with_capacity(max_bytes),
+        limit: max_bytes.saturating_sub(3),
+        truncated: false,
+    };
+    for (index, dir) in dirs.iter().enumerate() {
+        if index != 0 && output.write_str(", ").is_err() {
+            break;
+        }
+        if write!(&mut output, "{}", dir.display()).is_err() {
+            break;
+        }
+    }
+    if output.truncated {
+        output.text.push_str("...");
+    }
+    output.text
+}
+
+#[cfg(test)]
+fn retained_wait_text_bytes(progress: &ToolProgress) -> usize {
+    let message = progress.message.as_ref().map_or(0, String::len);
+    let Some(display) = &progress.display else {
+        return message;
+    };
+    message
+        + display.args.len()
+        + display.payload.as_ref().map_or(0, |payload| match payload {
+            ToolUsePayload::Text { text } => text.len(),
+            _ => 0,
+        })
 }
 /// Canonicalize `path` as an existing directory.
 pub(crate) fn canonical_existing_dir(path: &Path) -> Result<PathBuf, String> {
@@ -1504,14 +1571,6 @@ pub(crate) fn canonical_existing_dir(path: &Path) -> Result<PathBuf, String> {
         return Err(format!("{} is not a directory", canonical.display()));
     }
     Ok(canonical)
-}
-
-/// Return a stable human-readable lock directory list.
-pub(crate) fn display_dirs(dirs: &[PathBuf]) -> String {
-    dirs.iter()
-        .map(|dir| dir.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Canonical write-target lock directory, following the final symlink chain

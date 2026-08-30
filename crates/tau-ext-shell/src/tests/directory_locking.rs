@@ -1,6 +1,7 @@
 //! Tests for directory locking behavior.
 
 use super::*;
+use crate::tool_started_identity::ownership_probe;
 
 #[cfg(unix)]
 #[test]
@@ -2517,11 +2518,15 @@ fn dir_lock_waiting_progress_preserves_shell_mode() {
     let Event::ToolStarted(invoke) = tool_started(
         "blocked-shell",
         SHELL_TOOL_NAME,
-        cbor_text_map(vec![("command", "printf hello")]),
+        cbor_text_map(vec![(
+            "command",
+            &format!("printf hello\n# {}", "x".repeat(1024 * 1024)),
+        )]),
         "agent-b",
     ) else {
         panic!("expected tool started");
     };
+    ownership_probe::start("blocked-shell");
     let progress = crate::dir_lock::waiting_progress(
         &invoke,
         &[tempdir.path().to_path_buf()],
@@ -2536,6 +2541,131 @@ fn dir_lock_waiting_progress_preserves_shell_mode() {
     assert_eq!(display.info_chips, vec!["dir lock"]);
     assert_eq!(display.status, ToolUseStatus::InProgress);
     assert_eq!(display.status_text, "waiting");
+    let tau_proto::ToolUsePayload::Text { text } = display.payload.expect("command payload") else {
+        panic!("expected text payload");
+    };
+    assert!(text.len() <= 4096);
+    let work = ownership_probe::finish("blocked-shell");
+    assert!(work.lock_wait_snapshot_bytes <= 12_320);
+}
+
+/// Directory wait labels stream many multibyte paths directly into their cap
+/// without splitting UTF-8 or first materializing the full join.
+#[test]
+fn directory_wait_display_bounds_many_unicode_paths() {
+    let dirs = (0..100)
+        .map(|index| PathBuf::from(format!("/tmp/{index}/{}", "🦀".repeat(100))))
+        .collect::<Vec<_>>();
+    let display = crate::dir_lock::bounded_dirs_display(&dirs, 4096);
+    assert!(display.len() <= 4096);
+    assert!(display.ends_with("..."));
+    assert!(std::str::from_utf8(display.as_bytes()).is_ok());
+}
+
+/// Drives real admission, scheduler, alias scoping, and automatic lock waiting
+/// with 1–8 MiB commands; the queued payload must move without a deep clone and
+/// the independently retained wait snapshot must remain bounded.
+#[test]
+fn large_prefixed_edit_lock_wait_moves_one_payload_and_bounds_progress() {
+    for mib in [1, 2, 4, 8] {
+        let tempdir = TempDir::new().expect("tempdir");
+        let canonical = tempdir.path().canonicalize().expect("canonical tempdir");
+        let path = canonical.join("large.txt");
+        fs::write(&path, "before").expect("seed edit target");
+        let call_id = format!("large-lock-wait-{mib}");
+        let agent_id = tau_proto::AgentId::parse("large-wait-agent").expect("agent id");
+        let blocker_agent = tau_proto::AgentId::parse("large-wait-blocker").expect("agent id");
+        let lock_manager = DirLockManager::default();
+        let blocker = lock_manager
+            .acquire_auto(
+                tau_proto::ToolCallId::new(format!("blocker-{mib}")),
+                blocker_agent,
+                vec![canonical.clone()],
+                || {},
+            )
+            .expect("blocking lock");
+        let scheduler = WorkScheduler::new(crate::scheduler::SchedulerConfig {
+            queued_bytes_limit: 16 * 1024 * 1024,
+            control_workers: 0,
+            user_workers: 0,
+            cheap_workers: 0,
+            general_workers: 1,
+            ..Default::default()
+        });
+        let (tx, rx) = path_std_sync::mpsc::channel();
+        let output = Output::channel(tx);
+        let mut config = ExtConfig::default();
+        config.dir_lock.enable = true;
+        let cwd_state = CwdState::new_with_startup_cwd(canonical.clone());
+        let invoke = tau_proto::ToolStarted {
+            invocation_policy: Default::default(),
+            call_id: tau_proto::ToolCallId::new(&call_id),
+            tool_name: tau_proto::ToolName::new("prefix_replace"),
+            arguments: replace_arguments(
+                &path,
+                "before",
+                &format!("after{}", "x".repeat(mib * 1024 * 1024)),
+            ),
+            agent_id,
+            originator: tau_proto::PromptOriginator::User,
+        };
+        ownership_probe::start(&call_id);
+        schedule_tool_started(
+            (invoke, &tau_proto::ToolName::new(REPLACE_TOOL_NAME)),
+            &scheduler,
+            &output,
+            config,
+            lock_manager.clone(),
+            ToolCancellationState::default(),
+            cwd_state,
+        )
+        .expect("large shell scheduled");
+
+        let progress = loop {
+            let HarnessInputMessage::Emit(progress) = rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("waiting progress")
+            else {
+                continue;
+            };
+            if let Event::ToolProgressReported(progress) = *progress.event
+                && progress
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.starts_with("waiting for directory lock"))
+            {
+                break progress;
+            }
+        };
+        assert_eq!(progress.tool_name.as_str(), "prefix_replace");
+        let display = progress.display.expect("waiting display");
+        assert!(display.args.len() <= 4096);
+        if let Some(tau_proto::ToolUsePayload::Text { text }) = display.payload {
+            assert!(text.len() <= 4096, "wait payload bytes={}", text.len());
+        }
+
+        assert!(lock_manager.cancel_waiting_call(&tau_proto::ToolCallId::new(&call_id)));
+        drop(blocker);
+        drop(scheduler);
+        let work = ownership_probe::finish(&call_id);
+        assert_eq!(work.argument_clones, 0);
+        assert_eq!(work.identity_clones, 1);
+        assert_eq!(work.ingress_text_ptr, work.execution_text_ptr);
+        assert!(mib * 1024 * 1024 <= work.queued_argument_bytes);
+        assert!(work.lock_wait_snapshot_bytes <= 12_320);
+
+        let terminal = rx
+            .try_iter()
+            .find_map(|message| match message {
+                HarnessInputMessage::Emit(emit) => match *emit.event {
+                    Event::ToolCancelledReported(cancelled) => Some(cancelled),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("cancelled terminal");
+        assert_eq!(terminal.tool_name.as_str(), "prefix_replace");
+    }
 }
 
 #[test]

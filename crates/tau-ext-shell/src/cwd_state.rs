@@ -38,8 +38,8 @@ struct PendingWorkdirResult {
     mutation_id: tau_proto::AgentMetadataMutationId,
     /// Canonical path requested by the setter.
     expected_cwd: PathBuf,
-    /// Original tool call retained until the commit boundary.
-    invoke: tau_proto::ToolStarted,
+    /// Argument-free wire/local identity retained until the commit boundary.
+    identity: crate::tool_started_identity::ToolStartedIdentity,
     /// Lock wait metadata retained for the terminal event.
     lock_wait_duration_seconds: Option<u64>,
     /// Whether the metadata request has been emitted.
@@ -52,8 +52,8 @@ struct PendingWorkdirResult {
 /// reservation remains retained until checked terminal publication succeeds.
 #[derive(Clone)]
 pub(crate) struct CompletedPendingWorkdir {
-    /// Original invocation retained after the metadata linearization point.
-    pub(crate) invoke: tau_proto::ToolStarted,
+    /// Argument-free identity retained after the metadata linearization point.
+    pub(crate) identity: crate::tool_started_identity::ToolStartedIdentity,
     /// Optional directory-lock wait duration preserved for the terminal event.
     pub(crate) lock_wait_duration_seconds: Option<u64>,
     /// Whether the committed path equals the setter's requested canonical path.
@@ -388,15 +388,16 @@ impl CwdState {
         &self,
         agent_id: tau_proto::AgentId,
         expected_cwd: PathBuf,
-        invoke: tau_proto::ToolStarted,
+        identity: impl Into<crate::tool_started_identity::ToolStartedIdentity>,
         lock_wait_duration_seconds: Option<u64>,
-    ) -> Result<(), Box<tau_proto::ToolStarted>> {
+    ) -> Result<(), Box<crate::tool_started_identity::ToolStartedIdentity>> {
+        let identity = identity.into();
         let mut pending = self
             .pending_workdir_by_agent
             .lock()
             .expect("workdir setter map lock poisoned");
         if pending.contains_key(&agent_id) {
-            return Err(Box::new(invoke));
+            return Err(Box::new(identity));
         }
         pending.insert(
             agent_id,
@@ -413,7 +414,7 @@ impl CwdState {
                     .expect("fixed-size mutation id is valid")
                 },
                 expected_cwd,
-                invoke,
+                identity,
                 lock_wait_duration_seconds,
                 awaiting_echo: false,
                 cancel_requested: false,
@@ -432,7 +433,7 @@ impl CwdState {
             .lock()
             .expect("workdir setter map lock poisoned")
             .get(agent_id)
-            .filter(|pending| &pending.invoke.call_id == call_id)
+            .filter(|pending| &pending.identity.call_id == call_id)
             .map(|pending| pending.mutation_id.clone())
     }
 
@@ -450,7 +451,7 @@ impl CwdState {
         let Some(pending) = pending.get_mut(agent_id) else {
             return false;
         };
-        if &pending.invoke.call_id != call_id {
+        if &pending.identity.call_id != call_id {
             return false;
         }
         pending.awaiting_echo = true;
@@ -467,7 +468,7 @@ impl CwdState {
             .lock()
             .expect("workdir setter map lock poisoned")
             .get(agent_id)
-            .filter(|pending| &pending.invoke.call_id == call_id)
+            .filter(|pending| &pending.identity.call_id == call_id)
             .map(|pending| pending.expected_cwd.clone())
     }
 
@@ -490,7 +491,7 @@ impl CwdState {
         Some(CompletedPendingWorkdir {
             matched_request: pending.expected_cwd == *committed_cwd,
             cancel_requested: pending.cancel_requested,
-            invoke: pending.invoke.clone(),
+            identity: pending.identity.clone(),
             lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
         })
     }
@@ -513,7 +514,7 @@ impl CwdState {
         Some(CompletedPendingWorkdir {
             matched_request: false,
             cancel_requested: pending.cancel_requested,
-            invoke: pending.invoke.clone(),
+            identity: pending.identity.clone(),
             lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
         })
     }
@@ -531,7 +532,7 @@ impl CwdState {
         Some(CompletedPendingWorkdir {
             matched_request: false,
             cancel_requested: pending.cancel_requested,
-            invoke: pending.invoke,
+            identity: pending.identity,
             lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
         })
     }
@@ -546,13 +547,13 @@ impl CwdState {
             .lock()
             .expect("workdir setter map lock poisoned");
         let agent_id = pending.iter().find_map(|(agent_id, item)| {
-            (&item.invoke.call_id == call_id).then(|| agent_id.clone())
+            (&item.identity.call_id == call_id).then(|| agent_id.clone())
         })?;
         let pending = pending.remove(&agent_id)?;
         Some(CompletedPendingWorkdir {
             matched_request: false,
             cancel_requested: pending.cancel_requested,
-            invoke: pending.invoke,
+            identity: pending.identity,
             lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
         })
     }
@@ -566,7 +567,7 @@ impl CwdState {
             .map(|(_, pending)| CompletedPendingWorkdir {
                 matched_request: false,
                 cancel_requested: pending.cancel_requested,
-                invoke: pending.invoke,
+                identity: pending.identity,
                 lock_wait_duration_seconds: pending.lock_wait_duration_seconds,
             })
             .collect()
@@ -580,7 +581,7 @@ impl CwdState {
             .expect("workdir setter map lock poisoned");
         let Some(item) = pending
             .values_mut()
-            .find(|item| &item.invoke.call_id == call_id && item.awaiting_echo)
+            .find(|item| &item.identity.call_id == call_id && item.awaiting_echo)
         else {
             return false;
         };

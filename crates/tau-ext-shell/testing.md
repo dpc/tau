@@ -103,6 +103,9 @@ running-work joins, and cancellation after search work starts. Deterministic
 handoff barriers also cancel after scheduler dequeue and after automatic-lock
 acquisition but before effect start; both regressions require no mutation and
 exactly one cancelled terminal.
+Large-argument ownership regressions use 1–8 MiB shell and edit calls to require
+one queued payload allocation, argument-free error/workdir correlation, bounded
+lock-wait snapshots, and unchanged local-to-wire terminal names.
 
 ## Discovery
 
