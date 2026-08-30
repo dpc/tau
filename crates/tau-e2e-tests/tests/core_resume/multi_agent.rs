@@ -27,7 +27,9 @@ use terminal_oracles::*;
 use super::gate_fixture::GateFixture;
 use super::headless_process::HeadlessProcess;
 use super::observer::SideObserver;
-use super::pty_process::{PtyArtifacts, PtyProcess, PtyReadGeneration, TerminalSize};
+use super::pty_process::{
+    PtyArtifacts, PtyProcess, PtyReadGeneration, TerminalSize, VtStyledFrame,
+};
 use super::{DEADLINE, FAKE_PROVIDER, discover_daemon};
 
 const HARNESS_DAEMON: &str = env!("CARGO_BIN_EXE_tau-e2e-harness-daemon");
@@ -230,16 +232,31 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
         &identities,
         deadline,
     )?;
+    let second_main_switch = second.read_generation()?;
     second.send_line(&format!(":agent switch {}", identities.main))?;
-    second.wait_ready_for(identities.main.as_str(), deadline)?;
+    let second_main = second.wait_for_styled_frame_after(
+        second_main_switch,
+        identities.main.as_str(),
+        deadline,
+        |frame| assert_transcript_rows(frame, &identities.main, &identities).is_ok(),
+    )?;
+    let second_style_before = second_main.styles;
+    let first_agent_status = first.read_generation()?;
     first.send_line(":agent")?;
-    let first_still_worker =
-        first.wait_for(&format!("current: {}", identities.worker), deadline)?;
+    let first_worker = first.wait_for_styled_frame_after(
+        first_agent_status,
+        identities.worker.as_str(),
+        deadline,
+        |frame| {
+            frame.contains(&format!("current: {}", identities.worker))
+                && assert_transcript_rows(frame, &identities.worker, &identities).is_ok()
+        },
+    )?;
+    let first_still_worker = first_worker.frame;
     assert_transcript_rows(&first_still_worker, &identities.worker, &identities)?;
 
     const SECOND_THEME_NOTICE: &str = "theme set to `tau-dpc` for this UI";
-    let second_style_before = second.marker_styles(identities.main.as_str())?;
-    let first_style_before = first.marker_styles(identities.worker.as_str())?;
+    let first_style_before = first_worker.styles;
     second.send_line(":theme tau-dpc")?;
     let second_themed = second.wait_for(SECOND_THEME_NOTICE, deadline)?;
     assert_transcript_rows(&second_themed, &identities.main, &identities)?;
@@ -249,30 +266,51 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
         deadline,
     )?;
     assert_transcript_rows(&second_theme_change.frame, &identities.main, &identities)?;
-    let first_after_local_repaint =
-        repaint_barrier(&mut first, "first-theme-retention-barrier", deadline)?;
-    assert_transcript_rows(&first_after_local_repaint, &identities.worker, &identities)?;
-    if first_after_local_repaint.contains(SECOND_THEME_NOTICE)
-        || first.marker_styles(identities.worker.as_str())? != first_style_before
+    let first_after_local_repaint = styled_repaint_barrier(
+        &mut first,
+        "first-theme-retention-barrier",
+        &identities.worker,
+        &identities,
+        deadline,
+    )?;
+    assert_transcript_rows(
+        &first_after_local_repaint.frame,
+        &identities.worker,
+        &identities,
+    )?;
+    if first_after_local_repaint
+        .frame
+        .contains(SECOND_THEME_NOTICE)
+        || first_after_local_repaint.styles != first_style_before
     {
         return Err("attached UI theme or notice leaked into the owning UI".into());
     }
-    if second.marker_styles(identities.main.as_str())? != second_theme_change.styles {
+    let second_stable_theme = styled_repaint_barrier(
+        &mut second,
+        "second-theme-stability-barrier",
+        &identities.main,
+        &identities,
+        deadline,
+    )?;
+    if second_stable_theme.styles != second_theme_change.styles {
         return Err("peer repaint changed the themed UI's stable-row style".into());
     }
 
     let before_worker_switch = second.read_generation()?;
     second.send_line(&format!(":agent switch {}", identities.worker))?;
-    let second_worker_wide =
-        second.wait_for_frame_after(before_worker_switch, deadline, |frame| {
-            assert_worker_size_projection(frame, &identities.worker, &identities).is_ok()
-        })?;
+    let second_worker_wide = second.wait_for_styled_frame_after(
+        before_worker_switch,
+        identities.worker.as_str(),
+        deadline,
+        |frame| assert_worker_size_projection(frame, &identities.worker, &identities).is_ok(),
+    )?;
     let second_worker_projection =
-        assert_worker_size_projection(&second_worker_wide, &identities.worker, &identities)?;
-    let second_worker_style = second.marker_styles(identities.worker.as_str())?;
+        assert_worker_size_projection(&second_worker_wide.frame, &identities.worker, &identities)?;
+    let second_worker_style = second_worker_wide.styles;
     let narrow_prompt_prefix =
         "You were started by an agent `main`. Your responses will be delivered to it.";
     if !second_worker_wide
+        .frame
         .lines()
         .any(|line| line.contains(narrow_prompt_prefix))
     {
@@ -280,11 +318,21 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
     }
     first.send_line(&format!(":agent switch {}", identities.main))?;
     first.wait_ready_for(identities.main.as_str(), deadline)?;
+    let first_before_agent_status = first.read_generation()?;
     first.send_line(":agent")?;
-    let first_before_resize = first.wait_for(&format!("current: {}", identities.main), deadline)?;
+    let first_status = first.wait_for_styled_frame_after(
+        first_before_agent_status,
+        identities.main.as_str(),
+        deadline,
+        |frame| {
+            frame.contains(&format!("current: {}", identities.main))
+                && assert_transcript_rows(frame, &identities.main, &identities).is_ok()
+        },
+    )?;
+    let first_before_resize = first_status.frame;
     let first_main_rows =
         assert_transcript_rows(&first_before_resize, &identities.main, &identities)?;
-    let first_main_style = first.marker_styles(identities.main.as_str())?;
+    let first_main_style = first_status.styles;
     const WIDE_AGENT_USAGE: &str =
         ":agent <new|switch|suspend|resume|auto|name> [agent_id]; current: main; active: 1; known:";
     if !first_before_resize
@@ -300,44 +348,58 @@ fn attached_public_terminals_isolate_local_presentation() -> Result<(), Box<dyn 
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect::<String>();
-    let second_narrow = second.wait_for_frame_after(before_resize, deadline, |frame| {
-        let compact = frame
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect::<String>();
-        compact.contains(&prefix_compact)
-            && !frame
-                .lines()
-                .any(|line| line.contains(narrow_prompt_prefix))
-            && assert_worker_size_projection(frame, &identities.worker, &identities).is_ok()
-    })?;
+    let second_narrow = second.wait_for_styled_frame_after(
+        before_resize,
+        identities.worker.as_str(),
+        deadline,
+        |frame| {
+            let compact = frame
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            compact.contains(&prefix_compact)
+                && !frame
+                    .lines()
+                    .any(|line| line.contains(narrow_prompt_prefix))
+                && assert_worker_size_projection(frame, &identities.worker, &identities).is_ok()
+        },
+    )?;
     let narrow_projection =
-        assert_worker_size_projection(&second_narrow, &identities.worker, &identities)?;
+        assert_worker_size_projection(&second_narrow.frame, &identities.worker, &identities)?;
     if second_worker_projection != narrow_projection {
         return Err(
             format!("72x24 projection changed worker semantics: {narrow_projection:?}").into(),
         );
     }
-    if second.marker_styles(identities.worker.as_str())? != second_worker_style {
+    if second_narrow.styles != second_worker_style {
         return Err("72x24 resize changed the selected worker's critical status style".into());
     }
-    let first_after_peer_resize =
-        repaint_barrier(&mut first, "wide-peer-resize-barrier", deadline)?;
-    let first_rows_after_resize =
-        assert_transcript_rows(&first_after_peer_resize, &identities.main, &identities)?;
+    let first_after_peer_resize = styled_repaint_barrier(
+        &mut first,
+        "wide-peer-resize-barrier",
+        &identities.main,
+        &identities,
+        deadline,
+    )?;
+    let first_rows_after_resize = assert_transcript_rows(
+        &first_after_peer_resize.frame,
+        &identities.main,
+        &identities,
+    )?;
     if first_main_rows != first_rows_after_resize {
         return Err("peer resize changed the 120x40 main transcript projection".into());
     }
     if !first_after_peer_resize
+        .frame
         .lines()
         .any(|line| line.contains(WIDE_AGENT_USAGE))
     {
         return Err("peer resize changed the 120x40 unwrapped status signature".into());
     }
-    if first.marker_styles(identities.main.as_str())? != first_main_style {
+    if first_after_peer_resize.styles != first_main_style {
         return Err("peer resize changed the 120x40 selected-main critical status".into());
     }
-    let first_final_frame = first_after_peer_resize;
+    let first_final_frame = first_after_peer_resize.frame;
 
     let post_presentation_roster =
         observer.roster(&session_id, SessionAgentListScope::Current, deadline)?;
@@ -424,6 +486,27 @@ fn repaint_barrier(
     let generation = terminal.read_generation()?;
     terminal.send_backspaces(canary.len())?;
     terminal.wait_for_absence_after(canary, generation, deadline)
+}
+
+/// Completes one repaint and returns its transcript and selected-row styles
+/// from the same VT observation.
+fn styled_repaint_barrier(
+    terminal: &mut PtyProcess,
+    canary: &str,
+    agent_id: &AgentId,
+    identities: &Identities,
+    deadline: Instant,
+) -> Result<VtStyledFrame, Box<dyn std::error::Error>> {
+    if !canary.is_ascii() {
+        return Err("editor repaint canary must be ASCII".into());
+    }
+    terminal.send_text(canary)?;
+    terminal.wait_for(canary, deadline)?;
+    let generation = terminal.read_generation()?;
+    terminal.send_backspaces(canary.len())?;
+    terminal.wait_for_styled_frame_after(generation, agent_id.as_str(), deadline, |frame| {
+        !frame.contains(canary) && assert_transcript_rows(frame, agent_id, identities).is_ok()
+    })
 }
 
 /// Waits for a newer selected-worker frame with its exact compact idle row and

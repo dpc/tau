@@ -52,8 +52,8 @@ pub(super) struct VtCellStyle {
     bold: bool,
 }
 
-/// One atomic observation of a selected-agent status-row style transition.
-pub(super) struct VtStyleChange {
+/// One atomic observation of a complete frame and its selected-agent styles.
+pub(super) struct VtStyledFrame {
     /// Styles extracted from the exact frame below.
     pub(super) styles: Vec<VtCellStyle>,
     /// Normalized semantic VT frame that supplied `styles`.
@@ -342,15 +342,22 @@ impl PtyProcess {
         wait_for_complete_frame_after(&self.capture, generation, deadline, is_complete)
     }
 
-    /// Returns styles from the unique selected-agent status row.
-    ///
-    /// `marker` must be ASCII because byte columns map directly to VT cells.
-    pub(super) fn marker_styles(
+    /// Waits for one newer complete frame and extracts its selected-row styles
+    /// from the same locked VT observation.
+    pub(super) fn wait_for_styled_frame_after(
         &self,
+        generation: PtyReadGeneration,
         marker: &str,
-    ) -> Result<Vec<VtCellStyle>, Box<dyn std::error::Error>> {
-        let capture = self.capture.0.lock().map_err(|_| "PTY capture poisoned")?;
-        selected_agent_status_styles(&capture.parser, marker)
+        deadline: Instant,
+        is_complete: impl Fn(&str) -> bool,
+    ) -> Result<VtStyledFrame, Box<dyn std::error::Error>> {
+        wait_for_complete_styled_frame_after(
+            &self.capture,
+            generation,
+            marker,
+            deadline,
+            is_complete,
+        )
     }
 
     /// Waits until an exact visible marker's VT styles differ from `previous`.
@@ -359,7 +366,7 @@ impl PtyProcess {
         marker: &str,
         previous: &[VtCellStyle],
         deadline: Instant,
-    ) -> Result<VtStyleChange, Box<dyn std::error::Error>> {
+    ) -> Result<VtStyledFrame, Box<dyn std::error::Error>> {
         if !marker.is_ascii() {
             return Err("selected-agent style marker must be ASCII".into());
         }
@@ -369,7 +376,7 @@ impl PtyProcess {
             if let Ok(styles) = selected_agent_status_styles(&capture.parser, marker)
                 && styles != previous
             {
-                return Ok(VtStyleChange {
+                return Ok(VtStyledFrame {
                     styles,
                     frame: normalized_screen(&capture.parser),
                 });
@@ -612,6 +619,40 @@ fn wait_for_complete_frame_after(
         if remaining.is_zero() || capture.closed {
             return Err(format!(
                 "timed out waiting for complete newer frame; last frame:\n{frame}"
+            )
+            .into());
+        }
+        let (next, _) = wake
+            .wait_timeout(capture, remaining)
+            .map_err(|_| "PTY capture poisoned")?;
+        capture = next;
+    }
+}
+
+fn wait_for_complete_styled_frame_after(
+    capture: &Arc<(Mutex<Capture>, Condvar)>,
+    generation: PtyReadGeneration,
+    marker: &str,
+    deadline: Instant,
+    is_complete: impl Fn(&str) -> bool,
+) -> Result<VtStyledFrame, Box<dyn std::error::Error>> {
+    if !marker.is_ascii() {
+        return Err("selected-agent style marker must be ASCII".into());
+    }
+    let (lock, wake) = &**capture;
+    let mut capture = lock.lock().map_err(|_| "PTY capture poisoned")?;
+    loop {
+        let frame = normalized_screen(&capture.parser);
+        if generation < capture.generation
+            && is_complete(&frame)
+            && let Ok(styles) = selected_agent_status_styles(&capture.parser, marker)
+        {
+            return Ok(VtStyledFrame { styles, frame });
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || capture.closed {
+            return Err(format!(
+                "timed out waiting for complete newer styled frame; last frame:\n{frame}"
             )
             .into());
         }
@@ -914,17 +955,19 @@ fn bytewise_capture_latches_pending_before_backspace_overwrite() {
     assert!(capture.tool_violation.is_some());
 }
 
-/// Ensures complete-frame waiting rejects an idle-only redraw before accepting
-/// the subsequent redraw with the selected-agent status row.
+/// Ensures complete styled-frame waiting rejects an idle-only redraw before
+/// atomically accepting the subsequent selected-agent status row.
 #[test]
 fn complete_frame_wait_rejects_idle_only_generation() {
     let mut command = Command::new("sh");
     command.arg("-c").arg(
         "read first; \
-         printf 'This active-auto agent is idle'; \
+         printf 'This active-auto agent is idle phase-one'; \
          read second; \
+         printf ' phase-two'; \
+         read third; \
          printf '\\r\\n@worker $.00/$.00'; \
-         read third",
+         read fourth",
     );
     let mut process = PtyProcess::spawn(command, false, None).expect("spawn fragmented redraw");
     let mut writer = process
@@ -936,16 +979,23 @@ fn complete_frame_wait_rejects_idle_only_generation() {
     let before_idle = process.read_generation().expect("read initial generation");
     let capture = Arc::clone(&process.capture);
     let (result_tx, result_rx) = mpsc::channel();
+    let (evaluated_tx, evaluated_rx) = mpsc::channel();
 
     thread::scope(|scope| {
         scope.spawn(|| {
-            let result = wait_for_complete_frame_after(
+            let result = wait_for_complete_styled_frame_after(
                 &capture,
                 before_idle,
+                "worker",
                 Instant::now() + Duration::from_secs(1),
                 |frame| {
-                    frame.contains("This active-auto agent is idle")
-                        && frame.lines().any(|line| line.contains("@worker "))
+                    if frame.contains("This active-auto agent is idle") {
+                        let phase = u8::from(frame.contains("phase-two")) + 1;
+                        evaluated_tx.send(phase).expect("report evaluated phase");
+                        true
+                    } else {
+                        false
+                    }
                 },
             )
             .map_err(|error| error.to_string());
@@ -954,29 +1004,48 @@ fn complete_frame_wait_rejects_idle_only_generation() {
         writer.write_all(b"first\r").expect("release idle redraw");
         writer.flush().expect("flush idle redraw release");
         process
-            .wait_for(
-                "This active-auto agent is idle",
-                Instant::now() + Duration::from_secs(1),
-            )
+            .wait_for("phase-one", Instant::now() + Duration::from_secs(1))
             .expect("observe idle-only redraw");
+        while evaluated_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("waiter evaluated phase one")
+            != 1
+        {}
+        writer
+            .write_all(b"second\r")
+            .expect("release second idle-only redraw");
+        writer
+            .flush()
+            .expect("flush second idle-only redraw release");
+        while evaluated_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("waiter evaluated phase two")
+            != 2
+        {}
         assert!(matches!(
             result_rx.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
         writer
-            .write_all(b"second\r")
+            .write_all(b"third\r")
             .expect("release selected status redraw");
         writer
             .flush()
             .expect("flush selected status redraw release");
-        let frame = result_rx
+        let observation = result_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("complete frame result")
             .expect("complete selected status frame");
-        assert!(frame.contains("This active-auto agent is idle"));
-        assert!(frame.lines().any(|line| line.contains("@worker ")));
+        assert!(observation.frame.contains("This active-auto agent is idle"));
+        assert!(
+            observation
+                .frame
+                .lines()
+                .any(|line| line.contains("@worker "))
+        );
+        assert_eq!(observation.styles.len(), "worker".len());
         writer
-            .write_all(b"third\r")
+            .write_all(b"fourth\r")
             .expect("release selected status process");
         writer
             .flush()
