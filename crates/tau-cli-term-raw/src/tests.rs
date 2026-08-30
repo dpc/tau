@@ -1539,6 +1539,73 @@ fn take_output_snapshot_transfers_visible_allocations_without_cloning() {
     assert_eq!(state.layout.history.as_ptr(), history_pointer);
 }
 
+/// Replacing one stored block must finish the map mutation before the old
+/// allocation reaches the drop probe, and the probe itself checks that neither
+/// terminal lock remains held.
+#[test]
+fn set_block_retires_replaced_content_after_terminal_locks() {
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(std::io::sink()), CursorShape::Bar);
+    let block_id = handle.new_block("replace", plain_block("old content"));
+    let probes_before = handle.retirement_probe_count();
+
+    handle.set_block(block_id, plain_block("new content"));
+
+    assert_eq!(handle.retirement_probe_count(), probes_before + 1);
+    assert_eq!(
+        handle
+            .lock()
+            .layout
+            .blocks
+            .get(&block_id)
+            .expect("replacement must remain installed"),
+        &plain_block("new content")
+    );
+}
+
+/// Nested output transactions must retain a removed block until the outer
+/// transaction releases its lock, while completing all map and zone bookkeeping
+/// before that deferred drop.
+#[test]
+fn remove_block_retires_content_after_outer_output_transaction() {
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(std::io::sink()), CursorShape::Bar);
+    let block_id = handle.new_block("remove", plain_block("removed content"));
+    handle.push_history(block_id);
+    let probes_before = handle.retirement_probe_count();
+
+    handle.with_output_transaction(|| {
+        handle.remove_block(block_id);
+        assert_eq!(handle.retirement_probe_count(), probes_before);
+        let state = handle.lock();
+        assert!(!state.layout.blocks.contains_key(&block_id));
+        assert!(!state.layout.history.contains(&block_id));
+    });
+
+    assert_eq!(handle.retirement_probe_count(), probes_before + 1);
+}
+
+/// Clearing output must install the complete empty snapshot and release redraw
+/// bookkeeping before the displaced block map reaches the post-lock drop probe.
+#[test]
+fn clear_output_retires_displaced_snapshot_after_terminal_locks() {
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(std::io::sink()), CursorShape::Bar);
+    let first = handle.new_block("first", plain_block("first"));
+    let second = handle.new_block("second", plain_block("second"));
+    handle.push_history(first);
+    handle.push_above_active(second);
+    let probes_before = handle.retirement_probe_count();
+
+    handle.clear_output();
+
+    assert_eq!(handle.retirement_probe_count(), probes_before + 1);
+    let state = handle.lock();
+    assert!(state.layout.blocks.is_empty());
+    assert!(state.layout.history.is_empty());
+    assert!(state.layout.above_active.is_empty());
+}
+
 /// Detached snapshot mutation must preserve the same block identities, content,
 /// and zone semantics as applying the equivalent operations through a terminal
 /// handle. The CLI relies on this parity before materializing on selection.
@@ -7056,7 +7123,7 @@ fn queued_active_removal_skips_long_history_when_membership_is_absent() {
     st.layout.above_active.push(active);
     st.layout.history_removal_scan_entries = 0;
 
-    assert!(st.remove_block(active, true));
+    assert!(st.remove_block(active, true).0);
     assert_eq!(
         st.layout.history_removal_scan_entries, 0,
         "history membership must prevent scanning an unrelated long transcript"
@@ -7098,7 +7165,7 @@ fn history_removal_uses_first_changed_suffix_for_all_placements_and_duplicates()
         assert_eq!(cache.refresh(&mut st), HISTORY_LEN, "{name}");
         st.layout.history_removal_scan_entries = 0;
 
-        assert!(st.remove_block(target, true), "{name}");
+        assert!(st.remove_block(target, true).0, "{name}");
         let first_removed = positions[0];
         let expected_history: Vec<_> = (0..HISTORY_LEN)
             .filter(|index| !positions.contains(index))
@@ -7202,7 +7269,7 @@ fn randomized_block_removal_matches_reference_model() {
                     || reference.suggestions.contains(&id)
                     || reference.below.contains(&id);
                 reference.remove_block(id);
-                assert_eq!(st.remove_block(id, true), expected_delta, "step {step}");
+                assert_eq!(st.remove_block(id, true).0, expected_delta, "step {step}");
             }
         }
 
@@ -7255,7 +7322,7 @@ fn benchmark_queued_active_removal_history_membership_scaling() {
         st.layout.history_removal_scan_entries = 0;
         let started = path_std_time::Instant::now();
 
-        assert!(st.remove_block(active, true));
+        assert!(st.remove_block(active, true).0);
         let cache_entries_relaid = cache.refresh(&mut st);
         eprintln!(
             "queued active removal benchmark: history_entries={history_len} history_scan_entries={} cache_entries_relaid={cache_entries_relaid} previous_history_scan_entries={history_len} elapsed={:?}; no timing threshold",

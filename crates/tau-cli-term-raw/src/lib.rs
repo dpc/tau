@@ -394,9 +394,10 @@ impl SharedState {
     }
 
     /// Removes one block and every one of its rendered-zone references.
-    fn remove_block(&mut self, id: BlockId, observe_delta: bool) -> bool {
+    fn remove_block(&mut self, id: BlockId, observe_delta: bool) -> (bool, Option<StyledBlock>) {
         let presentation_changed = observe_delta && self.block_is_visible(id);
-        let existed = self.layout.blocks.remove(&id).is_some();
+        let removed_block = self.layout.blocks.remove(&id);
+        let existed = removed_block.is_some();
         let debug_id = self.layout.block_debug_ids.remove(&id);
 
         // `history_refs` is the authoritative membership index. Queued/live
@@ -432,7 +433,7 @@ impl SharedState {
         remove_all_from_zone(&mut self.layout.suggestions, id);
         remove_all_from_zone(&mut self.layout.below, id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, ?debug_id, existed, "remove block");
-        presentation_changed
+        (presentation_changed, removed_block)
     }
 
     fn current_snapshot(&self) -> PromptSnapshot {
@@ -1177,11 +1178,63 @@ pub struct TermHandle {
     /// Number of asynchronous redraw notifications released by this handle.
     #[cfg(feature = "redraw-test-counter")]
     redraw_request_count: Arc<path_std_sync::atomic::AtomicU64>,
+    /// Number of retired styled-block owners observed after lock release.
+    #[cfg(test)]
+    retirement_probe_count: Arc<path_std_sync_atomic::AtomicU64>,
 }
 
 thread_local! {
     static HELD_OUTPUT_TRANSACTIONS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+    #[cfg(test)]
+    static HELD_SHARED_STATES: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+    static RETIRED_STYLED_BLOCKS: RefCell<HashMap<usize, Vec<RetiredStyledBlocks>>> =
+        RefCell::new(HashMap::new());
 }
+
+/// Shared terminal state guard with thread-local lock-state tracking.
+#[cfg(test)]
+struct SharedStateGuard<'a> {
+    /// Underlying shared-state mutex guard.
+    guard: MutexGuard<'a, SharedState>,
+    /// Process-local identity of the shared state mutex.
+    key: usize,
+}
+
+#[cfg(test)]
+impl std::ops::Deref for SharedStateGuard<'_> {
+    type Target = SharedState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for SharedStateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+#[cfg(test)]
+impl Drop for SharedStateGuard<'_> {
+    fn drop(&mut self) {
+        HELD_SHARED_STATES.with(|held| {
+            let mut held = held.borrow_mut();
+            let depth = held
+                .get_mut(&self.key)
+                .expect("shared terminal state lock depth missing");
+            *depth -= 1;
+            if *depth == 0 {
+                held.remove(&self.key);
+            }
+        });
+    }
+}
+
+/// Shared terminal state guard without test-only lock-state tracking.
+#[cfg(not(test))]
+type SharedStateGuard<'a> = MutexGuard<'a, SharedState>;
 
 struct OutputTransactionDepthGuard {
     key: usize,
@@ -1204,10 +1257,23 @@ impl Drop for OutputTransactionDepthGuard {
 
 /// Guard that serializes terminal output snapshot mutations.
 struct OutputTransactionGuard<'a> {
-    _guard: MutexGuard<'a, ()>,
-    _depth: OutputTransactionDepthGuard,
+    guard: Option<MutexGuard<'a, ()>>,
+    depth: Option<OutputTransactionDepthGuard>,
+    key: usize,
     /// Monotonic acquisition time used for content-free hold diagnostics.
     acquired_at: std::time::Instant,
+    #[cfg(test)]
+    state: Arc<Mutex<SharedState>>,
+    #[cfg(test)]
+    retirement_probe_count: Arc<path_std_sync_atomic::AtomicU64>,
+}
+
+/// Styled blocks removed from the shared terminal presentation.
+enum RetiredStyledBlocks {
+    /// One replaced or explicitly removed block.
+    One(StyledBlock),
+    /// Every block displaced by an output snapshot replacement.
+    Snapshot(HashMap<BlockId, StyledBlock>),
 }
 
 impl Drop for OutputTransactionGuard<'_> {
@@ -1219,6 +1285,34 @@ impl Drop for OutputTransactionGuard<'_> {
                 hold_ms = held.as_millis(),
                 "terminal output transaction stalled"
             );
+        }
+
+        let retired = RETIRED_STYLED_BLOCKS
+            .with(|retired| retired.borrow_mut().remove(&self.key).unwrap_or_default());
+        drop(self.depth.take());
+        drop(self.guard.take());
+
+        for retired in retired {
+            #[cfg(test)]
+            {
+                assert!(
+                    !HELD_OUTPUT_TRANSACTIONS.with(|held| held.borrow().contains_key(&self.key)),
+                    "styled block retirement must follow output transaction release"
+                );
+                assert!(
+                    !HELD_SHARED_STATES.with(|held| {
+                        held.borrow()
+                            .contains_key(&(Arc::as_ptr(&self.state) as usize))
+                    }),
+                    "styled block retirement must follow shared terminal state release"
+                );
+                self.retirement_probe_count
+                    .fetch_add(1, path_std_sync_atomic::Ordering::Relaxed);
+            }
+            match retired {
+                RetiredStyledBlocks::One(block) => drop(block),
+                RetiredStyledBlocks::Snapshot(blocks) => drop(blocks),
+            }
         }
     }
 }
@@ -1256,8 +1350,20 @@ impl Drop for RedrawSuppressionGuard<'_> {
 }
 
 impl TermHandle {
-    fn lock(&self) -> MutexGuard<'_, SharedState> {
-        self.state.lock().expect("term state mutex poisoned")
+    fn lock(&self) -> SharedStateGuard<'_> {
+        let guard = self.state.lock().expect("term state mutex poisoned");
+        #[cfg(test)]
+        {
+            let key = Arc::as_ptr(&self.state) as usize;
+            HELD_SHARED_STATES.with(|held| {
+                *held.borrow_mut().entry(key).or_insert(0) += 1;
+            });
+            SharedStateGuard { guard, key }
+        }
+        #[cfg(not(test))]
+        {
+            guard
+        }
     }
 
     fn output_transaction_key(&self) -> usize {
@@ -1276,6 +1382,28 @@ impl TermHandle {
             *held.entry(key).or_insert(0) += 1;
         });
         OutputTransactionDepthGuard { key }
+    }
+
+    /// Retains removed styled blocks until the outer output transaction
+    /// unlocks.
+    fn retire_styled_blocks(&self, retired: RetiredStyledBlocks) {
+        let key = self.output_transaction_key();
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
+        debug_assert!(self.output_transaction_is_held());
+        RETIRED_STYLED_BLOCKS.with(|retirements| {
+            retirements
+                .borrow_mut()
+                .entry(key)
+                .or_default()
+                .push(retired);
+        });
+    }
+
+    /// Returns how many styled-block owners reached the post-lock drop probe.
+    #[cfg(test)]
+    fn retirement_probe_count(&self) -> u64 {
+        self.retirement_probe_count
+            .load(path_std_sync_atomic::Ordering::Relaxed)
     }
 
     fn output_transaction_barrier(&self) -> Option<OutputTransactionGuard<'_>> {
@@ -1306,9 +1434,14 @@ impl TermHandle {
         }
         let depth = self.mark_output_transaction_held();
         Some(OutputTransactionGuard {
-            _guard: guard,
-            _depth: depth,
+            guard: Some(guard),
+            depth: Some(depth),
+            key: self.output_transaction_key(),
             acquired_at: path_std_time::Instant::now(),
+            #[cfg(test)]
+            state: Arc::clone(&self.state),
+            #[cfg(test)]
+            retirement_probe_count: Arc::clone(&self.retirement_probe_count),
         })
     }
 
@@ -1543,7 +1676,7 @@ impl TermHandle {
     ) {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
-        st.layout.blocks = snapshot.blocks;
+        let retired_blocks = std::mem::replace(&mut st.layout.blocks, snapshot.blocks);
         st.layout.block_debug_ids = snapshot.block_debug_ids;
         st.layout.next_id = st.layout.next_id.max(snapshot.next_id);
         st.layout.history = snapshot.history;
@@ -1557,6 +1690,9 @@ impl TermHandle {
         }
         let notify = notify && Self::request_redraw_locked(&mut st);
         drop(st);
+        if !retired_blocks.is_empty() {
+            self.retire_styled_blocks(RetiredStyledBlocks::Snapshot(retired_blocks));
+        }
         if notify {
             self.release_redraw_notification();
         }
@@ -1647,9 +1783,13 @@ impl TermHandle {
         let debug_id = debug_id.into();
         let block = block.into();
         let content_empty = block.is_empty();
-        st.layout.blocks.insert(id, block);
+        let retired_block = st.layout.blocks.insert(id, block);
         st.layout.block_debug_ids.insert(id, debug_id.clone());
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, debug_id, content_empty, "new block");
+        drop(st);
+        if let Some(retired_block) = retired_block {
+            self.retire_styled_blocks(RetiredStyledBlocks::One(retired_block));
+        }
         id
     }
 
@@ -1683,7 +1823,7 @@ impl TermHandle {
         let affects_history = st.block_in_history(id);
         let changed = observe_delta && st.layout.blocks.get(&id) != Some(&block);
         let presentation_changed = changed && st.block_is_visible(id);
-        st.layout.blocks.insert(id, block);
+        let retired_block = st.layout.blocks.insert(id, block);
         st.layout
             .block_debug_ids
             .entry(id)
@@ -1692,6 +1832,10 @@ impl TermHandle {
             st.mark_history_dirty_from(0);
         }
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, content_empty, "set block");
+        drop(st);
+        if let Some(retired_block) = retired_block {
+            self.retire_styled_blocks(RetiredStyledBlocks::One(retired_block));
+        }
         presentation_changed
     }
 
@@ -1710,7 +1854,12 @@ impl TermHandle {
     fn remove_block_inner(&self, id: BlockId, observe_delta: bool) -> bool {
         let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
-        st.remove_block(id, observe_delta)
+        let (presentation_changed, retired_block) = st.remove_block(id, observe_delta);
+        drop(st);
+        if let Some(retired_block) = retired_block {
+            self.retire_styled_blocks(RetiredStyledBlocks::One(retired_block));
+        }
+        presentation_changed
     }
 
     // --- Zone lists ---
@@ -1886,12 +2035,15 @@ impl TermHandle {
         let debug_id = debug_id.into();
         let block = block.into();
         let content_empty = block.is_empty();
-        st.layout.blocks.insert(id, block);
+        let retired_block = st.layout.blocks.insert(id, block);
         st.layout.block_debug_ids.insert(id, debug_id.clone());
         st.append_history(id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, debug_id, content_empty, zone = "history", "print output");
         let notify = Self::request_redraw_locked(&mut st);
         drop(st);
+        if let Some(retired_block) = retired_block {
+            self.retire_styled_blocks(RetiredStyledBlocks::One(retired_block));
+        }
         if notify {
             self.release_redraw_notification();
         }
@@ -2237,6 +2389,8 @@ impl Term {
             output_snapshot_take_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
             #[cfg(feature = "redraw-test-counter")]
             redraw_request_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            retirement_probe_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         };
 
         handle.release_redraw_notification();
@@ -2313,6 +2467,8 @@ impl Term {
             output_snapshot_take_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
             #[cfg(feature = "redraw-test-counter")]
             redraw_request_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            retirement_probe_count: Arc::new(path_std_sync_atomic::AtomicU64::new(0)),
         };
 
         handle.release_redraw_notification();
