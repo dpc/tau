@@ -97,8 +97,43 @@ struct FailingWriter {
 
 /// Writer that blocks one checked report until the test releases it.
 struct BlockingReportWriter {
+    /// Notification that the checked report reached the writer.
     entered: mpsc::Sender<()>,
+    /// Causal release for the deliberately blocked write.
     release: mpsc::Receiver<()>,
+}
+
+/// Releases a deliberately blocked report writer on every normal or panic exit.
+struct BlockedWriterRelease {
+    /// One-shot release signal, consumed by an explicit release or `Drop`.
+    release: Option<mpsc::Sender<()>>,
+}
+
+impl BlockedWriterRelease {
+    /// Creates a cleanup guard for one blocked writer.
+    fn new(release: mpsc::Sender<()>) -> Self {
+        Self {
+            release: Some(release),
+        }
+    }
+
+    /// Releases the writer before the guarded scope ends.
+    fn release(mut self) {
+        self.send();
+    }
+
+    /// Sends the release at most once.
+    fn send(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+impl Drop for BlockedWriterRelease {
+    fn drop(&mut self) {
+        self.send();
+    }
 }
 
 impl Write for BlockingReportWriter {
@@ -4819,74 +4854,69 @@ fn disconnect_detaches_blocked_local_report() {
     let runner_client: Arc<dyn TelegramClient> = client.clone();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let (result_tx, result_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let result = run_with_client_observing_disconnect(
-            extension_input,
-            BlockingReportWriter {
-                entered: entered_tx,
-                release: release_rx,
-            },
-            runner_client,
-            disconnect_tx,
-        )
-        .map_err(|error| error.to_string());
-        let _ = result_tx.send(result);
+    std::thread::scope(|scope| {
+        let release = BlockedWriterRelease::new(release_tx);
+        let runner = scope.spawn(move || {
+            run_with_client_observing_disconnect(
+                extension_input,
+                BlockingReportWriter {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+                runner_client,
+                disconnect_tx,
+            )
+            .map_err(|error| error.to_string())
+        });
+        let mut input = tau_proto::HarnessOutputWriter::new(harness_input);
+        let mut secrets = BTreeMap::new();
+        secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
+        input
+            .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+                tool_prefix: None,
+                instance_name: tau_proto::ExtensionName::parse("test-extension").expect("name"),
+                config: tau_proto::json_to_cbor(&serde_json::json!({
+                    "bot_token_secret":"bot","allowed_user_ids":[123],"chat_id":123,
+                    "poll_timeout_seconds":1
+                })),
+                state_dir: Some(temp_state_dir()),
+                secrets,
+                settings_files: Default::default(),
+            }))
+            .expect("configure");
+        input
+            .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-1",
+                bool_args(true),
+            ))))
+            .expect("register");
+        input.flush().expect("startup");
+        client.wait_for_call_count(1);
+        client.release_first_response(Vec::new());
+        client.wait_for_call_count(2);
+        client.release_first_response(vec![TgUpdate {
+            update_id: telegram_update_id(92),
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("blocked".to_owned()),
+            }),
+        }]);
+        entered_rx.recv().expect("blocked report");
+        input
+            .write_message(&HarnessOutputMessage::Disconnect(Default::default()))
+            .expect("disconnect");
+        input.flush().expect("flush disconnect");
+        disconnect_rx
+            .recv()
+            .expect("manual runtime observed disconnect");
+        let result = runner.join().expect("prompt runner thread");
+        release.release();
+        result.expect("disconnect");
     });
-    let mut input = tau_proto::HarnessOutputWriter::new(harness_input);
-    let mut secrets = BTreeMap::new();
-    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
-    input
-        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
-            tool_prefix: None,
-            instance_name: tau_proto::ExtensionName::parse("test-extension").expect("name"),
-            config: tau_proto::json_to_cbor(&serde_json::json!({
-                "bot_token_secret":"bot","allowed_user_ids":[123],"chat_id":123,
-                "poll_timeout_seconds":1
-            })),
-            state_dir: Some(temp_state_dir()),
-            secrets,
-            settings_files: Default::default(),
-        }))
-        .expect("configure");
-    input
-        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
-            REGISTER_TOOL_NAME,
-            "agent-1",
-            bool_args(true),
-        ))))
-        .expect("register");
-    input.flush().expect("startup");
-    client.wait_for_call_count(1);
-    client.release_first_response(Vec::new());
-    client.wait_for_call_count(2);
-    client.release_first_response(vec![TgUpdate {
-        update_id: telegram_update_id(92),
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: Some("private".to_owned()),
-            user_id: 123,
-            from_name: None,
-            text: Some("blocked".to_owned()),
-        }),
-    }]);
-    entered_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("blocked report");
-    input
-        .write_message(&HarnessOutputMessage::Disconnect(Default::default()))
-        .expect("disconnect");
-    input.flush().expect("flush disconnect");
-    let disconnect = disconnect_rx.recv_timeout(Duration::from_secs(2));
-    let result = disconnect
-        .as_ref()
-        .map(|()| result_rx.recv_timeout(Duration::from_secs(2)));
-    release_tx.send(()).expect("release detached writer");
-    disconnect.expect("manual runtime observed disconnect");
-    result
-        .expect("disconnect observed")
-        .expect("prompt runner")
-        .expect("disconnect");
 }
 
 /// Disconnect handling must not wait for an in-flight long poll to release its
