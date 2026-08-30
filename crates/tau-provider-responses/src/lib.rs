@@ -25,7 +25,10 @@ use tau_proto::{
 use tau_provider::retry_policy::{
     RetryClass, RetryDecision, classify_error_code, parse_json_error_code,
 };
-use tau_provider::{StreamRepetition, StreamRepetitionGuard, StreamRepetitionKey};
+use tau_provider::{
+    StreamRepetition, StreamRepetitionGuard, StreamRepetitionKey,
+    private_attempt_trace as private_trace,
+};
 use tokio::runtime as path_tokio_runtime;
 
 use self::debug_capture::DebugCapture;
@@ -536,12 +539,20 @@ fn run_attempt_with_capture_and_updates(
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
+    let mut private_trace =
+        private_trace::AttemptTrace::selected_with(private_trace::Backend::PublicResponses, || {
+            match config.transport {
+                Transport::Sse => private_trace::Transport::HttpSse,
+                Transport::Websocket => private_trace::Transport::Websocket,
+            }
+        });
     let initial = AttemptProgress {
         output_items: Vec::new(),
         response_bytes_received: 0,
         has_timed_semantic_output: false,
     };
     if is_canceled() {
+        finish_private_trace(&mut private_trace, private_trace::Outcome::Canceled);
         return AttemptOutcome::Canceled { progress: initial };
     }
     let body = match build_request(prompt, config, model) {
@@ -551,6 +562,9 @@ fn run_attempt_with_capture_and_updates(
             return terminal(error, initial);
         }
     };
+    if let Some(trace) = private_trace.as_mut() {
+        trace.lowering_finished();
+    }
     let runtime = match path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -570,6 +584,7 @@ fn run_attempt_with_capture_and_updates(
         on_update,
         is_canceled,
         network,
+        &mut private_trace,
     ));
     match result {
         Ok(state) if state.terminal.is_some() => {
@@ -587,6 +602,7 @@ fn run_attempt_with_capture_and_updates(
                 TerminalKind::Completed => ProviderStopReason::EndTurn,
             };
             if state.has_incomplete_reasoning() {
+                finish_private_trace(&mut private_trace, private_trace::Outcome::Failed);
                 debug_capture.submit_error(
                     prompt,
                     config,
@@ -596,9 +612,11 @@ fn run_attempt_with_capture_and_updates(
                 );
                 terminal(Error::UnsupportedOutput, progress)
             } else if output_items.is_empty() && stop_reason != ProviderStopReason::Length {
+                finish_private_trace(&mut private_trace, private_trace::Outcome::Failed);
                 debug_capture.submit_error(prompt, config, model, &Error::EmptyResponse, &progress);
                 terminal(Error::EmptyResponse, progress)
             } else {
+                finish_private_trace(&mut private_trace, private_trace::Outcome::Completed);
                 state
                     .debug_capture
                     .submit_response(prompt, config, model, &state, stop_reason);
@@ -613,18 +631,38 @@ fn run_attempt_with_capture_and_updates(
             }
         }
         Ok(state) => {
+            finish_private_trace(&mut private_trace, private_trace::Outcome::Failed);
             let progress = state.progress();
             debug_capture.submit_error(prompt, config, model, &Error::EmptyResponse, &progress);
             terminal(Error::EmptyResponse, progress)
         }
-        Err((Error::Canceled, progress)) => AttemptOutcome::Canceled { progress },
+        Err((Error::Canceled, progress)) => {
+            finish_private_trace(&mut private_trace, private_trace::Outcome::Canceled);
+            AttemptOutcome::Canceled { progress }
+        }
         Err((error, progress)) => {
             debug_capture.submit_error(prompt, config, model, &error, &progress);
             match error.retry() {
-                Some(decision) => AttemptOutcome::Retryable { decision, progress },
-                None => terminal(error, progress),
+                Some(decision) => {
+                    finish_private_trace(&mut private_trace, private_trace::Outcome::Retryable);
+                    AttemptOutcome::Retryable { decision, progress }
+                }
+                None => {
+                    finish_private_trace(&mut private_trace, private_trace::Outcome::Failed);
+                    terminal(error, progress)
+                }
             }
         }
+    }
+}
+
+/// Finish enabled private tracing without introducing work on the plain path.
+fn finish_private_trace(
+    trace: &mut Option<private_trace::AttemptTrace>,
+    outcome: private_trace::Outcome,
+) {
+    if let Some(trace) = trace.take() {
+        trace.finish(outcome);
     }
 }
 
@@ -1636,6 +1674,7 @@ async fn stream(
     on_update: &mut impl FnMut(AttemptUpdate),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
+    private_trace: &mut Option<private_trace::AttemptTrace>,
 ) -> Result<State, (Error, AttemptProgress)> {
     match config.transport {
         Transport::Sse => {
@@ -1648,6 +1687,7 @@ async fn stream(
                 on_update,
                 is_canceled,
                 network,
+                private_trace,
             )
             .await
         }
@@ -1661,6 +1701,7 @@ async fn stream(
                 on_update,
                 is_canceled,
                 network,
+                private_trace,
             )
             .await
         }
@@ -1677,13 +1718,18 @@ async fn stream_sse(
     on_update: &mut impl FnMut(AttemptUpdate),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
+    private_trace: &mut Option<private_trace::AttemptTrace>,
 ) -> Result<State, (Error, AttemptProgress)> {
     let url = format!("{}/responses", config.base_url.trim_end_matches('/'));
     let client = network
         .client_for(&url)
         .map_err(|error| (Error::Outbound(error), State::default().progress()))?;
+    let serialization_started = private_trace::started(private_trace);
     let serialized =
         serde_json::to_string(body).map_err(|_| (Error::Json, State::default().progress()))?;
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), serialization_started) {
+        trace.serialization_finished(started, serialized.len());
+    }
     let mut request = client
         .post(&url)
         .header("content-type", "application/json")
@@ -1695,12 +1741,19 @@ async fn stream_sse(
     if is_canceled() {
         return Err((Error::Canceled, State::default().progress()));
     }
+    let capture_started = private_trace::started(private_trace);
     debug_capture.submit_request(prompt, config, model, body);
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), capture_started) {
+        trace.capture_finished(started);
+    }
     if is_canceled() {
         return Err((Error::Canceled, State::default().progress()));
     }
     let header_deadline = Instant::now() + deadlines::REQUEST_CONNECT_HEADER_TIMEOUT;
     let mut send = Box::pin(request.send());
+    if let Some(trace) = private_trace.as_mut() {
+        trace.record_dispatch();
+    }
     on_update(AttemptUpdate::Dispatched(Instant::now()));
     let response = loop {
         tokio::select! {
@@ -1776,6 +1829,9 @@ async fn stream_sse(
         let Some(chunk) = chunk else {
             return Ok(state);
         };
+        if let Some(trace) = private_trace.as_mut() {
+            trace.first_input(chunk.len());
+        }
         if deadlines.expired(Instant::now()) {
             return Err((Error::StreamFailure, state.progress()));
         }
@@ -1784,6 +1840,8 @@ async fn stream_sse(
             return Err((Error::StreamFailure, state.progress()));
         }
         pending.append(&chunk);
+        let decode_started = private_trace::started(private_trace);
+        let mut callback_elapsed = private_trace.as_ref().map(|_| Duration::ZERO);
         let control = process_complete_sse_lines(&mut pending, |line| {
             if is_canceled() {
                 return Err(Error::Canceled);
@@ -1794,7 +1852,16 @@ async fn stream_sse(
                     return Ok(SseLineControl::Break);
                 }
                 let qualifying_progress = state.apply_event(data)?;
+                if qualifying_progress && let Some(trace) = private_trace.as_mut() {
+                    trace.semantic_qualified();
+                }
+                let callback_started = private_trace::started(private_trace);
                 on_update(AttemptUpdate::Progress(state.progress()));
+                if let (Some(elapsed), Some(started)) =
+                    (callback_elapsed.as_mut(), callback_started)
+                {
+                    *elapsed = elapsed.saturating_add(started.elapsed());
+                }
                 if qualifying_progress {
                     deadlines.renew_for_qualifying_progress(Instant::now());
                 }
@@ -1803,8 +1870,11 @@ async fn stream_sse(
                 }
             }
             Ok(SseLineControl::Continue)
-        })
-        .map_err(|error| (error, state.progress()))?;
+        });
+        if let (Some(trace), Some(started)) = (private_trace.as_mut(), decode_started) {
+            trace.decoded_excluding(started, callback_elapsed.unwrap_or_default(), false);
+        }
+        let control = control.map_err(|error| (error, state.progress()))?;
         if control == SseLineControl::Break {
             return Ok(state);
         }

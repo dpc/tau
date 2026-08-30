@@ -95,6 +95,15 @@ cancellation, repetition, retryable failure, or terminal failure. The backend
 does not expose its request, pool, quota parser, or mutable stream internals and
 does not write harness events or sleep for logical retry.
 
+An independent private backend-stage TRACE target can observe a finite
+inference or standalone-compaction attempt over WebSocket or unary HTTP using
+only closed backend/transport/outcome classes and scalar durations, sizes,
+counts, and presence flags. The trace
+shares the existing dispatch and typed semantic-qualification boundaries and
+never carries prompt, model, endpoint, account, credential, error, or response
+values. Disabled selection constructs no observation state and has no effect on
+pooling, retry, cancellation, replay, or public updates.
+
 All HTTP control-plane operations and the HTTP/1.1 WebSocket upgrade use the
 startup-injected shared reqwest/rustls policy. WSS uses CONNECT through the
 selected proxy before target TLS; plain WS uses proxy absolute-form. Both paths

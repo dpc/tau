@@ -1713,6 +1713,7 @@ fn localhost_ws_silent_turn_returns_typed_idle_timeout() {
         &mut abort,
         &mut |_| {},
         &mut |_| {},
+        &mut None,
     );
     server.wait_for_request();
     let body = http_status_zero(result);
@@ -1816,6 +1817,7 @@ fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
         &mut abort,
         &mut |_| {},
         &mut |_| {},
+        &mut None,
     );
 
     let body = http_status_zero(result);
@@ -1861,6 +1863,7 @@ fn prewarm_absolute_timeout_preempts_queued_nonterminal_frames() {
         &mut abort,
         &mut |_| {},
         &mut |_| {},
+        &mut None,
     );
 
     assert!(matches!(

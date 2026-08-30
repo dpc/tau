@@ -107,6 +107,11 @@ arguments, while excluding transport bytes, ids, empty state, and buffered
 reasoning delimiters. The extension sampler captures the first qualifying
 callback before cadence filtering.
 
+The optional private backend-stage trace measures production request lowering,
+the existing single serialization, request dispatch, first decoded body chunk,
+decoder work, and first semantic qualification at these same boundaries. It
+uses only content-free scalar facts and does not alter public response sampling.
+
 Streaming parsers may receive upstream chunks at arbitrary cadence, but Tau
 protocol updates are sampled. The extension response sampler starts when the
 finite backend attempt begins. Received stream data advances backend-owned,

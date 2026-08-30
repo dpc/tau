@@ -38,6 +38,7 @@ use std::{io as path_std_io, thread, time as path_std_time};
 
 use futures_util::sink::SinkExt;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
+use tau_provider::private_attempt_trace as private_trace;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
@@ -582,6 +583,7 @@ impl WsConn {
             abort,
             on_dispatched,
             on_update,
+            &mut None,
         )
     }
 
@@ -612,6 +614,7 @@ impl WsConn {
             abort,
             on_dispatched,
             on_update,
+            &mut None,
         )
     }
 
@@ -631,8 +634,9 @@ impl WsConn {
         abort: &mut impl TurnAbort,
         on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
+        private_trace: &mut Option<private_trace::AttemptTrace>,
     ) -> Result<WsTurnResult, LlmError> {
-        self.run_response_with_capture_submit(
+        self.run_response_with_capture_submit_observed(
             config,
             agent_prompt_id,
             request,
@@ -642,12 +646,14 @@ impl WsConn {
             abort,
             on_dispatched,
             on_update,
+            private_trace,
             tau_provider::debug_capture_writer::submit_provider_debug_capture,
         )
     }
 
-    /// Runs one response with an injected debug-capture sink for deterministic
-    /// transport-boundary verification.
+    /// Runs one response with an injected capture sink and no private stage
+    /// observation, preserving the focused test seam.
+    #[cfg(test)]
     #[expect(
         clippy::too_many_arguments,
         reason = "the injected sink observes the existing transport lifecycle"
@@ -665,6 +671,42 @@ impl WsConn {
         on_update: &mut impl FnMut(&StreamState),
         capture_submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
     ) -> Result<WsTurnResult, LlmError> {
+        self.run_response_with_capture_submit_observed(
+            config,
+            agent_prompt_id,
+            request,
+            correlation,
+            recording_stream,
+            response_mode,
+            abort,
+            on_dispatched,
+            on_update,
+            &mut None,
+            capture_submit,
+        )
+    }
+
+    /// Runs one response with an injected debug-capture sink for deterministic
+    /// transport-boundary verification.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the injected sink observes the existing transport lifecycle"
+    )]
+    fn run_response_with_capture_submit_observed(
+        &mut self,
+        config: &ResponsesConfig,
+        agent_prompt_id: &str,
+        request: &PromptPayload<'_>,
+        correlation: Option<crate::attempt_failure::DispatchCorrelation>,
+        recording_stream: Option<&mut ProviderRawEventStream>,
+        response_mode: ResponseMode,
+        abort: &mut impl TurnAbort,
+        on_dispatched: &mut impl FnMut(Instant),
+        on_update: &mut impl FnMut(&StreamState),
+        private_trace: &mut Option<private_trace::AttemptTrace>,
+        capture_submit: impl FnOnce(tau_provider::debug_capture_writer::ProviderDebugCapture),
+    ) -> Result<WsTurnResult, LlmError> {
+        let lowering_started = private_trace::started(private_trace);
         let mut envelope =
             build_ws_envelope(config, request, self.cached_response_anchor.as_ref(), None);
         let eligible_previous_input_tokens = envelope
@@ -683,7 +725,11 @@ impl WsConn {
                 envelope.body.input.drain(..baseline.input_prefix.len());
             }
         }
+        if let (Some(trace), Some(started)) = (private_trace.as_mut(), lowering_started) {
+            trace.lowering_finished_from(started);
+        }
         let request_body = recorded_request_body(&envelope, recording_stream.is_some())?;
+        let capture_started = private_trace::started(private_trace);
         super::maybe_debug_submit_provider_request_with(
             agent_prompt_id,
             config,
@@ -693,6 +739,9 @@ impl WsConn {
             &envelope,
             capture_submit,
         );
+        if let (Some(trace), Some(started)) = (private_trace.as_mut(), capture_started) {
+            trace.capture_finished(started);
+        }
         let mut state = self.run_envelope_with_timeouts(
             agent_prompt_id,
             envelope,
@@ -712,6 +761,7 @@ impl WsConn {
             abort,
             on_dispatched,
             on_update,
+            private_trace,
         )?;
         if supports_cache_read_ceiling(config, state.compaction_update().is_some()) {
             state.prompt_cache_read_ceiling_tokens =
@@ -798,6 +848,7 @@ impl WsConn {
             abort,
             &mut |_| {},
             &mut |_| {},
+            &mut None,
         )?;
         self.cached_response_anchor = None;
         self.prewarm_baseline = state.response_id.clone().map(|response_id| {
@@ -810,6 +861,10 @@ impl WsConn {
         Ok(state)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "private observation follows envelope ownership"
+    )]
     fn run_envelope_with_timeouts(
         &mut self,
         agent_prompt_id: &str,
@@ -818,21 +873,28 @@ impl WsConn {
         abort: &mut impl TurnAbort,
         on_dispatched: &mut impl FnMut(Instant),
         on_update: &mut impl FnMut(&StreamState),
+        private_trace: &mut Option<private_trace::AttemptTrace>,
     ) -> Result<StreamState, LlmError> {
-        serialize_and_enqueue_envelope(&envelope, abort, on_dispatched, |text| {
-            self.outbound_tx
-                .send(WsCommand::SendText(text))
-                .map_err(|_| {
-                    LlmError::HttpStatus(0, "stream error: ws writer task gone".to_owned())
-                        .observed(
-                            path_crate_attempt_failure::AttemptFailureEvidence::transport(
-                                path_crate_attempt_failure::TransportPhase::Send,
-                                true,
-                                path_crate_attempt_failure::TransportFailureKind::Send,
-                            ),
-                        )
-                })
-        })?;
+        serialize_and_enqueue_envelope_observed(
+            &envelope,
+            abort,
+            on_dispatched,
+            private_trace,
+            |text| {
+                self.outbound_tx
+                    .send(WsCommand::SendText(text))
+                    .map_err(|_| {
+                        LlmError::HttpStatus(0, "stream error: ws writer task gone".to_owned())
+                            .observed(
+                                path_crate_attempt_failure::AttemptFailureEvidence::transport(
+                                    path_crate_attempt_failure::TransportPhase::Send,
+                                    true,
+                                    path_crate_attempt_failure::TransportFailureKind::Send,
+                                ),
+                            )
+                    })
+            },
+        )?;
 
         let mut state = StreamState::new();
         let mut compact_shape =
@@ -926,6 +988,9 @@ impl WsConn {
             };
             match event {
                 InboundEvent::Event { text } => {
+                    if let Some(trace) = private_trace.as_mut() {
+                        trace.first_input(text.len());
+                    }
                     let now = Instant::now();
                     let delta = now.saturating_duration_since(last_event_at);
                     last_event_at = now;
@@ -942,16 +1007,37 @@ impl WsConn {
                     if let Some(stream) = execution.recording_stream.as_deref_mut() {
                         record_provider_raw_event_after(stream, delta, text.to_string())?;
                     }
-                    let decoded = DecodedEvent::decode(text.as_ref())
-                        .map_err(|_| malformed_text_error(text.len()))?;
+                    let decode_started = private_trace::started(private_trace);
+                    let decoded = match DecodedEvent::decode(text.as_ref()) {
+                        Ok(decoded) => decoded,
+                        Err(_) => {
+                            if let (Some(trace), Some(started)) =
+                                (private_trace.as_mut(), decode_started)
+                            {
+                                trace.decoded(started, false);
+                            }
+                            return Err(malformed_text_error(text.len()));
+                        }
+                    };
+                    if let (Some(trace), Some(started)) = (private_trace.as_mut(), decode_started) {
+                        trace.decoded(started, false);
+                    }
                     if let Some(shape) = compact_shape.as_mut() {
                         shape.validate(decoded.value())?;
                     }
+                    let mut observed_update = |state: &StreamState| {
+                        if state.has_timed_semantic_output()
+                            && let Some(trace) = private_trace.as_mut()
+                        {
+                            trace.semantic_qualified();
+                        }
+                        on_update(state);
+                    };
                     let terminal = apply_ws_json_event(
                         &mut state,
                         decoded.value(),
                         decoded.raw_item(),
-                        on_update,
+                        &mut observed_update,
                     );
                     if terminal.as_ref().is_err_and(is_response_resource_limit) {
                         self.reader_abort.abort();
@@ -1212,15 +1298,38 @@ fn serialize_and_enqueue_envelope(
     on_dispatched: &mut impl FnMut(Instant),
     enqueue: impl FnOnce(String) -> Result<(), LlmError>,
 ) -> Result<(), LlmError> {
+    serialize_and_enqueue_envelope_observed(envelope, abort, on_dispatched, &mut None, enqueue)
+}
+
+/// Observed serializer/enqueue path used only by the private stage trace.
+fn serialize_and_enqueue_envelope_observed(
+    envelope: &impl serde::Serialize,
+    abort: &mut impl TurnAbort,
+    on_dispatched: &mut impl FnMut(Instant),
+    private_trace: &mut Option<private_trace::AttemptTrace>,
+    enqueue: impl FnOnce(String) -> Result<(), LlmError>,
+) -> Result<(), LlmError> {
     if abort.is_aborted() {
         return Err(LlmError::Canceled);
     }
+    let serialization_started = private_trace::started(private_trace);
     let text = serde_json::to_string(envelope).map_err(LlmError::Json)?;
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), serialization_started) {
+        trace.serialization_finished(started, text.len());
+    }
     if abort.is_aborted() {
         return Err(LlmError::Canceled);
     }
     on_dispatched(Instant::now());
-    enqueue(text)
+    if let Some(trace) = private_trace.as_mut() {
+        trace.record_dispatch();
+    }
+    let enqueue_started = private_trace::started(private_trace);
+    let result = enqueue(text);
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), enqueue_started) {
+        trace.enqueue_finished(started);
+    }
+    result
 }
 
 impl Drop for WsConn {

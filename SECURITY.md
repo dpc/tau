@@ -107,6 +107,17 @@ kernel/socket buffer ownership remain unobserved. Exact aggregate sizes, ratios,
 fanout, and timestamps may still reveal workload metadata or permit heuristic
 cross-process correlation; treat enabled operational trace files as private.
 
+Disabled-by-default provider backend-stage diagnostics use the dedicated
+`provider.backend-stages` TRACE target. They report only closed backend,
+transport, and outcome classes plus scalar durations, byte counts, occurrence
+counts, presence flags, and accounted/unattributed totals. They never retain or
+emit prompts, response content, model or prompt identifiers, endpoints, paths,
+accounts, credentials, status bodies, or raw errors, and create no event,
+journal, capture artifact, wire field, or protocol authority. Exact timing and
+size values remain private workload metadata. With the target disabled,
+backends retain only inert `None` checks and perform no diagnostic clock reads,
+allocation, byte sizing, hashing, I/O, or trace-state construction.
+
 Overall harness shutdown closes configured in-process extension transport first,
 then gives all such runners one shared finite grace to return on EOF. A runner
 still alive after that grace is left to a detached join-reaper, not

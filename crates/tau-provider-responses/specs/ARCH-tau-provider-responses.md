@@ -100,6 +100,13 @@ first-semantic-output duration under
 [`SPEC-provider-response-streaming`](../../../specs/SPEC-provider-response-streaming.md);
 it adds no event field or response semantics.
 
+The separately selected private backend-stage trace observes request lowering,
+the existing transport-specific serialization and capture, WebSocket
+connect/upgrade, send or frame enqueue, first body chunk or text frame, decoder
+work, and the same semantic qualification predicate. It emits only bounded
+scalar facts on a dedicated process-local target; the disabled path creates no
+trace state and takes no observation clock.
+
 Every request also lowers the harness-selected effective reasoning effort as
 `reasoning.effort`. The public API spells Tau's `off` as `none`; the remaining
 canonical levels (`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`) pass

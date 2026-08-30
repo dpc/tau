@@ -3,6 +3,23 @@ use std::{io as path_std_io, net as path_std_net, sync as path_std_sync, time as
 
 use super::*;
 
+/// In-memory trace writer for runtime-level production assertions.
+#[derive(Clone, Default)]
+struct TraceWriter(path_std_sync::Arc<path_std_sync::Mutex<Vec<u8>>>);
+
+impl path_std_io::Write for TraceWriter {
+    /// Append formatted trace bytes.
+    fn write(&mut self, bytes: &[u8]) -> path_std_io::Result<usize> {
+        self.0.lock().expect("trace lock").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    /// The in-memory sink has no external buffer.
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Retry identity retains only an account digest: bearer rotation is invisible,
 /// raw account content is absent, and missing identity stays fail-closed.
 #[test]
@@ -695,6 +712,7 @@ fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
         &mut correlation,
         &mut abort,
         &mut |_| {},
+        &mut None,
     ) {
         Ok(_) => panic!("context rejection must terminate"),
         Err(error) => error,
@@ -892,15 +910,28 @@ fn compact_exact_success_returns_one_item() {
     let context = compact_trigger_context();
     let request = test_prompt_payload(&session_id, &agent_id, &context);
 
+    let trace_output = TraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace_output = trace_output.clone();
+            move || trace_output.clone()
+        })
+        .finish();
+    let outcome = tracing::subscriber::with_default(subscriber, || {
+        runtime.compact(
+            "ap-compact-exact-success",
+            &config,
+            &request,
+            &mut NeverAbort,
+        )
+    });
     let CompactOutcome::Finished {
         output_items,
         usage,
-    } = runtime.compact(
-        "ap-compact-exact-success",
-        &config,
-        &request,
-        &mut NeverAbort,
-    )
+    } = outcome
     else {
         panic!("exact native compact response must finish");
     };
@@ -909,6 +940,14 @@ fn compact_exact_success_returns_one_item() {
         [tau_proto::ContextItem::Compaction(_)]
     ));
     assert!(usage.is_some(), "provider usage survives exact success");
+    let trace =
+        String::from_utf8(trace_output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
+    assert_eq!(
+        trace.matches("provider backend stage observation").count(),
+        1
+    );
+    assert!(trace.contains("outcome=\"completed\""), "{trace}");
+    assert!(trace.contains("transport=\"websocket\""), "{trace}");
 }
 
 /// Terminalizing one post-progress failure does not poison explicit recovery:

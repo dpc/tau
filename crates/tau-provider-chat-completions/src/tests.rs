@@ -14,6 +14,23 @@ use tau_provider::debug_capture_writer::ProviderDebugCaptureClass;
 
 use super::*;
 
+/// In-memory trace writer for production attempt assertions.
+#[derive(Clone, Default)]
+struct TraceWriter(Arc<path_std_sync::Mutex<Vec<u8>>>);
+
+impl path_std_io::Write for TraceWriter {
+    /// Append formatted trace bytes.
+    fn write(&mut self, bytes: &[u8]) -> path_std_io::Result<usize> {
+        self.0.lock().expect("trace lock").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    /// The in-memory sink has no external buffer.
+    fn flush(&mut self) -> path_std_io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Semantic assistant output renews the idle deadline from its accepted time.
 #[test]
 fn semantic_progress_renews_request_idle_deadline() {
@@ -683,17 +700,33 @@ fn attempt_transport_failure_redacts_backend_canaries() {
         )]),
         None,
     );
-    let outcome = run_attempt(
-        &prompt,
-        &resolved,
-        &model,
-        false,
-        &mut |_| {},
-        &mut || false,
-        &network,
-    );
+    let trace_output = TraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace_output = trace_output.clone();
+            move || trace_output.clone()
+        })
+        .finish();
+    let outcome = tracing::subscriber::with_default(subscriber, || {
+        run_attempt(
+            &prompt,
+            &resolved,
+            &model,
+            false,
+            &mut |_| {},
+            &mut || false,
+            &network,
+        )
+    });
     proxy.finish();
     assert!(matches!(outcome, AttemptOutcome::Retryable { .. }));
+    let trace =
+        String::from_utf8(trace_output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
+    assert!(trace.contains("outcome=\"retryable\""), "{trace}");
+    assert!(trace.contains("dispatch_count=1"), "{trace}");
     let projection = format!("{outcome:?}");
     for canary in [
         "target-backend-canary",

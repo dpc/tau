@@ -14,6 +14,52 @@ use tungstenite::protocol::frame::coding::{Data as WebSocketData, OpCode};
 
 use super::*;
 
+/// In-memory trace writer for production transport assertions.
+#[derive(Clone, Default)]
+struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for TraceWriter {
+    /// Append formatted trace bytes.
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("trace lock").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    /// The in-memory sink has no external buffer.
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A real public SSE success must emit exactly one fully qualified backend
+/// observation without changing the existing attempt result.
+#[test]
+fn public_sse_success_emits_private_stage_trace() {
+    let output = TraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let output = output.clone();
+            move || output.clone()
+        })
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let captures = successful_public_sse_captures(false, tau_proto::PromptOperation::Inference);
+        assert!(captures.is_empty());
+    });
+    let trace =
+        String::from_utf8(output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
+    assert_eq!(
+        trace.matches("provider backend stage observation").count(),
+        1
+    );
+    assert!(trace.contains("outcome=\"completed\""), "{trace}");
+    assert!(trace.contains("first_input_seen=true"), "{trace}");
+    assert!(trace.contains("decode_count=1"), "{trace}");
+}
+
 /// Text-only Responses tool-result lowering retains textual output, marks
 /// omitted typed images, and never embeds their canonical bytes.
 #[test]
@@ -2445,23 +2491,35 @@ fn websocket_rejected_upgrade_is_terminal() {
         true,
         Arc::new(move |capture| captured.lock().expect("capture lock").push(capture)),
     );
-    let outcome = run_attempt_with_capture(
-        &minimal_prompt(),
-        &AttemptConfig {
-            base_url: format!("http://{address}"),
-            api_key: "bad-key".to_owned(),
-            max_output_tokens: 0,
-            transport: Transport::Websocket,
-            prompt_cache: None,
-        },
-        &AttemptModel {
-            id: ModelName::new("test-model"),
-        },
-        debug_capture,
-        &mut |_| {},
-        &mut || false,
-        &test_network(),
-    );
+    let trace_output = TraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace_output = trace_output.clone();
+            move || trace_output.clone()
+        })
+        .finish();
+    let outcome = tracing::subscriber::with_default(subscriber, || {
+        run_attempt_with_capture(
+            &minimal_prompt(),
+            &AttemptConfig {
+                base_url: format!("http://{address}"),
+                api_key: "bad-key".to_owned(),
+                max_output_tokens: 0,
+                transport: Transport::Websocket,
+                prompt_cache: None,
+            },
+            &AttemptModel {
+                id: ModelName::new("test-model"),
+            },
+            debug_capture,
+            &mut |_| {},
+            &mut || false,
+            &test_network(),
+        )
+    });
     join_websocket_peer(server);
     let AttemptOutcome::Terminal(failure) = outcome else {
         panic!("authentication rejection must be terminal");
@@ -2471,6 +2529,15 @@ fn websocket_rejected_upgrade_is_terminal() {
         Some(tau_proto::ProviderFailureKind::RequestRejected)
     );
     assert_eq!(failure.message, "provider returned HTTP 401");
+    let trace =
+        String::from_utf8(trace_output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
+    assert_eq!(
+        trace.matches("provider backend stage observation").count(),
+        1
+    );
+    assert!(trace.contains("outcome=\"failed\""), "{trace}");
+    assert!(trace.contains("dispatch_count=0"), "{trace}");
+    assert!(trace.contains("first_input_seen=false"), "{trace}");
     let captures = captures.lock().expect("capture lock");
     assert_eq!(
         captures.len(),

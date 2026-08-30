@@ -28,6 +28,7 @@ use std::time::Duration;
 use std::{cell as path_std_cell, collections as path_std_collections, time as path_std_time};
 
 use lru::LruCache;
+use tau_provider::private_attempt_trace as private_trace;
 
 use super::ResponsesConfig;
 use super::ws::{ResponseMode, WsConn};
@@ -886,6 +887,33 @@ pub fn run_turn_through_shared_pool(
     abort: &mut impl TurnAbort,
     on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
 ) -> Result<crate::common::StreamState, WsTurnError> {
+    run_turn_through_shared_pool_observed(
+        pool,
+        config,
+        agent_prompt_id,
+        request,
+        correlation,
+        abort,
+        on_update,
+        &mut None,
+    )
+}
+
+/// Internal observed entry point preserving the plain supported API.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "private observation is an inert carrier"
+)]
+pub(crate) fn run_turn_through_shared_pool_observed(
+    pool: &SharedWsPool,
+    config: &ResponsesConfig,
+    agent_prompt_id: &str,
+    request: &crate::common::PromptPayload<'_>,
+    correlation: Option<&mut crate::attempt_failure::AttemptCaptureCorrelation>,
+    abort: &mut impl TurnAbort,
+    on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
+    private_trace: &mut Option<private_trace::AttemptTrace>,
+) -> Result<crate::common::StreamState, WsTurnError> {
     run_response_through_shared_pool(
         pool,
         config,
@@ -895,6 +923,7 @@ pub fn run_turn_through_shared_pool(
         ResponseMode::Ordinary,
         abort,
         on_update,
+        private_trace,
     )
 }
 
@@ -908,6 +937,33 @@ pub fn run_compact_through_shared_pool(
     abort: &mut impl TurnAbort,
     on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
 ) -> Result<crate::common::StreamState, WsTurnError> {
+    run_compact_through_shared_pool_observed(
+        pool,
+        config,
+        agent_prompt_id,
+        request,
+        correlation,
+        abort,
+        on_update,
+        &mut None,
+    )
+}
+
+/// Internal observed compact entry point preserving the plain supported API.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "private observation is an inert carrier"
+)]
+pub(crate) fn run_compact_through_shared_pool_observed(
+    pool: &SharedWsPool,
+    config: &ResponsesConfig,
+    agent_prompt_id: &str,
+    request: &crate::common::PromptPayload<'_>,
+    correlation: Option<&mut crate::attempt_failure::AttemptCaptureCorrelation>,
+    abort: &mut impl TurnAbort,
+    on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
+    private_trace: &mut Option<private_trace::AttemptTrace>,
+) -> Result<crate::common::StreamState, WsTurnError> {
     run_response_through_shared_pool(
         pool,
         config,
@@ -917,6 +973,7 @@ pub fn run_compact_through_shared_pool(
         ResponseMode::Compact,
         abort,
         on_update,
+        private_trace,
     )
 }
 
@@ -934,6 +991,7 @@ fn run_response_through_shared_pool(
     response_mode: ResponseMode,
     abort: &mut impl TurnAbort,
     on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
+    private_trace: &mut Option<private_trace::AttemptTrace>,
 ) -> Result<crate::common::StreamState, WsTurnError> {
     let mut correlation = correlation;
     let record_config = match prepare_vcr_turn(
@@ -952,7 +1010,12 @@ fn run_response_through_shared_pool(
     let session_id = request.session_id.as_str();
     let key = PoolKey::for_request(config, request);
 
-    if let Some(conn) = pool.checkout_until(&key, &config.api_key, abort)? {
+    let pool_started = private_trace::started(private_trace);
+    let checkout = pool.checkout_until(&key, &config.api_key, abort);
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), pool_started) {
+        trace.pool_wait_finished(started);
+    }
+    if let Some(conn) = checkout? {
         let turn_context = SharedTurnContext {
             pool,
             key: key.clone(),
@@ -962,7 +1025,14 @@ fn run_response_through_shared_pool(
             record_config: record_config.as_ref(),
             response_mode,
         };
-        match turn_context.run_cached(conn, session_id, &mut correlation, abort, on_update)? {
+        match turn_context.run_cached(
+            conn,
+            session_id,
+            &mut correlation,
+            abort,
+            on_update,
+            private_trace,
+        )? {
             CachedSharedTurn::Completed(state) => return Ok(*state),
             CachedSharedTurn::RetryFresh {
                 response_bytes,
@@ -984,6 +1054,7 @@ fn run_response_through_shared_pool(
                     &mut correlation,
                     abort,
                     on_update,
+                    private_trace,
                 );
             }
         }
@@ -998,7 +1069,15 @@ fn run_response_through_shared_pool(
         record_config: record_config.as_ref(),
         response_mode,
     }
-    .run_fresh(0, false, true, &mut correlation, abort, on_update)
+    .run_fresh(
+        0,
+        false,
+        true,
+        &mut correlation,
+        abort,
+        on_update,
+        private_trace,
+    )
 }
 
 impl<'a, 'request> SharedTurnContext<'a, 'request> {
@@ -1009,6 +1088,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         correlation: &mut Option<&mut crate::attempt_failure::AttemptCaptureCorrelation>,
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
+        private_trace: &mut Option<private_trace::AttemptTrace>,
     ) -> Result<CachedSharedTurn, WsTurnError> {
         if abort.is_aborted() {
             self.pool.release(self.key, conn)?;
@@ -1039,6 +1119,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
                     state,
                 );
             },
+            private_trace,
         ) {
             Ok(turn) => self
                 .release_and_store_recording(conn, turn, stream)
@@ -1077,6 +1158,10 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "private observation follows turn ownership"
+    )]
     fn run_fresh(
         self,
         carried_response_bytes: u64,
@@ -1085,6 +1170,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         correlation: &mut Option<&mut crate::attempt_failure::AttemptCaptureCorrelation>,
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(crate::StreamUpdate<'_>),
+        private_trace: &mut Option<private_trace::AttemptTrace>,
     ) -> Result<crate::common::StreamState, WsTurnError> {
         if abort.is_aborted() {
             self.pool.abandon(&self.key)?;
@@ -1094,14 +1180,19 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             correlation.mark_repair_used();
         }
         on_update(crate::StreamUpdate::Connecting);
-        let mut conn = self.pool.connect_reserved_fresh(
+        let connect_started = private_trace::started(private_trace);
+        let connected = self.pool.connect_reserved_fresh(
             &self.key,
             self.config,
             abort,
             |config, thread_id, abort| {
                 WsConn::connect(config, thread_id, &self.pool.network, abort)
             },
-        )?;
+        );
+        if let (Some(trace), Some(started)) = (private_trace.as_mut(), connect_started) {
+            trace.connect_upgrade_finished(started);
+        }
+        let mut conn = connected?;
         self.pool.record_fresh_open()?;
         let dispatch = correlation
             .as_deref_mut()
@@ -1132,6 +1223,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
                     state,
                 );
             },
+            private_trace,
         ) {
             Ok(mut turn) => {
                 turn.state.stale_chain_fallback = stale_chain;
@@ -1152,6 +1244,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
                     correlation,
                     abort,
                     updates.into_inner(),
+                    private_trace,
                 )
             }
             Err(err) => {

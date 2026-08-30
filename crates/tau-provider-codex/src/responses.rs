@@ -20,7 +20,10 @@ use tau_proto::{
     ContentPart, ContextItem, ContextRole, MessageItem, ResponsesToolCallEnvelope, ToolCallItem,
     ToolResultItem, ToolResultStatus,
 };
-use tau_provider::debug_capture_writer as path_tau_provider_debug_capture_writer;
+use tau_provider::{
+    debug_capture_writer as path_tau_provider_debug_capture_writer,
+    private_attempt_trace as private_trace,
+};
 use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync};
 
 use self::codex_response_wake_generation::CodexResponseWakeGeneration;
@@ -462,11 +465,39 @@ pub fn responses_compact(
     abort: &mut impl TurnAbort,
     network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>,
 ) -> Result<Vec<ContextItem>, LlmError> {
+    let mut private_trace = private_trace::AttemptTrace::selected(
+        private_trace::Backend::Codex,
+        private_trace::Transport::HttpUnary,
+    );
     if abort.is_aborted() {
+        if let Some(trace) = private_trace.take() {
+            trace.finish(private_trace::Outcome::Canceled);
+        }
         return Err(LlmError::Canceled);
     }
     let body = build_compact_request(config, request)?;
-    send_compact_request(agent_prompt_id, config, request, abort, body, network)
+    if let Some(trace) = private_trace.as_mut() {
+        trace.lowering_finished();
+    }
+    let result = send_compact_request_observed(
+        agent_prompt_id,
+        config,
+        request,
+        abort,
+        body,
+        network,
+        &mut private_trace,
+    );
+    if let Some(trace) = private_trace.take() {
+        let outcome = match &result {
+            Ok(_) => private_trace::Outcome::Completed,
+            Err(LlmError::Canceled) => private_trace::Outcome::Canceled,
+            Err(error) if error.retry_decision().is_some() => private_trace::Outcome::Retryable,
+            Err(_) => private_trace::Outcome::Failed,
+        };
+        trace.finish(outcome);
+    }
+    result
 }
 
 fn build_compact_request(
@@ -521,6 +552,27 @@ fn send_compact_request(
     body: serde_json::Value,
     network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>,
 ) -> Result<Vec<ContextItem>, LlmError> {
+    send_compact_request_observed(
+        agent_prompt_id,
+        config,
+        request,
+        abort,
+        body,
+        network,
+        &mut None,
+    )
+}
+
+/// Observed unary compact path preserving the plain helper.
+fn send_compact_request_observed(
+    agent_prompt_id: &str,
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+    abort: &mut impl TurnAbort,
+    body: serde_json::Value,
+    network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>,
+    private_trace: &mut Option<private_trace::AttemptTrace>,
+) -> Result<Vec<ContextItem>, LlmError> {
     send_compact_request_inner(
         agent_prompt_id,
         config,
@@ -528,12 +580,17 @@ fn send_compact_request(
         abort,
         body,
         network,
+        private_trace,
         #[cfg(test)]
         None,
     )
 }
 
 /// Implements compact worker ownership with an optional test-only exit barrier.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "private observation follows compact worker ownership"
+)]
 fn send_compact_request_inner(
     agent_prompt_id: &str,
     config: &ResponsesConfig,
@@ -541,8 +598,10 @@ fn send_compact_request_inner(
     abort: &mut impl TurnAbort,
     body: serde_json::Value,
     network: std::sync::Arc<tau_provider::OutboundNetworkPolicy>,
+    private_trace: &mut Option<private_trace::AttemptTrace>,
     #[cfg(test)] worker_exit_gate: Option<CompactWorkerExitGate>,
 ) -> Result<Vec<ContextItem>, LlmError> {
+    let capture_started = private_trace::started(private_trace);
     maybe_debug_submit_provider_request(
         agent_prompt_id,
         config,
@@ -551,8 +610,20 @@ fn send_compact_request_inner(
         None,
         &body,
     );
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), capture_started) {
+        trace.capture_finished(started);
+    }
+    let serialization_started = private_trace::started(private_trace);
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
-    let permit = acquire_compact_transport(abort)?;
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), serialization_started) {
+        trace.serialization_finished(started, body_str.len());
+    }
+    let pool_started = private_trace::started(private_trace);
+    let permit = acquire_compact_transport(abort);
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), pool_started) {
+        trace.pool_wait_finished(started);
+    }
+    let permit = permit?;
     let thread_id = request.prompt_cache_key(&config.base_url, config.mode);
     let failure_capture = compact_failure_capture::CompactFailureCaptureContext::new(
         agent_prompt_id,
@@ -566,6 +637,7 @@ fn send_compact_request_inner(
     ));
     let cancel_notify = path_std_sync::Arc::new(path_tokio_sync::Notify::new());
     let _abort_waker = register_compact_abort_waker(abort, &completion, &cancel_notify)?;
+    let mut worker_trace = private_trace.take();
     let network_completion = path_std_sync::Arc::clone(&completion);
     let network_cancel = path_std_sync::Arc::clone(&cancel_notify);
     let worker = path_std_thread::Builder::new()
@@ -580,6 +652,7 @@ fn send_compact_request_inner(
                     &network,
                     &network_cancel,
                     &failure_capture,
+                    &mut worker_trace,
                 )
             }))
             .unwrap_or_else(|_| {
@@ -599,6 +672,7 @@ fn send_compact_request_inner(
                 slot.result = Some(result);
                 changed.notify_all();
             }
+            worker_trace
         })
         .map_err(LlmError::Io)?;
     let (result_slot, changed) = &*completion;
@@ -612,20 +686,25 @@ fn send_compact_request_inner(
     }
     let canceled = slot.canceled || abort.is_aborted();
     drop(slot);
-    worker.join().map_err(|_| {
+    *private_trace = worker.join().map_err(|_| {
         LlmError::InvalidResponse("compact HTTP worker did not stop cleanly".to_owned())
     })?;
-    if canceled {
-        return Err(LlmError::Canceled);
-    }
     let mut slot = result_slot
         .lock()
         .map_err(|_| LlmError::InvalidResponse("compact completion lock poisoned".to_owned()))?;
+    if canceled {
+        return Err(LlmError::Canceled);
+    }
     let response_body = slot
         .result
         .take()
         .expect("compact completion is present unless canceled")?;
-    parse_compact_response(&response_body)
+    let decode_started = private_trace::started(private_trace);
+    let parsed = parse_compact_response(&response_body);
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), decode_started) {
+        trace.decoded(started, parsed.is_ok());
+    }
+    parsed
 }
 
 fn register_compact_abort_waker(
@@ -655,6 +734,7 @@ fn compact_http_request(
     network: &tau_provider::OutboundNetworkPolicy,
     cancel_notify: &tokio::sync::Notify,
     failure_capture: &compact_failure_capture::CompactFailureCaptureContext,
+    private_trace: &mut Option<private_trace::AttemptTrace>,
 ) -> Result<String, LlmError> {
     let url = compact_url(&config.base_url);
     let runtime = path_tokio_runtime::Builder::new_current_thread()
@@ -681,7 +761,12 @@ fn compact_http_request(
         let response = tokio::select! {
             biased;
             () = cancel_notify.notified() => return Err(LlmError::Canceled),
-            result = req.body(body_str.to_owned()).send() => result.map_err(|error| {
+            result = async {
+                if let Some(trace) = private_trace.as_mut() {
+                    trace.record_dispatch();
+                }
+                req.body(body_str.to_owned()).send().await
+            } => result.map_err(|error| {
                 LlmError::Outbound(network.reqwest_error(
                     &url,
                     tau_provider::OutboundPhase::Request,
@@ -707,7 +792,9 @@ fn compact_http_request(
                 .and_then(|value| {
                     tau_provider::retry_policy::parse_retry_after(value, SystemTime::now())
                 });
-            let body = read_compact_error_body(response, failure_capture, cancel_notify).await?;
+            let body =
+                read_compact_error_body(response, failure_capture, cancel_notify, private_trace)
+                    .await?;
             return Err(match retry_after {
                 Some(delay) => LlmError::HttpStatusRetryAfter(code, body, delay),
                 None => LlmError::HttpStatus(code, body),
@@ -721,6 +808,7 @@ fn compact_http_request(
                 MAX_COMPACT_SUCCESS_BODY_BYTES,
                 network,
                 &url,
+                private_trace,
             ) => result,
         }
     })
@@ -730,6 +818,7 @@ async fn read_compact_error_body(
     mut response: reqwest::Response,
     failure_capture: &compact_failure_capture::CompactFailureCaptureContext,
     cancel_notify: &tokio::sync::Notify,
+    private_trace: &mut Option<private_trace::AttemptTrace>,
 ) -> Result<String, LlmError> {
     let status = response.status().as_u16();
     let headers = response.headers().clone();
@@ -747,6 +836,9 @@ async fn read_compact_error_body(
         };
         match next {
             Ok(Some(chunk)) => {
+                if let Some(trace) = private_trace.as_mut() {
+                    trace.first_input(chunk.len());
+                }
                 body.push(&chunk);
                 #[cfg(test)]
                 failure_capture.observe_test_body_chunk();
@@ -776,11 +868,15 @@ async fn read_compact_body(
     limit: usize,
     network: &tau_provider::OutboundNetworkPolicy,
     url: &str,
+    private_trace: &mut Option<private_trace::AttemptTrace>,
 ) -> Result<String, LlmError> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|error| {
         LlmError::Outbound(network.reqwest_error(url, tau_provider::OutboundPhase::Body, &error))
     })? {
+        if let Some(trace) = private_trace.as_mut() {
+            trace.first_input(chunk.len());
+        }
         if bytes.len().saturating_add(chunk.len()) > limit {
             return Err(LlmError::InvalidResponse(
                 "compact response exceeded size limit".to_owned(),

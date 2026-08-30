@@ -25,5 +25,7 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 
 [dev-dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
 tungstenite.workspace = true
 zstd.workspace = true

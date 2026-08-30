@@ -21,6 +21,71 @@ use tau_proto::{
 use super::codex_response_wake_generation::CodexResponseWakeGeneration;
 use super::*;
 
+/// Shared trace writer for production-callpath assertions.
+#[derive(Clone, Default)]
+struct TraceWriter(path_std_sync::Arc<path_std_sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for TraceWriter {
+    /// Append one formatted trace fragment.
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("trace lock").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    /// The in-memory sink has no external buffer.
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// An already-canceled unary compact request emits one canceled observation
+/// without dispatching or constructing worker-owned trace state.
+#[test]
+fn unary_compact_pre_worker_cancel_emits_private_trace() {
+    struct ImmediateAbort;
+    impl crate::TurnAbort for ImmediateAbort {
+        fn is_aborted(&mut self) -> bool {
+            true
+        }
+
+        fn register_waker(
+            &mut self,
+            _waker: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+        ) -> Box<dyn crate::TurnAbortWaker> {
+            Box::new(TestAbortWaker)
+        }
+    }
+
+    let output = TraceWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let output = output.clone();
+            move || output.clone()
+        })
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, || {
+        responses_compact(
+            "ap-pre-worker-cancel",
+            &chain_test_config(),
+            &basic_prompt_payload(),
+            &mut ImmediateAbort,
+            path_std_sync::Arc::new(crate::test_network_policy()),
+        )
+    });
+    assert!(matches!(result, Err(LlmError::Canceled)));
+    let trace =
+        String::from_utf8(output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
+    assert_eq!(
+        trace.matches("provider backend stage observation").count(),
+        1
+    );
+    assert!(trace.contains("outcome=\"canceled\""), "{trace}");
+    assert!(trace.contains("dispatch_count=0"), "{trace}");
+}
+
 /// Ensures the compact transport wake authority retains its zero initial value
 /// and wrapping overflow policy, so a wake at the scalar maximum remains
 /// distinguishable from an unrelated asynchronous generation domain.
@@ -2075,6 +2140,7 @@ fn compact_http_rejection_submits_failure_capture() {
         &crate::test_network_policy(),
         &path_tokio_sync::Notify::new(),
         &capture,
+        &mut None,
     );
 
     assert!(matches!(result, Err(LlmError::HttpStatus(400, _))));
@@ -2140,6 +2206,7 @@ fn compact_http_body_cancellation_submits_incomplete_capture() {
                     &crate::test_network_policy(),
                     &worker_cancel,
                     &capture,
+                    &mut None,
                 ))
                 .expect("result");
         });
@@ -2219,16 +2286,43 @@ fn compact_http_request_uses_mode_specific_transport_contract() {
         let failure_capture =
             compact_failure_capture::CompactFailureCaptureContext::new("ap-test", &config, &prompt);
 
-        let body = compact_http_request(
-            &config,
-            "thread-test",
-            "{}",
-            &crate::test_network_policy(),
-            &path_tokio_sync::Notify::new(),
-            &failure_capture,
-        )
-        .expect("compact response");
+        let output = TraceWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .without_time()
+            .with_ansi(false)
+            .with_writer({
+                let output = output.clone();
+                move || output.clone()
+            })
+            .finish();
+        let body = tracing::subscriber::with_default(subscriber, || {
+            let mut trace = private_trace::AttemptTrace::selected(
+                private_trace::Backend::Codex,
+                private_trace::Transport::HttpUnary,
+            );
+            let body = compact_http_request(
+                &config,
+                "thread-test",
+                "{}",
+                &crate::test_network_policy(),
+                &path_tokio_sync::Notify::new(),
+                &failure_capture,
+                &mut trace,
+            )
+            .expect("compact response");
+            trace
+                .take()
+                .expect("enabled trace")
+                .finish(private_trace::Outcome::Completed);
+            body
+        });
         assert_eq!(body, r#"{"output":[]}"#);
+        let trace =
+            String::from_utf8(output.0.lock().expect("trace lock").clone()).expect("UTF-8 trace");
+        assert!(trace.contains("dispatch_count=1"), "{trace}");
+        assert!(trace.contains("first_input_seen=true"), "{trace}");
+        assert!(trace.contains("outcome=\"completed\""), "{trace}");
         server.join().expect("capture server");
         let request = captured.lock().expect("capture lock").to_ascii_lowercase();
         assert!(request.starts_with("post /codex/responses/compact http/1.1\r\n"));
@@ -2303,6 +2397,7 @@ fn compact_http_request_cancellation_closes_active_socket() {
                     &network,
                     &worker_cancel,
                     &failure_capture,
+                    &mut None,
                 ))
                 .expect("result receiver");
         });
@@ -2395,6 +2490,7 @@ fn compact_cancellation_joins_worker_before_returning() {
                 &mut abort,
                 body,
                 network,
+                &mut None,
                 Some(exit_gate),
             );
             result_tx.send(result).expect("result receiver");
@@ -3194,7 +3290,7 @@ fn compact_abort_rechecks_cancellation_after_waker_registration() {
         register_compact_abort_waker(
             &mut abort,
             &completion,
-            &std::sync::Arc::new(tokio::sync::Notify::new()),
+            &path_std_sync::Arc::new(tokio::sync::Notify::new()),
         ),
         Err(LlmError::Canceled)
     ));

@@ -30,6 +30,7 @@ use tau_provider::retry_policy::{
 use tau_provider::{
     StreamRepetitionGuard, StreamRepetitionKey,
     debug_capture_writer as path_tau_provider_debug_capture_writer,
+    private_attempt_trace as private_trace,
 };
 use tokio::runtime as path_tokio_runtime;
 
@@ -784,6 +785,10 @@ pub fn run_attempt_numbered(
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
+    let mut private_trace = private_trace::AttemptTrace::selected(
+        private_trace::Backend::ChatCompletions,
+        private_trace::Transport::HttpSse,
+    );
     let attempt = ProviderAttemptContext::new(prompt.operation, provider_attempt);
     debug_assert_eq!(attempt.operation, prompt.operation);
     let result = {
@@ -807,8 +812,18 @@ pub fn run_attempt_numbered(
             &mut on_dispatched,
             is_canceled,
             network,
+            &mut private_trace,
         )
     };
+    if let Some(trace) = private_trace.take() {
+        let outcome = match &result {
+            Ok(_) => private_trace::Outcome::Completed,
+            Err(LlmError::Canceled) => private_trace::Outcome::Canceled,
+            Err(error) if error.retry_decision().is_some() => private_trace::Outcome::Retryable,
+            Err(_) => private_trace::Outcome::Failed,
+        };
+        trace.finish(outcome);
+    }
     finish_attempt_with_facts(result, attempt.progress.get(), attempt.facts())
 }
 
@@ -1370,6 +1385,7 @@ fn chat_completions_stream(
     on_dispatched: &mut impl FnMut(Instant),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
+    private_trace: &mut Option<private_trace::AttemptTrace>,
 ) -> Result<StreamState, LlmError> {
     let debug_provider_requests = debug_capture_enabled_for_prompt(prompt, debug_provider_requests);
     if is_canceled() {
@@ -1380,7 +1396,14 @@ fn chat_completions_stream(
         provider.base_url.trim_end_matches('/')
     );
     let body = try_build_request(provider, model, prompt)?;
+    if let Some(trace) = private_trace.as_mut() {
+        trace.lowering_finished();
+    }
+    let serialization_started = private_trace::started(private_trace);
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), serialization_started) {
+        trace.serialization_finished(started, body_str.len());
+    }
     let runtime = path_tokio_runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1410,6 +1433,7 @@ fn chat_completions_stream(
         &mut on_wire_dispatch,
         is_canceled,
         network,
+        private_trace,
     ));
     let (mut state, raw_events) = match result {
         Ok(success) => success,
@@ -1481,6 +1505,7 @@ async fn chat_completions_stream_async(
     on_dispatched: &mut impl FnMut(Instant),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
+    private_trace: &mut Option<private_trace::AttemptTrace>,
 ) -> Result<(StreamState, DebugEventCapture), LlmError> {
     let client = network
         .client_for(context.url)
@@ -1498,6 +1523,9 @@ async fn chat_completions_stream_async(
     let mut response = loop {
         let deadlines = request_deadlines.get_or_insert_with(|| {
             let at = request_now();
+            if let Some(trace) = private_trace.as_mut() {
+                trace.record_dispatch();
+            }
             on_dispatched(at);
             RequestDeadlines::new(at)
         });
@@ -1619,13 +1647,29 @@ async fn chat_completions_stream_async(
         )?;
         match polled {
             Ok(Ok(Some(chunk))) => {
+                if let Some(trace) = private_trace.as_mut() {
+                    trace.first_input(chunk.len());
+                }
                 let mut boundary_error = None;
+                let decode_started = private_trace::started(private_trace);
+                let mut callback_elapsed = private_trace.as_ref().map(|_| Duration::ZERO);
                 let parsed = {
                     let mut on_parser_update = |state: &StreamState| {
                         if boundary_error.is_some() {
                             return;
                         }
+                        if state.has_timed_semantic_output()
+                            && let Some(trace) = private_trace.as_mut()
+                        {
+                            trace.semantic_qualified();
+                        }
+                        let callback_started = private_trace::started(private_trace);
                         on_update(state);
+                        if let (Some(elapsed), Some(started)) =
+                            (callback_elapsed.as_mut(), callback_started)
+                        {
+                            *elapsed = elapsed.saturating_add(started.elapsed());
+                        }
                         request_deadlines.observe(state);
                         boundary_error = ensure_request_active(
                             &request_deadlines,
@@ -1644,6 +1688,9 @@ async fn chat_completions_stream_async(
                         &mut on_parser_update,
                     )
                 };
+                if let (Some(trace), Some(started)) = (private_trace.as_mut(), decode_started) {
+                    trace.decoded_excluding(started, callback_elapsed.unwrap_or_default(), false);
+                }
                 if let Some(error) = boundary_error {
                     return Err(error);
                 }
@@ -1662,12 +1709,25 @@ async fn chat_completions_stream_async(
             }
             Ok(Ok(None)) => {
                 let mut boundary_error = None;
+                let decode_started = private_trace::started(private_trace);
+                let mut callback_elapsed = private_trace.as_ref().map(|_| Duration::ZERO);
                 let parsed = {
                     let mut on_parser_update = |state: &StreamState| {
                         if boundary_error.is_some() {
                             return;
                         }
+                        if state.has_timed_semantic_output()
+                            && let Some(trace) = private_trace.as_mut()
+                        {
+                            trace.semantic_qualified();
+                        }
+                        let callback_started = private_trace::started(private_trace);
                         on_update(state);
+                        if let (Some(elapsed), Some(started)) =
+                            (callback_elapsed.as_mut(), callback_started)
+                        {
+                            *elapsed = elapsed.saturating_add(started.elapsed());
+                        }
                         request_deadlines.observe(state);
                         boundary_error = ensure_request_active(
                             &request_deadlines,
@@ -1685,6 +1745,9 @@ async fn chat_completions_stream_async(
                         &mut on_parser_update,
                     )
                 };
+                if let (Some(trace), Some(started)) = (private_trace.as_mut(), decode_started) {
+                    trace.decoded_excluding(started, callback_elapsed.unwrap_or_default(), false);
+                }
                 if let Some(error) = boundary_error {
                     return Err(error);
                 }

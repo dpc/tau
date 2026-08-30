@@ -7,6 +7,13 @@ Backend crates still own wire request lowering. This crate does not own
 providers, session state, logical retry scheduling, or provider response
 semantics.
 
+The crate also owns the doc-hidden, unstable scalar carrier for
+disabled-by-default backend-stage TRACE diagnostics. Backend adapters select it
+once from the dedicated target and mark only boundaries they actually own; the
+carrier emits one fixed-cardinality process-local observation and has no
+protocol, event, journal, capture, or supported API representation. Disabled
+selection constructs no carrier and takes no observation clock.
+
 The shared provider debug-capture writer accepts already-serialized request and
 response metadata through one bounded process-wide nonblocking FIFO. Its
 detached worker zstd-compresses records and synchronously flushes a dedicated

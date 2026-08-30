@@ -6,6 +6,7 @@ use std::time::Instant;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
+use tau_provider::private_attempt_trace as private_trace;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -254,6 +255,7 @@ pub(super) async fn stream(
     on_update: &mut impl FnMut(AttemptUpdate),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
+    private_trace: &mut Option<private_trace::AttemptTrace>,
 ) -> Result<State, (Error, AttemptProgress)> {
     let websocket_url =
         websocket_url(&config.base_url).map_err(|error| (error, State::default().progress()))?;
@@ -281,31 +283,60 @@ pub(super) async fn stream(
         outbound = outbound.header(name, value);
     }
     let deadline = Instant::now() + deadlines::REQUEST_CONNECT_HEADER_TIMEOUT;
+    if let Some(trace) = private_trace.as_mut() {
+        trace.connect_upgrade_started();
+    }
     let mut send = Box::pin(outbound.send());
     let response = loop {
         tokio::select! {
-            result = &mut send => break result.map_err(|error| {
-                (Error::Outbound(network.reqwest_error(
-                    &websocket_url, tau_provider::OutboundPhase::Request, &error,
-                )), State::default().progress())
-            })?,
+            result = &mut send => match result {
+                Ok(response) => break response,
+                Err(error) => {
+                    if let Some(trace) = private_trace.as_mut() {
+                        trace.connect_upgrade_closed();
+                    }
+                    return Err((
+                        Error::Outbound(network.reqwest_error(
+                            &websocket_url,
+                            tau_provider::OutboundPhase::Request,
+                            &error,
+                        )),
+                        State::default().progress(),
+                    ));
+                }
+            },
             () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                if let Some(trace) = private_trace.as_mut() {
+                    trace.connect_upgrade_closed();
+                }
                 return Err((Error::StreamFailure, State::default().progress()));
             }
             () = tokio::time::sleep(CANCELLATION_POLL_INTERVAL) => {
                 if is_canceled() {
+                    if let Some(trace) = private_trace.as_mut() {
+                        trace.connect_upgrade_closed();
+                    }
                     return Err((Error::Canceled, State::default().progress()));
                 }
                 if deadline <= Instant::now() {
+                    if let Some(trace) = private_trace.as_mut() {
+                        trace.connect_upgrade_closed();
+                    }
                     return Err((Error::StreamFailure, State::default().progress()));
                 }
             }
         }
     };
     if deadline <= Instant::now() {
+        if let Some(trace) = private_trace.as_mut() {
+            trace.connect_upgrade_closed();
+        }
         return Err((Error::StreamFailure, State::default().progress()));
     }
     if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
+        if let Some(trace) = private_trace.as_mut() {
+            trace.connect_upgrade_closed();
+        }
         let status = response.status().as_u16();
         if let Some(error) = network.proxy_response_error(&websocket_url, status) {
             return Err((Error::Outbound(error), State::default().progress()));
@@ -321,12 +352,19 @@ pub(super) async fn stream(
         .map_err(|error| (error, State::default().progress()))?;
         return Err((Error::Http(status, body), State::default().progress()));
     }
-    validate_websocket_upgrade(&response, &key, network, &websocket_url)
-        .map_err(|error| (error, State::default().progress()))?;
+    if let Err(error) = validate_websocket_upgrade(&response, &key, network, &websocket_url) {
+        if let Some(trace) = private_trace.as_mut() {
+            trace.connect_upgrade_closed();
+        }
+        return Err((error, State::default().progress()));
+    }
     let mut deadlines = deadlines::StreamDeadlines::new(Instant::now());
     let upgraded = match await_with_deadline(response.upgrade(), deadline, is_canceled).await {
         Ok(Ok(upgraded)) => upgraded,
         Ok(Err(_)) | Err(WaitError::Deadline) => {
+            if let Some(trace) = private_trace.as_mut() {
+                trace.connect_upgrade_closed();
+            }
             return Err((
                 Error::Outbound(
                     network.protocol_error(&websocket_url, tau_provider::OutboundPhase::Request),
@@ -335,30 +373,54 @@ pub(super) async fn stream(
             ));
         }
         Err(WaitError::Canceled) => {
+            if let Some(trace) = private_trace.as_mut() {
+                trace.connect_upgrade_closed();
+            }
             return Err((Error::Canceled, State::default().progress()));
         }
     };
     let mut socket = configured_websocket_stream(upgraded).await;
+    if let Some(trace) = private_trace.as_mut() {
+        trace.connect_upgrade_closed();
+    }
     let envelope = WebSocketRequestBody::try_from(body)
         .map_err(|_| (Error::Json, State::default().progress()))?;
+    let serialization_started = private_trace::started(private_trace);
     let serialized =
         serde_json::to_string(&envelope).map_err(|_| (Error::Json, State::default().progress()))?;
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), serialization_started) {
+        trace.serialization_finished(started, serialized.len());
+    }
     if is_canceled() {
         return Err((Error::Canceled, State::default().progress()));
     }
+    let capture_started = private_trace::started(private_trace);
     debug_capture.submit_wire_request(prompt, config, model, &envelope);
+    if let (Some(trace), Some(started)) = (private_trace.as_mut(), capture_started) {
+        trace.capture_finished(started);
+    }
     if is_canceled() {
         return Err((Error::Canceled, State::default().progress()));
     }
     on_update(AttemptUpdate::Dispatched(Instant::now()));
-    send_bounded(
+    if let Some(trace) = private_trace.as_mut() {
+        trace.record_dispatch();
+    }
+    if let Some(trace) = private_trace.as_mut() {
+        trace.enqueue_started();
+    }
+    let sent = send_bounded(
         &mut socket,
         Message::Text(serialized.into()),
         is_canceled,
         (Instant::now() + deadlines::REQUEST_CONNECT_HEADER_TIMEOUT).min(deadlines.next_deadline()),
         &State::default(),
     )
-    .await?;
+    .await;
+    if let Some(trace) = private_trace.as_mut() {
+        trace.enqueue_closed();
+    }
+    sent?;
 
     let mut state = State {
         debug_capture,
@@ -382,22 +444,48 @@ pub(super) async fn stream(
         }
         match frame {
             Some(Ok(Message::Text(text))) => {
+                if let Some(trace) = private_trace.as_mut() {
+                    trace.first_input(text.len());
+                }
+                let decode_started = private_trace::started(private_trace);
                 let Some(bytes) = checked_response_bytes(state.bytes, text.len()) else {
                     return Err((Error::StreamFailure, state.progress()));
                 };
                 state.bytes = bytes;
-                let decoded = match decode_websocket_event(text.as_ref())
-                    .map_err(|error| (error, state.progress()))?
-                {
-                    DecodedWebSocketEvent::Apply(decoded) => decoded,
-                    DecodedWebSocketEvent::ProviderError { value, error } => {
+                let decoded = match decode_websocket_event(text.as_ref()) {
+                    Err(error) => {
+                        if let (Some(trace), Some(started)) =
+                            (private_trace.as_mut(), decode_started)
+                        {
+                            trace.decoded(started, false);
+                        }
+                        return Err((error, state.progress()));
+                    }
+                    Ok(DecodedWebSocketEvent::Apply(decoded)) => decoded,
+                    Ok(DecodedWebSocketEvent::ProviderError { value, error }) => {
                         state.debug_capture.record_event(&value, text.as_ref());
+                        if let (Some(trace), Some(started)) =
+                            (private_trace.as_mut(), decode_started)
+                        {
+                            trace.decoded(started, false);
+                        }
                         return Err((error, state.progress()));
                     }
                 };
-                let qualifying_progress = state
-                    .apply_decoded_event(&decoded, text.as_ref())
-                    .map_err(|error| (error, state.progress()))?;
+                let qualifying_progress = match state.apply_decoded_event(&decoded, text.as_ref()) {
+                    Ok(qualifying_progress) => qualifying_progress,
+                    Err(error) => {
+                        if let (Some(trace), Some(started)) =
+                            (private_trace.as_mut(), decode_started)
+                        {
+                            trace.decoded(started, false);
+                        }
+                        return Err((error, state.progress()));
+                    }
+                };
+                if let (Some(trace), Some(started)) = (private_trace.as_mut(), decode_started) {
+                    trace.decoded(started, qualifying_progress);
+                }
                 on_update(AttemptUpdate::Progress(state.progress()));
                 if qualifying_progress {
                     deadlines.renew_for_qualifying_progress(Instant::now());

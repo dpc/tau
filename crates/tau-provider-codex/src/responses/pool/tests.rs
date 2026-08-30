@@ -1816,16 +1816,32 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
         debug_provider_requests: false,
     };
     let mut abort = NeverAbort;
-    run_turn_through_shared_pool(
-        &pool,
-        &config,
-        "sp-shared-2",
-        &req2,
-        None,
-        &mut abort,
-        &mut on_update,
-    )
-    .expect("shared chained reconnect should rebuild WS warmth");
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(std::io::sink)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let mut private_trace = private_trace::AttemptTrace::selected(
+            private_trace::Backend::Codex,
+            private_trace::Transport::Websocket,
+        );
+        run_turn_through_shared_pool_observed(
+            &pool,
+            &config,
+            "sp-shared-2",
+            &req2,
+            None,
+            &mut abort,
+            &mut on_update,
+            &mut private_trace,
+        )
+        .expect("shared chained reconnect should rebuild WS warmth");
+        let debug = format!("{:?}", private_trace.as_ref().expect("enabled trace"));
+        assert!(debug.contains("dispatch_count: 2"), "{debug}");
+        assert!(debug.contains("first_input_seen: true"), "{debug}");
+        let trace = private_trace.take().expect("enabled trace");
+        trace.finish(private_trace::Outcome::Completed);
+    });
 
     let s = server.lock_state();
     assert_eq!(

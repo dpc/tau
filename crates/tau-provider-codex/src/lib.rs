@@ -24,7 +24,10 @@ use tau_proto::{
     Effort, ModelId, ModelName, ModelTag, ProviderBackendTransport, ProviderModelInfo,
     ProviderName, ThinkingSummary, Verbosity,
 };
-use tau_provider::debug_capture_writer as path_tau_provider_debug_capture_writer;
+use tau_provider::{
+    debug_capture_writer as path_tau_provider_debug_capture_writer,
+    private_attempt_trace as private_trace,
+};
 
 pub const LOG_TARGET: &str = "provider-codex";
 
@@ -769,11 +772,12 @@ impl CodexRuntime {
         correlation: &mut attempt_failure::AttemptCaptureCorrelation,
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(StreamUpdate<'_>),
+        private_trace: &mut Option<private_trace::AttemptTrace>,
     ) -> Result<StreamDispatchResult, common::LlmError> {
         let ws_pool_before = self.ws_pool.stats();
         let session_id = request.session_id.as_str();
         let dispatch = match response_mode {
-            ResponseMode::Ordinary => responses::pool::run_turn_through_shared_pool(
+            ResponseMode::Ordinary => responses::pool::run_turn_through_shared_pool_observed(
                 &self.ws_pool,
                 config,
                 agent_prompt_id,
@@ -781,8 +785,9 @@ impl CodexRuntime {
                 Some(correlation),
                 abort,
                 on_update,
+                private_trace,
             ),
-            ResponseMode::Compact => responses::pool::run_compact_through_shared_pool(
+            ResponseMode::Compact => responses::pool::run_compact_through_shared_pool_observed(
                 &self.ws_pool,
                 config,
                 agent_prompt_id,
@@ -790,6 +795,7 @@ impl CodexRuntime {
                 Some(correlation),
                 abort,
                 on_update,
+                private_trace,
             ),
         };
         let state = match dispatch {
@@ -862,6 +868,10 @@ impl CodexRuntime {
         abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(StreamUpdate<'_>),
     ) -> AttemptOutcome {
+        let mut private_trace = private_trace::AttemptTrace::selected(
+            private_trace::Backend::Codex,
+            private_trace::Transport::Websocket,
+        );
         let mut attempt = ProviderAttemptContext::new(AttemptOperation::Inference, logical_attempt);
         let result = self.stream(
             agent_prompt_id,
@@ -871,12 +881,24 @@ impl CodexRuntime {
             attempt.correlation(),
             abort,
             on_update,
+            &mut private_trace,
         );
         if let Ok(result) = &result {
             attempt.observe_stream(&result.state);
         }
         let progress = attempt.progress();
-        if abort.is_aborted() {
+        let canceled = abort.is_aborted();
+        if let Some(trace) = private_trace.take() {
+            let trace_outcome = match &result {
+                _ if canceled => private_trace::Outcome::Canceled,
+                Ok(_) => private_trace::Outcome::Completed,
+                Err(common::LlmError::Canceled) => private_trace::Outcome::Canceled,
+                Err(error) if error.retry_decision().is_some() => private_trace::Outcome::Retryable,
+                Err(_) => private_trace::Outcome::Failed,
+            };
+            trace.finish(trace_outcome);
+        }
+        if canceled {
             return AttemptOutcome::Canceled { progress };
         }
         match result {
@@ -1036,6 +1058,10 @@ impl CodexRuntime {
             return CompactOutcome::Canceled;
         }
         let mut attempt = ProviderAttemptContext::new(AttemptOperation::Compact, logical_attempt);
+        let mut private_trace = private_trace::AttemptTrace::selected(
+            private_trace::Backend::Codex,
+            private_trace::Transport::Websocket,
+        );
         let compact_result = self.stream(
             agent_prompt_id,
             config.wire(),
@@ -1044,6 +1070,7 @@ impl CodexRuntime {
             attempt.correlation(),
             abort,
             &mut |_| {},
+            &mut private_trace,
         );
         let (state, usage) = match compact_result {
             Ok(dispatch) => {
@@ -1053,7 +1080,12 @@ impl CodexRuntime {
                 let usage = dispatch.state.usage();
                 (dispatch.state, usage)
             }
-            Err(common::LlmError::Canceled) => return CompactOutcome::Canceled,
+            Err(common::LlmError::Canceled) => {
+                if let Some(trace) = private_trace.take() {
+                    trace.finish(private_trace::Outcome::Canceled);
+                }
+                return CompactOutcome::Canceled;
+            }
             Err(error) => {
                 if error.is_compaction_route_unavailable() {
                     let newly_downgraded = if let Some(probe) = probe {
@@ -1062,6 +1094,9 @@ impl CodexRuntime {
                     } else {
                         self.mark_compact_route_unavailable(identity)
                     };
+                    if let Some(trace) = private_trace.take() {
+                        trace.finish(private_trace::Outcome::Failed);
+                    }
                     return CompactOutcome::RouteUnavailable {
                         error: CodexError(error),
                         newly_downgraded,
@@ -1072,7 +1107,7 @@ impl CodexRuntime {
                 if let Some(probe) = probe {
                     probe.complete(CompactRouteState::Available);
                 }
-                return match (error.retry_decision(), attempt.progress()) {
+                let outcome = match (error.retry_decision(), attempt.progress()) {
                     (Some(decision), SemanticProgress::None) => {
                         attempt.finalize_retry_failure(RetryFailureInput {
                             agent_prompt_id,
@@ -1089,9 +1124,21 @@ impl CodexRuntime {
                         backend_reached: attempt.backend_reached(),
                     },
                 };
+                if let Some(trace) = private_trace.take() {
+                    let class = if matches!(outcome, CompactOutcome::Retry(_)) {
+                        private_trace::Outcome::Retryable
+                    } else {
+                        private_trace::Outcome::Failed
+                    };
+                    trace.finish(class);
+                }
+                return outcome;
             }
         };
         let Some(compaction_item) = state.into_single_compaction_item() else {
+            if let Some(trace) = private_trace.take() {
+                trace.finish(private_trace::Outcome::Failed);
+            }
             return CompactOutcome::Terminal {
                 error: CodexError(common::LlmError::InvalidResponse(
                     "compaction response did not contain exactly one canonical compaction item"
@@ -1105,8 +1152,14 @@ impl CodexRuntime {
             vec![tau_proto::ContextItem::Compaction(compaction_item)],
         );
         if abort.is_aborted() {
+            if let Some(trace) = private_trace.take() {
+                trace.finish(private_trace::Outcome::Canceled);
+            }
             CompactOutcome::Canceled
         } else {
+            if let Some(trace) = private_trace.take() {
+                trace.finish(private_trace::Outcome::Completed);
+            }
             CompactOutcome::Finished {
                 output_items: output,
                 usage,
