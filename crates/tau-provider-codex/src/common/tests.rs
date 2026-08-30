@@ -107,7 +107,7 @@ fn into_output_items_drops_nameless_accumulator_artifacts() {
         .arguments_json
         .push_str("{\"stray\": \"delta\"}");
     {
-        let call = state.tool_call_at_mut(1, tau_proto::ToolType::Function);
+        let mut call = state.tool_call_at_mut(1, tau_proto::ToolType::Function);
         call.id = "call_real".into();
         call.name = "shell".into();
         call.arguments_json = "{\"command\":\"ls\"}".into();
@@ -172,12 +172,8 @@ fn semantic_progress_excludes_transport_and_includes_output_items() {
     let mut state = StreamState::new();
     state.record_transport_response_bytes(100);
     assert!(!state.has_semantic_progress());
-    state
-        .output_items
-        .push(OutputItemAccumulator::UnknownProviderItem(
-            tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"future"}"#)
-                .expect("valid unknown item"),
-        ));
+    let item = serde_json::json!({"type": "future"});
+    state.set_unknown_provider_item_at(0, &item, item.to_string());
     assert!(state.has_semantic_progress());
 }
 
@@ -186,22 +182,11 @@ fn semantic_progress_excludes_transport_and_includes_output_items() {
 #[test]
 fn timed_semantic_output_has_narrow_metric_categories() {
     let mut state = StreamState::new();
-    state.output_items.push(OutputItemAccumulator::Empty);
-    state
-        .output_items
-        .push(OutputItemAccumulator::UnknownProviderItem(
-            tau_proto::OpaqueProviderItem::from_raw_json(r#"{"type":"future"}"#)
-                .expect("valid unknown item"),
-        ));
-    state
-        .output_items
-        .push(OutputItemAccumulator::Compaction(None));
-    state
-        .output_items
-        .push(OutputItemAccumulator::ToolCall(ToolCallAccumulator {
-            id: "call-only".to_owned(),
-            ..ToolCallAccumulator::new(tau_proto::ToolType::Function)
-        }));
+    state.reserve_output_item_at(0);
+    let unknown = serde_json::json!({"type": "future"});
+    state.set_unknown_provider_item_at(1, &unknown, unknown.to_string());
+    state.start_compaction_item_at(2);
+    state.tool_call_at_mut(3, tau_proto::ToolType::Function).id = "call-only".to_owned();
     assert!(!state.has_timed_semantic_output());
 
     state
@@ -210,7 +195,7 @@ fn timed_semantic_output_has_narrow_metric_categories() {
     assert!(state.has_timed_semantic_output());
 
     let mut assistant = StreamState::new();
-    assistant.message_at_mut(0).text.push_str("hello");
+    assistant.append_message_delta_at(0, "hello");
     assert!(assistant.has_timed_semantic_output());
 
     let mut summary = StreamState::new();
@@ -239,6 +224,33 @@ fn timed_semantic_output_has_narrow_metric_categories() {
     });
     opaque.set_reasoning_item_at(0, &reasoning, reasoning.to_string());
     assert!(opaque.has_timed_semantic_output());
+}
+
+/// Replacing one provider-indexed slot must subtract the old slot's cached
+/// visible/non-visible bytes and semantic classification before adding the new
+/// variant.
+#[test]
+fn indexed_slot_replacement_reconciles_cached_aggregates() {
+    let mut state = StreamState::new();
+    state.append_message_delta_at(0, "🙂");
+    assert_eq!(state.assistant_text_bytes(), 4);
+    assert_eq!(state.non_visible_output_bytes(), 0);
+    assert!(state.has_timed_semantic_output());
+
+    state
+        .tool_call_at_mut(0, tau_proto::ToolType::Custom)
+        .arguments_json
+        .push_str("abc");
+    assert_eq!(state.assistant_text_bytes(), 0);
+    assert_eq!(state.non_visible_output_bytes(), 3);
+    assert!(state.has_semantic_progress());
+    assert!(state.has_timed_semantic_output());
+
+    state.start_compaction_item_at(0);
+    assert_eq!(state.assistant_text_bytes(), 0);
+    assert_eq!(state.non_visible_output_bytes(), 0);
+    assert!(state.has_semantic_progress());
+    assert!(!state.has_timed_semantic_output());
 }
 
 /// Compact output extraction must reject an additional materialized item

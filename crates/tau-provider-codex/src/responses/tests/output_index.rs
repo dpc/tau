@@ -1,5 +1,85 @@
 use super::*;
 
+/// Proves many interleaved UTF-8 assistant, reasoning, and tool chunks update
+/// cached production aggregates without rebuilding cumulative assistant text.
+///
+/// The final aggregate is materialized once as a differential oracle, so the
+/// deterministic copy-work counter scales with final output bytes rather than
+/// the number of streamed deltas.
+#[test]
+fn interleaved_chunk_aggregates_scale_with_final_output() {
+    let mut state = path_crate_common::StreamState::new();
+    let mut expected_messages = [String::new(), String::new()];
+    let mut expected_reasoning = String::new();
+    let mut expected_tool = String::new();
+    let chunks = ["a", "β", "🙂", "終"];
+
+    for round in 0..512 {
+        let message_slot = round % 2;
+        let output_index = if message_slot == 0 { 3 } else { 0 };
+        let chunk = chunks[round % chunks.len()];
+        expected_messages[message_slot].push_str(chunk);
+        apply_event(
+            &mut state,
+            &serde_json::json!({
+                "type": "response.output_text.delta",
+                "output_index": output_index,
+                "delta": chunk,
+            }),
+            &mut |_| {},
+        )
+        .expect("assistant delta");
+
+        let reasoning = chunks[(round + 1) % chunks.len()];
+        expected_reasoning.push_str(reasoning);
+        apply_event(
+            &mut state,
+            &serde_json::json!({
+                "type": "response.reasoning_summary_text.delta",
+                "output_index": 2,
+                "delta": reasoning,
+            }),
+            &mut |_| {},
+        )
+        .expect("reasoning delta");
+
+        let tool = chunks[(round + 2) % chunks.len()];
+        expected_tool.push_str(tool);
+        apply_event(
+            &mut state,
+            &serde_json::json!({
+                "type": "response.custom_tool_call_input.delta",
+                "output_index": 1,
+                "delta": tool,
+            }),
+            &mut |_| {},
+        )
+        .expect("tool delta");
+
+        assert_eq!(
+            state.assistant_text_bytes(),
+            expected_messages.iter().map(String::len).sum::<usize>() as u64,
+        );
+        assert_eq!(state.non_visible_output_bytes(), expected_tool.len() as u64);
+        assert!(state.has_semantic_progress());
+        assert!(state.has_timed_semantic_output());
+        assert_eq!(
+            state.aggregate_assistant_text_copied_bytes(),
+            0,
+            "delta application must not materialize cumulative assistant text",
+        );
+    }
+
+    let expected = format!("{}{}", expected_messages[1], expected_messages[0]);
+    assert_eq!(state.aggregate_assistant_text(), expected);
+    assert_eq!(
+        state.aggregate_assistant_text_copied_bytes(),
+        state.assistant_text_bytes(),
+        "one terminal oracle copy must be linear only in final assistant bytes",
+    );
+    assert_eq!(state.thinking.as_deref(), Some(expected_reasoning.as_str()));
+}
+
 /// Pins the cold-state boundary so one event may create 1,024 slots but cannot
 /// request the 1,025th sparse slot.
 #[test]
@@ -12,7 +92,7 @@ fn output_index_bounds_empty_state_slot_growth() {
     });
     apply_event(&mut accepted, &accepted_event, &mut |_| {}).expect("growth of 1,024 slots");
     assert_eq!(accepted.output_items.len(), 1024);
-    assert_eq!(accepted.text, "accepted");
+    assert_eq!(accepted.aggregate_assistant_text(), "accepted");
 
     for rejected_index in [1024_u64, u64::MAX] {
         let mut rejected = path_crate_common::StreamState::new();
@@ -25,7 +105,7 @@ fn output_index_bounds_empty_state_slot_growth() {
             .expect_err("sparse output index must be rejected");
         assert_invalid_output_index(error);
         assert!(rejected.output_items.is_empty());
-        assert!(rejected.text.is_empty());
+        assert!(rejected.assistant_text_bytes() == 0);
     }
 }
 
@@ -53,7 +133,11 @@ fn output_index_bounds_relative_slot_growth() {
         .expect_err("growth of 1,025 slots must fail");
     assert_invalid_output_index(error);
     assert_eq!(state.output_items.len(), 1026);
-    assert!(!state.text.contains("one slot too far"));
+    assert!(
+        !state
+            .aggregate_assistant_text()
+            .contains("one slot too far")
+    );
 }
 
 /// Ensures dense streams can cross slot 1,024 because each event requests only
@@ -70,7 +154,7 @@ fn output_index_allows_dense_output_beyond_1024_items() {
         apply_event(&mut state, &event, &mut |_| {}).expect("dense output must remain valid");
     }
     assert_eq!(state.output_items.len(), 1025);
-    assert_eq!(state.text.len(), 1025);
+    assert_eq!(state.assistant_text_bytes(), 1025);
 }
 
 /// Preserves lower and duplicate provider indexes while keeping durable items
@@ -131,7 +215,7 @@ fn output_index_rejects_malformed_present_values_and_defaults_absent_to_zero() {
     });
     apply_event(&mut state, &absent, &mut |_| {}).expect("absent index remains slot zero");
     assert_eq!(state.output_items.len(), 1);
-    assert_eq!(state.text, "slot zero");
+    assert_eq!(state.aggregate_assistant_text(), "slot zero");
 }
 
 /// Rejects an index outside the public progress representation independently
@@ -212,7 +296,7 @@ fn output_index_rejection_precedes_indexed_handler_mutation() {
             .expect_err("sparse output index must precede handler checks");
         assert_invalid_output_index(error);
         assert!(state.output_items.is_empty());
-        assert!(state.text.is_empty());
+        assert!(state.assistant_text_bytes() == 0);
         assert!(state.thinking.is_none());
         assert_eq!(state.non_visible_output_bytes(), 0);
         assert_eq!(update_count, 0);

@@ -955,7 +955,7 @@ fn stream_ended_without_terminal_error(
 }
 
 fn stream_has_partial_output(state: &StreamState) -> bool {
-    !state.text.is_empty()
+    state.assistant_text_bytes() != 0
         || state
             .thinking
             .as_deref()
@@ -1803,7 +1803,7 @@ fn apply_output_item_tool(
     {
         check_tool_snapshot(state, output_index, tool_type, final_input)?;
     }
-    let call = state.tool_call_at_mut(output_index, tool_type);
+    let mut call = state.tool_call_at_mut(output_index, tool_type);
     let mut changed = false;
     if let Some(id) = item["call_id"].as_str() {
         call.id = id.to_owned();

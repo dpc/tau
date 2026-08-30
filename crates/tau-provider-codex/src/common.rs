@@ -1,5 +1,7 @@
 //! Types shared by the ChatGPT/Codex Responses transports.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
@@ -467,10 +469,19 @@ pub struct MessageAccumulator {
 
 /// Accumulated streaming state shared by both backends.
 pub struct StreamState {
-    /// Concatenated visible assistant text, kept for backend validation and
-    /// tests. The durable final output is assembled from `output_items`.
-    pub(crate) text: String,
+    /// Provider-indexed semantic accumulators.
+    ///
+    /// Production mutation must use this type's indexed helpers so the cached
+    /// aggregate fields remain coherent.
     pub(crate) output_items: Vec<OutputItemAccumulator>,
+    /// Cumulative UTF-8 bytes across all assistant message slots.
+    assistant_text_bytes: u64,
+    /// Cumulative UTF-8 bytes across all non-visible tool input slots.
+    non_visible_output_bytes: u64,
+    /// Number of output slots containing replay-significant semantic output.
+    semantic_output_items: usize,
+    /// Number of output slots qualifying for first-semantic-output timing.
+    timed_output_items: usize,
     pub(crate) input_tokens: Option<u64>,
     pub(crate) cached_tokens: Option<u64>,
     /// Provider-reported cache-write input tokens.
@@ -508,6 +519,9 @@ pub struct StreamState {
     pub(crate) provider_evidence_mode: crate::attempt_failure::ProviderEvidenceMode,
     /// Exact logical retained-state bytes admitted by the live WebSocket owner.
     retained_state_bytes: u64,
+    /// Assistant bytes copied by terminal aggregate fallback in test builds.
+    #[cfg(test)]
+    aggregate_assistant_text_copied_bytes: Cell<u64>,
 }
 
 /// Provider token counters accumulated by one completed response.
@@ -602,6 +616,101 @@ pub struct ToolCallAccumulator {
     pub tool_type: tau_proto::ToolType,
     pub arguments_json: String,
     pub responses_envelope: ResponsesToolCallEnvelope,
+}
+
+/// Mutable access to one tool-call slot that reconciles cached stream totals
+/// when the caller finishes changing the accumulator.
+pub(crate) struct ToolCallAccumulatorMut<'a> {
+    /// Owning stream state.
+    state: &'a mut StreamState,
+    /// Provider output index of the borrowed tool call.
+    output_index: usize,
+    /// Slot metrics before mutable access began.
+    old: SlotMetrics,
+}
+
+impl std::ops::Deref for ToolCallAccumulatorMut<'_> {
+    type Target = ToolCallAccumulator;
+
+    fn deref(&self) -> &Self::Target {
+        let OutputItemAccumulator::ToolCall(call) = &self.state.output_items[self.output_index]
+        else {
+            unreachable!("tool-call guard owns a tool-call slot");
+        };
+        call
+    }
+}
+
+impl std::ops::DerefMut for ToolCallAccumulatorMut<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let OutputItemAccumulator::ToolCall(call) = &mut self.state.output_items[self.output_index]
+        else {
+            unreachable!("tool-call guard owns a tool-call slot");
+        };
+        call
+    }
+}
+
+impl Drop for ToolCallAccumulatorMut<'_> {
+    fn drop(&mut self) {
+        let new = slot_metrics(&self.state.output_items[self.output_index]);
+        self.state.update_slot_metrics(self.old, new);
+    }
+}
+
+/// Cached aggregate contributions from one provider output slot.
+#[derive(Clone, Copy)]
+struct SlotMetrics {
+    /// Visible assistant UTF-8 bytes.
+    assistant_bytes: u64,
+    /// Non-visible tool-input UTF-8 bytes.
+    non_visible_bytes: u64,
+    /// Whether the slot makes transparent replay unsafe.
+    semantic: bool,
+    /// Whether the slot qualifies for first-output timing.
+    timed: bool,
+}
+
+fn slot_metrics(item: &OutputItemAccumulator) -> SlotMetrics {
+    match item {
+        OutputItemAccumulator::Empty => SlotMetrics {
+            assistant_bytes: 0,
+            non_visible_bytes: 0,
+            semantic: false,
+            timed: false,
+        },
+        OutputItemAccumulator::Message(message) => {
+            let present = !message.text.is_empty();
+            SlotMetrics {
+                assistant_bytes: message.text.len() as u64,
+                non_visible_bytes: 0,
+                semantic: present,
+                timed: present,
+            }
+        }
+        OutputItemAccumulator::ToolCall(call) => SlotMetrics {
+            assistant_bytes: 0,
+            non_visible_bytes: call.arguments_json.len() as u64,
+            semantic: !call.id.is_empty()
+                || !call.name.is_empty()
+                || !call.arguments_json.is_empty(),
+            timed: !call.name.is_empty() || !call.arguments_json.is_empty(),
+        },
+        OutputItemAccumulator::Reasoning(_) => SlotMetrics {
+            assistant_bytes: 0,
+            non_visible_bytes: 0,
+            semantic: true,
+            timed: true,
+        },
+        OutputItemAccumulator::Compaction(_) | OutputItemAccumulator::UnknownProviderItem(_) => {
+            SlotMetrics {
+                assistant_bytes: 0,
+                non_visible_bytes: 0,
+                semantic: true,
+                timed: false,
+            }
+        }
+    }
 }
 
 impl ToolCallAccumulator {
@@ -703,8 +812,11 @@ impl StreamState {
     /// Construct an empty provider response accumulator.
     pub(crate) fn new() -> Self {
         Self {
-            text: String::new(),
             output_items: Vec::new(),
+            assistant_text_bytes: 0,
+            non_visible_output_bytes: 0,
+            semantic_output_items: 0,
+            timed_output_items: 0,
             input_tokens: None,
             cached_tokens: None,
             cache_write_tokens: None,
@@ -720,6 +832,8 @@ impl StreamState {
             quota_observation: None,
             provider_evidence_mode: path_crate_attempt_failure::ProviderEvidenceMode::LiveOnly,
             retained_state_bytes: 0,
+            #[cfg(test)]
+            aggregate_assistant_text_copied_bytes: Cell::new(0),
         }
     }
 
@@ -735,7 +849,9 @@ impl StreamState {
             .len()
             .saturating_mul(std::mem::size_of::<OutputItemAccumulator>());
         let mut bytes = u64::try_from(slots).unwrap_or(u64::MAX);
-        bytes = add_len(bytes, self.text.len());
+        // Preserve the admission charge formerly owned by the duplicate
+        // concatenated assistant-text allocation without retaining that copy.
+        bytes = bytes.saturating_add(self.assistant_text_bytes);
         bytes = add_optional_string(bytes, self.thinking.as_ref());
         bytes = add_optional_string(bytes, self.response_id.as_ref());
         bytes = add_serialized(bytes, self.provider_terminal_event.as_ref());
@@ -921,14 +1037,16 @@ impl StreamState {
         self.ensure_output_len(output_index);
     }
 
-    pub(crate) fn message_at_mut(&mut self, output_index: usize) -> &mut MessageAccumulator {
+    fn message_at_mut(&mut self, output_index: usize) -> &mut MessageAccumulator {
         self.ensure_output_len(output_index);
         if !matches!(
             self.output_items[output_index],
             OutputItemAccumulator::Message(_)
         ) {
-            self.output_items[output_index] =
-                OutputItemAccumulator::Message(MessageAccumulator::default());
+            self.replace_output_item(
+                output_index,
+                OutputItemAccumulator::Message(MessageAccumulator::default()),
+            );
         }
         let OutputItemAccumulator::Message(message) = &mut self.output_items[output_index] else {
             unreachable!("message slot was just initialized");
@@ -951,13 +1069,23 @@ impl StreamState {
     }
 
     pub(crate) fn append_message_delta_at(&mut self, output_index: usize, delta: &str) {
-        self.message_at_mut(output_index).text.push_str(delta);
-        self.refresh_text();
+        self.message_at_mut(output_index);
+        let old = slot_metrics(&self.output_items[output_index]);
+        let OutputItemAccumulator::Message(message) = &mut self.output_items[output_index] else {
+            unreachable!("message slot was just initialized");
+        };
+        message.text.push_str(delta);
+        self.update_slot_metrics(old, slot_metrics(&self.output_items[output_index]));
     }
 
     pub(crate) fn set_message_text_at(&mut self, output_index: usize, text: &str) {
-        self.message_at_mut(output_index).text = text.to_owned();
-        self.refresh_text();
+        self.message_at_mut(output_index);
+        let old = slot_metrics(&self.output_items[output_index]);
+        let OutputItemAccumulator::Message(message) = &mut self.output_items[output_index] else {
+            unreachable!("message slot was just initialized");
+        };
+        message.text = text.to_owned();
+        self.update_slot_metrics(old, slot_metrics(&self.output_items[output_index]));
     }
 
     pub(crate) fn set_message_phase_at(
@@ -983,21 +1111,25 @@ impl StreamState {
         &mut self,
         output_index: usize,
         tool_type: tau_proto::ToolType,
-    ) -> &mut ToolCallAccumulator {
+    ) -> ToolCallAccumulatorMut<'_> {
         self.ensure_output_len(output_index);
         if !matches!(
             self.output_items[output_index],
             OutputItemAccumulator::ToolCall(_)
         ) {
-            self.output_items[output_index] =
-                OutputItemAccumulator::ToolCall(ToolCallAccumulator::new(tool_type));
-            self.refresh_text();
+            self.replace_output_item(
+                output_index,
+                OutputItemAccumulator::ToolCall(ToolCallAccumulator::new(tool_type)),
+            );
         }
-        let OutputItemAccumulator::ToolCall(call) = &mut self.output_items[output_index] else {
-            unreachable!("tool-call slot was just initialized");
+        let old = slot_metrics(&self.output_items[output_index]);
+        let mut guard = ToolCallAccumulatorMut {
+            state: self,
+            output_index,
+            old,
         };
-        call.tool_type = tool_type;
-        call
+        guard.tool_type = tool_type;
+        guard
     }
 
     pub(crate) fn set_reasoning_item_at(
@@ -1007,9 +1139,10 @@ impl StreamState {
         raw_json: String,
     ) {
         self.ensure_output_len(output_index);
-        self.output_items[output_index] =
-            OutputItemAccumulator::Reasoning(opaque_item_from_value(item, raw_json));
-        self.refresh_text();
+        self.replace_output_item(
+            output_index,
+            OutputItemAccumulator::Reasoning(opaque_item_from_value(item, raw_json)),
+        );
     }
 
     pub(crate) fn start_compaction_item_at(&mut self, output_index: usize) {
@@ -1018,8 +1151,7 @@ impl StreamState {
             self.output_items[output_index],
             OutputItemAccumulator::Compaction(_)
         ) {
-            self.output_items[output_index] = OutputItemAccumulator::Compaction(None);
-            self.refresh_text();
+            self.replace_output_item(output_index, OutputItemAccumulator::Compaction(None));
         }
     }
 
@@ -1030,9 +1162,10 @@ impl StreamState {
         raw_json: String,
     ) {
         self.ensure_output_len(output_index);
-        self.output_items[output_index] =
-            OutputItemAccumulator::Compaction(Some(opaque_item_from_value(item, raw_json)));
-        self.refresh_text();
+        self.replace_output_item(
+            output_index,
+            OutputItemAccumulator::Compaction(Some(opaque_item_from_value(item, raw_json))),
+        );
     }
 
     /// Stores an unrecognized provider output item at its provider index.
@@ -1043,9 +1176,10 @@ impl StreamState {
         raw_json: String,
     ) {
         self.ensure_output_len(output_index);
-        self.output_items[output_index] =
-            OutputItemAccumulator::UnknownProviderItem(opaque_item_from_value(item, raw_json));
-        self.refresh_text();
+        self.replace_output_item(
+            output_index,
+            OutputItemAccumulator::UnknownProviderItem(opaque_item_from_value(item, raw_json)),
+        );
     }
 
     /// Appends displayable reasoning-summary text at the provider output index
@@ -1072,24 +1206,24 @@ impl StreamState {
     /// Returns the cumulative non-visible provider output bytes generated for
     /// this prompt, such as streamed tool-call arguments and custom-tool input.
     pub fn non_visible_output_bytes(&self) -> u64 {
-        self.output_items
-            .iter()
-            .filter_map(|item| match item {
-                OutputItemAccumulator::ToolCall(call) => Some(call.arguments_json.len() as u64),
-                _ => None,
-            })
-            .sum()
+        self.non_visible_output_bytes
+    }
+
+    /// Returns cumulative visible assistant UTF-8 bytes without materializing
+    /// the provider-index-ordered aggregate.
+    pub(crate) fn assistant_text_bytes(&self) -> u64 {
+        self.assistant_text_bytes
     }
 
     /// Returns the cumulative provider response-progress bytes for this
     /// response, preferring transport-received bytes so progress moves before
     /// provider payloads have been semantically parsed.
     pub fn response_bytes_received(&self) -> u64 {
-        let visible_bytes = self
-            .text
-            .len()
-            .saturating_add(self.thinking.as_ref().map_or(0, |thinking| thinking.len()))
-            as u64;
+        let visible_bytes = self.assistant_text_bytes.saturating_add(
+            self.thinking
+                .as_ref()
+                .map_or(0, |thinking| thinking.len() as u64),
+        );
         visible_bytes
             .saturating_add(self.non_visible_output_bytes())
             .max(self.transport_response_bytes)
@@ -1102,19 +1236,11 @@ impl StreamState {
     /// provider output item or reasoning text does.
     #[must_use]
     pub fn has_semantic_progress(&self) -> bool {
-        self.thinking
-            .as_ref()
-            .is_some_and(|thinking| !thinking.is_empty())
-            || self.output_items.iter().any(|item| match item {
-                OutputItemAccumulator::Empty => false,
-                OutputItemAccumulator::Message(message) => !message.text.is_empty(),
-                OutputItemAccumulator::ToolCall(call) => {
-                    !call.id.is_empty() || !call.name.is_empty() || !call.arguments_json.is_empty()
-                }
-                OutputItemAccumulator::Reasoning(_)
-                | OutputItemAccumulator::Compaction(_)
-                | OutputItemAccumulator::UnknownProviderItem(_) => true,
-            })
+        self.semantic_output_items != 0
+            || self
+                .thinking
+                .as_ref()
+                .is_some_and(|thinking| !thinking.is_empty())
     }
 
     /// Returns whether accepted state contains output that qualifies for the
@@ -1124,19 +1250,11 @@ impl StreamState {
     /// unknown provider items.
     #[must_use]
     pub fn has_timed_semantic_output(&self) -> bool {
-        self.thinking
-            .as_ref()
-            .is_some_and(|thinking| !thinking.is_empty())
-            || self.output_items.iter().any(|item| match item {
-                OutputItemAccumulator::Empty
-                | OutputItemAccumulator::Compaction(_)
-                | OutputItemAccumulator::UnknownProviderItem(_) => false,
-                OutputItemAccumulator::Message(message) => !message.text.is_empty(),
-                OutputItemAccumulator::ToolCall(call) => {
-                    !call.name.is_empty() || !call.arguments_json.is_empty()
-                }
-                OutputItemAccumulator::Reasoning(_) => true,
-            })
+        self.timed_output_items != 0
+            || self
+                .thinking
+                .as_ref()
+                .is_some_and(|thinking| !thinking.is_empty())
     }
 
     /// Adds raw bytes received from the provider transport before semantic
@@ -1157,13 +1275,58 @@ impl StreamState {
         self.transport_response_bytes = self.transport_response_bytes.saturating_add(bytes);
     }
 
-    pub(crate) fn refresh_text(&mut self) {
-        self.text.clear();
+    /// Materializes provider-index-ordered assistant text for terminal
+    /// fallback.
+    ///
+    /// Live streaming paths must use indexed deltas and cached byte totals;
+    /// calling this after each delta would restore cumulative quadratic work.
+    pub(crate) fn aggregate_assistant_text(&self) -> String {
+        let capacity = usize::try_from(self.assistant_text_bytes).unwrap_or(usize::MAX);
+        let mut text = String::with_capacity(capacity);
         for item in &self.output_items {
             if let OutputItemAccumulator::Message(message) = item {
-                self.text.push_str(&message.text);
+                text.push_str(&message.text);
+                #[cfg(test)]
+                self.aggregate_assistant_text_copied_bytes.set(
+                    self.aggregate_assistant_text_copied_bytes
+                        .get()
+                        .saturating_add(message.text.len() as u64),
+                );
             }
         }
+        text
+    }
+
+    /// Returns deterministic assistant aggregate-copy work for scaling tests.
+    #[cfg(test)]
+    pub(crate) fn aggregate_assistant_text_copied_bytes(&self) -> u64 {
+        self.aggregate_assistant_text_copied_bytes.get()
+    }
+
+    fn replace_output_item(&mut self, output_index: usize, item: OutputItemAccumulator) {
+        let old = slot_metrics(&self.output_items[output_index]);
+        self.output_items[output_index] = item;
+        let new = slot_metrics(&self.output_items[output_index]);
+        self.update_slot_metrics(old, new);
+    }
+
+    fn update_slot_metrics(&mut self, old: SlotMetrics, new: SlotMetrics) {
+        self.assistant_text_bytes = self
+            .assistant_text_bytes
+            .saturating_sub(old.assistant_bytes)
+            .saturating_add(new.assistant_bytes);
+        self.non_visible_output_bytes = self
+            .non_visible_output_bytes
+            .saturating_sub(old.non_visible_bytes)
+            .saturating_add(new.non_visible_bytes);
+        self.semantic_output_items = self
+            .semantic_output_items
+            .saturating_sub(usize::from(old.semantic))
+            .saturating_add(usize::from(new.semantic));
+        self.timed_output_items = self
+            .timed_output_items
+            .saturating_sub(usize::from(old.timed))
+            .saturating_add(usize::from(new.timed));
     }
 
     /// Returns the current compact compaction status, when a compaction item is
@@ -1217,8 +1380,8 @@ impl StreamState {
             }
         }
 
-        if items.is_empty() && !self.text.is_empty() {
-            items.push(assistant_text_item(self.text.clone()));
+        if items.is_empty() && self.assistant_text_bytes != 0 {
+            items.push(assistant_text_item(self.aggregate_assistant_text()));
         }
 
         items

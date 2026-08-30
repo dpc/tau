@@ -4511,14 +4511,14 @@ fn ws_prewarm_envelope_sets_generate_false_and_drops_previous_response() {
 // apply_event — shared Responses event applicator
 // -----------------------------------------------------------------------
 
-/// `response.output_text.delta` accumulates into `state.text` and fires
+/// `response.output_text.delta` accumulates its indexed message slot and fires
 /// `on_update` once per delta.
 #[test]
 fn apply_event_text_delta_accumulates_and_notifies() {
     let mut state = path_crate_common::StreamState::new();
     let mut updates: Vec<String> = Vec::new();
     let mut on_update = |state: &crate::common::StreamState| {
-        updates.push(state.text.clone());
+        updates.push(state.aggregate_assistant_text());
     };
 
     for chunk in ["hel", "lo, ", "world"] {
@@ -4529,7 +4529,7 @@ fn apply_event_text_delta_accumulates_and_notifies() {
         let done = apply_event(&mut state, &ev, &mut on_update).expect("apply ok");
         assert!(!done, "text delta should not terminate the stream");
     }
-    assert_eq!(state.text, "hello, world");
+    assert_eq!(state.aggregate_assistant_text(), "hello, world");
     assert_eq!(updates, vec!["hel", "hello, ", "hello, world"]);
 }
 
@@ -4682,8 +4682,8 @@ fn apply_event_output_item_done_hydrates_message_text_before_tool_call() {
     let mut state = path_crate_common::StreamState::new();
     let mut updates: Vec<String> = Vec::new();
     let mut on_update = |state: &crate::common::StreamState| {
-        if updates.last() != Some(&state.text) {
-            updates.push(state.text.clone());
+        if updates.last() != Some(&state.aggregate_assistant_text()) {
+            updates.push(state.aggregate_assistant_text());
         }
     };
 
@@ -4771,7 +4771,7 @@ fn apply_event_completed_does_not_harvest_response_output() {
 
     assert!(done);
     assert_eq!(state.response_id.as_deref(), Some("resp_final"));
-    assert_eq!(state.text, "");
+    assert_eq!(state.aggregate_assistant_text(), "");
     assert!(state.into_output_items().is_empty());
 }
 
@@ -5035,7 +5035,7 @@ fn repeated_output_text_delta_aborts_before_appending_more_output() {
         result,
         Err(crate::common::LlmError::RepetitionDetected(_))
     ));
-    assert!(state.text.is_empty());
+    assert!(state.assistant_text_bytes() == 0);
 }
 
 #[test]
@@ -5071,7 +5071,7 @@ fn repeated_output_text_done_aborts_without_appending_snapshot() {
         result,
         Err(crate::common::LlmError::RepetitionDetected(_))
     ));
-    assert!(state.text.is_empty());
+    assert!(state.assistant_text_bytes() == 0);
 }
 
 #[test]
@@ -5086,7 +5086,10 @@ fn non_repeating_output_text_done_is_accepted() {
     });
     let done = apply_event(&mut state, &ev, &mut |_| {}).expect("done snapshot should apply");
     assert!(!done);
-    assert_eq!(state.text, "This is a concise non-repeating answer.");
+    assert_eq!(
+        state.aggregate_assistant_text(),
+        "This is a concise non-repeating answer."
+    );
 }
 
 #[test]
@@ -5144,7 +5147,7 @@ fn repeated_output_item_done_message_aborts_without_appending_snapshot() {
         result,
         Err(crate::common::LlmError::RepetitionDetected(_))
     ));
-    assert!(state.text.is_empty());
+    assert!(state.assistant_text_bytes() == 0);
 }
 
 #[test]

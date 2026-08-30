@@ -1095,7 +1095,7 @@ fn ws_turn_captures_response_id_for_chain_continuation() {
     let mut pool = WsPool::new();
     let mut last_text = String::new();
     let mut on_update = |state: &crate::common::StreamState| {
-        last_text = state.text.clone();
+        last_text = state.aggregate_assistant_text();
     };
 
     let session_id =

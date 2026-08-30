@@ -1593,7 +1593,7 @@ fn localhost_ws_round_trip_lowers_and_parses_production_frames() {
     );
     drop(capture);
 
-    assert_eq!(result.state.text, "hello");
+    assert_eq!(result.state.aggregate_assistant_text(), "hello");
     assert_eq!(result.state.response_id.as_deref(), Some("resp_local"));
     assert_eq!(result.state.input_tokens, Some(11));
     assert_eq!(result.state.cached_tokens, Some(3));
@@ -1990,7 +1990,11 @@ fn production_attempt_budget_accepts_equality_and_rejects_first_excess() {
         .0
         .expect("exact cumulative attempt limit")
         .state;
-    assert_eq!(state.text, expected, "flood must not drop or reorder data");
+    assert_eq!(
+        state.aggregate_assistant_text(),
+        expected,
+        "flood must not drop or reorder data"
+    );
 
     let mut excess = vec![padded_json("{}", MAX_WS_EVENT_BYTES); 64];
     excess.push("{}".to_owned());
@@ -2149,7 +2153,7 @@ fn production_retained_state_limit_accepts_equality_and_rejects_first_excess() {
                     if message == RESPONSE_RESOURCE_LIMIT_ERROR
             ));
             assert!(state.output_items.is_empty());
-            assert!(state.text.is_empty());
+            assert!(state.assistant_text_bytes() == 0);
         } else {
             result.expect("exact production retained-state equality");
             assert_eq!(
