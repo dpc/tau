@@ -63,16 +63,16 @@ impl ResponsesResponseSampler {
         &mut self,
         apid: &tau_proto::AgentPromptId,
         prompt: &tau_proto::AgentPromptCreated,
-        progress: tau_provider_responses::AttemptProgress,
+        progress: tau_provider_responses::AttemptProgressRef<'_>,
         writer: &mut S,
     ) {
         let now = path_std_time::Instant::now();
-        self.observe_progress(now, progress.has_timed_semantic_output);
-        let bytes = progress.response_bytes_received;
+        self.observe_progress(now, progress.has_timed_semantic_output());
+        let bytes = progress.response_bytes_received();
         if !self.is_due(now, bytes, false) {
             return;
         }
-        self.latest_items = progress.output_items;
+        self.latest_items = progress.materialize_output();
         self.latest_bytes = bytes;
         self.emit_at(apid, prompt, writer, now, false);
     }

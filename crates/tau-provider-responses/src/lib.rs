@@ -44,6 +44,14 @@ const IMAGE_OMISSION_MARKER: &str =
 const MAX_OUTPUT_ITEMS: u32 = 1024;
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+#[cfg(test)]
+std::thread_local! {
+    /// Counts complete display-slot snapshots created by parser state.
+    static PROGRESS_MATERIALIZATIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// Append-only buffer and scan cursor for one HTTP/SSE response.
 #[derive(Default)]
 struct SseLineBuffer {
@@ -268,8 +276,40 @@ pub struct AttemptProgress {
     pub has_timed_semantic_output: bool,
 }
 
+/// Read-only accumulated progress exposed to the extension-owned sampler.
+///
+/// This borrows parser state only for the synchronous callback. Callers can
+/// inspect cadence inputs without cloning output items, then materialize the
+/// stable display slots only for a due sample.
+pub struct AttemptProgressRef<'a> {
+    /// Prompt-local parser state borrowed for this callback invocation.
+    state: &'a State,
+}
+
+impl AttemptProgressRef<'_> {
+    /// Materialize the contiguous display slots safe to publish before terminal
+    /// validation.
+    #[must_use]
+    pub fn materialize_output(&self) -> Vec<AttemptOutputItem> {
+        self.state.progress_items()
+    }
+
+    /// Return cumulative provider response bytes.
+    #[must_use]
+    pub fn response_bytes_received(&self) -> u64 {
+        self.state.bytes
+    }
+
+    /// Return whether the accepted state contains output that qualifies for
+    /// first-semantic-output timing.
+    #[must_use]
+    pub fn has_timed_semantic_output(&self) -> bool {
+        self.state.has_qualifying_stream_progress()
+    }
+}
+
 /// One synchronous observation from a finite public Responses attempt.
-pub enum AttemptUpdate {
+pub enum AttemptUpdate<'a> {
     /// The selected transport is about to poll its first request send or
     /// enqueue its `response.create` frame.
     ///
@@ -278,7 +318,7 @@ pub enum AttemptUpdate {
     Dispatched(Instant),
     /// Accepted parser state changed or response transport progress was
     /// observed.
-    Progress(AttemptProgress),
+    Progress(AttemptProgressRef<'a>),
 }
 
 /// Result of one finite attempt.
@@ -446,7 +486,7 @@ pub fn run_attempt(
     prompt: &tau_proto::AgentPromptCreated,
     config: &AttemptConfig,
     model: &AttemptModel,
-    on_update: &mut impl FnMut(AttemptProgress),
+    on_update: &mut impl FnMut(AttemptProgressRef<'_>),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
@@ -478,7 +518,7 @@ pub fn run_attempt_with_debug(
     config: &AttemptConfig,
     model: &AttemptModel,
     debug_provider_requests: bool,
-    on_update: &mut impl FnMut(AttemptUpdate),
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
@@ -509,7 +549,7 @@ fn run_attempt_with_capture(
     config: &AttemptConfig,
     model: &AttemptModel,
     debug_capture: DebugCapture,
-    on_update: &mut impl FnMut(AttemptProgress),
+    on_update: &mut impl FnMut(AttemptProgressRef<'_>),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
@@ -535,7 +575,7 @@ fn run_attempt_with_capture_and_updates(
     config: &AttemptConfig,
     model: &AttemptModel,
     debug_capture: DebugCapture,
-    on_update: &mut impl FnMut(AttemptUpdate),
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
 ) -> AttemptOutcome {
@@ -1188,31 +1228,42 @@ impl State {
 
     fn progress(&self) -> AttemptProgress {
         AttemptProgress {
-            output_items: self
-                .contiguous_slots()
-                .flat_map(|slot| {
-                    let reasoning_text = slot
-                        .reasoning_text
-                        .as_ref()
-                        .filter(|item| !item.text.is_empty())
-                        .cloned()
-                        .map(|item| AttemptOutputItem {
-                            output_index: slot.index,
-                            item: ContextItem::ReasoningText(item),
-                        });
-                    reasoning_text.into_iter().chain(
-                        (!matches!(slot.item, ContextItem::UnknownProviderItem(_))).then(|| {
-                            AttemptOutputItem {
-                                output_index: slot.index,
-                                item: slot.item.clone(),
-                            }
-                        }),
-                    )
-                })
-                .collect(),
+            output_items: self.progress_items(),
             response_bytes_received: self.bytes,
             has_timed_semantic_output: self.has_qualifying_stream_progress(),
         }
+    }
+
+    /// Materialize the contiguous output slots safe for transient display.
+    fn progress_items(&self) -> Vec<AttemptOutputItem> {
+        #[cfg(test)]
+        PROGRESS_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        self.contiguous_slots()
+            .flat_map(|slot| {
+                let reasoning_text = slot
+                    .reasoning_text
+                    .as_ref()
+                    .filter(|item| !item.text.is_empty())
+                    .cloned()
+                    .map(|item| AttemptOutputItem {
+                        output_index: slot.index,
+                        item: ContextItem::ReasoningText(item),
+                    });
+                reasoning_text.into_iter().chain(
+                    (!matches!(slot.item, ContextItem::UnknownProviderItem(_))).then(|| {
+                        AttemptOutputItem {
+                            output_index: slot.index,
+                            item: slot.item.clone(),
+                        }
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    /// Borrow parser state for one synchronous extension sampling callback.
+    fn progress_view(&self) -> AttemptProgressRef<'_> {
+        AttemptProgressRef { state: self }
     }
 
     /// Returns whether this state contains material semantic stream output.
@@ -1671,7 +1722,7 @@ async fn stream(
     model: &AttemptModel,
     body: &RequestBody,
     debug_capture: DebugCapture,
-    on_update: &mut impl FnMut(AttemptUpdate),
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
     private_trace: &mut Option<private_trace::AttemptTrace>,
@@ -1715,7 +1766,7 @@ async fn stream_sse(
     model: &AttemptModel,
     body: &RequestBody,
     debug_capture: DebugCapture,
-    on_update: &mut impl FnMut(AttemptUpdate),
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
     private_trace: &mut Option<private_trace::AttemptTrace>,
@@ -1856,7 +1907,7 @@ async fn stream_sse(
                     trace.semantic_qualified();
                 }
                 let callback_started = private_trace::started(private_trace);
-                on_update(AttemptUpdate::Progress(state.progress()));
+                on_update(AttemptUpdate::Progress(state.progress_view()));
                 if let (Some(elapsed), Some(started)) =
                     (callback_elapsed.as_mut(), callback_started)
                 {

@@ -252,7 +252,7 @@ pub(super) async fn stream(
     model: &AttemptModel,
     body: &RequestBody,
     debug_capture: DebugCapture,
-    on_update: &mut impl FnMut(AttemptUpdate),
+    on_update: &mut impl FnMut(AttemptUpdate<'_>),
     is_canceled: &mut impl FnMut() -> bool,
     network: &tau_provider::OutboundNetworkPolicy,
     private_trace: &mut Option<private_trace::AttemptTrace>,
@@ -486,7 +486,7 @@ pub(super) async fn stream(
                 if let (Some(trace), Some(started)) = (private_trace.as_mut(), decode_started) {
                     trace.decoded(started, qualifying_progress);
                 }
-                on_update(AttemptUpdate::Progress(state.progress()));
+                on_update(AttemptUpdate::Progress(state.progress_view()));
                 if qualifying_progress {
                     deadlines.renew_for_qualifying_progress(Instant::now());
                 }

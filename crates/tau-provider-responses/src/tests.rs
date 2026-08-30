@@ -397,6 +397,37 @@ fn plain_reasoning_streams_displays_and_materializes_for_replay() {
     ));
 }
 
+/// Ensures per-event progress observations inspect scalar cadence inputs
+/// without cloning a growing public Responses display prefix; one due sample
+/// alone materializes that prefix.
+#[test]
+fn borrowed_progress_defers_display_materialization_until_sample_due() {
+    PROGRESS_MATERIALIZATIONS.with(|count| count.set(0));
+    let mut state = State::default();
+    for index in 0..1_000 {
+        state
+            .apply_event(&format!(
+                r#"{{"type":"response.output_text.delta","output_index":0,"delta":"{index},"}}"#
+            ))
+            .expect("accepted text delta");
+        let progress = state.progress_view();
+        assert!(progress.has_timed_semantic_output());
+        assert_eq!(progress.response_bytes_received(), 0);
+    }
+    assert_eq!(
+        PROGRESS_MATERIALIZATIONS.with(std::cell::Cell::get),
+        0,
+        "suppressed samples must not clone the growing display prefix"
+    );
+    let output = state.progress_view().materialize_output();
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        PROGRESS_MATERIALIZATIONS.with(std::cell::Cell::get),
+        1,
+        "a due sample materializes exactly one display snapshot"
+    );
+}
+
 /// A terminal response output array is authoritative when a provider omits
 /// incremental item events, including for plain reasoning followed by text.
 #[test]
@@ -1073,7 +1104,7 @@ fn sse_done_orders_out_of_order_indices_and_rejects_sparse_output() {
         &AttemptModel {
             id: ModelName::new("test-model"),
         },
-        &mut |progress| updates.push(progress),
+        &mut |progress| updates.push(progress.materialize_output()),
         &mut || false,
         &test_network(),
     );
@@ -1082,13 +1113,12 @@ fn sse_done_orders_out_of_order_indices_and_rejects_sparse_output() {
         panic!("contiguous SSE stream must complete");
     };
     assert_eq!(
-        updates[0].output_items.len(),
+        updates[0].len(),
         0,
         "index one must not project before index zero"
     );
     assert_eq!(
         updates[1]
-            .output_items
             .iter()
             .map(|item| item.output_index)
             .collect::<Vec<_>>(),
@@ -1780,6 +1810,75 @@ fn http_sse_attempt_posts_responses_and_completes() {
         "[image data omitted]"
     );
     assert_eq!(response["raw_events_truncated"], true);
+}
+
+/// Ensures the real SSE callback path reads only borrowed cadence inputs for a
+/// growing stream, materializes once for a due display sample, and separately
+/// materializes the durable terminal progress.
+#[test]
+fn sse_suppressed_progress_samples_do_not_materialize_display_slots() {
+    PROGRESS_MATERIALIZATIONS.with(|count| count.set(0));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE server");
+    let address = listener.local_addr().expect("SSE server address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept request");
+        let _ = read_http_request(&mut socket);
+        let deltas = (0..1_000)
+            .map(|index| {
+                format!(
+                    "data: {{\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"{index},\"}}\n\n"
+                )
+            })
+            .collect::<String>();
+        let output = (0..1_000)
+            .map(|index| format!("{index},"))
+            .collect::<String>();
+        let body = format!(
+            "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}}}\n\n{deltas}data: {{\"type\":\"response.completed\",\"response\":{{\"output\":[{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{output}\"}}]}}]}}}}\n\n"
+        );
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write response");
+    });
+    let mut due_samples = 0;
+    let outcome = run_attempt_with_debug(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Sse,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        false,
+        &mut |update| {
+            let AttemptUpdate::Progress(progress) = update else {
+                return;
+            };
+            std::hint::black_box(progress.response_bytes_received());
+            std::hint::black_box(progress.has_timed_semantic_output());
+            if due_samples == 0 && progress.has_timed_semantic_output() {
+                assert_eq!(progress.materialize_output().len(), 1);
+                due_samples += 1;
+            }
+        },
+        &mut || false,
+        &test_network(),
+    );
+    server.join().expect("join SSE server");
+    assert!(matches!(outcome, AttemptOutcome::Completed(_)));
+    assert_eq!(due_samples, 1);
+    assert_eq!(
+        PROGRESS_MATERIALIZATIONS.with(std::cell::Cell::get),
+        2,
+        "one due sample and the separate durable terminal must materialize"
+    );
 }
 
 /// Public Responses requests must lower every harness-effective effort to the
@@ -2830,6 +2929,84 @@ fn run_websocket_messages_captured(
     join_websocket_peer(server);
     let captures = std::mem::take(&mut *captures.lock().expect("capture lock"));
     (outcome, captures)
+}
+
+/// Ensures the real WebSocket callback path has the same borrowed suppressed
+/// sampling behavior as SSE, while a due sample and durable terminal retain
+/// their independent display-slot materializations.
+#[test]
+fn websocket_suppressed_progress_samples_do_not_materialize_display_slots() {
+    PROGRESS_MATERIALIZATIONS.with(|count| count.set(0));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind WebSocket server");
+    let address = listener.local_addr().expect("WebSocket server address");
+    let server = std::thread::spawn(move || {
+        let socket = accept_websocket_peer(&listener);
+        let mut socket = tungstenite::accept(socket).expect("upgrade WebSocket");
+        let _ = socket.read().expect("read response.create");
+        socket
+            .send(Message::Text(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[]}}"#
+                    .into(),
+            ))
+            .expect("send item");
+        for index in 0..1_000 {
+            socket
+                .send(Message::Text(
+                    format!(
+                        r#"{{"type":"response.output_text.delta","output_index":0,"delta":"{index},"}}"#
+                    )
+                    .into(),
+                ))
+                .expect("send delta");
+        }
+        let output = (0..1_000)
+            .map(|index| format!("{index},"))
+            .collect::<String>();
+        socket
+            .send(Message::Text(
+                format!(
+                    r#"{{"type":"response.completed","response":{{"output":[{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{output}"}}]}}]}}}}"#
+                )
+                .into(),
+            ))
+            .expect("send terminal");
+    });
+    let mut due_samples = 0;
+    let outcome = run_attempt_with_debug(
+        &minimal_prompt(),
+        &AttemptConfig {
+            base_url: format!("http://{address}"),
+            api_key: String::new(),
+            max_output_tokens: 0,
+            transport: Transport::Websocket,
+            prompt_cache: None,
+        },
+        &AttemptModel {
+            id: ModelName::new("test-model"),
+        },
+        false,
+        &mut |update| {
+            let AttemptUpdate::Progress(progress) = update else {
+                return;
+            };
+            std::hint::black_box(progress.response_bytes_received());
+            std::hint::black_box(progress.has_timed_semantic_output());
+            if due_samples == 0 && progress.has_timed_semantic_output() {
+                assert_eq!(progress.materialize_output().len(), 1);
+                due_samples += 1;
+            }
+        },
+        &mut || false,
+        &test_network(),
+    );
+    join_websocket_peer(server);
+    assert!(matches!(outcome, AttemptOutcome::Completed(_)));
+    assert_eq!(due_samples, 1);
+    assert_eq!(
+        PROGRESS_MATERIALIZATIONS.with(std::cell::Cell::get),
+        2,
+        "one due sample and the separate durable terminal must materialize"
+    );
 }
 
 fn accept_websocket_peer(listener: &TcpListener) -> TcpStream {
