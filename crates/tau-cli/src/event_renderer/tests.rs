@@ -1187,10 +1187,10 @@ fn watched_agent_count_projects_recursive_activity() {
         ("reviewer".to_owned(), vec!["manager".to_owned()]),
         ("worker".to_owned(), vec!["reviewer".to_owned()]),
     ]);
-    renderer
-        .watches
-        .active_agent_prompts
-        .insert("worker".to_owned(), HashSet::from(["prompt".to_owned()]));
+    renderer.watches.active_agent_prompts.insert(
+        "worker".to_owned(),
+        HashSet::from([tau_proto::AgentPromptId::parse("prompt").expect("valid prompt id")]),
+    );
 
     assert_eq!(renderer.active_side_agent_count(), 2);
     renderer.selection.current_agent_id = Some("reviewer".to_owned());
@@ -1786,6 +1786,17 @@ fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
     let mut live = renderer_for_agent_id_tests();
     live.switch_agent(agent_a.to_string());
     live.handle(&first_start);
+    assert!(
+        live.transcript.runtime.prompts.contains_key(&prompt_one),
+        "the production start path keys transcript state by the protocol prompt id"
+    );
+    assert!(
+        live.watches
+            .active_agent_prompts
+            .get(agent_a.as_str())
+            .is_some_and(|prompts| prompts.contains(&prompt_one)),
+        "the production start path keeps the typed id in the activity guard"
+    );
     live.switch_agent(agent_b.to_string());
     live.handle(&second_start);
     assert_eq!(
@@ -1813,6 +1824,11 @@ fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
     );
 
     live.handle(&late_terminal);
+    assert!(
+        !live.transcript.runtime.prompts.contains_key(&prompt_one)
+            && live.watches.terminal_agent_prompts.contains(&prompt_one),
+        "the production terminal path atomically retires typed runtime state and guards resurrection"
+    );
     assert_eq!(
         live.agent_id_for_event_for_test(&late_terminal),
         Some(agent_b.to_string()),
@@ -1845,6 +1861,10 @@ fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
         cold_replay.event_owners.prompt_agents, live.event_owners.prompt_agents,
         "cold replay preserves the live typed ownership winners"
     );
+    assert_eq!(
+        cold_replay.watches.terminal_agent_prompts, live.watches.terminal_agent_prompts,
+        "cold replay preserves the live typed terminal guards"
+    );
 
     live.handle(&tau_proto::Event::SessionStarted(
         tau_proto::SessionStarted {
@@ -1855,6 +1875,12 @@ fn prompt_ownership_uses_typed_protocol_ids_across_renderer_lifecycles() {
     assert!(
         live.event_owners.prompt_agents.is_empty(),
         "new-session reset clears every typed prompt owner"
+    );
+    assert!(
+        live.transcript.runtime.prompts.is_empty()
+            && live.watches.active_agent_prompts.is_empty()
+            && live.watches.terminal_agent_prompts.is_empty(),
+        "new-session reset clears typed transcript and idempotency state"
     );
 }
 
@@ -3324,11 +3350,14 @@ fn embedded_tool_continuation_trace_renders_fully_idle() {
 #[test]
 fn indexed_stream_join_preserves_order_and_reasoning_ownership() {
     let mut renderer = renderer_for_agent_id_tests();
-    renderer.transcript.runtime.prompts.insert(
-        "sp-indexed-ownership".to_owned(),
-        super::PromptState::default(),
-    );
-    renderer.ensure_live_response_block_for_prompt("sp-indexed-ownership");
+    let prompt_id =
+        tau_proto::AgentPromptId::parse("sp-indexed-ownership").expect("valid prompt id");
+    renderer
+        .transcript
+        .runtime
+        .prompts
+        .insert(prompt_id.clone(), super::PromptState::default());
+    renderer.ensure_live_response_block_for_prompt(&prompt_id);
     let update = |deltas| tau_proto::ProviderResponseUpdated {
         agent_prompt_id: tau_proto::AgentPromptId::parse("sp-indexed-ownership")
             .expect("valid prompt id"),
@@ -3380,8 +3409,7 @@ fn indexed_stream_join_preserves_order_and_reasoning_ownership() {
         .expect("joined reasoning")
         .as_ptr();
 
-    renderer
-        .update_live_thinking_block("sp-indexed-ownership", super::MarkdownStreamUpdate::Replace);
+    renderer.update_live_thinking_block(&prompt_id, super::MarkdownStreamUpdate::Replace);
 
     let state = renderer
         .transcript

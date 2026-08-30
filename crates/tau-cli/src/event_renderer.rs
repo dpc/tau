@@ -2123,7 +2123,7 @@ impl EventRenderer {
             .transcript
             .runtime
             .prompts
-            .get(finished.agent_prompt_id.as_str())
+            .get(&finished.agent_prompt_id)
             .is_some_and(|state| state.is_standalone_compaction);
         if is_standalone {
             self.staged_finished_status =
@@ -2454,7 +2454,11 @@ impl EventRenderer {
         self.refresh_watched_agent_blocks();
     }
 
-    fn mark_agent_prompt_active(&mut self, agent_id: &str, agent_prompt_id: &str) {
+    fn mark_agent_prompt_active(
+        &mut self,
+        agent_id: &str,
+        agent_prompt_id: &tau_proto::AgentPromptId,
+    ) {
         if self
             .watches
             .terminal_agent_prompts
@@ -2467,7 +2471,7 @@ impl EventRenderer {
             .active_agent_prompts
             .entry(agent_id.to_owned())
             .or_default()
-            .insert(agent_prompt_id.to_owned());
+            .insert(agent_prompt_id.clone());
         self.render_model_status_if_present();
         self.refresh_watched_agent_blocks();
     }
@@ -2484,20 +2488,24 @@ impl EventRenderer {
             .map(ToString::to_string)
             .or_else(|| self.agent_id_for_originator(originator))
         {
-            self.mark_agent_prompt_active(&agent_id, agent_prompt_id.as_str());
+            self.mark_agent_prompt_active(&agent_id, agent_prompt_id);
         }
     }
 
-    fn mark_agent_prompt_inactive(&mut self, _agent_id: &str, agent_prompt_id: &str) {
+    fn mark_agent_prompt_inactive(
+        &mut self,
+        _agent_id: &str,
+        agent_prompt_id: &tau_proto::AgentPromptId,
+    ) {
         self.watches
             .terminal_agent_prompts
-            .insert(agent_prompt_id.to_owned());
+            .insert(agent_prompt_id.clone());
         self.remove_active_agent_prompt(agent_prompt_id);
         self.render_model_status_if_present();
         self.refresh_watched_agent_blocks();
     }
 
-    fn remove_active_agent_prompt(&mut self, agent_prompt_id: &str) {
+    fn remove_active_agent_prompt(&mut self, agent_prompt_id: &tau_proto::AgentPromptId) {
         self.watches.active_agent_prompts.retain(|_, prompts| {
             prompts.remove(agent_prompt_id);
             !prompts.is_empty()
@@ -3519,7 +3527,7 @@ impl EventRenderer {
             })
             .collect::<Vec<_>>();
         for prompt_id in missing {
-            self.update_live_thinking_block(prompt_id.as_str(), MarkdownStreamUpdate::Replace);
+            self.update_live_thinking_block(&prompt_id, MarkdownStreamUpdate::Replace);
         }
     }
 
@@ -4828,7 +4836,7 @@ impl EventRenderer {
                     .transcript
                     .runtime
                     .prompts
-                    .get(finished.agent_prompt_id.as_str())
+                    .get(&finished.agent_prompt_id)
                     .is_some_and(|state| state.is_standalone_compaction);
                 if is_standalone {
                     self.staged_finished_status =
@@ -5554,7 +5562,7 @@ impl EventRenderer {
                 self.mark_agent_live(agent_id);
                 self.mark_agent_prompt_inactive(
                     terminated.agent_id.as_str(),
-                    terminated.agent_prompt_id.as_str(),
+                    &terminated.agent_prompt_id,
                 );
                 true
             }
@@ -5580,7 +5588,7 @@ impl EventRenderer {
                     self.event_owners
                         .prompt_agents
                         .insert(update.agent_prompt_id.clone(), update.agent_id.clone());
-                    self.mark_agent_prompt_active(&agent_id, update.agent_prompt_id.as_str());
+                    self.mark_agent_prompt_active(&agent_id, &update.agent_prompt_id);
                 }
                 true
             }
@@ -5604,7 +5612,7 @@ impl EventRenderer {
         self.event_owners
             .prompt_agents
             .insert(agent_prompt_id.clone(), agent_id.clone());
-        self.mark_agent_prompt_active(agent_id.as_str(), agent_prompt_id.as_str());
+        self.mark_agent_prompt_active(agent_id.as_str(), agent_prompt_id);
     }
 
     fn learn_provider_tool_metadata(&mut self, event: &Event) -> bool {
@@ -5622,7 +5630,7 @@ impl EventRenderer {
                 }
                 self.mark_agent_prompt_inactive(
                     finished.agent_id.as_str(),
-                    finished.agent_prompt_id.as_str(),
+                    &finished.agent_prompt_id,
                 );
                 let requested_tools = tool_calls_from_output_items(&finished.output_items);
                 self.mark_agent_live(agent_id.clone());
@@ -7131,7 +7139,10 @@ impl EventRenderer {
 
     /// Finds the one exact self-compaction call that owns a private provider
     /// prompt. This intentionally does not infer a match from timing or names.
-    fn self_compaction_tool_for_prompt(&self, prompt_id: &str) -> Option<String> {
+    fn self_compaction_tool_for_prompt(
+        &self,
+        prompt_id: &tau_proto::AgentPromptId,
+    ) -> Option<String> {
         self.transcript
             .runtime
             .self_compaction_tools
@@ -7139,7 +7150,7 @@ impl EventRenderer {
             .find_map(|(call_id, tool)| {
                 tool.compact_prompt_id
                     .as_ref()
-                    .is_some_and(|known_prompt_id| known_prompt_id.as_str() == prompt_id)
+                    .is_some_and(|known_prompt_id| known_prompt_id == prompt_id)
                     .then(|| call_id.clone())
             })
     }
@@ -7234,7 +7245,7 @@ impl EventRenderer {
         self.clear_accepted_submission_indicator();
         self.watches
             .finished_provider_prompts
-            .remove(prompt.agent_prompt_id.as_str());
+            .remove(&prompt.agent_prompt_id);
         let is_standalone_compaction = matches!(
             prompt.operation,
             tau_proto::PromptOperation::StandaloneCompaction
@@ -7244,7 +7255,7 @@ impl EventRenderer {
                 .transcript
                 .runtime
                 .prompts
-                .entry(prompt.agent_prompt_id.to_string())
+                .entry(prompt.agent_prompt_id.clone())
                 .or_default();
             if is_standalone_compaction {
                 state.is_standalone_compaction = true;
@@ -7255,13 +7266,11 @@ impl EventRenderer {
             )
         };
         if is_standalone_compaction {
-            self.clear_standalone_compaction_output(prompt.agent_prompt_id.as_str());
+            self.clear_standalone_compaction_output(&prompt.agent_prompt_id);
             if had_visible_output && prompt.originator.is_user() {
                 self.set_editor_current_response(None);
             }
-            if let Some(call_id) =
-                self.self_compaction_tool_for_prompt(prompt.agent_prompt_id.as_str())
-            {
+            if let Some(call_id) = self.self_compaction_tool_for_prompt(&prompt.agent_prompt_id) {
                 self.update_self_compaction_tool_status(
                     &call_id,
                     CompactionStatus::Progress,
@@ -7270,7 +7279,7 @@ impl EventRenderer {
                 return;
             }
             self.update_live_compaction_block(
-                prompt.agent_prompt_id.as_str(),
+                &prompt.agent_prompt_id,
                 Some((CompactionStatus::Progress, "Compacting…".to_owned())),
             );
             return;
@@ -7281,7 +7290,7 @@ impl EventRenderer {
         self.transcript
             .runtime
             .prompts
-            .entry(prompt.agent_prompt_id.to_string())
+            .entry(prompt.agent_prompt_id.clone())
             .or_default()
             .started_at = Some(Instant::now());
         self.clear_editor_current_response_for_user_prompt(prompt.originator.is_user());
@@ -7297,7 +7306,7 @@ impl EventRenderer {
 
     fn handle_agent_prompt_terminated(&mut self, terminated: &tau_proto::AgentPromptTerminated) {
         if self.finish_standalone_compaction_prompt(
-            terminated.agent_prompt_id.as_str(),
+            &terminated.agent_prompt_id,
             Some(("stopped", CompactionStatus::Failure)),
             false,
         ) {
@@ -7307,12 +7316,12 @@ impl EventRenderer {
         self.clear_editor_current_response_for_user_prompt(terminated.originator.is_user());
         self.watches
             .finished_provider_prompts
-            .insert(terminated.agent_prompt_id.to_string());
+            .insert(terminated.agent_prompt_id.clone());
         let Some(prompt_state) = self
             .transcript
             .runtime
             .prompts
-            .remove(terminated.agent_prompt_id.as_str())
+            .remove(&terminated.agent_prompt_id)
         else {
             return;
         };
@@ -7330,7 +7339,7 @@ impl EventRenderer {
 
     /// Removes any visible response state created before a standalone prompt's
     /// typed lifecycle fact arrived.
-    fn clear_standalone_compaction_output(&mut self, prompt_id: &str) {
+    fn clear_standalone_compaction_output(&mut self, prompt_id: &tau_proto::AgentPromptId) {
         let Some(state) = self.transcript.runtime.prompts.get_mut(prompt_id) else {
             return;
         };
@@ -7356,7 +7365,7 @@ impl EventRenderer {
     /// replaces its live marker with a content-free terminal marker.
     fn finish_standalone_compaction_prompt(
         &mut self,
-        prompt_id: &str,
+        prompt_id: &tau_proto::AgentPromptId,
         terminal: Option<(&str, CompactionStatus)>,
         render_without_state: bool,
     ) -> bool {
@@ -7372,7 +7381,7 @@ impl EventRenderer {
             self.transcript
                 .runtime
                 .standalone_compaction_transactions
-                .retain(|_, mapped_prompt_id| mapped_prompt_id.as_str() != prompt_id);
+                .retain(|_, mapped_prompt_id| mapped_prompt_id != prompt_id);
             if render_without_state && let Some((text, status)) = terminal {
                 self.resources.handle.print_output(
                     "standalone-compaction-terminal",
@@ -7387,16 +7396,16 @@ impl EventRenderer {
             self.transcript
                 .runtime
                 .prompts
-                .insert(prompt_id.to_owned(), state);
+                .insert(prompt_id.clone(), state);
             return false;
         }
         self.transcript
             .runtime
             .standalone_compaction_transactions
-            .retain(|_, mapped_prompt_id| mapped_prompt_id.as_str() != prompt_id);
+            .retain(|_, mapped_prompt_id| mapped_prompt_id != prompt_id);
         self.watches
             .finished_provider_prompts
-            .insert(prompt_id.to_owned());
+            .insert(prompt_id.clone());
         if let Some(block_id) = state.thinking_block_id {
             self.resources.handle.remove_block(block_id);
         }
@@ -7424,8 +7433,8 @@ impl EventRenderer {
         prompt_id: &tau_proto::AgentPromptId,
         terminal: Option<(&str, CompactionStatus)>,
     ) {
-        self.finish_standalone_compaction_prompt(prompt_id.as_str(), terminal, true);
-        self.mark_agent_prompt_inactive(agent_id.as_str(), prompt_id.as_str());
+        self.finish_standalone_compaction_prompt(prompt_id, terminal, true);
+        self.mark_agent_prompt_inactive(agent_id.as_str(), prompt_id);
         self.transcript
             .status
             .agent_activity
@@ -7470,17 +7479,17 @@ impl EventRenderer {
     fn handle_provider_prompt_submitted(&mut self, submitted: &tau_proto::ProviderPromptSubmitted) {
         self.watches
             .finished_provider_prompts
-            .remove(submitted.agent_prompt_id.as_str());
+            .remove(&submitted.agent_prompt_id);
         self.transcript
             .runtime
             .prompts
-            .entry(submitted.agent_prompt_id.to_string())
+            .entry(submitted.agent_prompt_id.clone())
             .or_default()
             .started_at = Some(Instant::now());
     }
 
     fn handle_provider_response_updated(&mut self, update: &tau_proto::ProviderResponseUpdated) {
-        let spid = update.agent_prompt_id.as_str();
+        let spid = &update.agent_prompt_id;
         self.event_owners
             .prompt_agents
             .entry(update.agent_prompt_id.clone())
@@ -7511,7 +7520,7 @@ impl EventRenderer {
             self.transcript
                 .runtime
                 .prompts
-                .entry(spid.to_owned())
+                .entry(spid.clone())
                 .or_default()
                 .provider_response_stats = Some(stats);
         }
@@ -7546,10 +7555,10 @@ impl EventRenderer {
             && self
                 .watches
                 .finished_provider_prompts
-                .contains(update.agent_prompt_id.as_str())
+                .contains(&update.agent_prompt_id)
     }
 
-    fn clear_live_response_accumulators(&mut self, spid: &str) {
+    fn clear_live_response_accumulators(&mut self, spid: &tau_proto::AgentPromptId) {
         if let Some(state) = self.transcript.runtime.prompts.get_mut(spid) {
             state.response_text_by_index.clear();
             state.thinking_text_by_index.clear();
@@ -7570,19 +7579,19 @@ impl EventRenderer {
         &mut self,
         update: &tau_proto::ProviderResponseUpdated,
     ) {
-        self.ensure_live_response_block_for_prompt(update.agent_prompt_id.as_str());
+        self.ensure_live_response_block_for_prompt(&update.agent_prompt_id);
     }
 
-    fn ensure_live_response_block_for_prompt(&mut self, spid: &str) {
+    fn ensure_live_response_block_for_prompt(&mut self, spid: &tau_proto::AgentPromptId) {
         use std::collections::hash_map::Entry;
 
         use tau_themes::names;
 
-        let (state, prompt_was_unknown) =
-            match self.transcript.runtime.prompts.entry(spid.to_owned()) {
-                Entry::Occupied(entry) => (entry.into_mut(), false),
-                Entry::Vacant(entry) => (entry.insert(PromptState::default()), true),
-            };
+        let (state, prompt_was_unknown) = match self.transcript.runtime.prompts.entry(spid.clone())
+        {
+            Entry::Occupied(entry) => (entry.into_mut(), false),
+            Entry::Vacant(entry) => (entry.insert(PromptState::default()), true),
+        };
         if state.response_block_id.is_some() {
             return;
         }
@@ -7604,7 +7613,7 @@ impl EventRenderer {
         self.transcript
             .runtime
             .prompts
-            .entry(spid.to_owned())
+            .entry(spid.clone())
             .or_default()
             .response_block_id = Some(id);
     }
@@ -7619,7 +7628,7 @@ impl EventRenderer {
             .transcript
             .runtime
             .prompts
-            .entry(update.agent_prompt_id.to_string())
+            .entry(update.agent_prompt_id.clone())
             .or_default();
         let mut response_update = MarkdownStreamUpdate::Append;
         let mut thinking_update = MarkdownStreamUpdate::Append;
@@ -7676,7 +7685,11 @@ impl EventRenderer {
         }
     }
 
-    fn update_live_thinking_block(&mut self, spid: &str, update: MarkdownStreamUpdate) {
+    fn update_live_thinking_block(
+        &mut self,
+        spid: &tau_proto::AgentPromptId,
+        update: MarkdownStreamUpdate,
+    ) {
         use tau_themes::names;
 
         let Some(state) = self.transcript.runtime.prompts.get_mut(spid) else {
@@ -7708,7 +7721,11 @@ impl EventRenderer {
         self.resources.handle.redraw();
     }
 
-    fn insert_live_thinking_block(&mut self, spid: &str, block: tau_cli_term::StyledBlock) {
+    fn insert_live_thinking_block(
+        &mut self,
+        spid: &tau_proto::AgentPromptId,
+        block: tau_cli_term::StyledBlock,
+    ) {
         // Insert thinking above the live compaction/response stack while keeping
         // any active tool-call UI pinned below the whole streaming response.
         let tbid = self
@@ -7722,14 +7739,14 @@ impl EventRenderer {
         self.transcript
             .runtime
             .prompts
-            .entry(spid.to_owned())
+            .entry(spid.clone())
             .or_default()
             .thinking_block_id = Some(tbid);
     }
 
     fn update_live_compaction_block(
         &mut self,
-        spid: &str,
+        spid: &tau_proto::AgentPromptId,
         status: Option<(CompactionStatus, String)>,
     ) {
         let Some((status, text)) = status else {
@@ -7751,7 +7768,7 @@ impl EventRenderer {
         self.resources.handle.redraw();
     }
 
-    fn remove_live_compaction_block(&mut self, spid: &str) {
+    fn remove_live_compaction_block(&mut self, spid: &tau_proto::AgentPromptId) {
         let Some(block_id) = self
             .transcript
             .runtime
@@ -7765,7 +7782,11 @@ impl EventRenderer {
         self.resources.handle.redraw();
     }
 
-    fn insert_live_compaction_block(&mut self, spid: &str, block: tau_cli_term::StyledBlock) {
+    fn insert_live_compaction_block(
+        &mut self,
+        spid: &tau_proto::AgentPromptId,
+        block: tau_cli_term::StyledBlock,
+    ) {
         let block_id = self
             .resources
             .handle
@@ -7777,7 +7798,7 @@ impl EventRenderer {
         self.transcript
             .runtime
             .prompts
-            .entry(spid.to_owned())
+            .entry(spid.clone())
             .or_default()
             .compaction_block_id = Some(block_id);
     }
@@ -7790,7 +7811,10 @@ impl EventRenderer {
             .push_above_active_before_any(block_id, anchors);
     }
 
-    fn live_thinking_anchor_ids(&self, spid: &str) -> Vec<tau_cli_term::BlockId> {
+    fn live_thinking_anchor_ids(
+        &self,
+        spid: &tau_proto::AgentPromptId,
+    ) -> Vec<tau_cli_term::BlockId> {
         let mut anchors = Vec::new();
         if let Some(state) = self.transcript.runtime.prompts.get(spid) {
             if let Some(block_id) = state.compaction_block_id {
@@ -7804,7 +7828,10 @@ impl EventRenderer {
         anchors
     }
 
-    fn live_compaction_anchor_ids(&self, spid: &str) -> Vec<tau_cli_term::BlockId> {
+    fn live_compaction_anchor_ids(
+        &self,
+        spid: &tau_proto::AgentPromptId,
+    ) -> Vec<tau_cli_term::BlockId> {
         let mut anchors = Vec::new();
         if let Some(state) = self.transcript.runtime.prompts.get(spid)
             && let Some(block_id) = state.response_block_id
@@ -7833,7 +7860,12 @@ impl EventRenderer {
         anchors
     }
 
-    fn update_live_response_block(&mut self, spid: &str, text: &str, update: MarkdownStreamUpdate) {
+    fn update_live_response_block(
+        &mut self,
+        spid: &tau_proto::AgentPromptId,
+        text: &str,
+        update: MarkdownStreamUpdate,
+    ) {
         use tau_themes::names;
 
         let verbose_mode = self.presentation.verbose_mode;

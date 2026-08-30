@@ -141,11 +141,11 @@ pub(super) struct WatchActivityState {
     pub(super) watched_agent_work_statuses:
         HashMap<String, tau_proto::AgentWatchWorkStatusNotification>,
     /// Active prompt ids keyed by agent.
-    pub(super) active_agent_prompts: HashMap<String, HashSet<String>>,
+    pub(super) active_agent_prompts: HashMap<String, HashSet<tau_proto::AgentPromptId>>,
     /// Prompt terminals that block stale resurrection.
-    pub(super) terminal_agent_prompts: HashSet<String>,
+    pub(super) terminal_agent_prompts: HashSet<tau_proto::AgentPromptId>,
     /// Provider prompts whose final output was rendered.
-    pub(super) finished_provider_prompts: HashSet<String>,
+    pub(super) finished_provider_prompts: HashSet<tau_proto::AgentPromptId>,
 }
 
 /// State that moves atomically with one rendered transcript.
@@ -169,7 +169,7 @@ pub(super) struct TranscriptRuntimeState {
     /// Editor response context for this transcript.
     pub(super) editor_conversation_context: EditorConversationContext,
     /// Prompt lifecycle records.
-    pub(super) prompts: HashMap<String, PromptState>,
+    pub(super) prompts: HashMap<tau_proto::AgentPromptId, PromptState>,
     /// Standalone compaction prompt correlations.
     pub(super) standalone_compaction_transactions:
         HashMap<tau_proto::CompactionTransactionId, tau_proto::AgentPromptId>,

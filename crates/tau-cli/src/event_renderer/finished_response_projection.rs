@@ -60,14 +60,10 @@ impl EventRenderer {
             .transcript
             .runtime
             .prompts
-            .get(finished.agent_prompt_id.as_str())
+            .get(&finished.agent_prompt_id)
             .is_some_and(|state| state.is_standalone_compaction);
         if is_standalone {
-            self.finish_standalone_compaction_prompt(
-                finished.agent_prompt_id.as_str(),
-                None,
-                false,
-            );
+            self.finish_standalone_compaction_prompt(&finished.agent_prompt_id, None, false);
             #[cfg(test)]
             if let Some(hook) = &self.finished_commit_hook {
                 hook();
@@ -100,7 +96,7 @@ impl EventRenderer {
             .transcript
             .runtime
             .prompts
-            .get(finished.agent_prompt_id.as_str());
+            .get(&finished.agent_prompt_id);
         let turn_latency = prompt_state
             .and_then(|state| state.started_at)
             .map(|started_at| started_at.elapsed());
@@ -198,7 +194,7 @@ impl EventRenderer {
             .agent_activity
             .finish_prompt(&finished.agent_prompt_id, &finished.output_items);
         self.watches.active_agent_prompts.retain(|_, prompts| {
-            prompts.remove(finished.agent_prompt_id.as_str());
+            prompts.remove(&finished.agent_prompt_id);
             !prompts.is_empty()
         });
         self.transcript.status.main_agent_turn_active = finished
@@ -238,7 +234,7 @@ impl EventRenderer {
             .agent_activity
             .finish_prompt(&finished.agent_prompt_id, &finished.output_items);
         self.watches.active_agent_prompts.retain(|_, prompts| {
-            prompts.remove(finished.agent_prompt_id.as_str());
+            prompts.remove(&finished.agent_prompt_id);
             !prompts.is_empty()
         });
         self.transcript.status.main_agent_turn_active = false;
@@ -265,7 +261,7 @@ impl EventRenderer {
         }
         self.watches
             .finished_provider_prompts
-            .insert(finished.agent_prompt_id.to_string());
+            .insert(finished.agent_prompt_id.clone());
         let prompt_state = self.take_finished_prompt_state(finished, projection.turn_latency);
         self.finalize_finished_thinking_block(
             prompt_state.thinking_block_id,
@@ -301,14 +297,13 @@ impl EventRenderer {
         finished: &tau_proto::ProviderResponseFinished,
         turn_latency: Option<Duration>,
     ) -> PromptState {
-        let spid = finished.agent_prompt_id.as_str();
         // Drain the whole per-prompt state in one shot — every field tracked
         // through the stream is consumed here.
         let prompt_state = self
             .transcript
             .runtime
             .prompts
-            .remove(spid)
+            .remove(&finished.agent_prompt_id)
             .unwrap_or_default();
         if let Some(latency) = turn_latency {
             self.transcript.status.cumulative_agent_latency += latency;
