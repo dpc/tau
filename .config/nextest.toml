@@ -18,6 +18,12 @@ filter = "package(tau) & binary(initial_ui_stdio)"
 threads-required = 4
 
 [[profile.default.overrides]]
+# These fixtures own nested public CLI/server, daemon/extension, and attached
+# UI processes. Keep their accounting isolated from unrelated Tau binaries.
+filter = "package(tau) & binary(detach_attach_cli)"
+threads-required = 4
+
+[[profile.default.overrides]]
 filter = "package(tau-e2e-tests) & binary(deterministic_provider)"
 slow-timeout = { period = "60s", terminate-after = 1 }
 

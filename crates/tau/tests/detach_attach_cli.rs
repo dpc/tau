@@ -461,161 +461,172 @@ fn owned_cli_eof_stops_daemon_and_removes_discovery_pair() {
 }
 
 /// Exact-ID creation remains discoverable across a stock attachment, pins
-/// switching, handles real SIGINT/SIGTERM cleanup, and leaves a session that
-/// the unchanged strict-existing mode can subsequently resume.
+/// switching, handles real SIGINT cleanup, and leaves a session that the
+/// unchanged strict-existing mode can subsequently resume.
 #[test]
-fn created_session_server_handles_stock_attach_signals_and_strict_resume() {
-    for signal in ["-INT", "-TERM"] {
-        let environment = TestEnvironment::new();
-        let session_id = format!("serve-{}", signal.trim_start_matches('-').to_lowercase());
-        let canary = environment.configure_shutdown_canary();
-        let mut server = environment
-            .command()
-            .args(["serve", "--session", &session_id, "--create"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn foreground server");
-        let metadata = environment.wait_for_metadata();
-        let socket = metadata.with_extension("sock");
-        let children_path = PathBuf::from(format!(
-            "/proc/{}/task/{}/children",
-            server.id(),
-            server.id()
-        ));
-        let child_pids = std::fs::read_to_string(&children_path)
-            .expect("read supervised extension children")
-            .split_whitespace()
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-        assert!(
-            !child_pids.is_empty(),
-            "serve acceptance must exercise supervised extension teardown"
-        );
+fn created_session_server_handles_stock_attach_sigint_and_strict_resume() {
+    assert_created_session_server_handles_stock_attach_signal_and_strict_resume("-INT");
+}
 
-        let listed = environment
-            .command()
-            .args(["session", "list", "--json"])
-            .output()
-            .expect("list served session");
-        assert!(listed.status.success(), "session list failed");
-        assert!(String::from_utf8_lossy(&listed.stdout).contains(&session_id));
+/// Exact-ID creation exercises the same complete public lifecycle under
+/// SIGTERM independently from the SIGINT fixture.
+#[test]
+fn created_session_server_handles_stock_attach_sigterm_and_strict_resume() {
+    assert_created_session_server_handles_stock_attach_signal_and_strict_resume("-TERM");
+}
 
-        let mut attach = environment.command();
-        attach.args(["attach", &session_id]);
-        let mut attach = PtyChild::spawn(attach);
-        environment.wait_for_ready_uis(1);
-        attach.clear_output();
-        attach.line(":session new");
-        attach.wait_for_text("pinned by the foreground server");
-        attach.wait_for_text(&format!("&{session_id}"));
-        attach.line(":cancel");
-        let events_path = environment
-            .state_home
-            .join(format!("tau/sessions/{session_id}/events.jsonl"));
-        let cancel_deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let routed_to_pinned_session = std::fs::read_to_string(&events_path)
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .any(|row| {
-                    row.get("type").and_then(serde_json::Value::as_str) == Some("from_connection")
-                        && row
-                            .pointer("/event/message")
-                            .and_then(serde_json::Value::as_str)
-                            == Some("emit")
-                        && row
-                            .pointer("/event/payload/event/event")
-                            .and_then(serde_json::Value::as_str)
-                            == Some("ui.cancel_prompt")
-                        && row
-                            .pointer("/event/payload/event/payload/session_id")
-                            .and_then(serde_json::Value::as_str)
-                            == Some(session_id.as_str())
-                });
-            if routed_to_pinned_session {
-                break;
-            }
-            assert!(
-                Instant::now() < cancel_deadline,
-                "stock attachment did not route cancel to pinned session"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        attach.line(":detach");
-        attach.wait_success(&environment.state_home);
-        assert!(metadata.exists(), "attachment disconnect removed metadata");
-        assert!(socket.exists(), "attachment disconnect removed socket");
+/// Exercises one signal through the complete create, list, PTY attach, ordered
+/// extension shutdown, cleanup, and strict-resume lifecycle.
+fn assert_created_session_server_handles_stock_attach_signal_and_strict_resume(signal: &str) {
+    let environment = TestEnvironment::new();
+    let session_id = format!("serve-{}", signal.trim_start_matches('-').to_lowercase());
+    let canary = environment.configure_shutdown_canary();
+    let mut server = environment
+        .command()
+        .args(["serve", "--session", &session_id, "--create"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn foreground server");
+    let metadata = environment.wait_for_metadata();
+    let socket = metadata.with_extension("sock");
+    let children_path = PathBuf::from(format!(
+        "/proc/{}/task/{}/children",
+        server.id(),
+        server.id()
+    ));
+    let child_pids = std::fs::read_to_string(&children_path)
+        .expect("read supervised extension children")
+        .split_whitespace()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    assert!(
+        !child_pids.is_empty(),
+        "serve acceptance must exercise supervised extension teardown"
+    );
 
-        let signaled = Command::new("kill")
-            .args([signal, &server.id().to_string()])
-            .status()
-            .expect("signal foreground server");
-        assert!(signaled.success(), "signal foreground server");
-        let admission_deadline = Instant::now() + Duration::from_secs(2);
-        while UnixStream::connect(&socket).is_ok() {
-            assert!(
-                Instant::now() < admission_deadline,
-                "signal did not retire listener admission"
-            );
-            std::thread::sleep(Duration::from_millis(10));
+    let listed = environment
+        .command()
+        .args(["session", "list", "--json"])
+        .output()
+        .expect("list served session");
+    assert!(listed.status.success(), "session list failed");
+    assert!(String::from_utf8_lossy(&listed.stdout).contains(&session_id));
+
+    let mut attach = environment.command();
+    attach.args(["attach", &session_id]);
+    let mut attach = PtyChild::spawn(attach);
+    environment.wait_for_ready_uis(1);
+    attach.clear_output();
+    attach.line(":session new");
+    attach.wait_for_text("pinned by the foreground server");
+    attach.wait_for_text(&format!("&{session_id}"));
+    attach.line(":cancel");
+    let events_path = environment
+        .state_home
+        .join(format!("tau/sessions/{session_id}/events.jsonl"));
+    let cancel_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let routed_to_pinned_session = std::fs::read_to_string(&events_path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|row| {
+                row.get("type").and_then(serde_json::Value::as_str) == Some("from_connection")
+                    && row
+                        .pointer("/event/message")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("emit")
+                    && row
+                        .pointer("/event/payload/event/event")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("ui.cancel_prompt")
+                    && row
+                        .pointer("/event/payload/event/payload/session_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(session_id.as_str())
+            });
+        if routed_to_pinned_session {
+            break;
         }
         assert!(
-            metadata.exists(),
-            "runtime metadata retired before extension shutdown"
+            Instant::now() < cancel_deadline,
+            "stock attachment did not route cancel to pinned session"
         );
-        let extension_deadline = Instant::now() + Duration::from_secs(2);
-        while !canary.stopped.exists() {
-            assert!(
-                Instant::now() < extension_deadline,
-                "extension did not observe ordered shutdown"
-            );
-            assert!(
-                metadata.exists(),
-                "runtime metadata retired before extension stopped"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(
-            metadata.exists(),
-            "runtime metadata retired before extension wrapper was reaped"
-        );
-        std::fs::write(&canary.release, b"release").expect("release extension wrapper");
-        let status = server.wait().expect("reap foreground server");
-        assert!(status.success(), "foreground server signal exit: {status}");
-        assert!(!metadata.exists(), "signal left metadata");
-        assert!(!socket.exists(), "signal left socket");
-        assert!(
-            child_pids
-                .iter()
-                .all(|pid| !PathBuf::from(format!("/proc/{pid}")).exists()),
-            "signal exit left a supervised extension child"
-        );
-        environment.assert_runtime_discovery_empty();
-
-        let mut resumed = environment
-            .command()
-            .args(["serve", "--session", &session_id, "--existing"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("strictly resume created session");
-        let resumed_metadata = environment.wait_for_metadata();
-        let resumed_socket = resumed_metadata.with_extension("sock");
-        let signaled = Command::new("kill")
-            .args(["-TERM", &resumed.id().to_string()])
-            .status()
-            .expect("signal resumed foreground server");
-        assert!(signaled.success(), "signal resumed foreground server");
-        let status = resumed.wait().expect("reap resumed foreground server");
-        assert!(status.success(), "strict existing resume failed: {status}");
-        assert!(!resumed_metadata.exists(), "resumed server left metadata");
-        assert!(!resumed_socket.exists(), "resumed server left socket");
-        environment.assert_runtime_discovery_empty();
+        std::thread::sleep(Duration::from_millis(10));
     }
+    attach.line(":detach");
+    attach.wait_success(&environment.state_home);
+    assert!(metadata.exists(), "attachment disconnect removed metadata");
+    assert!(socket.exists(), "attachment disconnect removed socket");
+
+    let signaled = Command::new("kill")
+        .args([signal, &server.id().to_string()])
+        .status()
+        .expect("signal foreground server");
+    assert!(signaled.success(), "signal foreground server");
+    let admission_deadline = Instant::now() + Duration::from_secs(2);
+    while UnixStream::connect(&socket).is_ok() {
+        assert!(
+            Instant::now() < admission_deadline,
+            "signal did not retire listener admission"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        metadata.exists(),
+        "runtime metadata retired before extension shutdown"
+    );
+    let extension_deadline = Instant::now() + Duration::from_secs(2);
+    while !canary.stopped.exists() {
+        assert!(
+            Instant::now() < extension_deadline,
+            "extension did not observe ordered shutdown"
+        );
+        assert!(
+            metadata.exists(),
+            "runtime metadata retired before extension stopped"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        metadata.exists(),
+        "runtime metadata retired before extension wrapper was reaped"
+    );
+    std::fs::write(&canary.release, b"release").expect("release extension wrapper");
+    let status = server.wait().expect("reap foreground server");
+    assert!(status.success(), "foreground server signal exit: {status}");
+    assert!(!metadata.exists(), "signal left metadata");
+    assert!(!socket.exists(), "signal left socket");
+    assert!(
+        child_pids
+            .iter()
+            .all(|pid| !PathBuf::from(format!("/proc/{pid}")).exists()),
+        "signal exit left a supervised extension child"
+    );
+    environment.assert_runtime_discovery_empty();
+
+    let mut resumed = environment
+        .command()
+        .args(["serve", "--session", &session_id, "--existing"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("strictly resume created session");
+    let resumed_metadata = environment.wait_for_metadata();
+    let resumed_socket = resumed_metadata.with_extension("sock");
+    let signaled = Command::new("kill")
+        .args(["-TERM", &resumed.id().to_string()])
+        .status()
+        .expect("signal resumed foreground server");
+    assert!(signaled.success(), "signal resumed foreground server");
+    let status = resumed.wait().expect("reap resumed foreground server");
+    assert!(status.success(), "strict existing resume failed: {status}");
+    assert!(!resumed_metadata.exists(), "resumed server left metadata");
+    assert!(!resumed_socket.exists(), "resumed server left socket");
+    environment.assert_runtime_discovery_empty();
 }
 
 /// The public serve CLI admits one bootstrap generation, remains attachable,
@@ -963,10 +974,10 @@ fn existing_session_server_rejects_invalid_modes_and_strict_state_failures() {
     malformed.assert_runtime_discovery_empty();
 }
 
-/// Create mode treats every pre-existing directory shape as authority it must
-/// not claim: valid, malformed, and diagnostic-only state all remain untouched.
+/// Create mode rejects a valid existing session and preserves its canonical
+/// manifest byte for byte without publishing runtime discovery.
 #[test]
-fn create_session_server_requires_complete_absence_without_mutation() {
+fn create_session_server_rejects_valid_existing_session_without_mutation() {
     let valid = TestEnvironment::new();
     valid.provision_session("valid");
     let valid_meta = valid.state_home.join("tau/sessions/valid/meta.json");
@@ -982,38 +993,69 @@ fn create_session_server_requires_complete_absence_without_mutation() {
         valid_before
     );
     valid.assert_runtime_discovery_empty();
+}
 
-    for (session_id, relative_path, bytes) in [
-        ("malformed-create", "meta.json", b"{not-json".as_slice()),
-        ("partial-create", "events.cbor", b"partial".as_slice()),
-        (
-            "diagnostic-create",
-            "logs/extension.log",
-            b"diagnostic".as_slice(),
-        ),
-    ] {
-        let environment = TestEnvironment::new();
-        let session = environment
-            .state_home
-            .join(format!("tau/sessions/{session_id}"));
-        let artifact = session.join(relative_path);
-        std::fs::create_dir_all(artifact.parent().expect("artifact parent"))
-            .expect("create partial session");
-        std::fs::write(&artifact, bytes).expect("write partial session artifact");
-        let output = environment
-            .command()
-            .args(["serve", "--session", session_id, "--create"])
-            .output()
-            .expect("reject partial session");
-        assert!(
-            !output.status.success(),
-            "{session_id} unexpectedly created"
-        );
-        assert_eq!(
-            std::fs::read(&artifact).expect("preserved partial artifact"),
-            bytes,
-            "{session_id} mutated its existing artifact"
-        );
-        environment.assert_runtime_discovery_empty();
-    }
+/// Create mode preserves a malformed manifest instead of claiming its
+/// pre-existing session directory.
+#[test]
+fn create_session_server_preserves_malformed_manifest() {
+    assert_create_session_server_preserves_partial_state(
+        "malformed-create",
+        "meta.json",
+        b"{not-json",
+    );
+}
+
+/// Create mode preserves a partial canonical journal instead of claiming its
+/// pre-existing session directory.
+#[test]
+fn create_session_server_preserves_partial_journal() {
+    assert_create_session_server_preserves_partial_state(
+        "partial-create",
+        "events.cbor",
+        b"partial",
+    );
+}
+
+/// Create mode treats a diagnostic-only directory as pre-existing authority
+/// and preserves its artifact.
+#[test]
+fn create_session_server_preserves_diagnostic_only_state() {
+    assert_create_session_server_preserves_partial_state(
+        "diagnostic-create",
+        "logs/extension.log",
+        b"diagnostic",
+    );
+}
+
+/// Exercises one pre-existing directory shape through the public create-mode
+/// rejection and verifies byte-for-byte preservation without runtime leakage.
+fn assert_create_session_server_preserves_partial_state(
+    session_id: &str,
+    relative_path: &str,
+    bytes: &[u8],
+) {
+    let environment = TestEnvironment::new();
+    let session = environment
+        .state_home
+        .join(format!("tau/sessions/{session_id}"));
+    let artifact = session.join(relative_path);
+    std::fs::create_dir_all(artifact.parent().expect("artifact parent"))
+        .expect("create partial session");
+    std::fs::write(&artifact, bytes).expect("write partial session artifact");
+    let output = environment
+        .command()
+        .args(["serve", "--session", session_id, "--create"])
+        .output()
+        .expect("reject partial session");
+    assert!(
+        !output.status.success(),
+        "{session_id} unexpectedly created"
+    );
+    assert_eq!(
+        std::fs::read(&artifact).expect("preserved partial artifact"),
+        bytes,
+        "{session_id} mutated its existing artifact"
+    );
+    environment.assert_runtime_discovery_empty();
 }
