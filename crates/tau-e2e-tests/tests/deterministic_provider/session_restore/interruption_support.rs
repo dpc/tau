@@ -252,7 +252,7 @@ pub(super) fn wait_for_tool_readiness(
                 Event::ToolProgress(progress)
                     if progress.call_id.as_str() == call_id
                         && progress.tool_name.as_str() == "restart_test_dummy"
-                        && progress.message.as_deref() == Some("hold_no_side_effect ready")
+                        && progress.message.as_deref() == Some("hold_until_success_release ready")
             ) {
                 return if observed.replay {
                     Err("tool hold readiness was not a live non-semantic fact".into())
@@ -358,7 +358,7 @@ pub(super) fn assert_no_terminal_tool_event(
     let events = snapshot.agent_events.get(worker).ok_or_else(|| {
         format!("interrupted call owner `{worker}` lacks a durable agent journal")
     })?;
-    if events.iter().any(|record| {
+    if let Some(terminal) = events.iter().find(|record| {
         matches!(
             &record.event,
             Event::ToolResult(result) | Event::ProviderToolResult(result)
@@ -369,7 +369,11 @@ pub(super) fn assert_no_terminal_tool_event(
                 if error.call_id.as_str() == call_id
         )
     }) {
-        return Err("interrupted call already had a terminal event at the crash cut".into());
+        return Err(format!(
+            "interrupted call already had a terminal event at the crash cut: {:?}",
+            terminal.event
+        )
+        .into());
     }
     Ok(())
 }

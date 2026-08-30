@@ -71,8 +71,8 @@ and typed unloaded-worker store records consume no fake-provider action. S4
 instead configures two distinct tool-free worker roles and keeps only
 `agent_start` on the main. S5 reuses S2's two-role tool surface for one
 synchronized interrupted-worker restore. S6 instead exposes only
-`restart_test_dummy` in exact `hold_no_side_effect` mode to the worker while the
-main retains only `agent_start`. S7 uses one main, two tool-free worker roles,
+`restart_test_dummy` in exact `hold_until_success_release` mode to the worker
+while the main retains only `agent_start`. S7 uses one main, two tool-free worker roles,
 and one repair-worker role exposing that same sole dummy. Its main consumes the
 existing two production-start pairs; one fixed durable UI creation supplies the
 repair worker without extending the fake grammar. S8 reuses S1's fixed
@@ -285,7 +285,11 @@ abandon, cancel, or otherwise recover the uncertain work.
 
 S6 uses the closed hold boundary from
 [ARCH-tau-ext-test-dummy](../../tau-ext-test-dummy/specs/ARCH-tau-ext-test-dummy.md).
-Its compact 1,072-byte scenario JSON contains two main actions and two worker
+The fixture never sends the authenticated release, so the existing release
+arbitration keeps the invocation live until process teardown rather than racing
+the crash cut against an elapsed terminal deadline. After SIGKILL, the fixture
+removes the dead generation's private release socket before starting Boot B.
+Its compact 1,085-byte scenario JSON contains two main actions and two worker
 actions.
 Boot A requires exactly one correlated worker `tool.request` followed by canonical
 `tool.started` in the typed execution-restore stream and one live readiness fact
@@ -297,7 +301,7 @@ complete tool-result context is exactly that balanced error. Boot C receives no
 input and must add no repair; its current/history membership, execution restore,
 current-agent journals, and separately loaded worker journal equal Boot B.
 
-S7 uses four lanes and compact 2,152-byte scenario JSON: five main actions, one
+S7 uses four lanes and compact 2,178-byte scenario JSON: five main actions, one
 quiescent-worker action, one uncertain hold, and the two-action dummy repair
 pair. Boot A consumes eight of nine actions, checkpointing exact cursors
 `[5, 1, 1, 1]`, four immutable lane bindings, and two contiguous
@@ -392,7 +396,7 @@ remains at one consumed worker action throughout, while the durable worker
 journal retains the one unfinished dispatch checkpoint. This proves
 conservative harness recovery at the established cut, not exactly-once external
 work or crash-transactional fake cursor recovery.
-S6 uses two lanes and compact 1,072-byte scenario JSON: two main actions and two
+S6 uses two lanes and compact 1,085-byte scenario JSON: two main actions and two
 worker actions. Boot A consumes two main turns and one worker turn before three
 matched actions; Boot B consumes one worker turn; Boot C consumes none. Extra
 repair events, terminals, starts, provider prompts, or actions fail closed.

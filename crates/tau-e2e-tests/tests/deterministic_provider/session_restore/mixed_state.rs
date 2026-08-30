@@ -208,6 +208,7 @@ fn cold_resume_mixed_state_is_agent_owned_and_idempotent() -> Result<(), Box<dyn
     let terminated = daemon_a.kill_ungracefully()?;
     drop(observer_a);
     terminated.require_gone(fixture.harness_state_dir(), session_id.as_str())?;
+    std::fs::remove_file(fixture.interrupted_tool_release_socket_path())?;
 
     let snapshot_a = DurableSessionSnapshot::load(fixture.harness_state_dir(), &session_id)?;
     interruption::assert_unfinished_worker_dispatch(&snapshot_a, &identities.uncertain, &dispatch)?;

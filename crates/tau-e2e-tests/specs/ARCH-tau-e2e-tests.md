@@ -23,8 +23,10 @@ correlates the same worker prompt across the durable dispatch checkpoint, decode
 fake cursor, and live `hold_ready` observation before process-group `SIGKILL`;
 neither independently persisted store acknowledges the other.
 S6 separately gives only the worker the supervised test dummy in exact
-`hold_no_side_effect` mode; main retains only `agent_start`. Its crash oracle
-requires the worker's durable request/start pair plus canonical readiness. The
+`hold_until_success_release` mode; main retains only `agent_start`. The fixture
+never sends the authenticated release, so elapsed time cannot terminalize its
+crash cut. Its oracle requires the worker's durable request/start pair plus
+canonical readiness. The
 strict fake observes the eager nonsemantic/durable repair order and validates the
 next explicit continuation's exact balanced error context without authorizing a
 tool redispatch.

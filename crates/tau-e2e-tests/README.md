@@ -172,8 +172,10 @@ whose initial typed provider status identifies the checkpointed prompt. This
 proves a conservative harness response at the synchronized cut, not backend
 acknowledgement, exactly-once work, transactional cursor/journal persistence, or
 retry, abandonment, or recovery behavior.
-A sixth fixture gives only the worker the closed no-side-effect dummy tool. It
-kills after one durable request/start pair and canonical hold readiness, then
+A sixth fixture gives only the worker the closed no-side-effect dummy tool. Its
+existing authenticated-release mode receives no release, so scheduler time
+cannot terminalize the crash cut. It kills after one durable request/start pair
+and canonical hold readiness, removes the dead hold socket, then
 requires the eager restart repair pair, no live tool redispatch, and one explicit
 repair-aware worker continuation with an exactly balanced error result. Boot C
 receives no further input and must preserve the exact Boot B membership,

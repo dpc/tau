@@ -61,7 +61,8 @@ file-write or a public unload operation. S4 enables the same sole `agent_start`
 tool for its main and configures two distinct tool-free worker roles. S5 reuses
 the S2 main/worker surface for one synchronized interrupted-worker restore. S6
 adds only the exact `restart_test_dummy` tool to its worker and fixes that
-extension to `hold_no_side_effect`; the main retains only `agent_start`.
+extension to the existing authenticated `hold_until_success_release` mode; the
+main retains only `agent_start`.
 S7 keeps that dummy mode and one main exposing only `agent_start`. Its
 production starts are limited to the existing quiescent and uncertain child
 pairs. The test driver adds the repair-role durable child through one exact
@@ -104,13 +105,15 @@ restoration after a synchronized interrupted worker dispatch. It does not prove
 watch persistence, exactly-once external work, crash-exact provider/harness
 checkpoint coordination, or any retry, abandonment, or recovery operation.
 
-The S6 dummy hold is closed no-side-effect fixture code. It accepts no arguments
-or runtime control, performs no filesystem, network, environment, or
-child-process operation, and allows only one active invocation. A one-second
-worker-start bound gates one exact correlated `tool.progress` readiness fact; a
-ten-second deadline terminalizes a surviving invocation. Exact cancellation
-wakes and joins the worker, while protocol disconnect and extension teardown join
-it without fabricating a tool terminal. S6 kills only after the worker's durable
+The S6 dummy hold is closed no-side-effect fixture code. It accepts no tool
+arguments, performs no network or child-process operation, and allows only one
+active invocation. The worker binds one fixture-private Unix socket and accepts
+only the fixture-generated nonce, but S6/S7 never send that release. One bounded
+startup gate owns the exact correlated `tool.progress` readiness fact; only an
+authenticated release could produce a result, so elapsed scheduler load cannot
+terminalize the intended crash cut. Exact cancellation wakes and joins the
+worker, while protocol disconnect and extension teardown join it without
+fabricating a tool terminal. S6 kills only after the worker's durable
 request/start pair and canonical readiness, removes the dead generation's
 fixture-owned socket after proving the process group exited, and probes the
 session lock before resume. Its repair-aware provider grammar accepts only the

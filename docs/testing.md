@@ -217,8 +217,9 @@ automatic worker provider turns; Boot B alone creates a fresh watch whose initia
 typed status names the checkpointed prompt. This is a conservative recovery
 oracle, not backend acknowledgement, exactly-once work, transactional checkpoint
 coordination, or retry/abandon/recovery coverage.
-S6 enables only the closed `hold_no_side_effect` dummy tool for the worker,
-kills after its durable request/start pair and canonical readiness, and observes
+S6 enables only the closed authenticated-release dummy hold for the worker and
+deliberately never releases it, so elapsed time cannot terminalize the crash cut.
+It kills after the durable request/start pair and canonical readiness, and observes
 the durable `provider.tool_error` repair followed by its live `tool.error`
 renderer projection, without redispatch. One explicit worker continuation
 validates the exact balanced error round. A second resume consumes no input or provider action and must preserve

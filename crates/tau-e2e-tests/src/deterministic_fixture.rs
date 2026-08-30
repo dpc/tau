@@ -561,12 +561,13 @@ impl DeterministicFixture {
         );
         let dummy_enabled = dummy_tool_bin.is_some();
         let tools = if let Some(dummy_tool_bin) = dummy_tool_bin {
+            let interrupted_tool_mode = matches!(
+                mode,
+                FixtureMode::SessionRestoreInterruptedTool | FixtureMode::SessionRestoreMixed
+            );
             let mut dummy_config = serde_json::json!({
-                "restart_mode": if matches!(
-                    mode,
-                    FixtureMode::SessionRestoreInterruptedTool | FixtureMode::SessionRestoreMixed
-                ) {
-                    "hold_no_side_effect"
+                "restart_mode": if interrupted_tool_mode {
+                    "hold_until_success_release"
                 } else if dummy_mode == FixtureDummyMode::ExitOnceThenSuccess {
                     "exit_once_then_success"
                 } else {
@@ -575,6 +576,23 @@ impl DeterministicFixture {
                 "typed_image": dummy_mode == FixtureDummyMode::TypedImage,
                 "provider_context_raw_message": mode == FixtureMode::ProviderContextPlacement,
             });
+            if interrupted_tool_mode {
+                let config = dummy_config
+                    .as_object_mut()
+                    .expect("literal dummy config is an object");
+                config.insert(
+                    "release_socket_path".to_owned(),
+                    serde_json::Value::String(
+                        root.join("interrupted-tool-release.sock")
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                );
+                config.insert(
+                    "release_nonce".to_owned(),
+                    serde_json::Value::String("session-restore-interrupted-tool".to_owned()),
+                );
+            }
             if dummy_mode == FixtureDummyMode::ExitOnceThenSuccess {
                 let marker_root = root.join("exit-once-marker");
                 create_private_directory(&marker_root)?;
@@ -845,6 +863,12 @@ impl DeterministicFixture {
             .expect("fixture config directory has a root")
     }
 
+    /// Returns the fixture-provided path where the dummy binds the S6/S7
+    /// release socket until process teardown.
+    pub fn interrupted_tool_release_socket_path(&self) -> PathBuf {
+        self.root().join("interrupted-tool-release.sock")
+    }
+
     /// Returns the canonical core-shell base directory.
     pub fn shell_base(&self) -> &Path {
         &self.shell_base
@@ -957,7 +981,7 @@ impl DeterministicFixture {
             || roles["deterministic-worker"]["tools"] != serde_json::json!(["restart_test_dummy"])
             || extensions["e2e-test-dummy"]["role"] != "tool"
             || extensions["e2e-test-dummy"]["require"] != true
-            || extensions["e2e-test-dummy"]["config"]["restart_mode"] != "hold_no_side_effect"
+            || !self.has_interrupted_tool_hold_config(&extensions["e2e-test-dummy"]["config"])
         {
             return Err("generated S6 role/extension configuration changed".into());
         }
@@ -996,11 +1020,22 @@ impl DeterministicFixture {
                 != serde_json::json!(["restart_test_dummy"])
             || extensions["e2e-test-dummy"]["role"] != "tool"
             || extensions["e2e-test-dummy"]["require"] != true
-            || extensions["e2e-test-dummy"]["config"]["restart_mode"] != "hold_no_side_effect"
+            || !self.has_interrupted_tool_hold_config(&extensions["e2e-test-dummy"]["config"])
         {
             return Err("generated S7 role/extension configuration changed".into());
         }
         Ok(())
+    }
+
+    /// Checks the exact causal hold configuration shared by S6 and S7.
+    fn has_interrupted_tool_hold_config(&self, config: &serde_json::Value) -> bool {
+        config["restart_mode"] == "hold_until_success_release"
+            && config["release_socket_path"]
+                == self
+                    .interrupted_tool_release_socket_path()
+                    .to_string_lossy()
+                    .as_ref()
+            && config["release_nonce"] == "session-restore-interrupted-tool"
     }
 
     fn assert_session_restore_role_tools(

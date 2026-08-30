@@ -217,7 +217,7 @@ two main turns and zero worker turns; Boot C spends zero provider turns. The
 initial dispatch-uncertain watch snapshot, roster queries, replay, and the
 synchronized crash cut consume no additional fake-provider action.
 
-S6 uses two lanes and compact 1,072-byte scenario JSON: exactly two main
+S6 uses two lanes and compact 1,085-byte scenario JSON: exactly two main
 actions (Boot A's start pair) and two worker
 actions (the foreground dummy call and Boot B's repair-aware continuation).
 Boot A spends two main turns and one worker turn before three actions have
@@ -225,7 +225,7 @@ matched. Boot B spends one worker turn after the eager repair pair; Boot C spend
 zero provider turns. Roster queries, typed store reads, the crash cut, and repair
 observation consume no additional fake-provider action.
 
-S7 uses four lanes and compact 2,152-byte scenario JSON: five main actions, one
+S7 uses four lanes and compact 2,178-byte scenario JSON: five main actions, one
 quiescent-worker action, one dispatch-uncertain hold action, and two repair-worker
 actions. The main uses the existing two-start maximum for the quiescent and
 uncertain workers; the fixture creates the durable repair child through one exact
