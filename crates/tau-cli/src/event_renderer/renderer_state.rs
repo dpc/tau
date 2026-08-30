@@ -174,7 +174,7 @@ pub(super) struct TranscriptRuntimeState {
     pub(super) standalone_compaction_transactions:
         HashMap<tau_proto::CompactionTransactionId, tau_proto::AgentPromptId>,
     /// Self-compaction tool correlations.
-    pub(super) self_compaction_tools: HashMap<String, SelfCompactionTool>,
+    pub(super) self_compaction_tools: HashMap<tau_proto::ToolCallId, SelfCompactionTool>,
     /// Last unclassified local user echo.
     pub(super) last_user_block: Option<(tau_cli_term::BlockId, String)>,
     /// Queued user prompt blocks.
@@ -184,7 +184,7 @@ pub(super) struct TranscriptRuntimeState {
     /// Provider-neutral accepted-submission block.
     pub(super) accepted_submission_block: Option<tau_cli_term::BlockId>,
     /// Tool-call lifecycle records.
-    pub(super) tool_calls: HashMap<String, ToolCallState>,
+    pub(super) tool_calls: HashMap<tau_proto::ToolCallId, ToolCallState>,
     /// User-shell lifecycle records.
     pub(super) shell_blocks: HashMap<String, ShellBlockState>,
     /// Persistent model status block.
@@ -226,7 +226,7 @@ pub(super) struct TranscriptStatusState {
     /// Requested main-agent tools.
     pub(super) main_tools_total: u64,
     /// Backgrounded tools awaiting real completion.
-    pub(super) main_backgrounded_tools: HashSet<String>,
+    pub(super) main_backgrounded_tools: HashSet<tau_proto::ToolCallId>,
     /// Whether the main-agent turn is active.
     pub(super) main_agent_turn_active: bool,
     /// Whether the main tool chip is visible.

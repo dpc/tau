@@ -679,7 +679,7 @@ impl EventRenderer {
             .transcript
             .runtime
             .tool_calls
-            .contains_key(call.call_id.as_str())
+            .contains_key(&call.call_id)
         {
             return;
         }
@@ -689,7 +689,7 @@ impl EventRenderer {
         );
         self.resources.handle.push_history(history_id);
         self.transcript.runtime.tool_calls.insert(
-            call.call_id.to_string(),
+            call.call_id.clone(),
             ToolCallState {
                 history_block_id: Some(history_id),
                 summary_block_id,

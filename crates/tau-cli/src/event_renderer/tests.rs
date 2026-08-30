@@ -852,6 +852,107 @@ fn background_terminal_handlers_normalize_status() {
     assert!(renderer.transcript.runtime.tool_calls.is_empty());
 }
 
+/// Generic tool events must keep protocol IDs in the transcript lifecycle and
+/// background guard while an equal shell-domain string remains independent.
+#[test]
+fn transcript_tool_runtime_retains_typed_ids_across_background_and_terminal_events() {
+    let agent = agent_id("runtime-agent");
+    let call_id = tau_proto::ToolCallId::from("shared-runtime-id");
+    let shell_id = tau_proto::ShellCommandId::parse(call_id.as_str()).expect("valid shell id");
+    let session_id = tau_proto::SessionId::parse("runtime-session").expect("valid session id");
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.switch_agent(agent.to_string());
+
+    renderer.handle(&tau_proto::Event::UiShellCommand(
+        tau_proto::UiShellCommand {
+            session_id,
+            command_id: shell_id,
+            command: "printf independent".to_owned(),
+            include_in_context: true,
+            target_agent_id: Some(agent.clone()),
+        },
+    ));
+    renderer.handle(&tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        call_id: call_id.clone(),
+        tool_name: tau_proto::ToolName::new("extension_custom"),
+        arguments: tau_proto::CborValue::Text("custom input".to_owned()),
+        agent_id: agent,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    renderer.handle(&tau_proto::Event::ToolProgress(tau_proto::ToolProgress {
+        call_id: call_id.clone(),
+        tool_name: tau_proto::ToolName::new("extension_custom"),
+        message: Some("running".to_owned()),
+        progress: None,
+        display: None,
+    }));
+
+    let typed_calls: &HashMap<tau_proto::ToolCallId, super::ToolCallState> =
+        &renderer.transcript.runtime.tool_calls;
+    assert!(typed_calls.contains_key(&call_id));
+    assert!(
+        renderer
+            .transcript
+            .runtime
+            .shell_blocks
+            .contains_key(call_id.as_str())
+    );
+
+    renderer.handle(&tau_proto::Event::ToolResultDisplay(
+        tau_proto::ToolResultDisplay {
+            call_id: call_id.clone(),
+            tool_name: tau_proto::ToolName::new("extension_custom"),
+            tool_type: tau_proto::ToolType::Custom,
+            kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+    ));
+    let typed_backgrounds: &HashSet<tau_proto::ToolCallId> =
+        &renderer.transcript.status.main_backgrounded_tools;
+    assert!(typed_backgrounds.contains(&call_id));
+
+    let terminal = tau_proto::Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+        call_id: call_id.clone(),
+        tool_name: tau_proto::ToolName::new("extension_custom"),
+        tool_type: tau_proto::ToolType::Custom,
+        message: "cancelled remotely".to_owned(),
+        details: None,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    renderer.handle(&terminal);
+    let settled_history_len = renderer.transcript.history.tool_history.len();
+    renderer.handle(&terminal);
+
+    assert!(
+        !renderer
+            .transcript
+            .runtime
+            .tool_calls
+            .contains_key(&call_id)
+    );
+    assert!(
+        !renderer
+            .transcript
+            .status
+            .main_backgrounded_tools
+            .contains(&call_id)
+    );
+    assert!(
+        renderer
+            .transcript
+            .runtime
+            .shell_blocks
+            .contains_key(call_id.as_str())
+    );
+    assert_eq!(
+        renderer.transcript.history.tool_history.len(),
+        settled_history_len + 1,
+        "a duplicate late terminal keeps the existing unknown-terminal fallback"
+    );
+}
+
 /// Blocker action labels stay visible from the live start through each terminal
 /// lifecycle, without exposing other structured invocation or terminal fields.
 #[test]

@@ -7077,12 +7077,7 @@ impl EventRenderer {
         {
             return;
         }
-        match self
-            .transcript
-            .runtime
-            .self_compaction_tools
-            .entry(call_id.to_string())
-        {
+        match self.transcript.runtime.self_compaction_tools.entry(call_id) {
             Entry::Vacant(entry) => {
                 entry.insert(SelfCompactionTool {
                     request_id: requested.request_id.clone(),
@@ -7102,7 +7097,7 @@ impl EventRenderer {
     fn associate_self_compaction_start(
         &mut self,
         started: &tau_proto::AgentStandaloneCompactionStarted,
-    ) -> Option<String> {
+    ) -> Option<tau_proto::ToolCallId> {
         let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
             request_id,
             caller_agent_id,
@@ -7114,12 +7109,12 @@ impl EventRenderer {
         if started.agent_id != *caller_agent_id {
             return None;
         }
-        let call_id = initiating_tool_call_id.to_string();
+        let call_id = initiating_tool_call_id.clone();
         let tool = self
             .transcript
             .runtime
             .self_compaction_tools
-            .get_mut(call_id.as_str())?;
+            .get_mut(&call_id)?;
         if tool.request_id != *request_id
             || tool
                 .compact_prompt_id
@@ -7142,7 +7137,7 @@ impl EventRenderer {
     fn self_compaction_tool_for_prompt(
         &self,
         prompt_id: &tau_proto::AgentPromptId,
-    ) -> Option<String> {
+    ) -> Option<tau_proto::ToolCallId> {
         self.transcript
             .runtime
             .self_compaction_tools
@@ -7159,7 +7154,7 @@ impl EventRenderer {
     /// state. A late reconstructed tool start receives the retained status.
     fn update_self_compaction_tool_status(
         &mut self,
-        call_id: &str,
+        call_id: &tau_proto::ToolCallId,
         status: CompactionStatus,
         status_text: impl Into<String>,
     ) {
@@ -7905,7 +7900,7 @@ impl EventRenderer {
     }
 
     fn handle_tool_started(&mut self, started: &tau_proto::ToolStarted, recorded_at: UnixMicros) {
-        let call_id = started.call_id.to_string();
+        let call_id = started.call_id.clone();
         self.event_owners
             .tool_agents
             .entry(started.call_id.clone())
@@ -7914,7 +7909,7 @@ impl EventRenderer {
             .transcript
             .runtime
             .tool_calls
-            .get(call_id.as_str())
+            .get(&call_id)
             .is_some_and(|state| state.is_sub_agent || state.block_id.is_some())
         {
             return;
@@ -7969,10 +7964,10 @@ impl EventRenderer {
             .transcript
             .runtime
             .self_compaction_tools
-            .get(started.call_id.as_str())
+            .get(&started.call_id)
             .and_then(|tool| tool.status.clone())
         {
-            self.update_self_compaction_tool_status(started.call_id.as_str(), status, status_text);
+            self.update_self_compaction_tool_status(&started.call_id, status, status_text);
         }
     }
 
@@ -8030,11 +8025,7 @@ impl EventRenderer {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
 
-        let state = self
-            .transcript
-            .runtime
-            .tool_calls
-            .get(progress.call_id.as_str());
+        let state = self.transcript.runtime.tool_calls.get(&progress.call_id);
         if state.is_some_and(|s| s.is_sub_agent) {
             return;
         }
@@ -8046,7 +8037,7 @@ impl EventRenderer {
                 .transcript
                 .runtime
                 .tool_calls
-                .get_mut(progress.call_id.as_str())
+                .get_mut(&progress.call_id)
                 && let Some(block_id) = state.block_id
             {
                 let mut display = if state.is_blocker {
@@ -8082,11 +8073,7 @@ impl EventRenderer {
             }
         }
 
-        let state = self
-            .transcript
-            .runtime
-            .tool_calls
-            .get(progress.call_id.as_str());
+        let state = self.transcript.runtime.tool_calls.get(&progress.call_id);
         if state.is_none_or(|s| s.block_id.is_none()) {
             if !self.presentation.verbose_mode {
                 return;
@@ -8278,7 +8265,7 @@ impl EventRenderer {
         call_id: &tau_proto::ToolCallId,
         originator_is_user: bool,
     ) -> Option<(ToolCallState, bool)> {
-        let prior = self.transcript.runtime.tool_calls.remove(call_id.as_str());
+        let prior = self.transcript.runtime.tool_calls.remove(call_id);
         let known_main_tool = prior
             .as_ref()
             .is_some_and(|prior| !prior.is_sub_agent && originator_is_user);
@@ -8296,7 +8283,7 @@ impl EventRenderer {
             self.transcript
                 .status
                 .main_backgrounded_tools
-                .remove(call_id.as_str());
+                .remove(call_id);
             self.record_main_tool_completed();
             if self.transcript.status.main_agent_turn_active
                 || !self.transcript.status.main_backgrounded_tools.is_empty()
@@ -8313,7 +8300,7 @@ impl EventRenderer {
         recorded_at: UnixMicros,
     ) {
         if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
-            self.handle_tool_background_placeholder(result.call_id.as_str());
+            self.handle_tool_background_placeholder(&result.call_id);
             return;
         }
         // Sub-agent tool activity stays out of the user's transcript; generic
@@ -8353,7 +8340,7 @@ impl EventRenderer {
         self.render_model_status_after_tool_completion(known_main_tool);
     }
 
-    fn handle_tool_background_placeholder(&mut self, call_id: &str) {
+    fn handle_tool_background_placeholder(&mut self, call_id: &tau_proto::ToolCallId) {
         let Some(state) = self.transcript.runtime.tool_calls.get(call_id) else {
             return;
         };
@@ -8363,7 +8350,7 @@ impl EventRenderer {
         self.transcript
             .status
             .main_backgrounded_tools
-            .insert(call_id.to_owned());
+            .insert(call_id.clone());
         self.transcript.status.main_tools_visible = true;
         self.render_model_status();
     }
