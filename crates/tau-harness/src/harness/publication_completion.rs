@@ -2519,6 +2519,18 @@ impl Harness {
         persist: bool,
         append_outcome: Option<&tau_core::AgentAppendOutcome>,
     ) {
+        if let Event::AgentPromptSubmitted(prompt) = event
+            && prompt.submission_source == tau_proto::PromptSubmissionSource::HumanUi
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(prompt.agent_id.as_str()))
+            && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
+        {
+            // Change live branch authority only after the authenticated prompt
+            // crossed semantic persistence. A rejected append must leave the
+            // creation query in control.
+            agent.identity.originator = tau_proto::PromptOriginator::User;
+            agent.identity.source_connection = None;
+        }
         self.react_to_committed_tool_terminal(source, event, append_outcome);
         if let Event::ProviderStandaloneExecutionAccounted(accounted) = event {
             self.fold_committed_standalone_accounting(accounted, source, true);

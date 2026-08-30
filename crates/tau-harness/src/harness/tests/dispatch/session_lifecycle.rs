@@ -1270,6 +1270,50 @@ fn cold_restore_does_not_classify_reactive_recovery_as_completed_worker() {
     cold_reader.shutdown().expect("shutdown cold reader");
 }
 
+/// Cold reconstruction must use the latest committed prompt authority rather
+/// than permanently inheriting the extension query that created an endpoint.
+#[test]
+fn cold_restore_uses_latest_committed_prompt_originator() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let worker_agent_id = {
+        let mut h = quiet_provider_harness(&sp).expect("start");
+        h.handle_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query("q-adopted-before-restart"),
+        )
+        .expect("start extension endpoint");
+        let worker_cid = ext_query_cid(&h, "q-adopted-before-restart").expect("extension endpoint");
+        let worker_agent_id = durable_agent_id_for_conversation(&h, &worker_cid);
+
+        h.publish_pending_prompt_for_agent(
+            &worker_cid,
+            PendingPrompt::human_ui("adopt endpoint".to_owned()),
+        )
+        .expect("commit authenticated user authority");
+        assert!(event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::AgentPromptSubmitted(prompt)
+                if prompt.agent_id == worker_agent_id
+                    && prompt.originator == tau_proto::PromptOriginator::User
+                    && prompt.submission_source
+                        == tau_proto::PromptSubmissionSource::HumanUi
+        )));
+        h.shutdown().expect("shutdown adopted endpoint");
+        worker_agent_id
+    };
+
+    let mut cold_reader =
+        echo_harness_for("classification-only", &sp).expect("open cold journal reader");
+    assert_eq!(
+        cold_reader
+            .restored_agent_runtime_from_log(worker_agent_id.as_str())
+            .originator,
+        tau_proto::PromptOriginator::User
+    );
+    cold_reader.shutdown().expect("shutdown cold reader");
+}
+
 /// Model-visible text cannot spoof harness-owned passive provenance: a normal
 /// activating prompt remains active even when its bytes resemble a restore
 /// notice.

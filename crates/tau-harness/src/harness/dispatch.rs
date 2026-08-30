@@ -124,7 +124,7 @@ impl Harness {
                     "publish_pending_prompt_for_agent: unknown agent `{agent_id}`"
                 ))
             })?);
-        let originator = self
+        let branch_originator = self
             .agent_runtime
             .agent_registry
             .agents
@@ -135,6 +135,16 @@ impl Harness {
                     "publish_pending_prompt_for_agent: unknown agent `{agent_id}`"
                 ))
             })?;
+        // Prompt authority belongs to the authenticated submission boundary, not
+        // permanently to the request that created the target agent. In
+        // particular, a peer auto-start query may create a reusable endpoint,
+        // but an attached UI prompt adopts that endpoint as an ordinary user
+        // turn. Payload fields cannot assert this authority: only the
+        // harness-stamped submission source can.
+        let originator = match &prompt.submission_source {
+            tau_proto::PromptSubmissionSource::HumanUi => tau_proto::PromptOriginator::User,
+            _ => branch_originator,
+        };
         if prompt.ctx_id.is_some()
             && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(agent_id)
         {

@@ -467,6 +467,12 @@ impl Harness {
             self.attach_finished_response_compaction_usage(&mut response, input_tokens);
         }
 
+        let is_non_tool_prompt_surface = self
+            .agent_runtime
+            .agent_registry
+            .agents
+            .get(&cid)
+            .is_some_and(Self::agent_uses_non_tool_prompt_surface);
         let is_non_tool_ext_query = self.is_non_tool_extension_query(&cid);
         let mut normalized_tool_calls = NormalizedFinishedToolCalls::default();
         if requested_tool_calls {
@@ -474,7 +480,7 @@ impl Harness {
             normalized_tool_calls = self.normalize_finished_response_tool_calls(
                 &mut response,
                 &mut tool_calls,
-                is_non_tool_ext_query,
+                is_non_tool_prompt_surface,
                 tool_calls_with_non_tool_stop,
                 declaration,
             );
@@ -3275,16 +3281,20 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .is_some_and(|conv| {
-                if Self::is_peer_entrypoint_agent(conv) {
-                    return false;
-                }
-                matches!(
-                    conv.identity.originator,
-                    tau_proto::PromptOriginator::Extension { .. }
-                ) && conv.identity.parent_tool_call_id.is_none()
-                    && !conv.identity.restored_tool_backed_start
+            .is_some_and(|agent| {
+                !Self::is_peer_entrypoint_agent(agent)
+                    && Self::agent_uses_non_tool_prompt_surface(agent)
             })
+    }
+
+    /// Return whether current prompt authority requires the restricted non-tool
+    /// surface.
+    pub(super) fn agent_uses_non_tool_prompt_surface(agent: &Agent) -> bool {
+        matches!(
+            agent.identity.originator,
+            tau_proto::PromptOriginator::Extension { .. }
+        ) && agent.identity.parent_tool_call_id.is_none()
+            && !agent.identity.restored_tool_backed_start
     }
 
     /// Identify the durable lifecycle purpose assigned by peer auto-start.

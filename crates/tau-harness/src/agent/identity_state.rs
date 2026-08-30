@@ -18,7 +18,8 @@ pub(crate) struct AgentIdentityState {
     pub(crate) runtime_incarnation: u64,
     /// Session whose loaded-agent membership owns this runtime.
     pub(crate) session_id: SessionId,
-    /// Authority that created the conversation and receives lifecycle results.
+    /// Current prompt authority, initially inherited from agent creation and
+    /// replaced after an authenticated UI prompt commits.
     pub(crate) originator: PromptOriginator,
     /// Local cursor — where the *next* transcript event for this agent
     /// should be parented in the owning agent tree. The tree's own `head`

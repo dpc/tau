@@ -1033,11 +1033,7 @@ impl Harness {
         // Non-tool extension side agents (`std-notifications`' idle summary,
         // etc.) must not execute tools. Provider `tool_choice: none` is the
         // upstream authority; local rejection alone cannot contain hosted tools.
-        let is_non_tool_ext_query = matches!(
-            conv.identity.originator,
-            tau_proto::PromptOriginator::Extension { .. }
-        ) && conv.identity.parent_tool_call_id.is_none()
-            && !conv.identity.restored_tool_backed_start;
+        let is_non_tool_ext_query = Self::agent_uses_non_tool_prompt_surface(conv);
         let tool_choice = if is_non_tool_ext_query {
             tau_proto::ToolChoice::None
         } else {
@@ -1371,11 +1367,7 @@ impl Harness {
         let Some(model) = model else {
             return true;
         };
-        let is_non_tool_ext_query = matches!(
-            conv.identity.originator,
-            tau_proto::PromptOriginator::Extension { .. }
-        ) && conv.identity.parent_tool_call_id.is_none()
-            && !conv.identity.restored_tool_backed_start;
+        let is_non_tool_ext_query = Self::agent_uses_non_tool_prompt_surface(conv);
         if let Some(message) = self.shell_tool_style_error(Some(&model)) {
             self.emit_harness_failure(&message);
             self.fail_initial_prompt_materialization(

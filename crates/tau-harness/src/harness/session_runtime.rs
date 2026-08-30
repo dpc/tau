@@ -3564,7 +3564,7 @@ impl Harness {
         let role = creation
             .map(|started| started.role.clone())
             .filter(|role| self.config.available_roles.contains_key(role));
-        let historical_originator = events.iter().find_map(|record| match &record.event {
+        let initial_originator = events.iter().find_map(|record| match &record.event {
             Event::AgentPromptSubmitted(submitted) => Some(submitted.originator.clone()),
             Event::ProviderResponseFinished(finished) => Some(finished.originator.clone()),
             Event::ProviderToolResult(result) => Some(result.originator.clone()),
@@ -3572,6 +3572,19 @@ impl Harness {
             Event::ToolBackgroundError(error) => Some(error.originator.clone()),
             _ => None,
         });
+        // Submitted prompts are durable authority transitions. Later tool
+        // terminals can carry another agent's stamped originator, so they must
+        // not override branch classification during restore.
+        let historical_originator = events
+            .iter()
+            .rev()
+            .find_map(|record| match &record.event {
+                Event::AgentPromptSubmitted(submitted) => Some(submitted.originator.clone()),
+                _ => None,
+            })
+            // Legacy journals can predate durable prompt submissions. Keep
+            // their original first-observed fallback semantics.
+            .or_else(|| initial_originator.clone());
         let durable_extension_originator = matches!(
             historical_originator,
             Some(tau_proto::PromptOriginator::Extension { .. })
@@ -3581,11 +3594,9 @@ impl Harness {
                 name: harness_extension_name().clone(),
                 query_id: format!("restored-{agent_id}"),
             });
-        let completed_worker = Self::journal_proves_completed_start_agent_worker(
-            &events,
-            creation,
-            &historical_originator,
-        );
+        let completed_worker = initial_originator.as_ref().is_some_and(|originator| {
+            Self::journal_proves_completed_start_agent_worker(&events, creation, originator)
+        });
         if completed_worker {
             return RestoredAgentRuntime {
                 role,

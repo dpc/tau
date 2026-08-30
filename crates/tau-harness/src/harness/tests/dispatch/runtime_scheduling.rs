@@ -1687,9 +1687,9 @@ fn activating_wait_settlement_dispatches_once_and_preserves_next_input() {
     h.shutdown().expect("shutdown");
 }
 
-/// A peer-created extension side conversation keeps its harness extension
-/// originator while visible user input settles an activating wait. The settled
-/// terminal and steered activation must still release exactly one continuation.
+/// A peer-created endpoint adopts user authority before opening an activating
+/// wait. Later visible input must settle the wait and release exactly one
+/// continuation under that adopted authority.
 #[test]
 fn peer_entrypoint_activating_wait_settlement_dispatches_once() {
     let td = TempDir::new().expect("tempdir");
@@ -1731,6 +1731,30 @@ fn peer_entrypoint_activating_wait_settlement_dispatches_once() {
         initial_prompt.originator,
         tau_proto::PromptOriginator::Extension { .. }
     ));
+    let mut initial_response = provider_text_response(
+        &initial_prompt.agent_prompt_id,
+        agent_id.clone(),
+        "peer query complete",
+    );
+    initial_response.originator = initial_prompt.originator.clone();
+    h.handle_provider_response_finished(initial_response)
+        .expect("finish restricted peer query");
+    assert_eq!(
+        h.submit_prompt_to_agent(
+            h.session_runtime.current_session_id.clone(),
+            agent_id.as_str(),
+            PendingPrompt::human_ui_watch_notified("wait for visible input".to_owned()),
+        )
+        .expect("adopt peer endpoint"),
+        PromptSubmission::Dispatched
+    );
+    let adopted_prompt_id = h.agent_runtime.agent_registry.agents[&cid]
+        .dispatch
+        .in_flight_prompt
+        .clone()
+        .expect("adopted prompt");
+    let initial_prompt = read_prompt_created(&h, &adopted_prompt_id);
+    assert_eq!(initial_prompt.originator, tau_proto::PromptOriginator::User);
     let mut wait_response =
         provider_input_wait_response(&initial_prompt, "side-activating-wait", 60);
     wait_response.originator = initial_prompt.originator.clone();
@@ -1778,7 +1802,7 @@ fn peer_entrypoint_activating_wait_settlement_dispatches_once() {
             matches!(event, Event::AgentInferenceDispatchStarted(_))
         }),
         checkpoints_before + 1,
-        "settlement releases exactly one side-conversation continuation"
+        "settlement releases exactly one adopted-endpoint continuation"
     );
     let continuation_id = h.agent_runtime.agent_registry.agents[&cid]
         .dispatch
@@ -1903,6 +1927,30 @@ fn peer_entrypoint_activating_wait_restart_recovers_committed_steer_once() {
                 (prompt_cid == &cid).then(|| read_prompt_created(&h, prompt_id))
             })
             .expect("side prompt");
+        let mut initial_response = provider_text_response(
+            &initial_prompt.agent_prompt_id,
+            agent_id.clone(),
+            "peer query complete",
+        );
+        initial_response.originator = initial_prompt.originator.clone();
+        h.handle_provider_response_finished(initial_response)
+            .expect("finish restricted peer query");
+        assert_eq!(
+            h.submit_prompt_to_agent(
+                h.session_runtime.current_session_id.clone(),
+                agent_id.as_str(),
+                PendingPrompt::human_ui_watch_notified("wait for visible input".to_owned()),
+            )
+            .expect("adopt peer endpoint"),
+            PromptSubmission::Dispatched
+        );
+        let adopted_prompt_id = h.agent_runtime.agent_registry.agents[&cid]
+            .dispatch
+            .in_flight_prompt
+            .clone()
+            .expect("adopted prompt");
+        let initial_prompt = read_prompt_created(&h, &adopted_prompt_id);
+        assert_eq!(initial_prompt.originator, tau_proto::PromptOriginator::User);
         let mut wait_response =
             provider_input_wait_response(&initial_prompt, "restart-side-activating-wait", 60);
         wait_response.originator = initial_prompt.originator.clone();
@@ -1994,10 +2042,7 @@ fn peer_entrypoint_activating_wait_restart_recovers_committed_steer_once() {
             .clone()
             .expect("recovered continuation");
         let continuation = read_prompt_created(&h, &continuation_id);
-        assert!(matches!(
-            continuation.originator,
-            tau_proto::PromptOriginator::Extension { .. }
-        ));
+        assert_eq!(continuation.originator, tau_proto::PromptOriginator::User);
         assert!(continuation.context.flatten().iter().any(|item| {
             text_part(item).is_some_and(|text| text.contains("first visible activation"))
         }));
