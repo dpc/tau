@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::fs as path_std_fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
@@ -18,8 +20,9 @@ use crate::memory::MemorySink;
 use crate::{
     AgentEntry, AgentEventParent, AgentStore, AgentStoreError, Connection, ConnectionOrigin,
     EventBus, MemoryInbox, NodeId, PendingConnectionMetadata, PersistedAgentEvent,
-    PersistedAgentEventSeq, PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership,
-    SessionStore, SessionStoreError, list_session_metas, memory_connection,
+    PersistedAgentEventSeq, PersistedSessionEvent, PersistedSessionEventSeq, PersistenceCapacity,
+    SemanticPersistenceOwner, SessionMembership, SessionStore, SessionStoreError,
+    list_session_metas, memory_connection,
 };
 
 /// Creates an in-memory test connection with an explicit transport origin.
@@ -340,6 +343,34 @@ fn provider_tool_call(agent_id: &str, call_id: &str) -> Event {
         provider_response_id: None,
         ws_pool_delta: None,
     })
+}
+
+fn agent_started(agent_id: &str) -> Event {
+    Event::AgentStarted(tau_proto::AgentStarted {
+        creator: None,
+        agent_id: AgentId::parse(agent_id).expect("agent id"),
+        parent_agent: None,
+        role: "test".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    })
+}
+
+fn full_scan_loaded_tool_call_ids(store: &AgentStore) -> HashSet<ToolCallId> {
+    let mut ids = HashSet::new();
+    for tree in store.agents() {
+        for node in tree.nodes() {
+            let AgentEntry::AssistantResponse { output_items, .. } = &node.entry else {
+                continue;
+            };
+            ids.extend(output_items.iter().filter_map(|item| match item {
+                ContextItem::ToolCall(call) => Some(call.call_id.clone()),
+                _ => None,
+            }));
+        }
+    }
+    ids
 }
 
 fn background_placeholder(call_id: &str) -> Event {
@@ -1309,6 +1340,275 @@ fn agent_store_rejects_duplicate_background_completion_before_persisting() {
     let events = store.agent_events("agent-1").expect("agent events");
     assert_eq!(events.len(), 3);
 
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// The loaded-tree tool-call index follows successful live folds, preserves
+/// cross-agent collisions, and cold replay reconstructs the same exact set.
+#[test]
+fn agent_store_loaded_tool_call_ids_match_live_and_cold_multi_agent_trees() {
+    let agents_dir = temp_dir("agents-loaded-tool-call-ids");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+
+    store
+        .append_agent_event(
+            "agent-1",
+            None,
+            provider_tool_call("agent-1", "shared-call"),
+        )
+        .expect("append first agent tool call");
+    store
+        .append_agent_event("agent-2", None, provider_tool_call("agent-2", "other-call"))
+        .expect("append second agent tool call");
+    store
+        .append_agent_event(
+            "agent-3",
+            None,
+            provider_tool_call("agent-3", "shared-call"),
+        )
+        .expect("append cross-agent collision");
+
+    let expected = HashSet::from([
+        ToolCallId::from("shared-call"),
+        ToolCallId::from("other-call"),
+    ]);
+    assert_eq!(store.loaded_tool_call_ids(), &expected);
+    assert_eq!(
+        store.loaded_tool_call_id_index_counters(),
+        (2, 3),
+        "three folded nodes produce two exact set insertions"
+    );
+    let counters_before_lookup = store.loaded_tool_call_id_index_counters();
+    assert_eq!(store.loaded_tool_call_ids(), &expected);
+    assert_eq!(
+        store.loaded_tool_call_id_index_counters(),
+        counters_before_lookup,
+        "constant-time index reads must perform no tree work or mutations"
+    );
+
+    let mut reopened = AgentStore::open_lazy(&agents_dir).expect("cold replay agent store");
+    reopened.load_agent("agent-1").expect("load first agent");
+    reopened.load_agent("agent-2").expect("load second agent");
+    reopened.load_agent("agent-3").expect("load third agent");
+    assert_eq!(reopened.loaded_tool_call_ids(), &expected);
+    let (_, replay_nodes_examined) = reopened.loaded_tool_call_id_index_counters();
+    assert_eq!(
+        replay_nodes_examined, 3,
+        "cold replay examines each newly loaded node exactly once"
+    );
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// A fixed-seed multi-agent history keeps the incremental index identical to
+/// the previous full-tree reference after every live fold and cold load.
+#[test]
+fn loaded_tool_call_id_index_differential_matches_full_scan() {
+    let agents_dir = temp_dir("agents-loaded-tool-call-id-differential");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    let mut seed = 0x4d59_5df4_d0f3_3173_u64;
+    let mut agent_ids = Vec::new();
+    for index in 0..64 {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let agent_id = format!("agent-{index}");
+        let call_id = format!("call-{}", seed % 17);
+        store
+            .append_agent_event(&agent_id, None, provider_tool_call(&agent_id, &call_id))
+            .expect("append differential tool call");
+        assert_eq!(
+            store.loaded_tool_call_ids(),
+            &full_scan_loaded_tool_call_ids(&store)
+        );
+        agent_ids.push(agent_id);
+    }
+    assert_eq!(
+        store.loaded_tool_call_id_index_counters(),
+        (full_scan_loaded_tool_call_ids(&store).len(), 64),
+        "live folds mutate once per unique id and examine only new nodes"
+    );
+    drop(store);
+
+    let mut reopened = AgentStore::open_lazy(&agents_dir).expect("open lazy replay store");
+    while !agent_ids.is_empty() {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let index = (seed as usize) % agent_ids.len();
+        let agent_id = agent_ids.swap_remove(index);
+        reopened.load_agent(&agent_id).expect("cold-load agent");
+        assert_eq!(
+            reopened.loaded_tool_call_ids(),
+            &full_scan_loaded_tool_call_ids(&reopened)
+        );
+    }
+    assert_eq!(
+        reopened.loaded_tool_call_id_index_counters(),
+        (full_scan_loaded_tool_call_ids(&reopened).len(), 64),
+        "cold replay mutates once per unique id and examines each node once"
+    );
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Managed-store ephemeral trees stay outside both `agents()` and the loaded-id
+/// index before and after a lifecycle rebuild.
+#[test]
+fn managed_ephemeral_tool_calls_remain_outside_loaded_tree_index() {
+    let agents_dir = temp_dir("agents-managed-ephemeral-tool-call-id");
+    let owner = Arc::new(
+        SemanticPersistenceOwner::new(PersistenceCapacity::default())
+            .expect("semantic persistence owner"),
+    );
+    let mut store = AgentStore::open_managed(&agents_dir, owner).expect("managed agent store");
+    store
+        .mark_agent_ephemeral("ephemeral-agent")
+        .expect("mark ephemeral agent");
+    store
+        .append_agent_event(
+            "ephemeral-agent",
+            None,
+            provider_tool_call("ephemeral-agent", "ephemeral-call"),
+        )
+        .expect("append ephemeral tool call");
+
+    assert!(store.agents().is_empty());
+    assert!(store.loaded_tool_call_ids().is_empty());
+    store.finish_managed_release();
+    assert!(store.loaded_tool_call_ids().is_empty());
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Managed durable append and partial/full projection removal keep the index
+/// equal to the authoritative managed-tree scan with exact rebuild work.
+#[test]
+fn managed_durable_tool_call_index_tracks_append_and_projection_removal() {
+    let agents_dir = temp_dir("agents-managed-durable-tool-call-id");
+    let owner = Arc::new(
+        SemanticPersistenceOwner::new(PersistenceCapacity::default())
+            .expect("semantic persistence owner"),
+    );
+    let mut store =
+        AgentStore::open_managed(&agents_dir, owner.clone()).expect("managed agent store");
+    for (agent_id, call_id) in [("managed-a", "call-a"), ("managed-b", "call-b")] {
+        store
+            .reserve_new_agent(agent_id)
+            .expect("reserve managed agent");
+        store
+            .append_agent_event(agent_id, None, agent_started(agent_id))
+            .expect("append managed creation");
+        store
+            .append_agent_event(agent_id, None, provider_tool_call(agent_id, call_id))
+            .expect("append managed tool call");
+        assert_eq!(
+            store.loaded_tool_call_ids(),
+            &full_scan_loaded_tool_call_ids(&store)
+        );
+    }
+    assert_eq!(store.loaded_tool_call_id_index_counters(), (2, 2));
+
+    let included = [AgentId::parse("managed-a").expect("agent id")];
+    let _snapshot = store
+        .capture_managed_snapshot(included, Duration::from_secs(2))
+        .expect("capture partial managed snapshot");
+    assert_eq!(
+        store.loaded_tool_call_ids(),
+        &full_scan_loaded_tool_call_ids(&store)
+    );
+    assert_eq!(
+        store.loaded_tool_call_id_index_counters(),
+        (5, 3),
+        "partial removal clears two ids then reindexes the one retained node"
+    );
+
+    store.finish_managed_release();
+    assert_eq!(
+        store.loaded_tool_call_ids(),
+        &full_scan_loaded_tool_call_ids(&store)
+    );
+    assert_eq!(store.loaded_tool_call_id_index_counters(), (6, 3));
+    drop(store);
+    drop(owner);
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Legacy recovery removes, rebuilds, and reloads one resident tree without
+/// changing the exact indexed collision set.
+#[test]
+fn legacy_recovery_rebuilds_and_reloads_tool_call_index() {
+    let agents_dir = temp_dir("agents-recovered-tool-call-id");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    store
+        .append_agent_event(
+            "recovered-agent",
+            None,
+            provider_tool_call("recovered-agent", "recovered-call"),
+        )
+        .expect("append tool call");
+    assert_eq!(store.loaded_tool_call_id_index_counters(), (1, 1));
+
+    store
+        .lock_and_recover_agent("recovered-agent")
+        .expect("recover agent");
+    assert_eq!(
+        store.loaded_tool_call_ids(),
+        &full_scan_loaded_tool_call_ids(&store)
+    );
+    assert_eq!(
+        store.loaded_tool_call_id_index_counters(),
+        (3, 2),
+        "recovery removes one id and reloads one node and id"
+    );
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+/// Manual scaling benchmark contrasts equivalent owned collision-set builds
+/// from the index and the previous full loaded-tree scan without a threshold.
+#[test]
+#[ignore = "manual loaded tool-call id index scaling benchmark"]
+fn benchmark_loaded_tool_call_id_index_against_full_tree_scan() {
+    let agents_dir = temp_dir("agents-loaded-tool-call-id-benchmark");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+    for index in 0..1_024 {
+        let agent_id = format!("agent-{index}");
+        store
+            .append_agent_event(
+                &agent_id,
+                None,
+                provider_tool_call(&agent_id, &format!("call-{index}")),
+            )
+            .expect("append benchmark tool call");
+    }
+
+    let indexed_started = Instant::now();
+    let mut indexed_checksum = 0_usize;
+    for _ in 0..1_000 {
+        let ids: HashSet<_> = store.loaded_tool_call_ids().iter().cloned().collect();
+        indexed_checksum = indexed_checksum.wrapping_add(std::hint::black_box(ids.len()));
+    }
+    let indexed_elapsed = indexed_started.elapsed();
+
+    let scan_started = Instant::now();
+    let mut scan_checksum = 0_usize;
+    for _ in 0..1_000 {
+        let mut ids = HashSet::new();
+        for tree in store.agents() {
+            for node in tree.nodes() {
+                let AgentEntry::AssistantResponse { output_items, .. } = &node.entry else {
+                    continue;
+                };
+                ids.extend(output_items.iter().filter_map(|item| match item {
+                    ContextItem::ToolCall(call) => Some(call.call_id.clone()),
+                    _ => None,
+                }));
+            }
+        }
+        scan_checksum = scan_checksum.wrapping_add(std::hint::black_box(ids.len()));
+    }
+    assert_eq!(indexed_checksum, scan_checksum);
+    eprintln!(
+        "loaded_tool_call_ids nodes=1024 samples=1000 indexed_owned={indexed_elapsed:?} \
+         full_scan_owned={:?} checksum={}",
+        scan_started.elapsed(),
+        indexed_checksum
+    );
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 

@@ -8,6 +8,7 @@
 //! [`AgentStore::append_agent_message_fact_at`] so their canonical append
 //! precedes and cannot be vetoed by post-commit projection.
 
+mod loaded_tool_call_ids;
 mod snapshot;
 
 use std::collections::{HashMap, HashSet};
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
+use loaded_tool_call_ids::LoadedToolCallIds;
 use serde::{Deserialize, Serialize};
 pub use snapshot::{
     AgentJournalLocks, AgentJournalReader, AgentJournalSnapshot, read_agent_creation_record,
@@ -401,6 +403,8 @@ pub struct AgentStore {
     /// Legacy/offline writer state, structurally absent from managed stores.
     legacy_io: Option<LegacyAgentIo>,
     agents: HashMap<AgentId, AgentTree>,
+    /// Exact non-persisted tool-call identities in the currently loaded trees.
+    loaded_tool_call_ids: LoadedToolCallIds,
     /// Agents whose validated stream begins with their immutable creation fact.
     created_agents: HashSet<AgentId>,
     /// Memory-only agent ids owned by this process.
@@ -498,6 +502,20 @@ impl ManagedAgentProjection {
 }
 
 impl AgentStore {
+    /// Rebuilds the runtime-only index from the same tree set exposed by
+    /// [`Self::agents`].
+    fn rebuild_loaded_tool_call_ids(&mut self) {
+        if self.persistence_owner.is_some() {
+            self.loaded_tool_call_ids.rebuild(
+                self.managed_projections
+                    .values()
+                    .map(|projection| &projection.tree),
+            );
+        } else {
+            self.loaded_tool_call_ids.rebuild(self.agents.values());
+        }
+    }
+
     fn require_mutation_authority(&self) -> Result<(), AgentStoreError> {
         if self.default_persistence.is_durable()
             && self.persistence_owner.is_none()
@@ -574,6 +592,7 @@ impl AgentStore {
             default_persistence: AgentPersistenceMode::Durable,
             legacy_io: None,
             agents: HashMap::new(),
+            loaded_tool_call_ids: LoadedToolCallIds::default(),
             created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
             ephemeral_events: HashMap::new(),
@@ -617,6 +636,7 @@ impl AgentStore {
                 locks: HashMap::new(),
             }),
             agents: HashMap::new(),
+            loaded_tool_call_ids: LoadedToolCallIds::default(),
             created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
             ephemeral_events: HashMap::new(),
@@ -636,6 +656,7 @@ impl AgentStore {
             default_persistence: AgentPersistenceMode::Ephemeral,
             legacy_io: None,
             agents: HashMap::new(),
+            loaded_tool_call_ids: LoadedToolCallIds::default(),
             created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
             ephemeral_events: HashMap::new(),
@@ -661,6 +682,7 @@ impl AgentStore {
             default_persistence: AgentPersistenceMode::Durable,
             legacy_io: None,
             agents: HashMap::new(),
+            loaded_tool_call_ids: LoadedToolCallIds::default(),
             created_agents: HashSet::new(),
             ephemeral_agents: HashSet::new(),
             ephemeral_events: HashMap::new(),
@@ -701,6 +723,7 @@ impl AgentStore {
                 self.created_agents.insert(aid.clone());
             }
             self.summaries.insert(aid.clone(), summary);
+            self.loaded_tool_call_ids.extend_nodes(tree.nodes());
             self.agents.insert(aid, tree);
             return Ok(());
         }
@@ -785,6 +808,7 @@ impl AgentStore {
             }
         }
         self.summaries.insert(aid.clone(), summary);
+        self.loaded_tool_call_ids.extend_nodes(tree.nodes());
         self.agents.insert(aid, tree);
         Ok(())
     }
@@ -856,6 +880,13 @@ impl AgentStore {
             agent_id.clone(),
             ManagedAgentProjection::from_replay(tree, summary, prepared.events),
         );
+        self.loaded_tool_call_ids.extend_nodes(
+            self.managed_projections
+                .get(&agent_id)
+                .expect("prepared projection was installed")
+                .tree
+                .nodes(),
+        );
         Ok(())
     }
 
@@ -876,6 +907,7 @@ impl AgentStore {
             .map_err(AgentStoreError::Persistence)?;
         self.persistence_leases.clear();
         self.managed_projections.clear();
+        self.rebuild_loaded_tool_call_ids();
         Ok(())
     }
 
@@ -895,6 +927,7 @@ impl AgentStore {
     pub fn finish_managed_release(&mut self) {
         self.persistence_leases.clear();
         self.managed_projections.clear();
+        self.rebuild_loaded_tool_call_ids();
     }
 
     /// Relinquishes live ownership, captures a strict read-only snapshot, then
@@ -933,6 +966,7 @@ impl AgentStore {
             self.persistence_leases.remove(&agent_id);
             self.managed_projections.remove(&agent_id);
         }
+        self.rebuild_loaded_tool_call_ids();
         finish.map_err(AgentStoreError::Persistence)?;
         snapshot
     }
@@ -1437,10 +1471,15 @@ impl AgentStore {
             None
         };
 
+        let prior_node_count = tree.nodes().len();
         let folded_node_id = tree
             .apply_persisted_record(&record)
             .expect("persisted record passed append-time validation");
         let selected_head_id = tree.head();
+        if self.persistence_owner.is_none() {
+            self.loaded_tool_call_ids
+                .extend_nodes(&tree.nodes()[prior_node_count..]);
+        }
         if matches!(&record.event, Event::AgentStarted(_)) {
             self.created_agents.insert(sid.clone());
         }
@@ -1545,6 +1584,7 @@ impl AgentStore {
             path: self.agent_dir(agent_id.as_str()).join("events.cbor"),
             source,
         })?;
+        let prior_node_count = projection.tree.nodes().len();
         let (replacement_tree, folded_node_id) =
             AgentTree::apply_prevalidated(validated).expect("validated managed record");
         let replacement =
@@ -1568,6 +1608,8 @@ impl AgentStore {
         reservation
             .commit_swap(target, replacement, staged)
             .map_err(AgentStoreError::Persistence)?;
+        self.loaded_tool_call_ids
+            .extend_nodes(&target.tree.nodes()[prior_node_count..]);
         Ok(AgentAppendOutcome {
             observation_id,
             seq: next_seq,
@@ -1954,6 +1996,7 @@ impl AgentStore {
         self.agents.remove(&parsed);
         self.created_agents.remove(&parsed);
         self.summaries.remove(&parsed);
+        self.rebuild_loaded_tool_call_ids();
         self.load_agent_if_needed(agent_id)?;
         Ok(self.agents.get(&parsed))
     }
@@ -1981,6 +2024,21 @@ impl AgentStore {
         } else {
             self.agents.values().collect()
         }
+    }
+
+    /// Returns the exact provider-visible tool-call identities in loaded trees.
+    ///
+    /// This runtime-only projection is seeded by replay and updated by the same
+    /// accepted folds as [`Self::agents`].
+    #[must_use]
+    pub fn loaded_tool_call_ids(&self) -> &HashSet<tau_proto::ToolCallId> {
+        self.loaded_tool_call_ids.ids()
+    }
+
+    /// Returns exact loaded-id index mutation and node-work counters for tests.
+    #[cfg(test)]
+    pub(crate) fn loaded_tool_call_id_index_counters(&self) -> (usize, usize) {
+        self.loaded_tool_call_ids.counters()
     }
 
     /// Reads sidecar metadata for one durable or ephemeral agent, if it exists.

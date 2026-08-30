@@ -4526,18 +4526,13 @@ impl Harness {
             .chain(self.tool_routing.tool_runtime.completed_tool_calls.iter())
             .cloned()
             .collect();
-        for tree in self.session_runtime.agent_store.agents() {
-            for node in tree.nodes() {
-                let tau_core::AgentEntry::AssistantResponse { output_items, .. } = &node.entry
-                else {
-                    continue;
-                };
-                ids.extend(output_items.iter().filter_map(|item| match item {
-                    ContextItem::ToolCall(call) => Some(call.call_id.clone()),
-                    _ => None,
-                }));
-            }
-        }
+        ids.extend(
+            self.session_runtime
+                .agent_store
+                .loaded_tool_call_ids()
+                .iter()
+                .cloned(),
+        );
         ids
     }
 
