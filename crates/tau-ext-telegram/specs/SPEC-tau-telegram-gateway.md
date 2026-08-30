@@ -14,14 +14,16 @@ Token-bearing data stays gateway-only.
 
 The gateway exposes stable service-manager exit classes: clean/help exits zero;
 malformed CLI input and a missing or empty token environment value use
-`EX_USAGE` (64); active webhook, local stream-lock contention, and runtime
-`getUpdates` HTTP 409 use `EX_UNAVAILABLE` (69); unexpected invariant or
-response-shape failures use `EX_SOFTWARE` (70); local state, lock, runtime
-filesystem, and durability failures use `EX_IOERR` (74); webhook-preflight
-transport failures and HTTP 408, 425, 429, or 5xx use `EX_TEMPFAIL` (75); and
+`EX_USAGE` (64); active webhook and local stream-lock contention use
+`EX_UNAVAILABLE` (69); unexpected invariant or response-shape failures use
+`EX_SOFTWARE` (70); local state, lock, runtime filesystem, and durability
+failures use `EX_IOERR` (74); webhook-preflight transport failures and HTTP 408,
+425, 429, or 5xx, plus runtime `getUpdates` HTTP 409, use `EX_TEMPFAIL` (75); and
 semantic configuration or permanent authentication/configuration failures use
 `EX_CONFIG` (78). Ordinary runtime polling failures retain the bounded internal
-retry instead of delegating retry policy to the supervisor.
+retry instead of delegating retry policy to the supervisor. Runtime HTTP 409
+terminates instead so the process releases its local stream ownership and the
+supervisor can retry at a bounded low rate after an out-of-band poller exits.
 
 Durable per-stream state contains the cursor, links/selections, recent IDs,
 counters, and an ordered mixed checkpoint sequence. Each update is classified

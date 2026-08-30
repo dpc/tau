@@ -2022,7 +2022,7 @@ impl TelegramClient for FakeGatewayClient {
 }
 
 /// Ordinary runtime failures wait exactly five seconds and repoll, while the
-/// following HTTP 409 exits immediately as unavailable.
+/// following HTTP 409 exits immediately as temporary for supervisor backoff.
 #[test]
 fn runtime_poll_retry_policy_is_deterministic() {
     let fixture = GatewayFixture::new(Some(10), [7]);
@@ -2050,7 +2050,7 @@ fn runtime_poll_retry_policy_is_deterministic() {
         .gateway
         .run_with_retry(|delay| waits.push(delay))
         .expect_err("HTTP 409 must terminate polling");
-    assert_eq!(error.exit_code(), ExitCode::from(69));
+    assert_eq!(error.exit_code(), ExitCode::from(75));
     assert_eq!(
         waits,
         [

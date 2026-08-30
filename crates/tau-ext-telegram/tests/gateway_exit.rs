@@ -367,12 +367,13 @@ fn webhook_preflight_transient_failures_use_ex_tempfail() {
     assert_exit(gateway, 75);
 }
 
-/// Active webhooks and post-preflight getUpdates HTTP 409 are explicit
-/// EX_UNAVAILABLE ownership failures. The active-webhook fixture also prevents
-/// successful remote diagnostics that reflect the bot token from leaking it to
-/// gateway stderr while retaining useful ownership-error context.
+/// Active webhooks remain EX_UNAVAILABLE, while a runtime getUpdates HTTP 409
+/// uses EX_TEMPFAIL so a supervisor can recover after the competing poller
+/// exits. The active-webhook fixture also prevents successful remote
+/// diagnostics that reflect the bot token from leaking it to gateway stderr
+/// while retaining useful ownership-error context.
 #[test]
-fn webhook_and_runtime_conflict_use_ex_unavailable() {
+fn webhook_and_runtime_conflict_use_distinct_restart_classes() {
     let _serial = serial();
     let temp = tempfile::tempdir().expect("tempdir");
     let (base, worker) = server(vec![(
@@ -409,7 +410,7 @@ fn webhook_and_runtime_conflict_use_ex_unavailable() {
     ]);
     let mut conflict = command(&temp);
     conflict.arg("--api-base").arg(base);
-    assert_exit(conflict, 69);
+    assert_exit(conflict, 75);
     worker.join().expect("join conflict server");
 }
 

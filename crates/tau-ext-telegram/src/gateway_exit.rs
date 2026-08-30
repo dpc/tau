@@ -16,7 +16,7 @@ pub(super) enum GatewayExitError {
     Software(String),
     /// Local filesystem, lock, state, or durability failure.
     Io(String),
-    /// Transient webhook-preflight network or HTTP failure.
+    /// Transient Bot API failure that a supervisor may retry.
     Temporary(String),
     /// Semantically invalid or permanently rejected configuration.
     Config(String),
@@ -61,7 +61,7 @@ impl GatewayExitError {
             TelegramApiFailure::Http {
                 status: 409,
                 message,
-            } => Some(Self::Unavailable(format!(
+            } => Some(Self::Temporary(format!(
                 "Telegram getUpdates returned HTTP 409: {message}"
             ))),
             _ => None,

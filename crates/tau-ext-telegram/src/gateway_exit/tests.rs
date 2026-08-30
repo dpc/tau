@@ -36,8 +36,8 @@ fn webhook_preflight_classifies_transport_and_every_http_status_family() {
     );
 }
 
-/// Runtime polling retries every ordinary failure but terminates on HTTP
-/// 409 because another Telegram stream owner has displaced this process.
+/// Runtime polling retries every ordinary failure internally but reports HTTP
+/// 409 as temporary so a supervisor can recover after a competing poller exits.
 #[test]
 fn runtime_poll_only_terminates_for_http_409() {
     for status in 100..=599 {
@@ -47,7 +47,7 @@ fn runtime_poll_only_terminates_for_http_409() {
         };
         assert_eq!(
             GatewayExitError::runtime_poll(&failure).map(|error| error.exit_code()),
-            (status == 409).then(|| ExitCode::from(69)),
+            (status == 409).then(|| ExitCode::from(75)),
             "HTTP {status}"
         );
     }

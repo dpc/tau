@@ -17,7 +17,10 @@ Bot API failures keep the existing internal retry. The gateway maps terminating
 classes to the stable `sysexits(3)` statuses specified by
 [SPEC-tau-telegram-gateway](SPEC-tau-telegram-gateway.md), so a supervisor can
 distinguish permanent configuration, temporary preflight, local repair, and
-stream ownership without parsing diagnostics.
+stream ownership without parsing diagnostics. Active webhook and local
+stream-lock contention are unavailable ownership failures; a runtime HTTP 409
+is temporary so bounded supervisor retries can recover after a competing
+out-of-band poller exits.
 
 The durable state is scoped by the same non-secret stream fingerprint used for locking.
 It stores the next update offset, an optional private-chat link, chat/user-scoped

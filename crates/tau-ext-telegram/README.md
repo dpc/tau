@@ -108,17 +108,19 @@ The daemon returns stable supervisor-facing statuses:
 
 - `0`: clean/help;
 - `64` (`EX_USAGE`): malformed CLI or missing/empty token environment value;
-- `69` (`EX_UNAVAILABLE`): active webhook, held stream lock, or polling HTTP 409;
+- `69` (`EX_UNAVAILABLE`): active webhook or held stream lock;
 - `70` (`EX_SOFTWARE`): unexpected invariant or response-shape failure;
 - `74` (`EX_IOERR`): local state, lock, runtime filesystem, or durability failure;
 - `75` (`EX_TEMPFAIL`): webhook-preflight transport failure or HTTP
-  408/425/429/5xx;
+  408/425/429/5xx, or polling HTTP 409;
 - `78` (`EX_CONFIG`): invalid semantic configuration or permanent API
   authentication/configuration rejection.
 
 Ordinary failures after polling starts still retry internally every five
 seconds. Exit status is non-secret control data; bounded stderr diagnostics
-remain token-redacted.
+remain token-redacted. A polling HTTP 409 exits as temporary so a service
+manager can retry with bounded backoff and recover once the out-of-band poller
+stops, rather than leaving the gateway unavailable indefinitely.
 
 Allowlisted users can use `/start`, `/help`, `/status`, `/sessions`, `/agents`,
 `/select-session`, `/select`, `/to`, and `/where`. Session listings use
