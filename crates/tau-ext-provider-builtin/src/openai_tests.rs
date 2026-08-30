@@ -1963,20 +1963,21 @@ fn successful_probe_requires_current_generation_and_successful_terminal() {
     let cancellation = CancellationState::default();
     cancellation.cancel(prompt_id.clone());
     let (canceled_message, released_provider) = validate_worker_output_and_probe_for_commit(
-        Box::new(success_message),
+        prepare_worker_report(success_message).expect("prepare successful output"),
         (0, 0, false),
         &prompt_id,
         &cancellation,
         Some(&probe),
         &cooldowns,
     )
+    .expect("validate worker output")
     .expect("successful output becomes a canceled terminal");
     assert!(
         released_provider.is_none(),
         "cancellation validation must precede release authority"
     );
     assert!(!successful_probe_matches(
-        &canceled_message,
+        canceled_message.message(),
         &prompt_id,
         &probe,
         &cooldowns
@@ -2314,7 +2315,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     ));
     assert_eq!(rejected_waker.wakes.load(Ordering::SeqCst), 0);
     tx.send(WorkerMessage::Output {
-        message: Box::new(HarnessInputMessage::emit_transient(
+        output: prepare_worker_report(HarnessInputMessage::emit_transient(
             Event::ProviderResponseUpdatedReported(ProviderResponseUpdated {
                 agent_prompt_id: target.clone(),
                 agent_id: agent_id.clone(),
@@ -2328,7 +2329,8 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
                 response_stats: None,
                 originator: originator.clone(),
             }),
-        )),
+        ))
+        .expect("prepare target clear"),
         cancel_generation: 0,
         agent_prompt_id: target.clone(),
         cooldown_probe: None,
@@ -2336,14 +2338,15 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     .expect("queue target clear");
     for (id, text) in [(&target, "stale success"), (&peer, "peer success")] {
         tx.send(WorkerMessage::Output {
-            message: Box::new(HarnessInputMessage::emit_transient(
+            output: prepare_worker_report(HarnessInputMessage::emit_transient(
                 Event::ProviderResponseFinishedReported(simple_finished(
                     id.clone(),
                     agent_id.clone(),
                     originator.clone(),
                     text,
                 )),
-            )),
+            ))
+            .expect("prepare terminal"),
             cancel_generation: 0,
             agent_prompt_id: id.clone(),
             cooldown_probe: None,
@@ -2355,21 +2358,23 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     cancellation.cancel(target.clone());
     let mut committed = Vec::new();
     while let Ok(WorkerMessage::Output {
-        message,
+        output,
         cancel_generation,
         agent_prompt_id,
         cooldown_probe: _,
     }) = rx.try_recv()
     {
-        if let Some(message) = validate_worker_output_for_commit(
-            message,
+        if let Some(output) = validate_worker_output_for_commit(
+            output,
             cancel_generation,
             0,
             false,
             &agent_prompt_id,
             &cancellation,
-        ) {
-            committed.push(message);
+        )
+        .expect("validate worker output")
+        {
+            committed.push(output);
         }
     }
 
@@ -2377,7 +2382,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         committed
             .iter()
             .filter(|message| matches!(
-                input_event(message),
+                input_event(message.message()),
                 Some(Event::ProviderResponseUpdatedReported(update))
                     if update.agent_prompt_id == target
                         && !update.status.as_ref().is_some_and(|status| status.clear_response)
@@ -2390,7 +2395,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         .iter()
         .position(|message| {
             matches!(
-                input_event(message),
+                input_event(message.message()),
                 Some(Event::ProviderResponseUpdatedReported(update))
                     if update.agent_prompt_id == target
                         && update.status.as_ref().is_some_and(|status| status.clear_response)
@@ -2401,7 +2406,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         .iter()
         .position(|message| {
             matches!(
-                input_event(message),
+                input_event(message.message()),
                 Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id == target
                         && finished.error.as_deref() == Some("(cancelled by harness)")
@@ -2413,7 +2418,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         committed
             .iter()
             .filter(|message| matches!(
-                input_event(message),
+                input_event(message.message()),
                 Some(Event::ProviderResponseFinishedReported(finished))
                     if finished.agent_prompt_id == target
                         && finished.error.as_deref() == Some("(cancelled by harness)")
@@ -2423,7 +2428,7 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
         "target lifecycle must close exactly once as canceled"
     );
     assert!(committed.iter().any(|message| matches!(
-        input_event(message),
+        input_event(message.message()),
         Some(Event::ProviderResponseFinishedReported(finished))
             if finished.agent_prompt_id == peer
                 && finished.error.as_deref() == Some("peer success")
@@ -2434,27 +2439,66 @@ fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
     );
 
     let reused = validate_worker_output_for_commit(
-        Box::new(HarnessInputMessage::emit_transient(
+        prepare_worker_report(HarnessInputMessage::emit_transient(
             Event::ProviderResponseFinishedReported(simple_finished(
                 target.clone(),
                 agent_id,
                 originator,
                 "reused prompt success",
             )),
-        )),
+        ))
+        .expect("prepare reused output"),
         0,
         0,
         false,
         &target,
         &cancellation,
     )
+    .expect("validate worker output")
     .expect("reused prompt ID may commit");
     assert!(matches!(
-        input_event(&reused),
+        input_event(reused.message()),
         Some(Event::ProviderResponseFinishedReported(finished))
             if finished.agent_prompt_id == target
                 && finished.error.as_deref() == Some("reused prompt success")
     ));
+}
+
+/// Worker preparation preserves the streaming decoder's inclusive 16-MiB
+/// boundary before the main loop applies its stricter client admission.
+#[test]
+fn worker_report_preparation_preserves_decoder_limit_boundary() {
+    let boundary = input_message_with_encoded_size(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES);
+    let prepared = prepare_worker_report(boundary).expect("accept exact decoder boundary");
+    assert_eq!(
+        prepared.encoded_bytes(),
+        tau_proto::MAX_PROTOCOL_MESSAGE_BYTES
+    );
+
+    let oversized = input_message_with_encoded_size(tau_proto::MAX_PROTOCOL_MESSAGE_BYTES + 1);
+    assert!(prepare_worker_report(oversized).is_err());
+}
+
+/// Construct one simple input message with the exact current CBOR frame size.
+fn input_message_with_encoded_size(target: u64) -> HarnessInputMessage {
+    let mut low = 0_usize;
+    let mut high = usize::try_from(target).expect("test target fits usize");
+    loop {
+        let middle = low + (high - low) / 2;
+        let candidate = HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("x".repeat(middle)),
+        });
+        let bytes = tau_client::encoded_outbound_frame_bytes(&candidate)
+            .expect("measure sized worker fixture");
+        if bytes == target {
+            return candidate;
+        }
+        if bytes < target {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
 }
 
 /// The production main-loop drain must arbitrate cancellation before the

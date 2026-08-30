@@ -4313,9 +4313,10 @@ fn detached_continuous_refill_does_not_starve_synchronous_output() {
     let (synchronous_ack_tx, synchronous_ack_rx) = mpsc::channel();
     command_sender
         .send(WriterCommand::Send(
-            HarnessInputMessage::Disconnect(tau_proto::Disconnect {
+            PeerOutput::prepare(HarnessInputMessage::Disconnect(tau_proto::Disconnect {
                 reason: Some("synchronous marker".to_owned()),
-            }),
+            }))
+            .expect("prepare synchronous marker"),
             synchronous_ack_tx,
         ))
         .expect("queue synchronous command while writer is blocked");
@@ -4544,6 +4545,48 @@ fn synchronous_and_startup_output_enforce_approved_byte_limit() {
     runtime_handle.shutdown().expect("shutdown runtime writer");
     runtime_thread.join().expect("writer join").expect("writer");
     assert!(runtime_written.bytes().is_empty());
+}
+
+/// A prepared output carries its one exact size measurement into synchronous
+/// admission while preserving the ordinary encoded bytes and flush result.
+#[test]
+fn prepared_output_preserves_exact_boundary_bytes_and_synchronous_flush() {
+    const APPROVED_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
+    let approved = disconnect_with_encoded_size(APPROVED_OUTPUT_BYTES);
+    let traversals_before = crate::peer_output::measurement_traversals();
+    let prepared = PeerOutput::prepare(approved.clone()).expect("prepare boundary frame");
+    assert_eq!(
+        crate::peer_output::measurement_traversals() - traversals_before,
+        1,
+        "preparation must traverse the typed value exactly once"
+    );
+    assert_eq!(prepared.encoded_bytes(), APPROVED_OUTPUT_BYTES);
+
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
+    let handle = ClientHandle::new(sender);
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+    handle.finish_startup().expect("finish startup");
+    handle
+        .send_prepared(prepared)
+        .expect("admit and flush exact boundary frame");
+    assert_eq!(
+        crate::peer_output::measurement_traversals() - traversals_before,
+        1,
+        "client admission must reuse the preparation traversal"
+    );
+    assert_eq!(frames_from_writer(&written), vec![approved]);
+
+    let oversized = PeerOutput::prepare(disconnect_with_encoded_size(APPROVED_OUTPUT_BYTES + 1))
+        .expect("prepare oversized frame");
+    assert!(matches!(
+        handle.send_prepared(oversized),
+        Err(ClientError::Overloaded)
+    ));
+    handle.shutdown().expect("shutdown writer");
+    writer_thread.join().expect("writer join").expect("writer");
 }
 
 /// Construct a disconnect whose complete CBOR frame has the requested size.

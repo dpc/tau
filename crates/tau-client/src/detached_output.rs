@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
-use std::io::{self, Write};
 use std::sync::Mutex;
 
-use crate::{ClientError, ClientResult};
+use crate::peer_output::measure_message;
+use crate::{ClientError, ClientResult, PeerOutput};
 
 /// Maximum detached frames retained for the protocol writer.
 pub(crate) const MAX_FRAMES: usize = 64;
@@ -10,19 +10,20 @@ pub(crate) const MAX_FRAMES: usize = 64;
 /// Maximum encoded size accepted for one complete outbound protocol frame.
 pub const MAX_OUTBOUND_FRAME_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Measure the complete encoded peer-to-harness protocol frame.
+///
+/// Prefer [`PeerOutput::prepare`] when the caller will subsequently submit the
+/// same message because it carries this measurement into client admission.
+pub fn encoded_outbound_frame_bytes(message: &tau_proto::HarnessInputMessage) -> ClientResult<u64> {
+    measure_message(message)
+}
+
 /// Maximum aggregate encoded bytes retained for the protocol writer.
 const MAX_ENCODED_BYTES: EncodedBytes = EncodedBytes {
     bytes: MAX_OUTBOUND_FRAME_BYTES,
 };
 
-/// Measure the complete encoded peer-to-harness protocol frame.
-///
-/// Producers can use this to budget a complete frame before submitting it.
-pub fn encoded_outbound_frame_bytes(message: &tau_proto::HarnessInputMessage) -> ClientResult<u64> {
-    Ok(EncodedBytes::measure(message)?.bytes)
-}
-
-/// Encoded protocol-frame size used for admission accounting.
+/// Carried encoded protocol-frame size used for admission accounting.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct EncodedBytes {
     /// Number of bytes produced by protocol encoding.
@@ -30,13 +31,11 @@ pub(crate) struct EncodedBytes {
 }
 
 impl EncodedBytes {
-    /// Measures one frame by encoding it into a discard-only byte counter.
-    pub(crate) fn measure(message: &tau_proto::HarnessInputMessage) -> ClientResult<Self> {
-        let mut counter = CountingWriter::default();
-        tau_proto::PeerOutputWriter::new(&mut counter).write_message(message)?;
-        Ok(Self {
-            bytes: counter.bytes,
-        })
+    /// Extracts the measurement already carried by one prepared output.
+    pub(crate) fn from_output(output: &PeerOutput) -> Self {
+        Self {
+            bytes: output.encoded_bytes(),
+        }
     }
 
     /// Returns whether this one frame exceeds the individual byte limit.
@@ -60,20 +59,20 @@ impl EncodedBytes {
 /// One measured frame retained in the detached-output FIFO.
 pub(crate) struct QueuedFrame {
     /// Protocol frame retained until transport writing drains it.
-    message: tau_proto::HarnessInputMessage,
+    output: PeerOutput,
     /// Encoded size charged to the shared byte budget.
     encoded_bytes: EncodedBytes,
 }
 
 impl QueuedFrame {
-    /// Measures and wraps one frame for detached FIFO admission.
-    pub(crate) fn measure(message: tau_proto::HarnessInputMessage) -> ClientResult<Self> {
-        let encoded_bytes = EncodedBytes::measure(&message)?;
+    /// Checks and wraps one prepared frame for detached FIFO admission.
+    pub(crate) fn admit(output: PeerOutput) -> ClientResult<Self> {
+        let encoded_bytes = EncodedBytes::from_output(&output);
         if encoded_bytes.exceeds_frame_limit() {
             return Err(ClientError::Overloaded);
         }
         Ok(Self {
-            message,
+            output,
             encoded_bytes,
         })
     }
@@ -84,8 +83,8 @@ impl QueuedFrame {
     }
 
     /// Releases the protocol message for transport writing.
-    fn into_message(self) -> tau_proto::HarnessInputMessage {
-        self.message
+    fn into_output(self) -> PeerOutput {
+        self.output
     }
 }
 
@@ -162,36 +161,13 @@ impl DetachedOutput {
     }
 
     /// Removes the next active frame and releases its queue budget.
-    pub(crate) fn pop(&self) -> Option<tau_proto::HarnessInputMessage> {
+    pub(crate) fn pop(&self) -> Option<PeerOutput> {
         let mut state = self.state.lock().expect("lock detached output");
         if !state.active {
             return None;
         }
         let frame = state.queue.pop_front()?;
         state.encoded_bytes.remove(frame.encoded_bytes());
-        Some(frame.into_message())
-    }
-}
-
-/// Discard-only writer that counts serialized protocol bytes.
-#[derive(Default)]
-struct CountingWriter {
-    /// Total bytes accepted by [`Write::write`].
-    bytes: u64,
-}
-
-impl Write for CountingWriter {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        let bytes = u64::try_from(buffer.len())
-            .map_err(|_| io::Error::other("encoded frame size exceeds u64"))?;
-        self.bytes = self
-            .bytes
-            .checked_add(bytes)
-            .ok_or_else(|| io::Error::other("encoded frame size overflow"))?;
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        Some(frame.into_output())
     }
 }

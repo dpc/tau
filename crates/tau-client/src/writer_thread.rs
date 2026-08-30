@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::{Arc, mpsc};
 
 use crate::detached_output::{DetachedOutput, QueuedFrame};
-use crate::{ClientError, ClientResult};
+use crate::{ClientError, ClientResult, PeerOutput};
 
 /// Number of commands allowed to wait outside the active transport write.
 pub(crate) const WRITER_QUEUE_ITEMS: usize = 1;
@@ -80,17 +80,11 @@ pub(crate) struct WriterReceiver {
 /// Command sent from [`crate::ClientHandle`] clones to the writer thread.
 pub(crate) enum WriterCommand {
     /// Write and flush a protocol frame, then acknowledge the result.
-    Send(
-        tau_proto::HarnessInputMessage,
-        mpsc::Sender<ClientResult<()>>,
-    ),
+    Send(PeerOutput, mpsc::Sender<ClientResult<()>>),
     /// Wake the writer to drain accepted detached frames.
     DetachedReady,
     /// Drain accepted detached frames before this acknowledged write.
-    SendAfterDetached(
-        tau_proto::HarnessInputMessage,
-        mpsc::Sender<ClientResult<()>>,
-    ),
+    SendAfterDetached(PeerOutput, mpsc::Sender<ClientResult<()>>),
     /// Flush any pending writer state and terminate the writer thread.
     Shutdown(mpsc::Sender<ClientResult<()>>),
 }
@@ -104,9 +98,9 @@ where
     while let Ok(command) = receiver.commands.recv() {
         let shutdown = matches!(&command, WriterCommand::Shutdown(_));
         let result = match command {
-            WriterCommand::Send(message, ack) => {
+            WriterCommand::Send(output, ack) => {
                 let result = writer
-                    .write_message(&message)
+                    .write_message(output.message())
                     .map_err(ClientError::from)
                     .and_then(|()| writer.flush().map_err(ClientError::from));
                 let should_stop = result.is_err();
@@ -119,10 +113,10 @@ where
                 }
             }
             WriterCommand::DetachedReady => drain_detached_batch(&mut writer, &receiver.detached),
-            WriterCommand::SendAfterDetached(message, ack) => {
+            WriterCommand::SendAfterDetached(output, ack) => {
                 let result = drain_detached_batch(&mut writer, &receiver.detached).and_then(|()| {
                     writer
-                        .write_message(&message)
+                        .write_message(output.message())
                         .map_err(ClientError::from)
                         .and_then(|()| writer.flush().map_err(ClientError::from))
                 });
@@ -161,11 +155,11 @@ where
     W: Write,
 {
     for _ in 0..detached.active_batch_len() {
-        let Some(message) = detached.pop() else {
+        let Some(output) = detached.pop() else {
             break;
         };
         writer
-            .write_message(&message)
+            .write_message(output.message())
             .map_err(ClientError::from)
             .and_then(|()| writer.flush().map_err(ClientError::from))?;
     }

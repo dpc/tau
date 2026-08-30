@@ -144,9 +144,14 @@ service will authenticate it. The harness derives canonical model state after
 activation. The normal `tau-client` writer is the only protocol serialization
 path.
 
-Prompt and prewarm workers enqueue typed messages before waking the manual main
-loop with `ManualRuntimeWaker`. Wakes are coalesced, so the loop drains both
-harness input and worker messages before blocking again. Prewarm work is
+Prompt workers prepare one typed `PeerOutput`, measuring its exact protocol size
+against the 16-MiB decoder boundary, then enqueue that owned value before waking
+the manual main loop with `ManualRuntimeWaker`. The main loop performs
+cancellation and cooldown arbitration before passing the same measurement to
+`ClientHandle` for the stricter 8-MiB admission and synchronous writer flush.
+Only the client writer serializes the accepted value to transport. Wakes are
+coalesced, so the loop drains both harness input and worker messages before
+blocking again. Prewarm work is
 supervised separately from prompt concurrency. Delayed retries share one
 scheduler thread and do not retain worker permits; their ownership and cooldown
 contract is specified by

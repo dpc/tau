@@ -4120,7 +4120,7 @@ fn typed_worker_reports_match_wire_roundtrip_for_every_converted_variant() {
         .try_iter()
         .map(|worker| {
             let WorkerMessage::Output {
-                message,
+                output,
                 cancel_generation,
                 agent_prompt_id,
                 cooldown_probe,
@@ -4131,7 +4131,7 @@ fn typed_worker_reports_match_wire_roundtrip_for_every_converted_variant() {
             assert_eq!(cancel_generation, 7);
             assert_eq!(agent_prompt_id, prompt.agent_prompt_id);
             assert!(cooldown_probe.is_none());
-            *message
+            output.message().clone()
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -4201,10 +4201,7 @@ fn benchmark_owned_provider_report_handoff_scaling() {
             for _ in 0..report_count {
                 let report =
                     prepare_worker_report(message.clone()).expect("admit benchmark typed report");
-                typed_checksum = typed_checksum.wrapping_add(
-                    tau_client::encoded_outbound_frame_bytes(&report)
-                        .expect("measure typed benchmark report"),
-                );
+                typed_checksum = typed_checksum.wrapping_add(report.encoded_bytes());
                 black_box(report);
             }
             let typed_elapsed = typed_started.elapsed();

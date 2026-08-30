@@ -4939,25 +4939,25 @@ where
                     }
                 }
                 Ok(WorkerMessage::Output {
-                    message,
+                    output,
                     cancel_generation,
                     agent_prompt_id,
                     cooldown_probe,
                 }) => {
-                    if let Some((message, released_provider)) =
+                    if let Some((output, released_provider)) =
                         validate_worker_output_and_probe_for_commit(
-                            message,
+                            output,
                             (cancel_generation, self.cancel_generation, self.input_closed),
                             &agent_prompt_id,
                             &self.cancellation,
                             cooldown_probe.as_ref(),
                             &self.shared_cooldowns,
-                        )
+                        )?
                     {
                         if let Some(provider) = released_provider {
                             self.release_shared_cooldown(&provider);
                         }
-                        handle.send(message)?;
+                        handle.send_prepared(output)?;
                     }
                 }
                 Ok(WorkerMessage::PromptDone) => {
@@ -5604,35 +5604,37 @@ fn install_shared_cooldown(
 /// Tentative output is dropped, while a queued successful terminal is replaced
 /// with exactly one canceled terminal and consumes the targeted marker.
 fn validate_worker_output_for_commit(
-    message: Box<HarnessInputMessage>,
+    output: tau_client::PeerOutput,
     dispatch_generation: u64,
     current_generation: u64,
     input_closed: bool,
     agent_prompt_id: &tau_proto::AgentPromptId,
     cancellation: &CancellationState,
-) -> Option<HarnessInputMessage> {
+) -> ClientResult<Option<tau_client::PeerOutput>> {
     let targeted = cancellation.is_canceled(agent_prompt_id);
     if dispatch_generation == current_generation && !input_closed && !targeted {
-        return Some(*message);
+        return Ok(Some(output));
     }
-    if is_intentional_partial_clear_for(message.as_ref(), agent_prompt_id) {
-        return Some(*message);
+    if is_intentional_partial_clear_for(output.message(), agent_prompt_id) {
+        return Ok(Some(output));
     }
-    let HarnessInputMessage::Emit(emit) = message.as_ref() else {
-        return None;
+    let HarnessInputMessage::Emit(emit) = output.message() else {
+        return Ok(None);
     };
     let Event::ProviderResponseFinishedReported(finished) = emit.event.as_ref() else {
-        return None;
+        return Ok(None);
     };
     cancellation.take_canceled(agent_prompt_id);
-    Some(HarnessInputMessage::emit_transient(
-        Event::ProviderResponseFinishedReported(simple_finished(
-            finished.agent_prompt_id.clone(),
-            finished.agent_id.clone(),
-            finished.originator.clone(),
-            "(cancelled by harness)",
+    Ok(Some(tau_client::PeerOutput::prepare(
+        HarnessInputMessage::emit_transient(Event::ProviderResponseFinishedReported(
+            simple_finished(
+                finished.agent_prompt_id.clone(),
+                finished.agent_id.clone(),
+                finished.originator.clone(),
+                "(cancelled by harness)",
+            ),
         )),
-    ))
+    )?))
 }
 
 fn is_intentional_partial_clear_for(
@@ -5653,26 +5655,31 @@ fn is_intentional_partial_clear_for(
 
 /// Validates cancellation before deriving any successful-probe release action.
 fn validate_worker_output_and_probe_for_commit(
-    message: Box<HarnessInputMessage>,
+    output: tau_client::PeerOutput,
     commit_state: (u64, u64, bool),
     agent_prompt_id: &tau_proto::AgentPromptId,
     cancellation: &CancellationState,
     probe: Option<&CooldownProbe>,
     cooldowns: &BTreeMap<ProviderName, SharedCooldown>,
-) -> Option<(HarnessInputMessage, Option<ProviderName>)> {
+) -> ClientResult<Option<(tau_client::PeerOutput, Option<ProviderName>)>> {
     let (dispatch_generation, current_generation, input_closed) = commit_state;
-    let message = validate_worker_output_for_commit(
-        message,
+    let output = validate_worker_output_for_commit(
+        output,
         dispatch_generation,
         current_generation,
         input_closed,
         agent_prompt_id,
         cancellation,
     )?;
+    let Some(output) = output else {
+        return Ok(None);
+    };
     let released_provider = probe
-        .filter(|probe| successful_probe_matches(&message, agent_prompt_id, probe, cooldowns))
+        .filter(|probe| {
+            successful_probe_matches(output.message(), agent_prompt_id, probe, cooldowns)
+        })
         .map(|probe| probe.provider.clone());
-    Some((message, released_provider))
+    Ok(Some((output, released_provider)))
 }
 
 /// Returns whether a committed frame authoritatively proves provider success.
@@ -7170,10 +7177,10 @@ enum WorkerMessage {
         /// Request correlation to invalidate.
         request_id: String,
     },
-    /// One typed provider frame produced by a prompt worker and awaiting main
-    /// loop serialization.
+    /// One measured typed provider frame awaiting main-loop arbitration and
+    /// client-writer serialization.
     Output {
-        message: Box<HarnessInputMessage>,
+        output: tau_client::PeerOutput,
         cancel_generation: u64,
         agent_prompt_id: tau_proto::AgentPromptId,
         /// Cooldown generation carried by the manually admitted attempt.
@@ -7298,10 +7305,10 @@ impl WorkerReportWaker for ManualRuntimeWaker {
 
 impl<W: WorkerReportWaker> ProviderReportSink for WorkerReportSink<W> {
     fn send_report(&mut self, message: HarnessInputMessage) -> ClientResult<()> {
-        let message = prepare_worker_report(message)?;
+        let output = prepare_worker_report(message)?;
         self.tx
             .send(WorkerMessage::Output {
-                message,
+                output,
                 cancel_generation: self.cancel_generation,
                 agent_prompt_id: self.agent_prompt_id.clone(),
                 cooldown_probe: self.cooldown_probe.clone(),
@@ -7314,9 +7321,9 @@ impl<W: WorkerReportWaker> ProviderReportSink for WorkerReportSink<W> {
 
 /// Check the old worker encoder's validity boundary without moving the final
 /// frame-size admission ahead of main-loop cancellation arbitration.
-fn prepare_worker_report(message: HarnessInputMessage) -> ClientResult<Box<HarnessInputMessage>> {
-    let encoded_bytes = tau_client::encoded_outbound_frame_bytes(&message)?;
-    if tau_proto::MAX_PROTOCOL_MESSAGE_BYTES < encoded_bytes {
+fn prepare_worker_report(message: HarnessInputMessage) -> ClientResult<tau_client::PeerOutput> {
+    let output = tau_client::PeerOutput::prepare(message)?;
+    if tau_proto::MAX_PROTOCOL_MESSAGE_BYTES < output.encoded_bytes() {
         return Err(path_std_io::Error::new(
             path_std_io::ErrorKind::InvalidData,
             format!(
@@ -7326,7 +7333,7 @@ fn prepare_worker_report(message: HarnessInputMessage) -> ClientResult<Box<Harne
         )
         .into());
     }
-    Ok(Box::new(message))
+    Ok(output)
 }
 
 /// Direct typed report destination for provider main-loop helpers.

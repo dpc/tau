@@ -31,6 +31,7 @@ mod handler;
 mod intercept_decision;
 mod logging;
 mod manual_runtime;
+mod peer_output;
 mod protocol_io;
 mod runner;
 mod tool_name_scope;
@@ -53,6 +54,7 @@ pub use manual_runtime::{
     DispatchOutcome, ExtensionDataClient, ExtensionDataRpcError, LocalInputObservation,
     ManualExtensionRuntime, ManualRuntimeInput, ManualRuntimePoll, ManualRuntimeWaker,
 };
+pub use peer_output::PeerOutput;
 pub use protocol_io::{
     PROTOCOL_IO_MAX_KEYS_PER_DIRECTION, PROTOCOL_IO_OVERFLOW_KEY, ProtocolIoCumulativeStats,
     ProtocolIoDirection, ProtocolIoFrameStats, ProtocolIoMeter, ProtocolIoRollingStats,

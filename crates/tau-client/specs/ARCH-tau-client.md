@@ -112,8 +112,11 @@ frames and 8 MiB of aggregate measured encoded bytes across startup and runtime;
 exhaustion returns `Overloaded`. Every frame, including synchronous and
 runner-owned startup output, also has an individual 8 MiB encoded limit.
 Synchronous and runner-owned startup output may backpressure on the transport,
-preserving flush acknowledgement and startup ordering. Admission measures
-serialization without retaining a second full payload, and the writer owns later
+preserving flush acknowledgement and startup ordering. `PeerOutput` can carry an
+owned typed message plus one exact counting measurement across an in-process
+producer's scheduling checks into the same client admission. Admission therefore
+does not need to traverse that value again and does not retain a second full
+payload; the writer remains the sole transport serializer and owns later
 encode/flush errors for accepted detached frames.
 The client exports this same counting measurement and individual-frame limit so
 effectful producers can budget an actual complete envelope before submitting it;

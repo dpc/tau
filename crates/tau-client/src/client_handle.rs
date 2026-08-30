@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 use crate::detached_output::{EncodedBytes, QueuedFrame};
 use crate::writer_thread::{WriterCommand, WriterSender};
-use crate::{ClientError, ClientResult};
+use crate::{ClientError, ClientResult, PeerOutput};
 
 /// Cloneable outbound handle for sending peer-to-harness protocol frames.
 #[derive(Clone)]
@@ -359,6 +359,38 @@ impl ClientHandle {
         self.send_immediate(message)
     }
 
+    /// Send one previously prepared typed output and wait for transport flush.
+    ///
+    /// This preserves the ordinary post-startup admission and writer authority
+    /// while allowing an in-process producer to carry one exact size
+    /// measurement across its own cancellation or scheduling checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when startup is incomplete, the frame exceeds 8 MiB,
+    /// the writer has stopped, or transport encoding or flushing fails.
+    pub fn send_prepared(&self, output: PeerOutput) -> ClientResult<()> {
+        if matches!(output.message(), tau_proto::HarnessInputMessage::Ready(_)) {
+            return Err(ClientError::handler(
+                "startup Ready is runner-owned and cannot be sent through the raw handle",
+            ));
+        }
+        if !self.startup_complete.load(Ordering::Acquire) {
+            return Err(ClientError::handler(
+                "client output is unavailable before startup Ready",
+            ));
+        }
+        if matches!(
+            output.message(),
+            tau_proto::HarnessInputMessage::ConfigError(_)
+        ) {
+            let ack = self.enqueue_prepared_after_detached(output)?;
+            return Self::wait_for_ack(ack);
+        }
+        let ack = self.enqueue_prepared(output)?;
+        Self::wait_for_ack(ack)
+    }
+
     /// Sends one runner-owned startup frame before the public handle is
     /// released.
     pub(crate) fn send_startup(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
@@ -396,9 +428,18 @@ impl ClientHandle {
         &self,
         message: tau_proto::HarnessInputMessage,
     ) -> ClientResult<mpsc::Receiver<ClientResult<()>>> {
-        ensure_admissible_frame(&message)?;
+        let output = PeerOutput::prepare(message)?;
+        self.enqueue_prepared(output)
+    }
+
+    /// Admit one measured output and enqueue its acknowledged transport write.
+    fn enqueue_prepared(
+        &self,
+        output: PeerOutput,
+    ) -> ClientResult<mpsc::Receiver<ClientResult<()>>> {
+        ensure_admissible_frame(&output)?;
         let (ack_sender, ack_receiver) = mpsc::channel();
-        self.enqueue_blocking(WriterCommand::Send(message, ack_sender))?;
+        self.enqueue_blocking(WriterCommand::Send(output, ack_sender))?;
         Ok(ack_receiver)
     }
 
@@ -407,9 +448,18 @@ impl ClientHandle {
         &self,
         message: tau_proto::HarnessInputMessage,
     ) -> ClientResult<mpsc::Receiver<ClientResult<()>>> {
-        ensure_admissible_frame(&message)?;
+        let output = PeerOutput::prepare(message)?;
+        self.enqueue_prepared_after_detached(output)
+    }
+
+    /// Enqueue one measured acknowledged frame behind detached output.
+    fn enqueue_prepared_after_detached(
+        &self,
+        output: PeerOutput,
+    ) -> ClientResult<mpsc::Receiver<ClientResult<()>>> {
+        ensure_admissible_frame(&output)?;
         let (ack_sender, ack_receiver) = mpsc::channel();
-        self.enqueue_blocking(WriterCommand::SendAfterDetached(message, ack_sender))?;
+        self.enqueue_blocking(WriterCommand::SendAfterDetached(output, ack_sender))?;
         Ok(ack_receiver)
     }
 
@@ -482,7 +532,7 @@ impl ClientHandle {
 
     /// Admits one detached frame to the shared bounded FIFO.
     fn admit_detached(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
-        let frame = QueuedFrame::measure(message)?;
+        let frame = QueuedFrame::admit(PeerOutput::prepare(message)?)?;
         let sender = self.sender.lock().expect("lock client handle sender");
         sender
             .as_ref()
@@ -798,8 +848,8 @@ impl ClientHandle {
 }
 
 /// Reject a frame that exceeds the local output-admission byte budget.
-fn ensure_admissible_frame(message: &tau_proto::HarnessInputMessage) -> ClientResult<()> {
-    if EncodedBytes::measure(message)?.exceeds_frame_limit() {
+fn ensure_admissible_frame(output: &PeerOutput) -> ClientResult<()> {
+    if EncodedBytes::from_output(output).exceeds_frame_limit() {
         return Err(ClientError::Overloaded);
     }
     Ok(())
