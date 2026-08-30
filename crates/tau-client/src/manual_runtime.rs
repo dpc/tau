@@ -238,13 +238,39 @@ impl ExtensionDataClient {
         scope: tau_proto::ExtensionDataScope,
         op: tau_proto::ExtensionDataRequestOp,
     ) -> Result<String, ClientError> {
+        self.start_request_inner(scope, None, op)
+    }
+
+    /// Exact-session variant of [`Self::start_request`].
+    ///
+    /// The request carries `expected_session_id`; the harness rejects it if
+    /// that session is no longer current at admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request frame cannot be queued and flushed.
+    pub fn start_request_for_session(
+        &self,
+        scope: tau_proto::ExtensionDataScope,
+        expected_session_id: tau_proto::SessionId,
+        op: tau_proto::ExtensionDataRequestOp,
+    ) -> Result<String, ClientError> {
+        self.start_request_inner(scope, Some(expected_session_id), op)
+    }
+
+    fn start_request_inner(
+        &self,
+        scope: tau_proto::ExtensionDataScope,
+        expected_session_id: Option<tau_proto::SessionId>,
+        op: tau_proto::ExtensionDataRequestOp,
+    ) -> Result<String, ClientError> {
         let request_id = next_extension_data_request_id();
         self.handle
             .send(tau_proto::HarnessInputMessage::ExtensionDataRequest(
                 tau_proto::ExtensionDataRequest {
                     request_id: request_id.clone(),
                     scope,
-                    expected_session_id: None,
+                    expected_session_id,
                     op,
                 },
             ))?;
@@ -275,6 +301,29 @@ impl ExtensionDataClient {
         op: tau_proto::ExtensionDataRequestOp,
     ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataRpcError> {
         self.request_inner(scope, op, None)
+    }
+
+    /// Exact-session variant of [`Self::request`].
+    ///
+    /// This call has the same indefinite wait, unrelated-frame deferral, and
+    /// priority `Disconnect` preservation contract as [`Self::request`]. The
+    /// request additionally carries `expected_session_id`, which the harness
+    /// validates at admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same transport, harness, input-closure, and disconnect
+    /// errors as [`Self::request`].
+    pub fn request_for_session(
+        &self,
+        scope: tau_proto::ExtensionDataScope,
+        expected_session_id: tau_proto::SessionId,
+        op: tau_proto::ExtensionDataRequestOp,
+    ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataRpcError> {
+        let request_id = self.start_request_for_session(scope, expected_session_id, op)?;
+        self.input
+            .borrow_mut()
+            .wait_for_extension_data_result(request_id, None)
     }
 
     /// Sends one extension-data request and waits up to `timeout` for its

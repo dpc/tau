@@ -159,6 +159,17 @@ pub enum Command {
         session: Option<SessionId>,
     },
 
+    /// Serve one persisted session in the foreground without an initial UI.
+    Serve {
+        /// Persisted session id to serve.
+        #[arg(long)]
+        session: SessionId,
+
+        /// Require the session to exist; creation is deliberately unsupported.
+        #[arg(long, required = true)]
+        existing: bool,
+    },
+
     /// Inspect sessions.
     Session {
         #[command(subcommand)]

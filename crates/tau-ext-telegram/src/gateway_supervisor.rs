@@ -286,6 +286,12 @@ impl GatewaySupervisorWorker {
         let mut retry_delay = GATEWAY_RECONNECT_INITIAL_DELAY;
         let mut outage_reported = false;
         while !shutdown.load(Ordering::Relaxed) && self.is_current() {
+            if !state.lock().registration_replay_complete {
+                if !self.wait_for_retry(GATEWAY_RECONNECT_INITIAL_DELAY) {
+                    break;
+                }
+                continue;
+            }
             let gateway = Arc::new(GatewayClient::new(config.clone()));
             *connecting.lock().expect("connecting gateway lock") = Some(Arc::clone(&gateway));
             let hello = match gateway.connect_cancellable(|| !self.is_current()) {

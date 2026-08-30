@@ -2767,6 +2767,35 @@ fn manual_loop_extension_data_start_request_returns_before_result() {
     runtime.finish().expect("finish");
 }
 
+/// Session-bound extension-data requests must carry the exact expected session
+/// on the existing wire frame so a concurrent harness switch rejects stale I/O.
+#[test]
+fn manual_loop_extension_data_request_can_bind_exact_session() {
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    write_initial_configure(&writer_stream);
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+    let session_id = tau_proto::SessionId::parse("session-bound").expect("session id");
+
+    runtime
+        .extension_data_client()
+        .start_request_for_session(
+            tau_proto::ExtensionDataScope::Session,
+            session_id.clone(),
+            tau_proto::ExtensionDataRequestOp::ReadFile {
+                path: tau_proto::ExtensionDataPath::new("state.cbor"),
+            },
+        )
+        .expect("start session-bound request");
+
+    let request = latest_extension_data_request(&written);
+    assert_eq!(request.expected_session_id, Some(session_id));
+    runtime.finish().expect("finish");
+}
+
 /// Ensures extension-data RPC preserves an early Disconnect for the caller's
 /// normal manual-loop shutdown path.
 #[test]

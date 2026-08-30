@@ -1002,6 +1002,42 @@ pub(crate) fn resolve_config_with_extension_cli_overrides(
     resolve_config_in_with_extension_cli_overrides(&dirs, extension_overrides)
 }
 
+/// Resolves the complete effective configuration for a foreground CLI launch.
+pub(crate) fn resolve_config_with_cli_overrides(
+    profile_selection: Option<&ProfileSelection>,
+    startup_role: Option<&str>,
+    environment_extension_names: &[String],
+    extension_overrides: &[ExtensionCliOverride],
+    role_overrides: &[RoleCliOverride],
+    harness_config_overrides: &[HarnessConfigCliOverride],
+) -> Result<Config, Box<dyn std::error::Error>> {
+    let dirs = path_tau_config_settings::TauDirs::default();
+    let mut settings = load_settings_for_cli_overrides_in(
+        &dirs,
+        profile_selection,
+        role_overrides,
+        harness_config_overrides,
+    )?;
+    if let Some(role) = startup_role.filter(|role| !role.is_empty()) {
+        settings.default_role = Some(role.to_owned());
+    }
+    let resolved_extensions = resolve_extensions_with_environment_and_cli_overrides(
+        &settings,
+        builtin_extensions(),
+        environment_extension_names,
+        extension_overrides,
+    )?;
+    Ok(Config {
+        extensions: resolved_extensions
+            .extensions
+            .into_iter()
+            .map(|extension| (extension.name.clone(), extension))
+            .collect(),
+        extension_startup_diagnostics: resolved_extensions.diagnostics,
+        harness_settings: settings,
+    })
+}
+
 pub(crate) fn resolve_config_in(
     dirs: &tau_config::settings::TauDirs,
 ) -> Result<Config, Box<dyn std::error::Error>> {

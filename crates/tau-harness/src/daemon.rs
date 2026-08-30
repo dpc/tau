@@ -14,6 +14,8 @@ use std::{fmt, io as path_std_io, io, thread};
 
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::io::Errno;
+use signal_hook::consts::{SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
 use tau_proto::{
     ClientKind, ConnectionId, Disconnect, Event, EventName, EventSelector, HarnessInputMessage,
     HarnessOutputMessage, HarnessOutputWriter, Hello, PROTOCOL_VERSION, Subscribe, UiCreateAgent,
@@ -21,7 +23,7 @@ use tau_proto::{
 use tau_socket::{SocketListener, SocketPeer, SocketReceive};
 
 use crate::error::HarnessError;
-use crate::event::HarnessEvent;
+use crate::event::{HarnessCommand, HarnessEvent};
 use crate::format::{format_extension_event, format_tool_progress};
 use crate::harness::{
     Harness, HarnessSessionLaunch, HarnessStartupInputs, InitialClient,
@@ -37,6 +39,31 @@ use crate::{daemon as path_crate_daemon, runtime_dir};
 /// helper) waits for a daemon response. This is not a daemon-wide knob —
 /// the long-running daemon paths block indefinitely on their event loop.
 const SEND_DAEMON_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Installs SIGINT/SIGTERM handlers before foreground startup begins.
+fn prepare_termination_signals() -> Result<Signals, HarnessError> {
+    Signals::new([SIGINT, SIGTERM]).map_err(HarnessError::Io)
+}
+
+/// Starts one detached Unix signal waiter that wakes the central event loop.
+fn spawn_termination_signal_forwarder(
+    mut signals: Signals,
+    tx: mpsc::Sender<HarnessEvent>,
+) -> Result<(), HarnessError> {
+    thread::Builder::new()
+        .name("tau-termination-signal".to_owned())
+        .spawn(move || {
+            let mut received = signals.forever();
+            if received.next().is_some() {
+                let _ = tx.send(HarnessEvent::Command(HarnessCommand::Shutdown));
+            }
+            if let Some(signal) = received.next() {
+                let _ = signal_hook::low_level::emulate_default_handler(signal);
+            }
+        })
+        .map_err(HarnessError::Io)?;
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionLaunchStatus {
@@ -166,6 +193,10 @@ pub struct ServeOptions {
     /// and delegated extension storage while retaining lifecycle runtime files.
     #[builder(default)]
     pub storage_mode: HarnessStorageMode,
+    /// Reject every in-process session switch and keep discovery bound to the
+    /// eager session.
+    #[builder(default)]
+    pub pin_session: bool,
 }
 
 impl Default for ServeOptions {
@@ -178,6 +209,7 @@ impl Default for ServeOptions {
             ignore_startup_environment: false,
             allowed_extensions: None,
             storage_mode: HarnessStorageMode::Durable,
+            pin_session: false,
         }
     }
 }
@@ -860,6 +892,7 @@ pub fn run_daemon_with_internal_tools(
         },
         &mut initial_client_error_stream,
     )?;
+    harness.session_runtime.session_pinned = options.pin_session;
     // ast-grep-ignore: debug-assert-expression-must-not-mutate
     debug_assert!(initial_client_id.is_none());
 
@@ -867,9 +900,9 @@ pub fn run_daemon_with_internal_tools(
     let forwarder = listener_handle.spawn_forwarder(tx)?;
 
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
-    let _ = harness.shutdown();
     drop(forwarder);
     drop(listener_handle);
+    let _ = harness.shutdown();
     result
 }
 
@@ -948,9 +981,9 @@ fn run_daemon_with_echo_on_listener_handle(
     let forwarder = listener_handle.spawn_forwarder(tx)?;
 
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
-    let _ = harness.shutdown();
     drop(forwarder);
     drop(listener_handle);
+    let _ = harness.shutdown();
     result
 }
 
@@ -1401,6 +1434,8 @@ struct RuntimeHarnessLaunch {
     initial_client_error_stream: Option<InitialClientStartupErrorOutput>,
     /// Whether the owned stdio client is the conversational terminal UI.
     introduction_notice_eligible: bool,
+    /// Signal handlers installed before a supervised foreground startup.
+    termination_signals: Option<signal_hook::iterator::Signals>,
 }
 
 fn run_harness_daemon_with_internal_tools_and_initial_client(
@@ -1416,6 +1451,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         initial_client,
         mut initial_client_error_stream,
         introduction_notice_eligible,
+        termination_signals,
     } = launch;
     let project_root = canonical_project_root(project_root)?;
     validate_pre_resolved_serve_options(&options, config)?;
@@ -1460,8 +1496,12 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         ),
         &mut initial_client_error_stream,
     )?;
+    harness.session_runtime.session_pinned = options.pin_session;
     harness.set_runtime_harness_path(harness_paths.path().to_path_buf());
     harness_paths.set_peer_entrypoint(harness.has_peer_entrypoint());
+    if let Some(signals) = termination_signals {
+        spawn_termination_signal_forwarder(signals, harness.runtime_io.tx.clone())?;
+    }
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness constructed");
 
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "writing daemon ready markers");
@@ -1485,11 +1525,27 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         harness.send_introduction_notice_to_initial_client(initial_client_id.as_ref());
     }
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
-    let _ = harness.shutdown();
     drop(forwarder);
     drop(listener_handle);
+    let admission_retirement = verify_listener_admission_retired(&socket_path);
+    let shutdown = harness.shutdown();
     harness_paths.cleanup();
+    admission_retirement?;
+    shutdown?;
     result
+}
+
+/// Verifies the raw listener boundary before extension transports are closed.
+fn verify_listener_admission_retired(socket_path: &Path) -> Result<(), HarnessError> {
+    match UnixStream::connect(socket_path) {
+        Err(_) => Ok(()),
+        Ok(stream) => {
+            let _ = stream.shutdown(Shutdown::Both);
+            Err(HarnessError::Participant(
+                "harness listener still admitted clients at shutdown boundary".to_owned(),
+            ))
+        }
+    }
 }
 
 /// Resolves and validates the immutable directory identity advertised by a
@@ -1529,6 +1585,76 @@ pub fn run_component_with_internal_tools_and_extension_cli_overrides(
         internal_tool_handlers,
         ComponentLaunch::Direct(extension_cli_overrides),
     )
+}
+
+/// Complete inputs for one supported foreground existing-session launch.
+pub struct ExistingSessionServeOptions<'a> {
+    /// Persisted session to resume and pin.
+    pub session_id: &'a tau_proto::SessionId,
+    /// Ordered selected configuration profiles.
+    pub profile_selection: Option<&'a tau_config::settings::ProfileSelection>,
+    /// Optional startup role override.
+    pub startup_role: Option<&'a str>,
+    /// Extension names enabled by the public environment setting.
+    pub environment_extension_names: &'a [String],
+    /// Ordered extension CLI overrides.
+    pub extension_cli_overrides: &'a [tau_config::settings::ExtensionCliOverride],
+    /// Ordered role CLI overrides.
+    pub role_cli_overrides: &'a [tau_config::settings::RoleCliOverride],
+    /// Ordered generic harness configuration overrides.
+    pub harness_config_overrides: &'a [tau_config::settings::HarnessConfigCliOverride],
+    /// Harness-owned internal tool handlers installed before rehydration.
+    pub internal_tool_handlers: crate::InternalToolHandlers,
+}
+
+/// Serves one strict existing session in the foreground without an initial UI.
+///
+/// The daemon remains discoverable through the ordinary runtime socket and
+/// metadata, accepts later stock UI attachments, and rejects session switches.
+pub fn run_existing_session_component_with_internal_tools(
+    options: ExistingSessionServeOptions<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ExistingSessionServeOptions {
+        session_id,
+        profile_selection,
+        startup_role,
+        environment_extension_names,
+        extension_cli_overrides,
+        role_cli_overrides,
+        harness_config_overrides,
+        internal_tool_handlers,
+    } = options;
+    let termination_signals = prepare_termination_signals()?;
+    let config = crate::settings::resolve_config_with_cli_overrides(
+        profile_selection,
+        startup_role,
+        environment_extension_names,
+        extension_cli_overrides,
+        role_cli_overrides,
+        harness_config_overrides,
+    )?;
+    crate::version::export_to_env();
+    let project_root = std::env::current_dir()?;
+    run_harness_daemon_with_internal_tools_and_initial_client(
+        &project_root,
+        &config,
+        session_id.as_ref(),
+        ServeOptions {
+            exit_on_disconnect: false,
+            session_status: SessionLaunchStatus::Resumed,
+            pin_session: true,
+            ..Default::default()
+        },
+        internal_tool_handlers,
+        RuntimeHarnessLaunch {
+            runtime_instance_id: runtime_dir::HarnessInstanceId::mint(),
+            initial_client: None,
+            initial_client_error_stream: None,
+            introduction_notice_eligible: false,
+            termination_signals: Some(termination_signals),
+        },
+    )
+    .map_err(Into::into)
 }
 
 /// Entrypoint for `tau component harness` with injected internal tool handlers
@@ -1660,6 +1786,7 @@ fn run_component_with_internal_tools_and_initial_client(
                 initial_client_error_stream: initial_client_error_output.take(),
                 introduction_notice_eligible: std::env::var_os(INITIAL_UI_INTRODUCTION_NOTICE_ENV)
                     .is_some(),
+                termination_signals: None,
             },
         )
         .map_err(Into::into)

@@ -696,6 +696,12 @@ fn set_test_publisher(ext: &Extension) {
 fn test_extension(client: Arc<dyn TelegramClient>, output: impl Into<Output>) -> Extension {
     let ext = Extension::new(client, output);
     set_test_publisher(&ext);
+    {
+        let mut state = ext.state.lock();
+        state.current_session_id =
+            Some(tau_proto::SessionId::parse("s1").expect("test session id"));
+        state.registration_replay_complete = true;
+    }
     ext
 }
 
@@ -1257,6 +1263,7 @@ fn gateway_client_register_before_session_started_does_not_announce() {
     ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
         .expect("apply gateway client config");
     ext.wait_for_gateway_connection();
+    ext.state.lock().current_session_id = None;
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let message = expect_tool_error(&rx);
     assert!(message.contains("session.started"), "{message}");
@@ -1469,7 +1476,10 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
         }],
     );
     let report = expect_delivered(&rx);
-    let runtime = TelegramRuntime { ext };
+    let runtime = TelegramRuntime {
+        ext,
+        desired_registration_storage: DesiredRegistrationStorage::default(),
+    };
     handle_live_event_value(
         &runtime,
         Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
@@ -1478,7 +1488,8 @@ fn gateway_delivery_ack_requires_exact_canonical_echo_after_agent_unload() {
                 .expect("known-safe SessionId must be valid"),
             agent_id: agent_id("agent-1"),
         }),
-    );
+    )
+    .expect("unload reconciliation");
     let mut wrong = canonical_delivered(report.clone());
     wrong.message_id = MessageFactId::new("wrong");
     runtime.ext.acknowledge_live_delivery(&wrong);
@@ -1885,7 +1896,10 @@ fn gateway_client_agent_unload_sends_unregister() {
     }
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     expect_tool_finished(&rx);
-    let runtime = TelegramRuntime { ext };
+    let runtime = TelegramRuntime {
+        ext,
+        desired_registration_storage: DesiredRegistrationStorage::default(),
+    };
     handle_live_event_value(
         &runtime,
         Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
@@ -1894,7 +1908,8 @@ fn gateway_client_agent_unload_sends_unregister() {
                 .expect("known-safe SessionId must be valid"),
             agent_id: agent_id("agent-1"),
         }),
-    );
+    )
+    .expect("unload reconciliation");
     drop(runtime);
     server.join().expect("fake gateway thread");
 
@@ -2326,8 +2341,8 @@ fn telegram_send_transport_failure_does_not_submit_sent_report() {
     );
 }
 
-/// Registering an agent updates in-memory runtime state and lazily marks the
-/// poller as started, without persisting a stale registration anywhere.
+/// Registering an agent updates active and durable desired state before the
+/// successful terminal becomes observable.
 #[test]
 fn telegram_register_true_registers_agent_and_starts_poller() {
     let (ext, rx, _client) = extension();
@@ -2336,7 +2351,199 @@ fn telegram_register_true_registers_agent_and_starts_poller() {
     let _result = rx.recv().expect("result");
     let state = ext.state.lock();
     assert!(state.registered_agents.contains(&agent_id("agent-1")));
+    assert!(state.desired_registrations.contains(&agent_id("agent-1")));
     assert!(state.poller_started);
+}
+
+/// A durable-add failure occurs after live activation but before tool success,
+/// so registration must roll back instead of leaving unremembered authority.
+#[test]
+fn telegram_register_persistence_failure_rolls_back_live_authority() {
+    let (ext, rx, _client) = extension();
+    ext.dispatch_tool_checked(
+        tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)),
+        &DesiredRegistrationStorage::FailWrites,
+    )
+    .expect("checked output");
+    assert!(expect_tool_error(&rx).contains("desired Telegram registrations"));
+    let state = ext.state.lock();
+    assert!(!state.registered_agents.contains(&agent_id("agent-1")));
+    assert!(!state.desired_registrations.contains(&agent_id("agent-1")));
+}
+
+/// An indeterminate durable-add outcome must retire checked output without
+/// publishing a tool terminal that could misstate the crash-recovery result.
+#[test]
+fn telegram_register_indeterminate_persistence_stops_without_terminal() {
+    let (ext, rx, _client) = extension();
+    assert!(
+        ext.dispatch_tool_checked(
+            tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)),
+            &DesiredRegistrationStorage::FailIndeterminate,
+        )
+        .is_err()
+    );
+    let _progress = rx.recv().expect("progress");
+    assert!(
+        rx.try_recv().is_err(),
+        "indeterminate outcome emitted terminal"
+    );
+    assert!(
+        !ext.state
+            .lock()
+            .registered_agents
+            .contains(&agent_id("agent-1"))
+    );
+}
+
+/// Explicit unregister must not revoke live authority when its required
+/// durable removal fails.
+#[test]
+fn telegram_unregister_persistence_failure_preserves_live_authority() {
+    let (ext, rx, _client) = extension();
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("progress");
+    let _result = rx.recv().expect("result");
+
+    ext.dispatch_tool_checked(
+        tool(REGISTER_TOOL_NAME, "agent-1", bool_args(false)),
+        &DesiredRegistrationStorage::FailWrites,
+    )
+    .expect("checked output");
+    assert!(expect_tool_error(&rx).contains("desired Telegram registrations"));
+    let state = ext.state.lock();
+    assert!(state.registered_agents.contains(&agent_id("agent-1")));
+    assert!(state.desired_registrations.contains(&agent_id("agent-1")));
+}
+
+/// A whole-extension restart must restore only durable desired routes whose
+/// agents remain in the replayed current session, and must durably prune stale
+/// desire before activating Telegram authority.
+#[test]
+fn replay_complete_restores_loaded_desire_and_prunes_unloaded_desire() {
+    let (ext, _rx, _client) = extension();
+    let storage = DesiredRegistrationStorage::default();
+    let session_id = tau_proto::SessionId::parse("s1").expect("session id");
+    storage
+        .store(
+            &session_id,
+            &BTreeSet::from([agent_id("agent-1"), agent_id("agent-stale")]),
+        )
+        .expect("seed durable desire");
+    let runtime = TelegramRuntime {
+        ext,
+        desired_registration_storage: storage,
+    };
+    handle_replayed_event_value(
+        &runtime,
+        Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: session_id.clone(),
+            reason: tau_proto::SessionStartReason::Resume,
+        }),
+    )
+    .expect("replay session startup");
+    handle_replayed_event_value(
+        &runtime,
+        Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            session_id: tau_proto::SessionId::parse("s1").expect("session id"),
+            agent_id: agent_id("agent-1"),
+            agent_initialization_id: tau_proto::AgentInitializationId::parse("test-init")
+                .expect("initialization id"),
+            ephemeral: false,
+        }),
+    )
+    .expect("replay loaded agent");
+    handle_live_event_value(
+        &runtime,
+        Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+            session_id: tau_proto::SessionId::parse("s1").expect("session id"),
+            error: None,
+        }),
+    )
+    .expect("reconcile replay");
+
+    assert_eq!(
+        runtime
+            .desired_registration_storage
+            .load(&session_id)
+            .expect("read reconciled desire"),
+        BTreeSet::from([agent_id("agent-1")])
+    );
+    let state = runtime.ext.state.lock();
+    assert_eq!(
+        state.registered_agents,
+        HashSet::from([agent_id("agent-1")])
+    );
+    assert_eq!(
+        state.desired_registrations,
+        BTreeSet::from([agent_id("agent-1")])
+    );
+}
+
+/// Canonical unload must revoke process-local authority even when its durable
+/// removal fails, then force the extension loop to fail closed.
+#[test]
+fn unload_persistence_failure_still_revokes_live_authority() {
+    let (ext, _rx, _client) = extension();
+    {
+        let mut state = ext.state.lock();
+        state.registered_agents.insert(agent_id("agent-1"));
+        state.desired_registrations.insert(agent_id("agent-1"));
+    }
+    let runtime = TelegramRuntime {
+        ext,
+        desired_registration_storage: DesiredRegistrationStorage::FailWrites,
+    };
+
+    let error = handle_live_event_value(
+        &runtime,
+        Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+            session_id: tau_proto::SessionId::parse("s1").expect("session id"),
+            agent_id: agent_id("agent-1"),
+        }),
+    )
+    .expect_err("durable unload failure must stop the extension");
+
+    assert!(error.contains("desired Telegram registrations"));
+    assert!(
+        !runtime
+            .ext
+            .state
+            .lock()
+            .registered_agents
+            .contains(&agent_id("agent-1"))
+    );
+}
+
+/// A delayed replay boundary from an old session must not prune or activate the
+/// current session's durable desired registrations after a switch.
+#[test]
+fn stale_replay_complete_cannot_reconcile_new_session_desire() {
+    let (ext, _rx, _client) = extension();
+    {
+        let mut state = ext.state.lock();
+        state.current_session_id = Some(tau_proto::SessionId::parse("s2").expect("session id"));
+        state.desired_registrations.insert(agent_id("agent-2"));
+    }
+    let runtime = TelegramRuntime {
+        ext,
+        desired_registration_storage: DesiredRegistrationStorage::default(),
+    };
+
+    let error = handle_live_event_value(
+        &runtime,
+        Event::SessionReplayComplete(tau_proto::SessionReplayComplete {
+            session_id: tau_proto::SessionId::parse("s1").expect("session id"),
+            error: None,
+        }),
+    )
+    .expect_err("old replay boundary must fail closed");
+
+    assert!(error.contains("stale Telegram session"));
+    assert_eq!(
+        runtime.ext.state.lock().desired_registrations,
+        BTreeSet::from([agent_id("agent-2")])
+    );
 }
 
 /// Two Tau sessions using the same Telegram Bot API base and bot token would
@@ -3034,15 +3241,20 @@ fn reported_delivery_event_does_not_ack_routed_update() {
         },
     );
     let report = expect_delivered(&rx);
-    let runtime = TelegramRuntime { ext };
+    let runtime = TelegramRuntime {
+        ext,
+        desired_registration_storage: DesiredRegistrationStorage::default(),
+    };
 
-    handle_live_event_value(&runtime, Event::MessageDeliveredReported(report.clone()));
+    handle_live_event_value(&runtime, Event::MessageDeliveredReported(report.clone()))
+        .expect("reported event");
     assert_eq!(runtime.ext.state.lock().next_update_offset, None);
 
     handle_live_event_value(
         &runtime,
         Event::MessageDelivered(canonical_delivered(report)),
-    );
+    )
+    .expect("canonical event");
     assert_eq!(
         runtime.ext.state.lock().next_update_offset,
         Some(update_offset(42))

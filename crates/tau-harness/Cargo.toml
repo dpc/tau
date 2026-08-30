@@ -45,6 +45,7 @@ rustix = { version = "0.38", default-features = false, features = [
 ] }
 serde.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
 tau-actions.workspace = true
 tau-client.workspace = true
 tau-config.workspace = true

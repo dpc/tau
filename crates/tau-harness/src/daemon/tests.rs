@@ -1,6 +1,6 @@
 use std::io::{BufReader, Read, Write};
 use std::os::unix as path_std_os_unix;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command as path_std_process_Command;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -698,4 +698,20 @@ fn pre_resolved_daemon_rejects_environment_bypass_and_enforces_allowlist() {
             .to_string()
             .contains("resolved extensions differ from deterministic allowlist")
     );
+}
+
+/// The shutdown boundary rejects a still-live raw listener and accepts its
+/// stale socket path only after the listener file descriptor is gone.
+#[test]
+fn listener_retirement_check_precedes_transport_shutdown() {
+    let temp = tempfile::tempdir().expect("temporary socket root");
+    let socket = temp.path().join("harness.sock");
+    let listener = UnixListener::bind(&socket).expect("bind listener");
+    assert!(
+        verify_listener_admission_retired(&socket).is_err(),
+        "live listener must fail the pre-transport shutdown boundary"
+    );
+    drop(listener);
+    verify_listener_admission_retired(&socket)
+        .expect("retired listener must pass the pre-transport shutdown boundary");
 }

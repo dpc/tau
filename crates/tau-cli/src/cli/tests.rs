@@ -50,6 +50,22 @@ fn attach_and_resume_are_subcommands_only() {
     ));
 }
 
+/// The foreground server requires both a fixed session id and the explicit
+/// existing-session guard so it can never become an accidental create path.
+#[test]
+fn serve_requires_an_explicit_existing_session() {
+    assert!(Cli::try_parse_from(["tau", "serve", "--session", "s1"]).is_err());
+    assert!(Cli::try_parse_from(["tau", "serve", "--existing"]).is_err());
+    let parsed = Cli::parse_from(["tau", "serve", "--session", "s1", "--existing"]);
+    assert!(matches!(
+        parsed.command,
+        Some(super::Command::Serve {
+            session,
+            existing: true,
+        }) if session.as_str() == "s1"
+    ));
+}
+
 /// Startup options remain root-owned: callers place them before the target
 /// subcommand, and omitted resume targets still preserve resume mode.
 #[test]

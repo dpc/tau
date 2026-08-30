@@ -182,8 +182,11 @@ mode writes and flushes only `Hello`, starts the reader/writer threads, and
 returns before any `Subscribe`, `Intercept`, startup `Emit`, or `Ready` frames.
 The caller then receives configuration, sends explicit dynamic startup frames
 through `ManualExtensionRuntime` helpers (including `startup_local_tool` for
-scope-aware logical registrations), and completes startup exactly once with
-`startup_ready`. Static builder declarations are rejected in this mode so a
+scope-aware logical registrations). Dynamic subscription can either select one
+live-only set or provide explicit historical and live sets; the latter preserves
+ordinary replay-before-live catch-up semantics for a late or respawned manual
+extension. The caller completes startup exactly once with `startup_ready`.
+Static builder declarations are rejected in this mode so a
 config-gated extension cannot accidentally leak pre-configuration subscriptions,
 intercepts, tool registrations, action schemas, or ready text. After `Ready`,
 the runtime has the same blocking receive, reactive wake, dispatch, finish, and
@@ -258,7 +261,9 @@ storage policy, path validation, or background demux ownership to tau-client; th
 harness still owns storage boundaries and the extension still owns how storage
 errors map to feature behavior. Generic helper requests omit
 `expected_session_id`; for Session scope, the harness therefore binds them to the
-frame-admission session.
+frame-admission session. Session-aware request helpers instead put one exact
+`expected_session_id` on the existing frame; the harness remains the sole
+validator and rejects admission after a concurrent session switch.
 
 Manual-loop receive results distinguish timeout, clean input EOF, and protocol
 `Disconnect`. Non-blocking `try_recv` has separate message, input-closed, and

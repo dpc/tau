@@ -499,6 +499,7 @@ impl Harness {
         command: HarnessCommand,
     ) -> Result<(), HarnessError> {
         match command {
+            HarnessCommand::Shutdown => {}
             HarnessCommand::SemanticPersistenceProgress => {
                 self.observe_semantic_persistence_progress();
             }

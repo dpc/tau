@@ -1,5 +1,13 @@
 # ARCH-tau-cli: tau-cli architecture
 
+`tau serve --session ID --existing` is the supported foreground owner for one
+already-persisted session. It starts no UI, keeps the ordinary runtime discovery
+socket and metadata available for `tau session list` and `tau attach ID`, and
+keeps running across UI disconnects. Resume preparation is strict: missing,
+locked, or malformed state fails startup instead of creating or repairing a
+session. The daemon pins the selected session and rejects every in-process
+session switch.
+
 The CLI consumes harness-validated provider-neutral quota snapshots and applies
 the fixed weekly pacing classifier from
 [SPEC-provider-quota-pacing](../../../specs/SPEC-provider-quota-pacing.md).

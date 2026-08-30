@@ -35,8 +35,11 @@ transcripts survive restarts and retain alternate branches when you rewind.
 Sessions and agents can also be made ephemeral independently when their state
 should exist only for the lifetime of the daemon.
 
-Use `tau attach [SESSION]` for a running target and `tau resume [SESSION]` for
-persisted state; omission opens target selection. See the
+Use `tau attach [SESSION]` for a running target, `tau resume [SESSION]` for
+persisted state with an initial UI, and `tau serve --session SESSION --existing`
+for a pinned foreground headless owner supervised by another process. Attach and
+resume omission opens target selection; serve always requires an exact existing
+ID. See the
 [session startup guide](docs/session-startup.md) for identity, locking, and
 root-option semantics.
 

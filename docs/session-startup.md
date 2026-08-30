@@ -1,11 +1,12 @@
 # Session startup
 
 Plain `tau` creates a new session and owns its new harness daemon. Targeted
-startup uses two explicit commands:
+startup uses three explicit commands:
 
 ```text
 tau attach [SESSION]
 tau resume [SESSION]
+tau serve --session SESSION --existing
 ```
 
 `attach` connects to the live daemon that currently advertises `SESSION` and
@@ -13,6 +14,16 @@ does not take ownership of it. `resume` verifies a persisted session and starts
 a new daemon for it. An unavailable attach target suggests `tau resume
 SESSION`; a missing resume target reports that no persisted session exists.
 Invalid session IDs fail before daemon startup.
+
+`serve` is the foreground supervisor entrypoint for one explicitly provisioned
+persisted session. It starts no terminal UI, remains alive across attachment
+disconnects, and publishes the ordinary runtime socket and metadata, so `tau
+session list` and `tau attach SESSION` work unchanged. It pins the session and
+rejects `:session new`. The mandatory `--existing` guard prevents accidental
+creation; missing, locked, or malformed state fails strictly. SIGINT and SIGTERM
+stop listener admission, shut down the harness and extensions, remove runtime
+socket/metadata, and exit normally. A second SIGINT or SIGTERM forces the
+signal's default termination and can interrupt that cleanup.
 
 Startup options remain root options and precede the target command, for example
 `tau --prompt-stdin resume SESSION`. They are not repeated after `attach` or

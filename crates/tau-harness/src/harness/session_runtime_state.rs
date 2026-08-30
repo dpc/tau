@@ -53,6 +53,8 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) project_root: PathBuf,
     /// Active session binding.
     pub(crate) current_session_id: SessionId,
+    /// Whether this process rejects all UI-requested session switches.
+    pub(crate) session_pinned: bool,
     /// Monotonic generation of the active session binding.
     pub(crate) current_session_generation: SessionGeneration,
     /// Reason associated with the active session binding.

@@ -3,6 +3,7 @@
 use super::super::super::{MAX_EXTENSION_ACTIVATION_BYTES, MAX_EXTENSION_ACTIVATION_MESSAGES};
 use super::super::dispatch::provider_text_response;
 use super::*;
+use crate::event::HarnessCommand;
 
 /// Session rollover resets only budget exhaustion; a peer disabled by
 /// configuration policy remains disabled.
@@ -1423,6 +1424,23 @@ fn provider_disconnect_terminates_event_loop() {
         HarnessError::Participant(message) if message == "provider disconnected"
     ));
 
+    h.shutdown().expect("shutdown");
+}
+
+/// SIGINT/SIGTERM forwarding must wake an otherwise idle foreground daemon and
+/// return through its coordinated shutdown path rather than terminating it
+/// asynchronously inside a signal handler.
+#[test]
+fn termination_command_wakes_idle_event_loop() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.runtime_io
+        .tx
+        .send(HarnessEvent::Command(HarnessCommand::Shutdown))
+        .expect("queue termination command");
+
+    h.run_event_loop(None, false)
+        .expect("termination command exits cleanly");
     h.shutdown().expect("shutdown");
 }
 

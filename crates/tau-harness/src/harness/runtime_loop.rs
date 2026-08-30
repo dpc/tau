@@ -420,6 +420,9 @@ impl Harness {
                 RuntimeEventWait::DeadlineElapsed => continue,
                 RuntimeEventWait::Disconnected => break,
             };
+            if matches!(harness_evt, HarnessEvent::Command(HarnessCommand::Shutdown)) {
+                break;
+            }
             self.log_event(&harness_evt);
             self.handle_runtime_event(
                 harness_evt,

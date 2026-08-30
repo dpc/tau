@@ -5663,6 +5663,7 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 name = "tau"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "rostra-core",
  "rustix-openpty",
  "serde_json",
@@ -6056,6 +6057,7 @@ name = "tau-ext-telegram"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ciborium",
  "fs2",
  "rand 0.8.6",
  "serde",
@@ -6168,6 +6170,7 @@ dependencies = [
  "rustix 0.38.44",
  "serde",
  "serde_json",
+ "signal-hook",
  "tau-actions",
  "tau-client",
  "tau-config",

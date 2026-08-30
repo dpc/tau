@@ -8,6 +8,11 @@ disconnect only signals it, preserving prompt shutdown while an existing
 provider long poll returns.
 Tests must synchronize the shared publication/shutdown transaction and cover
 both extension-owned and tau-client-owned checked configuration errors.
+Desired-registration tests cover strict file decoding, live-before-durable
+register rollback, durable-before-live unregister, unload fail-closed behavior,
+and replay-complete loaded-membership reconciliation. Restart coverage must use
+harness extension-data RPC or a shared deterministic storage fixture; replay
+itself must perform no fake Telegram operation before its completion boundary.
 
 Tests are hermetic. Use `FakeClient` for Bot API behavior, loopback TCP for
 production HTTP framing and response-body-limit contracts, and loopback Unix

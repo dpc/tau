@@ -32,9 +32,13 @@ configured.
 ## Usage
 
 Ask an agent to call this instance's register tool with `enabled: true`
-(`telegram_register` when no `tool_prefix` is configured). The first
-registration that starts polling checks that Telegram has no active webhook
-before claiming success. If a webhook is active, Tau reports a tool error and
+(`telegram_register` when no `tool_prefix` is configured). The first registration
+that starts polling checks that Telegram has no active webhook before claiming
+success. A successful registration is remembered in that configured extension
+instance's current Session-scope state. After a whole Tau or extension restart,
+Tau restores the route only if the agent remains loaded in the resumed session.
+Calling the tool with `enabled: false` or unloading the agent revokes that desire.
+If a webhook is active, Tau reports a tool error and
 does not delete the webhook or drop updates; remove the webhook yourself or
 configure a different bot token. Allowed Telegram users can then use:
 
@@ -77,8 +81,9 @@ The removed Telegram-specific `config.tool_namespace` setting is rejected.
 ## Limitations
 
 The legacy extension MVP is text-only. Attachments are acknowledged as
-unsupported. Registrations, selected agents, learned chat link, and Telegram
-update checkpoints are in memory only in legacy local-poll mode. Routed updates
+unsupported. Desired registrations are durable; active routes, selected agents,
+the learned chat link, and Telegram update checkpoints remain in memory only in
+legacy local-poll mode. Routed updates
 advance the poll cursor only after the extension receives their matching
 canonical `message.delivered` echo; a missing echo causes Telegram redelivery to
 replay the retained report. Non-routed updates advance at processing return and

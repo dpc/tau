@@ -6,7 +6,11 @@ report submission are specified by
 The optional shared-token gateway contract is
 [SPEC-tau-telegram-gateway](SPEC-tau-telegram-gateway.md).
 
-`std-telegram` is a personal text bridge, not a generic chat abstraction. The extension process starts to register tools, but it does not contact Telegram until a Tau agent calls this instance's register tool (`telegram_register` without a generic tool prefix) with `enabled: true`.
+`std-telegram` is a personal text bridge, not a generic chat abstraction. The
+extension process starts to register tools, but it contacts Telegram only after
+either a successful live registration request (`telegram_register` without a
+generic tool prefix) with `enabled: true` or replay-complete restoration of
+durable desire for a still-loaded agent.
 
 External ingress is constrained by [ARCH-external-message-boundary](../../../specs/ARCH-external-message-boundary.md).
 Structural tool naming follows
@@ -14,9 +18,27 @@ Structural tool naming follows
 
 ## State
 
-Runtime state is intentionally in memory: registered agents, labels, selected
-agent per chat, learned private chat link, update offset, and ordered update
-checkpoints are forgotten when the extension restarts. Update offsets,
+Desired registered agents use one strict versioned Session-scope
+`extension_data` file per configured extension instance. Successful registration
+activates live authority, durably adds desire, then returns its tool terminal;
+durable-add failure rolls live authority back. Explicit unregister durably
+removes desire before revoking live authority. Canonical agent unload likewise
+attempts durable removal before revocation and fails closed locally even when a
+storage or gateway operation fails.
+
+Startup reads the complete file from the exact replayed session before route
+restoration; missing means empty, while malformed, unsupported, or unreadable
+state fails configuration. Historical
+session membership is accumulated without Telegram I/O and reconciled at the
+non-replay `session.replay_complete` boundary. Desire for agents no longer
+loaded is durably pruned before remaining routes reactivate. Session shutdown
+and process teardown do not erase desire. Successful runtime reconfiguration
+durably clears the exact current session's desire before applying its live
+replacement or revocation.
+
+Labels, selected agent per chat, learned private chat link, update offset, and
+ordered update checkpoints remain process-local and are forgotten when the
+extension restarts. Update offsets,
 checkpoints, and backlog-drain state are scoped to the Telegram update stream,
 identified by the Bot API base URL plus bot token. A routed checkpoint retains
 its exact `message.delivered_reported` report until the configured publisher

@@ -58,6 +58,14 @@ without blocking shutdown on final Rust teardown; process-backed extensions
 retain their separate supervised signal-and-reap cleanup. See
 [SPEC-tau-harness-extension-lifecycle](SPEC-tau-harness-extension-lifecycle.md#overall-harness-shutdown).
 
+A pinned foreground session installs process-level SIGINT and SIGTERM handling
+that wakes the central event loop. Coordinated shutdown retires listener
+admission first, then shuts down harness connections and extensions, removes the
+runtime socket and metadata, and returns normally to the supervisor. A second
+SIGINT or SIGTERM restores that signal's default forced termination; it may
+interrupt extension cleanup and runtime-file removal. Signal handlers perform no
+semantic work themselves.
+
 Harness storage policy is immutable for one process. Durable mode owns normal
 session, agent, diagnostic, retention, and extension storage;
 session-ephemeral mode suppresses only session-owned artifacts; memory-only

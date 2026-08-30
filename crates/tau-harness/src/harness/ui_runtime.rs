@@ -2280,6 +2280,24 @@ impl Harness {
         req: tau_proto::UiSwitchSession,
     ) -> Result<bool, HarnessError> {
         self.publish_event(Some(client_id), Event::UiSwitchSession(req.clone()));
+        if self.session_runtime.session_pinned {
+            self.send_ui_error_response(
+                client_id,
+                format!(
+                    "session `{}` is pinned by the foreground server",
+                    self.session_runtime.current_session_id
+                ),
+            );
+            let _ = self.runtime_io.bus.send_to(
+                client_id,
+                None,
+                HarnessOutputMessage::deliver(Event::SessionStarted(tau_proto::SessionStarted {
+                    session_id: self.session_runtime.current_session_id.clone(),
+                    reason: self.session_runtime.current_session_start_reason,
+                })),
+            );
+            return Ok(true);
+        }
         if req.new_session_id == self.session_runtime.current_session_id
             && !matches!(req.reason, tau_proto::SessionStartReason::New)
         {

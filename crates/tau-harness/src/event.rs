@@ -25,6 +25,8 @@ pub(crate) const SUPERVISED_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 /// Commands that mutate harness-owned state from inside the central loop.
 pub(crate) enum HarnessCommand {
+    /// Stop the foreground daemon after retiring listener admission.
+    Shutdown,
     /// Observe persistence transitions and retry exact retained publications.
     SemanticPersistenceProgress,
     /// Retry exact ordinary activations after the recovery observation returns.

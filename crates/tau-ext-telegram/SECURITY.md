@@ -7,6 +7,20 @@ Checked configuration errors use the same sticky failure signal. A shared
 publication/shutdown gate ensures forced output teardown joins the poller,
 while ordinary disconnect does not wait for a provider long poll.
 
+Desired listener registrations are the only restart-durable sidecar routing
+state. They use the configured instance's harness-owned Session-scope extension
+data and contain only a strict version plus Tau agent IDs. Missing state is
+empty; malformed, unsupported, or unreadable state fails configuration. Replay
+performs no Telegram I/O: current loaded membership gates restoration at
+`session.replay_complete`, and stale desire is removed before live authority is
+reactivated. Bot tokens, gateway credentials, Telegram identities, native
+routes, message text, selections, and checkpoints do not enter this file.
+Replacement errors are read back through the same exact-session RPC. An
+unchanged snapshot is a known failure. A visible target snapshot whose
+parent-directory durability sync failed remains indeterminate across a crash;
+read-back failure is likewise indeterminate. The extension retires without a
+tool terminal rather than continuing to route from either uncertain outcome.
+
 `std-telegram` is a disabled-by-default personal text bridge. The configured
 extension process and optional same-UID gateway are cooperative local
 components, not hostile-code sandboxes. The gateway socket uses mandatory
@@ -73,8 +87,9 @@ make message text trustworthy or grant Tau tool authority.
   checkpoints. Same-stream configuration generations and polling-contention
   shutdown preserve already submitted checkpoints, while stale in-flight
   responses cannot process updates.
-- Local registrations, links, selections, offsets, and checkpoints are not
-  durable. Process death forgets pending reports; a fresh process drains
+- Desired registrations are durable as described above; their currently active
+  local routes, links, selections, offsets, and checkpoints are process-local.
+  Process death forgets pending reports; a fresh process drains
   Telegram backlog and can therefore discard a routed update whose canonical
   echo was lost before the crash. Conversely, report replay before a crash may
   produce duplicate canonical facts, wakes, or model work. There is no durable

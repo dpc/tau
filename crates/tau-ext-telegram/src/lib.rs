@@ -1,9 +1,9 @@
 //! Personal Telegram bridge extension for Tau agents.
 //!
 //! By default the extension exposes `telegram_register` and `telegram_send`
-//! tools. It keeps listener registrations in memory and uses the Telegram Bot
-//! API only after an agent registers or another Telegram action needs the
-//! client.
+//! tools. It keeps desired listener registrations in Session-scope extension
+//! data, retains active routes in memory, and uses the Telegram Bot API only
+//! after an agent registers or another Telegram action needs the client.
 //! Update-stream ownership follows
 //! `SPEC-tau-ext-telegram-stream-owner`, while instance-specific tool
 //! names follow the workspace-wide `SPEC-extension-tool-prefixes`.
@@ -14,6 +14,7 @@
 
 use ureq::tls as path_ureq_tls;
 
+mod desired_registrations;
 mod gateway;
 mod gateway_auth;
 mod gateway_client;
@@ -24,10 +25,10 @@ mod output;
 mod pending_retry_backoff;
 mod stream_owner;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::{Error as IoError, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
@@ -35,6 +36,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
+use desired_registrations::{DesiredRegistrationStorage, DesiredRegistrationStoreError};
 use gateway_client::{
     GatewayClient, GatewayClientConfig, GatewayMessageDelivery, GatewaySocketResponse,
 };
@@ -444,6 +446,13 @@ struct State {
     /// Configuration generation whose gateway supervisor is authoritative.
     gateway_config_generation: Option<ConfigGeneration>,
     registered_agents: HashSet<AgentId>,
+    /// Session-scoped desired registrations loaded from durable extension data.
+    desired_registrations: BTreeSet<AgentId>,
+    /// Loaded membership reconstructed from the current replay window.
+    replayed_loaded_agents: HashSet<AgentId>,
+    /// Whether the current session's replay boundary authorized route
+    /// activation.
+    registration_replay_complete: bool,
     /// Local registration calls that have reserved update-stream ownership
     /// while checking Telegram webhook status without holding the state mutex.
     pending_local_registrations: usize,
@@ -858,6 +867,17 @@ impl State {
     }
 }
 
+enum ToolDispatch {
+    Terminal(Box<Event>),
+    Indeterminate(String),
+}
+
+impl ToolDispatch {
+    fn terminal(event: Event) -> Self {
+        Self::Terminal(Box::new(event))
+    }
+}
+
 struct Extension {
     state: Arc<SharedState>,
     client: Arc<dyn TelegramClient>,
@@ -917,6 +937,107 @@ impl Extension {
 
     fn set_publisher_name(&self, publisher_name: tau_proto::ExtensionName) {
         self.state.lock().publisher_name = Some(publisher_name);
+    }
+
+    /// Loads one session's strict desired-registration snapshot.
+    fn load_desired_registrations(
+        &self,
+        storage: &DesiredRegistrationStorage,
+        session_id: &tau_proto::SessionId,
+    ) -> Result<(), String> {
+        let desired = storage.load(session_id)?;
+        let mut state = self.state.lock();
+        state.desired_registrations = desired;
+        state.replayed_loaded_agents.clear();
+        Ok(())
+    }
+
+    /// Durably changes one desired registration before committing in-memory
+    /// intent.
+    fn persist_desired_registration(
+        &self,
+        storage: &DesiredRegistrationStorage,
+        session_id: &tau_proto::SessionId,
+        agent_id: &AgentId,
+        enabled: bool,
+    ) -> Result<(), DesiredRegistrationStoreError> {
+        let mut replacement = self.state.lock().desired_registrations.clone();
+        if replacement.contains(agent_id) == enabled {
+            return Ok(());
+        }
+        if enabled {
+            replacement.insert(agent_id.clone());
+        } else {
+            replacement.remove(agent_id);
+        }
+        storage.store(session_id, &replacement)?;
+        if self.state.lock().current_session_id.as_ref() != Some(session_id) {
+            return Err(DesiredRegistrationStoreError::Known(
+                "Telegram registration session changed during persistence".to_owned(),
+            ));
+        }
+        self.state.lock().desired_registrations = replacement;
+        Ok(())
+    }
+
+    /// Converts one typed storage failure without erasing fail-stop authority.
+    fn desired_registration_dispatch(
+        invoke: ToolStarted,
+        error: DesiredRegistrationStoreError,
+    ) -> ToolDispatch {
+        match error {
+            DesiredRegistrationStoreError::Known(message) => {
+                ToolDispatch::terminal(tool_error(invoke, message))
+            }
+            DesiredRegistrationStoreError::Indeterminate(message) => {
+                ToolDispatch::Indeterminate(message)
+            }
+        }
+    }
+
+    /// Reconciles durable desire with the complete replayed loaded membership.
+    fn reconcile_desired_registrations(
+        &self,
+        storage: &DesiredRegistrationStorage,
+        session_id: &tau_proto::SessionId,
+    ) -> Result<(), String> {
+        let (desired, loaded, gateway_mode) = {
+            let state = self.state.lock();
+            (
+                state.desired_registrations.clone(),
+                state.replayed_loaded_agents.clone(),
+                state.gateway_config_generation.is_some(),
+            )
+        };
+        let loaded = loaded.into_iter().collect::<BTreeSet<_>>();
+        let reconciled = desired
+            .intersection(&loaded)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if reconciled != desired {
+            storage
+                .store(session_id, &reconciled)
+                .map_err(|error| error.to_string())?;
+            self.state.lock().desired_registrations = reconciled.clone();
+        }
+        if gateway_mode {
+            let mut state = self.state.lock();
+            state.registered_agents.extend(reconciled);
+            state.registration_replay_complete = true;
+            state.mark_coordination_changed();
+            drop(state);
+            self.state.notify_all();
+            if let Some(gateway) = self.gateway_client() {
+                fail_gateway_client_if_current(&self.gateway, &self.state, &gateway);
+                gateway.disconnect();
+            }
+            return Ok(());
+        }
+        self.state.lock().registration_replay_complete = true;
+        for agent_id in reconciled {
+            self.activate_local_registration(&agent_id)?;
+        }
+        Ok(())
     }
 
     fn publisher_claim(&self) -> RawMessagePublisherId {
@@ -1163,7 +1284,11 @@ impl Extension {
         state.config.is_some() && state.config_generation == config_generation
     }
 
-    fn dispatch_tool_checked(&self, invoke: ToolStarted) -> ClientResult<()> {
+    fn dispatch_tool_checked(
+        &self,
+        invoke: ToolStarted,
+        storage: &DesiredRegistrationStorage,
+    ) -> ClientResult<()> {
         self.output.report_tool_progress(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -1175,10 +1300,23 @@ impl Extension {
                 ..Default::default()
             }),
         });
-        let event = match invoke.tool_name.as_str() {
-            name if name == self.tool_names.register.as_str() => self.handle_register(invoke),
-            name if name == self.tool_names.send.as_str() => self.handle_send(invoke),
-            _ => tool_error(invoke, "unknown telegram tool".to_owned()),
+        let dispatch = match invoke.tool_name.as_str() {
+            name if name == self.tool_names.register.as_str() => {
+                self.handle_register(invoke, storage)
+            }
+            name if name == self.tool_names.send.as_str() => {
+                ToolDispatch::terminal(self.handle_send(invoke))
+            }
+            _ => ToolDispatch::terminal(tool_error(invoke, "unknown telegram tool".to_owned())),
+        };
+        let event = match dispatch {
+            ToolDispatch::Terminal(event) => *event,
+            ToolDispatch::Indeterminate(message) => {
+                self.output.report_known_mandatory_failure();
+                return Err(tau_client::ClientError::handler(format!(
+                    "desired Telegram registration storage outcome is indeterminate: {message}"
+                )));
+            }
         };
         self.output.check_mandatory_output()?;
         self.output.report_tool_terminal(event)
@@ -1188,7 +1326,7 @@ impl Extension {
     /// infallible.
     #[cfg(test)]
     fn dispatch_tool(&self, invoke: ToolStarted) {
-        self.dispatch_tool_checked(invoke)
+        self.dispatch_tool_checked(invoke, &DesiredRegistrationStorage::default())
             .expect("test output channel remains connected");
     }
 
@@ -1196,117 +1334,160 @@ impl Extension {
         tool_name == self.tool_names.register.as_str() || tool_name == self.tool_names.send.as_str()
     }
 
-    fn handle_register(&self, invoke: ToolStarted) -> Event {
-        if let Err(message) = validate_object_fields(&invoke.arguments, &["enabled"]) {
-            return tool_error(invoke, message);
-        }
-        let enabled = match cbor_bool_field(&invoke.arguments, "enabled") {
-            Ok(enabled) => enabled,
-            Err(message) => return tool_error(invoke, message),
-        };
-        if self.gateway_mode_configured() {
-            return self.handle_gateway_register(invoke, enabled);
-        }
+    /// Activates one local-poll registration after all preflight checks.
+    fn activate_local_registration(&self, agent_id: &AgentId) -> Result<(), String> {
         let mut state = self.state.lock();
-        if enabled {
-            let was_unregistered = state.registered_agents.is_empty();
-            let cfg = match state.config.clone() {
-                Some(cfg) => cfg,
-                None => {
-                    return tool_error(invoke, "telegram extension is not configured".to_owned());
-                }
-            };
-            if was_unregistered {
-                if let Err(message) = state.ensure_update_stream_locked(&cfg) {
-                    return tool_error(invoke, message);
-                }
-                state.pending_local_registrations += 1;
-                let config_generation = state.config_generation;
-                drop(state);
-                let webhook_result = self.check_webhook_allows_get_updates(&cfg, config_generation);
-                state = self.state.lock();
-                state.pending_local_registrations -= 1;
-                if let Err(message) = webhook_result {
-                    state.mark_coordination_changed();
-                    self.state.notify_all();
-                    return tool_error(invoke, message);
-                }
-                if state.config_generation != config_generation
-                    || state
-                        .config
-                        .as_ref()
-                        .is_none_or(|current| !current.uses_same_update_stream_as(&cfg))
-                {
-                    state.mark_coordination_changed();
-                    self.state.notify_all();
-                    return tool_error(
-                        invoke,
-                        "telegram configuration changed while checking webhook status".to_owned(),
-                    );
-                }
-                if !state
-                    .update_stream_lock
+        let was_unregistered = state.registered_agents.is_empty();
+        let cfg = state
+            .config
+            .clone()
+            .ok_or_else(|| "telegram extension is not configured".to_owned())?;
+        if was_unregistered {
+            state.ensure_update_stream_locked(&cfg)?;
+            state.pending_local_registrations += 1;
+            let config_generation = state.config_generation;
+            drop(state);
+            let webhook_result = self.check_webhook_allows_get_updates(&cfg, config_generation);
+            state = self.state.lock();
+            state.pending_local_registrations -= 1;
+            if let Err(message) = webhook_result {
+                state.mark_coordination_changed();
+                self.state.notify_all();
+                return Err(message);
+            }
+            if state.config_generation != config_generation
+                || state
+                    .config
                     .as_ref()
-                    .is_some_and(|lock| lock.covers(cfg.stream_identity()))
-                {
-                    state.mark_coordination_changed();
-                    self.state.notify_all();
-                    return tool_error(
-                        invoke,
-                        "telegram update-stream lock was lost while checking webhook status"
-                            .to_owned(),
-                    );
-                }
-            } else if !state
+                    .is_none_or(|current| !current.uses_same_update_stream_as(&cfg))
+            {
+                state.mark_coordination_changed();
+                self.state.notify_all();
+                return Err(
+                    "telegram configuration changed while checking webhook status".to_owned(),
+                );
+            }
+            if !state
                 .update_stream_lock
                 .as_ref()
                 .is_some_and(|lock| lock.covers(cfg.stream_identity()))
             {
-                return tool_error(
-                    invoke,
-                    "telegram update-stream lock is not held by this registration".to_owned(),
+                state.mark_coordination_changed();
+                self.state.notify_all();
+                return Err(
+                    "telegram update-stream lock was lost while checking webhook status".to_owned(),
                 );
             }
-            self.ensure_poller_started_locked(&mut state);
-            state.registered_agents.insert(invoke.agent_id.clone());
-            if was_unregistered {
-                state.poller_drained_initial_backlog = false;
-            }
-            state
-                .agent_labels
-                .entry(invoke.agent_id.clone())
-                .or_insert_with(|| invoke.agent_id.to_string());
-            state.mark_coordination_changed();
-            self.state.notify_all();
-        } else {
-            state.registered_agents.remove(&invoke.agent_id);
-            state
-                .selected_agent_by_chat
-                .retain(|_, agent| agent != &invoke.agent_id);
-            if state.registered_agents.is_empty() {
-                state.poller_drained_initial_backlog = false;
-            }
-            state.mark_coordination_changed();
-            self.state.notify_all();
+        } else if !state
+            .update_stream_lock
+            .as_ref()
+            .is_some_and(|lock| lock.covers(cfg.stream_identity()))
+        {
+            return Err("telegram update-stream lock is not held by this registration".to_owned());
         }
-        tool_result(
+        self.ensure_poller_started_locked(&mut state);
+        state.registered_agents.insert(agent_id.clone());
+        if was_unregistered {
+            state.poller_drained_initial_backlog = false;
+        }
+        state
+            .agent_labels
+            .entry(agent_id.clone())
+            .or_insert_with(|| agent_id.to_string());
+        state.mark_coordination_changed();
+        drop(state);
+        self.state.notify_all();
+        Ok(())
+    }
+
+    /// Revokes one process-local registration and its selection authority.
+    fn revoke_local_registration(&self, agent_id: &AgentId) {
+        let mut state = self.state.lock();
+        state.registered_agents.remove(agent_id);
+        state
+            .selected_agent_by_chat
+            .retain(|_, agent| agent != agent_id);
+        if state.registered_agents.is_empty() {
+            state.poller_drained_initial_backlog = false;
+        }
+        state.mark_coordination_changed();
+        drop(state);
+        self.state.notify_all();
+    }
+
+    fn handle_register(
+        &self,
+        invoke: ToolStarted,
+        storage: &DesiredRegistrationStorage,
+    ) -> ToolDispatch {
+        if let Err(message) = validate_object_fields(&invoke.arguments, &["enabled"]) {
+            return ToolDispatch::terminal(tool_error(invoke, message));
+        }
+        let enabled = match cbor_bool_field(&invoke.arguments, "enabled") {
+            Ok(enabled) => enabled,
+            Err(message) => return ToolDispatch::terminal(tool_error(invoke, message)),
+        };
+        let Some(session_id) = self.state.lock().current_session_id.clone() else {
+            return ToolDispatch::terminal(tool_error(
+                invoke,
+                "telegram extension has not observed session.started yet".to_owned(),
+            ));
+        };
+        if self.gateway_mode_configured() {
+            return self.handle_gateway_register(invoke, enabled, storage, &session_id);
+        }
+        if enabled {
+            if let Err(message) = self.activate_local_registration(&invoke.agent_id) {
+                return ToolDispatch::terminal(tool_error(invoke, message));
+            }
+            if let Err(message) =
+                self.persist_desired_registration(storage, &session_id, &invoke.agent_id, true)
+            {
+                self.revoke_local_registration(&invoke.agent_id);
+                return Self::desired_registration_dispatch(invoke, message);
+            }
+        } else {
+            if let Err(message) =
+                self.persist_desired_registration(storage, &session_id, &invoke.agent_id, false)
+            {
+                return Self::desired_registration_dispatch(invoke, message);
+            }
+            self.revoke_local_registration(&invoke.agent_id);
+        }
+        ToolDispatch::terminal(tool_result(
             invoke,
             if enabled {
                 "registered for Telegram messages"
             } else {
                 "unregistered from Telegram messages"
             },
-        )
+        ))
     }
 
-    fn handle_gateway_register(&self, invoke: ToolStarted, enabled: bool) -> Event {
+    fn handle_gateway_register(
+        &self,
+        invoke: ToolStarted,
+        enabled: bool,
+        storage: &DesiredRegistrationStorage,
+        expected_session_id: &tau_proto::SessionId,
+    ) -> ToolDispatch {
+        if !enabled
+            && let Err(message) = self.persist_desired_registration(
+                storage,
+                expected_session_id,
+                &invoke.agent_id,
+                false,
+            )
+        {
+            return Self::desired_registration_dispatch(invoke, message);
+        }
         let (session_id, display_name, config_generation) = {
             let mut state = self.state.lock();
             let Some(session_id) = state.current_session_id.clone() else {
-                return tool_error(
+                return ToolDispatch::terminal(tool_error(
                     invoke,
                     "telegram gateway client has not observed session.started yet".to_owned(),
-                );
+                ));
             };
             let display_name = state.agent_labels.get(&invoke.agent_id).cloned();
             let config_generation = state.config_generation;
@@ -1318,7 +1499,7 @@ impl Extension {
             (session_id, display_name, config_generation)
         };
         let Some(gateway) = self.gateway_client() else {
-            return if enabled {
+            return ToolDispatch::terminal(if enabled {
                 tool_error(
                     invoke,
                     "telegram gateway is disconnected; registration failed closed".to_owned(),
@@ -1328,7 +1509,7 @@ impl Extension {
                     invoke,
                     "removed local Telegram gateway registration while disconnected",
                 )
-            };
+            });
         };
         let response = if enabled {
             gateway.register_agent(session_id.as_ref(), invoke.agent_id.as_ref(), display_name)
@@ -1337,6 +1518,14 @@ impl Extension {
         };
         match response {
             Ok(response) => {
+                if gateway_response_requires_reconnect(&gateway, &response) {
+                    fail_gateway_client_if_current(&self.gateway, &self.state, &gateway);
+                    gateway.disconnect();
+                    return ToolDispatch::terminal(tool_error(
+                        invoke,
+                        "telegram gateway changed generation during registration".to_owned(),
+                    ));
+                }
                 {
                     let mut state = self.state.lock();
                     let gateway_is_current = self
@@ -1346,10 +1535,10 @@ impl Extension {
                         .as_ref()
                         .is_some_and(|current| Arc::ptr_eq(current, &gateway));
                     if state.config_generation != config_generation || !gateway_is_current {
-                        return tool_error(
+                        return ToolDispatch::terminal(tool_error(
                             invoke,
                             "telegram gateway configuration changed during registration".to_owned(),
-                        );
+                        ));
                     }
                     if enabled {
                         state.registered_agents.insert(invoke.agent_id.clone());
@@ -1357,26 +1546,46 @@ impl Extension {
                     state.mark_coordination_changed();
                 }
                 self.state.notify_all();
+                if enabled
+                    && let Err(message) = self.persist_desired_registration(
+                        storage,
+                        expected_session_id,
+                        &invoke.agent_id,
+                        true,
+                    )
+                {
+                    self.revoke_local_registration(&invoke.agent_id);
+                    let rollback_authoritative = gateway
+                        .unregister_agent(session_id.as_ref(), invoke.agent_id.as_ref())
+                        .is_ok_and(|response| {
+                            !gateway_response_requires_reconnect(&gateway, &response)
+                        });
+                    if !rollback_authoritative {
+                        fail_gateway_client_if_current(&self.gateway, &self.state, &gateway);
+                        gateway.disconnect();
+                    }
+                    return Self::desired_registration_dispatch(invoke, message);
+                }
                 if !self.apply_gateway_response(&gateway, response) {
-                    return tool_error(
+                    return ToolDispatch::terminal(tool_error(
                         invoke,
                         "telegram gateway changed generation during registration".to_owned(),
-                    );
+                    ));
                 }
-                tool_result(
+                ToolDispatch::terminal(tool_result(
                     invoke,
                     if enabled {
                         "registered with Telegram gateway"
                     } else {
                         "unregistered from Telegram gateway"
                     },
-                )
+                ))
             }
             Err(message) => {
                 if message.is_connection_fatal() {
                     fail_gateway_client_if_current(&self.gateway, &self.state, &gateway);
                 }
-                tool_error(invoke, message.to_string())
+                ToolDispatch::terminal(tool_error(invoke, message.to_string()))
             }
         }
     }
@@ -2536,10 +2745,24 @@ where
 {
     let mut runtime = tau_client::TauExtensionRunner::new(TelegramExtension)
         .start_manual_loop_deferred_startup_with_state(reader, writer, move |handle| {
+            let ext = Extension::new(client, handle);
+            #[cfg(test)]
+            {
+                let mut state = ext.state.lock();
+                state.current_session_id =
+                    Some(tau_proto::SessionId::parse("s1").expect("test session id"));
+                state.registration_replay_complete = true;
+            }
             TelegramRuntime {
-                ext: Extension::new(client, handle),
+                ext,
+                desired_registration_storage: DesiredRegistrationStorage::default(),
             }
         })?;
+    #[cfg(not(test))]
+    {
+        let storage = DesiredRegistrationStorage::rpc(runtime.extension_data_client());
+        runtime.state_mut().desired_registration_storage = storage;
+    }
     runtime.state().ext.output.install_waker(runtime.waker());
     let Some(configure) = read_initial_config(&mut runtime)? else {
         let state = runtime.finish()?;
@@ -2605,6 +2828,8 @@ impl TauExtension for TelegramExtension {
 struct TelegramRuntime {
     /// Shared Telegram bridge state and background-worker coordination.
     ext: Extension,
+    /// Session-scoped desired-registration storage owned by the manual loop.
+    desired_registration_storage: DesiredRegistrationStorage,
 }
 
 /// Read the mandatory initial configuration used for namespaced startup
@@ -2655,15 +2880,24 @@ fn send_startup_declarations(
     runtime: &mut tau_client::ManualExtensionRuntime<TelegramRuntime>,
     tool_names: &ToolNames,
 ) -> ClientResult<()> {
-    runtime.startup_subscribe([
-        tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_STARTED),
+    let historical = [
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_DISPLAY_NAME_SET),
         tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
+    ];
+    let live = [tau_proto::EventSelector::Exact(
+        tau_proto::EventName::TOOL_STARTED,
+    )]
+    .into_iter()
+    .chain(historical.iter().cloned())
+    .chain([
+        tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_REPLAY_COMPLETE),
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN),
         tau_proto::EventSelector::Exact(tau_proto::EventName::MESSAGE_DELIVERED),
-    ])?;
+    ]);
+    runtime.startup_subscribe_split(historical.clone(), live)?;
     runtime.startup_local_tool(tau_proto::ToolRegistrationDeclared {
         tool: register_tool_spec_for(tool_names),
         tool_group: Some(telegram_tool_group()),
@@ -2710,16 +2944,34 @@ fn drive_manual_runtime(
             }
             ManualRuntimePoll::Message(tau_proto::HarnessOutputMessage::Deliver(delivery)) => {
                 if delivery.replay {
+                    if let Err(message) =
+                        handle_replayed_event_value(runtime.state(), *delivery.event)
+                    {
+                        runtime.state().ext.output.config_error(message)?;
+                        return Err(Box::new(IoError::other(
+                            "durable Telegram registration replay failed",
+                        )));
+                    }
                     continue;
                 }
                 match *delivery.event {
                     Event::ToolStarted(invoke)
                         if runtime.state().ext.handles_tool(invoke.tool_name.as_str()) =>
                     {
-                        runtime.state().ext.dispatch_tool_checked(invoke)?;
+                        runtime.state().ext.dispatch_tool_checked(
+                            invoke,
+                            &runtime.state().desired_registration_storage,
+                        )?;
                     }
                     Event::ToolStarted(_) => {}
-                    event => handle_live_event_value(runtime.state(), event),
+                    event => {
+                        if let Err(message) = handle_live_event_value(runtime.state(), event) {
+                            runtime.state().ext.output.config_error(message)?;
+                            return Err(Box::new(IoError::other(
+                                "durable Telegram registration reconciliation failed",
+                            )));
+                        }
+                    }
                 }
             }
             ManualRuntimePoll::Message(tau_proto::HarnessOutputMessage::Disconnect(_)) => {
@@ -2748,7 +3000,30 @@ fn handle_configure_message(
     let publisher_name = configure.instance_name.clone();
     let result = parse_ext_config(&configure.config)
         .and_then(|cfg| cfg.validate(&configure.secrets))
-        .and_then(|cfg| runtime.ext.apply_config(cfg, configure.state_dir));
+        .and_then(|cfg| {
+            let session_id = runtime
+                .ext
+                .state
+                .lock()
+                .current_session_id
+                .clone()
+                .ok_or_else(|| {
+                    "cannot reconfigure Telegram before observing session.started".to_owned()
+                })?;
+            let empty = BTreeSet::new();
+            runtime
+                .desired_registration_storage
+                .store(&session_id, &empty)
+                .map_err(|error| error.to_string())?;
+            {
+                let mut state = runtime.ext.state.lock();
+                state.desired_registrations = empty;
+                state.clear_active_bridge_state();
+                state.mark_coordination_changed();
+            }
+            runtime.ext.state.notify_all();
+            runtime.ext.apply_config(cfg, configure.state_dir)
+        });
     if let Err(message) = result {
         runtime.ext.clear_config_after_error();
         runtime.ext.output.config_error(message)?;
@@ -2758,8 +3033,41 @@ fn handle_configure_message(
     Ok(())
 }
 
+/// Accumulates only membership and labels needed for restart reconciliation.
+fn handle_replayed_event_value(runtime: &TelegramRuntime, event: Event) -> Result<(), String> {
+    if let Event::SessionStarted(started) = &event {
+        runtime.ext.load_desired_registrations(
+            &runtime.desired_registration_storage,
+            &started.session_id,
+        )?;
+    }
+    let mut state = runtime.ext.state.lock();
+    match event {
+        Event::SessionStarted(started) => state.current_session_id = Some(started.session_id),
+        Event::SessionAgentLoaded(loaded) => {
+            state.replayed_loaded_agents.insert(loaded.agent_id);
+        }
+        Event::SessionAgentUnloaded(unloaded) => {
+            state.replayed_loaded_agents.remove(&unloaded.agent_id);
+        }
+        Event::AgentStarted(started) => {
+            if let Some(display_name) = started.display_name {
+                state.agent_labels.insert(started.agent_id, display_name);
+            }
+        }
+        Event::AgentDisplayNameSet(name) => {
+            state.agent_labels.insert(name.agent_id, name.display_name);
+        }
+        _ => return Ok(()),
+    }
+    state.mark_coordination_changed();
+    drop(state);
+    runtime.ext.state.notify_all();
+    Ok(())
+}
+
 /// Handle a delivered live event without tau-client's static handler registry.
-fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
+fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) -> Result<(), String> {
     match event {
         Event::MessageDelivered(fact) => {
             runtime.ext.acknowledge_live_delivery(&fact);
@@ -2797,12 +3105,17 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
             }
         }
         Event::SessionStarted(started) => {
+            runtime.ext.load_desired_registrations(
+                &runtime.desired_registration_storage,
+                &started.session_id,
+            )?;
             let mut state = runtime.ext.state.lock();
             let session_changed = state
                 .current_session_id
                 .as_ref()
                 .is_some_and(|current| current != &started.session_id);
             state.current_session_id = Some(started.session_id);
+            state.registration_replay_complete = false;
             state.mark_coordination_changed();
             runtime.ext.state.notify_all();
             drop(state);
@@ -2818,6 +3131,15 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
             }
         }
         Event::SessionAgentUnloaded(unloaded) => {
+            let persistence_error = runtime
+                .ext
+                .persist_desired_registration(
+                    &runtime.desired_registration_storage,
+                    &unloaded.session_id,
+                    &unloaded.agent_id,
+                    false,
+                )
+                .err();
             let mut state = runtime.ext.state.lock();
             let session_id = state
                 .current_session_id
@@ -2850,6 +3172,23 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
                     }
                 }
             }
+            if let Some(message) = persistence_error {
+                return Err(message.to_string());
+            }
+        }
+        Event::SessionReplayComplete(complete) => {
+            if complete.error.is_some() {
+                return Err(
+                    "session replay failed before Telegram registration reconciliation".to_owned(),
+                );
+            }
+            if runtime.ext.state.lock().current_session_id.as_ref() != Some(&complete.session_id) {
+                return Err("stale Telegram session replay completion".to_owned());
+            }
+            runtime.ext.reconcile_desired_registrations(
+                &runtime.desired_registration_storage,
+                &complete.session_id,
+            )?;
         }
         Event::SessionShutdown(_) => {
             let (session_id, agents) = {
@@ -2858,6 +3197,9 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
                 let agents = state.registered_agents.iter().cloned().collect::<Vec<_>>();
                 state.current_session_id = None;
                 state.registered_agents.clear();
+                state.desired_registrations.clear();
+                state.replayed_loaded_agents.clear();
+                state.registration_replay_complete = false;
                 state.agent_labels.clear();
                 state.selected_agent_by_chat.clear();
                 state.poller_drained_initial_backlog = false;
@@ -2897,6 +3239,7 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn parse_ext_config(value: &CborValue) -> Result<ExtConfig, String> {
