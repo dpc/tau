@@ -38,7 +38,13 @@ impl AgentActivity {
     }
 
     /// Moves one optimistic submission, if present, into an active prompt id.
+    ///
+    /// Repeated canonical progress updates retain the same active prompt
+    /// without consuming another optimistic submission.
     pub(crate) fn start_prompt(&mut self, agent_prompt_id: &AgentPromptId) {
+        if self.active_prompts.contains(agent_prompt_id) {
+            return;
+        }
         self.optimistic_submissions = self.optimistic_submissions.saturating_sub(1);
         self.active_prompts.insert(agent_prompt_id.clone());
     }

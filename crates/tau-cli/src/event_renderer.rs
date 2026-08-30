@@ -2466,6 +2466,18 @@ impl EventRenderer {
         {
             return;
         }
+        // Prompt membership is exclusive: every transition below removes this
+        // id from all previous owners before adding this owner. This direct
+        // lookup avoids rebuilding status and watch rows for sampled updates
+        // that already retain that exact association.
+        if self
+            .watches
+            .active_agent_prompts
+            .get(agent_id)
+            .is_some_and(|prompts| prompts.contains(agent_prompt_id))
+        {
+            return;
+        }
         self.remove_active_agent_prompt(agent_prompt_id);
         self.watches
             .active_agent_prompts
@@ -5585,9 +5597,13 @@ impl EventRenderer {
                         .prompt_agents
                         .contains_key(&update.agent_prompt_id)
                 {
-                    self.event_owners
-                        .prompt_agents
-                        .insert(update.agent_prompt_id.clone(), update.agent_id.clone());
+                    if self.event_owners.prompt_agents.get(&update.agent_prompt_id)
+                        != Some(&update.agent_id)
+                    {
+                        self.event_owners
+                            .prompt_agents
+                            .insert(update.agent_prompt_id.clone(), update.agent_id.clone());
+                    }
                     self.mark_agent_prompt_active(&agent_id, &update.agent_prompt_id);
                 }
                 true
@@ -7507,6 +7523,22 @@ impl EventRenderer {
                 .prompt_agents
                 .get(&update.agent_prompt_id)
                 .is_some_and(|agent_id| agent_id != &update.agent_id)
+        {
+            return;
+        }
+        // The first empty update creates its pending response marker. Once it
+        // exists, another completely empty sample cannot alter the transcript,
+        // status, editor context, or terminal frame.
+        if update.deltas.is_empty()
+            && update.compaction.is_none()
+            && update.status.is_none()
+            && update.response_stats.is_none()
+            && self
+                .transcript
+                .runtime
+                .prompts
+                .get(spid)
+                .is_some_and(|state| state.response_block_id.is_some())
         {
             return;
         }

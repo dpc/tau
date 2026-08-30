@@ -357,18 +357,247 @@ fn presentation_mutation_eligibility_rejects_same_value_block_updates() {
         RendererDeliveryId::new(1),
     );
     assert!(renderer.resources.handle.selected_delivery_mutated());
+    let redraws_after_first_update = renderer.redraw_request_count_for_test();
     renderer.handle_socket_delivery(
         &update,
         tau_proto::UnixMicros::new(2),
         RendererDeliveryId::new(2),
     );
     assert!(!renderer.resources.handle.selected_delivery_mutated());
+    assert_eq!(
+        renderer.redraw_request_count_for_test(),
+        redraws_after_first_update,
+        "an already-rendered empty update must not request another redraw"
+    );
     let observations = renderer
         .resources
         .handle
         .presentation_observations_for_test();
     assert_eq!(observations.len(), 1);
     assert_eq!(observations[0].class, Class::ResponseUpdated);
+}
+
+/// Canonical provider updates keep a prompt's owner and watch activity stable
+/// across repeated response shapes, while late ownership and compatibility
+/// rehomes still move it exactly once.
+#[test]
+fn response_update_activation_is_idempotent_across_routing_shapes() {
+    let agent_a = agent_id("agent-a");
+    let agent_b = agent_id("agent-b");
+    let agent_c = agent_id("agent-c");
+    let prompt_id = tau_proto::AgentPromptId::parse("prompt-activation").expect("valid prompt id");
+    let response_update = |agent_id: tau_proto::AgentId| {
+        tau_proto::Event::ProviderResponseUpdated(tau_proto::ProviderResponseUpdated {
+            agent_prompt_id: prompt_id.clone(),
+            agent_id,
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
+            response_stats: None,
+            originator: tau_proto::PromptOriginator::User,
+        })
+    };
+
+    let mut live = renderer_for_agent_id_tests();
+    live.selection.current_agent_id = Some(agent_a.to_string());
+    live.selection.displayed_agent_id = Some(agent_a.to_string());
+    live.watches.watched_agents.insert(
+        agent_a.to_string(),
+        vec![agent_b.to_string(), agent_c.to_string()],
+    );
+
+    let mut status = response_update(agent_b.clone());
+    let tau_proto::Event::ProviderResponseUpdated(status_update) = &mut status else {
+        unreachable!("response update constructor")
+    };
+    status_update.status = Some(tau_proto::ProviderResponseStatusUpdate {
+        text: "retrying".to_owned(),
+        clear_response: false,
+        retry: None,
+    });
+    live.handle(&status);
+    let redraws_after_activation = live.redraw_request_count_for_test();
+    assert_eq!(
+        live.event_owners.prompt_agents.get(&prompt_id),
+        Some(&agent_b),
+        "a late status update adopts its canonical owner"
+    );
+    assert_eq!(
+        live.watches.active_agent_prompts.get(agent_b.as_str()),
+        Some(&HashSet::from([prompt_id.clone()])),
+        "the selected watcher sees the hidden worker as active"
+    );
+
+    for repeated in [&status, &status] {
+        live.handle(repeated);
+    }
+    assert_eq!(
+        live.redraw_request_count_for_test(),
+        redraws_after_activation,
+        "identical hidden status updates do not rebuild selected watch rows"
+    );
+
+    let mut content = response_update(agent_b.clone());
+    let tau_proto::Event::ProviderResponseUpdated(content_update) = &mut content else {
+        unreachable!("response update constructor")
+    };
+    content_update
+        .deltas
+        .push(tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "worker output".to_owned(),
+            phase: None,
+        });
+    let mut compaction = response_update(agent_b.clone());
+    let tau_proto::Event::ProviderResponseUpdated(compaction_update) = &mut compaction else {
+        unreachable!("response update constructor")
+    };
+    compaction_update.compaction = Some(tau_proto::ProviderResponseCompactionUpdate {
+        status: tau_proto::ProviderResponseCompactionStatus::Started,
+        original_input_tokens: Some(42),
+        compaction_output_tokens: None,
+    });
+    for update in [&content, &compaction] {
+        live.handle(update);
+        assert_eq!(
+            live.redraw_request_count_for_test(),
+            redraws_after_activation,
+            "hidden content and compaction retain their own transcript without rebuilding A's rows"
+        );
+    }
+
+    let mut rehome = response_update(agent_c.clone());
+    let tau_proto::Event::ProviderResponseUpdated(rehome_update) = &mut rehome else {
+        unreachable!("response update constructor")
+    };
+    rehome_update
+        .deltas
+        .push(tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 1,
+            text: "rehome".to_owned(),
+            phase: None,
+        });
+    live.handle(&rehome);
+    assert_eq!(
+        live.event_owners.prompt_agents.get(&prompt_id),
+        Some(&agent_c),
+        "a visible-content compatibility update rehomes the prompt"
+    );
+    assert!(
+        !live
+            .watches
+            .active_agent_prompts
+            .contains_key(agent_b.as_str())
+            && live
+                .watches
+                .active_agent_prompts
+                .get(agent_c.as_str())
+                .is_some_and(|prompts| prompts.contains(&prompt_id)),
+        "a rehome removes only the old owner before activating the new one"
+    );
+    assert!(
+        live.redraw_request_count_for_test() > redraws_after_activation,
+        "a real activity transition rebuilds the selected watch row"
+    );
+
+    let terminal = tau_proto::Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+        agent_id: agent_c.clone(),
+        agent_prompt_id: prompt_id.clone(),
+        reason: tau_proto::AgentPromptTerminationReason::Stale,
+        originator: tau_proto::PromptOriginator::User,
+        automatic_compaction_decision: None,
+    });
+    live.handle(&terminal);
+    let redraws_after_terminal = live.redraw_request_count_for_test();
+    let late_stats = response_update(agent_c.clone());
+    live.handle(&late_stats);
+    assert!(
+        live.watches.active_agent_prompts.is_empty()
+            && live.watches.terminal_agent_prompts.contains(&prompt_id),
+        "a stale terminal update cannot resurrect prompt activity"
+    );
+    assert_eq!(
+        live.redraw_request_count_for_test(),
+        redraws_after_terminal,
+        "a terminal-guarded no-op does not redraw selected watch rows"
+    );
+
+    let mut cold_replay = renderer_for_agent_id_tests();
+    cold_replay.selection.current_agent_id = Some(agent_a.to_string());
+    cold_replay.selection.displayed_agent_id = Some(agent_a.to_string());
+    cold_replay.watches.watched_agents.insert(
+        agent_a.to_string(),
+        vec![agent_b.to_string(), agent_c.to_string()],
+    );
+    for event in [
+        &status,
+        &content,
+        &compaction,
+        &rehome,
+        &terminal,
+        &late_stats,
+    ] {
+        cold_replay.handle(event);
+    }
+    assert_eq!(
+        cold_replay.event_owners.prompt_agents, live.event_owners.prompt_agents,
+        "cold replay retains the live owner after repeated updates and rehome"
+    );
+    assert_eq!(
+        cold_replay.watches.active_agent_prompts, live.watches.active_agent_prompts,
+        "cold replay retains the live terminal activity state"
+    );
+
+    let mut no_agent = renderer_for_agent_id_tests();
+    let unknown = tau_proto::AgentPromptId::parse("prompt-late").expect("valid prompt id");
+    let late = tau_proto::Event::ProviderResponseUpdated(tau_proto::ProviderResponseUpdated {
+        agent_prompt_id: unknown.clone(),
+        agent_id: agent_b.clone(),
+        deltas: Vec::new(),
+        compaction: None,
+        status: None,
+        response_stats: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    no_agent.handle(&late);
+    let no_agent_redraws = no_agent.redraw_request_count_for_test();
+    no_agent.handle(&late);
+    assert_eq!(
+        no_agent.event_owners.prompt_agents.get(&unknown),
+        Some(&agent_b),
+        "a no-agent late update adopts ownership before generic routing"
+    );
+    assert_eq!(
+        no_agent.redraw_request_count_for_test(),
+        no_agent_redraws,
+        "an already-rendered no-agent no-op does not redraw"
+    );
+}
+
+/// Repeated progress for one prompt must not consume another optimistic
+/// submission that still needs its own prompt lifecycle.
+#[test]
+fn repeated_prompt_start_preserves_other_optimistic_submission() {
+    let first = tau_proto::AgentPromptId::parse("prompt-first").expect("valid prompt id");
+    let second = tau_proto::AgentPromptId::parse("prompt-second").expect("valid prompt id");
+    let mut activity = AgentActivity::default();
+
+    activity.mark_optimistic_submission();
+    activity.mark_optimistic_submission();
+    activity.start_prompt(&first);
+    activity.start_prompt(&first);
+    activity.finish_prompt(&first, &[]);
+    assert!(
+        activity.is_in_progress(),
+        "the second optimistic submission remains active after duplicate progress"
+    );
+
+    activity.start_prompt(&second);
+    activity.finish_prompt(&second, &[]);
+    assert!(
+        !activity.is_in_progress(),
+        "finishing the second prompt clears the remaining optimistic submission"
+    );
 }
 
 /// Every allowlisted canonical fact must drive the real selected renderer fold
