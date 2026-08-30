@@ -1003,6 +1003,90 @@ fn markdown_table_does_not_parse_links_across_structural_pipes() {
     );
 }
 
+/// Ensures the retained cell projections emit exactly the same runs as the
+/// complete Markdown path across pipes, code, Unicode, links, and both OSC 8
+/// projections.
+#[test]
+fn markdown_table_retained_cell_runs_match_complete_rendering() {
+    let source = "| A | Link | Code |\n| :--- | ---: | :---: |\n| x\\|y | [中](https://example.test) | `a|b` |\n";
+
+    for osc8_links in [false, true] {
+        let (projected, reparsed, work) =
+            projected_table_runs_and_work(source, osc8_links).expect("valid table projection");
+        let mut fence = None;
+        let complete = parse_markdown_with_state(source, &mut fence, osc8_links);
+
+        assert_eq!(projected, reparsed);
+        assert_eq!(projected, complete);
+        assert_eq!(work.parsed_rows, 3);
+        assert_eq!(work.parsed_cells, 9);
+        assert_eq!(work.emitted_cells, 6);
+    }
+}
+
+/// Proves a large accepted table performs exactly one structural and inline
+/// parse per projected row and cell without relying on elapsed-time thresholds.
+#[test]
+fn markdown_large_table_projects_each_cell_once() {
+    // Each one-column-wide body cell contributes two canonical margins and two
+    // alignment spaces. Stay just below the aggregate padding limit.
+    const BODY_ROWS: usize = TABLE_MAX_EXTRA_PADDING_BYTES / (TABLE_MAX_COLUMNS * 4) - 5;
+    let header = format!(
+        "| {} |\n",
+        (0..TABLE_MAX_COLUMNS)
+            .map(|index| format!("H{index}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let separator = format!(
+        "| {} |\n",
+        (0..TABLE_MAX_COLUMNS)
+            .map(|_| "---")
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let body = format!(
+        "| {} |\n",
+        (0..TABLE_MAX_COLUMNS)
+            .map(|_| "x")
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let source = format!("{header}{separator}{}", body.repeat(BODY_ROWS));
+
+    let (projected, reparsed, work) =
+        projected_table_runs_and_work(&source, true).expect("bounded large table projection");
+    let mut fence = None;
+    assert_eq!(projected, reparsed);
+    assert_eq!(
+        projected,
+        parse_markdown_with_state(&source, &mut fence, true)
+    );
+    assert_eq!(work.parsed_rows, BODY_ROWS + 2);
+    assert_eq!(work.parsed_cells, (BODY_ROWS + 2) * TABLE_MAX_COLUMNS);
+    assert_eq!(work.emitted_cells, (BODY_ROWS + 1) * TABLE_MAX_COLUMNS);
+}
+
+/// Ensures the canonical-margin lower bound stops cell projection at a fixed
+/// count for a far-over-bound table while preserving exact raw fallback text.
+#[test]
+fn markdown_over_bound_table_stops_projection_work_early() {
+    const COLUMNS: usize = 2;
+    const RETAINED_ROWS: usize = TABLE_MAX_EXTRA_PADDING_BYTES / (COLUMNS * 2);
+    const BODY_ROWS: usize = RETAINED_ROWS * 2;
+    let mut source = "| A | B |\n| --- | --- |\n".to_owned();
+    source.push_str(&"| x | y |\n".repeat(BODY_ROWS));
+
+    let work = table_projection_work(&source, true);
+    assert_eq!(work.parsed_rows, RETAINED_ROWS + 1);
+    assert_eq!(work.parsed_cells, RETAINED_ROWS * COLUMNS);
+    assert_eq!(work.emitted_cells, 0);
+
+    let theme = markdown_test_theme();
+    let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
+    assert_eq!(rendered_text(&block), source);
+}
+
 /// Ensures indented pipe-shaped text remains code and is not table-padded.
 #[test]
 fn indented_pipe_tables_remain_code() {
