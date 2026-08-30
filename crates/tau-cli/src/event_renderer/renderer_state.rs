@@ -370,6 +370,34 @@ pub(super) struct EditorPublicationState {
     /// context by test builds.
     #[cfg(test)]
     pub(super) response_copy_bytes: Cell<u64>,
+    /// Exact final semantic projection work performed by production paths in
+    /// test builds.
+    #[cfg(test)]
+    pub(super) final_semantic_projection: FinalSemanticProjectionCounts,
+}
+
+/// Production-coupled final semantic string projection counters.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct FinalSemanticProjectionCounts {
+    /// Non-empty assistant message bodies projected for terminal display.
+    pub(crate) message_materializations: u64,
+    /// Displayed message bodies that required concatenating multiple text
+    /// parts.
+    pub(crate) message_concat_allocations: u64,
+    /// Non-empty assistant aggregates requested for editor retention.
+    pub(crate) assistant_materializations: u64,
+    /// Assistant aggregates that required concatenating multiple text parts.
+    pub(crate) assistant_concat_allocations: u64,
+    /// External-editor publication copies prepared before selected final
+    /// commits.
+    pub(crate) editor_publication_clones: u64,
+    /// Bytes copied into those staged external-editor publication values.
+    pub(crate) editor_publication_clone_bytes: u64,
+    /// Non-empty reasoning aggregates requested for display or retention.
+    pub(crate) reasoning_materializations: u64,
+    /// Reasoning aggregates that required concatenating multiple text items.
+    pub(crate) reasoning_concat_allocations: u64,
 }
 
 /// Renderer-global activity notifications.

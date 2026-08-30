@@ -1123,6 +1123,19 @@ fn hidden_agent_response_does_not_replace_visible_editor_context() {
             "worker two response",
         ),
     ));
+    let hidden_projection = renderer.final_semantic_projection_counts_for_test();
+    assert_eq!(hidden_projection.message_materializations, 2);
+    assert_eq!(hidden_projection.message_concat_allocations, 0);
+    assert_eq!(hidden_projection.assistant_materializations, 2);
+    assert_eq!(hidden_projection.assistant_concat_allocations, 0);
+    assert_eq!(
+        hidden_projection.editor_publication_clones, 1,
+        "the hidden final must not prepare an external-editor publication copy"
+    );
+    assert_eq!(
+        hidden_projection.editor_publication_clone_bytes,
+        "worker one response".len() as u64
+    );
 
     let visible_context = renderer.editor_context();
     let visible_context = visible_context.lock().expect("editor context");

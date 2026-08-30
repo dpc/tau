@@ -6,10 +6,9 @@ use super::*;
 pub(super) struct FinishedResponseProjection {
     /// Final reasoning text and its settled history block.
     thinking: Option<(String, tau_cli_term::StyledBlock)>,
-    /// Complete assistant text published to editor context.
-    assistant_text: Option<String>,
-    /// Separately owned editor value moved into the shared input context.
-    editor_last_response: Option<String>,
+    /// Complete user assistant text for transcript retention and external
+    /// editor publication.
+    editor_response: Option<(String, Option<String>)>,
     /// Settled durable items in provider output order.
     items: Vec<FinishedContextProjection>,
     /// Number of declared calls, including length-truncated calls.
@@ -109,13 +108,35 @@ impl EventRenderer {
         let turn_latency = prompt_state
             .and_then(|state| state.started_at)
             .map(|started_at| started_at.elapsed());
-        let thinking = reasoning_text_from_output_items(&finished.output_items)
-            .or_else(|| prompt_state.and_then(|state| state.thinking_text.clone()))
-            .filter(|text| !text.is_empty())
-            .filter(|_| self.presentation.show_thinking || !self.presentation.verbose_mode)
+        let retain_thinking = self.presentation.show_thinking || !self.presentation.verbose_mode;
+        #[cfg(test)]
+        let mut reasoning_concat_allocations = 0;
+        let thinking = retain_thinking
+            .then(|| {
+                reasoning_text_from_output_items(
+                    &finished.output_items,
+                    #[cfg(test)]
+                    &mut reasoning_concat_allocations,
+                )
+                .or_else(|| {
+                    prompt_state
+                        .and_then(|state| state.thinking_text.as_deref())
+                        .map(Cow::Borrowed)
+                })
+            })
+            .flatten()
             .map(|text| {
+                #[cfg(test)]
+                {
+                    self.editor
+                        .final_semantic_projection
+                        .reasoning_materializations += 1;
+                    self.editor
+                        .final_semantic_projection
+                        .reasoning_concat_allocations += reasoning_concat_allocations;
+                }
                 let display = if self.presentation.verbose_mode && self.presentation.show_thinking {
-                    text.as_str()
+                    text.as_ref()
                 } else {
                     ""
                 };
@@ -125,13 +146,45 @@ impl EventRenderer {
                     display,
                     self.presentation.osc8_links,
                 );
-                (text, block)
+                (text.into_owned(), block)
             });
-        let assistant_text = assistant_text_from_output_items(&finished.output_items);
-        let editor_last_response = finished
+        #[cfg(test)]
+        let mut assistant_concat_allocations = 0;
+        let editor_response = finished
             .originator
             .is_user()
-            .then(|| assistant_text.clone())
+            .then(|| {
+                assistant_text_from_output_items(
+                    &finished.output_items,
+                    #[cfg(test)]
+                    &mut assistant_concat_allocations,
+                )
+                .map(|text| {
+                    #[cfg(test)]
+                    {
+                        self.editor
+                            .final_semantic_projection
+                            .assistant_materializations += 1;
+                        self.editor
+                            .final_semantic_projection
+                            .assistant_concat_allocations += assistant_concat_allocations;
+                    }
+                    let retained = text.into_owned();
+                    let published = (!self.editor.suppress_editor_context_publish).then(|| {
+                        #[cfg(test)]
+                        {
+                            self.editor
+                                .final_semantic_projection
+                                .editor_publication_clones += 1;
+                            self.editor
+                                .final_semantic_projection
+                                .editor_publication_clone_bytes += retained.len() as u64;
+                        }
+                        retained.clone()
+                    });
+                    (retained, published)
+                })
+            })
             .flatten();
         let items = self.stage_finished_context_items(finished, terminal_tool_calls);
         let placeholder = self.stage_finished_placeholder(finished, terminal_tool_calls);
@@ -175,8 +228,7 @@ impl EventRenderer {
         }
         FinishedResponseProjection {
             thinking,
-            assistant_text,
-            editor_last_response,
+            editor_response,
             items,
             declared_tool_calls,
             admitted_tool_calls,
@@ -284,11 +336,7 @@ impl EventRenderer {
             hook();
         }
 
-        self.record_finished_assistant_context(
-            finished,
-            projection.assistant_text.take(),
-            projection.editor_last_response.take(),
-        );
+        self.record_finished_assistant_context(projection.editor_response.take());
         self.record_finished_turn_stats(projection.turn_stats.take(), projection.turn_latency);
         let status_block = projection
             .status_block
@@ -364,28 +412,24 @@ impl EventRenderer {
 
     fn record_finished_assistant_context(
         &mut self,
-        finished: &tau_proto::ProviderResponseFinished,
-        full_assistant_text: Option<String>,
-        editor_last_response: Option<String>,
+        editor_response: Option<(String, Option<String>)>,
     ) {
-        let Some(text) = full_assistant_text else {
+        let Some((retained, published)) = editor_response else {
             return;
         };
-        if finished.originator.is_user() {
-            self.transcript
-                .runtime
-                .editor_conversation_context
-                .last_response = Some(text);
-            self.transcript
-                .runtime
-                .editor_conversation_context
-                .current_response = None;
-            if !self.editor.suppress_editor_context_publish
-                && let Ok(mut context) = self.editor.editor_context.lock()
-            {
-                context.last_response = editor_last_response;
-                context.current_response = None;
-            }
+        self.transcript
+            .runtime
+            .editor_conversation_context
+            .last_response = Some(retained);
+        self.transcript
+            .runtime
+            .editor_conversation_context
+            .current_response = None;
+        if let Some(published) = published
+            && let Ok(mut context) = self.editor.editor_context.lock()
+        {
+            context.last_response = Some(published);
+            context.current_response = None;
         }
     }
 
@@ -478,28 +522,39 @@ impl EventRenderer {
     /// Classifies and renders durable provider items outside the publication
     /// cut.
     fn stage_finished_context_items(
-        &self,
+        &mut self,
         finished: &tau_proto::ProviderResponseFinished,
         terminal_tool_calls: &TerminalToolCalls,
     ) -> Vec<FinishedContextProjection> {
         use tau_themes::names;
 
         let mut projected_calls = terminal_tool_calls.iter();
+        #[cfg(test)]
+        let mut message_materializations = 0;
+        #[cfg(test)]
+        let mut message_concat_allocations = 0;
         let items = finished
             .output_items
             .iter()
             .filter_map(|item| match item {
-                ContextItem::Message(message) => {
-                    assistant_text_from_message_item(message).map(|text| {
-                        FinishedContextProjection::Message(markdown_prefixed_block_with_osc8(
-                            &self.resources.theme,
-                            names::AGENT_RESPONSE,
-                            COMPLETED_AGENT_RESPONSE_PREFIX,
-                            &text,
-                            self.presentation.osc8_links,
-                        ))
-                    })
-                }
+                ContextItem::Message(message) => assistant_text_from_message_item(
+                    message,
+                    #[cfg(test)]
+                    &mut message_concat_allocations,
+                )
+                .map(|text| {
+                    #[cfg(test)]
+                    {
+                        message_materializations += 1;
+                    }
+                    FinishedContextProjection::Message(markdown_prefixed_block_with_osc8(
+                        &self.resources.theme,
+                        names::AGENT_RESPONSE,
+                        COMPLETED_AGENT_RESPONSE_PREFIX,
+                        &text,
+                        self.presentation.osc8_links,
+                    ))
+                }),
                 ContextItem::ToolCall(_) => {
                     let call = projected_calls
                         .next()
@@ -523,6 +578,15 @@ impl EventRenderer {
                 _ => None,
             })
             .collect();
+        #[cfg(test)]
+        {
+            self.editor
+                .final_semantic_projection
+                .message_materializations += message_materializations;
+            self.editor
+                .final_semantic_projection
+                .message_concat_allocations += message_concat_allocations;
+        }
         let projected_calls_exhausted = projected_calls.next().is_none();
         // ast-grep-ignore: debug-assert-expression-must-not-mutate
         debug_assert!(projected_calls_exhausted);

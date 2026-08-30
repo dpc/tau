@@ -10,8 +10,9 @@ use tau_config::settings as path_tau_config_settings;
 
 use super::{
     AgentActivity, MessageRenderMode, QUEUED_PROJECTION_WINDOW_BYTES, RoleCompletionDetails,
-    bounded_queued_line_end, bounded_queued_line_start, presentation_fact_name,
-    queued_prompt_projection, role_setting_value_completions,
+    assistant_text_from_message_item, assistant_text_from_output_items, bounded_queued_line_end,
+    bounded_queued_line_start, content_part_text, presentation_fact_name, queued_prompt_projection,
+    reasoning_text_from_output_items, role_setting_value_completions,
 };
 use crate::chat::{DraftSlot, queue_prompt_draft_snapshot};
 
@@ -32,6 +33,153 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
         tau_cli_term::CompletionData::new(),
         crate::tests::cli_test_theme(),
     )
+}
+
+/// The borrowed final-text projector must match the removed eager-`String`
+/// semantics for empty, single, multipart, mixed-role, and Unicode inputs while
+/// reporting allocations at the exact concatenation site.
+#[test]
+fn final_text_projection_matches_eager_reference_and_observes_real_allocations() {
+    use std::borrow::Cow;
+
+    use tau_proto::{
+        ContentPart, ContextItem, ContextRole, MessageItem, ReasoningTextItem, ReasoningTextKind,
+    };
+
+    let message = |role, content| {
+        ContextItem::Message(MessageItem {
+            role,
+            content,
+            phase: None,
+            responses_raw_json: None,
+        })
+    };
+    let items = [
+        message(
+            ContextRole::User,
+            vec![ContentPart::Text {
+                text: "ignored user".to_owned(),
+            }],
+        ),
+        message(
+            ContextRole::Assistant,
+            vec![ContentPart::Text {
+                text: String::new(),
+            }],
+        ),
+        message(
+            ContextRole::Assistant,
+            vec![ContentPart::HarnessInternalText {
+                text: "single 🦀".to_owned(),
+            }],
+        ),
+        ContextItem::ReasoningText(ReasoningTextItem {
+            kind: ReasoningTextKind::Summary,
+            text: "reason ".to_owned(),
+        }),
+        message(
+            ContextRole::Assistant,
+            vec![
+                ContentPart::Text {
+                    text: "\nsecond λ".to_owned(),
+                },
+                ContentPart::SyntheticCompactionSummary {
+                    text: "\nthird".to_owned(),
+                },
+            ],
+        ),
+        ContextItem::ReasoningText(ReasoningTextItem {
+            kind: ReasoningTextKind::Full,
+            text: "λ".to_owned(),
+        }),
+    ];
+    let eager_assistant = |items: &[ContextItem]| {
+        let text = items
+            .iter()
+            .filter_map(|item| match item {
+                ContextItem::Message(message) if message.role == ContextRole::Assistant => Some(
+                    message
+                        .content
+                        .iter()
+                        .map(content_part_text)
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect::<String>();
+        (!text.is_empty()).then_some(text)
+    };
+    let eager_reasoning = |items: &[ContextItem]| {
+        let text = items
+            .iter()
+            .filter_map(|item| match item {
+                ContextItem::ReasoningText(reasoning) => Some(reasoning.text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        (!text.is_empty()).then_some(text)
+    };
+
+    for end in 0..=items.len() {
+        let slice = &items[..end];
+        let expected_assistant = eager_assistant(slice);
+        let mut assistant_allocations = 0;
+        let actual_assistant = assistant_text_from_output_items(slice, &mut assistant_allocations);
+        assert_eq!(
+            actual_assistant.as_deref(),
+            expected_assistant.as_deref(),
+            "assistant prefix ending at item {end}"
+        );
+        let assistant_parts = slice
+            .iter()
+            .filter_map(|item| match item {
+                ContextItem::Message(message) if message.role == ContextRole::Assistant => {
+                    Some(&message.content)
+                }
+                _ => None,
+            })
+            .flatten()
+            .filter(|part| !content_part_text(part).is_empty())
+            .count();
+        assert_eq!(assistant_allocations, u64::from(assistant_parts > 1));
+        if assistant_parts == 1 {
+            assert!(matches!(actual_assistant, Some(Cow::Borrowed(_))));
+        }
+
+        let expected_reasoning = eager_reasoning(slice);
+        let mut reasoning_allocations = 0;
+        let actual_reasoning = reasoning_text_from_output_items(slice, &mut reasoning_allocations);
+        assert_eq!(
+            actual_reasoning.as_deref(),
+            expected_reasoning.as_deref(),
+            "reasoning prefix ending at item {end}"
+        );
+        let reasoning_parts = slice
+            .iter()
+            .filter(|item| {
+                matches!(item, ContextItem::ReasoningText(reasoning) if !reasoning.text.is_empty())
+            })
+            .count();
+        assert_eq!(reasoning_allocations, u64::from(reasoning_parts > 1));
+        if reasoning_parts == 1 {
+            assert!(matches!(actual_reasoning, Some(Cow::Borrowed(_))));
+        }
+    }
+
+    let ContextItem::Message(multipart_message) = &items[4] else {
+        panic!("multipart assistant fixture")
+    };
+    let eager_message = multipart_message
+        .content
+        .iter()
+        .map(content_part_text)
+        .collect::<String>();
+    let mut message_allocations = 0;
+    let projected_message =
+        assistant_text_from_message_item(multipart_message, &mut message_allocations)
+            .expect("assistant message projection");
+    assert_eq!(projected_message.as_ref(), eager_message);
+    assert_eq!(message_allocations, 1);
 }
 
 /// Submitted prompts must parse the caller's borrowed text and produce the

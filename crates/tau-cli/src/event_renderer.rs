@@ -5,6 +5,7 @@
 //! Provider delta ordering and accumulation follow
 //! `SPEC-tau-cli-provider-stream-rendering`.
 
+use std::borrow::Cow;
 #[cfg(test)]
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
@@ -1514,59 +1515,90 @@ fn update_compaction_status(
     }
 }
 
-fn reasoning_text_from_output_items(output_items: &[ContextItem]) -> Option<String> {
-    let text = output_items
-        .iter()
-        .filter_map(|item| match item {
+fn reasoning_text_from_output_items<'a>(
+    output_items: &'a [ContextItem],
+    #[cfg(test)] concat_allocations: &mut u64,
+) -> Option<Cow<'a, str>> {
+    text_projection(
+        output_items.iter().filter_map(|item| match item {
             ContextItem::ReasoningText(reasoning) => Some(reasoning.text.as_str()),
             _ => None,
-        })
-        .collect::<String>();
-    (!text.is_empty()).then_some(text)
+        }),
+        #[cfg(test)]
+        concat_allocations,
+    )
 }
 
-fn assistant_text_from_output_items(output_items: &[ContextItem]) -> Option<String> {
-    let text = output_items
-        .iter()
-        .filter_map(assistant_text_from_context_item)
-        .collect::<String>();
-    (!text.is_empty()).then_some(text)
+fn assistant_text_from_output_items<'a>(
+    output_items: &'a [ContextItem],
+    #[cfg(test)] concat_allocations: &mut u64,
+) -> Option<Cow<'a, str>> {
+    text_projection(
+        output_items
+            .iter()
+            .flat_map(|item| match item {
+                ContextItem::Message(MessageItem {
+                    role: ContextRole::Assistant,
+                    content,
+                    ..
+                }) => content.as_slice(),
+                _ => &[],
+            })
+            .map(content_part_text),
+        #[cfg(test)]
+        concat_allocations,
+    )
 }
 
-fn assistant_text_from_context_item(item: &ContextItem) -> Option<String> {
-    match item {
-        ContextItem::Message(MessageItem {
-            role: ContextRole::Assistant,
-            content,
-            ..
-        }) => Some(
-            content
-                .iter()
-                .map(|part| match part {
-                    ContentPart::Text { text }
-                    | ContentPart::SyntheticCompactionSummary { text }
-                    | ContentPart::HarnessInternalText { text } => text.as_str(),
-                })
-                .collect::<String>(),
-        ),
-        _ => None,
+/// Borrows one non-empty semantic text part and concatenates only when a second
+/// non-empty part exists.
+fn text_projection<'a>(
+    parts: impl Iterator<Item = &'a str> + Clone,
+    #[cfg(test)] concat_allocations: &mut u64,
+) -> Option<Cow<'a, str>> {
+    let mut non_empty = parts.filter(|part| !part.is_empty());
+    let first = non_empty.next()?;
+    let Some(second) = non_empty.next() else {
+        return Some(Cow::Borrowed(first));
+    };
+    let capacity = non_empty
+        .clone()
+        .fold(first.len().saturating_add(second.len()), |total, part| {
+            total.saturating_add(part.len())
+        });
+    let mut text = String::with_capacity(capacity);
+    #[cfg(test)]
+    {
+        *concat_allocations += 1;
+    }
+    text.push_str(first);
+    text.push_str(second);
+    for part in non_empty {
+        text.push_str(part);
+    }
+    Some(Cow::Owned(text))
+}
+
+fn content_part_text(part: &ContentPart) -> &str {
+    match part {
+        ContentPart::Text { text }
+        | ContentPart::SyntheticCompactionSummary { text }
+        | ContentPart::HarnessInternalText { text } => text,
     }
 }
 
-fn assistant_text_from_message_item(message: &MessageItem) -> Option<String> {
+fn assistant_text_from_message_item<'a>(
+    message: &'a MessageItem,
+    #[cfg(test)] concat_allocations: &mut u64,
+) -> Option<Cow<'a, str>> {
     if message.role != ContextRole::Assistant {
         return None;
     }
-    let text = message
-        .content
-        .iter()
-        .map(|part| match part {
-            ContentPart::Text { text }
-            | ContentPart::SyntheticCompactionSummary { text }
-            | ContentPart::HarnessInternalText { text } => text.as_str(),
-        })
-        .collect::<String>();
-    (!text.is_empty()).then_some(text)
+    text_projection(
+        message.content.iter().map(content_part_text),
+        #[cfg(test)]
+        concat_allocations,
+    )
 }
 
 /// Semantic state of one visible projected watched-agent row.
@@ -1819,6 +1851,8 @@ impl EventRenderer {
                 suppress_editor_context_publish: false,
                 #[cfg(test)]
                 response_copy_bytes: Cell::new(0),
+                #[cfg(test)]
+                final_semantic_projection: renderer_state::FinalSemanticProjectionCounts::default(),
             },
             activity: renderer_state::RendererActivityState {
                 tool_timer: None,
@@ -2921,6 +2955,15 @@ impl EventRenderer {
     #[cfg(test)]
     pub(crate) fn editor_response_copy_bytes_for_test(&self) -> u64 {
         self.editor.response_copy_bytes.get()
+    }
+
+    /// Returns exact final semantic projection work performed by production
+    /// renderer paths.
+    #[cfg(test)]
+    pub(crate) fn final_semantic_projection_counts_for_test(
+        &self,
+    ) -> renderer_state::FinalSemanticProjectionCounts {
+        self.editor.final_semantic_projection
     }
 
     /// Reports whether generic prompt fallback still marks an agent active.

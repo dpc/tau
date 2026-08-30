@@ -73,6 +73,295 @@ fn agent_response_marker_tracks_streaming_and_completed_states() {
     assert!(!vt.screen_contains(80, "◇ marker answer"));
 }
 
+/// Final assistant projection must ignore non-editor consumers, borrow a
+/// single part, and concatenate multipart user responses exactly once.
+#[test]
+fn final_assistant_projection_is_demand_driven_and_preserves_editor_bytes() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = marker_test_renderer(handle);
+    renderer.switch_agent(agent_id("main"));
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-empty-final",
+        Vec::new(),
+    )));
+    let mut extension_final = finished_response(
+        "sp-extension-final",
+        vec![assistant_message_item("private side reply")],
+    );
+    extension_final.originator = tau_proto::PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::parse("projection-test").expect("valid extension name"),
+        query_id: "side-query".to_owned(),
+    };
+    renderer.handle(&Event::ProviderResponseFinished(extension_final));
+    let unused = renderer.final_semantic_projection_counts_for_test();
+    assert_eq!(unused.message_materializations, 1);
+    assert_eq!(unused.message_concat_allocations, 0);
+    assert_eq!(unused.assistant_materializations, 0);
+    assert_eq!(unused.assistant_concat_allocations, 0);
+    assert_eq!(unused.editor_publication_clones, 0);
+    assert_eq!(unused.editor_publication_clone_bytes, 0);
+    assert_eq!(unused.reasoning_materializations, 0);
+    assert_eq!(unused.reasoning_concat_allocations, 0);
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-single-final",
+        vec![assistant_message_item("single λ part")],
+    )));
+    let single = renderer.final_semantic_projection_counts_for_test();
+    assert_eq!(single.message_materializations, 2);
+    assert_eq!(single.message_concat_allocations, 0);
+    assert_eq!(single.assistant_materializations, 1);
+    assert_eq!(single.assistant_concat_allocations, 0);
+    assert_eq!(single.editor_publication_clones, 1);
+    assert_eq!(
+        single.editor_publication_clone_bytes,
+        "single λ part".len() as u64
+    );
+    assert_eq!(
+        renderer
+            .editor_context()
+            .lock()
+            .expect("editor context")
+            .last_response
+            .as_deref(),
+        Some("single λ part")
+    );
+
+    let multipart = ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![
+            ContentPart::Text {
+                text: "first 🦀".to_owned(),
+            },
+            ContentPart::HarnessInternalText {
+                text: String::new(),
+            },
+            ContentPart::SyntheticCompactionSummary {
+                text: "\nsecond λ".to_owned(),
+            },
+        ],
+        phase: None,
+        responses_raw_json: None,
+    });
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-multipart-final",
+        vec![multipart, assistant_message_item("\nthird")],
+    )));
+    let multipart = renderer.final_semantic_projection_counts_for_test();
+    assert_eq!(multipart.message_materializations, 4);
+    assert_eq!(multipart.message_concat_allocations, 1);
+    assert_eq!(multipart.assistant_materializations, 2);
+    assert_eq!(multipart.assistant_concat_allocations, 1);
+    assert_eq!(multipart.editor_publication_clones, 2);
+    assert_eq!(
+        multipart.editor_publication_clone_bytes,
+        ("single λ part".len() + "first 🦀\nsecond λ\nthird".len()) as u64
+    );
+    assert_eq!(
+        renderer
+            .editor_context()
+            .lock()
+            .expect("editor context")
+            .last_response
+            .as_deref(),
+        Some("first 🦀\nsecond λ\nthird"),
+        "the optimized aggregate must preserve part variants, order, empties, and UTF-8 bytes"
+    );
+}
+
+/// Multipart message projection must produce the exact terminal cells and
+/// editor bytes that the previous eager concatenation produced.
+#[test]
+fn multipart_final_terminal_projection_matches_prejoined_reference() {
+    let multipart = ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![
+            ContentPart::Text {
+                text: "styled **bold 🦀**".to_owned(),
+            },
+            ContentPart::HarnessInternalText {
+                text: "\nsecond `λ`".to_owned(),
+            },
+            ContentPart::SyntheticCompactionSummary {
+                text: "\nthird".to_owned(),
+            },
+        ],
+        phase: None,
+        responses_raw_json: None,
+    });
+    let prejoined = assistant_message_item("styled **bold 🦀**\nsecond `λ`\nthird");
+    let render = |prompt_id: &str, item| {
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = marker_test_renderer(handle.clone());
+        renderer.switch_agent(agent_id("main"));
+        renderer.handle(&Event::ProviderResponseFinished(finished_response(
+            prompt_id,
+            vec![item],
+        )));
+        sync(&handle);
+        (renderer, vt)
+    };
+
+    let (multipart_renderer, multipart_vt) = render("sp-multipart-oracle", multipart);
+    let (reference_renderer, reference_vt) = render("sp-prejoined-oracle", prejoined);
+    assert_eq!(
+        multipart_vt.screen_text(80),
+        reference_vt.screen_text(80),
+        "multipart and eagerly prejoined finals must render identical terminal bytes and order"
+    );
+    for row in 0..24 {
+        for column in 0..80 {
+            assert_eq!(
+                multipart_vt.cell_style(row, column),
+                reference_vt.cell_style(row, column),
+                "terminal style mismatch at row {row}, column {column}"
+            );
+        }
+    }
+    let multipart_editor = multipart_renderer.editor_context();
+    let multipart_editor = multipart_editor.lock().expect("multipart editor");
+    let reference_editor = reference_renderer.editor_context();
+    let reference_editor = reference_editor.lock().expect("reference editor");
+    assert_eq!(
+        multipart_editor.last_response,
+        reference_editor.last_response
+    );
+
+    let multipart_work = multipart_renderer.final_semantic_projection_counts_for_test();
+    let reference_work = reference_renderer.final_semantic_projection_counts_for_test();
+    assert_eq!(multipart_work.message_concat_allocations, 1);
+    assert_eq!(multipart_work.assistant_concat_allocations, 1);
+    assert_eq!(reference_work.message_concat_allocations, 0);
+    assert_eq!(reference_work.assistant_concat_allocations, 0);
+}
+
+/// Multipart reasoning retained in verbose or compact mode must reproject to
+/// the same terminal cells as the previous eagerly joined string.
+#[test]
+fn multipart_reasoning_projection_matches_prejoined_reference_in_both_modes() {
+    let reasoning = |text: &str| {
+        ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Summary,
+            text: text.to_owned(),
+        })
+    };
+    for compact_initially in [false, true] {
+        let render = |prompt_id: &str, items| {
+            let (_term, handle, vt) = setup(80, 24);
+            let mut renderer = marker_test_renderer(handle.clone());
+            renderer.switch_agent(agent_id("main"));
+            renderer.apply_setting(
+                "show-thinking",
+                if compact_initially { "false" } else { "true" },
+            );
+            if compact_initially {
+                renderer.toggle_verbose_mode();
+            }
+            renderer.handle(&Event::ProviderResponseFinished(finished_response(
+                prompt_id, items,
+            )));
+            if compact_initially {
+                renderer.toggle_verbose_mode();
+                renderer.apply_setting("show-thinking", "true");
+            }
+            sync(&handle);
+            (renderer, vt)
+        };
+        let (multipart_renderer, multipart_vt) = render(
+            "sp-reasoning-multipart-oracle",
+            vec![reasoning("reason **🦀** "), reasoning("`λ`")],
+        );
+        let (reference_renderer, reference_vt) = render(
+            "sp-reasoning-prejoined-oracle",
+            vec![reasoning("reason **🦀** `λ`")],
+        );
+        assert_eq!(multipart_vt.screen_text(80), reference_vt.screen_text(80));
+        for row in 0..24 {
+            for column in 0..80 {
+                assert_eq!(
+                    multipart_vt.cell_style(row, column),
+                    reference_vt.cell_style(row, column),
+                    "mode={compact_initially}, row={row}, column={column}"
+                );
+            }
+        }
+        assert_eq!(
+            multipart_renderer
+                .final_semantic_projection_counts_for_test()
+                .reasoning_concat_allocations,
+            1
+        );
+        assert_eq!(
+            reference_renderer
+                .final_semantic_projection_counts_for_test()
+                .reasoning_concat_allocations,
+            0
+        );
+    }
+}
+
+/// Hidden reasoning must perform no aggregate work, while visible and
+/// compact-retained reasoning project the same bytes with allocation counts
+/// determined only by the number of non-empty source items.
+#[test]
+fn final_reasoning_projection_skips_unretained_text_and_counts_concatenation() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = marker_test_renderer(handle.clone());
+    renderer.switch_agent(agent_id("main"));
+    renderer.apply_setting("show-thinking", "false");
+    let reasoning = |text: &str| {
+        ContextItem::ReasoningText(tau_proto::ReasoningTextItem {
+            kind: tau_proto::ReasoningTextKind::Summary,
+            text: text.to_owned(),
+        })
+    };
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-hidden-reasoning",
+        vec![reasoning("not retained"), assistant_message_item("answer")],
+    )));
+    let hidden = renderer.final_semantic_projection_counts_for_test();
+    assert_eq!(hidden.reasoning_materializations, 0);
+    assert_eq!(hidden.reasoning_concat_allocations, 0);
+
+    renderer.apply_setting("show-thinking", "true");
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-visible-reasoning",
+        vec![
+            reasoning("visible 🦀"),
+            reasoning(""),
+            assistant_message_item("second answer"),
+        ],
+    )));
+    let single = renderer.final_semantic_projection_counts_for_test();
+    assert_eq!(single.reasoning_materializations, 1);
+    assert_eq!(single.reasoning_concat_allocations, 0);
+    sync(&handle);
+    assert!(vt.screen_contains(80, "visible 🦀"));
+
+    renderer.apply_setting("show-thinking", "false");
+    renderer.toggle_verbose_mode();
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-retained-reasoning",
+        vec![
+            reasoning("retained "),
+            reasoning("λ"),
+            assistant_message_item("compact answer"),
+        ],
+    )));
+    let retained = renderer.final_semantic_projection_counts_for_test();
+    assert_eq!(retained.reasoning_materializations, 2);
+    assert_eq!(retained.reasoning_concat_allocations, 1);
+    renderer.toggle_verbose_mode();
+    renderer.apply_setting("show-thinking", "true");
+    sync(&handle);
+    assert!(
+        vt.screen_contains(80, "retained λ"),
+        "compact-hidden reasoning must retain the exact aggregate for later display"
+    );
+}
+
 /// A visible final must coalesce all of its block, editor, and status redraw
 /// requests into one settled wake instead of exposing intermediate final state.
 #[test]
@@ -1800,6 +2089,9 @@ fn markdown_table_response_events_preserve_raw_text_and_replay_projection() {
             .as_deref(),
         Some(source)
     );
+    let live_projection = renderer.final_semantic_projection_counts_for_test();
+    assert_eq!(live_projection.assistant_materializations, 1);
+    assert_eq!(live_projection.assistant_concat_allocations, 0);
 
     let (_cold_term, cold_handle, cold_vt) = setup(160, 40);
     let mut cold_renderer = EventRenderer::new(
@@ -1830,6 +2122,11 @@ fn markdown_table_response_events_preserve_raw_text_and_replay_projection() {
             .last_response
             .as_deref(),
         Some(source)
+    );
+    let cold_projection = cold_renderer.final_semantic_projection_counts_for_test();
+    assert_eq!(
+        cold_projection, live_projection,
+        "live and cold-replayed editor finals must perform equivalent projection work"
     );
     assert!(cold_vt.screen_contains(160, "◆ | Scope"));
     assert!(cold_vt.screen_contains(160, "                    Effort |"));
