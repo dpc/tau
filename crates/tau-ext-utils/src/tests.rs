@@ -1601,7 +1601,7 @@ fn papercut_schema_and_validation_bound_report() {
 #[test]
 fn papercut_append_uses_harness_attribution_and_jsonl_newline() {
     let mut rt = runtime();
-    rt.session_id = Some("session-42".to_owned());
+    rt.session_id = Some(tau_proto::SessionId::parse("session-42").expect("session id"));
     let storage = FakePapercutStorage::default();
     let lines = Rc::clone(&storage.lines);
     rt.papercut_storage = Some(Box::new(storage));
@@ -1614,14 +1614,29 @@ fn papercut_append_uses_harness_attribution_and_jsonl_newline() {
     let lines = lines.borrow();
     assert_eq!(lines.len(), 1);
     assert!(lines[0].ends_with(b"\n"));
-    let record: serde_json::Value =
-        serde_json::from_slice(&lines[0]).expect("valid newline-delimited JSON");
-    assert_eq!(record["schema"], PAPERCUT_SCHEMA_VERSION);
-    assert_eq!(record["agent_id"], "agent-one");
-    assert_eq!(record["session_id"], "session-42");
-    assert_eq!(record["timestamp_us"], 1_234);
-    assert_eq!(record["report"], "tool output was confusing");
-    assert_eq!(record.as_object().expect("record object").len(), 5);
+    assert_eq!(
+        lines[0],
+        b"{\"schema\":1,\"agent_id\":\"agent-one\",\"session_id\":\"session-42\",\"timestamp_us\":1234,\"report\":\"tool output was confusing\"}\n"
+    );
+}
+
+/// A call without the current harness session remains a best-effort no-op and
+/// must not reach storage with model-supplied or stale attribution.
+#[test]
+fn papercut_without_active_session_does_not_append() {
+    let mut rt = runtime();
+    let storage = FakePapercutStorage::default();
+    let lines = Rc::clone(&storage.lines);
+    rt.papercut_storage = Some(Box::new(storage));
+
+    assert_eq!(
+        rt.record_papercut(
+            &papercut_started("call-1", "agent-one", "missing lifecycle state"),
+            UnixMicros::new(1),
+        ),
+        "not recorded: no active session is available; continue the primary task and do not retry"
+    );
+    assert!(lines.borrow().is_empty());
 }
 
 /// A failed append, including memory-only, quota, or RPC rejection, returns a
@@ -1629,7 +1644,7 @@ fn papercut_append_uses_harness_attribution_and_jsonl_newline() {
 #[test]
 fn papercut_append_failure_does_not_distract_the_primary_task() {
     let mut rt = runtime();
-    rt.session_id = Some("session-42".to_owned());
+    rt.session_id = Some(tau_proto::SessionId::parse("session-42").expect("session id"));
     let storage = FakePapercutStorage {
         fail: true,
         ..Default::default()
@@ -1653,7 +1668,7 @@ fn papercut_append_failure_does_not_distract_the_primary_task() {
 #[test]
 fn replayed_papercut_does_not_duplicate_append() {
     let mut rt = runtime();
-    rt.session_id = Some("session-42".to_owned());
+    rt.session_id = Some(tau_proto::SessionId::parse("session-42").expect("session id"));
     let storage = FakePapercutStorage::default();
     let lines = Rc::clone(&storage.lines);
     rt.papercut_storage = Some(Box::new(storage));
