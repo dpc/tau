@@ -25,7 +25,7 @@ use crate::truncate::{
     MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_line_oriented_lines_with_byte_limit,
 };
 
-pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 300;
+pub(crate) const DEFAULT_TIMEOUT: path_std_time::Duration = path_std_time::Duration::from_secs(300);
 pub(crate) const SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
 const VCR_REPLAY_SPEEDUP: u64 = 100;
 const MAX_CAPTURED_LINE_BYTES: usize = MAX_SAVED_OUTPUT_BYTES - 128;
@@ -312,15 +312,19 @@ fn run_command_live_for_surface_with_authorized_cwd(
         .or(cwd);
     let display_mode = command_mode.display_label().unwrap_or_default();
     let (display_args, display_payload) = command_display(&command);
-    let timeout_secs = parse_timeout_secs(arguments).map_err(|message| {
+    let timeout = parse_timeout(arguments).map_err(|message| {
         ToolFailure::from(message)
             .with_args(display_args.clone())
             .with_mode(display_mode)
             .with_payload(display_payload.clone())
     })?;
-    let timeout = path_std_time::Duration::from_secs(timeout_secs);
 
-    debug!(command = %command, cwd = ?cwd, timeout_secs, "starting shell command");
+    debug!(
+        command = %command,
+        cwd = ?cwd,
+        timeout_secs = timeout.as_secs(),
+        "starting shell command"
+    );
     let child = shell_config
         .spawn_isolated(
             &command,
@@ -445,7 +449,7 @@ pub(crate) fn prepare_tool_invocation(
 ) -> Result<Option<PathBuf>, ToolFailure> {
     let command = argument_text(arguments, "command").map_err(ToolFailure::from)?;
     validate_surface_arguments(surface, arguments)?;
-    parse_timeout_secs(arguments).map_err(ToolFailure::from)?;
+    parse_timeout(arguments).map_err(ToolFailure::from)?;
     let cwd = optional_argument_text(arguments, surface.directory_argument())
         .map_err(ToolFailure::from)?
         .map(PathBuf::from)
@@ -507,9 +511,7 @@ fn replay_shell_outcome(
             })))
         }
         WorldShellOutcome::Cancelled => {
-            let timeout = path_std_time::Duration::from_secs(
-                parse_timeout_secs(arguments).map_err(ToolFailure::from)?,
-            );
+            let timeout = parse_timeout(arguments).map_err(ToolFailure::from)?;
             let Some(cancel_rx) = cancel_rx else {
                 return Err(ToolFailure::new(format!(
                     "vcr replay for {key} expected shell cancellation but call is not cancellable"
@@ -543,14 +545,14 @@ fn sleep_for_replay_elapsed(elapsed_ms: u64) {
     ));
 }
 
-fn parse_timeout_secs(arguments: &CborValue) -> Result<u64, String> {
+fn parse_timeout(arguments: &CborValue) -> Result<path_std_time::Duration, String> {
     let Some(timeout) = optional_argument_int_strict(arguments, "timeout")? else {
-        return Ok(DEFAULT_TIMEOUT_SECS);
+        return Ok(DEFAULT_TIMEOUT);
     };
     if timeout < 0 {
         return Err("argument `timeout` must be non-negative".to_owned());
     }
-    Ok(timeout as u64)
+    Ok(path_std_time::Duration::from_secs(timeout as u64))
 }
 
 /// Run a user-initiated `!`/`!!` shell command, streaming stdout and
@@ -589,18 +591,12 @@ pub(crate) fn dispatch_user_shell_command(
     };
 
     #[cfg(unix)]
-    dispatch_user_shell_command_unix(
-        cmd,
-        child,
-        shell_config.user_command_timeout_secs,
-        tx,
-        cancel_rx,
-    );
+    dispatch_user_shell_command_unix(cmd, child, shell_config.user_command_timeout, tx, cancel_rx);
     #[cfg(not(unix))]
     dispatch_user_shell_command_blocking(
         cmd,
         child,
-        shell_config.user_command_timeout_secs,
+        shell_config.user_command_timeout,
         tx,
         cancel_rx,
     );
@@ -1169,7 +1165,7 @@ fn user_shell_poll_fds(
 fn dispatch_user_shell_command_unix(
     cmd: tau_proto::UiShellCommand,
     mut process: ShellProcess,
-    timeout_secs: u64,
+    timeout: path_std_time::Duration,
     tx: &Output,
     cancel_rx: mpsc::Receiver<()>,
 ) {
@@ -1177,7 +1173,6 @@ fn dispatch_user_shell_command_unix(
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let timeout = path_std_time::Duration::from_secs(timeout_secs);
     let pid = process.child.id();
     debug!(
         pid,
@@ -1407,7 +1402,10 @@ fn dispatch_user_shell_command_unix(
 
     let exit_code = status.as_ref().and_then(|status| status.code());
     let status_note = if timed_out {
-        Some(format!("command killed after {timeout_secs}s timeout"))
+        Some(format!(
+            "command killed after {}s timeout",
+            timeout.as_secs()
+        ))
     } else if cancelled {
         Some("command cancelled".to_owned())
     } else if wait_failed {
@@ -1423,7 +1421,7 @@ fn dispatch_user_shell_command_unix(
 fn dispatch_user_shell_command_blocking(
     cmd: tau_proto::UiShellCommand,
     mut process: ShellProcess,
-    timeout_secs: u64,
+    timeout: path_std_time::Duration,
     tx: &Output,
     cancel_rx: mpsc::Receiver<()>,
 ) {
@@ -1536,7 +1534,6 @@ fn dispatch_user_shell_command_blocking(
         let _ = pipe_done_tx.send(());
     }
 
-    let timeout = path_std_time::Duration::from_secs(timeout_secs);
     let child_wait = NonUnixChildWait::start(&process.child, timeout, Some(cancel_rx));
     let pid = process.child.id();
     debug!(
@@ -1564,7 +1561,10 @@ fn dispatch_user_shell_command_blocking(
                 let _ = process.child.kill();
                 (
                     process.child.wait().ok(),
-                    Some(format!("command killed after {timeout_secs}s timeout")),
+                    Some(format!(
+                        "command killed after {}s timeout",
+                        timeout.as_secs()
+                    )),
                     true,
                 )
             }

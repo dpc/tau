@@ -25,8 +25,14 @@ fn omitted_timeout_uses_default_and_explicit_timeout_overrides_it() {
         CborValue::Text("printf ok".to_owned()),
     )]);
 
-    assert_eq!(parse_timeout_secs(&omitted), Ok(300));
-    assert_eq!(parse_timeout_secs(&shell_args("printf ok", 17)), Ok(17));
+    assert_eq!(
+        parse_timeout(&omitted),
+        Ok(path_std_time::Duration::from_secs(300))
+    );
+    assert_eq!(
+        parse_timeout(&shell_args("printf ok", 17)),
+        Ok(path_std_time::Duration::from_secs(17))
+    );
 }
 
 fn output_text(result: &CborValue) -> &str {

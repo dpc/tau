@@ -2,6 +2,28 @@ use tempfile::TempDir;
 
 use super::*;
 
+/// Ensures the raw integer-second configuration field has the same default and
+/// accepted zero/value forms while shell dispatch retains a unit-safe duration.
+#[test]
+fn user_command_timeout_config_decodes_integer_seconds_to_duration() {
+    assert_eq!(
+        ShellConfig::default().user_command_timeout,
+        Duration::from_secs(60 * 60)
+    );
+
+    let configured: ShellConfig = serde_json::from_value(serde_json::json!({
+        "user_command_timeout_secs": 17
+    }))
+    .expect("parse integer-second timeout");
+    assert_eq!(configured.user_command_timeout, Duration::from_secs(17));
+
+    let zero: ShellConfig = serde_json::from_value(serde_json::json!({
+        "user_command_timeout_secs": 0
+    }))
+    .expect("parse zero timeout");
+    assert_eq!(zero.user_command_timeout, Duration::ZERO);
+}
+
 /// Ensures omission preserves unrestricted behavior without requiring the
 /// supplied cwd to exist.
 #[test]

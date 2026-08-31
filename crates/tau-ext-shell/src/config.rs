@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use std::path as path_std_path;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 #[cfg(test)]
 use shell_allowlist::{
@@ -92,11 +93,16 @@ pub(crate) struct ShellConfig {
     /// argv prefix prepended before the shell command. The effective
     /// argv is `prefix ++ [command, "-c", user_command]`.
     prefix: Vec<String>,
-    /// Maximum wall-clock seconds a user-initiated `!`/`!!` shell
-    /// command may run before it is killed. Tool-side shell calls
-    /// have their own per-call `timeout` argument; this one bounds
-    /// the UI path where the agent isn't driving the timeout.
-    pub(crate) user_command_timeout_secs: u64,
+    /// Maximum wall-clock time a user-initiated `!`/`!!` shell command may run
+    /// before it is killed. The `user_command_timeout_secs` configuration field
+    /// decodes its integer seconds into this duration. Tool-side shell calls
+    /// have their own per-call `timeout` argument; this one bounds the UI path
+    /// where the agent isn't driving the timeout.
+    #[serde(
+        rename = "user_command_timeout_secs",
+        deserialize_with = "deserialize_user_command_timeout_secs"
+    )]
+    pub(crate) user_command_timeout: Duration,
     /// Extra environment variables injected into shell-tool / `!`
     /// command children, applied after the inherited environment so
     /// they override or supplement it. Keys with an empty value still
@@ -121,12 +127,21 @@ impl Default for ShellConfig {
         Self {
             command: "sh".to_owned(),
             prefix: Vec::new(),
-            user_command_timeout_secs: 60 * 60,
+            user_command_timeout: Duration::from_secs(60 * 60),
             extra_env: BTreeMap::new(),
             non_interactive_pager: true,
             allowlist: None,
         }
     }
+}
+
+/// Decode the integer-second user shell timeout configuration into its internal
+/// duration.
+fn deserialize_user_command_timeout_secs<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Duration::from_secs)
 }
 
 impl ShellConfig {
