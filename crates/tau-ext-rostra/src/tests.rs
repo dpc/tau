@@ -34,8 +34,8 @@ use crate::specs::{
     vote_spec,
 };
 use crate::tools::write::{
-    handle as handle_signed_tool_with_limit, log_local_commit, log_local_commit_result, parse_tags,
-    pause_before_test_publication, pause_before_test_publication_with_deadline_after_entry,
+    handle as handle_signed_tool_with_limit, parse_tags, pause_before_test_publication,
+    pause_before_test_publication_with_deadline_after_entry,
     pause_before_test_publication_without_deadline, short_event_id, validate_body,
 };
 use crate::tools::{ToolFailure, tool_error};
@@ -83,20 +83,6 @@ impl Write for CapturedStderr {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
-}
-
-/// Run one operation with debug Rostra logs captured as extension stderr.
-fn capture_rostra_stderr<T>(emit: impl FnOnce() -> T) -> (T, String) {
-    let stderr = CapturedStderr::default();
-    let writer = stderr.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter("tau_ext_rostra=debug,rostra=debug,warn")
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .without_time()
-        .finish();
-    let result = tracing::dispatcher::with_default(&Dispatch::new(subscriber), emit);
-    (result, stderr.text())
 }
 
 impl Write for SharedWriter {
@@ -1201,105 +1187,20 @@ fn signed_write_timeout_and_cancellation_retain_the_committing_lane() {
     assert!(0 < retry_after && retry_after <= 3_600);
 }
 
-/// Proves a successful post emits one post-commit diagnostic and that its
-/// stderr cannot disclose the post body, tags, mnemonic-derived identity, or
-/// full externally addressable event ID.
+/// Keeps the diagnostic event-ID projection at its fixed twelve-character
+/// prefix.
 #[test]
-fn local_commit_debug_record_is_content_free_and_post_commit_only() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let secret = RostraIdSecretKey::generate();
-    let identity = secret.id().to_string();
-    let runtime = RuntimeBuilder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    let database = runtime
-        .block_on(Database::open(
-            temporary.path().join("rostra.redb"),
-            secret.id(),
-        ))
-        .expect("database");
-    let client = runtime
-        .block_on(
-            Client::builder(secret.id())
-                .start_background_tasks(false)
-                .db(database)
-                .public_mode(false)
-                .build(),
-        )
-        .expect("client");
-    let mut invoke = signed_invoke(
-        POST_TOOL,
-        serde_json::json!({
-            "body": "private body canary",
-            "persona_tags": ["private-tag-canary"],
-        }),
-    );
-    invoke.call_id = tau_proto::ToolCallId::new("private-call-canary");
-
-    let (result, stderr) = capture_rostra_stderr(|| {
-        let result = runtime.block_on(handle_signed_tool(
-            &invoke,
-            &client,
-            secret,
-            Arc::new(AsyncMutex::new(())),
-            write_boundary(),
-        ));
-        if let Ok(text) = &result {
-            log_local_commit_result(&invoke, text);
-        }
-        result
-    });
-    let result = result.expect("stored post");
-    let result: serde_json::Value = serde_json::from_str(&result).expect("post result JSON");
-    let full_event_id = result["event_id"].as_str().expect("event ID");
-    let local_commit = stderr
-        .lines()
-        .find(|line| line.contains("call_id=private-call-canary"))
-        .expect("post-commit Rostra log record");
-    let default_info = stderr
-        .lines()
-        .find(|line| line.contains("local_state=\"stored\""))
-        .expect("default-info local commit record");
-
-    assert_eq!(stderr.matches("local_commit").count(), 2);
-    assert!(local_commit.contains("call_id=private-call-canary"));
-    assert!(local_commit.contains("operation=\"post\""));
-    assert!(default_info.contains("operation=\"post\""));
-    assert!(!default_info.contains("call_id"));
-    assert!(!default_info.contains("event_id"));
-    assert!(!local_commit.contains("private body canary"));
-    assert!(!local_commit.contains("private-tag-canary"));
-    assert!(!local_commit.contains(&identity));
-    assert!(!local_commit.contains(&secret.to_string()));
-    assert!(!local_commit.contains(full_event_id));
-}
-
-/// Prevents widening the local-commit event field from its fixed
-/// non-identifying prefix to the full local event ID.
-#[test]
-fn local_commit_debug_record_shortens_the_full_local_event_id() {
+fn short_event_id_keeps_the_fixed_diagnostic_prefix() {
     let full_event_id = rostra_core::EventId::from_bytes([0x42; 32]);
     let expected_event_id = short_event_id(full_event_id);
     let full_event_id = full_event_id.to_string();
-    let call_id = tau_proto::ToolCallId::new("short-id-canary");
-    let (_, stderr) = capture_rostra_stderr(|| {
-        log_local_commit(
-            &call_id,
-            "post",
-            rostra_core::EventId::from_bytes([0x42; 32]),
-        );
-    });
-    let local_commit = stderr
-        .lines()
-        .find(|line| line.contains("call_id=short-id-canary"))
-        .expect("local-commit Rostra log record");
 
-    assert_eq!(stderr.matches("local_commit").count(), 2);
-    assert!(local_commit.contains("call_id=short-id-canary"));
-    assert!(local_commit.contains("operation=\"post\""));
-    assert!(local_commit.contains(&format!("event_id={expected_event_id}")));
-    assert!(!local_commit.contains(&full_event_id));
+    assert_eq!(expected_event_id.chars().count(), 12);
+    assert_eq!(
+        expected_event_id,
+        full_event_id.chars().take(12).collect::<String>()
+    );
+    assert_ne!(expected_event_id, full_event_id);
 }
 
 /// Keeps outbound post source below the approved local content bound.

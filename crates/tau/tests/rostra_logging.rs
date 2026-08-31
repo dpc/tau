@@ -3,11 +3,12 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::process::{Command, Stdio};
+use std::str::FromStr as _;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use rostra_core::id::RostraIdSecretKey;
+use rostra_core::id::{ExternalEventId, RostraIdSecretKey};
 use tau_proto::{
     Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
     PromptOriginator, ToolStarted,
@@ -36,14 +37,17 @@ fn rostra_debug_command_reaches_the_bundled_rostra_target() {
     let reader = thread::spawn(move || {
         let mut reader = HarnessInputReader::new(stdout);
         while let Ok(Some(message)) = reader.read_message() {
-            if matches!(
-                message,
-                HarnessInputMessage::Emit(emit)
-                    if matches!(*emit.event, Event::ToolResultReported(_))
-            ) {
-                let _ = result_tx.send(());
-                return;
-            }
+            let HarnessInputMessage::Emit(emit) = message else {
+                continue;
+            };
+            let Event::ToolResultReported(result) = *emit.event else {
+                continue;
+            };
+            let tau_proto::CborValue::Text(result) = result.result else {
+                panic!("Rostra post result is text");
+            };
+            result_tx.send(result).expect("receive Rostra post result");
+            return;
         }
     });
     let stderr_reader = thread::spawn(move || {
@@ -86,10 +90,9 @@ fn rostra_debug_command_reaches_the_bundled_rostra_target() {
         .expect("start post");
     input.flush().expect("flush component input");
 
-    assert!(
-        result_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
-        "Rostra component did not report its locally stored post"
-    );
+    let result = result_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("Rostra component did not report its locally stored post");
     drop(input);
     let status = child.wait().expect("wait for component");
     reader.join().expect("component stdout reader");
@@ -99,6 +102,10 @@ fn rostra_debug_command_reaches_the_bundled_rostra_target() {
     assert!(status.success());
     assert_eq!(stderr.matches("local_commit").count(), 2);
     assert!(stderr.contains("rostra"));
+    let result: serde_json::Value = serde_json::from_str(&result).expect("Rostra post result JSON");
+    let full_event_id = result["event_id"].as_str().expect("full external event ID");
+    let external_event_id =
+        ExternalEventId::from_str(full_event_id).expect("parse full external event ID");
     let local_commit = stderr
         .lines()
         .find(|line| line.contains("call_id=subprocess-log-canary"))
@@ -107,6 +114,8 @@ fn rostra_debug_command_reaches_the_bundled_rostra_target() {
         .lines()
         .find(|line| line.contains("local_state=\"stored\""))
         .expect("default-info local commit record");
+    assert!(local_commit.contains("operation=\"post\""));
+    assert!(default_info.contains("operation=\"post\""));
     assert!(!default_info.contains("call_id"));
     assert!(!default_info.contains("event_id"));
     let event_id = local_commit
@@ -114,6 +123,16 @@ fn rostra_debug_command_reaches_the_bundled_rostra_target() {
         .find_map(|field| field.strip_prefix("event_id="))
         .expect("short event ID field");
     assert_eq!(event_id.chars().count(), 12);
+    assert_eq!(
+        event_id,
+        external_event_id
+            .event_id()
+            .to_string()
+            .chars()
+            .take(12)
+            .collect::<String>()
+    );
+    assert!(!stderr.contains(full_event_id));
     assert!(!local_commit.contains("subprocess private body canary"));
     assert!(!local_commit.contains("subprocess-private-tag"));
     assert!(!local_commit.contains(&identity));

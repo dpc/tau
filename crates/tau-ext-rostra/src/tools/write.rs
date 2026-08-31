@@ -565,28 +565,6 @@ fn result(client: &Client, event_id: rostra_core::EventId, operation: &str) -> S
     .to_string()
 }
 
-/// Emit the post-commit diagnostic without exposing signed content or identity.
-#[cfg(test)]
-pub(crate) fn log_local_commit(
-    call_id: &tau_proto::ToolCallId,
-    operation: &'static str,
-    event_id: rostra_core::EventId,
-) {
-    tracing::info!(
-        target: crate::LOG_TARGET,
-        operation,
-        local_state = "stored",
-        "local_commit"
-    );
-    tracing::debug!(
-        target: crate::LOG_TARGET,
-        call_id = %call_id,
-        operation,
-        event_id = %short_event_id(event_id),
-        "local_commit"
-    );
-}
-
 /// Emit a local-commit record from the successful signed-write result only.
 pub(crate) fn log_local_commit_result(invoke: &ToolStarted, text: &str) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
