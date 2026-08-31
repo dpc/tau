@@ -14,7 +14,7 @@ use tau_swarm_client_api::{
 use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 
 use crate::projection::SessionProjection;
-use crate::tools::{BlockerRecord, BlockerState};
+use crate::tools::{BlockerHistoryLimits, BlockerRecord, BlockerState};
 
 /// One request for Tau's existing internal prompt submission path.
 #[derive(Debug)]
@@ -59,27 +59,42 @@ enum CommandEntry {
     },
 }
 
+/// Validated no-eviction command-table bounds.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CommandLimits {
+    /// Number of retained commands across command kinds and sessions.
+    pub(crate) entries: usize,
+    /// Logical bytes retained by command request and result strings.
+    pub(crate) logical_bytes: usize,
+}
+
+impl Default for CommandLimits {
+    fn default() -> Self {
+        Self {
+            entries: 1_024,
+            logical_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
 /// Bounded no-eviction command table shared across remote command kinds.
 pub(crate) struct CommandState {
     /// Tagged no-eviction table shared by both remote command kinds.
     entries: HashMap<(SessionIdentity, String), CommandEntry>,
     /// Retained logical request/result string bytes.
     bytes: usize,
-    /// Configured no-eviction entry ceiling.
-    maximum_entries: usize,
-    /// Configured no-eviction logical byte ceiling.
-    maximum_bytes: usize,
+    /// Validated command-table limits.
+    limits: CommandLimits,
 }
 
 impl CommandState {
     /// Creates an empty process-incarnation command table under configured
     /// bounds.
-    pub(crate) fn new(maximum_entries: usize, maximum_bytes: usize) -> Self {
+    pub(crate) fn new(limits: CommandLimits) -> Self {
         Self {
             entries: HashMap::new(),
             bytes: 0,
-            maximum_entries,
-            maximum_bytes,
+            limits,
         }
     }
 }
@@ -102,8 +117,8 @@ pub(crate) struct SwarmApplication {
     blocker_history: Option<Arc<std::sync::Mutex<Vec<BlockerRecord>>>>,
     /// End-to-end queue-admission and canonical-loopback deadline.
     command_timeout: Duration,
-    /// Maximum encoded full-history blocker listing.
-    blocker_history_bytes: usize,
+    /// Validated full-history blocker listing limits.
+    blocker_history_limits: BlockerHistoryLimits,
 }
 
 impl SwarmApplication {
@@ -122,27 +137,19 @@ impl SwarmApplication {
             changed,
             prompts,
             blockers,
-            commands: Arc::new(Mutex::new(CommandState::new(1_024, 16 * 1024 * 1024))),
+            commands: Arc::new(Mutex::new(CommandState::new(CommandLimits::default()))),
             blocker_history: None,
             command_timeout: Duration::from_secs(25),
-            blocker_history_bytes: 4 * 1024 * 1024,
+            blocker_history_limits: BlockerHistoryLimits::default(),
         }
     }
 
     /// Applies the configured command deadline and no-eviction table bounds.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn with_command_policy(
-        mut self,
-        timeout: Duration,
-        maximum_entries: usize,
-        maximum_bytes: usize,
-    ) -> Self {
+    pub(crate) fn with_command_policy(mut self, timeout: Duration, limits: CommandLimits) -> Self {
         self.command_timeout = timeout;
-        self.commands = Arc::new(Mutex::new(CommandState::new(
-            maximum_entries,
-            maximum_bytes,
-        )));
+        self.commands = Arc::new(Mutex::new(CommandState::new(limits)));
         self
     }
 
@@ -162,10 +169,10 @@ impl SwarmApplication {
         let Some(next_bytes) = commands.bytes.checked_add(bytes) else {
             return Err("command byte accounting overflow");
         };
-        if commands.maximum_entries <= commands.entries.len() {
+        if commands.limits.entries <= commands.entries.len() {
             return Err("command entry limit is full");
         }
-        if commands.maximum_bytes < next_bytes {
+        if commands.limits.logical_bytes < next_bytes {
             return Err("command byte limit is full");
         }
         commands.bytes = next_bytes;
@@ -178,10 +185,10 @@ impl SwarmApplication {
     pub(crate) fn with_blocker_history(
         mut self,
         history: Arc<std::sync::Mutex<Vec<BlockerRecord>>>,
-        maximum_bytes: usize,
+        limits: BlockerHistoryLimits,
     ) -> Self {
         self.blocker_history = Some(history);
-        self.blocker_history_bytes = maximum_bytes;
+        self.blocker_history_limits = limits;
         self
     }
 }
@@ -537,7 +544,7 @@ impl SwarmApplication {
             .checked_add(reserved_elsewhere)
             .and_then(|bytes| bytes.checked_add(additional))
             .ok_or_else(|| "blocker byte accounting overflow".to_owned())?;
-        if self.blocker_history_bytes < required {
+        if self.blocker_history_limits.encoded_bytes < required {
             return Err("blocker byte limit is full".into());
         }
         history[index].reserved_answer_bytes = additional.max(1);

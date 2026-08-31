@@ -23,6 +23,7 @@ use tau_swarm_client_api::{
 use tau_swarm_iroh::{Credentials, IrohConnector, Server};
 
 use super::*;
+use crate::projection::ProjectionLimits;
 
 fn prompt(id: &str, message: &str) -> DeliverPromptRequest {
     DeliverPromptRequest {
@@ -45,7 +46,10 @@ fn application(
     mpsc::Receiver<PromptSubmission>,
     mpsc::Receiver<BlockerSubmission>,
 ) {
-    let mut projection = SessionProjection::new(16);
+    let mut projection = SessionProjection::new(ProjectionLimits {
+        history_entries: 16,
+        ..ProjectionLimits::unconfigured()
+    });
     if loaded {
         projection
             .upsert_agent(Agent {
@@ -67,7 +71,13 @@ fn application(
         prompt_tx,
         blocker_tx,
     )
-    .with_command_policy(Duration::from_millis(25), 8, 16 * 1024);
+    .with_command_policy(
+        Duration::from_millis(25),
+        CommandLimits {
+            entries: 8,
+            logical_bytes: 16 * 1024,
+        },
+    );
     (Arc::new(application), prompt_rx, blocker_rx)
 }
 
@@ -130,7 +140,13 @@ async fn prompt_accounting_rejects_exact_bound_overflow() {
         Arc::try_unwrap(application)
             .ok()
             .expect("sole application")
-            .with_command_policy(Duration::from_millis(25), 8, maximum - 1),
+            .with_command_policy(
+                Duration::from_millis(25),
+                CommandLimits {
+                    entries: 8,
+                    logical_bytes: maximum - 1,
+                },
+            ),
     );
     assert!(matches!(
         application.deliver_prompt(request).await,

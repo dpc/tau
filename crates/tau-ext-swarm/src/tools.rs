@@ -15,6 +15,42 @@ use tau_swarm_api::{
 
 use crate::runtime::SwarmRuntime;
 
+/// Validated owner-history admission bounds.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BlockerHistoryLimits {
+    /// Number of retained blocker records across all owners.
+    pub(crate) entries: usize,
+    /// Encoded bytes allowed in one owner's complete blocker-history response.
+    pub(crate) encoded_bytes: usize,
+}
+
+impl Default for BlockerHistoryLimits {
+    fn default() -> Self {
+        Self {
+            entries: 256,
+            encoded_bytes: 4 * 1024 * 1024,
+        }
+    }
+}
+
+/// Validated immutable-update outbox admission bounds.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UpdateLimits {
+    /// Number of unacknowledged immutable updates.
+    pub(crate) entries: usize,
+    /// Logical UTF-8 bytes retained by immutable update fields.
+    pub(crate) logical_bytes: usize,
+}
+
+impl Default for UpdateLimits {
+    fn default() -> Self {
+        Self {
+            entries: 256,
+            logical_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
 /// Logical tool group shared by Tau Swarm's model-visible tools.
 pub const TOOL_GROUP_NAME: &str = "swarm";
 
@@ -320,7 +356,7 @@ fn add_blocker(
         .blocker_history
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    if config.limits.blocker_entries <= history.len() {
+    if config.blocker_history_limits.entries <= history.len() {
         return Err("blocker entry limit is full".into());
     }
     let id = random_id();
@@ -354,7 +390,12 @@ fn add_blocker(
         .cloned()
         .collect();
     prospective.push(record.clone());
-    if !owner_history_fits(&history, owner, &prospective, config.limits.blocker_bytes)? {
+    if !owner_history_fits(
+        &history,
+        owner,
+        &prospective,
+        config.blocker_history_limits.encoded_bytes,
+    )? {
         return Err("blocker byte limit is full".into());
     }
     state
@@ -407,8 +448,8 @@ fn cancel_blocker(
         .config
         .as_ref()
         .ok_or("Swarm is not configured")?
-        .limits
-        .blocker_bytes;
+        .blocker_history_limits
+        .encoded_bytes;
     if !owner_history_fits(&history, owner, &prospective, limit)? {
         return Err("blocker byte limit is full".into());
     }
@@ -532,17 +573,17 @@ fn add_update(
     validate_text("description", &args.description, 65_536)?;
     validate_optional("task_id", args.task_id.as_deref(), 128, true)?;
     let id = random_id();
-    let (entries, bytes) = state.projection.blocking_lock().update_usage();
+    let usage = state.projection.blocking_lock().update_usage();
     let config = state.config.as_ref().ok_or("Swarm is not configured")?;
     let added_bytes = id.len()
         + owner.len()
         + args.title.len()
         + args.description.len()
         + args.task_id.as_ref().map_or(0, String::len);
-    if config.limits.update_entries <= entries {
+    if config.update_limits.entries <= usage.entries {
         return Err("update entry limit is full".into());
     }
-    if config.limits.update_bytes < bytes.saturating_add(added_bytes) {
+    if config.update_limits.logical_bytes < usage.logical_bytes.saturating_add(added_bytes) {
         return Err("update byte limit is full".into());
     }
     let update = UpdatePublication {

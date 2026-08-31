@@ -70,7 +70,12 @@ fn worker_error_retires_health_before_optional_notice() {
 fn scopes_application_incarnation_to_extension_process() {
     let mut running = SwarmRuntime::new();
     let incarnation = running.application_incarnation_id.clone();
-    let commands = Arc::new(path_tokio_sync::Mutex::new(CommandState::new(8, 1_024)));
+    let commands = Arc::new(path_tokio_sync::Mutex::new(CommandState::new(
+        crate::application::CommandLimits {
+            entries: 8,
+            logical_bytes: 1_024,
+        },
+    )));
     running.commands = Some(Arc::clone(&commands));
 
     running.reset_session(Some("first".parse().expect("session ID")));
@@ -121,7 +126,12 @@ fn gates_publication_on_agent_replay_and_clears_invalid_projection() {
         1
     );
 
-    state.config.as_mut().expect("config").limits.agent_entries = 0;
+    state
+        .config
+        .as_mut()
+        .expect("config")
+        .runtime_limits
+        .agent_entries = 0;
     fold_event(
         &mut state,
         &Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {
@@ -281,7 +291,13 @@ fn session_switch_clears_incarnation_state_before_replay() {
     assert!(state.agents.is_empty());
     assert!(state.blocker_history.lock().expect("history").is_empty());
     assert!(state.pending.lock().expect("pending").is_empty());
-    assert_eq!(state.projection.blocking_lock().update_usage(), (0, 0));
+    assert_eq!(
+        state.projection.blocking_lock().update_usage(),
+        crate::projection::UpdateUsage {
+            entries: 0,
+            logical_bytes: 0,
+        }
+    );
     assert!(
         state
             .projection

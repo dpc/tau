@@ -16,11 +16,19 @@ fn task_info(id: impl Into<String>, title: impl Into<String>) -> TaskInfo {
     }
 }
 
+/// Builds a projection with only its retained-change entry bound varied.
+fn projection_with_history(history_entries: usize) -> SessionProjection {
+    SessionProjection::new(ProjectionLimits {
+        history_entries,
+        ..ProjectionLimits::unconfigured()
+    })
+}
+
 /// Ensures snapshots and incremental batches represent the same
 /// replacement.
 #[test]
 fn publishes_agent_replacement() {
-    let mut projection = SessionProjection::new(8);
+    let mut projection = projection_with_history(8);
     let agent = Agent {
         id: AgentId::new("a"),
         name: "Agent".into(),
@@ -48,7 +56,7 @@ fn publishes_agent_replacement() {
 /// snapshot.
 #[test]
 fn rejects_stale_revision() {
-    let mut projection = SessionProjection::new(1);
+    let mut projection = projection_with_history(1);
     for id in ["a", "b"] {
         projection
             .upsert_agent(Agent {
@@ -68,7 +76,7 @@ fn rejects_stale_revision() {
 /// payload cannot replace the retained outbox entry.
 #[test]
 fn deduplicates_updates_by_immutable_payload() {
-    let mut projection = SessionProjection::new(8);
+    let mut projection = projection_with_history(8);
     let update = UpdatePublication {
         id: UpdateId::new("update"),
         owner: AgentId::new("agent"),
@@ -89,16 +97,27 @@ fn deduplicates_updates_by_immutable_payload() {
     let mut changed = update;
     changed.description = "different".into();
     assert!(projection.add_update(changed).is_err());
-    assert_eq!(projection.update_usage().0, 1);
+    assert_eq!(projection.update_usage().entries, 1);
     projection.acknowledge_update(&UpdateId::new("update"));
-    assert_eq!(projection.update_usage(), (0, 0));
+    assert_eq!(
+        projection.update_usage(),
+        UpdateUsage {
+            entries: 0,
+            logical_bytes: 0,
+        }
+    );
 }
 
 /// Change-history byte limits count logical UTF-8 fields rather than bincode
 /// framing bytes.
 #[test]
-fn evicts_change_history_by_logical_string_bytes() {
-    let mut projection = SessionProjection::new(8).with_byte_limits(1, usize::MAX);
+fn keeps_logical_history_and_encoded_publication_limits_distinct() {
+    let mut projection = SessionProjection::new(ProjectionLimits {
+        history_entries: 8,
+        history_bytes: 1,
+        publication_bytes: usize::MAX,
+        task_info_entries: tau_swarm_api::MAX_TASK_INFO_ENTRIES,
+    });
     projection
         .upsert_agent(Agent {
             id: AgentId::new("a"),
@@ -116,7 +135,7 @@ fn evicts_change_history_by_logical_string_bytes() {
 /// immutable updates and appears identically in snapshot and live views.
 #[test]
 fn task_info_replacement_shares_projection_order() {
-    let mut projection = SessionProjection::new(8);
+    let mut projection = projection_with_history(8);
     let first = task_info("task", "First");
     projection
         .upsert_task_info(first.clone())
@@ -167,7 +186,7 @@ fn task_info_replacement_shares_projection_order() {
 /// mutation, while a changed replacement advances the revision.
 #[test]
 fn equal_task_info_upsert_does_not_advance_revision() {
-    let mut projection = SessionProjection::new(8);
+    let mut projection = projection_with_history(8);
     let info = task_info("task", "Title");
     projection
         .upsert_task_info(info.clone())
@@ -206,7 +225,11 @@ fn equal_task_info_upsert_does_not_advance_revision() {
 /// task fails without changing the complete projection transaction.
 #[test]
 fn task_info_entry_limit_is_transactional() {
-    let mut projection = SessionProjection::new(8).with_task_info_limit(1);
+    let mut projection = SessionProjection::new(ProjectionLimits {
+        history_entries: 8,
+        task_info_entries: 1,
+        ..ProjectionLimits::unconfigured()
+    });
     projection
         .upsert_task_info(task_info("task", "First"))
         .expect("first metadata");
@@ -226,7 +249,7 @@ fn task_info_entry_limit_is_transactional() {
 /// both fail before changing map, history, or revision.
 #[test]
 fn task_info_capacity_and_revision_fail_closed() {
-    let mut projection = SessionProjection::new(8);
+    let mut projection = projection_with_history(8);
     let description = TaskDescription::new("x".repeat(16_384)).expect("maximum description");
     for index in 0..511 {
         let info = TaskInfo {
@@ -253,7 +276,7 @@ fn task_info_capacity_and_revision_fail_closed() {
     assert_eq!(projection.snapshot(), before_snapshot);
     assert_eq!(projection.changes, before_changes);
 
-    let mut exhausted = SessionProjection::new(8);
+    let mut exhausted = projection_with_history(8);
     exhausted.revision = PublicationRevision(u64::MAX);
     let before = exhausted.snapshot();
     assert_eq!(
@@ -267,7 +290,12 @@ fn task_info_capacity_and_revision_fail_closed() {
 /// an encoded-size rejection leaves no metadata behind.
 #[test]
 fn task_info_encoded_bounds_fail_closed() {
-    let mut projection = SessionProjection::new(8).with_byte_limits(usize::MAX, 1);
+    let mut projection = SessionProjection::new(ProjectionLimits {
+        history_entries: 8,
+        history_bytes: usize::MAX,
+        publication_bytes: 1,
+        task_info_entries: tau_swarm_api::MAX_TASK_INFO_ENTRIES,
+    });
     let before = projection.snapshot();
     assert!(
         projection
@@ -300,7 +328,7 @@ fn agent_and_blocker_revision_exhaustion_is_transactional() {
         source_timestamp: Timestamp(1),
     };
 
-    let mut projection = SessionProjection::new(8);
+    let mut projection = projection_with_history(8);
     projection.revision = PublicationRevision(u64::MAX);
     assert_eq!(
         projection.upsert_agent(agent.clone()),

@@ -7,6 +7,42 @@ use tau_swarm_api::{
 use tau_swarm_client::{ChangeBatch, PublicationRevision, RevisionedSnapshot};
 use tau_swarm_client_api::v0 as path_tau_swarm_client_api_v0;
 
+/// Bounds for one current-session projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProjectionLimits {
+    /// Number of retained incremental publication changes.
+    pub(crate) history_entries: usize,
+    /// Logical UTF-8 bytes retained by incremental publication changes.
+    pub(crate) history_bytes: usize,
+    /// Encoded bytes allowed for one snapshot or individual change publication.
+    pub(crate) publication_bytes: usize,
+    /// Number of replaceable current task-metadata records.
+    pub(crate) task_info_entries: usize,
+}
+
+impl ProjectionLimits {
+    /// Returns the bounded entry and unbounded byte defaults used before
+    /// Configure.
+    #[must_use]
+    pub(crate) const fn unconfigured() -> Self {
+        Self {
+            history_entries: 4_096,
+            history_bytes: usize::MAX,
+            publication_bytes: usize::MAX,
+            task_info_entries: tau_swarm_api::MAX_TASK_INFO_ENTRIES,
+        }
+    }
+}
+
+/// Retained immutable-update occupancy measured for local admission.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct UpdateUsage {
+    /// Number of retained immutable updates.
+    pub(crate) entries: usize,
+    /// Logical UTF-8 bytes retained by update string fields.
+    pub(crate) logical_bytes: usize,
+}
+
 /// Coherent, bounded in-memory projection of the current Tau session.
 #[derive(Debug)]
 pub(crate) struct SessionProjection {
@@ -22,22 +58,16 @@ pub(crate) struct SessionProjection {
     revision: PublicationRevision,
     /// Retained changes paired with their resulting revision.
     changes: VecDeque<(PublicationRevision, SessionChange, usize)>,
-    /// Maximum number of retained changes.
-    capacity: usize,
-    /// Maximum encoded bytes retained by changes.
-    byte_capacity: usize,
-    /// Current encoded retained-change bytes.
+    /// Validated limits owned by this projection.
+    limits: ProjectionLimits,
+    /// Current logical retained-change bytes.
     change_bytes: usize,
-    /// Maximum encoded current snapshot or individual change.
-    publication_bytes: usize,
-    /// Maximum current task metadata entries.
-    task_info_capacity: usize,
 }
 
 impl SessionProjection {
-    /// Creates an empty projection retaining at most `capacity` changes.
+    /// Creates an empty projection under supplied limits.
     #[must_use]
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(limits: ProjectionLimits) -> Self {
         Self {
             agents: BTreeMap::new(),
             blockers: BTreeMap::new(),
@@ -45,27 +75,9 @@ impl SessionProjection {
             task_info: BTreeMap::new(),
             revision: PublicationRevision(0),
             changes: VecDeque::new(),
-            capacity,
-            byte_capacity: usize::MAX,
+            limits,
             change_bytes: 0,
-            publication_bytes: usize::MAX,
-            task_info_capacity: tau_swarm_api::MAX_TASK_INFO_ENTRIES,
         }
-    }
-
-    /// Applies configured history and publication byte bounds.
-    #[must_use]
-    pub fn with_byte_limits(mut self, history_bytes: usize, publication_bytes: usize) -> Self {
-        self.byte_capacity = history_bytes;
-        self.publication_bytes = publication_bytes;
-        self
-    }
-
-    /// Applies the configured local task-info entry ceiling.
-    #[must_use]
-    pub fn with_task_info_limit(mut self, task_info_entries: usize) -> Self {
-        self.task_info_capacity = task_info_entries;
-        self
     }
 
     /// Inserts or replaces an agent and publishes the replacement.
@@ -80,7 +92,7 @@ impl SessionProjection {
                 self.agents.remove(&agent.id);
             }
         }
-        if self.publication_bytes < snapshot_length? {
+        if self.limits.publication_bytes < snapshot_length? {
             return Err("snapshot exceeds publication byte limit");
         }
         self.publish(SessionChange::UpsertAgent(agent.clone()))?;
@@ -117,7 +129,7 @@ impl SessionProjection {
                 self.blockers.remove(&blocker.blocker_id);
             }
         }
-        if self.publication_bytes < snapshot_length? {
+        if self.limits.publication_bytes < snapshot_length? {
             return Err("snapshot exceeds publication byte limit");
         }
         self.publish(SessionChange::OpenBlocker(blocker.clone()))?;
@@ -187,10 +199,10 @@ impl SessionProjection {
         self.updates.remove(id);
     }
 
-    /// Returns retained update count and logical string bytes.
+    /// Returns retained update occupancy for local admission.
     #[must_use]
-    pub fn update_usage(&self) -> (usize, usize) {
-        let bytes = self
+    pub fn update_usage(&self) -> UpdateUsage {
+        let logical_bytes = self
             .updates
             .values()
             .map(|(_, update)| {
@@ -201,7 +213,10 @@ impl SessionProjection {
                     + update.task_id.as_ref().map_or(0, |id| id.as_str().len())
             })
             .sum();
-        (self.updates.len(), bytes)
+        UpdateUsage {
+            entries: self.updates.len(),
+            logical_bytes,
+        }
     }
 
     /// Atomically installs and publishes complete current task metadata.
@@ -213,7 +228,7 @@ impl SessionProjection {
             return Ok(());
         }
         let old = self.task_info.get(&info.task_id);
-        if old.is_none() && self.task_info_capacity <= self.task_info.len() {
+        if old.is_none() && self.limits.task_info_entries <= self.task_info.len() {
             return Err("task info entry limit is full");
         }
         task_info_bytes(
@@ -234,7 +249,7 @@ impl SessionProjection {
                 self.task_info.remove(&info.task_id);
             }
         }
-        if self.publication_bytes < snapshot_length? {
+        if self.limits.publication_bytes < snapshot_length? {
             return Err("snapshot exceeds publication byte limit");
         }
         self.publish(SessionChange::UpsertTaskInfo(info.clone()))?;
@@ -281,7 +296,7 @@ impl SessionProjection {
 
     fn publish(&mut self, change: SessionChange) -> Result<(), &'static str> {
         let encoded_bytes = change_encoded_len(change.clone())?;
-        if self.publication_bytes < encoded_bytes {
+        if self.limits.publication_bytes < encoded_bytes {
             return Err("change exceeds publication byte limit");
         }
         let bytes = change_logical_bytes(&change)?;
@@ -298,7 +313,9 @@ impl SessionProjection {
         self.revision = revision;
         self.change_bytes = change_bytes;
         self.changes.push_back((revision, change, bytes));
-        while self.capacity < self.changes.len() || self.byte_capacity < self.change_bytes {
+        while self.limits.history_entries < self.changes.len()
+            || self.limits.history_bytes < self.change_bytes
+        {
             if let Some((_, _, bytes)) = self.changes.pop_front() {
                 self.change_bytes = self.change_bytes.saturating_sub(bytes);
             }

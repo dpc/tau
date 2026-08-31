@@ -24,7 +24,7 @@ use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync};
 
 use crate::application::{BlockerSubmission, CommandState, PromptSubmission, SwarmApplication};
 use crate::config::{ExtConfig, ResolvedConfig};
-use crate::projection::SessionProjection;
+use crate::projection::{ProjectionLimits, SessionProjection};
 use crate::tools::BlockerRecord;
 use crate::worker_health::WorkerHealth;
 
@@ -48,6 +48,28 @@ struct AgentDraft {
     loaded: bool,
     /// Whether this load epoch reached a successful agent replay boundary.
     replay_valid: bool,
+}
+
+/// Validated runtime-local bounds that do not belong to a projection or tool
+/// state.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RuntimeLimits {
+    /// Number of current published agents.
+    pub(crate) agent_entries: usize,
+    /// Number of current published watch memberships.
+    pub(crate) watch_entries: usize,
+    /// Capacity of each local Tau-submission queue.
+    pub(crate) submission_queue_entries: usize,
+}
+
+impl Default for RuntimeLimits {
+    fn default() -> Self {
+        Self {
+            agent_entries: 4_096,
+            watch_entries: 16_384,
+            submission_queue_entries: 16,
+        }
+    }
 }
 
 impl AgentDraft {
@@ -153,7 +175,9 @@ impl SwarmRuntime {
             replay_complete: false,
             projection_valid: true,
             agents: HashMap::new(),
-            projection: Arc::new(path_tokio_sync::Mutex::new(SessionProjection::new(4_096))),
+            projection: Arc::new(path_tokio_sync::Mutex::new(SessionProjection::new(
+                ProjectionLimits::unconfigured(),
+            ))),
             changed: Arc::new(path_tokio_sync::Notify::new()),
             pending: Arc::new(Mutex::new(HashMap::new())),
             commands: None,
@@ -177,20 +201,10 @@ impl SwarmRuntime {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
-        let capacity = self
-            .config
-            .as_ref()
-            .map_or(4_096, |config| config.limits.change_history_entries);
-        let projection = if let Some(config) = &self.config {
-            SessionProjection::new(capacity)
-                .with_byte_limits(
-                    config.limits.change_history_bytes,
-                    config.limits.publication_bytes,
-                )
-                .with_task_info_limit(config.limits.task_info_entries)
-        } else {
-            SessionProjection::new(capacity)
-        };
+        let projection = self.config.as_ref().map_or_else(
+            || SessionProjection::new(ProjectionLimits::unconfigured()),
+            |config| SessionProjection::new(config.projection_limits),
+        );
         self.projection = Arc::new(path_tokio_sync::Mutex::new(projection));
         self.changed = Arc::new(path_tokio_sync::Notify::new());
     }
@@ -222,11 +236,11 @@ impl SwarmRuntime {
             .try_fold(0_usize, |total, draft| {
                 total.checked_add(draft.watches.len())
             });
-        let limits = &self
+        let limits = self
             .config
             .as_ref()
             .ok_or_else(|| ClientError::handler("Swarm is not configured"))?
-            .limits;
+            .runtime_limits;
         if limits.agent_entries < loaded
             || watches.is_none_or(|watches| limits.watch_entries < watches)
         {
@@ -261,20 +275,10 @@ impl SwarmRuntime {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
-        let capacity = self
-            .config
-            .as_ref()
-            .map_or(4_096, |config| config.limits.change_history_entries);
-        let projection = if let Some(config) = &self.config {
-            SessionProjection::new(capacity)
-                .with_byte_limits(
-                    config.limits.change_history_bytes,
-                    config.limits.publication_bytes,
-                )
-                .with_task_info_limit(config.limits.task_info_entries)
-        } else {
-            SessionProjection::new(capacity)
-        };
+        let projection = self.config.as_ref().map_or_else(
+            || SessionProjection::new(ProjectionLimits::unconfigured()),
+            |config| SessionProjection::new(config.projection_limits),
+        );
         self.projection = Arc::new(path_tokio_sync::Mutex::new(projection));
         self.changed = Arc::new(path_tokio_sync::Notify::new());
         if let Some(handle) = &self.handle {
@@ -328,8 +332,10 @@ impl SwarmRuntime {
         );
         let application_incarnation_id = self.application_incarnation_id.clone();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (prompts_tx, prompts_rx) = mpsc::channel(config.limits.submission_queue_entries);
-        let (blockers_tx, blockers_rx) = mpsc::channel(config.limits.submission_queue_entries);
+        let (prompts_tx, prompts_rx) =
+            mpsc::channel(config.runtime_limits.submission_queue_entries);
+        let (blockers_tx, blockers_rx) =
+            mpsc::channel(config.runtime_limits.submission_queue_entries);
         let identity = SessionIdentity::new(
             Hostname::new(config.hostname.clone()),
             SessionId::new(session_id.as_str()),
@@ -339,7 +345,7 @@ impl SwarmRuntime {
                 .with_command_state(commands, config.command_timeout)
                 .with_blocker_history(
                     Arc::clone(&self.blocker_history),
-                    config.limits.blocker_bytes,
+                    config.blocker_history_limits,
                 ),
         );
         let worker_health = WorkerHealth::running();
@@ -589,20 +595,13 @@ fn handle_configure(cx: RawConfigureContext<'_, SwarmRuntime>) -> Result<(), Cli
         .resolve(cx.secrets())
         .map_err(ClientError::handler)?;
     cx.state.handle = Some(cx.handle());
-    cx.state.projection = Arc::new(path_tokio_sync::Mutex::new(
-        SessionProjection::new(config.limits.change_history_entries)
-            .with_byte_limits(
-                config.limits.change_history_bytes,
-                config.limits.publication_bytes,
-            )
-            .with_task_info_limit(config.limits.task_info_entries),
-    ));
-    cx.state.config = Some(config);
-    let limits = &cx.state.config.as_ref().expect("installed config").limits;
+    cx.state.projection = Arc::new(path_tokio_sync::Mutex::new(SessionProjection::new(
+        config.projection_limits,
+    )));
     cx.state.commands = Some(Arc::new(path_tokio_sync::Mutex::new(CommandState::new(
-        limits.command_entries,
-        limits.command_bytes,
+        config.command_limits,
     ))));
+    cx.state.config = Some(config);
     tracing::info!(target: LOG_TARGET, "swarm configured");
     Ok(())
 }

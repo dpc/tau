@@ -17,8 +17,8 @@ use tau_swarm_client_api::v0::PromptRequest;
 use tokio::sync::{Mutex as TokioMutex, Notify, mpsc as path_tokio_mpsc};
 
 use super::super::*;
-use crate::application::SwarmApplication;
-use crate::projection::SessionProjection;
+use crate::application::{CommandLimits, SwarmApplication};
+use crate::projection::{ProjectionLimits, SessionProjection};
 
 /// Extension state that bridges queued Swarm prompts through production
 /// detached submission.
@@ -143,7 +143,10 @@ fn prompt(id: &str) -> DeliverPromptRequest {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detached_prompt_saturation_caches_indeterminate_and_cleans_up() {
     const COMMANDS: usize = 96;
-    let mut projection = SessionProjection::new(16);
+    let mut projection = SessionProjection::new(ProjectionLimits {
+        history_entries: 16,
+        ..ProjectionLimits::unconfigured()
+    });
     projection
         .upsert_agent(Agent {
             id: AgentId::new("agent"),
@@ -164,7 +167,13 @@ async fn detached_prompt_saturation_caches_indeterminate_and_cleans_up() {
             prompt_tx,
             blocker_tx,
         )
-        .with_command_policy(Duration::from_secs(30), COMMANDS, 16 * 1024 * 1024),
+        .with_command_policy(
+            Duration::from_secs(30),
+            CommandLimits {
+                entries: COMMANDS,
+                logical_bytes: 16 * 1024 * 1024,
+            },
+        ),
     );
     let (result_tx, result_rx) = mpsc::channel();
     let mut commands = Vec::new();

@@ -238,3 +238,56 @@ fn task_info_entry_limit_cannot_exceed_protocol_maximum() {
         .expect_err("out-of-range task-info entries");
     }
 }
+
+/// Raw JSON limit fields retain their exact accepted values after validation,
+/// but the runtime receives unit-named internal limit groups instead.
+#[test]
+fn resolves_raw_limit_fields_into_named_internal_groups() {
+    let config: ExtConfig = serde_json::from_value(serde_json::json!({
+        "endpoint": {"peer_id": peer_id()},
+        "credential_id": "worker",
+        "credential_secret": "swarm",
+        "hostname": "builder",
+        "limits": {
+            "command_entries": 7,
+            "command_bytes": 262_145,
+            "blocker_entries": 9,
+            "blocker_bytes": 262_146,
+            "update_entries": 11,
+            "update_bytes": 262_147,
+            "task_info_entries": 13,
+            "change_history_entries": 15,
+            "change_history_bytes": 1_048_576,
+            "publication_bytes": 1_048_577,
+            "agent_entries": 17,
+            "watch_entries": 19,
+            "submission_queue_entries": 21
+        }
+    }))
+    .expect("stable JSON shape");
+    let resolved = config
+        .resolve(&BTreeMap::from([(
+            "swarm".into(),
+            SecretValue::new("secret"),
+        )]))
+        .expect("accepted configured values");
+
+    assert_eq!(resolved.command_limits.entries, 7);
+    assert_eq!(resolved.command_limits.logical_bytes, 262_145);
+    assert_eq!(resolved.blocker_history_limits.entries, 9);
+    assert_eq!(resolved.blocker_history_limits.encoded_bytes, 262_146);
+    assert_eq!(resolved.update_limits.entries, 11);
+    assert_eq!(resolved.update_limits.logical_bytes, 262_147);
+    assert_eq!(
+        resolved.projection_limits,
+        crate::projection::ProjectionLimits {
+            history_entries: 15,
+            history_bytes: 1_048_576,
+            publication_bytes: 1_048_577,
+            task_info_entries: 13,
+        }
+    );
+    assert_eq!(resolved.runtime_limits.agent_entries, 17);
+    assert_eq!(resolved.runtime_limits.watch_entries, 19);
+    assert_eq!(resolved.runtime_limits.submission_queue_entries, 21);
+}

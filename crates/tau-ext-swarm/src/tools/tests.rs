@@ -15,7 +15,7 @@ use tokio::sync as path_tokio_sync;
 
 use super::*;
 use crate::application::SwarmApplication;
-use crate::projection::SessionProjection;
+use crate::projection::{ProjectionLimits, SessionProjection};
 use crate::worker_health::WorkerHealth;
 
 /// Minimal runner used to exercise the production Swarm tool handlers.
@@ -308,9 +308,13 @@ fn task_info_tool_capacity_failure_is_transactional() {
         .config
         .as_mut()
         .expect("config")
-        .limits
+        .projection_limits
         .task_info_entries = 1;
-    *state.projection.blocking_lock() = SessionProjection::new(8).with_task_info_limit(1);
+    *state.projection.blocking_lock() = SessionProjection::new(ProjectionLimits {
+        history_entries: 8,
+        task_info_entries: 1,
+        ..ProjectionLimits::unconfigured()
+    });
     state
         .projection
         .blocking_lock()
@@ -669,7 +673,7 @@ fn owner_history_budget_includes_pending_answer_reservations() {
 #[test]
 fn update_tool_enforces_and_releases_outbox_capacity() {
     let mut state = configured_runtime();
-    state.config.as_mut().expect("config").limits.update_entries = 1;
+    state.config.as_mut().expect("config").update_limits.entries = 1;
     let first = add_update(
         &mut state,
         "agent",
@@ -749,7 +753,7 @@ async fn blocker_tool_answer_lifecycle_and_deduplication() {
         )
         .with_blocker_history(
             path_std_sync::Arc::clone(&state.blocker_history),
-            4 * 1024 * 1024,
+            BlockerHistoryLimits::default(),
         ),
     );
     let request = AnswerBlockerRequest {

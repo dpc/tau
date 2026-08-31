@@ -9,6 +9,11 @@ use tau_proto::SecretValue;
 use tau_swarm_client::Backoff;
 use tau_swarm_client_api::{Credential, CredentialId, Secret};
 
+use crate::application::CommandLimits;
+use crate::projection::ProjectionLimits;
+use crate::runtime::RuntimeLimits;
+use crate::tools::{BlockerHistoryLimits, UpdateLimits};
+
 /// Strict operator configuration for one Swarm extension instance.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,8 +156,18 @@ pub(crate) struct ResolvedConfig {
     pub reconnect: ReconnectConfig,
     /// Local command deadline.
     pub command_timeout: Duration,
-    /// Process-memory limits.
-    pub limits: Limits,
+    /// Projection limits derived after validating raw configuration fields.
+    pub projection_limits: ProjectionLimits,
+    /// Command-table limits derived after validating raw configuration fields.
+    pub command_limits: CommandLimits,
+    /// Blocker-history limits derived after validating raw configuration
+    /// fields.
+    pub blocker_history_limits: BlockerHistoryLimits,
+    /// Immutable-update limits derived after validating raw configuration
+    /// fields.
+    pub update_limits: UpdateLimits,
+    /// Runtime-local limits derived after validating raw configuration fields.
+    pub runtime_limits: RuntimeLimits,
 }
 
 impl ExtConfig {
@@ -206,6 +221,21 @@ impl ExtConfig {
         if secret.is_empty() || 4_096 < secret.len() {
             return Err("credential secret must contain 1..=4096 bytes".into());
         }
+        let Limits {
+            command_entries,
+            command_bytes,
+            blocker_entries,
+            blocker_bytes,
+            update_entries,
+            update_bytes,
+            task_info_entries,
+            change_history_entries,
+            change_history_bytes,
+            publication_bytes,
+            agent_entries,
+            watch_entries,
+            submission_queue_entries,
+        } = self.limits;
         let transports = relay
             .iter()
             .cloned()
@@ -221,7 +251,29 @@ impl ExtConfig {
             hostname,
             reconnect: self.reconnect,
             command_timeout: Duration::from_millis(self.command_timeout_ms),
-            limits: self.limits,
+            projection_limits: ProjectionLimits {
+                history_entries: change_history_entries,
+                history_bytes: change_history_bytes,
+                publication_bytes,
+                task_info_entries,
+            },
+            command_limits: CommandLimits {
+                entries: command_entries,
+                logical_bytes: command_bytes,
+            },
+            blocker_history_limits: BlockerHistoryLimits {
+                entries: blocker_entries,
+                encoded_bytes: blocker_bytes,
+            },
+            update_limits: UpdateLimits {
+                entries: update_entries,
+                logical_bytes: update_bytes,
+            },
+            runtime_limits: RuntimeLimits {
+                agent_entries,
+                watch_entries,
+                submission_queue_entries,
+            },
         })
     }
 }
