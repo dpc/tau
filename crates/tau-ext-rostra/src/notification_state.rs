@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rostra_client::{RostraId, SocialPostMaterializationCursor};
-use tau_proto::{AgentId, CborValue, ExtensionName, MessageDelivered};
+use tau_proto::{AgentId, CborValue, ExtensionName, MessageDelivered, UnixMillis};
 
 use crate::notification_page::ScannedPage;
 pub(crate) use crate::notification_pending::Pending;
@@ -463,7 +463,7 @@ impl State {
             }
         } else {
             let queued_ms = registration.queued_since_unix_ms.unwrap_or_else(now_ms);
-            let elapsed = now_ms().saturating_sub(queued_ms);
+            let elapsed = now_ms().get().saturating_sub(queued_ms.get());
             let now = Instant::now();
             registration.queued_since_unix_ms = Some(queued_ms);
             registration.pending = Some(Pending {
@@ -634,12 +634,16 @@ fn decode_value<T: serde::de::DeserializeOwned>(value: &CborValue) -> Option<T> 
 }
 
 /// Returns a saturating Unix-millisecond clock for durable timing.
-pub(crate) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            duration.as_millis().try_into().unwrap_or(u64::MAX)
-        })
+pub(crate) fn now_ms() -> UnixMillis {
+    unix_millis_since_epoch(SystemTime::now().duration_since(UNIX_EPOCH))
+}
+
+/// Converts an epoch-relative duration into a saturating Unix-millisecond
+/// timestamp, retaining the pre-epoch fallback.
+fn unix_millis_since_epoch(
+    since_epoch: Result<Duration, std::time::SystemTimeError>,
+) -> UnixMillis {
+    UnixMillis::new(since_epoch.map_or(0, duration_ms))
 }
 
 /// Converts a duration to a saturating millisecond count.

@@ -6,7 +6,7 @@ use rostra_client::RostraId;
 use rostra_core::id::RostraIdSecretKey;
 use tau_proto::{
     AgentId, CborValue, ExtensionName, MessageAgentTarget, MessageDelivered, MessageExtensionData,
-    MessageFactId, MessageParty, MessagePublisherId,
+    MessageFactId, MessageParty, MessagePublisherId, UnixMillis,
 };
 
 use super::*;
@@ -134,7 +134,7 @@ fn durable_report_spacing_survives_reconstruction() {
             REPORT_INTERVAL,
         )
         .expect("due time");
-    let elapsed = Duration::from_millis(wall_clock_now.saturating_sub(last_report));
+    let elapsed = Duration::from_millis(wall_clock_now.get().saturating_sub(last_report.get()));
     let expected_remaining = REPORT_INTERVAL.saturating_sub(elapsed);
     let remaining = due.duration_since(now);
     assert!(
@@ -230,6 +230,199 @@ fn durable_checkpoint_file_schema_remains_v1() {
     restarted
         .configure(publisher(), identity(), directory.path())
         .expect("existing v1 checkpoint loads");
+}
+
+/// Ensures transparent Unix-millisecond timestamps write the exact legacy
+/// checkpoint CBOR field bytes and continue to decode from that representation.
+#[test]
+fn stored_registration_timestamps_preserve_legacy_cbor_bytes() {
+    #[derive(serde::Serialize)]
+    struct LegacyStoredRegistration {
+        baseline: SocialPostMaterializationCursor,
+        committed: SocialPostMaterializationCursor,
+        last_canonical_report_unix_ms: Option<u64>,
+        queued_since_unix_ms: Option<u64>,
+    }
+
+    let registration = StoredRegistration {
+        baseline: cursor(4),
+        committed: cursor(17),
+        last_canonical_report_unix_ms: Some(UnixMillis::new(1)),
+        queued_since_unix_ms: Some(UnixMillis::new(u64::MAX)),
+    };
+    let legacy = LegacyStoredRegistration {
+        baseline: cursor(4),
+        committed: cursor(17),
+        last_canonical_report_unix_ms: Some(1),
+        queued_since_unix_ms: Some(u64::MAX),
+    };
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&registration, &mut encoded).expect("typed registration encodes");
+    let mut legacy_encoded = Vec::new();
+    ciborium::ser::into_writer(&legacy, &mut legacy_encoded).expect("legacy registration encodes");
+    assert_eq!(encoded, legacy_encoded);
+    let decoded = ciborium::de::from_reader::<StoredRegistration, _>(legacy_encoded.as_slice())
+        .expect("legacy timestamp scalars decode");
+    assert_eq!(decoded.baseline, registration.baseline);
+    assert_eq!(decoded.committed, registration.committed);
+    assert_eq!(
+        decoded.last_canonical_report_unix_ms,
+        registration.last_canonical_report_unix_ms
+    );
+    assert_eq!(
+        decoded.queued_since_unix_ms,
+        registration.queued_since_unix_ms
+    );
+}
+
+/// Ensures timestamp conversion retains both the pre-epoch zero fallback and
+/// saturation of duration values too large for a Unix-millisecond scalar.
+#[test]
+fn unix_millis_clock_preserves_pre_epoch_fallback_and_saturation() {
+    let pre_epoch = UNIX_EPOCH
+        .checked_sub(Duration::from_millis(1))
+        .expect("pre-epoch system time")
+        .duration_since(UNIX_EPOCH);
+    assert_eq!(unix_millis_since_epoch(pre_epoch), UnixMillis::new(0));
+    assert_eq!(
+        unix_millis_since_epoch(Ok(Duration::new(u64::MAX, 999_999_999))),
+        UnixMillis::new(u64::MAX)
+    );
+}
+
+/// Ensures report spacing keeps its exact millisecond boundary and truncates
+/// sub-millisecond duration remainder just as the durable scalar policy did.
+#[test]
+fn report_due_at_preserves_millisecond_boundary_and_rounding() {
+    let now = Instant::now();
+    let pending = Pending {
+        end: cursor(5),
+        first_queued_at: now.checked_sub(MAX_BATCH_AGE).expect("batch age"),
+        last_queued_at: now.checked_sub(IDLE_DEBOUNCE).expect("idle age"),
+        count: 1,
+    };
+    let registration = Registration {
+        baseline: cursor(4),
+        committed: cursor(4),
+        last_canonical_report_unix_ms: Some(UnixMillis::new(1_000)),
+        pending: Some(pending),
+        inflight_end: None,
+        queued_since_unix_ms: None,
+    };
+    assert_eq!(
+        registration
+            .due_at(
+                now,
+                UnixMillis::new(1_999),
+                IDLE_DEBOUNCE,
+                MAX_BATCH_AGE,
+                Duration::from_secs(1),
+            )
+            .expect("one millisecond remains")
+            .duration_since(now),
+        Duration::from_millis(1)
+    );
+    assert_eq!(
+        registration
+            .due_at(
+                now,
+                UnixMillis::new(1_000),
+                IDLE_DEBOUNCE,
+                MAX_BATCH_AGE,
+                Duration::from_micros(1_500),
+            )
+            .expect("sub-millisecond remainder truncates")
+            .duration_since(now),
+        Duration::from_millis(1)
+    );
+}
+
+/// Ensures restart recovery reconstructs a persisted queued age through a
+/// rescan, preserving an already-due live batch's scheduling result.
+#[test]
+fn restart_rescan_preserves_live_queued_age_scheduling() {
+    let (directory, mut state) = configured_state();
+    let agent = AgentId::parse("agent").expect("agent id");
+    state.enable(agent.clone(), cursor(4)).expect("enable");
+    let first_scan = state.scan_snapshot(&agent).expect("first scan");
+    state
+        .merge_page(
+            &agent,
+            &first_scan,
+            ScannedPage {
+                scanned_through: cursor(5),
+                had_items: true,
+                exhausted: true,
+                count: 1,
+            },
+        )
+        .expect("first selected row");
+    {
+        let registration = state
+            .registrations
+            .get_mut(&agent)
+            .expect("queued registration");
+        registration.queued_since_unix_ms = Some(UnixMillis::new(
+            now_ms().get().saturating_sub(duration_ms(MAX_BATCH_AGE)),
+        ));
+        registration
+            .pending
+            .as_mut()
+            .expect("live pending page")
+            .first_queued_at = Instant::now()
+            .checked_sub(MAX_BATCH_AGE)
+            .expect("live batch age");
+    }
+    state
+        .commit(state.registrations.clone())
+        .expect("persist queued age");
+    let live_now = Instant::now();
+    assert_eq!(
+        state.registrations[&agent]
+            .due_at(
+                live_now,
+                now_ms(),
+                IDLE_DEBOUNCE,
+                MAX_BATCH_AGE,
+                REPORT_INTERVAL,
+            )
+            .expect("live overdue batch"),
+        live_now
+    );
+    drop(state);
+
+    let mut restored_state = State::default();
+    restored_state
+        .configure(publisher(), identity(), directory.path())
+        .expect("restore checkpoint");
+    let replay_scan = restored_state
+        .scan_snapshot(&agent)
+        .expect("replay scan after restart");
+    restored_state
+        .merge_page(
+            &agent,
+            &replay_scan,
+            ScannedPage {
+                scanned_through: cursor(5),
+                had_items: true,
+                exhausted: true,
+                count: 1,
+            },
+        )
+        .expect("replay selected row");
+    let restored_now = Instant::now();
+    assert_eq!(
+        restored_state.registrations[&agent]
+            .due_at(
+                restored_now,
+                now_ms(),
+                IDLE_DEBOUNCE,
+                MAX_BATCH_AGE,
+                REPORT_INTERVAL,
+            )
+            .expect("restored overdue batch"),
+        restored_now
+    );
 }
 
 /// Ensures replayed or stale canonical facts cannot checkpoint an un-emitted

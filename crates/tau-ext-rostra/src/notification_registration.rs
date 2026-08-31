@@ -3,6 +3,7 @@
 use std::time::{Duration, Instant};
 
 use rostra_client::SocialPostMaterializationCursor;
+use tau_proto::UnixMillis;
 
 use crate::notification_pending::Pending;
 use crate::notification_state::duration_ms;
@@ -15,9 +16,9 @@ pub(crate) struct StoredRegistration {
     /// Cursor acknowledging every disposed feed row before it.
     pub(crate) committed: SocialPostMaterializationCursor,
     /// Wall-clock time of the most recently canonical report.
-    pub(crate) last_canonical_report_unix_ms: Option<u64>,
+    pub(crate) last_canonical_report_unix_ms: Option<UnixMillis>,
     /// Durable first queued time so restart preserves max batch age.
-    pub(crate) queued_since_unix_ms: Option<u64>,
+    pub(crate) queued_since_unix_ms: Option<UnixMillis>,
 }
 
 /// Per-agent durable policy plus transient report coordination.
@@ -28,13 +29,13 @@ pub(crate) struct Registration {
     /// Last durably disposed feed cursor.
     pub(crate) committed: SocialPostMaterializationCursor,
     /// Most recent canonical report time.
-    pub(crate) last_canonical_report_unix_ms: Option<u64>,
+    pub(crate) last_canonical_report_unix_ms: Option<UnixMillis>,
     /// Current source page, if it contains selected posts.
     pub(crate) pending: Option<Pending>,
     /// Report cursor awaiting canonical message echo.
     pub(crate) inflight_end: Option<SocialPostMaterializationCursor>,
     /// Recovered first queued wall-clock time.
-    pub(crate) queued_since_unix_ms: Option<u64>,
+    pub(crate) queued_since_unix_ms: Option<UnixMillis>,
 }
 
 impl Registration {
@@ -64,7 +65,7 @@ impl Registration {
     pub(crate) fn due_at(
         &self,
         now: Instant,
-        now_ms: u64,
+        now_ms: UnixMillis,
         idle_debounce: Duration,
         max_batch_age: Duration,
         report_interval: Duration,
@@ -73,12 +74,18 @@ impl Registration {
         let idle = pending.last_queued_at.checked_add(idle_debounce)?;
         let age = pending.first_queued_at.checked_add(max_batch_age)?;
         let spacing = self.last_canonical_report_unix_ms.map_or(now, |last| {
-            let remaining = last
-                .saturating_add(duration_ms(report_interval))
-                .saturating_sub(now_ms);
+            let remaining = remaining_report_interval(last, now_ms, report_interval);
             now.checked_add(Duration::from_millis(remaining))
                 .unwrap_or(now)
         });
         Some(idle.min(age).max(spacing))
     }
+}
+
+/// Returns the remaining interval after comparing two Unix-millisecond clock
+/// readings and an explicitly converted duration.
+fn remaining_report_interval(last: UnixMillis, now: UnixMillis, report_interval: Duration) -> u64 {
+    last.get()
+        .saturating_add(duration_ms(report_interval))
+        .saturating_sub(now.get())
 }
