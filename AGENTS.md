@@ -21,6 +21,8 @@
   explicit user or maintainer confirmation of the exact semantics before
   implementation; do not hide the choice in unrelated work or create another
   gate unless the user explicitly requests one.
+- Before designing a multi-stage event-log operation, read
+  `specs/GATE-atomic-event-log-publication.md`.
 
 ## Verification
 
