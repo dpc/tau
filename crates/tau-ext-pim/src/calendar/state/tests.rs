@@ -62,6 +62,42 @@ fn pending_calendar_changes_are_deduplicated_and_private() {
     );
 }
 
+/// Semantic runtime identities must not change the exact raw JSON approval
+/// representation consumed after process restart.
+#[test]
+fn pending_calendar_change_preserves_raw_identity_bytes() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let state = StateStore::open(temp.path().join("state")).expect("state");
+    let mut change = CalendarChangeApproval::pending("update_event", "google", "primary");
+    change.event_id = Some("evt/raw".to_owned());
+    change.etag = Some("etag/raw".to_owned());
+    change.title = Some("Team sync".to_owned());
+
+    let id = state.pending_change(&change).expect("pending change");
+    let bytes = fs::read(
+        temp.path()
+            .join(format!("state/approvals/calendar-change/pending/{id}.json")),
+    )
+    .expect("approval bytes");
+
+    assert_eq!(
+        bytes,
+        br#"{
+  "schema": 0,
+  "id": "1",
+  "kind": "calendar_change",
+  "status": "pending",
+  "command": "update_event",
+  "account": "google",
+  "calendar": "primary",
+  "event_id": "evt/raw",
+  "etag": "etag/raw",
+  "title": "Team sync",
+  "reason": "user_approval_required"
+}"#
+    );
+}
+
 #[test]
 fn claimed_calendar_change_can_be_released_before_dispatch() {
     // Local preparation can fail after the approval record is claimed. When

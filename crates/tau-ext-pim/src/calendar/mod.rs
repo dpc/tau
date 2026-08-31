@@ -8,6 +8,7 @@ mod config;
 mod cursor;
 mod google;
 mod ics_feed;
+mod identity;
 mod runtime;
 mod state;
 mod tool;

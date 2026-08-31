@@ -21,7 +21,7 @@ fn range_visibility_filters_standalone_and_master_cancellations_before_paging() 
 
     filter_ics_event_visibility(&mut events, false);
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].id, "active");
+    assert_eq!(events[0].id.as_str(), "active");
 
     let mut discovery = parse_ics_events_in_range(ics, Tz::UTC, range).expect("ICS parses");
     filter_ics_event_visibility(&mut discovery, true);
@@ -52,7 +52,7 @@ fn backend_applies_cancellation_visibility_before_page_slicing() {
         )
         .expect("active page");
     active_handle.join().expect("active server exits");
-    assert_eq!(active.events[0].id, "active");
+    assert_eq!(active.events[0].id.as_str(), "active");
     assert!(!active.truncated);
 
     let (discovery_url, discovery_handle) = serve_ics_once(ICS);
@@ -68,7 +68,7 @@ fn backend_applies_cancellation_visibility_before_page_slicing() {
         )
         .expect("discovery page");
     discovery_handle.join().expect("discovery server exits");
-    assert_eq!(discovery.events[0].id, "cancelled");
+    assert_eq!(discovery.events[0].id.as_str(), "cancelled");
     assert_eq!(discovery.next_cursor.as_deref(), Some("ics:1"));
 }
 
@@ -79,7 +79,8 @@ fn parser_unfolds_and_extracts_basic_events() {
     let events = parse_ics_events(ics).expect("ics parses");
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].id, "abc");
+    assert_eq!(events[0].id.as_str(), "abc");
+    assert_eq!(events[0].uid.as_str(), "abc");
     assert_eq!(events[0].summary, "Helloworld");
     assert_eq!(events[0].location.as_deref(), Some("Room, 1"));
     assert!(events[0].start_utc.is_some());

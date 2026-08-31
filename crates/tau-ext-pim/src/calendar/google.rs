@@ -9,6 +9,7 @@ use url::form_urlencoded;
 
 use super::config::{ValidatedAccount, ValidatedBackendConfig};
 use super::ics_feed::TimeRange;
+use super::identity::{EventEtag, EventId, ICalUid, ProviderCalendarId};
 use crate::google_oauth::{
     GoogleDeviceAuthFinish, GoogleDeviceAuthStart, GoogleOauthClient, GoogleOauthSecretConfig,
     google_http_agent,
@@ -53,7 +54,7 @@ struct ErrorBodyRedaction<'a> {
     endpoint: Option<&'a [u8]>,
 }
 
-/// One Google calendar visible to the account.
+/// One Google calendar visible through the public backend API.
 pub struct GoogleCalendar {
     /// Calendar id used in tool and API calls.
     pub id: String,
@@ -65,7 +66,19 @@ pub struct GoogleCalendar {
     pub read_only: bool,
 }
 
-/// One Google Calendar event.
+/// One Google calendar retained by the calendar runtime.
+pub(super) struct GoogleCalendarRecord {
+    /// Calendar id used in tool and API calls.
+    pub(crate) id: ProviderCalendarId,
+    /// Calendar display name.
+    pub summary: String,
+    /// Whether this is the authenticated user's primary calendar.
+    pub primary: bool,
+    /// Whether the calendar is read-only for this authenticated user.
+    pub read_only: bool,
+}
+
+/// One Google Calendar event exposed through the public backend API.
 pub struct GoogleEvent {
     /// Backend event id.
     pub id: String,
@@ -100,12 +113,80 @@ pub struct GoogleEvent {
     pub recurring: bool,
 }
 
+/// One Google Calendar event retained by the calendar runtime.
+pub(super) struct GoogleEventRecord {
+    /// Backend event id.
+    pub(crate) id: EventId,
+    /// Event ETag.
+    pub(crate) etag: Option<EventEtag>,
+    /// iCalendar UID, when Google exposes it.
+    pub(crate) i_cal_uid: Option<ICalUid>,
+    /// Event summary.
+    pub summary: String,
+    /// Event description.
+    pub description: Option<String>,
+    /// Event location.
+    pub location: Option<String>,
+    /// Event start date or date-time.
+    pub start: String,
+    /// Event end date or date-time.
+    pub end: String,
+    /// Event status.
+    pub status: Option<String>,
+    /// Event visibility, such as `private`.
+    pub visibility: Option<String>,
+    /// Event transparency, such as `transparent` for non-busy events.
+    pub transparency: Option<String>,
+    /// Organizer email or display name.
+    pub organizer: Option<String>,
+    /// Attendee emails.
+    pub attendees: Vec<String>,
+    /// Current authenticated attendee response, when Google marks an attendee
+    /// as `self`.
+    pub self_response_status: Option<String>,
+    /// Whether the event is part of a recurring series.
+    pub recurring: bool,
+}
+
 /// One page of Google Calendar events.
-pub struct GoogleEventPage {
+pub(super) struct GoogleEventRecordPage {
     /// Events in this page.
-    pub events: Vec<GoogleEvent>,
+    pub events: Vec<GoogleEventRecord>,
     /// Cursor for the next page, when Google returns another page token.
     pub next_cursor: Option<String>,
+}
+
+impl From<GoogleCalendarRecord> for GoogleCalendar {
+    fn from(calendar: GoogleCalendarRecord) -> Self {
+        Self {
+            id: calendar.id.into_string(),
+            summary: calendar.summary,
+            primary: calendar.primary,
+            read_only: calendar.read_only,
+        }
+    }
+}
+
+impl From<GoogleEventRecord> for GoogleEvent {
+    fn from(event: GoogleEventRecord) -> Self {
+        Self {
+            id: event.id.into_string(),
+            etag: event.etag.map(EventEtag::into_string),
+            i_cal_uid: event.i_cal_uid.map(ICalUid::into_string),
+            summary: event.summary,
+            description: event.description,
+            location: event.location,
+            start: event.start,
+            end: event.end,
+            status: event.status,
+            visibility: event.visibility,
+            transparency: event.transparency,
+            organizer: event.organizer,
+            attendees: event.attendees,
+            self_response_status: event.self_response_status,
+            recurring: event.recurring,
+        }
+    }
 }
 
 /// Parameters for one Google event-list page.
@@ -286,6 +367,16 @@ impl GoogleBackend {
         account: &ValidatedAccount,
         stored_refresh_token: Option<&str>,
     ) -> Result<Vec<GoogleCalendar>, String> {
+        self.list_calendar_records(account, stored_refresh_token)
+            .map(|calendars| calendars.into_iter().map(GoogleCalendar::from).collect())
+    }
+
+    /// List typed Google calendar records for the calendar runtime.
+    pub(super) fn list_calendar_records(
+        &self,
+        account: &ValidatedAccount,
+        stored_refresh_token: Option<&str>,
+    ) -> Result<Vec<GoogleCalendarRecord>, String> {
         let token = self.access_token(account, stored_refresh_token)?;
         let api_base = api_base(account)?;
         let url = format!("{}/users/me/calendarList", api_base.effective);
@@ -310,11 +401,12 @@ impl GoogleBackend {
         range: TimeRange,
         limit: usize,
     ) -> Result<Vec<GoogleEvent>, String> {
+        let calendar_id = ProviderCalendarId::new(calendar_id);
         Ok(self
             .list_events_page(
                 account,
                 stored_refresh_token,
-                calendar_id,
+                &calendar_id,
                 GoogleEventListQuery {
                     range,
                     limit,
@@ -322,17 +414,20 @@ impl GoogleBackend {
                     include_cancelled: false,
                 },
             )?
-            .events)
+            .events
+            .into_iter()
+            .map(GoogleEvent::from)
+            .collect())
     }
 
     /// List one cursor page of Google events in a calendar.
-    pub(crate) fn list_events_page(
+    pub(super) fn list_events_page(
         &self,
         account: &ValidatedAccount,
         stored_refresh_token: Option<&str>,
-        calendar_id: &str,
+        calendar_id: &ProviderCalendarId,
         query: GoogleEventListQuery<'_>,
-    ) -> Result<GoogleEventPage, String> {
+    ) -> Result<GoogleEventRecordPage, String> {
         ensure_google_calendar_allowed(account, calendar_id)?;
         let token = self.access_token(account, stored_refresh_token)?;
         let api_base = api_base(account)?;
@@ -340,7 +435,7 @@ impl GoogleBackend {
         let url = format!(
             "{}/calendars/{}/events?{}",
             api_base.effective,
-            encode_path_segment(calendar_id),
+            encode_path_segment(calendar_id.as_str()),
             query
         );
         let json = self.get_json(&url, &token, api_base.custom)?;
@@ -352,7 +447,7 @@ impl GoogleBackend {
             .flatten()
             .filter_map(parse_event)
             .collect();
-        Ok(GoogleEventPage {
+        Ok(GoogleEventRecordPage {
             events,
             next_cursor,
         })
@@ -366,17 +461,37 @@ impl GoogleBackend {
         calendar_id: &str,
         event_id: &str,
     ) -> Result<GoogleEvent, String> {
+        self.read_event_record(
+            account,
+            stored_refresh_token,
+            &ProviderCalendarId::new(calendar_id),
+            &EventId::new(event_id),
+        )
+        .map(GoogleEvent::from)
+    }
+
+    /// Read one typed Google event for the calendar runtime.
+    pub(super) fn read_event_record(
+        &self,
+        account: &ValidatedAccount,
+        stored_refresh_token: Option<&str>,
+        calendar_id: &ProviderCalendarId,
+        event_id: &EventId,
+    ) -> Result<GoogleEventRecord, String> {
         ensure_google_calendar_allowed(account, calendar_id)?;
         let token = self.access_token(account, stored_refresh_token)?;
         let api_base = api_base(account)?;
         let url = format!(
             "{}/calendars/{}/events/{}",
             api_base.effective,
-            encode_path_segment(calendar_id),
-            encode_path_segment(event_id)
+            encode_path_segment(calendar_id.as_str()),
+            encode_path_segment(event_id.as_str())
         );
         parse_event(&self.get_json(&url, &token, api_base.custom)?).ok_or_else(|| {
-            format!("Google event `{event_id}` response was missing required fields")
+            format!(
+                "Google event `{}` response was missing required fields",
+                event_id.as_str()
+            )
         })
     }
 
@@ -388,18 +503,24 @@ impl GoogleBackend {
         calendar_id: &str,
         event: &GoogleEventWrite<'_>,
     ) -> Result<GoogleEvent, String> {
-        self.create_event_classified(account, stored_refresh_token, calendar_id, event)
-            .map_err(GoogleWriteError::into_string)
+        self.create_event_classified(
+            account,
+            stored_refresh_token,
+            &ProviderCalendarId::new(calendar_id),
+            event,
+        )
+        .map(GoogleEvent::from)
+        .map_err(GoogleWriteError::into_string)
     }
 
     /// Create one Google event while preserving mutation-dispatch authority.
-    pub(crate) fn create_event_classified(
+    pub(super) fn create_event_classified(
         &self,
         account: &ValidatedAccount,
         stored_refresh_token: Option<&str>,
-        calendar_id: &str,
+        calendar_id: &ProviderCalendarId,
         event: &GoogleEventWrite<'_>,
-    ) -> Result<GoogleEvent, GoogleWriteError> {
+    ) -> Result<GoogleEventRecord, GoogleWriteError> {
         ensure_google_calendar_allowed(account, calendar_id)
             .map_err(GoogleWriteError::NotDispatched)?;
         let token = self
@@ -411,7 +532,7 @@ impl GoogleBackend {
         let url = format!(
             "{}/calendars/{}/events?{}",
             api_base.effective,
-            encode_path_segment(calendar_id),
+            encode_path_segment(calendar_id.as_str()),
             query.finish()
         );
         let body = google_event_body(event).map_err(GoogleWriteError::NotDispatched)?;
@@ -432,24 +553,25 @@ impl GoogleBackend {
         self.update_event_classified(
             account,
             stored_refresh_token,
-            calendar_id,
-            event_id,
-            etag,
+            &ProviderCalendarId::new(calendar_id),
+            &EventId::new(event_id),
+            &EventEtag::new(etag),
             event,
         )
+        .map(GoogleEvent::from)
         .map_err(GoogleWriteError::into_string)
     }
 
     /// Patch one Google event while preserving mutation-dispatch authority.
-    pub(crate) fn update_event_classified(
+    pub(super) fn update_event_classified(
         &self,
         account: &ValidatedAccount,
         stored_refresh_token: Option<&str>,
-        calendar_id: &str,
-        event_id: &str,
-        etag: &str,
+        calendar_id: &ProviderCalendarId,
+        event_id: &EventId,
+        etag: &EventEtag,
         event: &GoogleEventWrite<'_>,
-    ) -> Result<GoogleEvent, GoogleWriteError> {
+    ) -> Result<GoogleEventRecord, GoogleWriteError> {
         ensure_google_calendar_allowed(account, calendar_id)
             .map_err(GoogleWriteError::NotDispatched)?;
         let token = self
@@ -461,12 +583,12 @@ impl GoogleBackend {
         let url = format!(
             "{}/calendars/{}/events/{}?{}",
             api_base.effective,
-            encode_path_segment(calendar_id),
-            encode_path_segment(event_id),
+            encode_path_segment(calendar_id.as_str()),
+            encode_path_segment(event_id.as_str()),
             query.finish()
         );
         let body = google_event_body(event).map_err(GoogleWriteError::NotDispatched)?;
-        parse_event(&self.patch_json_write(&url, &token, Some(etag), &body)?)
+        parse_event(&self.patch_json_write(&url, &token, Some(etag.as_str()), &body)?)
             .ok_or(GoogleWriteError::OutcomeUnknown)
     }
 
@@ -479,18 +601,24 @@ impl GoogleBackend {
         event_id: &str,
         etag: &str,
     ) -> Result<(), String> {
-        self.delete_event_classified(account, stored_refresh_token, calendar_id, event_id, etag)
-            .map_err(GoogleWriteError::into_string)
+        self.delete_event_classified(
+            account,
+            stored_refresh_token,
+            &ProviderCalendarId::new(calendar_id),
+            &EventId::new(event_id),
+            &EventEtag::new(etag),
+        )
+        .map_err(GoogleWriteError::into_string)
     }
 
     /// Delete one Google event while preserving mutation-dispatch authority.
-    pub(crate) fn delete_event_classified(
+    pub(super) fn delete_event_classified(
         &self,
         account: &ValidatedAccount,
         stored_refresh_token: Option<&str>,
-        calendar_id: &str,
-        event_id: &str,
-        etag: &str,
+        calendar_id: &ProviderCalendarId,
+        event_id: &EventId,
+        etag: &EventEtag,
     ) -> Result<(), GoogleWriteError> {
         ensure_google_calendar_allowed(account, calendar_id)
             .map_err(GoogleWriteError::NotDispatched)?;
@@ -503,15 +631,15 @@ impl GoogleBackend {
         let url = format!(
             "{}/calendars/{}/events/{}?{}",
             api_base.effective,
-            encode_path_segment(calendar_id),
-            encode_path_segment(event_id),
+            encode_path_segment(calendar_id.as_str()),
+            encode_path_segment(event_id.as_str()),
             query.finish()
         );
         let response = self
             .agent
             .delete(&url)
             .header("Authorization", format!("Bearer {token}"))
-            .header("If-Match", google_if_match_header(etag))
+            .header("If-Match", google_if_match_header(etag.as_str()))
             .call()
             .map_err(|_| GoogleWriteError::OutcomeUnknown)?;
         if !response.status().is_success() {
@@ -534,24 +662,25 @@ impl GoogleBackend {
         self.respond_invite_classified(
             account,
             stored_refresh_token,
-            calendar_id,
-            event_id,
-            etag,
+            &ProviderCalendarId::new(calendar_id),
+            &EventId::new(event_id),
+            &EventEtag::new(etag),
             response_status,
         )
+        .map(GoogleEvent::from)
         .map_err(GoogleWriteError::into_string)
     }
 
     /// Respond to an invitation while preserving mutation-dispatch authority.
-    pub(crate) fn respond_invite_classified(
+    pub(super) fn respond_invite_classified(
         &self,
         account: &ValidatedAccount,
         stored_refresh_token: Option<&str>,
-        calendar_id: &str,
-        event_id: &str,
-        etag: &str,
+        calendar_id: &ProviderCalendarId,
+        event_id: &EventId,
+        etag: &EventEtag,
         response_status: &str,
-    ) -> Result<GoogleEvent, GoogleWriteError> {
+    ) -> Result<GoogleEventRecord, GoogleWriteError> {
         ensure_google_calendar_allowed(account, calendar_id)
             .map_err(GoogleWriteError::NotDispatched)?;
         let token = self
@@ -561,8 +690,8 @@ impl GoogleBackend {
         let event_url = format!(
             "{}/calendars/{}/events/{}",
             api_base.effective,
-            encode_path_segment(calendar_id),
-            encode_path_segment(event_id)
+            encode_path_segment(calendar_id.as_str()),
+            encode_path_segment(event_id.as_str())
         );
         let current = self
             .get_json(&event_url, &token, api_base.custom)
@@ -572,7 +701,7 @@ impl GoogleBackend {
         let mut query = form_urlencoded::Serializer::new(String::new());
         query.append_pair("sendUpdates", GOOGLE_SEND_UPDATES);
         let patch_url = format!("{event_url}?{}", query.finish());
-        parse_event(&self.patch_json_write(&patch_url, &token, Some(etag), &patch)?)
+        parse_event(&self.patch_json_write(&patch_url, &token, Some(etag.as_str()), &patch)?)
             .ok_or(GoogleWriteError::OutcomeUnknown)
     }
 
@@ -767,13 +896,13 @@ fn api_base(account: &ValidatedAccount) -> Result<GoogleApiBase<'_>, String> {
 
 fn allowed_google_calendar(
     account: &ValidatedAccount,
-    mut calendar: GoogleCalendar,
-) -> Option<GoogleCalendar> {
-    if google_calendar_id_allowed(account, &calendar.id) {
+    mut calendar: GoogleCalendarRecord,
+) -> Option<GoogleCalendarRecord> {
+    if google_calendar_id_allowed(account, calendar.id.as_str()) {
         return Some(calendar);
     }
     if calendar.primary && google_calendar_id_allowed(account, "primary") {
-        calendar.id = "primary".to_owned();
+        calendar.id = ProviderCalendarId::new("primary");
         return Some(calendar);
     }
     None
@@ -788,13 +917,14 @@ fn google_calendar_id_allowed(account: &ValidatedAccount, calendar_id: &str) -> 
 
 fn ensure_google_calendar_allowed(
     account: &ValidatedAccount,
-    calendar_id: &str,
+    calendar_id: &ProviderCalendarId,
 ) -> Result<(), String> {
-    if google_calendar_id_allowed(account, calendar_id) {
+    if google_calendar_id_allowed(account, calendar_id.as_str()) {
         return Ok(());
     }
     Err(format!(
-        "calendar `{calendar_id}` is not allowed for account `{}`",
+        "calendar `{}` is not allowed for account `{}`",
+        calendar_id.as_str(),
         account.id
     ))
 }
@@ -828,7 +958,7 @@ fn is_safe_google_page_token(token: &str) -> bool {
         && !token.chars().any(char::is_control)
 }
 
-fn parse_calendar(value: &Value) -> Option<GoogleCalendar> {
+fn parse_calendar(value: &Value) -> Option<GoogleCalendarRecord> {
     let id = value.get("id")?.as_str()?.to_owned();
     let summary = value
         .get("summary")
@@ -843,15 +973,15 @@ fn parse_calendar(value: &Value) -> Option<GoogleCalendar> {
         .get("primary")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    Some(GoogleCalendar {
-        id,
+    Some(GoogleCalendarRecord {
+        id: ProviderCalendarId::new(id),
         summary,
         primary,
         read_only: matches!(access_role, "freeBusyReader" | "reader"),
     })
 }
 
-fn parse_event(value: &Value) -> Option<GoogleEvent> {
+fn parse_event(value: &Value) -> Option<GoogleEventRecord> {
     let id = value.get("id")?.as_str()?.to_owned();
     let start = google_event_time(value.get("start")?)?;
     let end = google_event_time(value.get("end")?)?;
@@ -887,13 +1017,16 @@ fn parse_event(value: &Value) -> Option<GoogleEvent> {
             .and_then(Value::as_str)
             .map(str::to_owned)
     });
-    Some(GoogleEvent {
-        id,
-        etag: value.get("etag").and_then(Value::as_str).map(str::to_owned),
+    Some(GoogleEventRecord {
+        id: EventId::new(id),
+        etag: value
+            .get("etag")
+            .and_then(Value::as_str)
+            .map(EventEtag::new),
         i_cal_uid: value
             .get("iCalUID")
             .and_then(Value::as_str)
-            .map(str::to_owned),
+            .map(ICalUid::new),
         summary: value
             .get("summary")
             .and_then(Value::as_str)

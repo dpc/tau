@@ -18,6 +18,7 @@ use ureq::tls as path_ureq_tls;
 use url::Url;
 
 use super::config::{ValidatedAccount, ValidatedBackendConfig};
+use super::identity::{EventId, ICalUid, ProviderCalendarId};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_ICS_BYTES: u64 = 2 * 1024 * 1024;
@@ -31,7 +32,7 @@ pub struct IcsFeedBackend {
     agent: ureq::Agent,
 }
 
-/// One calendar visible through a backend account.
+/// One calendar visible through the public backend API.
 pub struct BackendCalendar {
     /// Calendar id used in tool calls.
     pub id: String,
@@ -41,13 +42,58 @@ pub struct BackendCalendar {
     pub read_only: bool,
 }
 
-/// One event parsed from an iCalendar feed.
+/// One calendar retained by the calendar runtime.
+pub(super) struct BackendCalendarRecord {
+    /// Calendar id used in tool calls.
+    pub(crate) id: ProviderCalendarId,
+    /// User-facing display name.
+    pub display_name: String,
+    /// Whether the calendar is read-only.
+    pub read_only: bool,
+}
+
+/// One event parsed from an iCalendar feed through the public backend API.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IcsEvent {
     /// Stable event id.
     pub id: String,
     /// iCalendar UID.
     pub uid: String,
+    /// Event summary.
+    pub summary: String,
+    /// Event description.
+    pub description: Option<String>,
+    /// Event location.
+    pub location: Option<String>,
+    /// Backend-normalized start value.
+    pub start: String,
+    /// Backend-normalized end value.
+    pub end: String,
+    /// Parsed start instant, when the event has a concrete time range.
+    pub start_utc: Option<OffsetDateTime>,
+    /// Parsed end instant, when the event has a concrete time range.
+    pub end_utc: Option<OffsetDateTime>,
+    /// Event status.
+    pub status: Option<String>,
+    /// Whether `CLASS` marks this event private/confidential.
+    pub private: bool,
+    /// Organizer value.
+    pub organizer: Option<String>,
+    /// Attendee values.
+    pub attendees: Vec<String>,
+    /// Whether the source component contains recurrence metadata.
+    pub recurring: bool,
+    /// Whether time filtering could not fully interpret this event's time.
+    pub time_unparsed: bool,
+}
+
+/// One event retained by the calendar runtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct IcsEventRecord {
+    /// Stable event id.
+    pub(crate) id: EventId,
+    /// iCalendar UID.
+    pub(crate) uid: ICalUid,
     /// Event summary.
     pub summary: String,
     /// Event description.
@@ -86,7 +132,7 @@ pub struct IcsEvent {
     pub time_unparsed: bool,
 }
 
-/// One page of iCalendar feed events.
+/// One public page of iCalendar feed events.
 pub struct IcsEventPage {
     /// Events in this page.
     pub events: Vec<IcsEvent>,
@@ -94,6 +140,48 @@ pub struct IcsEventPage {
     pub next_cursor: Option<String>,
     /// Whether more matching events remain after this page.
     pub truncated: bool,
+}
+
+/// One typed page retained by the calendar runtime.
+pub(super) struct IcsEventRecordPage {
+    /// Events in this page.
+    pub events: Vec<IcsEventRecord>,
+    /// Cursor for the next page, when more matching events remain.
+    pub next_cursor: Option<String>,
+    /// Whether more matching events remain after this page.
+    pub truncated: bool,
+}
+
+impl From<BackendCalendarRecord> for BackendCalendar {
+    fn from(calendar: BackendCalendarRecord) -> Self {
+        Self {
+            id: calendar.id.into_string(),
+            display_name: calendar.display_name,
+            read_only: calendar.read_only,
+        }
+    }
+}
+
+impl From<IcsEventRecord> for IcsEvent {
+    fn from(event: IcsEventRecord) -> Self {
+        Self {
+            id: event.id.into_string(),
+            uid: event.uid.into_string(),
+            summary: event.summary,
+            description: event.description,
+            location: event.location,
+            start: event.start,
+            end: event.end,
+            start_utc: event.start_utc,
+            end_utc: event.end_utc,
+            status: event.status,
+            private: event.private,
+            organizer: event.organizer,
+            attendees: event.attendees,
+            recurring: event.recurring,
+            time_unparsed: event.time_unparsed,
+        }
+    }
 }
 
 /// Time range for event and free-busy queries.
@@ -123,11 +211,22 @@ impl IcsFeedBackend {
 
     /// List synthetic calendars exposed by an iCalendar feed account.
     pub fn list_calendars(&self, account: &ValidatedAccount) -> Vec<BackendCalendar> {
+        self.list_calendar_records(account)
+            .into_iter()
+            .map(BackendCalendar::from)
+            .collect()
+    }
+
+    /// List typed synthetic calendars for the calendar runtime.
+    pub(super) fn list_calendar_records(
+        &self,
+        account: &ValidatedAccount,
+    ) -> Vec<BackendCalendarRecord> {
         account
             .allowed_calendars
             .iter()
-            .map(|id| BackendCalendar {
-                id: id.clone(),
+            .map(|id| BackendCalendarRecord {
+                id: ProviderCalendarId::new(id),
                 display_name: account.display_name.clone().unwrap_or_else(|| id.clone()),
                 read_only: true,
             })
@@ -142,9 +241,13 @@ impl IcsFeedBackend {
         range: TimeRange,
         limit: usize,
     ) -> Result<Vec<IcsEvent>, String> {
+        let calendar = ProviderCalendarId::new(calendar);
         Ok(self
-            .list_events_page(account, calendar, range, limit, None, false)?
-            .events)
+            .list_event_records_page(account, &calendar, range, limit, None, false)?
+            .events
+            .into_iter()
+            .map(IcsEvent::from)
+            .collect())
     }
 
     /// List one cursor page of events from the account's feed.
@@ -157,7 +260,32 @@ impl IcsFeedBackend {
         cursor: Option<&str>,
         include_cancelled: bool,
     ) -> Result<IcsEventPage, String> {
-        ensure_calendar_allowed(account, calendar)?;
+        let page = self.list_event_records_page(
+            account,
+            &ProviderCalendarId::new(calendar),
+            range,
+            limit,
+            cursor,
+            include_cancelled,
+        )?;
+        Ok(IcsEventPage {
+            events: page.events.into_iter().map(IcsEvent::from).collect(),
+            next_cursor: page.next_cursor,
+            truncated: page.truncated,
+        })
+    }
+
+    /// List one typed cursor page for the calendar runtime.
+    pub(super) fn list_event_records_page(
+        &self,
+        account: &ValidatedAccount,
+        calendar: &ProviderCalendarId,
+        range: TimeRange,
+        limit: usize,
+        cursor: Option<&str>,
+        include_cancelled: bool,
+    ) -> Result<IcsEventRecordPage, String> {
+        ensure_calendar_allowed(account, calendar.as_str())?;
         let offset = parse_ics_cursor(cursor)?;
         let text = self.fetch_feed(account)?;
         let timezone = ics_default_timezone(account)?;
@@ -172,7 +300,7 @@ impl IcsFeedBackend {
             None
         };
         let events = events.into_iter().skip(offset).take(limit).collect();
-        Ok(IcsEventPage {
+        Ok(IcsEventRecordPage {
             events,
             next_cursor,
             truncated,
@@ -186,17 +314,35 @@ impl IcsFeedBackend {
         calendar: &str,
         event_id: &str,
     ) -> Result<IcsEvent, String> {
-        ensure_calendar_allowed(account, calendar)?;
+        self.read_event_record(
+            account,
+            &ProviderCalendarId::new(calendar),
+            &EventId::new(event_id),
+        )
+        .map(IcsEvent::from)
+    }
+
+    /// Read one typed event for the calendar runtime.
+    pub(super) fn read_event_record(
+        &self,
+        account: &ValidatedAccount,
+        calendar: &ProviderCalendarId,
+        event_id: &EventId,
+    ) -> Result<IcsEventRecord, String> {
+        ensure_calendar_allowed(account, calendar.as_str())?;
         let text = self.fetch_feed(account)?;
         let timezone = ics_default_timezone(account)?;
         if let Some(event) = parse_ics_static_events(&text, timezone)?
             .into_iter()
-            .find(|event| event.id == event_id)
+            .find(|event| event.id == *event_id)
         {
             return Ok(event);
         }
-        let Some(timestamp) = recurring_event_timestamp(event_id) else {
-            return Err(format!("calendar event `{event_id}` was not found"));
+        let Some(timestamp) = recurring_event_timestamp(event_id.as_str()) else {
+            return Err(format!(
+                "calendar event `{}` was not found",
+                event_id.as_str()
+            ));
         };
         let start = OffsetDateTime::from_unix_timestamp(timestamp)
             .map_err(|_| "calendar event id timestamp is out of range".to_owned())?;
@@ -212,8 +358,8 @@ impl IcsFeedBackend {
             },
         )?
         .into_iter()
-        .find(|event| event.id == event_id)
-        .ok_or_else(|| format!("calendar event `{event_id}` was not found"))
+        .find(|event| event.id == *event_id)
+        .ok_or_else(|| format!("calendar event `{}` was not found", event_id.as_str()))
     }
     fn fetch_feed(&self, account: &ValidatedAccount) -> Result<String, String> {
         let url = self.feed_url(account)?;
@@ -368,7 +514,7 @@ fn system_timezone_name() -> Option<String> {
 }
 
 #[cfg(test)]
-fn parse_ics_events(text: &str) -> Result<Vec<IcsEvent>, String> {
+fn parse_ics_events(text: &str) -> Result<Vec<IcsEventRecord>, String> {
     parse_ics_events_in_range(
         text,
         Tz::UTC,
@@ -381,7 +527,7 @@ fn parse_ics_events(text: &str) -> Result<Vec<IcsEvent>, String> {
 
 struct RangeEventSeed<'a> {
     component: &'a ICalendarComponent,
-    uid: String,
+    uid: ICalUid,
     start: chrono::DateTime<Tz>,
     duration: chrono::Duration,
     all_day: bool,
@@ -395,7 +541,7 @@ fn parse_ics_events_in_range(
     text: &str,
     timezone: Tz,
     range: TimeRange,
-) -> Result<Vec<IcsEvent>, String> {
+) -> Result<Vec<IcsEventRecord>, String> {
     let (Some(range_min), Some(range_max)) = (range.min, range.max) else {
         return Err("iCalendar list_events requires a bounded range".to_owned());
     };
@@ -431,7 +577,7 @@ fn parse_ics_events_in_range(
     Ok(events)
 }
 
-fn parse_ics_static_events(text: &str, timezone: Tz) -> Result<Vec<IcsEvent>, String> {
+fn parse_ics_static_events(text: &str, timezone: Tz) -> Result<Vec<IcsEventRecord>, String> {
     let mut parser = Parser::new(text);
     let mut events = Vec::new();
     loop {
@@ -493,10 +639,10 @@ fn expand_calendar_events_in_range(
     timezone: Tz,
     range_min: OffsetDateTime,
     range_max: OffsetDateTime,
-) -> Result<Vec<IcsEvent>, String> {
+) -> Result<Vec<IcsEventRecord>, String> {
     let resolver = calendar.build_tz_resolver().with_default(timezone);
     let mut masters = Vec::new();
-    let mut overrides = BTreeMap::<String, BTreeMap<i64, RangeEventSeed<'_>>>::new();
+    let mut overrides = BTreeMap::<ICalUid, BTreeMap<i64, RangeEventSeed<'_>>>::new();
     for (index, component) in calendar.components.iter().enumerate() {
         if component.component_type != ICalendarComponentType::VEvent {
             continue;
@@ -642,8 +788,8 @@ fn expand_master_in_range(
     overrides: Option<&BTreeMap<i64, RangeEventSeed<'_>>>,
     range_min: OffsetDateTime,
     range_max: OffsetDateTime,
-    emitted_override_ids: &mut std::collections::BTreeSet<String>,
-    events: &mut Vec<IcsEvent>,
+    emitted_override_ids: &mut std::collections::BTreeSet<EventId>,
+    events: &mut Vec<IcsEventRecord>,
 ) -> Result<(), String> {
     if master.rrules.is_empty() && master.rdates.is_empty() {
         push_seed_occurrence_if_overlaps(master, master.start, range_min, range_max, events);
@@ -717,7 +863,7 @@ fn push_seed_occurrence_if_overlaps(
     start: chrono::DateTime<Tz>,
     range_min: OffsetDateTime,
     range_max: OffsetDateTime,
-    events: &mut Vec<IcsEvent>,
+    events: &mut Vec<IcsEventRecord>,
 ) {
     let Some(start_utc) = chrono_to_offset_time(start) else {
         return;
@@ -736,11 +882,15 @@ fn push_seed_occurrence_if_overlaps(
     let recurring =
         !seed.rrules.is_empty() || !seed.rdates.is_empty() || seed.recurrence_id.is_some();
     let id = if recurring {
-        format!("{}#{}", seed.uid, start_utc.unix_timestamp())
+        EventId::new(format!(
+            "{}#{}",
+            seed.uid.as_str(),
+            start_utc.unix_timestamp()
+        ))
     } else {
-        seed.uid.clone()
+        EventId::new(seed.uid.as_str())
     };
-    events.push(IcsEvent {
+    events.push(IcsEventRecord {
         id,
         uid: seed.uid.clone(),
         summary: first_property_text(seed.component, &ICalendarProperty::Summary)
@@ -786,7 +936,7 @@ fn format_range_event_time(
 }
 
 /// Remove cancellation records before sorting and slicing an ICS range page.
-fn filter_ics_event_visibility(events: &mut Vec<IcsEvent>, include_cancelled: bool) {
+fn filter_ics_event_visibility(events: &mut Vec<IcsEventRecord>, include_cancelled: bool) {
     if !include_cancelled {
         events.retain(|event| {
             !event
@@ -797,8 +947,8 @@ fn filter_ics_event_visibility(events: &mut Vec<IcsEvent>, include_cancelled: bo
     }
 }
 
-fn override_event_key(uid: &str, recurrence_id: i64) -> String {
-    format!("{uid}#{recurrence_id}")
+fn override_event_key(uid: &ICalUid, recurrence_id: i64) -> EventId {
+    EventId::new(format!("{}#{recurrence_id}", uid.as_str()))
 }
 
 fn rrule_timezone(tz: Tz) -> rrule::Tz {
@@ -850,11 +1000,11 @@ fn capped_range_error() -> String {
     "iCalendar recurrence expansion for the requested range exceeded the safety limit; narrow the requested range".to_owned()
 }
 
-fn component_uid(component: &ICalendarComponent, index: usize) -> String {
+fn component_uid(component: &ICalendarComponent, index: usize) -> ICalUid {
     component
         .uid()
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("ics-component-{index}"))
+        .map(ICalUid::new)
+        .unwrap_or_else(|| ICalUid::new(format!("ics-component-{index}")))
 }
 
 fn first_property_text(
@@ -893,7 +1043,7 @@ fn chrono_to_offset_time(time: chrono::DateTime<Tz>) -> Option<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp(time.timestamp()).ok()
 }
 
-fn event_overlaps(event: &IcsEvent, range: TimeRange) -> bool {
+fn event_overlaps(event: &IcsEventRecord, range: TimeRange) -> bool {
     let (Some(start), Some(end)) = (event.start_utc, event.end_utc) else {
         return false;
     };
@@ -910,7 +1060,7 @@ fn event_overlaps(event: &IcsEvent, range: TimeRange) -> bool {
     true
 }
 
-fn event_sort_key(event: &IcsEvent) -> Option<OffsetDateTime> {
+fn event_sort_key(event: &IcsEventRecord) -> Option<OffsetDateTime> {
     event.start_utc
 }
 

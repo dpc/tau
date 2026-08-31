@@ -121,7 +121,7 @@ fn parses_calendar_list_items() {
 
     let calendar = parse_calendar(&json).expect("calendar parses");
 
-    assert_eq!(calendar.id, "primary");
+    assert_eq!(calendar.id.as_str(), "primary");
     assert!(calendar.read_only);
 }
 
@@ -141,7 +141,7 @@ fn primary_alias_is_tool_facing_when_allowed() {
     let calendar = allowed_google_calendar(&account, parse_calendar(&json).expect("calendar"))
         .expect("primary alias allowed");
 
-    assert_eq!(calendar.id, "primary");
+    assert_eq!(calendar.id.as_str(), "primary");
     assert_eq!(calendar.summary, "Personal");
 }
 
@@ -195,6 +195,7 @@ fn parses_event_date_times_dates_and_attendees() {
     let json = serde_json::json!({
         "id": "evt",
         "etag": "abc",
+        "iCalUID": "uid@example.test",
         "summary": "Meeting",
         "visibility": "private",
         "transparency": "transparent",
@@ -209,7 +210,12 @@ fn parses_event_date_times_dates_and_attendees() {
 
     let event = parse_event(&json).expect("event parses");
 
-    assert_eq!(event.id, "evt");
+    assert_eq!(event.id.as_str(), "evt");
+    assert_eq!(event.etag.as_ref().map(EventEtag::as_str), Some("abc"));
+    assert_eq!(
+        event.i_cal_uid.as_ref().map(ICalUid::as_str),
+        Some("uid@example.test")
+    );
     assert_eq!(event.end, "2026-05-29");
     assert_eq!(event.attendees, vec!["a@example.com", "me@example.com"]);
     assert_eq!(event.visibility.as_deref(), Some("private"));

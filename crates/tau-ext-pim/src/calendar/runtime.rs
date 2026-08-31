@@ -17,9 +17,10 @@ use super::config::{
 };
 use super::cursor::{CalendarCursor, CalendarCursorQuery, CalendarCursorSelector};
 use super::google::{
-    GoogleBackend, GoogleEvent, GoogleEventListQuery, GoogleEventWrite, GoogleWriteError,
+    GoogleBackend, GoogleEventListQuery, GoogleEventRecord, GoogleEventWrite, GoogleWriteError,
 };
-use super::ics_feed::{IcsEvent, IcsFeedBackend, TimeRange, normalize_feed_url};
+use super::ics_feed::{IcsEventRecord, IcsFeedBackend, TimeRange, normalize_feed_url};
+use super::identity::{EventEtag, EventId, EventKey, ICalUid, ProviderCalendarId};
 use super::state::{CalendarChangeApproval, CalendarLogEntry, GooglePendingAuth, StateStore};
 use super::tool::{
     CalendarCommand, CalendarRangeArgs, CreateEventArgs, DeleteEventArgs, ListCalendarsArgs,
@@ -155,23 +156,14 @@ struct Engine {
     state: StateStore,
     google: GoogleBackend,
     ics_feed: IcsFeedBackend,
-    etags: RefCell<BTreeMap<EventEtagKey, String>>,
+    etags: RefCell<BTreeMap<EventKey, EventEtag>>,
     last_events: RefCell<BTreeMap<String, Vec<RecentEventRef>>>,
 }
 
 #[derive(Clone, Debug)]
 struct RecentEventRef {
-    account: String,
-    calendar: String,
-    event_id: String,
+    key: EventKey,
     summary: String,
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct EventEtagKey {
-    account: String,
-    calendar: String,
-    event_id: String,
 }
 
 impl RuntimeState {
@@ -353,8 +345,8 @@ fn required_config_secret(
 }
 
 enum BackendEvent {
-    Ics(IcsEvent),
-    Google(GoogleEvent),
+    Ics(IcsEventRecord),
+    Google(GoogleEventRecord),
 }
 
 /// One provider or provider-neutral page of calendar rows.
@@ -403,7 +395,7 @@ impl EventVisibility {
 }
 
 enum CalendarMutationResult {
-    Event(Box<GoogleEvent>),
+    Event(Box<GoogleEventRecord>),
     Deleted,
 }
 
@@ -530,7 +522,7 @@ fn extract_unknown_field(message: &str) -> Option<&str> {
 impl CalendarMutationResult {
     fn event_id(&self) -> Option<&str> {
         match self {
-            Self::Event(event) => Some(&event.id),
+            Self::Event(event) => Some(event.id.as_str()),
             Self::Deleted => None,
         }
     }
@@ -895,7 +887,7 @@ impl Engine {
             for account in accounts {
                 match &account.backend {
                     Some(ValidatedBackendConfig::IcsFeed { .. }) => {
-                        for calendar in self.ics_feed.list_calendars(account) {
+                        for calendar in self.ics_feed.list_calendar_records(account) {
                             let flags = if calendar.read_only {
                                 "read_only"
                             } else {
@@ -903,7 +895,7 @@ impl Engine {
                             };
                             rows.push(format!(
                                 "{} {} {}",
-                                flatten_calendar_id(&account.id, &calendar.id),
+                                flatten_calendar_id(&account.id, calendar.id.as_str()),
                                 flags,
                                 quoted_display_field(&calendar.display_name)
                             ));
@@ -913,7 +905,7 @@ impl Engine {
                         let stored_refresh_token = self.google_refresh_token(account)?;
                         for calendar in self
                             .google
-                            .list_calendars(account, stored_refresh_token.as_deref())?
+                            .list_calendar_records(account, stored_refresh_token.as_deref())?
                         {
                             let flags = if calendar.read_only {
                                 "read_only"
@@ -922,7 +914,7 @@ impl Engine {
                             };
                             rows.push(format!(
                                 "{} {} {}",
-                                flatten_calendar_id(&account.id, &calendar.id),
+                                flatten_calendar_id(&account.id, calendar.id.as_str()),
                                 flags,
                                 quoted_display_field(&calendar.summary)
                             ));
@@ -1085,16 +1077,19 @@ impl Engine {
         let implicit_event_id = args.event_id.is_none();
         let event_id =
             self.resolve_read_event_id(agent_id, account, calendar, args.event_id.as_deref())?;
+        let provider_calendar = ProviderCalendarId::new(calendar);
+        let event_id = EventId::new(event_id);
         let event = match &account.backend {
-            Some(ValidatedBackendConfig::IcsFeed { .. }) => {
-                BackendEvent::Ics(self.ics_feed.read_event(account, calendar, &event_id)?)
-            }
+            Some(ValidatedBackendConfig::IcsFeed { .. }) => BackendEvent::Ics(
+                self.ics_feed
+                    .read_event_record(account, &provider_calendar, &event_id)?,
+            ),
             Some(ValidatedBackendConfig::Google { .. }) => {
                 let stored_refresh_token = self.google_refresh_token(account)?;
-                BackendEvent::Google(self.google.read_event(
+                BackendEvent::Google(self.google.read_event_record(
                     account,
                     stored_refresh_token.as_deref(),
-                    calendar,
+                    &provider_calendar,
                     &event_id,
                 )?)
             }
@@ -1115,7 +1110,10 @@ impl Engine {
                     calendar,
                 ))),
             ),
-            ("event_id", CborValue::Text(safe_display_line(&event_id))),
+            (
+                "event_id",
+                CborValue::Text(safe_display_line(event_id.as_str())),
+            ),
             ("format", CborValue::Text(EVENT_DETAIL_FORMAT.to_owned())),
             (
                 "event",
@@ -1368,28 +1366,29 @@ impl Engine {
         calendar: &str,
         event: &BackendEvent,
     ) {
-        let key = EventEtagKey {
-            account: account.id.clone(),
-            calendar: calendar.to_owned(),
-            event_id: event_id(event).to_owned(),
-        };
+        let key = EventKey::new(
+            &account.id,
+            ProviderCalendarId::new(calendar),
+            event_id(event).clone(),
+        );
         let Some(etag) = event_etag(event) else {
             self.etags.borrow_mut().remove(&key);
             return;
         };
-        self.etags.borrow_mut().insert(key, etag.to_owned());
+        self.etags.borrow_mut().insert(key, etag.clone());
     }
 
     fn cached_etag_for_change(&self, change: &CalendarChangeApproval) -> Result<String, String> {
         let event_id = required_change_field(change.event_id.as_deref(), "event_id")?;
         self.etags
             .borrow()
-            .get(&EventEtagKey {
-                account: change.account.clone(),
-                calendar: change.calendar.clone(),
-                event_id: event_id.to_owned(),
-            })
+            .get(&EventKey::new(
+                &change.account,
+                ProviderCalendarId::new(&change.calendar),
+                EventId::new(event_id),
+            ))
             .cloned()
+            .map(EventEtag::into_string)
             .ok_or_else(|| {
                 format!(
                     "calendar event `{}` has not been read in this session or changed since it was cached; re-read the event and retry",
@@ -1403,26 +1402,23 @@ impl Engine {
         change: &CalendarChangeApproval,
         result: &CalendarMutationResult,
     ) {
+        let calendar = ProviderCalendarId::new(&change.calendar);
         match result {
             CalendarMutationResult::Event(event) => {
                 if let Some(etag) = &event.etag {
                     self.etags.borrow_mut().insert(
-                        EventEtagKey {
-                            account: change.account.clone(),
-                            calendar: change.calendar.clone(),
-                            event_id: event.id.clone(),
-                        },
+                        EventKey::new(&change.account, calendar, event.id.clone()),
                         etag.clone(),
                     );
                 }
             }
             CalendarMutationResult::Deleted => {
                 if let Some(event_id) = &change.event_id {
-                    self.etags.borrow_mut().remove(&EventEtagKey {
-                        account: change.account.clone(),
-                        calendar: change.calendar.clone(),
-                        event_id: event_id.clone(),
-                    });
+                    self.etags.borrow_mut().remove(&EventKey::new(
+                        &change.account,
+                        calendar,
+                        EventId::new(event_id),
+                    ));
                 }
             }
         }
@@ -1438,9 +1434,11 @@ impl Engine {
         let recent = events
             .iter()
             .map(|event| RecentEventRef {
-                account: account.id.clone(),
-                calendar: calendar.to_owned(),
-                event_id: event_id(event).to_owned(),
+                key: EventKey::new(
+                    &account.id,
+                    ProviderCalendarId::new(calendar),
+                    event_id(event).clone(),
+                ),
                 summary: event_summary_for_policy(&self.config.policy, event).to_owned(),
             })
             .collect();
@@ -1459,18 +1457,19 @@ impl Engine {
         if let Some(event_id) = event_id {
             return required_arg(Some(event_id), "event_id").map(str::to_owned);
         }
+        let calendar = ProviderCalendarId::new(calendar);
         let recent = self.last_events.borrow();
         let candidates = recent
             .get(agent_id.as_ref())
             .map(|events| {
                 events
                     .iter()
-                    .filter(|event| event.account == account.id && event.calendar == calendar)
+                    .filter(|event| event.key.belongs_to(&account.id, &calendar))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         match candidates.as_slice() {
-            [event] => Ok(event.event_id.clone()),
+            [event] => Ok(event.key.event().clone().into_string()),
             [] => Err(
                 "event_id is required; retry calendar_get with event_id set to the event id from calendar_search".to_owned(),
             ),
@@ -1480,7 +1479,7 @@ impl Engine {
                     .iter()
                     .map(|event| format!(
                         "{} ({})",
-                        safe_display_line(&event.event_id),
+                        safe_display_line(event.key.event().as_str()),
                         safe_display_line(&event.summary)
                     ))
                     .collect::<Vec<_>>()
@@ -1526,12 +1525,13 @@ impl Engine {
         let stored_refresh_token = self
             .google_refresh_token(account)
             .map_err(GoogleWriteError::NotDispatched)?;
+        let calendar = ProviderCalendarId::new(&change.calendar);
         let result = match change.command.as_str() {
             "create_event" => {
                 let event = self.google.create_event_classified(
                     account,
                     stored_refresh_token.as_deref(),
-                    &change.calendar,
+                    &calendar,
                     &google_write_from_change(change),
                 )?;
                 Ok(CalendarMutationResult::Event(Box::new(event)))
@@ -1541,12 +1541,14 @@ impl Engine {
                     .map_err(GoogleWriteError::NotDispatched)?;
                 let etag = required_change_field(change.etag.as_deref(), "etag")
                     .map_err(GoogleWriteError::NotDispatched)?;
+                let event_id = EventId::new(event_id);
+                let etag = EventEtag::new(etag);
                 let event = self.google.update_event_classified(
                     account,
                     stored_refresh_token.as_deref(),
-                    &change.calendar,
-                    event_id,
-                    etag,
+                    &calendar,
+                    &event_id,
+                    &etag,
                     &google_write_from_change(change),
                 )?;
                 Ok(CalendarMutationResult::Event(Box::new(event)))
@@ -1556,12 +1558,14 @@ impl Engine {
                     .map_err(GoogleWriteError::NotDispatched)?;
                 let etag = required_change_field(change.etag.as_deref(), "etag")
                     .map_err(GoogleWriteError::NotDispatched)?;
+                let event_id = EventId::new(event_id);
+                let etag = EventEtag::new(etag);
                 self.google.delete_event_classified(
                     account,
                     stored_refresh_token.as_deref(),
-                    &change.calendar,
-                    event_id,
-                    etag,
+                    &calendar,
+                    &event_id,
+                    &etag,
                 )?;
                 Ok(CalendarMutationResult::Deleted)
             }
@@ -1572,12 +1576,14 @@ impl Engine {
                     .map_err(GoogleWriteError::NotDispatched)?;
                 let response = required_change_field(change.response.as_deref(), "response")
                     .map_err(GoogleWriteError::NotDispatched)?;
+                let event_id = EventId::new(event_id);
+                let etag = EventEtag::new(etag);
                 let event = self.google.respond_invite_classified(
                     account,
                     stored_refresh_token.as_deref(),
-                    &change.calendar,
-                    event_id,
-                    etag,
+                    &calendar,
+                    &event_id,
+                    &etag,
                     response,
                 )?;
                 Ok(CalendarMutationResult::Event(Box::new(event)))
@@ -1599,11 +1605,12 @@ impl Engine {
         cursor: Option<&str>,
         visibility: EventVisibility,
     ) -> Result<BackendEventPage, String> {
+        let calendar = ProviderCalendarId::new(calendar);
         match &account.backend {
             Some(ValidatedBackendConfig::IcsFeed { .. }) => {
-                let page = self.ics_feed.list_events_page(
+                let page = self.ics_feed.list_event_records_page(
                     account,
-                    calendar,
+                    &calendar,
                     range,
                     limit,
                     cursor,
@@ -1622,7 +1629,7 @@ impl Engine {
                 let page = self.google.list_events_page(
                     account,
                     stored_refresh_token.as_deref(),
-                    calendar,
+                    &calendar,
                     GoogleEventListQuery {
                         range,
                         limit,
@@ -2519,7 +2526,7 @@ fn format_event_line(
     let status = event_status(event).unwrap_or("-");
     format!(
         "{} {} {} {} {} {}",
-        safe_field(event_id(event)),
+        safe_field(event_id(event).as_str()),
         safe_field(&event_start_for_output(event, output_timezone)),
         safe_field(&event_end_for_output(event, output_timezone)),
         event_flags(policy, event),
@@ -2535,7 +2542,7 @@ fn format_free_busy_line(
 ) -> String {
     format!(
         "{} {} {} {}",
-        safe_field(event_id(event)),
+        safe_field(event_id(event).as_str()),
         safe_field(&event_start_for_output(event, output_timezone)),
         safe_field(&event_end_for_output(event, output_timezone)),
         event_flags(policy, event)
@@ -2554,7 +2561,7 @@ fn format_event_detail(
             "calendar {}",
             safe_field(&flatten_calendar_id(&account.id, calendar))
         ),
-        format!("event_id {}", safe_field(event_id(event))),
+        format!("event_id {}", safe_field(event_id(event).as_str())),
         format!(
             "start {}",
             safe_field(&event_start_for_output(event, output_timezone))
@@ -2570,7 +2577,7 @@ fn format_event_detail(
         ),
     ];
     if let Some(uid) = event_uid(event) {
-        lines.push(format!("uid {}", safe_field(uid)));
+        lines.push(format!("uid {}", safe_field(uid.as_str())));
     }
     if let Some(status) = event_status(event) {
         lines.push(format!("status {}", safe_field(status)));
@@ -2666,24 +2673,24 @@ fn collect_semantic_page(
     }
 }
 
-fn event_id(event: &BackendEvent) -> &str {
+fn event_id(event: &BackendEvent) -> &EventId {
     match event {
         BackendEvent::Ics(event) => &event.id,
         BackendEvent::Google(event) => &event.id,
     }
 }
 
-fn event_uid(event: &BackendEvent) -> Option<&str> {
+fn event_uid(event: &BackendEvent) -> Option<&ICalUid> {
     match event {
         BackendEvent::Ics(event) => Some(&event.uid),
-        BackendEvent::Google(event) => event.i_cal_uid.as_deref(),
+        BackendEvent::Google(event) => event.i_cal_uid.as_ref(),
     }
 }
 
-fn event_etag(event: &BackendEvent) -> Option<&str> {
+fn event_etag(event: &BackendEvent) -> Option<&EventEtag> {
     match event {
         BackendEvent::Ics(_) => None,
-        BackendEvent::Google(event) => event.etag.as_deref(),
+        BackendEvent::Google(event) => event.etag.as_ref(),
     }
 }
 
@@ -2928,7 +2935,7 @@ fn format_mutation_result(
             safe_display_line(&change.command),
             safe_display_line(&change.account),
             safe_display_line(&change.calendar),
-            safe_display_line(&event.id)
+            safe_display_line(event.id.as_str())
         ),
         CalendarMutationResult::Deleted => format!(
             "{verb} calendar change {id}. command={} account={} calendar={} event_id={}",
@@ -2964,7 +2971,10 @@ fn format_mutation_result_envelope(
     ];
     match result {
         CalendarMutationResult::Event(event) => {
-            entries.push(("event_id", CborValue::Text(safe_display_line(&event.id))));
+            entries.push((
+                "event_id",
+                CborValue::Text(safe_display_line(event.id.as_str())),
+            ));
         }
         CalendarMutationResult::Deleted => {
             entries.push((

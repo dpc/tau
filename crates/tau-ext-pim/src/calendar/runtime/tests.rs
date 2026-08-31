@@ -850,12 +850,12 @@ fn google_update_event_builds_default_end_with_cached_etag() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let engine = google_test_engine(temp.path());
     engine.etags.borrow_mut().insert(
-        EventEtagKey {
-            account: "google".to_owned(),
-            calendar: "primary".to_owned(),
-            event_id: "evt1".to_owned(),
-        },
-        "etag-1".to_owned(),
+        EventKey::new(
+            "google",
+            ProviderCalendarId::new("primary"),
+            EventId::new("evt1"),
+        ),
+        EventEtag::new("etag-1"),
     );
 
     let change = engine
@@ -882,12 +882,12 @@ fn update_event_rejects_invite_response_argument() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let engine = google_test_engine(temp.path());
     engine.etags.borrow_mut().insert(
-        EventEtagKey {
-            account: "google".to_owned(),
-            calendar: "primary".to_owned(),
-            event_id: "evt1".to_owned(),
-        },
-        "etag-1".to_owned(),
+        EventKey::new(
+            "google",
+            ProviderCalendarId::new("primary"),
+            EventId::new("evt1"),
+        ),
+        EventEtag::new("etag-1"),
     );
 
     let err = engine
@@ -991,9 +991,9 @@ fn private_event_details_are_busy_only_by_default() {
         allowed_calendars: vec!["primary".to_owned()],
         timezone: Some("UTC".to_owned()),
     };
-    let event = BackendEvent::Google(GoogleEvent {
-        id: "evt".to_owned(),
-        etag: Some("abc".to_owned()),
+    let event = BackendEvent::Google(GoogleEventRecord {
+        id: EventId::new("evt".to_owned()),
+        etag: Some(EventEtag::new("abc")),
         i_cal_uid: None,
         summary: "Private title".to_owned(),
         description: Some("private body".to_owned()),
@@ -1056,10 +1056,10 @@ fn google_event_details_hide_etag_from_agent() {
         allowed_calendars: vec!["primary".to_owned()],
         timezone: Some("UTC".to_owned()),
     };
-    let event = BackendEvent::Google(GoogleEvent {
-        id: "evt".to_owned(),
-        etag: Some("abc".to_owned()),
-        i_cal_uid: Some("uid@example.com".to_owned()),
+    let event = BackendEvent::Google(GoogleEventRecord {
+        id: EventId::new("evt".to_owned()),
+        etag: Some(EventEtag::new("abc")),
+        i_cal_uid: Some(ICalUid::new("uid@example.com")),
         summary: "Team Sync".to_owned(),
         description: Some("line 1\nline 2".to_owned()),
         location: Some("Room 1".to_owned()),
@@ -1115,9 +1115,9 @@ fn calendar_event_output_uses_account_timezone() {
         allowed_calendars: vec!["main".to_owned()],
         timezone: Some("America/Los_Angeles".to_owned()),
     };
-    let event = BackendEvent::Ics(IcsEvent {
-        id: "evt".to_owned(),
-        uid: "uid".to_owned(),
+    let event = BackendEvent::Ics(IcsEventRecord {
+        id: EventId::new("evt".to_owned()),
+        uid: ICalUid::new("uid".to_owned()),
         summary: "Local meeting".to_owned(),
         description: None,
         location: None,
@@ -1245,9 +1245,9 @@ fn google_event_etag_cache_is_cleared_by_missing_provider_etag() {
         allowed_calendars: vec!["primary".to_owned()],
         timezone: Some("UTC".to_owned()),
     };
-    let mut event = BackendEvent::Google(GoogleEvent {
-        id: "evt".to_owned(),
-        etag: Some("abc".to_owned()),
+    let mut event = BackendEvent::Google(GoogleEventRecord {
+        id: EventId::new("evt".to_owned()),
+        etag: Some(EventEtag::new("abc")),
         i_cal_uid: None,
         summary: "Team Sync".to_owned(),
         description: None,
@@ -1279,11 +1279,59 @@ fn google_event_etag_cache_is_cleared_by_missing_provider_etag() {
     assert!(engine.cached_etag_for_change(&change).is_err());
 }
 
+/// ETag cache lookup must retain account, calendar, and event namespaces so an
+/// identical provider event string cannot authorize a mutation elsewhere.
+#[test]
+fn google_event_etag_cache_rejects_cross_namespace_reuse() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let engine = test_engine(temp.path());
+    engine.etags.borrow_mut().insert(
+        EventKey::new(
+            "work",
+            ProviderCalendarId::new("primary"),
+            EventId::new("shared"),
+        ),
+        EventEtag::new("etag-work-primary"),
+    );
+
+    let change = |account: &str, calendar: &str| {
+        let mut change = CalendarChangeApproval::pending("update_event", account, calendar);
+        change.event_id = Some("shared".to_owned());
+        change
+    };
+
+    assert_eq!(
+        engine
+            .cached_etag_for_change(&change("work", "primary"))
+            .expect("exact namespace matches"),
+        "etag-work-primary"
+    );
+    assert!(
+        engine
+            .cached_etag_for_change(&change("personal", "primary"))
+            .is_err()
+    );
+    assert!(
+        engine
+            .cached_etag_for_change(&change("work", "secondary"))
+            .is_err()
+    );
+    assert!(
+        engine
+            .cached_etag_for_change(&{
+                let mut other_event = change("work", "primary");
+                other_event.event_id = Some("other".to_owned());
+                other_event
+            })
+            .is_err()
+    );
+}
+
 #[test]
 fn title_filter_matches_visible_event_summaries() {
     let events = [
-        BackendEvent::Google(GoogleEvent {
-            id: "evt1".to_owned(),
+        BackendEvent::Google(GoogleEventRecord {
+            id: EventId::new("evt1".to_owned()),
             etag: None,
             i_cal_uid: None,
             summary: "Tau Testing Party".to_owned(),
@@ -1299,8 +1347,8 @@ fn title_filter_matches_visible_event_summaries() {
             self_response_status: None,
             recurring: false,
         }),
-        BackendEvent::Google(GoogleEvent {
-            id: "evt2".to_owned(),
+        BackendEvent::Google(GoogleEventRecord {
+            id: EventId::new("evt2".to_owned()),
             etag: None,
             i_cal_uid: None,
             summary: "Lunch".to_owned(),
@@ -1334,7 +1382,7 @@ fn title_filter_matches_visible_event_summaries() {
         .collect::<Vec<_>>();
 
     assert_eq!(filtered.len(), 1);
-    assert_eq!(event_id(filtered[0]), "evt1");
+    assert_eq!(event_id(filtered[0]).as_str(), "evt1");
 }
 
 /// Ordinary searches must defensively hide cancelled provider rows, whereas a
@@ -1357,7 +1405,7 @@ fn search_visibility_filters_cancelled_rows_case_insensitively() {
         .collect::<Vec<_>>();
 
     assert_eq!(active.len(), 1);
-    assert_eq!(event_id(active[0]), "active");
+    assert_eq!(event_id(active[0]).as_str(), "active");
     assert_eq!(discovery.len(), 2);
 }
 
@@ -1377,7 +1425,7 @@ fn free_busy_excludes_cancelled_transparent_and_self_declined_events() {
         .iter()
         .filter(|event| event_is_visible(&policy, event, None, EventVisibility::Active))
         .filter(|event| event_blocks_time(event))
-        .map(event_id)
+        .map(|event| event_id(event).as_str())
         .collect::<Vec<_>>();
 
     assert_eq!(busy, vec!["busy", "tentative"]);
@@ -1426,7 +1474,10 @@ fn title_filter_fills_page_across_provider_pages() {
     .expect("semantic page");
 
     assert_eq!(
-        page.events.iter().map(event_id).collect::<Vec<_>>(),
+        page.events
+            .iter()
+            .map(|event| event_id(event).as_str())
+            .collect::<Vec<_>>(),
         vec!["planning-one", "planning-two"]
     );
     assert_eq!(page.next_cursor.as_deref(), Some("google:p2"));
@@ -1443,7 +1494,10 @@ fn free_busy_fills_page_after_transparent_provider_row() {
     );
 
     assert_eq!(
-        page.events.iter().map(event_id).collect::<Vec<_>>(),
+        page.events
+            .iter()
+            .map(|event| event_id(event).as_str())
+            .collect::<Vec<_>>(),
         vec!["busy"]
     );
     assert_eq!(page.next_cursor.as_deref(), Some("google:p2"));
@@ -1459,7 +1513,10 @@ fn free_busy_fills_page_after_self_declined_provider_row() {
     );
 
     assert_eq!(
-        page.events.iter().map(event_id).collect::<Vec<_>>(),
+        page.events
+            .iter()
+            .map(|event| event_id(event).as_str())
+            .collect::<Vec<_>>(),
         vec!["busy"]
     );
     assert_eq!(page.next_cursor.as_deref(), Some("google:p2"));
@@ -1700,8 +1757,8 @@ fn test_google_event(
     transparency: Option<&str>,
     self_response_status: Option<&str>,
 ) -> BackendEvent {
-    BackendEvent::Google(GoogleEvent {
-        id: id.to_owned(),
+    BackendEvent::Google(GoogleEventRecord {
+        id: EventId::new(id.to_owned()),
         etag: None,
         i_cal_uid: None,
         summary: id.to_owned(),
@@ -1797,9 +1854,9 @@ fn read_event_can_use_single_recent_event_for_agent() {
         allowed_calendars: vec!["main".to_owned()],
         timezone: Some("UTC".to_owned()),
     };
-    let event = BackendEvent::Ics(IcsEvent {
-        id: "evt".to_owned(),
-        uid: "uid".to_owned(),
+    let event = BackendEvent::Ics(IcsEventRecord {
+        id: EventId::new("evt".to_owned()),
+        uid: ICalUid::new("uid".to_owned()),
         summary: "Tau Testing Party".to_owned(),
         description: None,
         location: None,
@@ -1821,6 +1878,93 @@ fn read_event_can_use_single_recent_event_for_agent() {
         .expect("single recent event id");
 
     assert_eq!(event_id, "evt");
+}
+
+/// Implicit recent-event resolution must scope identical raw values by account
+/// and calendar, and must behave identically for Google and ICS records.
+#[test]
+fn recent_event_resolution_retains_namespace_and_provider_parity() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let engine = test_engine(temp.path());
+    let agent_id = AgentId::parse("agent").expect("agent id");
+    let account = |id: &str, calendar: &str| ValidatedAccount {
+        id: id.to_owned(),
+        enable: true,
+        display_name: None,
+        backend: None,
+        default_calendar: Some(calendar.to_owned()),
+        allowed_calendars: vec![calendar.to_owned()],
+        timezone: Some("UTC".to_owned()),
+    };
+    let feed = account("feed", "main");
+    let other_feed = account("other-feed", "main");
+    let google = account("google", "primary");
+    let ics = BackendEvent::Ics(IcsEventRecord {
+        id: EventId::new("shared"),
+        uid: ICalUid::new("shared"),
+        summary: "ICS event".to_owned(),
+        description: None,
+        location: None,
+        start: "2026-05-28".to_owned(),
+        end: "2026-05-29".to_owned(),
+        start_utc: None,
+        end_utc: None,
+        status: None,
+        organizer: None,
+        attendees: Vec::new(),
+        private: false,
+        recurring: false,
+        time_unparsed: false,
+    });
+
+    engine.remember_visible_events(&agent_id, &feed, "main", &[&ics]);
+    assert_eq!(
+        engine
+            .resolve_read_event_id(&agent_id, &feed, "main", None)
+            .expect("ICS namespace matches"),
+        "shared"
+    );
+    assert!(
+        engine
+            .resolve_read_event_id(&agent_id, &other_feed, "main", None)
+            .is_err()
+    );
+    assert!(
+        engine
+            .resolve_read_event_id(&agent_id, &feed, "secondary", None)
+            .is_err()
+    );
+
+    let google_event = test_google_event("shared", Some("confirmed"), None, None);
+    engine.remember_visible_events(&agent_id, &google, "primary", &[&google_event]);
+    assert_eq!(
+        engine
+            .resolve_read_event_id(&agent_id, &google, "primary", None)
+            .expect("Google namespace matches"),
+        "shared"
+    );
+    assert!(
+        engine
+            .resolve_read_event_id(&agent_id, &feed, "main", None)
+            .is_err()
+    );
+}
+
+/// Persisted wildcard ETags must be rejected before any mutation execution can
+/// reach the provider backend.
+#[test]
+fn persisted_wildcard_etag_is_rejected_before_execution() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let engine = google_test_engine(temp.path());
+    let mut change = CalendarChangeApproval::pending("delete_event", "google", "primary");
+    change.event_id = Some("evt".to_owned());
+    change.etag = Some("*".to_owned());
+
+    let error = engine
+        .validate_persisted_change(&change)
+        .expect_err("wildcard must be rejected");
+
+    assert_eq!(error, "calendar change contains unsafe wildcard etag");
 }
 
 #[test]
