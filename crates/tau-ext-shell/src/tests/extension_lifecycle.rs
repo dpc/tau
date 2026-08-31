@@ -524,6 +524,8 @@ fn extension_apply_patch_updates_file() {
     writer.flush().expect("flush");
 }
 
+/// Ensures an expected-lines mismatch leaves the target unchanged while
+/// separating a safe single-line error header from multiline recovery details.
 #[test]
 fn extension_apply_patch_reports_context_mismatch_without_writing() {
     let tempdir = TempDir::new().expect("tempdir");
@@ -554,10 +556,15 @@ fn extension_apply_patch_reports_context_mismatch_without_writing() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, APPLY_PATCH_TOOL_NAME);
-    assert!(error.message.contains("Failed to find expected lines"));
-    assert!(
-        error.details.is_none(),
-        "apply_patch errors should not echo patch text"
+    assert_eq!(
+        error.message,
+        format!("Failed to find expected lines in {}", file_path.display())
+    );
+    assert!(!error.message.contains(['\n', '\r']));
+    let expected_output = format!("Expected lines in {}:\nmissing", file_path.display());
+    assert_eq!(
+        cbor_map_text(error.details.as_ref().expect("mismatch details"), "output"),
+        Some(expected_output.as_str())
     );
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
@@ -965,13 +972,15 @@ fn extension_apply_patch_applies_multiple_chunks() {
     writer.flush().expect("flush");
 }
 
-/// Ensures a later patch failure retains an already-added file as a one-entry,
-/// path-labelled `Diffs` payload while reporting the later failed operation.
+/// Ensures a later expected-context mismatch retains an already-added file,
+/// exposes bounded multiline recovery plus partial-change details, and keeps
+/// the matching UI-only diff.
 #[test]
-fn extension_apply_patch_failure_after_partial_success_leaves_changes() {
+fn extension_apply_patch_context_mismatch_after_partial_success_leaves_changes() {
     let tempdir = TempDir::new().expect("tempdir");
     let created_path = tempdir.path().join("created.txt");
-    let missing_path = tempdir.path().join("missing.txt");
+    let mismatch_path = tempdir.path().join("mismatch.txt");
+    fs::write(&mismatch_path, "present\n").expect("write mismatch target");
 
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
@@ -979,7 +988,7 @@ fn extension_apply_patch_failure_after_partial_success_leaves_changes() {
     let patch = format!(
         "*** Begin Patch\n*** Add File: {}\n+hello\n*** Update File: {}\n@@\n-old\n+new\n*** End Patch",
         created_path.display(),
-        missing_path.display(),
+        mismatch_path.display(),
     );
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
@@ -998,11 +1007,33 @@ fn extension_apply_patch_failure_after_partial_success_leaves_changes() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, APPLY_PATCH_TOOL_NAME);
-    assert!(error.message.contains("Failed to read file to update"));
+    assert_eq!(
+        error.message,
+        format!(
+            "Failed to find expected lines in {}",
+            mismatch_path.display()
+        )
+    );
+    assert!(!error.message.contains(['\n', '\r']));
     let details = error.details.expect("partial changes details");
     let CborValue::Map(entries) = details else {
         panic!("expected structured partial change details");
     };
+    assert_eq!(
+        entries.len(),
+        2,
+        "details must contain only output and partial_changes"
+    );
+    let expected_output = format!("Expected lines in {}:\nold", mismatch_path.display());
+    assert_eq!(
+        entries.iter().find_map(|(key, value)| match (key, value) {
+            (CborValue::Text(key), CborValue::Text(output)) if key == "output" => {
+                Some(output.as_str())
+            }
+            _ => None,
+        }),
+        Some(expected_output.as_str())
+    );
     let partial_changes = entries
         .iter()
         .find_map(|(key, value)| match (key, value) {
@@ -1020,6 +1051,11 @@ fn extension_apply_patch_failure_after_partial_success_leaves_changes() {
         (key, value),
         (CborValue::Text(key), CborValue::Text(value)) if key == "status" && value == "A"
     )));
+    assert_eq!(
+        change.len(),
+        2,
+        "partial change exposes only status and path"
+    );
     assert!(change.iter().any(|(key, value)| matches!(
         (key, value),
         (CborValue::Text(key), CborValue::Text(value))
@@ -1045,7 +1081,10 @@ fn extension_apply_patch_failure_after_partial_success_leaves_changes() {
         fs::read_to_string(&created_path).expect("created file should remain"),
         "hello\n"
     );
-    assert!(!missing_path.exists());
+    assert_eq!(
+        fs::read_to_string(&mismatch_path).expect("mismatch target remains"),
+        "present\n"
+    );
 
     writer
         .write_frame(&disconnect_frame(None))

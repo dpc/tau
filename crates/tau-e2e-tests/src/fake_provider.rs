@@ -86,6 +86,20 @@ impl ScenarioConfig {
     /// Return whether this scenario emits parallel tool calls.
     fn supports_parallel_tool_calls(&self) -> bool {
         matches!(self, Self::V1(scenario) if scenario.uses_status_policy())
+            || matches!(
+                self,
+                Self::V2(scenario)
+                    if scenario.lanes.iter().flat_map(|lane| &lane.actions).any(|action| {
+                        matches!(
+                            action,
+                            ScenarioActionV2::CoreShellParallelCalls {
+                                advertise_parallel: true,
+                                ..
+                            }
+                                | ScenarioActionV2::BarrierParallelDummyTools { .. }
+                        )
+                    })
+            )
     }
 
     /// Returns whether the closed scenario explicitly exercises standalone
@@ -1764,7 +1778,8 @@ impl FakeState {
                 ..
             }
             | ScenarioActionV2::CoreShellCreateResult { response, .. }
-            | ScenarioActionV2::CoreShellResumeEditResult { response, .. } => {
+            | ScenarioActionV2::CoreShellResumeEditResult { response, .. }
+            | ScenarioActionV2::CoreShellParallelResult { response, .. } => {
                 emit_text_response(prompt, handle, response)
             }
             ScenarioActionV2::StandaloneCompaction { narrative } => {
@@ -1866,6 +1881,16 @@ impl FakeState {
                     &format!("before:{nonce}"),
                 ),
             ),
+            ScenarioActionV2::CoreShellParallelCalls {
+                call_ids,
+                probe_executable,
+                ..
+            } => emit_parallel_shell_calls(prompt, handle, call_ids, &probe_executable),
+            ScenarioActionV2::CoreShellParallelWaits {
+                call_ids,
+                wait_call_ids,
+                ..
+            } => emit_parallel_wait_calls(prompt, handle, call_ids, wait_call_ids),
             ScenarioActionV2::Disconnect { reason, .. } => {
                 self.trace(&format!("deliberate_disconnect={reason}"))?;
                 Err(ClientError::handler(format!(
@@ -2303,9 +2328,12 @@ impl FakeState {
             }
             ScenarioActionV2::CoreShellWorkdirCall { .. }
             | ScenarioActionV2::CoreShellResumeEditCall { .. }
+            | ScenarioActionV2::CoreShellParallelCalls { .. }
+            | ScenarioActionV2::CoreShellParallelWaits { .. }
             | ScenarioActionV2::CoreShellWorkdirResult { .. }
             | ScenarioActionV2::CoreShellCreateResult { .. }
-            | ScenarioActionV2::CoreShellResumeEditResult { .. } => {
+            | ScenarioActionV2::CoreShellResumeEditResult { .. }
+            | ScenarioActionV2::CoreShellParallelResult { .. } => {
                 self.validate_v2_core_action(cursor, prompt, action)
             }
             _ => Ok(()),
@@ -3176,7 +3204,20 @@ impl FakeState {
                     .collect::<Vec<_>>();
                 names.sort_unstable();
                 if names != ["edit", "workdir"] {
-                    return Err(self.mismatch(cursor, "core-shell tool snapshot mismatch"));
+                    return Err(self.mismatch(
+                        cursor,
+                        &format!("core-shell tool snapshot mismatch: {names:?}"),
+                    ));
+                }
+                if !prompt.system_prompt.contains("at most one tool call")
+                    || prompt
+                        .system_prompt
+                        .contains("Maximize use of parallel tool calls")
+                {
+                    return Err(self.mismatch(
+                        cursor,
+                        "serial core-shell prompt capability guidance mismatch",
+                    ));
                 }
                 if let ScenarioActionV2::CoreShellResumeEditCall { nonce, .. } = action {
                     let context = serde_json::to_string(&prompt.context)
@@ -3199,6 +3240,37 @@ impl FakeState {
                     }
                 }
             }
+            ScenarioActionV2::CoreShellParallelCalls {
+                advertise_parallel, ..
+            }
+            | ScenarioActionV2::CoreShellParallelWaits {
+                advertise_parallel, ..
+            } => {
+                let mut names = prompt
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect::<Vec<_>>();
+                names.sort_unstable();
+                if names != ["shell", "wait"] {
+                    return Err(self.mismatch(
+                        cursor,
+                        &format!("parallel core-shell tool snapshot mismatch: {names:?}"),
+                    ));
+                }
+                let parallel_guidance = prompt
+                    .system_prompt
+                    .contains("Maximize use of parallel tool calls");
+                let serial_guidance = prompt.system_prompt.contains("at most one tool call");
+                if parallel_guidance != *advertise_parallel
+                    || serial_guidance == *advertise_parallel
+                {
+                    return Err(self.mismatch(
+                        cursor,
+                        "parallel core-shell prompt capability guidance mismatch",
+                    ));
+                }
+            }
             ScenarioActionV2::CoreShellWorkdirResult { call_id, .. }
             | ScenarioActionV2::CoreShellCreateResult { call_id, .. }
             | ScenarioActionV2::CoreShellResumeEditResult { call_id, .. } => {
@@ -3214,6 +3286,21 @@ impl FakeState {
                     .collect::<Vec<_>>();
                 if results.len() != 1 || results[0].status != tau_proto::ToolResultStatus::Success {
                     return Err(self.mismatch(cursor, "core-shell result continuity mismatch"));
+                }
+            }
+            ScenarioActionV2::CoreShellParallelResult { call_ids, .. } => {
+                let ScenarioActionV2::CoreShellParallelResult { wait_call_ids, .. } = action else {
+                    unreachable!()
+                };
+                if let Err(detail) =
+                    validate_complete_parallel_wait_round(prompt, call_ids, wait_call_ids)
+                {
+                    self.trace(&format!(
+                        "parallel_context={}",
+                        serde_json::to_string(&prompt.context)
+                            .unwrap_or_else(|_| "<unserializable>".to_owned())
+                    ))?;
+                    return Err(self.mismatch(cursor, detail));
                 }
             }
             _ => {}
@@ -3481,6 +3568,81 @@ fn emit_parallel_dummy_tool_calls(
     )))
 }
 
+/// Publishes one tool-calling response containing four sibling production shell
+/// commands whose identity-tagged intervals can be checked for overlap.
+fn emit_parallel_shell_calls(
+    prompt: &tau_proto::AgentPromptCreated,
+    handle: &tau_client::ClientHandle,
+    call_ids: [tau_proto::ToolCallId; 4],
+    probe_executable: &std::path::Path,
+) -> ClientResult<()> {
+    let probe_executable = probe_executable
+        .to_str()
+        .ok_or_else(|| ClientError::handler("parallel shell probe_executable path is not UTF-8"))?;
+    let output_items = call_ids
+        .into_iter()
+        .enumerate()
+        .map(|(index, call_id)| {
+            let ident = format!("parallel-{}", index + 1);
+            let command = format!("{} {}", shell_quote(probe_executable), shell_quote(&ident));
+            ContextItem::ToolCall(ToolCallItem {
+                call_id,
+                name: ToolName::new("shell"),
+                tool_type: ToolType::Function,
+                arguments: cbor_map(vec![
+                    ("command", CborValue::Text(command)),
+                    ("timeout", CborValue::Integer(60.into())),
+                ]),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })
+        })
+        .collect();
+    handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+        prompt,
+        output_items,
+        ProviderStopReason::ToolCalls,
+    )))
+}
+
+/// Publishes four sibling exact waits so the provider continuation cannot
+/// finish until every background shell command has produced its real result.
+fn emit_parallel_wait_calls(
+    prompt: &tau_proto::AgentPromptCreated,
+    handle: &tau_client::ClientHandle,
+    call_ids: [tau_proto::ToolCallId; 4],
+    wait_call_ids: [tau_proto::ToolCallId; 4],
+) -> ClientResult<()> {
+    let output_items = call_ids
+        .into_iter()
+        .zip(wait_call_ids)
+        .map(|(background_call_id, wait_call_id)| {
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: wait_call_id,
+                name: ToolName::new("wait"),
+                tool_type: ToolType::Function,
+                arguments: cbor_map(vec![(
+                    "tool_call_id",
+                    CborValue::Text(background_call_id.to_string()),
+                )]),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            })
+        })
+        .collect();
+    handle.emit_transient(Event::ProviderResponseFinishedReported(finished(
+        prompt,
+        output_items,
+        ProviderStopReason::ToolCalls,
+    )))
+}
+
+/// Quotes one argument for the POSIX shell used by the production core-shell
+/// fixture without depending on ambient command lookup.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 fn assistant_message(text: String) -> ContextItem {
     ContextItem::Message(MessageItem {
         role: ContextRole::Assistant,
@@ -3710,6 +3872,9 @@ impl ScenarioActionV2 {
             | Self::CoreShellCreateResult { user_text, .. }
             | Self::CoreShellResumeEditCall { user_text, .. }
             | Self::CoreShellResumeEditResult { user_text, .. }
+            | Self::CoreShellParallelCalls { user_text, .. }
+            | Self::CoreShellParallelWaits { user_text, .. }
+            | Self::CoreShellParallelResult { user_text, .. }
             | Self::Error { user_text, .. }
             | Self::HoldUntilCancel { user_text, .. }
             | Self::Disconnect { user_text, .. }
@@ -3824,6 +3989,78 @@ fn validate_complete_parallel_dummy_round(
         .ok_or("parallel dummy round omitted tool results")?;
     if first_result != last_call + 1 || last_result + 1 != first_result + expected_call_ids.len() {
         return Err("parallel dummy round was split");
+    }
+    Ok(())
+}
+
+/// Validates that one provider continuation contains exactly the four sibling
+/// shell calls followed by their four successful correlated results.
+fn validate_complete_parallel_wait_round(
+    prompt: &tau_proto::AgentPromptCreated,
+    expected_shell_call_ids: &[tau_proto::ToolCallId; 4],
+    expected_wait_call_ids: &[tau_proto::ToolCallId; 4],
+) -> Result<(), &'static str> {
+    let context = prompt.context.flatten();
+    let shell_calls = context
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolCall(call) if call.name.as_str() == "shell" => Some(&call.call_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let wait_calls = context
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolCall(call) if call.name.as_str() == "wait" => Some(call),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let all_results = context
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let wait_mapping_matches =
+        wait_calls
+            .iter()
+            .zip(expected_shell_call_ids)
+            .all(|(wait, shell_id)| {
+                cbor_map_text_field(&wait.arguments, "tool_call_id") == Some(shell_id.as_str())
+            });
+    let expected_results = expected_shell_call_ids
+        .iter()
+        .chain(expected_wait_call_ids)
+        .collect::<Vec<_>>();
+    let wait_payloads_match = all_results
+        .iter()
+        .skip(4)
+        .enumerate()
+        .all(|(index, result)| {
+            result
+                .output
+                .body
+                .contains(&format!("id=parallel-{}", index + 1))
+        });
+    if shell_calls != expected_shell_call_ids.iter().collect::<Vec<_>>()
+        || wait_calls
+            .iter()
+            .map(|call| &call.call_id)
+            .collect::<Vec<_>>()
+            != expected_wait_call_ids.iter().collect::<Vec<_>>()
+        || !wait_mapping_matches
+        || all_results
+            .iter()
+            .map(|result| &result.call_id)
+            .collect::<Vec<_>>()
+            != expected_results
+        || all_results
+            .iter()
+            .any(|result| result.status != tau_proto::ToolResultStatus::Success)
+        || !wait_payloads_match
+    {
+        return Err("parallel shell round identity/order mismatch");
     }
     Ok(())
 }

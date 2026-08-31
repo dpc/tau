@@ -13,7 +13,12 @@ This skill supplies the focused verification guidance for this tool group.
 
 ### Message tool verification plan
 
-Use this plan when asked to verify the `message` tool, especially in multi-agent scenarios. The goal is to prove that messages are routed correctly among the main agent, sub-agents, sibling sub-agents, sessions, and completed or invalid recipients. Also verify timing, sender IDs, async delivery, payload escaping in hidden prompts, exact payload preservation in durable `AgentMessage` events, and error behavior.
+Use this plan when asked to verify the `message` tool, especially in multi-agent
+scenarios. Prove routing among the main agent, children, siblings, sessions,
+post-final but still-live agents, stopped/unloaded/canceled agents, and
+invalid/unknown recipients. Also verify timing, sender IDs, async delivery,
+payload escaping in hidden prompts, exact durable `AgentMessage` payloads, and
+error behavior.
 
 Do not rely on memory. Give every sub-agent a self-contained prompt. A delegated agent starts with a clean context and does not know this skill, the parent conversation, or the IDs of other agents unless you include them in its prompt or later messages.
 
@@ -32,7 +37,8 @@ Record all of these observations:
 * Sender IDs visible to recipients.
 * Message payload preservation in durable events, and exact-close framing in hidden prompts, for multiline content, blank lines, unicode, JSON-like text, backticks, and literal `<message>` tags inside the payload.
 * Error for an unknown recipient ID.
-* Error for a completed sub-agent recipient ID.
+* Successful follow-up delivery to a final-responded but still-loaded sub-agent.
+* Error for a genuinely stopped, unloaded, or canceled sub-agent recipient ID.
 * Error for an empty message.
 * `agent_start`, `agent_watch`, and `wait` behavior around long-running sub-agents; in current Tau, sub-agent responses arrive by watch notifications rather than slow `agent_start` results.
 
@@ -120,7 +126,20 @@ Wait for both delegates. In their final logs, verify that:
 * Delayed messages arrived even though the agents were already running.
 * The visible sender ID for messages from the main agent is present and matches the `self_agent_id` from the agent_start result. Save that sender ID; it is the main agent recipient ID for the next phase.
 
-After both delegates complete, try to send a post-completion message to each old `sub_agent_id`. Expect an error until completed-agent wakeup is implemented. Current behavior may report this the same way as an unknown recipient.
+After both delegates emit final responses, send a follow-up message to each old
+`sub_agent_id`. A final response ends a turn but does not stop a still-loaded
+agent, so expect a committed message and potentially a new response turn.
+Separately test a genuinely unloaded, canceled, or explicitly stopped agent and
+expect `stopped message recipient`; a never-known ID must remain `unknown
+message recipient`.
+
+When a controlled cold-restart fixture is available, start a durable child,
+stop the harness while its delegation route is not resumable, restore the
+session, and message the restored child ID before starting a replacement. Expect
+exactly `restored message recipient cannot resume its pre-restart delegation:
+\`<id>\`; start a replacement` and no sent/received projection. If the live
+session cannot create this restart cut, mark the restored-unavailable category
+conditional/unavailable rather than inferring it.
 
 #### Phase 2: verify delivery to a delegate queued behind a backgrounded tool
 
@@ -206,7 +225,9 @@ To Agent D:
 
 Wait for both delegates. Verify that their final logs match the parent-visible reports already received by the main agent.
 
-After both complete, again send post-completion messages to both old `sub_agent_id` values and expect errors until completed-agent wakeup is implemented.
+After both emit final responses, again verify follow-up messages succeed while
+the agents remain loaded. Do not label a final-answering agent completed or
+stopped without lifecycle evidence.
 
 #### Phase 4: verify self, content, and simple validation errors
 
@@ -236,11 +257,13 @@ Report concise but complete findings:
 
 * List each tested route and whether it passed: main to child, child to child,
   child to parent, rejected exact `user`, main to self, invalid recipient,
-  completed recipient, empty payload, rich content payload.
+  post-final live recipient, stopped recipient, conditional restored-unavailable
+  recipient, empty payload, rich content payload.
 * Include exact unexpected errors or output.
 * Mention any timing surprises, missed messages, duplicate messages, or ordering uncertainty.
 * Confirm the `message` success output includes a stable message ID and `response not guaranteed`; it confirms async acceptance, not delivery completion.
-* Include whether errors distinguish completed recipients from unknown recipients. Current behavior may use the same unknown-recipient error for both.
+* Include whether stopped recipients, restored-unavailable recipients, and
+  never-known recipients produce their distinct errors.
 * Include whether parent recipient ID discovery was clear from `self_agent_id` or still had to be inferred from sub-agent logs.
 * Include whether the delivered wrapper preserved literal `<message>` openings
   and ampersands while replacing every exact `</message>` collision.
@@ -298,7 +321,8 @@ Record all of these observations:
 * The `agent_start` final tool result contains metadata such as `self_agent_id` and `sub_agent_id`, but does not duplicate the sub-agent response text as `output`.
 * `agent_watch({"agent_id": id, "enable": false})` disables notifications for that watcher.
 * Re-enabling with `enable: true` restores notifications for later responses.
-* Unknown, empty, or self `agent_id` values fail clearly. Stopped but known agents can still be watched or unwatched.
+* Unknown, empty, or self `agent_id` values fail clearly. A stopped known agent
+  may be idempotently unwatched, but enabling a watch for it must fail.
 * Mid-turn tool-call responses do not notify early; notifications should correspond to final response semantics.
 * Prompts delivered through the `message` tool do not produce watch-prompt notifications; they remain ordinary explicit-message deliveries to the watched agent.
 * If a watched sub-agent errors, the starter should still receive a useful watch/error notification. In legacy/background `agent_start` sessions where the agent_start call itself is cancellable, cancellation should still report a useful error.
@@ -310,7 +334,10 @@ Record all of these observations:
 3. Confirm the `agent_start` result exposes `self_agent_id` and `sub_agent_id` without returning the nonce as duplicated tool output.
 4. Start a long-lived sub-agent. Disable watching it with `agent_watch({"agent_id":"<sub_agent_id>","enable":false})`, then cause or wait for a later response. Confirm no watch message is delivered to the starter for that response.
 5. Re-enable the watch and cause another response. Confirm a watch message is delivered again.
-6. Exercise validation: watch self, watch an empty id, watch an unknown id, and watch a stopped completed sub-agent. Unknown, empty, and self ids should error; the stopped but known sub-agent should be accepted. Record exact tool results or errors.
+6. Exercise validation: watch self, watch an empty id, watch an unknown id, and
+   watch a stopped sub-agent. Unknown, empty, self, and enabling a stopped agent
+   should error; disabling the stopped known agent may succeed idempotently.
+   Record exact tool results or errors.
 7. Deliver a real user prompt to a watched agent, or inspect event logs from a test that does so, and confirm the watcher receives exactly the “Watched agent <id> received a user prompt” wrapper with a `<prompt>` block.
 8. Deliver an internal prompt to a watched agent if you can do so safely, or inspect event logs around a watched agent's background tool completion. Confirm no watch prompt notification is delivered for `[tau-internal] Tool call ... completed. Its result is queued; use wait to consume it.` or similar internal/steering text. If the watched agent later responds after processing that internal prompt, record that later response as a separate final-response notification.
 9. In current watch-based sessions, verify an erroring watched sub-agent reports a useful watch/error notification. If legacy/background `agent_start` cancellation is available, cancel a watched long-running `agent_start` and confirm cancellation still reports a useful error; if watch delivery reached the starter, generic watch-delivered wording is acceptable, otherwise the original `Tool call canceled` must be preserved.

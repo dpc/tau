@@ -81,8 +81,11 @@ with one `done` transition, remain alive only long enough to detect a bounded
 post-Done repeat (for example, two further turns), then stop the delegate.
 
 Pass when no routine round requests or causes another Working acknowledgement.
-Report post-Done directives separately: they may reveal lifecycle or queued
-activation behavior rather than loss of the original Working acknowledgement.
+Report post-Done directives separately. With no new substantive tool call,
+there must be no spontaneous reminder. A post-Done `self_info`, skill, shell,
+or other substantive tool admission correctly requests one fresh Working
+acknowledgement; `status` and `wait` are exempt. A repeated reminder without
+another substantive admission is a defect.
 
 ### Watched progress isolation
 

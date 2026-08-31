@@ -141,6 +141,7 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
     {
         return Err(ClientError::handler("scenario exceeds 16384 bytes"));
     }
+    validate_parallel_shell_shape(scenario)?;
     let mut ids = path_std_collections::HashSet::new();
     let mut barriers: HashMap<String, (usize, std::collections::HashSet<String>)> = HashMap::new();
     let mut dummy_call_ids = path_std_collections::HashSet::new();
@@ -397,6 +398,66 @@ pub(super) fn validate_v2(scenario: &ScenarioV2) -> ClientResult<()> {
     Ok(())
 }
 
+fn validate_parallel_shell_shape(scenario: &ScenarioV2) -> ClientResult<()> {
+    let has_parallel = scenario.lanes.iter().any(|lane| {
+        lane.actions.iter().any(|action| {
+            matches!(
+                action,
+                ScenarioActionV2::CoreShellParallelCalls { .. }
+                    | ScenarioActionV2::CoreShellParallelWaits { .. }
+                    | ScenarioActionV2::CoreShellParallelResult { .. }
+            )
+        })
+    });
+    if !has_parallel {
+        return Ok(());
+    }
+    let [lane] = scenario.lanes.as_slice() else {
+        return Err(ClientError::handler(
+            "parallel shell scenario must contain exactly one lane",
+        ));
+    };
+    let [
+        ScenarioActionV2::CoreShellParallelCalls {
+            user_text: call_text,
+            advertise_parallel: call_capability,
+            call_ids,
+            ..
+        },
+        ScenarioActionV2::CoreShellParallelWaits {
+            user_text: wait_text,
+            advertise_parallel: wait_capability,
+            call_ids: waited_ids,
+            wait_call_ids,
+        },
+        ScenarioActionV2::CoreShellParallelResult {
+            user_text: result_text,
+            advertise_parallel: result_capability,
+            call_ids: result_ids,
+            wait_call_ids: result_wait_ids,
+            ..
+        },
+    ] = lane.actions.as_slice()
+    else {
+        return Err(ClientError::handler(
+            "parallel shell lane must contain calls, waits, and result only",
+        ));
+    };
+    if call_text != wait_text
+        || call_text != result_text
+        || call_capability != wait_capability
+        || call_capability != result_capability
+        || call_ids != waited_ids
+        || call_ids != result_ids
+        || wait_call_ids != result_wait_ids
+    {
+        return Err(ClientError::handler(
+            "parallel shell action correlation mismatch",
+        ));
+    }
+    Ok(())
+}
+
 /// Validates one lane header before validating its individual closed actions.
 fn validate_v2_lane_header(
     lane: &ScenarioLaneV2,
@@ -466,9 +527,12 @@ fn validate_v2_action(
         }
         ScenarioActionV2::CoreShellWorkdirCall { .. }
         | ScenarioActionV2::CoreShellResumeEditCall { .. }
+        | ScenarioActionV2::CoreShellParallelCalls { .. }
+        | ScenarioActionV2::CoreShellParallelWaits { .. }
         | ScenarioActionV2::CoreShellWorkdirResult { .. }
         | ScenarioActionV2::CoreShellCreateResult { .. }
-        | ScenarioActionV2::CoreShellResumeEditResult { .. } => {
+        | ScenarioActionV2::CoreShellResumeEditResult { .. }
+        | ScenarioActionV2::CoreShellParallelResult { .. } => {
             validate_v2_core_action(lane, action_index, action, core_call_ids)
         }
         ScenarioActionV2::HoldUntilCancel { .. }
@@ -1023,6 +1087,64 @@ fn validate_v2_core_action(
         {
             return Err(ClientError::handler(
                 "resume edit result must follow its call",
+            ));
+        }
+        ScenarioActionV2::CoreShellParallelCalls {
+            call_ids,
+            probe_executable,
+            ..
+        } if call_ids.iter().any(|call_id| {
+            call_id.is_empty()
+                || call_id.len() > 256
+                || !core_call_ids.insert(call_id.as_str().to_owned())
+        }) || !probe_executable.is_absolute()
+            || probe_executable.as_os_str().as_encoded_bytes().len() > 4 * 1024 =>
+        {
+            return Err(ClientError::handler(
+                "parallel shell calls require four unique ids and an absolute probe_executable",
+            ));
+        }
+        ScenarioActionV2::CoreShellParallelWaits {
+            call_ids,
+            wait_call_ids,
+            advertise_parallel,
+            ..
+        } if !matches!(
+            action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
+            Some(ScenarioActionV2::CoreShellParallelCalls {
+                call_ids: prior,
+                advertise_parallel: prior_capability,
+                ..
+            }) if prior == call_ids && prior_capability == advertise_parallel
+        ) || wait_call_ids.iter().any(|call_id| {
+            call_id.is_empty()
+                || call_id.len() > 256
+                || !core_call_ids.insert(call_id.as_str().to_owned())
+        }) =>
+        {
+            return Err(ClientError::handler(
+                "parallel waits must follow their calls with four unique ids",
+            ));
+        }
+        ScenarioActionV2::CoreShellParallelResult {
+            call_ids,
+            wait_call_ids,
+            advertise_parallel,
+            ..
+        } if !matches!(
+            action_index.checked_sub(1).and_then(|i| lane.actions.get(i)),
+            Some(ScenarioActionV2::CoreShellParallelWaits {
+                    call_ids: prior,
+                    wait_call_ids: prior_waits,
+                    advertise_parallel: prior_capability,
+                    ..
+                }) if prior == call_ids
+                    && prior_waits == wait_call_ids
+                    && prior_capability == advertise_parallel
+        ) =>
+        {
+            return Err(ClientError::handler(
+                "parallel shell result must follow its matching calls",
             ));
         }
         _ => {}

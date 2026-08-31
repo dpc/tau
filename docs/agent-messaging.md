@@ -319,7 +319,11 @@ message({"recipient_id":"engineer_0","message":"hello"})
 unknown message recipient: `engineer_0`
 ```
 
-If the id belonged to an agent that has already finished or was canceled before it could start, the tool reports a stopped recipient:
+A final provider response ends the agent's current turn; it does not unload the
+durable endpoint. A message to that still-loaded agent is accepted and can
+start another turn. If the id belonged to an agent that was explicitly stopped,
+unloaded, or canceled before it could start, the tool reports a stopped
+recipient:
 
 ```text
 message({"recipient_id":"engineer_1","message":"hello"})
@@ -328,5 +332,16 @@ message({"recipient_id":"engineer_1","message":"hello"})
 ```text
 stopped message recipient: `engineer_1`
 ```
+
+A durable agent identity can cold-restore without a resumable pre-restart
+delegation route. Messaging that known-but-unavailable identity fails
+distinctly and asks the caller to create a replacement:
+
+```text
+restored message recipient cannot resume its pre-restart delegation: `engineer_2`; start a replacement
+```
+
+This classification requires a real restart/restored-agent cut; an ordinary
+final response remains live, and a never-known ID remains unknown.
 
 Tool arguments are schema-validated before dispatch. Unknown extra fields are rejected before any logical tool invocation is logged.

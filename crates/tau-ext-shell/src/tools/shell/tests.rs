@@ -704,6 +704,27 @@ fn captured_output_bounds_no_newline_lines() {
     assert!(output.saved_output.starts_with("out(no_nl,truncated) xxx"));
 }
 
+/// Ensures shell totals and saved artifacts count the complete rendered UTF-8
+/// records rather than the child process's raw stdout/stderr payload bytes.
+#[test]
+fn captured_output_totals_match_rendered_records() {
+    let stdout = b"a\nb\r\n";
+    let stderr = b"c\rd\xff";
+    let mut output = CapturedOutput::default();
+    output.push_bytes(OutputStream::Stdout, stdout);
+    output.push_bytes(OutputStream::Stderr, stderr);
+    output.finish();
+
+    let expected = "out a\nout(crlf) b\nerr(cr) c\nerr(invalid-utf8,no_nl) d\u{fffd}";
+    assert_eq!(output.saved_output, expected);
+    assert_eq!(output.total_lines, 4);
+    assert_eq!(output.total_bytes, expected.len());
+    assert_ne!(output.total_bytes, stdout.len() + stderr.len());
+    let visible = output.truncate();
+    assert_eq!(visible.content, expected);
+    assert_eq!(visible.total_bytes, expected.len());
+}
+
 /// Ensures many complete prefixed lines stop the saved rendering at its
 /// hard cap and later lines cannot grow the retained buffer.
 #[test]

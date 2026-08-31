@@ -163,5 +163,16 @@ while ext-shell lifecycle started/result events retain `replace`. The explicit
 
 `apply_patch` output should stay compact and should not echo the full patch text back to the agent. For UTF-8 files it mutates, the tool should attach structured UI-only diffs; multi-file patches should attach one structured diff per changed file. When a later hunk fails after earlier hunks have already been applied, the agent-visible error must include structured partial-mutation details for the files/paths that changed where applicable, while the UI still receives diffs for those applied UTF-8 changes. Invalid UTF-8 or binary-like files should not produce misleading text diffs; report any missing, duplicated, or agent-visible raw diff payloads as tool-output regressions.
 
+Context mismatches must keep `ToolError.message` single-line so the normalized
+`error` header remains readable and injection-safe. Put the bounded,
+path-labelled expected-context excerpt in `details.output`, where real
+newlines are valid. Preserve escaped metadata paths, no-mutation evidence, and
+any partial-change fields/UI diffs from earlier successful hunks.
+
+For shell truncation, independently construct the expected rendered records.
+`total_bytes` and saved artifacts count the complete UTF-8 rendering, including
+`out` / `err` prefixes, flags such as `crlf`, `no_nl`, and `invalid-utf8`, plus
+inserted separators. They deliberately do not report raw process payload bytes.
+
 Other commands should adhere to pre-existing conventions and naming used in
 standard tools.

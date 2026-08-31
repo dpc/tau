@@ -103,6 +103,7 @@ pub struct DeterministicFixture {
 enum FixtureMode {
     Standard,
     CoreShell,
+    CoreShellParallel,
     SessionRestore,
     SessionRestoreWatch,
     SessionRestoreMultipleWorkers,
@@ -475,6 +476,24 @@ impl DeterministicFixture {
         )
     }
 
+    /// Creates the closed production core-shell sibling-concurrency fixture.
+    pub fn new_core_shell_parallel(
+        name: &str,
+        scenario: &ScenarioV2,
+        fake_provider_bin: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let expected_actions = scenario.lanes.iter().map(|lane| lane.actions.len()).sum();
+        Self::new_serialized(
+            name,
+            serde_json::to_value(scenario)?,
+            expected_actions,
+            scenario.lanes.len(),
+            fake_provider_bin,
+            FixtureToolSurface::default(),
+            FixtureMode::CoreShellParallel,
+        )
+    }
+
     fn new_serialized(
         name: &str,
         scenario: serde_json::Value,
@@ -484,7 +503,10 @@ impl DeterministicFixture {
         tool_surface: FixtureToolSurface,
         mode: FixtureMode,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let core_shell_enabled = mode == FixtureMode::CoreShell;
+        let core_shell_enabled = matches!(
+            mode,
+            FixtureMode::CoreShell | FixtureMode::CoreShellParallel
+        );
         let FixtureToolSurface {
             dummy_tool_bin,
             dummy_mode,
@@ -647,7 +669,11 @@ impl DeterministicFixture {
                     }
                 }),
             );
-            serde_json::json!(["workdir", "edit"])
+            if mode == FixtureMode::CoreShellParallel {
+                serde_json::json!(["shell", "wait"])
+            } else {
+                serde_json::json!(["workdir", "edit"])
+            }
         } else {
             tools
         };

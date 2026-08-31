@@ -29,7 +29,9 @@ continuation, and terminal usage without downloading or serving a model.
 
 The default workspace test run executes a test-only fake provider as a real
 supervised subprocess. No environment opt-in, provider credential, network
-access, shell, or VCR cassette is involved:
+access, or VCR cassette is involved. Most cases use no shell; the listed
+`core_shell_resume` binary contains the controlled production core-shell
+exceptions described below:
 
 ```sh
 cargo nextest run -p tau-e2e-tests --test deterministic_provider
@@ -68,6 +70,15 @@ synchronized held-worker crash followed by two dispatch-uncertain fail-closed
 resumes, an acknowledged interrupted worker foreground tool repaired exactly
 once across two cold resumes, and startup rejection of invalid
 scenario config.
+
+The Unix core-shell test binary also contains one closed sibling-concurrency
+oracle. It preflights the exact Cargo-built `tau-e2e-shell-probe` executable
+before fixture startup and has one parallel-capable fake-provider
+terminal emit four fixed production `shell` calls. The same closed four-call
+terminal also runs while the route advertises one-call guidance, proving a
+violating provider response remains losslessly aggregated. A bounded filesystem start
+barrier and monotonic interval records prove common overlap and a sub-six-second
+makespan; four exact `wait` calls collect the real background completions.
 
 Output-length acceptance uses one closed Chat Completions-shaped pair. The live
 case proves a reasoning-only `Length` response creates exactly one successor,

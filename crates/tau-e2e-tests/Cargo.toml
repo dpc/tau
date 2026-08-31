@@ -25,6 +25,7 @@ nix = { version = "0.29", default-features = false, features = [
   "process",
   "signal",
   "term",
+  "time",
 ] }
 serde.workspace = true
 serde_json.workspace = true

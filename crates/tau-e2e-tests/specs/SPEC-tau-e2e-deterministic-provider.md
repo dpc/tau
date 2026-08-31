@@ -2,12 +2,20 @@
 
 ## Record justification
 
-This cross-cutting contract coordinates generated role and extension
-configuration, the fake provider's scenario grammar and durable checkpoint,
-daemon-side production-tool injection, typed multi-agent store snapshots,
-replay-aware socket observation, and the exact deterministic CI lane. Keeping
-the acceptance boundary here prevents those independently maintained pieces
-from silently broadening fixture authority or weakening the claimed oracle.
+This contract is necessarily distributed across fixture configuration, fake-provider grammar/checkpointing, production-tool injection, durable stores, socket observation, and deterministic CI.
+
+## Closed sibling-shell concurrency
+
+One closed V2 core-shell scenario emits exactly four sibling `shell` calls in
+one canonical provider terminal. It runs in both capability modes: the positive
+case advertises parallel calls, while the violating-response control retains
+one-call guidance and still requires lossless aggregation. Each fixed command
+uses the preflight-resolved Cargo-built helper path, synchronizes through private cwd marker
+files retained for the fixture lifetime, and records monotonic timestamps around
+a three-second sleep. Four exact `wait` calls collect the real background results. The oracle
+requires all requests and starts before the first placeholder, exact
+call/wait/result correlation without extras, common overlap, and a makespan
+below six seconds. It does not alter runtime scheduling.
 
 Deterministic harness acceptance uses a test-only supervised provider subprocess
 inside `tau-e2e-tests`. It is launched by exact path as a required custom
@@ -60,8 +68,9 @@ artifact directories. Its embedded harness socket and discovery catalog remain
 below that process-runtime directory.
 It disables every unrelated built-in extension and normally enables only the
 no-side-effect `tau-ext-test-dummy` success mode. Gate 2 is one controlled
-exception: the exact universal `component ext-shell` may expose only `workdir`
-and `edit` to a closed scratch-only scenario. S1 is the other: its main role
+exception: the exact universal `component ext-shell` uses separate closed
+surfaces: `workdir`/`edit` for cold resume and `shell`/`wait` for sibling
+concurrency. S1 is the other: its main role
 exposes only the production harness-owned `agent_start` built-in while its
 worker role exposes no tools. The isolated production-message fixture instead
 exposes only `message` to its main and no tools to its test-driver-created idle
@@ -244,11 +253,12 @@ Continuations cannot change that binding. The fake subscribes
 only to live prompt/cancel/watch traffic, so restored event replay cannot
 consume actions.
 
-The core-shell action family is likewise closed rather than generic: it can set
-only relative `project`, edit only `resume-sentinel.txt` with the two fixed
-line-range shapes, and vary only bounded call IDs, nonce text, prompts, and final
-markers. Its result continuations require success; the resumed provider prompt
-must contain both the old nonce-bearing transcript and restored workdir context.
+The cold-resume core-shell action family can set only relative `project` and
+edit only `resume-sentinel.txt` with two fixed line-range shapes. The separate
+sibling-concurrency family is the exact three-action call/wait/result sequence
+in [Closed sibling-shell concurrency](#closed-sibling-shell-concurrency); no
+extra lane or action may accompany it. Both families require
+successful, exactly correlated continuations.
 
 V2 cursors, immutable agent-to-lane bindings, and bounded harness-minted
 parent-to-child associations are atomically checkpointed in the harness-assigned

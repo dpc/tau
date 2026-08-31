@@ -140,3 +140,16 @@ Harness test-provider fixtures use the `echo-agent`-gated empty discovery policy
 their child-process regression poisons `HOME` with a user skill and verifies the
 fixture does not discover it. Production extension runners always use environment
 discovery.
+
+## `apply_patch` recovery and shell accounting
+
+`apply_patch` regressions keep expected-context mismatch headers single-line,
+place bounded multiline recovery in `details.output`, and combine that recovery
+with truthful `partial_changes` plus UI-only diffs when a later hunk fails after
+an earlier mutation.
+
+The `shell` and model-visible `shell_command` accounting tests construct exact
+rendered stdout/stderr records, including stream prefixes, line-ending/UTF-8
+flags, and separators. They require `total_bytes` and saved artifacts to equal
+that rendered UTF-8 form and to differ deliberately from raw process-byte
+length where markers expand it.

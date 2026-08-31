@@ -29,8 +29,8 @@ synthetic scenario data, session state, stderr logs, and provider trace below a
 fresh private temporary root. The fake provider opens the fixed
 `fake-provider.trace` filename in its fixture-owned working directory and the
 fixed clean-resume cursor filename in its harness-assigned extension state
-directory. It has no
-network, authentication, shell, evaluation, dynamic plugin, child-process,
+directory. The fake provider itself has no
+network, authentication, shell evaluation, dynamic plugin, child-process,
 prompt-control, or arbitrary input-file behavior. V2 actions are selected only
 by fixture-authored correlation ids and typed cancellation, never prompt
 commands. Scenario counts, bytes, hold deadlines, barriers, and diagnostics are
@@ -286,6 +286,18 @@ interpreter. Core-shell still runs with same-UID filesystem permissions and is
 not a sandbox. A private scratch tree, symlink rejection, exact target bytes,
 wrong-path absence, and an outside canary bound the scenario and detect drift;
 the Nix build sandbox remains the outer isolation boundary.
+
+The separate headless core-shell concurrency oracle is another closed
+production-extension exception. It exposes only `shell` and harness-owned
+`wait`. The fixture preflights one exact Cargo-built helper executable, then the
+fake provider emits four fixed commands that create only four dotfile barrier
+markers below the private core-shell cwd, use monotonic clocks, sleep for three
+seconds, and print bounded identity/timing records. The markers remain inside
+the private temporary fixture until its teardown so the all-arrived state cannot
+regress. Four
+exact waits collect the real background completions before shutdown. The
+scripts accept no prompt-derived command, path, environment control, or network
+input; same-UID execution and the Nix sandbox remain the outer boundary.
 
 `VcrFixture` is deliberately non-hermetic. It can use real provider credentials
 and lets `core-shell` execute with the user's permissions. Its cassettes can

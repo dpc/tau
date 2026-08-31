@@ -11,6 +11,8 @@ use crate::tools::find::escape_path_text;
 use crate::tools::world::{MAX_SAFE_FILE_READ_BYTES, ShellWorld};
 
 const SUMMARY_HEADER: &str = "Success. Updated the following files:";
+const MAX_CONTEXT_MISMATCH_DETAIL_BYTES: usize = 4 * 1024;
+const MAX_CONTEXT_MISMATCH_PATH_BYTES: usize = 1024;
 
 #[expect(unused)]
 pub(crate) const APPLY_PATCH_LARK_GRAMMAR: &str = include_str!("apply_patch.lark");
@@ -25,7 +27,7 @@ pub(crate) fn apply_patch(
     let changes = match apply_hunks(&hunks, world) {
         Ok(changes) => changes,
         Err(failure) => {
-            let details = partial_changes_details(&failure.changes);
+            let details = failure_details(&failure);
             let mut tool_failure = ToolFailure::new(failure.message)
                 .with_payload(display_payload_for_failure(&failure.changes));
             if let Some(details) = details {
@@ -144,8 +146,13 @@ struct AppliedChange {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+/// One failed patch application plus truthful evidence of any earlier effects.
 struct ApplyPatchFailure {
+    /// Single-line provider-visible failure summary.
     message: String,
+    /// Optional bounded multiline recovery body.
+    recovery_output: Option<String>,
+    /// Files changed before the failure occurred.
     changes: Vec<AppliedChange>,
 }
 
@@ -153,8 +160,14 @@ impl ApplyPatchFailure {
     fn new(message: impl Into<String>, changes: &[AppliedChange]) -> Self {
         Self {
             message: message.into(),
+            recovery_output: None,
             changes: changes.to_vec(),
         }
+    }
+
+    fn with_recovery_output(mut self, recovery_output: String) -> Self {
+        self.recovery_output = Some(recovery_output);
+        self
     }
 }
 
@@ -261,8 +274,14 @@ impl<'world> HunkApplier<'world> {
     ) -> Result<(), ApplyPatchFailure> {
         let abs = resolve_path(&self.cwd, path);
         let old_content = self.read_file_to_update(&abs)?;
-        let new_content = derive_new_contents_from_chunks(&abs, &old_content, chunks)
-            .map_err(|message| self.failure(message))?;
+        let new_content =
+            derive_new_contents_from_chunks(&abs, &old_content, chunks).map_err(|diagnostic| {
+                let failure = self.failure(diagnostic.message);
+                match diagnostic.recovery_output {
+                    Some(output) => failure.with_recovery_output(output),
+                    None => failure,
+                }
+            })?;
 
         if let Some(move_path) = move_path {
             self.apply_move_update(&abs, move_path, old_content, new_content)
@@ -438,12 +457,20 @@ fn display_payload_for_failure(changes: &[AppliedChange]) -> Option<ToolUsePaylo
     display_payload_for_changes(changes, &summary)
 }
 
-fn partial_changes_details(changes: &[AppliedChange]) -> Option<CborValue> {
-    if changes.is_empty() {
+fn failure_details(failure: &ApplyPatchFailure) -> Option<CborValue> {
+    if failure.changes.is_empty() && failure.recovery_output.is_none() {
         return None;
     }
 
-    let changes = changes
+    let mut details = Vec::new();
+    if let Some(output) = &failure.recovery_output {
+        details.push((
+            CborValue::Text("output".to_owned()),
+            CborValue::Text(output.clone()),
+        ));
+    }
+    let changes = failure
+        .changes
         .iter()
         .map(|change| {
             CborValue::Map(vec![
@@ -458,10 +485,13 @@ fn partial_changes_details(changes: &[AppliedChange]) -> Option<CborValue> {
             ])
         })
         .collect();
-    Some(CborValue::Map(vec![(
-        CborValue::Text("partial_changes".to_owned()),
-        CborValue::Array(changes),
-    )]))
+    if !failure.changes.is_empty() {
+        details.push((
+            CborValue::Text("partial_changes".to_owned()),
+            CborValue::Array(changes),
+        ));
+    }
+    Some(CborValue::Map(details))
 }
 
 fn format_partial_summary(changes: &[AppliedChange]) -> String {
@@ -539,7 +569,7 @@ fn derive_new_contents_from_chunks(
     path: &Path,
     original_contents: &str,
     chunks: &[UpdateChunk],
-) -> Result<String, String> {
+) -> Result<String, UpdateDiagnostic> {
     let mut original_lines: Vec<String> = original_contents.split('\n').map(String::from).collect();
     if original_lines.last().is_some_and(String::is_empty) {
         original_lines.pop();
@@ -557,7 +587,7 @@ fn compute_replacements(
     original_lines: &[String],
     path: &Path,
     chunks: &[UpdateChunk],
-) -> Result<Vec<(usize, usize, Vec<String>)>, String> {
+) -> Result<Vec<(usize, usize, Vec<String>)>, UpdateDiagnostic> {
     let mut replacements = Vec::new();
     let mut line_index = 0usize;
 
@@ -571,11 +601,11 @@ fn compute_replacements(
             ) {
                 line_index = idx + 1;
             } else {
-                return Err(format!(
+                return Err(UpdateDiagnostic::message(format!(
                     "Failed to find context '{}' in {}",
                     ctx_line,
                     render_path(path)
-                ));
+                )));
             }
         }
 
@@ -605,16 +635,65 @@ fn compute_replacements(
             replacements.push((start_idx, pattern.len(), new_slice.to_vec()));
             line_index = start_idx + pattern.len();
         } else {
-            return Err(format!(
-                "Failed to find expected lines in {}:\n{}",
-                render_path(path),
-                chunk.old_lines.join("\n")
-            ));
+            let rendered_path = render_path(path);
+            return Err(UpdateDiagnostic {
+                message: format!("Failed to find expected lines in {rendered_path}"),
+                recovery_output: Some(bounded_context_mismatch_output(
+                    &rendered_path,
+                    &chunk.old_lines,
+                )),
+            });
         }
     }
 
     replacements.sort_by_key(|(start_idx, _, _)| *start_idx);
     Ok(replacements)
+}
+
+#[derive(Debug, Eq, PartialEq)]
+/// Structured update-planning failure split into header and body content.
+struct UpdateDiagnostic {
+    /// Single-line diagnostic suitable for the provider-visible error header.
+    message: String,
+    /// Bounded multiline context intended for the provider-visible body.
+    recovery_output: Option<String>,
+}
+
+impl UpdateDiagnostic {
+    fn message(message: String) -> Self {
+        Self {
+            message,
+            recovery_output: None,
+        }
+    }
+}
+
+fn bounded_context_mismatch_output(path: &str, expected_lines: &[String]) -> String {
+    let path = truncate_utf8(path, MAX_CONTEXT_MISMATCH_PATH_BYTES, "...(path truncated)");
+    let full = format!("Expected lines in {path}:\n{}", expected_lines.join("\n"));
+    if full.len() <= MAX_CONTEXT_MISMATCH_DETAIL_BYTES {
+        return full;
+    }
+
+    let marker = "\n...(context truncated)";
+    let retained_bytes = MAX_CONTEXT_MISMATCH_DETAIL_BYTES.saturating_sub(marker.len());
+    let retained_end = (0..=retained_bytes.min(full.len()))
+        .rev()
+        .find(|index| full.is_char_boundary(*index))
+        .unwrap_or(0);
+    format!("{}{marker}", &full[..retained_end])
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize, marker: &str) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let retained_bytes = max_bytes.saturating_sub(marker.len());
+    let retained_end = (0..=retained_bytes.min(value.len()))
+        .rev()
+        .find(|index| value.is_char_boundary(*index))
+        .unwrap_or(0);
+    format!("{}{marker}", &value[..retained_end])
 }
 
 fn apply_replacements(

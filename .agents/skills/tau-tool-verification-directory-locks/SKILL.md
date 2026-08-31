@@ -30,7 +30,11 @@ disabled or unavailable and mutation tools do not wait on directory locks.
 When locking is enabled, verify all of these behaviors:
 
 * `dir_lock` accepts only `command: update` and `command: unlock` with an existing directory.
-* Directories are canonicalized before locking. Relative paths, `.` components, and symlinked directories should report or behave as the canonical absolute directory.
+* Directories are canonicalized before locking. Relative paths, `.` components,
+  and symlinked directories behave as the canonical absolute directory.
+  Provider output includes `canonical_directory` only when canonicalization
+  changes the submitted spelling; an already-canonical invocation returns only
+  `locked`, while UI display still names the canonical path.
 * Missing directories and regular files are rejected before any lock is acquired.
 * Manual locks are owner-scoped by `agent_id`; a different agent cannot unlock them unless it passes `owner_agent_id` for an explicit force-unlock.
 * Repeated `update` by the same agent on the same canonical directory, an ancestor, or a child is an error. It should return `error: dir_lock_duplicate` with details headers including `blocking_directory`, `requested_directory`, and `lock_owner_id`, plus a short text payload in `output`. Same-agent automatic writer reentry under a manual lock should still complete, including while another same-agent mutating tool under that lock is still running.
@@ -48,7 +52,12 @@ When locking is enabled, verify all of these behaviors:
 
 #### Phase 1: basic manual lock behavior
 
-With `dir_lock.enable` true, call `dir_lock update` on a relative path like `root/a/../a`. Expect success and a canonical absolute directory in the result/display. Call `dir_lock unlock` for the same path. Expect success.
+With `dir_lock.enable` true, call `dir_lock update` on a relative path like
+`root/a/../a`. Expect success with `canonical_directory` in the provider result
+and the canonical path in display. Unlock it, then reacquire with that exact
+canonical path and expect only `locked` in the provider result while display
+still names the path. Unlock again. Do not issue the canonical update while the
+noncanonical spelling remains held: that is correctly a same-owner duplicate.
 
 Call `dir_lock update` on a missing directory and on `root/a/file.txt`. Expect tool errors. Then call `dir_lock update` twice on `root/a` from the same agent. The second update should error and mention the already-held lock. Also call `dir_lock update root/a/child` and `dir_lock update root` from that same agent while `root/a` is held; both should error. Start a delegate that tries to create `root/a/child/blocked.txt` with `edit` and reports to `user` after it succeeds. The delegate should wait. Call `dir_lock unlock` once from the original agent; the delegate should complete. A second `unlock` should error. Also verify that a different agent cannot unlock Agent A's lock without `owner_agent_id`, but can force-unlock it when `owner_agent_id` is Agent A.
 

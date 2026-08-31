@@ -1,7 +1,9 @@
-//! Gate 2: real bundled core-shell state reconstruction across process
-//! replacement.
+//! Gate 2 core-shell acceptance: cold state reconstruction plus one closed
+//! four-sibling production-shell concurrency oracle.
 
 use std::collections as path_std_collections;
+use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use tau_e2e_tests::{
@@ -18,7 +20,236 @@ use daemon_support::*;
 
 const FAKE_PROVIDER: &str = env!("CARGO_BIN_EXE_tau-e2e-fake-provider");
 const HARNESS_DAEMON: &str = env!("CARGO_BIN_EXE_tau-e2e-harness-daemon");
+const SHELL_PROBE: &str = env!("CARGO_BIN_EXE_tau-e2e-shell-probe");
 const SESSION: &str = "deterministic-e2e-session";
+
+/// Proves one fake-provider terminal containing four sibling production shell
+/// calls reaches the ext-shell worker pool concurrently rather than serially.
+#[test]
+fn core_shell_four_sibling_commands_overlap() -> Result<(), Box<dyn std::error::Error>> {
+    run_core_shell_four_sibling_commands(true)
+}
+
+/// Proves a route that advertises one-call guidance still preserves a violating
+/// four-call provider terminal and its complete continuation losslessly.
+#[test]
+fn core_shell_four_sibling_commands_remain_lossless_when_capability_false()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_core_shell_four_sibling_commands(false)
+}
+
+fn run_core_shell_four_sibling_commands(
+    advertise_parallel: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const PROMPT: &str = "run four deterministic sibling shell commands";
+    const RESPONSE: &str = "parallel shell commands completed";
+    let probe_executable = resolve_executable(SHELL_PROBE)
+        .ok_or("the deterministic shell concurrency probe is not executable")?;
+    let call_ids = std::array::from_fn(|index| {
+        tau_proto::ToolCallId::new(format!("parallel-shell-{}", index + 1))
+    });
+    let wait_call_ids = std::array::from_fn(|index| {
+        tau_proto::ToolCallId::new(format!("parallel-wait-{}", index + 1))
+    });
+    let scenario = ScenarioV2::new(
+        "core-shell-parallel",
+        vec![ScenarioLaneV2 {
+            ctx_id: "core-shell-parallel-lane".to_owned(),
+            actions: vec![
+                ScenarioActionV2::CoreShellParallelCalls {
+                    user_text: PROMPT.to_owned(),
+                    advertise_parallel,
+                    call_ids: call_ids.clone(),
+                    probe_executable,
+                },
+                ScenarioActionV2::CoreShellParallelWaits {
+                    user_text: PROMPT.to_owned(),
+                    advertise_parallel,
+                    call_ids: call_ids.clone(),
+                    wait_call_ids: wait_call_ids.clone(),
+                },
+                ScenarioActionV2::CoreShellParallelResult {
+                    user_text: PROMPT.to_owned(),
+                    advertise_parallel,
+                    call_ids: call_ids.clone(),
+                    wait_call_ids,
+                    response: RESPONSE.to_owned(),
+                },
+            ],
+        }],
+    );
+    let fixture = DeterministicFixture::new_core_shell_parallel(
+        if advertise_parallel {
+            "core_shell_four_sibling_commands_overlap"
+        } else {
+            "core_shell_four_sibling_commands_capability_false"
+        },
+        &scenario,
+        FAKE_PROVIDER,
+    )?;
+    let socket = fixture.socket_path("parallel-shell");
+    let daemon = spawn_daemon(&fixture, &socket, tau_harness::SessionLaunchStatus::New);
+    let mut peer = connect_ui(&socket)?;
+    create_agent_without_prompt(&mut peer)?;
+    let agent_id = wait_agent_and_context_ready(&mut peer, false, fixture.shell_base())?;
+    submit_prompt(&mut peer, &agent_id, "core-shell-parallel-lane", PROMPT)?;
+    let final_response = recv_end_turn(&mut peer)?;
+    assert_eq!(assistant_text(&final_response.output_items), RESPONSE);
+    disconnect_ui(&mut peer)?;
+    daemon.finish()?;
+
+    let events = fixture.published_trace_events()?;
+    let sibling_terminal = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ProviderResponseFinished(response) => {
+                let calls = response
+                    .output_items
+                    .iter()
+                    .filter_map(|item| match item {
+                        tau_proto::ContextItem::ToolCall(call) => Some(call),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                (calls.len() == 4 && calls.iter().all(|call| call.name.as_str() == "shell"))
+                    .then_some(calls)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sibling_terminal.len(), 1);
+    assert_eq!(
+        sibling_terminal[0]
+            .iter()
+            .map(|call| &call.call_id)
+            .collect::<Vec<_>>(),
+        call_ids.iter().collect::<Vec<_>>()
+    );
+
+    let first_terminal = events
+        .iter()
+        .position(|event| match event {
+            Event::ProviderToolResult(result) => call_ids.contains(&result.call_id),
+            Event::ProviderToolError(error) => call_ids.contains(&error.call_id),
+            _ => false,
+        })
+        .expect("parallel shell calls must terminate");
+    let request_positions = call_ids
+        .iter()
+        .enumerate()
+        .map(|(index, call_id)| {
+            let expected = sibling_terminal[0][index];
+            let positions = events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| {
+                    matches!(
+                        event,
+                        Event::ToolRequest(request)
+                            if &request.call_id == call_id
+                                && request.tool_name == expected.name
+                                && request.tool_type == expected.tool_type
+                                && request.arguments == expected.arguments
+                                && request.agent_id == agent_id
+                    )
+                    .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(positions.len(), 1, "canonical request must be unique");
+            positions[0]
+        })
+        .collect::<Vec<_>>();
+    let started_positions = call_ids
+        .iter()
+        .enumerate()
+        .map(|(index, call_id)| {
+            let expected = sibling_terminal[0][index];
+            let positions = events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| {
+                    matches!(
+                        event,
+                        Event::ToolStarted(started)
+                            if &started.call_id == call_id
+                                && started.tool_name == expected.name
+                                && started.arguments == expected.arguments
+                                && started.agent_id == agent_id
+                    )
+                    .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(positions.len(), 1, "tool start must be unique");
+            positions[0]
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        request_positions
+            .iter()
+            .chain(&started_positions)
+            .all(|position| *position < first_terminal),
+        "all sibling requests and starts must precede any terminal: requests={request_positions:?}, starts={started_positions:?}, terminal={first_terminal}"
+    );
+    let background_results = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ToolBackgroundResult(result) if call_ids.contains(&result.call_id) => {
+                Some(&result.call_id)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(background_results.len(), 4);
+    assert_eq!(
+        background_results
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        call_ids.iter().collect::<std::collections::BTreeSet<_>>(),
+        "each shell call must produce exactly one real background result"
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::ToolBackgroundError(error) if call_ids.contains(&error.call_id)
+    )));
+
+    let intervals = call_ids
+        .iter()
+        .map(|call_id| shell_interval(&events, call_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let latest_start = intervals
+        .iter()
+        .map(|interval| interval.start)
+        .max()
+        .expect("four intervals");
+    let earliest_end = intervals
+        .iter()
+        .map(|interval| interval.end)
+        .min()
+        .expect("four intervals");
+    let first_start = intervals
+        .iter()
+        .map(|interval| interval.start)
+        .min()
+        .expect("four intervals");
+    let last_end = intervals
+        .iter()
+        .map(|interval| interval.end)
+        .max()
+        .expect("four intervals");
+    assert!(latest_start < earliest_end, "intervals lack common overlap");
+    assert!(
+        Duration::from_nanos(last_end - first_start) < Duration::from_secs(6),
+        "parallel makespan exceeded six seconds: {intervals:?}"
+    );
+    for interval in &intervals {
+        assert!(
+            (Duration::from_millis(2_500)..=Duration::from_secs(5)).contains(&interval.elapsed)
+        );
+        assert!(interval.start < interval.end);
+    }
+    fixture.assert_consumed()?;
+    Ok(())
+}
 
 /// Proves the bundled production core-shell restores a committed per-agent
 /// workdir and performs a context-checked relative edit after a cold resume.
@@ -505,4 +736,81 @@ fn edit_result(new_max_valid_start_line: i64, total_bytes: usize) -> CborValue {
             CborValue::Integer((total_bytes as i64).into()),
         ),
     ])
+}
+
+fn resolve_executable(path: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let candidate = PathBuf::from(path);
+    (candidate
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        && Command::new(&candidate)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success()))
+    .then(|| candidate.canonicalize().ok())
+    .flatten()
+}
+
+/// One identity-tagged monotonic execution interval reported by a sibling
+/// shell process.
+#[derive(Debug)]
+struct ShellInterval {
+    /// Monotonic process-local start timestamp in nanoseconds.
+    start: u64,
+    /// Monotonic process-local end timestamp in nanoseconds.
+    end: u64,
+    /// Reported command duration.
+    elapsed: Duration,
+}
+
+fn shell_interval(
+    events: &[Event],
+    call_id: &tau_proto::ToolCallId,
+) -> Result<ShellInterval, Box<dyn std::error::Error>> {
+    let output = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolBackgroundResult(result) if &result.call_id == call_id => {
+                cbor_text_field(&result.result, "output")
+            }
+            _ => None,
+        })
+        .ok_or_else(|| format!("missing shell output for {call_id}"))?;
+    let mut start = None;
+    let mut end = None;
+    let mut elapsed: Option<f64> = None;
+    for field in output
+        .strip_prefix("out ")
+        .unwrap_or(output)
+        .split_whitespace()
+    {
+        if let Some(value) = field.strip_prefix("start_ns=") {
+            start = Some(value.parse()?);
+        } else if let Some(value) = field.strip_prefix("end_ns=") {
+            end = Some(value.parse()?);
+        } else if let Some(value) = field.strip_prefix("elapsed_ms=") {
+            elapsed = Some(value.parse()?);
+        }
+    }
+    Ok(ShellInterval {
+        start: start.ok_or("missing start_ns")?,
+        end: end.ok_or("missing end_ns")?,
+        elapsed: Duration::from_secs_f64(elapsed.ok_or("missing elapsed_ms")? / 1_000.0),
+    })
+}
+
+fn cbor_text_field<'a>(value: &'a CborValue, key: &str) -> Option<&'a str> {
+    let CborValue::Map(entries) = value else {
+        return None;
+    };
+    entries.iter().find_map(|(entry_key, entry_value)| {
+        matches!(entry_key, CborValue::Text(entry_key) if entry_key == key)
+            .then(|| match entry_value {
+                CborValue::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .flatten()
+    })
 }

@@ -1,5 +1,11 @@
 # ARCH-tau-e2e-tests: tau-e2e-tests architecture
 
+The deterministic family has two separate production core-shell surfaces. The
+cold-resume gate exposes only `workdir` and `edit`. The sibling-concurrency
+oracle exposes only `shell` and harness-owned `wait`. No production scheduling
+code is replaced or configured specially. The closed mechanics are governed by
+[SPEC-tau-e2e-deterministic-provider](SPEC-tau-e2e-deterministic-provider.md).
+
 `tau-e2e-tests` contains three deliberately separate fixture families.
 
 `DeterministicFixture` is always-on and hermetic. It starts an exact

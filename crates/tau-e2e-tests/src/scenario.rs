@@ -452,6 +452,43 @@ pub enum ScenarioActionV2 {
         /// Complete assistant marker.
         response: String,
     },
+    /// Emit four sibling production `shell` calls in one provider
+    /// terminal so the fixture can prove execution overlap.
+    CoreShellParallelCalls {
+        /// Exact latest user text.
+        user_text: String,
+        /// Whether the fake route advertises parallel-call support.
+        advertise_parallel: bool,
+        /// Exact four provider-authored call identities.
+        call_ids: [ToolCallId; 4],
+        /// Preflight-resolved absolute probe executable.
+        probe_executable: std::path::PathBuf,
+    },
+    /// Collect the four real background shell completions through exact waits.
+    CoreShellParallelWaits {
+        /// Exact latest user text retained in the continuation.
+        user_text: String,
+        /// Whether the fake route advertises parallel-call support.
+        advertise_parallel: bool,
+        /// Exact background shell call identities.
+        call_ids: [ToolCallId; 4],
+        /// Exact provider-authored wait call identities.
+        wait_call_ids: [ToolCallId; 4],
+    },
+    /// Accept all four correlated shell results and finish with an exact
+    /// marker.
+    CoreShellParallelResult {
+        /// Exact latest user text retained in the continuation.
+        user_text: String,
+        /// Whether the fake route advertises parallel-call support.
+        advertise_parallel: bool,
+        /// Exact four provider-authored call identities.
+        call_ids: [ToolCallId; 4],
+        /// Exact four provider-authored wait call identities.
+        wait_call_ids: [ToolCallId; 4],
+        /// Complete assistant marker.
+        response: String,
+    },
     /// Complete with a typed terminal provider error.
     Error {
         /// Exact latest user text.

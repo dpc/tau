@@ -73,6 +73,19 @@ substantive tool admission, the third result also carries one `advice` string
 suggesting `status(waiting)` and event-driven wakeups. Later timeouts in that
 no-progress run omit it, and current Waiting suppresses it.
 
+Exact-id and bare waits arbitrate completed results against activating input.
+A wait may consume its matching completed result before that completion's own
+queued notification preempts it. A different unsuppressed completion prompt,
+watch notification, or direct message is ordinary activating input and may
+interrupt the wait even when the requested result is already complete. Report
+which activation preempted the wait; after it drains, retrying the exact wait
+must still deliver the result once.
+
+Do not infer an exact-wait result from a delegate's prose. Confirm the actual
+tool request contained `tool_call_id`. A request containing
+`timeout_minutes` instead exercises activating-input wait and correctly returns
+`input_available: true`.
+
 Current background timing: most backgroundable tools background after about 2
 seconds, and `wait` itself never backgrounds. `agent_start` currently finishes
 instantly after creating the sub-agent and returns `self_agent_id` and
@@ -92,7 +105,7 @@ Also verify the active-`wait` variant of the same scenario. Use a delegate promp
 
 Because `agent_start` enables a persistent watch, these message-delivery probes can produce later watch notifications if the child leaves an earlier background tool running. For example, after an active-`wait` interruption, the original sleep may complete later, queue a normal background-completion prompt in the child, and the child may answer something like `Received.`. That is not a duplicate watch notification by itself; it is a later child turn caused by the delayed inner completion. If the verifier no longer wants notifications from that child after the success nonce, explicitly call `agent_watch({"agent_id":"<sub_agent_id>","enable":false})`.
 
-A completed background result is consumed by the first successful `wait`. Later waits for the same id should fail with an already-consumed error. Parallel duplicate waits on the same id race; at most one should receive the result, and the rest should fail. Parallel duplicate no-arg waits in the same conversation should also fail clearly because only one waiter can consume the next completion. The exact error depends on timing: an in-progress duplicate-wait error, an already-consumed error, or another clear race-related error can be acceptable if only one wait receives the result.
+A completed background result is consumed by the first successful `wait`. Later waits for the same id should fail with an already-consumed error. Parallel duplicate waits on the same id race; at most one should receive the result, and the rest should fail. At most one *installed* no-arg waiter may target the same next completion: with no completed result and one running call, sibling bare waits must produce one registration and one clear duplicate/in-progress error. If two results are already complete, two sibling bare waits may immediately consume the two distinct results in completion order; that does not install duplicate waiters. The exact race error depends on timing, but each result must be consumed at most once.
 
 
 ### Background tool `cancel`

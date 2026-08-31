@@ -39,7 +39,7 @@ and conform to our standards and guidelines.
 ## Guidelines
 
 ### Tool result output structure
-All tools should return a HTTP-protocol-like structure:
+All tools should return a normalized HTTP-protocol-like structure:
 
 ```
 header-1: value-1
@@ -50,7 +50,10 @@ header-n: value-n
 multi-line-payload
 ```
 
-With a single empty line separating headers from the main payload.
+The canonical form is zero or more headers followed by an optional body. When
+headers and a body are both present, one empty line separates them. A compact
+body-only scalar response is valid and must not gain a leading empty line or
+redundant status header.
 
 `multi-line-payload` can be arbitrary, but line-oriented output typically uses
 `<prefix>(optional-per-line-flags) <line-content>` structure. If that's the case
@@ -123,6 +126,10 @@ Lines which are too long show a `truncated` flag and have content skipped.
 Total outputs that are too long are truncated; `truncated: true`,
 `total_lines: {lines}` and `total_bytes: {bytes}` headers are added.
 These total headers are omitted when output is not truncated, except `read` may report `total_lines: 0` and `total_bytes: 0` for an empty file.
+For shell output, `total_bytes` and saved artifacts count the complete rendered
+UTF-8 shell form, including `out` / `err` prefixes, line-ending and UTF-8
+markers, and inserted record separators. They are not raw stdout/stderr byte
+counts.
 
 When output is truncated due to line number limit, first and last 1000 lines
 should be shown with `...` line separating them, instead of usual line prefix.
@@ -215,6 +222,16 @@ python3 -c 'import time; ident="parallel-3"; start=time.time_ns(); time.sleep(3)
 python3 -c 'import time; ident="parallel-4"; start=time.time_ns(); time.sleep(3); end=time.time_ns(); print(f"id={ident} start_ns={start} end_ns={end} elapsed_ms={(end-start)/1_000_000:.3f}")'
 ```
 
+Before the probe, resolve the required interpreter in the effective execution
+environment. Do this before changing persistent workdir, or use a verified
+absolute executable path. If it is unavailable, report the probe unavailable
+rather than treating command-not-found as a concurrency failure.
+
+Confirm from the canonical `provider.response_finished` aggregate or an exact
+provider capture that all four call IDs occurred in one provider terminal.
+Visual adjacency in the UI or one apparent assistant message is insufficient:
+calls emitted by separate provider responses do not test sibling scheduling.
+
 Interpret the model-visible results by call identity, not by result-delivery
 order. For each interval use `[start_ns, end_ns]`, and compute the overall
 makespan as `max(end_ns) - min(start_ns)`. Normal process startup and scheduler
@@ -245,6 +262,14 @@ overlap observation, and which layer the available evidence implicates.
 
 For every tool thoroughly consider all corner cases, including ones which are not covered
 in this document.
+
+Negative probes intentionally produce tool failures, so do not run enough of
+them consecutively to trip Tau's loop guard and then report the pivot as a tool
+defect. Three identical failures or four consecutive distinct failures can
+trigger the guard; one successful terminal resets the streak. Isolate negative
+groups in short-lived delegates or insert a harmless successful tool call
+between groups. A pivot below threshold, after a successful reset, or with
+incorrect argument-sensitive grouping remains a discrepancy.
 
 Report back:
 

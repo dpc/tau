@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::num::{NonZeroU32, NonZeroU64};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tau_proto::ProviderFailureKind;
@@ -193,6 +194,166 @@ fn standalone_compaction_capability_requires_a_dedicated_action() {
                 .supports_standalone_compaction
         );
     }
+}
+
+/// Ensures the closed sibling-shell scenario can select either capability mode
+/// while ordinary scenarios retain the default one-call capability.
+#[test]
+fn parallel_tool_capability_requires_a_dedicated_action() {
+    let ordinary = ScenarioConfig::V2(ScenarioV2::new(
+        "ordinary",
+        vec![ScenarioLaneV2 {
+            ctx_id: "ordinary".to_owned(),
+            actions: vec![ScenarioActionV2::Text {
+                user_text: "ordinary".to_owned(),
+                response: "done".to_owned(),
+            }],
+        }],
+    ));
+    assert!(!ordinary.supports_parallel_tool_calls());
+
+    let parallel = ScenarioConfig::V2(parallel_shell_scenario(
+        PathBuf::from("/fixture/tau-e2e-shell-probe"),
+        true,
+    ));
+    assert!(parallel.supports_parallel_tool_calls());
+    let violating = ScenarioConfig::V2(parallel_shell_scenario(
+        PathBuf::from("/fixture/tau-e2e-shell-probe"),
+        false,
+    ));
+    assert!(!violating.supports_parallel_tool_calls());
+}
+
+/// Ensures the sibling-shell grammar rejects a relative probe_executable and
+/// duplicate call identities before the fake provider publishes a model.
+#[test]
+fn parallel_shell_scenario_rejects_malformed_authority() {
+    let valid = parallel_shell_scenario(PathBuf::from("/fixture/tau-e2e-shell-probe"), true);
+    validation::validate_v2(&valid).expect("closed parallel shell scenario is valid");
+
+    let relative = parallel_shell_scenario(PathBuf::from("tau-e2e-shell-probe"), true);
+    assert!(
+        validation::validate_v2(&relative)
+            .expect_err("relative probe_executable")
+            .to_string()
+            .contains("absolute probe_executable")
+    );
+
+    let mut duplicate = valid.clone();
+    let ScenarioActionV2::CoreShellParallelCalls { call_ids, .. } =
+        &mut duplicate.lanes[0].actions[0]
+    else {
+        panic!("parallel call action");
+    };
+    call_ids[1] = call_ids[0].clone();
+    for action in &mut duplicate.lanes[0].actions[1..] {
+        match action {
+            ScenarioActionV2::CoreShellParallelWaits { call_ids, .. }
+            | ScenarioActionV2::CoreShellParallelResult { call_ids, .. } => {
+                call_ids[1] = call_ids[0].clone();
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        validation::validate_v2(&duplicate)
+            .expect_err("duplicate shell id")
+            .to_string()
+            .contains("unique ids")
+    );
+
+    let mut extra = valid.clone();
+    extra.lanes[0].actions.push(ScenarioActionV2::Text {
+        user_text: "extra".to_owned(),
+        response: "extra".to_owned(),
+    });
+    assert!(
+        validation::validate_v2(&extra)
+            .expect_err("extra action")
+            .to_string()
+            .contains("calls, waits, and result only")
+    );
+
+    let mut wait_mismatch = valid.clone();
+    let ScenarioActionV2::CoreShellParallelWaits { call_ids, .. } =
+        &mut wait_mismatch.lanes[0].actions[1]
+    else {
+        panic!("parallel waits");
+    };
+    call_ids[0] = "wrong-shell".into();
+    assert!(
+        validation::validate_v2(&wait_mismatch)
+            .expect_err("wait correlation")
+            .to_string()
+            .contains("action correlation mismatch")
+    );
+
+    let mut wait_duplicate = valid.clone();
+    let ScenarioActionV2::CoreShellParallelWaits { wait_call_ids, .. } =
+        &mut wait_duplicate.lanes[0].actions[1]
+    else {
+        panic!("parallel waits");
+    };
+    wait_call_ids[1] = wait_call_ids[0].clone();
+    let duplicated_wait_ids = wait_call_ids.clone();
+    let ScenarioActionV2::CoreShellParallelResult { wait_call_ids, .. } =
+        &mut wait_duplicate.lanes[0].actions[2]
+    else {
+        panic!("parallel result");
+    };
+    *wait_call_ids = duplicated_wait_ids;
+    assert!(
+        validation::validate_v2(&wait_duplicate)
+            .expect_err("duplicate wait id")
+            .to_string()
+            .contains("unique ids")
+    );
+
+    let mut result_mismatch = valid;
+    let ScenarioActionV2::CoreShellParallelResult { wait_call_ids, .. } =
+        &mut result_mismatch.lanes[0].actions[2]
+    else {
+        panic!("parallel result");
+    };
+    wait_call_ids[0] = "wrong-wait".into();
+    assert!(
+        validation::validate_v2(&result_mismatch)
+            .expect_err("result correlation")
+            .to_string()
+            .contains("action correlation mismatch")
+    );
+}
+
+fn parallel_shell_scenario(probe_executable: PathBuf, advertise_parallel: bool) -> ScenarioV2 {
+    let call_ids = std::array::from_fn(|index| format!("parallel-shell-{}", index + 1).into());
+    let wait_call_ids = std::array::from_fn(|index| format!("parallel-wait-{}", index + 1).into());
+    ScenarioV2::new(
+        "parallel-shell",
+        vec![ScenarioLaneV2 {
+            ctx_id: "parallel-shell".to_owned(),
+            actions: vec![
+                ScenarioActionV2::CoreShellParallelCalls {
+                    user_text: "parallel".to_owned(),
+                    advertise_parallel,
+                    call_ids: call_ids.clone(),
+                    probe_executable,
+                },
+                ScenarioActionV2::CoreShellParallelWaits {
+                    user_text: "parallel".to_owned(),
+                    advertise_parallel,
+                    call_ids: call_ids.clone(),
+                    wait_call_ids: wait_call_ids.clone(),
+                },
+                ScenarioActionV2::CoreShellParallelResult {
+                    user_text: "parallel".to_owned(),
+                    advertise_parallel,
+                    call_ids,
+                    wait_call_ids,
+                    response: "done".to_owned(),
+                },
+            ],
+        }],
+    )
 }
 
 /// Rejects a typed-image sequence whose call and result identities differ so

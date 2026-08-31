@@ -64,6 +64,8 @@ fn parse_delete_hunk() {
     );
 }
 
+/// Ensures context-guided replacement still selects the intended original
+/// range after mismatch diagnostics become structured.
 #[test]
 fn compute_replacements_with_context() {
     let original = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
@@ -76,6 +78,49 @@ fn compute_replacements_with_context() {
     let replacements = compute_replacements(&original, Path::new("file.txt"), &chunks)
         .expect("replacement plan should compute");
     assert_eq!(replacements, vec![(1, 1, vec!["B".to_owned()])]);
+}
+
+/// Ensures a missing expected sequence keeps the provider error header
+/// single-line and returns bounded multiline recovery text separately.
+#[test]
+fn expected_line_mismatch_separates_header_and_recovery_output() {
+    let original = vec!["present".to_owned()];
+    let chunks = vec![UpdateChunk {
+        change_context: None,
+        old_lines: vec!["missing one".to_owned(), "missing two".to_owned()],
+        new_lines: vec!["replacement".to_owned()],
+        is_end_of_file: false,
+    }];
+
+    let error = compute_replacements(&original, Path::new("line\tbreak.txt"), &chunks)
+        .expect_err("missing expected lines must fail");
+    assert_eq!(
+        error.message,
+        "Failed to find expected lines in line\\tbreak.txt"
+    );
+    assert!(!error.message.contains(['\n', '\r']));
+    assert_eq!(
+        error.recovery_output.as_deref(),
+        Some("Expected lines in line\\tbreak.txt:\nmissing one\nmissing two")
+    );
+}
+
+/// Ensures mismatch recovery cannot echo an unbounded patch excerpt while
+/// preserving valid UTF-8 at the truncation boundary.
+#[test]
+fn expected_line_mismatch_recovery_is_bounded() {
+    let expected_lines = vec!["🙂".repeat(MAX_CONTEXT_MISMATCH_DETAIL_BYTES)];
+    let output = bounded_context_mismatch_output("file.txt", &expected_lines);
+
+    assert!(output.len() <= MAX_CONTEXT_MISMATCH_DETAIL_BYTES);
+    assert!(output.ends_with("...(context truncated)"));
+
+    let long_path = "p".repeat(MAX_CONTEXT_MISMATCH_DETAIL_BYTES * 2);
+    let output = bounded_context_mismatch_output(&long_path, &["expected".to_owned()]);
+    assert!(output.len() <= MAX_CONTEXT_MISMATCH_DETAIL_BYTES);
+    assert!(output.starts_with("Expected lines in "));
+    assert!(output.contains("...(path truncated):\nexpected"));
+    assert!(output.ends_with("expected"));
 }
 
 #[test]
