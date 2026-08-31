@@ -5860,6 +5860,73 @@ fn valid_envelopes_are_acked_and_routed() {
     assert_eq!(recv_prompt(&rx), "hello");
 }
 
+/// Socket envelope decoding must retain the existing exact no-op, reconnect,
+/// and shutdown classifications without representable conflicting lifecycle
+/// flags.
+#[test]
+fn socket_envelope_classes_select_one_explicit_disposition() {
+    let (ext, _rx, _client) = extension();
+    let cases = [
+        (
+            r#"not-json"#,
+            EnvelopeClass::Malformed,
+            SocketDisposition::Continue,
+            None,
+        ),
+        (
+            r#"{"type":"hello"}"#,
+            EnvelopeClass::Hello,
+            SocketDisposition::Continue,
+            None,
+        ),
+        (
+            r#"{"type":"unsupported","envelope_id":"env-unknown"}"#,
+            EnvelopeClass::Unknown,
+            SocketDisposition::Continue,
+            Some("env-unknown"),
+        ),
+        (
+            r#"{"type":"disconnect"}"#,
+            EnvelopeClass::Disconnect,
+            SocketDisposition::Reconnect,
+            None,
+        ),
+        (
+            r#"{"type":"disconnect","reason":"warning","envelope_id":"env-warning"}"#,
+            EnvelopeClass::Disconnect,
+            SocketDisposition::Reconnect,
+            Some("env-warning"),
+        ),
+        (
+            r#"{"type":"disconnect","reason":"refresh_requested"}"#,
+            EnvelopeClass::Disconnect,
+            SocketDisposition::Reconnect,
+            None,
+        ),
+        (
+            r#"{"type":"disconnect","reason":"link_disabled","envelope_id":"env-stop"}"#,
+            EnvelopeClass::Disconnect,
+            SocketDisposition::Shutdown,
+            Some("env-stop"),
+        ),
+        (
+            r#"{"type":"disconnect","reason":7}"#,
+            EnvelopeClass::Disconnect,
+            SocketDisposition::Reconnect,
+            None,
+        ),
+    ];
+
+    for (text, envelope_class, disposition, ack_envelope_id) in cases {
+        let action = handle_socket_text(&ext, text);
+        assert_eq!(action.envelope_class, envelope_class);
+        assert_eq!(action.disposition, disposition);
+        assert_eq!(action.ack_envelope_id.as_deref(), ack_envelope_id);
+        assert!(action.event.is_none());
+        assert_eq!(action.outcome(), disposition.worker_outcome());
+    }
+}
+
 /// Malformed thread metadata is rejected rather than downgraded to a top-level
 /// destination that could misroute a reply.
 #[test]

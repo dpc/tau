@@ -1002,7 +1002,7 @@ enum DecodedSlackEvent {
 }
 
 /// Bounded Socket Mode envelope classes used by payload-free traces.
-#[derive(Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum EnvelopeClass {
     /// JSON could not be decoded.
     #[default]
@@ -4813,26 +4813,44 @@ async fn send_socket_ack(
     .await
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SocketDisposition {
+    /// Keep reading frames from the current websocket connection.
+    #[default]
+    Continue,
+    /// Retire the current websocket and reconnect without backoff.
+    Reconnect,
+    /// Retire the Socket Mode worker without reconnecting.
+    Shutdown,
+}
+
+impl SocketDisposition {
+    /// Convert a decoded lifecycle disposition into the worker-loop outcome.
+    fn worker_outcome(self) -> Option<WorkerOutcome> {
+        match self {
+            Self::Continue => None,
+            Self::Reconnect => Some(WorkerOutcome::ReconnectNow),
+            Self::Shutdown => Some(WorkerOutcome::Shutdown),
+        }
+    }
+}
+
 #[derive(Default)]
 struct SocketAction {
+    /// Envelope identity to acknowledge before any supported event admission.
     ack_envelope_id: Option<String>,
     /// Decoded supported event, when the envelope carries one.
     event: Option<DecodedSlackEvent>,
-    reconnect: bool,
-    shutdown: bool,
+    /// Lifecycle action to take after any required acknowledgement.
+    disposition: SocketDisposition,
     /// Bounded decoded envelope class retained from the sole JSON parse.
     envelope_class: EnvelopeClass,
 }
 
 impl SocketAction {
+    /// Return the worker-loop outcome selected by this decoded frame.
     fn outcome(&self) -> Option<WorkerOutcome> {
-        if self.reconnect {
-            Some(WorkerOutcome::ReconnectNow)
-        } else if self.shutdown {
-            Some(WorkerOutcome::Shutdown)
-        } else {
-            None
-        }
+        self.disposition.worker_outcome()
     }
 }
 
@@ -4866,9 +4884,12 @@ fn handle_socket_text(ext: &Extension, text: &str) -> SocketAction {
         }
         Some("disconnect") => {
             let reason = value.get("reason").and_then(|value| value.as_str());
-            action.reconnect =
-                matches!(reason, Some("warning" | "refresh_requested")) || reason.is_none();
-            action.shutdown = !action.reconnect;
+            action.disposition =
+                if matches!(reason, Some("warning" | "refresh_requested")) || reason.is_none() {
+                    SocketDisposition::Reconnect
+                } else {
+                    SocketDisposition::Shutdown
+                };
         }
         Some("events_api") => {
             let installation = {
