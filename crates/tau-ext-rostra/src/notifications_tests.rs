@@ -233,6 +233,98 @@ fn durable_checkpoint_file_schema_remains_v1() {
         .expect("existing v1 checkpoint loads");
 }
 
+/// Ensures the live notification-store identity is installed and cleared as one
+/// unit, while reconfiguration retains its established mismatch diagnostic and
+/// reset behavior.
+#[test]
+fn notification_store_configuration_is_complete_across_clear_and_reconfiguration() {
+    let directory = tempfile::tempdir().expect("state directory");
+    let mut state = State::default();
+    let agent = AgentId::parse("agent").expect("agent id");
+
+    assert_eq!(
+        state.enable(agent.clone(), cursor(4)),
+        Err("notification state is unavailable"),
+        "an unconfigured state cannot persist a partial identity"
+    );
+    assert!(state.configured.is_none());
+
+    state
+        .configure(publisher(), identity(), directory.path())
+        .expect("configure");
+    let configured = state.configured.as_ref().expect("complete configuration");
+    assert_eq!(configured.publisher, publisher());
+    assert_eq!(configured.identity, identity());
+    assert_eq!(
+        configured.path,
+        directory.path().join("rostra-notifications-v1.cbor")
+    );
+    state.enable(agent.clone(), cursor(4)).expect("enable");
+
+    state.clear();
+    assert!(state.configured.is_none());
+    assert!(state.registrations.is_empty());
+    assert_eq!(
+        state.enable(agent.clone(), cursor(4)),
+        Err("notification state is unavailable")
+    );
+
+    state
+        .configure(publisher(), identity(), directory.path())
+        .expect("reconfigure same store");
+    assert!(state.registrations.contains_key(&agent));
+
+    let other_identity = RostraIdSecretKey::generate().id();
+    assert_eq!(
+        state.configure(publisher(), other_identity, directory.path()),
+        Err("notification state schema, publisher, or identity does not match")
+    );
+    assert_eq!(
+        state
+            .configured
+            .as_ref()
+            .expect("configured before validation")
+            .identity,
+        other_identity
+    );
+    assert!(state.registrations.is_empty());
+}
+
+/// Ensures due reports use the configured publisher and identity, while only a
+/// matching publisher's canonical echo may advance that store's checkpoint.
+#[test]
+fn configured_store_binds_due_report_and_canonical_acknowledgement() {
+    let (_directory, mut state) = configured_state();
+    let agent = AgentId::parse("agent").expect("agent id");
+    state.enable(agent.clone(), cursor(4)).expect("enable");
+    state.loaded(agent.clone());
+    state.replay_complete(agent.clone());
+    state.set_pending_due(&agent, cursor(17), 1);
+
+    let (report_publisher, report_identity, pending) =
+        state.due_report(&agent).expect("due configured report");
+    assert_eq!(report_publisher, publisher());
+    assert_eq!(report_identity, identity());
+    assert_eq!(pending.end, cursor(17));
+
+    state.mark_inflight(&agent, pending.end);
+    let mut mismatch = delivered(&agent, pending.end);
+    mismatch.publisher_extension_id =
+        MessagePublisherId::parse("another-extension").expect("mismatched publisher");
+    assert!(
+        !state
+            .acknowledge(&mismatch)
+            .expect("publisher mismatch is ignored")
+    );
+    assert_eq!(state.registrations[&agent].committed, cursor(4));
+    assert!(
+        state
+            .acknowledge(&delivered(&agent, pending.end))
+            .expect("matching canonical echo")
+    );
+    assert_eq!(state.registrations[&agent].committed, cursor(17));
+}
+
 /// Ensures the typed durable report attempt retains the exact legacy CBOR
 /// scalar representation at the largest valid value.
 #[test]

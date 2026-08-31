@@ -70,6 +70,20 @@ struct StoredState {
     agents: BTreeMap<String, StoredRegistration>,
 }
 
+/// Process-live identity and checkpoint location for one notification store.
+///
+/// This is deliberately separate from [`StoredState`]: the checkpoint retains
+/// its established flat CBOR fields and this private bundle is never serialized
+/// as its own structure.
+struct NotificationStoreConfig {
+    /// Stable publisher namespace that scopes report facts.
+    publisher: ExtensionName,
+    /// Rostra identity that owns the checkpoint's opaque cursors.
+    identity: RostraId,
+    /// Location of this identity-bound notification checkpoint.
+    path: PathBuf,
+}
+
 /// Extension-owned durable notification policy and live session gates.
 #[derive(Default)]
 pub(crate) struct State {
@@ -81,12 +95,8 @@ pub(crate) struct State {
     loaded_agents: BTreeSet<AgentId>,
     /// Agents with another bounded source page ready to scan.
     continuations: BTreeSet<AgentId>,
-    /// Configured extension instance stamped on reports.
-    publisher: Option<ExtensionName>,
-    /// Configured Rostra identity bound to the state file.
-    identity: Option<RostraId>,
-    /// State file path after successful configuration.
-    path: Option<PathBuf>,
+    /// Complete configured notification-store identity and checkpoint location.
+    configured: Option<NotificationStoreConfig>,
     /// Next identity-wide publisher message-attempt number.
     next_report_attempt: ReportAttempt,
     /// Stops persisted mutations after an ambiguous post-rename failure.
@@ -149,16 +159,20 @@ impl State {
         state_dir: &Path,
     ) -> Result<(), &'static str> {
         self.clear();
-        self.publisher = Some(publisher.clone());
-        self.identity = Some(identity);
-        self.path = Some(state_dir.join("rostra-notifications-v1.cbor"));
-        let Some(path) = self.path.as_deref() else {
-            return Err("notification path unavailable");
-        };
-        if !path.exists() {
+        self.configured = Some(NotificationStoreConfig {
+            publisher,
+            identity,
+            path: state_dir.join("rostra-notifications-v1.cbor"),
+        });
+        let configured = self
+            .configured
+            .as_ref()
+            .expect("notification configuration was just installed");
+        if !configured.path.exists() {
             return Ok(());
         }
-        let mut file = File::open(path).map_err(|_| "notification state cannot be opened")?;
+        let mut file =
+            File::open(&configured.path).map_err(|_| "notification state cannot be opened")?;
         let mut bytes = Vec::new();
         Read::by_ref(&mut file)
             .take((MAX_STATE_FILE_BYTES + 1) as u64)
@@ -170,8 +184,8 @@ impl State {
         let stored: StoredState = ciborium::de::from_reader(bytes.as_slice())
             .map_err(|_| "notification state is corrupt")?;
         if stored.schema != STATE_SCHEMA
-            || stored.publisher != publisher
-            || stored.rostra_identity != identity
+            || stored.publisher != configured.publisher
+            || stored.rostra_identity != configured.identity
         {
             return Err("notification state schema, publisher, or identity does not match");
         }
@@ -208,19 +222,16 @@ impl State {
                 "notification state durability is uncertain",
             ));
         }
-        let path = self.path.as_deref().ok_or(PersistFailure::BeforeRename(
-            "notification state is unavailable",
-        ))?;
-        let identity = self.identity.ok_or(PersistFailure::BeforeRename(
-            "notification identity unavailable",
-        ))?;
-        let publisher = self.publisher.clone().ok_or(PersistFailure::BeforeRename(
-            "notification publisher unavailable",
-        ))?;
+        let configured = self
+            .configured
+            .as_ref()
+            .ok_or(PersistFailure::BeforeRename(
+                "notification state is unavailable",
+            ))?;
         let stored = StoredState {
             schema: STATE_SCHEMA.to_owned(),
-            publisher,
-            rostra_identity: identity,
+            publisher: configured.publisher.clone(),
+            rostra_identity: configured.identity,
             next_report_attempt,
             agents: registrations
                 .iter()
@@ -235,7 +246,7 @@ impl State {
                 "notification state exceeds its bound",
             ));
         }
-        let temp = path.with_extension("cbor.tmp");
+        let temp = configured.path.with_extension("cbor.tmp");
         if temp.exists() {
             // A same-directory temporary file was never renamed, so no durable
             // candidate became authoritative. The extension mutex owns this name.
@@ -266,11 +277,11 @@ impl State {
             .map_err(|_| PersistFailure::BeforeRename("notification state cannot be synced"))?;
         drop(file);
         self.fault(PersistFault::Rename)?;
-        fs::rename(&temp, path)
+        fs::rename(&temp, &configured.path)
             .map_err(|_| PersistFailure::BeforeRename("notification state cannot be replaced"))?;
         self.fault(PersistFault::DirectorySync)
             .map_err(|failure| failure.after_rename())?;
-        File::open(path.parent().ok_or(PersistFailure::AfterRename(
+        File::open(configured.path.parent().ok_or(PersistFailure::AfterRename(
             "notification state parent unavailable",
         ))?)
         .and_then(|directory| directory.sync_all())
@@ -516,9 +527,10 @@ impl State {
         {
             return None;
         }
+        let configured = self.configured.as_ref()?;
         Some((
-            self.publisher.clone()?,
-            self.identity?,
+            configured.publisher.clone(),
+            configured.identity,
             registration.pending.clone()?,
         ))
     }
@@ -607,7 +619,10 @@ impl State {
         let Some(end) = report_end(delivered) else {
             return Ok(false);
         };
-        if self.publisher.as_ref().map(ExtensionName::as_str)
+        if self
+            .configured
+            .as_ref()
+            .map(|configured| configured.publisher.as_str())
             != Some(delivered.publisher_extension_id.as_str())
         {
             return Ok(false);
