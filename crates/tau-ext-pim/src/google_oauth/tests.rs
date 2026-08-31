@@ -78,6 +78,38 @@ fn installed_app_authorization_url_contains_pkce_and_offline_access() {
     assert!(!url.contains("verifier"));
 }
 
+/// Ensures the Gmail start result retains the spec's ten-minute pending
+/// lifetime as a duration before email persistence converts it to milliseconds.
+#[test]
+fn gmail_installed_app_start_uses_ten_minute_duration() {
+    let client = GoogleOauthClient::new(BTreeMap::from([(
+        "client-id".to_owned(),
+        SecretValue::new("client-id"),
+    )]));
+    let started = client
+        .start_gmail_installed_app_auth(GoogleOauthSecretConfig {
+            client_id_secret: "client-id",
+            client_secret_secret: None,
+            refresh_token_secret: None,
+        })
+        .expect("Gmail authorization starts");
+    assert_eq!(started.pending_lifetime, Duration::from_secs(10 * 60));
+}
+
+/// Ensures installed-app token responses convert provider seconds into the
+/// named result's duration before reaching the email backend boundary.
+#[test]
+fn installed_app_token_response_retains_access_token_lifetime_as_duration() {
+    let finished = parse_installed_app_token_response(
+        r#"{"refresh_token":"refresh-token","access_token":"access-token","expires_in":3600}"#,
+    )
+    .expect("installed-app token response parses");
+    assert_eq!(
+        finished.access_token_lifetime,
+        Some(Duration::from_secs(3600))
+    );
+}
+
 /// Ensures token exchanges use the exact stored redirect URI and PKCE
 /// verifier instead of deriving redirect data from the pasted browser URL.
 #[test]
@@ -245,6 +277,26 @@ fn huge_expires_in_skips_cache_without_panicking() {
     client
         .prime_access_token_cache("work", "access-token".to_owned(), Some(u64::MAX))
         .expect("huge expiry is ignored");
+    assert_eq!(
+        client
+            .cached_access_token("work")
+            .expect("cache remains readable"),
+        None
+    );
+}
+
+/// Ensures a completed installed-app result with an unrepresentable duration
+/// takes the same no-cache overflow path as raw provider expiries.
+#[test]
+fn huge_installed_app_lifetime_skips_cache_without_panicking() {
+    let client = GoogleOauthClient::new(BTreeMap::new());
+    client
+        .prime_access_token_cache_with_lifetime(
+            "work",
+            "access-token".to_owned(),
+            Some(Duration::from_secs(u64::MAX)),
+        )
+        .expect("huge lifetime is ignored");
     assert_eq!(
         client
             .cached_access_token("work")

@@ -39,7 +39,10 @@ use super::{
     OutgoingMessage, READ_BODY_MAX_BYTES, StateStore, TlsMode, ValidatedAuthConfig,
     ValidatedConfig, ValidatedImapConfig, ValidatedSmtpConfig, recent_cutoff,
 };
-use crate::google_oauth::{GoogleOauthClient, GoogleOauthSecretConfig};
+use crate::google_oauth::{
+    GoogleInstalledAppAuthFinish, GoogleInstalledAppAuthStart, GoogleOauthClient,
+    GoogleOauthSecretConfig,
+};
 
 pub(super) const READ_MESSAGE_FETCH_MAX_BYTES: usize = READ_BODY_MAX_BYTES * 4;
 pub(super) const METADATA_HEADER_FETCH_MAX_BYTES: usize = 32 * 1024;
@@ -337,17 +340,10 @@ impl EmailBackend for RealEmailBackend {
     fn start_google_installed_app_auth(
         &self,
         account: &str,
-    ) -> Result<(String, String, String, String, u64), String> {
+    ) -> Result<GoogleInstalledAppAuthStart, String> {
         let account = self.account(account)?;
         let config = account.google_oauth_config()?;
-        let started = self.oauth.start_gmail_installed_app_auth(config)?;
-        Ok((
-            started.authorization_url,
-            started.state,
-            started.pkce_verifier,
-            started.redirect_uri,
-            started.expires_in_secs,
-        ))
+        self.oauth.start_gmail_installed_app_auth(config)
     }
 
     fn finish_google_installed_app_auth(
@@ -356,27 +352,26 @@ impl EmailBackend for RealEmailBackend {
         code: &str,
         pkce_verifier: &str,
         redirect_uri: &str,
-    ) -> Result<(String, Option<String>, Option<u64>), String> {
+    ) -> Result<GoogleInstalledAppAuthFinish, String> {
         let account = self.account(account)?;
         let config = account.google_oauth_config()?;
-        let finished =
-            self.oauth
-                .finish_installed_app_auth(config, code, pkce_verifier, redirect_uri)?;
-        Ok((
-            finished.refresh_token,
-            finished.access_token,
-            finished.expires_in_secs,
-        ))
+        self.oauth
+            .finish_installed_app_auth(config, code, pkce_verifier, redirect_uri)
     }
 
     fn prime_google_access_token_cache(
         &self,
         account: &str,
-        access_token: String,
-        expires_in_secs: Option<u64>,
+        finished: &GoogleInstalledAppAuthFinish,
     ) -> Result<(), String> {
-        self.oauth
-            .prime_access_token_cache(account, access_token, expires_in_secs)
+        let Some(access_token) = &finished.access_token else {
+            return Ok(());
+        };
+        self.oauth.prime_access_token_cache_with_lifetime(
+            account,
+            access_token.clone(),
+            finished.access_token_lifetime,
+        )
     }
 }
 

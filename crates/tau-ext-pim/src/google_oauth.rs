@@ -83,8 +83,8 @@ pub struct GoogleInstalledAppAuthStart {
     pub pkce_verifier: String,
     /// Exact loopback redirect URI to send during token exchange.
     pub redirect_uri: String,
-    /// Number of seconds before the pending authorization should expire.
-    pub expires_in_secs: u64,
+    /// Time before the pending authorization should expire.
+    pub pending_lifetime: Duration,
 }
 
 /// Validated data extracted from a pasted installed-app redirect URL.
@@ -107,8 +107,8 @@ pub struct GoogleInstalledAppAuthFinish {
     pub refresh_token: String,
     /// Short-lived access token that can be primed into the in-memory cache.
     pub access_token: Option<String>,
-    /// Seconds until the optional access token expires.
-    pub expires_in_secs: Option<u64>,
+    /// Lifetime of the optional access token.
+    pub access_token_lifetime: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -160,7 +160,7 @@ impl GoogleOauthClient {
             state,
             pkce_verifier,
             redirect_uri,
-            expires_in_secs: 10 * 60,
+            pending_lifetime: Duration::from_secs(10 * 60),
         })
     }
 
@@ -318,6 +318,16 @@ impl GoogleOauthClient {
         self.cache_access_token(account_id, access_token, expires_in_secs)
     }
 
+    /// Prime the access-token cache with an already validated token lifetime.
+    pub(crate) fn prime_access_token_cache_with_lifetime(
+        &self,
+        account_id: &str,
+        access_token: String,
+        access_token_lifetime: Option<Duration>,
+    ) -> Result<(), String> {
+        self.cache_access_token_with_lifetime(account_id, access_token, access_token_lifetime)
+    }
+
     /// Invalidate any cached access token for an account.
     pub(crate) fn invalidate_access_token(&self, account_id: &str) -> Result<(), String> {
         let mut cache = self
@@ -400,12 +410,25 @@ impl GoogleOauthClient {
         access_token: String,
         expires_in_secs: Option<u64>,
     ) -> Result<(), String> {
-        let expires_in_secs = expires_in_secs.unwrap_or(3600);
-        if expires_in_secs <= TOKEN_CACHE_SKEW.as_secs() {
+        self.cache_access_token_with_lifetime(
+            account_id,
+            access_token,
+            expires_in_secs.map(Duration::from_secs),
+        )
+    }
+
+    fn cache_access_token_with_lifetime(
+        &self,
+        account_id: &str,
+        access_token: String,
+        access_token_lifetime: Option<Duration>,
+    ) -> Result<(), String> {
+        let access_token_lifetime =
+            access_token_lifetime.unwrap_or_else(|| Duration::from_secs(3600));
+        if access_token_lifetime <= TOKEN_CACHE_SKEW {
             return Ok(());
         }
-        let Some(expires_at) = Instant::now().checked_add(Duration::from_secs(expires_in_secs))
-        else {
+        let Some(expires_at) = Instant::now().checked_add(access_token_lifetime) else {
             return Ok(());
         };
         let mut cache = self
@@ -646,11 +669,11 @@ fn parse_installed_app_token_response(text: &str) -> Result<GoogleInstalledAppAu
     })?
     .to_owned();
     let access_token = optional_oauth_string(&json, "access_token")?.map(str::to_owned);
-    let expires_in_secs = optional_oauth_u64(&json, "expires_in")?;
+    let access_token_lifetime = optional_oauth_u64(&json, "expires_in")?.map(Duration::from_secs);
     Ok(GoogleInstalledAppAuthFinish {
         refresh_token,
         access_token,
-        expires_in_secs,
+        access_token_lifetime,
     })
 }
 

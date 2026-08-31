@@ -3,7 +3,7 @@ use std::io::{BufReader, BufWriter};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{collections as path_std_collections, fs as path_std_fs, thread};
 
 use tau_proto::{
@@ -110,7 +110,7 @@ struct SpyBackend {
 
 #[derive(Default)]
 struct OAuthBackend {
-    primed: RefCell<Vec<(String, String, Option<u64>)>>,
+    primed: RefCell<Vec<(String, String, Option<Duration>)>>,
     exchanged: RefCell<Vec<(String, String, String, String)>>,
 }
 
@@ -158,15 +158,15 @@ impl EmailBackend for OAuthBackend {
     fn start_google_installed_app_auth(
         &self,
         account: &str,
-    ) -> Result<(String, String, String, String, u64), String> {
+    ) -> Result<GoogleInstalledAppAuthStart, String> {
         assert_eq!(account, "work");
-        Ok((
-            "https://accounts.google.com/o/oauth2/v2/auth?scope=https%3A%2F%2Fmail.google.com%2F&access_type=offline&prompt=consent&state=state-secret&code_challenge=challenge-secret&code_challenge_method=S256".to_owned(),
-            "state-secret".to_owned(),
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.".to_owned(),
-            "http://127.0.0.1:54321/".to_owned(),
-            600,
-        ))
+        Ok(GoogleInstalledAppAuthStart {
+            authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?scope=https%3A%2F%2Fmail.google.com%2F&access_type=offline&prompt=consent&state=state-secret&code_challenge=challenge-secret&code_challenge_method=S256".to_owned(),
+            state: "state-secret".to_owned(),
+            pkce_verifier: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.".to_owned(),
+            redirect_uri: "http://127.0.0.1:54321/".to_owned(),
+            pending_lifetime: Duration::from_secs(600),
+        })
     }
 
     fn finish_google_installed_app_auth(
@@ -175,7 +175,7 @@ impl EmailBackend for OAuthBackend {
         code: &str,
         pkce_verifier: &str,
         redirect_uri: &str,
-    ) -> Result<(String, Option<String>, Option<u64>), String> {
+    ) -> Result<GoogleInstalledAppAuthFinish, String> {
         assert_eq!(account, "work");
         self.exchanged.borrow_mut().push((
             account.to_owned(),
@@ -183,22 +183,27 @@ impl EmailBackend for OAuthBackend {
             pkce_verifier.to_owned(),
             redirect_uri.to_owned(),
         ));
-        Ok((
-            "refresh-secret".to_owned(),
-            Some("access-secret".to_owned()),
-            Some(3600),
-        ))
+        Ok(GoogleInstalledAppAuthFinish {
+            refresh_token: "refresh-secret".to_owned(),
+            access_token: Some("access-secret".to_owned()),
+            access_token_lifetime: Some(Duration::from_secs(3600)),
+        })
     }
 
     fn prime_google_access_token_cache(
         &self,
         account: &str,
-        access_token: String,
-        expires_in_secs: Option<u64>,
+        finished: &GoogleInstalledAppAuthFinish,
     ) -> Result<(), String> {
-        self.primed
-            .borrow_mut()
-            .push((account.to_owned(), access_token, expires_in_secs));
+        let access_token = finished
+            .access_token
+            .as_ref()
+            .expect("finish result with an access token");
+        self.primed.borrow_mut().push((
+            account.to_owned(),
+            access_token.clone(),
+            finished.access_token_lifetime,
+        ));
         Ok(())
     }
 }
@@ -1452,7 +1457,7 @@ fn email_google_oauth_state_is_private_and_account_checked() {
         "state-secret",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.",
         "http://127.0.0.1:54321/",
-        900,
+        Duration::from_secs(900),
     );
     state
         .save_pending_google_auth(&pending)
@@ -1462,6 +1467,40 @@ fn email_google_oauth_state_is_private_and_account_checked() {
     assert_eq!(installed_app.redirect_uri, "http://127.0.0.1:54321/");
     assert_eq!(installed_app.state, "state-secret");
     assert!(state.pending_google_auth("other").is_err());
+}
+
+/// Ensures pending installed-app lifetimes keep the established whole-second
+/// to absolute-millisecond conversion and saturating timestamp overflow.
+#[test]
+fn email_google_oauth_pending_duration_preserves_timestamp_representation() {
+    let pending = EmailGooglePendingAuth::installed_app(
+        "work",
+        "state-secret",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.",
+        "http://127.0.0.1:54321/",
+        Duration::from_millis(900_999),
+    );
+    let encoded = serde_json::to_value(&pending).expect("pending serializes");
+    let created_at_unix_ms = encoded["created_at_unix_ms"]
+        .as_u64()
+        .expect("created timestamp");
+    let expires_at_unix_ms = encoded["expires_at_unix_ms"]
+        .as_u64()
+        .expect("expiry timestamp");
+    assert_eq!(expires_at_unix_ms - created_at_unix_ms, 900_000);
+
+    let overflow = EmailGooglePendingAuth::installed_app(
+        "work",
+        "state-secret",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.",
+        "http://127.0.0.1:54321/",
+        Duration::from_secs(u64::MAX),
+    );
+    let encoded = serde_json::to_value(&overflow).expect("overflow pending serializes");
+    let expires_at_unix_ms = encoded["expires_at_unix_ms"]
+        .as_u64()
+        .expect("expiry timestamp");
+    assert_eq!(expires_at_unix_ms, u64::MAX);
 }
 
 /// Ensures `:email auth google` stores only private state secrets, accepts a
@@ -1531,7 +1570,11 @@ fn email_google_oauth_actions_manage_private_state_without_token_output() {
     assert!(engine.state.pending_google_auth("work").is_err());
     assert_eq!(
         engine.backend.primed.borrow().as_slice(),
-        &[("work".to_owned(), "access-secret".to_owned(), Some(3600))]
+        &[(
+            "work".to_owned(),
+            "access-secret".to_owned(),
+            Some(Duration::from_secs(3600))
+        )]
     );
     assert_eq!(
         engine.backend.exchanged.borrow().as_slice(),

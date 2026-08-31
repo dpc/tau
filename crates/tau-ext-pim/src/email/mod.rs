@@ -18,7 +18,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::google_oauth::{
-    is_valid_pkce_verifier, parse_installed_app_redirect_url, validate_loopback_redirect_uri,
+    GoogleInstalledAppAuthFinish, GoogleInstalledAppAuthStart, is_valid_pkce_verifier,
+    parse_installed_app_redirect_url, validate_loopback_redirect_uri,
 };
 use crate::storage::{FsStorage, SharedStorage, StorageCreateError, file_name};
 
@@ -1275,7 +1276,7 @@ impl EmailGooglePendingAuth {
         state: &str,
         pkce_verifier: &str,
         redirect_uri: &str,
-        expires_in_secs: u64,
+        pending_lifetime: Duration,
     ) -> Self {
         let created_at_unix_ms = current_unix_millis();
         Self {
@@ -1287,7 +1288,7 @@ impl EmailGooglePendingAuth {
                 redirect_uri: redirect_uri.to_owned(),
                 created_at_unix_ms,
                 expires_at_unix_ms: created_at_unix_ms
-                    .saturating_add(expires_in_secs.saturating_mul(1000)),
+                    .saturating_add(pending_lifetime.as_secs().saturating_mul(1000)),
             },
         }
     }
@@ -2387,32 +2388,29 @@ pub trait EmailBackend {
     ) -> Result<String, String>;
     /// Send one already-approved outgoing message.
     fn send_message(&mut self, message: &OutgoingMessage) -> Result<String, EmailSendFailure>;
-    /// Start Google OAuth installed-app authorization and return
-    /// authorization_url, state, pkce_verifier, redirect_uri, and
-    /// expires_in_secs.
+    /// Start Google OAuth installed-app authorization.
     fn start_google_installed_app_auth(
         &self,
         _account: &str,
-    ) -> Result<(String, String, String, String, u64), String> {
+    ) -> Result<GoogleInstalledAppAuthStart, String> {
         Err("auth_error: Google email OAuth is not available in this backend".to_owned())
     }
-    /// Finish Google OAuth installed-app authorization and return
-    /// refresh_token, access_token, and expires_in_secs.
+    /// Finish Google OAuth installed-app authorization.
     fn finish_google_installed_app_auth(
         &self,
         _account: &str,
         _code: &str,
         _pkce_verifier: &str,
         _redirect_uri: &str,
-    ) -> Result<(String, Option<String>, Option<u64>), String> {
+    ) -> Result<GoogleInstalledAppAuthFinish, String> {
         Err("auth_error: Google email OAuth is not available in this backend".to_owned())
     }
-    /// Prime any backend access-token cache with a fresh Google access token.
+    /// Prime any backend access-token cache from a completed Google
+    /// authorization.
     fn prime_google_access_token_cache(
         &self,
         _account: &str,
-        _access_token: String,
-        _expires_in_secs: Option<u64>,
+        _finished: &GoogleInstalledAppAuthFinish,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -4378,22 +4376,21 @@ impl<B: EmailBackend> Engine<B> {
 
     fn action_auth_google_start(&self, account_id: &str) -> Result<String, String> {
         let account = self.google_oauth_state_account(account_id)?;
-        let (authorization_url, state, pkce_verifier, redirect_uri, expires_in_secs) =
-            self.backend.start_google_installed_app_auth(&account.id)?;
+        let started = self.backend.start_google_installed_app_auth(&account.id)?;
         let pending = EmailGooglePendingAuth::installed_app(
             &account.id,
-            &state,
-            &pkce_verifier,
-            &redirect_uri,
-            expires_in_secs,
+            &started.state,
+            &started.pkce_verifier,
+            &started.redirect_uri,
+            started.pending_lifetime,
         );
         self.state.save_pending_google_auth(&pending)?;
         Ok(format!(
             "Google email authorization started for account {}.\nOpen this URL:\n{}\nApprove access in the browser. The browser will fail to connect to localhost; copy the full final address-bar URL and run:\n:email auth google finish {} <copied-url>\nExpires in {} second(s).",
             safe_display_line(&account.id),
-            safe_oauth_url_display(&authorization_url),
+            safe_oauth_url_display(&started.authorization_url),
             safe_display_line(&account.id),
-            expires_in_secs,
+            started.pending_lifetime.as_secs(),
         ))
     }
 
@@ -4431,22 +4428,19 @@ impl<B: EmailBackend> Engine<B> {
             installed_app.redirect_uri,
             installed_app.state,
         )?;
-        let (refresh_token, access_token, expires_in_secs) =
-            self.backend.finish_google_installed_app_auth(
-                &account_id,
-                &redirect.code,
-                installed_app.pkce_verifier,
-                installed_app.redirect_uri,
-            )?;
+        let finished = self.backend.finish_google_installed_app_auth(
+            &account_id,
+            &redirect.code,
+            installed_app.pkce_verifier,
+            installed_app.redirect_uri,
+        )?;
         self.state
-            .save_google_refresh_token(&account_id, &refresh_token)?;
+            .save_google_refresh_token(&account_id, &finished.refresh_token)?;
         self.state.clear_pending_google_auth(&account_id)?;
-        if let Some(access_token) = access_token
-            && let Err(_message) = self.backend.prime_google_access_token_cache(
-                &account_id,
-                access_token,
-                expires_in_secs,
-            )
+        if finished.access_token.is_some()
+            && let Err(_message) = self
+                .backend
+                .prime_google_access_token_cache(&account_id, &finished)
         {
             tracing::warn!(target: LOG_TARGET, "failed to prime Google email access token cache");
         }
