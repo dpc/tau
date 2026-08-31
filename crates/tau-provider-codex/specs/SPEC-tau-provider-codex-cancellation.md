@@ -2,7 +2,7 @@
 
 ## Record justification
 
-Cancellation spans the synchronous turn owner, async WebSocket tasks, connection and pool waits, and compact workers, so no single local artifact can own the contract coherently.
+Cancellation spans the synchronous turn owner, async WebSocket tasks, connection and pool waits, and standalone compaction, so no single local artifact can own the contract coherently.
 
 ChatGPT/Codex Responses turns accept a typed local abort source that can both
 report cancellation and register a wake callback. Ordered provider data uses a
@@ -43,6 +43,9 @@ sockets and marks active reservations so a late owner cannot reinstall stale
 state. Completed turns unregister wake callbacks. Prewarm completion likewise
 cannot publish a socket after cancellation.
 
-Standalone compact owns and joins its HTTP worker before returning cancellation.
-Cancellation therefore cannot leave detached compact I/O or publish a late
-compacted result after the caller has resumed.
+Standalone compaction uses the ordinary pooled WebSocket route. Its pool
+reservation, fresh connection work, and provider-event wait register the same
+abort source; cancellation abandons the reservation and returns typed
+cancellation without publishing a late compacted result after the caller has
+resumed. Retained unary compact helpers and fixtures are historical
+compatibility evidence, not a production standalone-compaction path.
