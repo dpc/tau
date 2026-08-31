@@ -1220,14 +1220,17 @@ fn optional_provider_configuration_resolves_secrets_and_capabilities() {
     let mut validated = config
         .validate(&secrets)
         .expect("validated credentialed config");
-    assert_eq!(validated.hosted.brave_api_key.as_deref(), Some("brave-key"));
     assert_eq!(
-        validated.hosted.tavily_api_key.as_deref(),
-        Some("tavily-key")
+        validated.hosted.brave_api_key.as_ref(),
+        Some(&tau_proto::SecretValue::new("brave-key"))
     );
     assert_eq!(
-        validated.hosted.firecrawl_api_key.as_deref(),
-        Some("firecrawl-key")
+        validated.hosted.tavily_api_key.as_ref(),
+        Some(&tau_proto::SecretValue::new("tavily-key"))
+    );
+    assert_eq!(
+        validated.hosted.firecrawl_api_key.as_ref(),
+        Some(&tau_proto::SecretValue::new("firecrawl-key"))
     );
     assert_eq!(
         validated.search_pool.reserve().as_ref(),

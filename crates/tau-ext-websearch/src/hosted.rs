@@ -4,6 +4,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use tau_proto::SecretValue;
+
 use super::{
     DEFAULT_BRAVE_ENDPOINT, DEFAULT_FIRECRAWL_ENDPOINT, DEFAULT_TAVILY_ENDPOINT,
     DEFAULT_YOU_ENDPOINT, HTTP_TOO_MANY_REQUESTS, MCP_PROTOCOL_VERSION, RATE_LIMITED_ERROR,
@@ -20,15 +22,15 @@ pub(super) struct HostedConfig {
     /// Optional Brave search endpoint.
     pub(super) brave_endpoint: Option<String>,
     /// Optional Brave subscription token.
-    pub(super) brave_api_key: Option<String>,
+    pub(super) brave_api_key: Option<SecretValue>,
     /// Optional Tavily API base endpoint.
     pub(super) tavily_endpoint: Option<String>,
     /// Optional Tavily bearer token.
-    pub(super) tavily_api_key: Option<String>,
+    pub(super) tavily_api_key: Option<SecretValue>,
     /// Optional Firecrawl API base endpoint.
     pub(super) firecrawl_endpoint: Option<String>,
     /// Optional Firecrawl bearer token.
-    pub(super) firecrawl_api_key: Option<String>,
+    pub(super) firecrawl_api_key: Option<SecretValue>,
 }
 
 /// Provider seam used by the composite scheduler.
@@ -76,15 +78,15 @@ struct RuntimeConfig {
     /// Brave search endpoint.
     brave_endpoint: String,
     /// Brave subscription token.
-    brave_api_key: Option<String>,
+    brave_api_key: Option<SecretValue>,
     /// Tavily API base endpoint.
     tavily_endpoint: String,
     /// Tavily bearer token.
-    tavily_api_key: Option<String>,
+    tavily_api_key: Option<SecretValue>,
     /// Firecrawl API base endpoint.
     firecrawl_endpoint: String,
     /// Firecrawl bearer token.
-    firecrawl_api_key: Option<String>,
+    firecrawl_api_key: Option<SecretValue>,
 }
 
 impl Default for RuntimeConfig {
@@ -199,8 +201,11 @@ impl HostedClient for HttpHostedClient {
     }
 }
 
-fn required_key<'a>(key: &'a Option<String>, provider: &str) -> Result<&'a str, String> {
-    key.as_deref()
+fn required_key<'a>(
+    key: &'a Option<SecretValue>,
+    provider: &str,
+) -> Result<&'a SecretValue, String> {
+    key.as_ref()
         .ok_or_else(|| format!("{provider} credentials are not configured"))
 }
 
@@ -335,7 +340,7 @@ fn post_you_mcp(
 
 fn call_brave(
     endpoint: &str,
-    key: &str,
+    key: &SecretValue,
     query: &str,
     count: u32,
     timeout: Duration,
@@ -347,13 +352,17 @@ fn call_brave(
         .query("count", count.min(20).to_string())
         .query("extra_snippets", "true")
         .header("Accept", "application/json")
-        .header("X-Subscription-Token", key)
+        .header("X-Subscription-Token", key.expose_secret())
         .call()
         .map_err(|error| safe_error("brave", error.to_string(), endpoint, key))?;
     normalize_response(response, "brave", endpoint, key, &["web", "results"])
 }
 
-fn call_tavily(base: &str, key: &str, attempt: &HostedAttempt<'_>) -> Result<String, String> {
+fn call_tavily(
+    base: &str,
+    key: &SecretValue,
+    attempt: &HostedAttempt<'_>,
+) -> Result<String, String> {
     let (path, mut body, projection): (&str, serde_json::Value, &[&str]) = match &attempt.request {
         HostedRequest::Search {
             query,
@@ -388,7 +397,11 @@ fn call_tavily(base: &str, key: &str, attempt: &HostedAttempt<'_>) -> Result<Str
     post_json(&endpoint, key, "tavily", body, attempt.timeout, projection)
 }
 
-fn call_firecrawl(base: &str, key: &str, attempt: &HostedAttempt<'_>) -> Result<String, String> {
+fn call_firecrawl(
+    base: &str,
+    key: &SecretValue,
+    attempt: &HostedAttempt<'_>,
+) -> Result<String, String> {
     let (path, mut body, projection): (&str, serde_json::Value, &[&str]) = match &attempt.request {
         HostedRequest::Search {
             query,
@@ -440,7 +453,7 @@ fn endpoint_path(base: &str, path: &str) -> Result<String, String> {
 
 fn post_json(
     endpoint: &str,
-    key: &str,
+    key: &SecretValue,
     provider: &str,
     body: serde_json::Value,
     timeout: Duration,
@@ -450,7 +463,7 @@ fn post_json(
         .post(endpoint)
         .content_type("application/json")
         .header("Accept", "application/json")
-        .header("Authorization", &format!("Bearer {key}"))
+        .header("Authorization", &format!("Bearer {}", key.expose_secret()))
         .send(body.to_string())
         .map_err(|error| safe_error(provider, error.to_string(), endpoint, key))?;
     normalize_response(response, provider, endpoint, key, path)
@@ -460,7 +473,7 @@ fn normalize_response(
     mut response: ureq::http::Response<ureq::Body>,
     provider: &str,
     endpoint: &str,
-    key: &str,
+    key: &SecretValue,
     path: &[&str],
 ) -> Result<String, String> {
     if response.status().as_u16() == HTTP_TOO_MANY_REQUESTS {
@@ -495,14 +508,15 @@ fn normalize_response(
     limit_tool_output(text, provider)
 }
 
-fn safe_error(provider: &str, message: String, endpoint: &str, key: &str) -> String {
+fn safe_error(provider: &str, message: String, endpoint: &str, key: &SecretValue) -> String {
     format!(
         "{provider} transport error: {}",
         safe_diagnostic(message, endpoint, key)
     )
 }
 
-fn safe_diagnostic(message: String, endpoint: &str, key: &str) -> String {
+fn safe_diagnostic(message: String, endpoint: &str, key: &SecretValue) -> String {
+    let key = key.expose_secret();
     sanitize_endpoint_error(&message.replace(key, "…"), endpoint)
         .replace(&format!("Bearer {key}"), "Bearer …")
         .replace(key, "…")

@@ -402,7 +402,7 @@ fn resolve_secret(
     secrets: &std::collections::BTreeMap<String, tau_proto::SecretValue>,
     name: Option<&str>,
     field: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<tau_proto::SecretValue>, String> {
     let Some(name) = name else {
         return Ok(None);
     };
@@ -411,12 +411,11 @@ fn resolve_secret(
     }
     let value = secrets
         .get(name)
-        .ok_or_else(|| format!("`{field}` references unavailable secret `{name}`"))?
-        .expose_secret();
-    if value.trim().is_empty() {
+        .ok_or_else(|| format!("`{field}` references unavailable secret `{name}`"))?;
+    if value.expose_secret().trim().is_empty() {
         return Err(format!("secret `{name}` referenced by `{field}` is empty"));
     }
-    Ok(Some(value.to_owned()))
+    Ok(Some(value.clone()))
 }
 
 /// Fully validated runtime configuration built before state mutation.

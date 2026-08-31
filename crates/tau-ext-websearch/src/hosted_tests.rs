@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use tau_proto::SecretValue;
+
 use super::hosted::{HostedAttempt, HostedClient, HostedConfig, HostedRequest, HttpHostedClient};
 use super::{WebAdapter, WebOperation};
 
@@ -119,6 +121,11 @@ fn config() -> HostedConfig {
         firecrawl_endpoint: None,
         firecrawl_api_key: None,
     }
+}
+
+/// Returns a redacted protocol secret for hosted-adapter fixture configuration.
+fn fixture_secret(value: &str) -> SecretValue {
+    SecretValue::new(value)
 }
 
 fn request<'a>(
@@ -316,7 +323,7 @@ fn brave_search_fixture_is_exact() {
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
         brave_endpoint: Some(format!("{}search", server.origin)),
-        brave_api_key: Some("brave-fixture-secret".to_owned()),
+        brave_api_key: Some(fixture_secret("brave-fixture-secret")),
         ..config()
     });
     let output = client
@@ -358,7 +365,7 @@ fn tavily_fetch_fixture_is_exact() {
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
         tavily_endpoint: Some(server.origin.clone()),
-        tavily_api_key: Some("tavily-fixture-secret".to_owned()),
+        tavily_api_key: Some(fixture_secret("tavily-fixture-secret")),
         ..config()
     });
     let output = client
@@ -403,7 +410,7 @@ fn tavily_search_fixture_is_exact() {
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
         tavily_endpoint: Some(server.origin.clone()),
-        tavily_api_key: Some("tavily-fixture-secret".to_owned()),
+        tavily_api_key: Some(fixture_secret("tavily-fixture-secret")),
         ..config()
     });
     let output = client
@@ -452,7 +459,7 @@ fn firecrawl_search_fixture_is_exact() {
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
         firecrawl_endpoint: Some(server.origin.clone()),
-        firecrawl_api_key: Some("firecrawl-fixture-secret".to_owned()),
+        firecrawl_api_key: Some(fixture_secret("firecrawl-fixture-secret")),
         ..config()
     });
     let output = client
@@ -501,7 +508,7 @@ fn firecrawl_fetch_fixture_is_exact() {
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
         firecrawl_endpoint: Some(format!("{}v2", server.origin)),
-        firecrawl_api_key: Some("firecrawl-fixture-secret".to_owned()),
+        firecrawl_api_key: Some(fixture_secret("firecrawl-fixture-secret")),
         ..config()
     });
     let output = client
@@ -539,7 +546,7 @@ fn hosted_errors_redact_endpoint_and_credentials() {
     let client = HttpHostedClient::default();
     client.configure(HostedConfig {
         brave_endpoint: Some(format!("{}search?token=endpoint-token", server.origin)),
-        brave_api_key: Some("brave-fixture-secret".to_owned()),
+        brave_api_key: Some(fixture_secret("brave-fixture-secret")),
         ..config()
     });
     let error = client
