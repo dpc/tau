@@ -457,6 +457,69 @@ fn harness_internal_prompt(text: &str) -> Event {
     event
 }
 
+/// Ordinary prompt assembly must not execute JSON serialization or block clones
+/// that exist solely for rolling-compaction prefix measurements.
+#[test]
+fn normal_prompt_assembly_skips_all_measurement_only_work() {
+    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+    tree.apply_event(&compacted_event(vec![materialized_message(
+        "replacement summary",
+    )]));
+    tree.apply_event(&user_prompt("suffix"));
+
+    reset_prompt_measurement_test_counters();
+    let assembled = assemble_prompt_context_from(&tree, tree.head());
+    assert_eq!(assembled.context.blocks.len(), 2);
+    assert_eq!(
+        prompt_measurement_test_counts(),
+        (0, 0, 0),
+        "the normal production assembly entrypoint must bypass measurement-only work"
+    );
+
+    let measurements =
+        active_prompt_prefix_json_measurements(&tree, tree.head()).expect("measure prefixes");
+    let (serializations, measured_block_clones, block_count_snapshots) =
+        prompt_measurement_test_counts();
+    assert!(!measurements.is_empty());
+    assert!(serializations > 0, "the measurement path must use its seam");
+    assert!(
+        measured_block_clones > 0,
+        "the replacement prefix must exercise measured-block cloning"
+    );
+    assert!(
+        block_count_snapshots > 0,
+        "the measurement path must snapshot append boundaries"
+    );
+}
+
+/// Rolling-compaction accounting must remain byte-exact with independently
+/// serializing every complete logical prefix.
+#[test]
+fn prompt_prefix_json_measurements_match_serializing_every_prefix() {
+    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+    tree.apply_event(&user_prompt("first"));
+    tree.apply_event(&user_prompt("second"));
+    let active_head = tree.head();
+
+    let measurements =
+        active_prompt_prefix_json_measurements(&tree, active_head).expect("measure prefixes");
+    assert_eq!(measurements.len(), 2);
+    for (node_id, measured_bytes) in measurements {
+        let prefix = assemble_prompt_context_prefix_from(
+            &tree,
+            active_head,
+            tau_proto::AgentHead::Node(node_id),
+        )
+        .expect("measured node belongs to the active window");
+        let expected_bytes = serde_json::to_vec(&prefix.context)
+            .ok()
+            .and_then(|encoded| u64::try_from(encoded.len()).ok())
+            .map(tau_proto::ByteCount::new)
+            .expect("fixture serializes within u64");
+        assert_eq!(measured_bytes, expected_bytes, "prefix through {node_id:?}");
+    }
+}
+
 fn discovered_skill(description: &str, add_to_prompt: bool) -> DiscoveredSkill {
     DiscoveredSkill {
         source_id: crate::test_connection_id("test-extension"),

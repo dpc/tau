@@ -22,6 +22,12 @@ thread_local! {
         const { std::cell::Cell::new(0) };
     static PROMPT_TEMPLATE_RENDER_COUNT: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static PROMPT_MEASUREMENT_JSON_SERIALIZATION_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static PROMPT_MEASURED_BLOCK_CLONE_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static PROMPT_MEASUREMENT_BLOCK_COUNT_SNAPSHOT_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// Reset test-only counters for prompt construction and preflight work.
@@ -41,6 +47,25 @@ pub(crate) fn prompt_context_construction_count() -> usize {
 #[cfg(test)]
 pub(crate) fn prompt_preflight_entry_visit_count() -> usize {
     PROMPT_PREFLIGHT_ENTRY_VISIT_COUNT.get()
+}
+
+/// Reset test-only counters for prompt-context measurement work.
+#[cfg(test)]
+pub(crate) fn reset_prompt_measurement_test_counters() {
+    PROMPT_MEASUREMENT_JSON_SERIALIZATION_COUNT.set(0);
+    PROMPT_MEASURED_BLOCK_CLONE_COUNT.set(0);
+    PROMPT_MEASUREMENT_BLOCK_COUNT_SNAPSHOT_COUNT.set(0);
+}
+
+/// Return test-only JSON serialization, measured-block clone, and block-count
+/// snapshot counts.
+#[cfg(test)]
+pub(crate) fn prompt_measurement_test_counts() -> (usize, usize, usize) {
+    (
+        PROMPT_MEASUREMENT_JSON_SERIALIZATION_COUNT.get(),
+        PROMPT_MEASURED_BLOCK_CLONE_COUNT.get(),
+        PROMPT_MEASUREMENT_BLOCK_COUNT_SNAPSHOT_COUNT.get(),
+    )
 }
 
 /// Reset deterministic template parse and render work counters.
@@ -1457,7 +1482,7 @@ fn assemble_prompt_context_window(
     tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,
     prefix_through: Option<tau_proto::AgentHead>,
-    mut measurements: Option<&mut Vec<(tau_core::NodeId, tau_proto::ByteCount)>>,
+    measurements: Option<&mut Vec<(tau_core::NodeId, tau_proto::ByteCount)>>,
 ) -> AssembledPromptContext {
     #[cfg(test)]
     PROMPT_CONTEXT_CONSTRUCTION_COUNT
@@ -1498,36 +1523,21 @@ fn assemble_prompt_context_window(
             },
         ));
     }
-    // Prefix admission measures the exact historical context that prompt
-    // materialization will send. Keep the initialization block out of the
-    // assembled transcript itself so materialization remains its sole owner.
-    let measurement_prefix = measurements
-        .as_ref()
-        .and_then(|_| initialization_agents_context_block(tree));
-    let measured_blocks = measurement_prefix
-        .iter()
-        .cloned()
-        .chain(blocks.iter().cloned())
-        .collect();
-    let mut serialized_bytes = serde_json::to_vec(&tau_proto::PromptContext {
-        blocks: measured_blocks,
-    })
-    .ok()
-    .and_then(|encoded| u64::try_from(encoded.len()).ok())
-    .map(tau_proto::ByteCount::new)
-    .unwrap_or(tau_proto::ByteCount::MAX);
-    let mut serialized_block_count = blocks.len() + usize::from(measurement_prefix.is_some());
+    let mut measurement_state = measurements
+        .map(|measurements| PromptContextMeasurementState::new(tree, &blocks, measurements));
 
     for (node_id, entry) in active_window.transcript {
         if matches!(entry, AgentEntry::AgentMessage { .. })
             && !agent_message_is_provider_visible(entry)
         {
-            if let Some(measurements) = measurements.as_deref_mut() {
-                measurements.push((node_id, serialized_bytes));
+            if let Some(measurement_state) = measurement_state.as_mut() {
+                measurement_state.record(node_id);
             }
             continue;
         }
-        let blocks_before = blocks.len();
+        let blocks_before = measurement_state
+            .as_ref()
+            .map(|_| measurement_block_count(&blocks));
         match entry {
             AgentEntry::Compaction {
                 replacement_window, ..
@@ -1614,8 +1624,8 @@ fn assemble_prompt_context_window(
                     if *direction == tau_core::AgentMessageDirection::Outbound {
                         // The original tool call/result already records the sender turn.
                         // Replaying this routing fact would fabricate assistant output.
-                        if let Some(measurements) = measurements.as_deref_mut() {
-                            measurements.push((node_id, serialized_bytes));
+                        if let Some(measurement_state) = measurement_state.as_mut() {
+                            measurement_state.record(node_id);
                         }
                         continue;
                     }
@@ -1817,24 +1827,10 @@ fn assemble_prompt_context_window(
                 ));
             }
         }
-        for block in &blocks[blocks_before..] {
-            let block_bytes = serde_json::to_vec(block)
-                .ok()
-                .and_then(|encoded| u64::try_from(encoded.len()).ok())
-                .map(tau_proto::ByteCount::new)
-                .unwrap_or(tau_proto::ByteCount::MAX);
-            serialized_bytes = serialized_bytes
-                .checked_add(block_bytes)
-                .and_then(|bytes| {
-                    bytes.checked_add(tau_proto::ByteCount::new(u64::from(
-                        serialized_block_count != 0,
-                    )))
-                })
-                .unwrap_or(tau_proto::ByteCount::MAX);
-            serialized_block_count = serialized_block_count.saturating_add(1);
-        }
-        if let Some(measurements) = measurements.as_deref_mut() {
-            measurements.push((node_id, serialized_bytes));
+        if let Some(measurement_state) = measurement_state.as_mut() {
+            let blocks_before = blocks_before.expect("measurement snapshot must exist");
+            measurement_state.append_blocks(&blocks[blocks_before..]);
+            measurement_state.record(node_id);
         }
     }
 
@@ -1842,6 +1838,102 @@ fn assemble_prompt_context_window(
         context: tau_proto::PromptContext { blocks },
         contains_payload_envelope_provenance_projection,
     }
+}
+
+/// Exact serialized-prefix accounting used only by rolling-compaction
+/// admission.
+struct PromptContextMeasurementState<'a> {
+    /// Caller-owned per-node measurement output.
+    measurements: &'a mut Vec<(tau_core::NodeId, tau_proto::ByteCount)>,
+    /// Exact JSON byte count for the prefix through the current node.
+    serialized_bytes: tau_proto::ByteCount,
+    /// Number of blocks already represented in `serialized_bytes`.
+    serialized_block_count: usize,
+}
+
+impl<'a> PromptContextMeasurementState<'a> {
+    /// Initialize accounting from the replacement window and initialization
+    /// block.
+    fn new(
+        tree: &tau_core::AgentTree,
+        blocks: &[tau_proto::ContextBlock],
+        measurements: &'a mut Vec<(tau_core::NodeId, tau_proto::ByteCount)>,
+    ) -> Self {
+        // Prefix admission measures the exact historical context that prompt
+        // materialization will send. Keep the initialization block out of the
+        // assembled transcript itself so materialization remains its sole owner.
+        let measurement_prefix = initialization_agents_context_block(tree);
+        let measured_blocks = measurement_prefix
+            .iter()
+            .map(clone_measured_block)
+            .chain(blocks.iter().map(clone_measured_block))
+            .collect();
+        let serialized_bytes = measurement_json_bytes(&tau_proto::PromptContext {
+            blocks: measured_blocks,
+        });
+        let serialized_block_count = blocks.len() + usize::from(measurement_prefix.is_some());
+        Self {
+            measurements,
+            serialized_bytes,
+            serialized_block_count,
+        }
+    }
+
+    /// Extend the exact JSON byte count with newly appended context blocks.
+    fn append_blocks(&mut self, blocks: &[tau_proto::ContextBlock]) {
+        for block in blocks {
+            let block_bytes = measurement_json_bytes(block);
+            self.serialized_bytes = self
+                .serialized_bytes
+                .checked_add(block_bytes)
+                .and_then(|bytes| {
+                    bytes.checked_add(tau_proto::ByteCount::new(u64::from(
+                        self.serialized_block_count != 0,
+                    )))
+                })
+                .unwrap_or(tau_proto::ByteCount::MAX);
+            self.serialized_block_count = self.serialized_block_count.saturating_add(1);
+        }
+    }
+
+    /// Record the current prefix size for one canonical transcript node.
+    fn record(&mut self, node_id: tau_core::NodeId) {
+        self.measurements.push((node_id, self.serialized_bytes));
+    }
+}
+
+/// Clone one context block solely for the initial measurement prefix.
+fn clone_measured_block(block: &tau_proto::ContextBlock) -> tau_proto::ContextBlock {
+    #[cfg(test)]
+    PROMPT_MEASURED_BLOCK_CLONE_COUNT
+        .set(PROMPT_MEASURED_BLOCK_CLONE_COUNT.get().saturating_add(1));
+    block.clone()
+}
+
+/// Serialize one measurement-only JSON value and return its exact byte count.
+fn measurement_json_bytes(value: &impl serde::Serialize) -> tau_proto::ByteCount {
+    #[cfg(test)]
+    PROMPT_MEASUREMENT_JSON_SERIALIZATION_COUNT.set(
+        PROMPT_MEASUREMENT_JSON_SERIALIZATION_COUNT
+            .get()
+            .saturating_add(1),
+    );
+    serde_json::to_vec(value)
+        .ok()
+        .and_then(|encoded| u64::try_from(encoded.len()).ok())
+        .map(tau_proto::ByteCount::new)
+        .unwrap_or(tau_proto::ByteCount::MAX)
+}
+
+/// Snapshot the current output block count solely for prefix measurement.
+fn measurement_block_count(blocks: &[tau_proto::ContextBlock]) -> usize {
+    #[cfg(test)]
+    PROMPT_MEASUREMENT_BLOCK_COUNT_SNAPSHOT_COUNT.set(
+        PROMPT_MEASUREMENT_BLOCK_COUNT_SNAPSHOT_COUNT
+            .get()
+            .saturating_add(1),
+    );
+    blocks.len()
 }
 
 /// Apply the provider-only envelope selected by typed prompt provenance.
