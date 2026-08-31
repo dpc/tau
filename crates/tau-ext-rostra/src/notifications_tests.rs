@@ -1,5 +1,6 @@
 //! Deterministic regression tests for durable Rostra notification state.
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use rostra_client::RostraId;
@@ -230,6 +231,73 @@ fn durable_checkpoint_file_schema_remains_v1() {
     restarted
         .configure(publisher(), identity(), directory.path())
         .expect("existing v1 checkpoint loads");
+}
+
+/// Ensures the typed durable report attempt retains the exact legacy CBOR
+/// scalar representation at the largest valid value.
+#[test]
+fn stored_report_attempt_preserves_legacy_cbor_scalar() {
+    #[derive(serde::Serialize)]
+    struct LegacyStoredState {
+        schema: String,
+        publisher: ExtensionName,
+        rostra_identity: RostraId,
+        next_report_attempt: u64,
+        agents: BTreeMap<String, StoredRegistration>,
+    }
+
+    let stored = StoredState {
+        schema: STATE_SCHEMA.to_owned(),
+        publisher: publisher(),
+        rostra_identity: identity(),
+        next_report_attempt: ReportAttempt(u64::MAX),
+        agents: BTreeMap::new(),
+    };
+    let legacy = LegacyStoredState {
+        schema: stored.schema.clone(),
+        publisher: stored.publisher.clone(),
+        rostra_identity: stored.rostra_identity,
+        next_report_attempt: u64::MAX,
+        agents: BTreeMap::new(),
+    };
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&stored, &mut encoded).expect("typed state encodes");
+    let mut legacy_encoded = Vec::new();
+    ciborium::ser::into_writer(&legacy, &mut legacy_encoded).expect("legacy state encodes");
+    assert_eq!(encoded, legacy_encoded);
+    let decoded = ciborium::de::from_reader::<StoredState, _>(legacy_encoded.as_slice())
+        .expect("legacy report-attempt scalar decodes");
+    assert_eq!(decoded.next_report_attempt, stored.next_report_attempt);
+}
+
+/// Ensures report attempts retain zero origin, decimal fact-ID spelling, and
+/// the checked exhaustion boundary without wrapping or reusing an ID.
+#[test]
+fn report_attempt_preserves_zero_decimal_max_and_exhaustion() {
+    assert_eq!(
+        ReportAttempt::default().fact_id().as_str(),
+        "rostra-batch-v1:0"
+    );
+    assert_eq!(ReportAttempt(42).fact_id().as_str(), "rostra-batch-v1:42");
+    assert_eq!(
+        ReportAttempt(u64::MAX).fact_id().as_str(),
+        "rostra-batch-v1:18446744073709551615"
+    );
+    assert_eq!(ReportAttempt(0).next(), Some(ReportAttempt(1)));
+    assert_eq!(ReportAttempt(u64::MAX).next(), None);
+}
+
+/// Ensures allocation at the terminal report attempt fails before persistence
+/// or reuse can advance the durable counter.
+#[test]
+fn report_attempt_allocation_rejects_exhaustion_without_advancing() {
+    let (_directory, mut state) = configured_state();
+    state.next_report_attempt = ReportAttempt(u64::MAX);
+    assert_eq!(
+        state.allocate_report_attempt(),
+        Err("notification report attempt counter is exhausted")
+    );
+    assert_eq!(state.next_report_attempt, ReportAttempt(u64::MAX));
 }
 
 /// Ensures transparent Unix-millisecond timestamps write the exact legacy
@@ -582,16 +650,22 @@ fn report_attempt_counter_survives_disable_and_restart() {
     let (directory, mut state) = configured_state();
     let agent = AgentId::parse("agent").expect("agent id");
     state.enable(agent.clone(), cursor(4)).expect("enable");
-    assert_eq!(state.allocate_report_attempt().expect("first attempt"), 0);
+    assert_eq!(
+        state.allocate_report_attempt().expect("first attempt"),
+        ReportAttempt(0)
+    );
     state.disable(&agent).expect("disable");
-    assert_eq!(state.allocate_report_attempt().expect("second attempt"), 1);
+    assert_eq!(
+        state.allocate_report_attempt().expect("second attempt"),
+        ReportAttempt(1)
+    );
     let mut restarted = State::default();
     restarted
         .configure(publisher(), identity(), directory.path())
         .expect("restart");
     assert_eq!(
         restarted.allocate_report_attempt().expect("third attempt"),
-        2
+        ReportAttempt(2)
     );
 }
 

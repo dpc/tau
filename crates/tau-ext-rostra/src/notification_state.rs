@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rostra_client::{RostraId, SocialPostMaterializationCursor};
-use tau_proto::{AgentId, CborValue, ExtensionName, MessageDelivered, UnixMillis};
+use tau_proto::{AgentId, CborValue, ExtensionName, MessageDelivered, MessageFactId, UnixMillis};
 
 use crate::notification_page::ScannedPage;
 pub(crate) use crate::notification_pending::Pending;
@@ -34,6 +34,27 @@ pub(crate) const MAX_BATCH_AGE: Duration = Duration::from_secs(5 * 60);
 /// Minimum spacing between canonical Rostra reports for one agent.
 pub(crate) const REPORT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// One identity-wide, durably allocated Rostra notification report attempt.
+///
+/// The transparent representation preserves the checkpoint's established CBOR
+/// scalar while this type owns checked allocation and canonical fact-ID
+/// spelling.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[repr(transparent)]
+pub(crate) struct ReportAttempt(u64);
+
+impl ReportAttempt {
+    /// Returns the next attempt unless the durable sequence is exhausted.
+    fn next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+
+    /// Builds the canonical publisher-scoped fact ID for this attempt.
+    pub(crate) fn fact_id(self) -> MessageFactId {
+        MessageFactId::new(format!("rostra-batch-v1:{}", self.0))
+    }
+}
+
 /// Versioned identity-bound contents of the extension-owned state file.
 #[derive(serde::Deserialize, serde::Serialize)]
 struct StoredState {
@@ -44,7 +65,7 @@ struct StoredState {
     /// Rostra identity that owns every opaque cursor in this file.
     rostra_identity: RostraId,
     /// Next identity-wide publisher message-attempt number.
-    next_report_attempt: u64,
+    next_report_attempt: ReportAttempt,
     /// Enabled agents keyed by canonical agent identifier text.
     agents: BTreeMap<String, StoredRegistration>,
 }
@@ -67,7 +88,7 @@ pub(crate) struct State {
     /// State file path after successful configuration.
     path: Option<PathBuf>,
     /// Next identity-wide publisher message-attempt number.
-    next_report_attempt: u64,
+    next_report_attempt: ReportAttempt,
     /// Stops persisted mutations after an ambiguous post-rename failure.
     poisoned: bool,
     /// Earliest worker retry after a transient scan or pre-rename persistence
@@ -180,7 +201,7 @@ impl State {
     fn persist(
         &self,
         registrations: &BTreeMap<AgentId, Registration>,
-        next_report_attempt: u64,
+        next_report_attempt: ReportAttempt,
     ) -> Result<(), PersistFailure> {
         if self.poisoned {
             return Err(PersistFailure::BeforeRename(
@@ -283,13 +304,13 @@ impl State {
 
     /// Allocates and durably advances one identity-wide report attempt before
     /// its publisher-scoped message ID becomes visible.
-    pub(crate) fn allocate_report_attempt(&mut self) -> Result<u64, &'static str> {
+    pub(crate) fn allocate_report_attempt(&mut self) -> Result<ReportAttempt, &'static str> {
         if self.poisoned {
             return Err("notification state durability is uncertain");
         }
         let allocated = self.next_report_attempt;
         let next = allocated
-            .checked_add(1)
+            .next()
             .ok_or("notification report attempt counter is exhausted")?;
         match self.persist(&self.registrations, next) {
             Ok(()) => {
@@ -308,7 +329,7 @@ impl State {
     /// Returns the next report attempt in deterministic state tests.
     #[cfg(test)]
     pub(crate) fn next_report_attempt(&self) -> u64 {
-        self.next_report_attempt
+        self.next_report_attempt.0
     }
 
     /// Records a transient worker failure using bounded exponential backoff.

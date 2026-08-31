@@ -10,14 +10,14 @@ use std::time::Duration;
 use rostra_client::{Client, SocialPostMaterialization, SocialPostMaterializationCursor};
 use tau_proto::{
     AgentId, CborValue, Event, MessageAgentTarget, MessageConversation, MessageDelivered,
-    MessageExtensionData, MessageFactId, MessageParty, RawMessagePublisherId,
+    MessageExtensionData, MessageParty, RawMessagePublisherId,
 };
 use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 use tokio::time::Instant as TokioInstant;
 
 use crate::notification_page::ScannedPage;
-use crate::notification_state::{MATERIALIZATION_PAGE, Pending, SCHEMA, State};
+use crate::notification_state::{MATERIALIZATION_PAGE, Pending, ReportAttempt, SCHEMA, State};
 
 /// Calls the materialization scanner with the fixed one-row request bound.
 fn scan_materialization_page<F, T>(after: SocialPostMaterializationCursor, scan: F) -> T
@@ -32,7 +32,7 @@ fn report(
     publisher: RawMessagePublisherId,
     agent_id: AgentId,
     self_id: String,
-    attempt: u64,
+    attempt: ReportAttempt,
     pending: &Pending,
 ) -> Result<MessageDelivered<RawMessagePublisherId>, &'static str> {
     if pending.count == 0 {
@@ -41,7 +41,7 @@ fn report(
     let mut delivered = MessageDelivered::new(
         publisher,
         MessageAgentTarget::new(agent_id.as_ref()),
-        MessageFactId::new(format!("rostra-batch-v1:{attempt}")),
+        attempt.fact_id(),
         MessageParty {
             stable_id: "rostra-following".to_owned(),
             display_name: Some("Rostra following timeline".to_owned()),

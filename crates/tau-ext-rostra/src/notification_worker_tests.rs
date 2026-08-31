@@ -8,7 +8,7 @@ use rostra_core::id::RostraIdSecretKey;
 use tau_proto::{AgentId, CborValue, ExtensionName};
 
 use super::*;
-use crate::notification_state::{MATERIALIZATION_PAGE, Pending, State};
+use crate::notification_state::{MATERIALIZATION_PAGE, Pending, ReportAttempt, State};
 
 /// Returns the stable typed publisher identity used by worker tests.
 fn publisher() -> ExtensionName {
@@ -76,8 +76,12 @@ fn report_enqueue_failure_waits_before_allocating_another_attempt() {
         .configure(publisher(), identity(), directory.path())
         .expect("restart");
     assert_eq!(
-        restarted.allocate_report_attempt().expect("next attempt"),
-        1,
+        restarted
+            .allocate_report_attempt()
+            .expect("next attempt")
+            .fact_id()
+            .as_str(),
+        "rostra-batch-v1:1",
         "the failed publication must retain its consumed attempt across restart"
     );
 }
@@ -114,7 +118,7 @@ fn count_only_wakes_exclude_preview_content() {
             tau_proto::RawMessagePublisherId::new("std-rostra"),
             AgentId::parse("agent").expect("agent"),
             identity().to_string(),
-            0,
+            ReportAttempt::default(),
             pending,
         )
         .expect("count-only report")
@@ -183,8 +187,12 @@ fn successful_enqueue_suppresses_live_reissue_and_restart_clears_it() {
         .configure(publisher(), identity(), directory.path())
         .expect("restart");
     assert_eq!(
-        restarted.allocate_report_attempt().expect("next attempt"),
-        1,
+        restarted
+            .allocate_report_attempt()
+            .expect("next attempt")
+            .fact_id()
+            .as_str(),
+        "rostra-batch-v1:1",
         "restart preserves the allocated message-ID sequence"
     );
     assert!(
