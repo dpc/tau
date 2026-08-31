@@ -126,6 +126,10 @@ running does it wait for the next completion; otherwise it returns an error.
 Use `wait({"tool_call_id":"..."})` when targeting a specific call: it is
 unambiguous. A wait can suppress or remove a completion notification only while
 it remains pending; a notification already delivered to the model stays visible.
+Activating input can interrupt exact and bare background waits with successful
+`wait_outcome: interrupted`, `wait_reason: activating_input`, and
+`wait_mode: exact` or `any_background` headers. The interruption does not consume
+the target result; retry the exact wait after handling the input.
 `wait({"timeout_minutes":N})` instead waits for activating input without
 consuming either input or background results. `N` must be a positive integer;
 `harness.yaml` silently clamps it to the inclusive

@@ -57,6 +57,15 @@ is ordinary activating input and interrupts them in either queue/register order;
 an exact or bare waiter that consumed/suppressed the completion produces no
 prompt to wake an input waiter.
 
+An interrupted background wait remains a successful scheduling result with the
+exact provider-visible headers `tau_internal: true`, `wait_outcome: interrupted`,
+`wait_reason: activating_input`, and `wait_mode: exact` or
+`wait_mode: any_background`, followed by exactly one blank line and optional
+concise harness-authored prose. Header names and values are LF-separated closed
+ASCII tokens. The result contains no activating payload or redundant target ID,
+consumes no target completion, and leaves that completion directly consumable
+once by a later wait.
+
 The foreground wait keeps `AgentTurnState::ToolsRunning`; it introduces no
 suspended lifecycle state, watcher idle notification, or idle/running watch
 edge. Live UI reconnect does not

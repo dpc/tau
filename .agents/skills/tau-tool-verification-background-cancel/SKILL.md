@@ -77,9 +77,21 @@ Exact-id and bare waits arbitrate completed results against activating input.
 A wait may consume its matching completed result before that completion's own
 queued notification preempts it. A different unsuppressed completion prompt,
 watch notification, or direct message is ordinary activating input and may
-interrupt the wait even when the requested result is already complete. Report
-which activation preempted the wait; after it drains, retrying the exact wait
-must still deliver the result once.
+interrupt the wait even when the requested result is already complete. The
+successful interruption result must use exactly these closed headers, with LF
+line endings and one blank line before any optional concise prose:
+
+```text
+tau_internal: true
+wait_outcome: interrupted
+wait_reason: activating_input
+wait_mode: exact
+```
+
+Bare waits use `wait_mode: any_background`. The result must not echo a target ID
+or copy activating input into a header. Report which activation preempted the
+wait; after it drains, retrying the exact wait must still deliver the result
+once.
 
 Do not infer an exact-wait result from a delegate's prose. Confirm the actual
 tool request contained `tool_call_id`. A request containing
@@ -101,7 +113,7 @@ results, not through a slow `agent_start` result with `duration_seconds`.
 
 When asked to verify the `agent_start` tool, also verify delayed `message` delivery to a live delegated sub-agent whose own tool turn is parked behind a backgrounded tool. This is a delegate-specific regression path, not only a `message` tool test. Use a delegate prompt that first runs `sleep 30`, then after the background placeholder requests a second shell command `sleep 5`, and asks it to report to the parent agent ID if it receives a parent message. After the first shell backgrounds and the second shell request is queued, send `message` to the delegate `sub_agent_id` with a nonce. Expected: a stable-ID `Message committed` result with `response not guaranteed`, the queued `sleep 5` is terminalized internally, and the delegate promptly reports receiving the nonce instead of staying stuck until `sleep 30` finishes. If event logs are available, confirm `AgentMessage`, `ToolCancelled` for the not-yet-started queued call, and a new `AgentPromptCreated` for the delegate message prompt. Treat omission of this scenario as incomplete `agent_start` verification.
 
-Also verify the active-`wait` variant of the same scenario. Use a delegate prompt that starts a long backgroundable tool, then calls `wait` on that tool call ID before it completes. While the delegate is blocked in `wait`, send `message` to the delegate `sub_agent_id` with a nonce. Expected: a stable-ID `Message committed` result with `response not guaranteed`, the delegate's `wait` returns promptly with a `tau_internal: true` interruption result saying new input is queued, and the delegate receives the hidden message prompt without waiting for the original background tool to complete. If event logs are available, confirm the wait `ToolResult` appears before the message-driven follow-up `AgentPromptCreated`.
+Also verify the active-`wait` variant of the same scenario. Use a delegate prompt that starts a long backgroundable tool, then calls `wait` on that tool call ID before it completes. While the delegate is blocked in `wait`, send `message` to the delegate `sub_agent_id` with a nonce. Expected: a stable-ID `Message committed` result with `response not guaranteed`, the delegate's `wait` returns promptly with the exact typed `tau_internal`/`wait_outcome`/`wait_reason`/`wait_mode: exact` interruption headers, and the delegate receives the hidden message prompt without waiting for the original background tool to complete. If event logs are available, confirm the wait `ToolResult` appears before the message-driven follow-up `AgentPromptCreated`.
 
 Because `agent_start` enables a persistent watch, these message-delivery probes can produce later watch notifications if the child leaves an earlier background tool running. For example, after an active-`wait` interruption, the original sleep may complete later, queue a normal background-completion prompt in the child, and the child may answer something like `Received.`. That is not a duplicate watch notification by itself; it is a later child turn caused by the delayed inner completion. If the verifier no longer wants notifications from that child after the success nonce, explicitly call `agent_watch({"agent_id":"<sub_agent_id>","enable":false})`.
 

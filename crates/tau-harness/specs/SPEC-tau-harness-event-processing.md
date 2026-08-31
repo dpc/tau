@@ -306,6 +306,14 @@ duplicate-cancel or completed-call state and before publishing
 absent calls so tool-call existence, completion state, and already-cancelled
 state do not leak across agents.
 
+When activating input preempts an exact or bare background wait, the successful
+ToolResult uses the HTTP-like `tau_internal`, `wait_outcome`, `wait_reason`, and
+`wait_mode` headers specified by
+[SPEC-tau-harness-activating-input-wait](SPEC-tau-harness-activating-input-wait.md).
+This provider-visible typing does not change the canonical wait settlement,
+event schema, observation linkage, queue ordering, or once-only completion
+ownership.
+
 ## Lifecycle events
 
 Harness lifecycle events such as session start/shutdown and extension status are

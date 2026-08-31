@@ -2879,12 +2879,7 @@ impl Harness {
                             .subagents
                             .wait_tracker
                             .call_tool_name(&target);
-                        wait_interrupted_reply(
-                            call_id,
-                            visible_tool_name,
-                            source_tool_name,
-                            &target,
-                        )
+                        wait_interrupted_reply(call_id, visible_tool_name, source_tool_name)
                     }
                 }
                 Ok(WaitTarget::AnyBackground) => {

@@ -1601,7 +1601,6 @@ impl WaitTracker {
             wait.call_id.clone(),
             wait.tool_name.clone(),
             source_tool_name,
-            &target,
         )
         .with_settlement(
             &wait,
@@ -1990,16 +1989,12 @@ pub(super) fn wait_interrupted_reply(
     wait_call_id: ToolCallId,
     wait_tool_name: ToolName,
     source_tool_name: Option<ToolName>,
-    target_call_id: &ToolCallId,
 ) -> WaitReply {
     wait_result_reply(
         wait_call_id,
         wait_tool_name,
         source_tool_name,
-        CborValue::Text(format!(
-            "{}: true\n\nWaiting for tool call `{target_call_id}` was interrupted because new input is queued. Try again later.",
-            tau_proto::TAU_INTERNAL_HEADER_NAME
-        )),
+        interrupted_wait_result(InterruptedWaitMode::Exact),
         None,
     )
 }
@@ -2013,12 +2008,35 @@ pub(super) fn wait_interrupted_any_reply(
         wait_call_id,
         wait_tool_name,
         None,
-        CborValue::Text(format!(
-            "{}: true\n\nWaiting for a background tool call in this conversation was interrupted because new input is queued. Try again later.",
-            tau_proto::TAU_INTERNAL_HEADER_NAME
-        )),
+        interrupted_wait_result(InterruptedWaitMode::AnyBackground),
         None,
     )
+}
+
+/// Closed provider-visible mode for one interrupted background wait.
+enum InterruptedWaitMode {
+    /// Wait for one explicit background tool call.
+    Exact,
+    /// Wait for the next background completion owned by the conversation.
+    AnyBackground,
+}
+
+impl InterruptedWaitMode {
+    /// Return the stable ASCII header value for this mode.
+    fn as_header_value(&self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::AnyBackground => "any_background",
+        }
+    }
+}
+
+fn interrupted_wait_result(wait_mode: InterruptedWaitMode) -> CborValue {
+    let wait_mode = wait_mode.as_header_value();
+    CborValue::Text(format!(
+        "{}: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: {wait_mode}\n\nNew input is queued; retry the wait to consume its target result.",
+        tau_proto::TAU_INTERNAL_HEADER_NAME
+    ))
 }
 
 fn result_with_original_tool_call_id(

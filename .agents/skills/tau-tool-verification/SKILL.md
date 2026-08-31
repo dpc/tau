@@ -84,6 +84,12 @@ context and makes the meaningful result harder to scan. Only report a requested
 path, query, command, or similar argument when the tool has transformed it into
 new information, such as a canonicalized path that differs from the input.
 
+Harness-owned background-wait interruption is a successful control result, not
+an ordinary completion. It uses closed `tau_internal: true`,
+`wait_outcome: interrupted`, `wait_reason: activating_input`, and
+`wait_mode: exact` or `any_background` headers. It does not echo a target ID or
+consume the target result.
+
 ### Layered escaping policy
 
 Tools must semantically escape untrusted metadata fields before composing

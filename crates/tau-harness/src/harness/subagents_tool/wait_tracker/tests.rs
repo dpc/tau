@@ -1150,6 +1150,45 @@ fn activating_input_wakes_only_target_owned_waits() {
     assert_eq!(other_replies[0].wait_call_id.as_str(), "input-other");
 }
 
+/// Exact and bare background waits expose the closed provider-visible
+/// interruption contract without echoing a potentially untrusted target ID.
+#[test]
+fn activating_input_interruption_results_use_typed_headers() {
+    let owner = conv("owner");
+    let mut exact = WaitTracker::default();
+    exact.record_tool_invoke("source".into(), slow_tool_name(), owner.clone());
+    let exact_reply = start_wait_exact(&mut exact, &owner, "wait-exact", "source");
+    assert!(exact_reply.reply.is_none());
+    let exact_reply = exact
+        .activate_waits_for(&owner, tau_proto::ObservationId::random())
+        .pop()
+        .expect("exact wait interruption");
+    assert_eq!(
+        reply_result_with_display(exact_reply).0,
+        CborValue::Text(
+            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: exact\n\nNew input is queued; retry the wait to consume its target result."
+                .to_owned()
+        )
+    );
+
+    let mut any = WaitTracker::default();
+    any.record_tool_invoke("source".into(), slow_tool_name(), owner.clone());
+    any.calls
+        .insert("source".into(), WaitCallState::Backgrounded);
+    assert!(start_wait_any(&mut any, &owner, "wait-any").reply.is_none());
+    let any_reply = any
+        .activate_waits_for(&owner, tau_proto::ObservationId::random())
+        .pop()
+        .expect("bare wait interruption");
+    assert_eq!(
+        reply_result_with_display(any_reply).0,
+        CborValue::Text(
+            "tau_internal: true\nwait_outcome: interrupted\nwait_reason: activating_input\nwait_mode: any_background\n\nNew input is queued; retry the wait to consume its target result."
+                .to_owned()
+        )
+    );
+}
+
 /// There can be only one pending input wait per runtime agent, preventing a
 /// second tool call from replacing or aliasing the first waiter.
 #[test]

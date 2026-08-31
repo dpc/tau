@@ -4741,7 +4741,7 @@ fn agent_message_interrupts_recipient_active_wait() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == wait_call_id.as_str()
-                && matches!(&result.result, CborValue::Text(text) if text.contains("interrupted because new input is queued"))
+                && matches!(&result.result, CborValue::Text(text) if text.contains("wait_outcome: interrupted"))
     )));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -4837,7 +4837,7 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == wait_call_id.as_str()
-                && matches!(&result.result, CborValue::Text(text) if text.contains("interrupted because new input is queued"))
+                && matches!(&result.result, CborValue::Text(text) if text.contains("wait_outcome: interrupted"))
     )));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,

@@ -313,6 +313,10 @@ fn wait_spec_documents_completion_retention_and_optional_non_consuming_input_mod
     assert!(description.contains("otherwise it returns an error"));
     assert!(description.contains("`wait({\"tool_call_id\":\"ID\"})`"));
     assert!(description.contains("notifications leave results queued until `wait` consumes them"));
+    assert!(description.contains("`wait_outcome: interrupted`"));
+    assert!(description.contains("`wait_reason: activating_input`"));
+    assert!(description.contains("`wait_mode: exact` or `any_background`"));
+    assert!(description.contains("interruption consumes no background result"));
     assert!(description.contains("only while it is pending"));
 }
 
