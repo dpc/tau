@@ -129,7 +129,7 @@ fn cwd_parts() -> (String, String) {
 }
 
 fn template_context<'a>(
-    hook: &'a str,
+    hook: NotificationHook,
     agent_id: &'a tau_proto::AgentId,
     agent_name: &'a str,
     user_prompt: &'a str,
@@ -139,7 +139,7 @@ fn template_context<'a>(
     let host = hostname();
     let (cwd, cwd_basename) = cwd_parts();
     TemplateContext {
-        hook,
+        hook: hook.as_str(),
         agent: AgentTemplateContext {
             id: agent_id.as_ref(),
             name: agent_name,
@@ -152,6 +152,33 @@ fn template_context<'a>(
             agent_response,
             agent_summary,
         },
+    }
+}
+
+/// Closed identity of a notification trigger and its external hook name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NotificationHook {
+    /// User submitted a main-agent prompt.
+    Start,
+    /// Main-agent turn reached its final response.
+    End,
+    /// One agent remained idle past its configured deadline.
+    Idle,
+    /// Every loaded agent in a session remained idle past its configured
+    /// deadline.
+    IdleAll,
+}
+
+impl NotificationHook {
+    /// Returns the stable configuration, template, and display spelling of this
+    /// hook.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "agent_start",
+            Self::End => "agent_end",
+            Self::Idle => "agent_idle",
+            Self::IdleAll => "agent_idle_all",
+        }
     }
 }
 
@@ -482,13 +509,13 @@ struct ExtConfig {
 
 impl ExtConfig {
     fn validate(&self) -> Result<(), String> {
-        validate_hooks("agent_start", &self.agent_start)?;
-        validate_hooks("agent_end", &self.agent_end)?;
+        validate_hooks(NotificationHook::Start, &self.agent_start)?;
+        validate_hooks(NotificationHook::End, &self.agent_end)?;
         for idle in &self.agent_idle {
-            validate_hook("agent_idle", &idle.hook)?;
+            validate_hook(NotificationHook::Idle, &idle.hook)?;
         }
         for idle in &self.agent_idle_all {
-            validate_hook("agent_idle_all", &idle.hook)?;
+            validate_hook(NotificationHook::IdleAll, &idle.hook)?;
         }
         Ok(())
     }
@@ -1102,7 +1129,7 @@ impl NotificationLoop {
         if turn.begin_prompt(prompt.text) {
             let agent_name = display_name_for_agent(&self.agent_display_names, &prompt.agent_id);
             let ctx = template_context(
-                "agent_start",
+                NotificationHook::Start,
                 &prompt.agent_id,
                 &agent_name,
                 &turn.last_user_prompt,
@@ -1410,8 +1437,8 @@ impl NotificationLoop {
         emit_idle_hook(
             handle,
             IdleHookEmission {
-                hook_name: idle_hook_name(pending.hook_kind),
-                hook,
+                hook: idle_hook(pending.hook_kind),
+                config: hook,
                 agent_id: &pending.agent_id,
                 agent_name: &agent_name,
                 user_prompt: &pending.user_prompt,
@@ -1604,8 +1631,8 @@ fn emit_due_idle_hook(
     emit_idle_hook(
         handle,
         IdleHookEmission {
-            hook_name: idle_hook_name(pending.hook_kind),
-            hook,
+            hook: idle_hook(pending.hook_kind),
+            config: hook,
             agent_id: &pending.agent_id,
             agent_name: &agent_name,
             user_prompt: &pending.user_prompt,
@@ -1627,7 +1654,7 @@ fn emit_agent_end(
     agent_response: String,
 ) -> Result<(), Box<dyn Error>> {
     let ctx = template_context(
-        "agent_end",
+        NotificationHook::End,
         &agent_id,
         &agent_name,
         &user_prompt,
@@ -1757,10 +1784,10 @@ fn pending_idle_summary_query_id(pending: &PendingIdleHook) -> Option<&str> {
     }
 }
 
-fn idle_hook_name(kind: IdleHookKind) -> &'static str {
+fn idle_hook(kind: IdleHookKind) -> NotificationHook {
     match kind {
-        IdleHookKind::Agent => "agent_idle",
-        IdleHookKind::AgentAll => "agent_idle_all",
+        IdleHookKind::Agent => NotificationHook::Idle,
+        IdleHookKind::AgentAll => NotificationHook::IdleAll,
     }
 }
 
@@ -1837,14 +1864,15 @@ fn emit_hook(
     Ok(())
 }
 
-fn validate_hooks(name: &str, hooks: &[HookConfig]) -> Result<(), String> {
+fn validate_hooks(hook_name: NotificationHook, hooks: &[HookConfig]) -> Result<(), String> {
     for hook in hooks {
-        validate_hook(name, hook)?;
+        validate_hook(hook_name, hook)?;
     }
     Ok(())
 }
 
-fn validate_hook(name: &str, hook: &HookConfig) -> Result<(), String> {
+fn validate_hook(hook_name: NotificationHook, hook: &HookConfig) -> Result<(), String> {
+    let name = hook_name.as_str();
     if !hook.bell && hook.command.is_none() && hook.osc1337.is_none() {
         return Err(format!(
             "{name} hook item must set bell, command, or osc1337"
@@ -1852,7 +1880,7 @@ fn validate_hook(name: &str, hook: &HookConfig) -> Result<(), String> {
     }
     let agent_id = tau_proto::AgentId::parse("agent").expect("valid test agent id");
     let ctx = template_context(
-        name,
+        hook_name,
         &agent_id,
         "Agent",
         "user prompt",
@@ -1964,9 +1992,9 @@ fn is_sub_agent_event(event: &Event) -> bool {
 /// Borrowed data needed to render and emit one configured idle hook.
 struct IdleHookEmission<'a> {
     /// Template hook name to expose as `hook`.
-    hook_name: &'a str,
+    hook: NotificationHook,
     /// Configured idle hook whose actions should be emitted.
-    hook: &'a IdleHookConfig,
+    config: &'a IdleHookConfig,
     /// Agent id that supplies `agent.id` in templates.
     agent_id: &'a tau_proto::AgentId,
     /// Agent display name that supplies `agent.name` in templates.
@@ -1984,14 +2012,14 @@ fn emit_idle_hook(
     emission: IdleHookEmission<'_>,
 ) -> Result<(), Box<dyn Error>> {
     let ctx = template_context(
-        emission.hook_name,
+        emission.hook,
         emission.agent_id,
         emission.agent_name,
         emission.user_prompt,
         emission.agent_response,
         emission.agent_summary,
     );
-    emit_hook(handle, &emission.hook.hook, &ctx)?;
+    emit_hook(handle, &emission.config.hook, &ctx)?;
     Ok(())
 }
 

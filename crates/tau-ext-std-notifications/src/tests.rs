@@ -846,6 +846,39 @@ fn agent_start_hook_renders_multiple_configured_actions() {
     }
 }
 
+/// Each closed hook identity must retain its established configuration key,
+/// template payload spelling, and validation label. This prevents an internal
+/// type refactor from silently changing the public hook contract.
+#[test]
+fn notification_hook_identities_preserve_external_strings() {
+    let agent_id = tau_proto::AgentId::parse("agent").expect("agent id");
+    for (hook, expected) in [
+        (NotificationHook::Start, "agent_start"),
+        (NotificationHook::End, "agent_end"),
+        (NotificationHook::Idle, "agent_idle"),
+        (NotificationHook::IdleAll, "agent_idle_all"),
+    ] {
+        assert_eq!(hook.as_str(), expected);
+
+        let context = template_context(hook, &agent_id, "Agent", "prompt", "response", "summary");
+        let template_payload = serde_json::to_value(context).expect("serialize template context");
+        assert_eq!(template_payload["hook"], expected);
+
+        let config = serde_json::Value::Object(
+            [(expected.to_owned(), serde_json::json!([{ "bell": true }]))]
+                .into_iter()
+                .collect(),
+        );
+        let config: ExtConfig = serde_json::from_value(config).expect("accepted hook config key");
+        config.validate().expect("valid hook config");
+
+        assert_eq!(
+            validate_hook(hook, &HookConfig::default()).expect_err("empty hook is invalid"),
+            format!("{expected} hook item must set bell, command, or osc1337"),
+        );
+    }
+}
+
 /// Display-name updates should survive a later prompt whose embedded display
 /// name is blank, and templates should fall back to the stored name rather than
 /// the raw agent id. This prevents transient empty prompt metadata from
@@ -3350,7 +3383,7 @@ fn agent_idle_timers_are_scoped_per_agent() {
             &serde_json::json!({
                 "agent_idle": [{
                     "delay_seconds": 0,
-                    "osc1337": { "key": TEXT_VAR_NAME, "value": "idle:{{agent.id}}" },
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "{{hook}}:{{agent.id}}" },
                 }],
             }),
         )))
@@ -3389,7 +3422,7 @@ fn agent_idle_timers_are_scoped_per_agent() {
     let Event::Osc1337SetUserVar(osc) = idle else {
         panic!("expected main idle OSC, got {idle:?}");
     };
-    assert_eq!(osc.value, "idle:main");
+    assert_eq!(osc.value, "agent_idle:main");
 }
 
 /// Provider prompt submissions carry only an agent prompt id. If the extension
