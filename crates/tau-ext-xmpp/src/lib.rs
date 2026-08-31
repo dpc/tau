@@ -194,8 +194,9 @@ trait XmppBridge: Send + Sync + 'static {
 struct RuntimeConfig {
     /// Bare XMPP account JID used for login.
     account_jid: BareJid,
-    /// Resolved account password. Never log this value.
-    password: String,
+    /// Resolved account password. Never log or expose this value outside the
+    /// final XMPP client adapter.
+    password: tau_proto::SecretValue,
     /// JIDs allowed to deliver messages through this bridge.
     allowed_jids: Vec<AllowedJid>,
     /// Default human recipient for notices and direct fallback sends.
@@ -398,14 +399,13 @@ fn validate_account_jid(jid: Option<String>) -> Result<BareJid, String> {
 fn resolve_password(
     secrets: &BTreeMap<String, tau_proto::SecretValue>,
     password_secret: Option<String>,
-) -> Result<String, String> {
+) -> Result<tau_proto::SecretValue, String> {
     let secret_name =
         password_secret.ok_or_else(|| "xmpp config requires `password_secret`".to_owned())?;
     secrets
         .get(&secret_name)
-        .map(tau_proto::SecretValue::expose_secret)
-        .filter(|password| !password.trim().is_empty())
-        .map(str::to_owned)
+        .filter(|password| !password.expose_secret().trim().is_empty())
+        .cloned()
         .ok_or_else(|| format!("xmpp secret `{secret_name}` is missing or empty"))
 }
 
@@ -1254,7 +1254,7 @@ async fn xmpp_worker(
             return;
         }
     };
-    let mut client = Client::new(login_jid, cfg.password.clone());
+    let mut client = Client::new(login_jid, cfg.password.expose_secret().to_owned());
     let mut command_rx = std_to_tokio(command_rx);
     let mut worker = WorkerState::new(cfg, output, Arc::clone(&shutdown), authority);
     loop {

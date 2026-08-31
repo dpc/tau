@@ -479,9 +479,54 @@ fn secrets() -> BTreeMap<String, tau_proto::SecretValue> {
     let mut secrets = BTreeMap::new();
     secrets.insert(
         "xmpp_password".to_owned(),
-        tau_proto::SecretValue::new("secret"),
+        tau_proto::SecretValue::new(" secret "),
     );
     secrets
+}
+
+/// Validation retains the named password as a redacted secret until the XMPP
+/// client adapter needs its exact plaintext bytes.
+#[test]
+fn runtime_config_retains_redacted_password_until_client_adapter() {
+    let config = cfg();
+
+    assert_eq!(
+        config.password,
+        tau_proto::SecretValue::new(" secret "),
+        "validation must retain the exact configured password"
+    );
+    assert_eq!(
+        config.password.expose_secret(),
+        " secret ",
+        "the final client adapter must receive the unchanged password text"
+    );
+    assert_eq!(
+        format!("{:?}", config.password),
+        "<redacted>",
+        "ordinary Debug formatting must not reveal the password"
+    );
+
+    let trace = TraceWriter::default();
+    let captured = Arc::clone(&trace.0);
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("xmpp=info")
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || trace.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!(target: LOG_TARGET, password = ?config.password, "XMPP password test");
+    });
+    let output = String::from_utf8(captured.lock().expect("trace bytes").clone())
+        .expect("UTF-8 trace output");
+    assert!(
+        output.contains("<redacted>"),
+        "log must mark the password redacted"
+    );
+    assert!(
+        !output.contains("secret"),
+        "log must not reveal the password"
+    );
 }
 
 fn configure_from_json(config: serde_json::Value) -> tau_proto::Configure {
@@ -964,7 +1009,7 @@ fn config_rejects_unsafe_shapes() {
     .validate(&BTreeMap::new(), None)
     .err()
     .expect("missing password secret rejected");
-    assert!(err.contains("missing or empty"));
+    assert_eq!(err, "xmpp secret `xmpp_password` is missing or empty");
 
     let err = ExtConfig {
         jid: Some("tau@example.org".to_owned()),
@@ -974,7 +1019,7 @@ fn config_rejects_unsafe_shapes() {
     .validate(&empty_password_secrets(), None)
     .err()
     .expect("empty password secret rejected");
-    assert!(err.contains("missing or empty"));
+    assert_eq!(err, "xmpp secret `xmpp_password` is missing or empty");
 
     let err = ExtConfig {
         jid: Some("tau@example.org".to_owned()),
