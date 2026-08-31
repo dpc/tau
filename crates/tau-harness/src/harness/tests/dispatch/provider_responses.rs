@@ -1098,7 +1098,7 @@ fn restored_context_usage_requires_current_model_and_resets_on_model_change() {
         h.agent_runtime.agent_registry.agents[&cid]
             .execution
             .context_input_tokens,
-        Some(900)
+        Some(tau_proto::TokenCount::new(900))
     );
     let alternate: tau_proto::ModelId = "test/alternate".into();
     let route = h
@@ -1459,12 +1459,12 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        conv.execution.context_input_tokens = Some(800);
+        conv.execution.context_input_tokens = Some(tau_proto::TokenCount::new(800));
         conv.execution.context_usage_head = conv.identity.head;
         conv.execution.context_usage_model = Some(alternate.clone());
         conv.execution.context_usage_prompt_id =
             Some(test_agent_prompt_id("ap-test-provider-usage"));
-        conv.execution.context_cached_tokens = Some(400);
+        conv.execution.context_cached_tokens = Some(tau_proto::TokenCount::new(400));
         conv.execution.context_percent_used = Some(80);
     }
     h.handle_ui_role_update(
@@ -1490,12 +1490,12 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
             .get_mut(&cid)
             .expect("agent");
         conv.identity.model_override = Some("test/model".into());
-        conv.execution.context_input_tokens = Some(700);
+        conv.execution.context_input_tokens = Some(tau_proto::TokenCount::new(700));
         conv.execution.context_usage_head = conv.identity.head;
         conv.execution.context_usage_model = Some("test/model".into());
         conv.execution.context_usage_prompt_id =
             Some(test_agent_prompt_id("ap-test-provider-usage"));
-        conv.execution.context_cached_tokens = Some(350);
+        conv.execution.context_cached_tokens = Some(tau_proto::TokenCount::new(350));
         conv.execution.context_percent_used = Some(70);
     }
     h.handle_ui_role_update(
@@ -1512,7 +1512,7 @@ fn role_model_updates_reconcile_loaded_agent_context_usage() {
         h.agent_runtime.agent_registry.agents[&cid]
             .execution
             .context_input_tokens,
-        Some(700)
+        Some(tau_proto::TokenCount::new(700))
     );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid]
@@ -1551,13 +1551,13 @@ fn finished_response_normalizes_cached_usage_before_context_update() {
         h.agent_runtime.agent_registry.agents[&cid]
             .execution
             .context_input_tokens,
-        Some(10)
+        Some(tau_proto::TokenCount::new(10))
     );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid]
             .execution
             .context_cached_tokens,
-        Some(10)
+        Some(tau_proto::TokenCount::new(10))
     );
     let canonical = event_log_events(&h)
         .into_iter()

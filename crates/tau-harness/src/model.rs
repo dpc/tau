@@ -492,18 +492,19 @@ pub(crate) fn thinking_summaries_for_model(
 pub(crate) fn context_window_for_model(
     provider_models: &HashMap<ModelId, ProviderModelInfo>,
     model: &ModelId,
-) -> Option<u64> {
-    provider_models
-        .get(model)
-        .map(|info| info.context_window.get())
+) -> Option<tau_proto::TokenCount> {
+    provider_models.get(model).map(|info| info.context_window)
 }
 
 /// Convert used input tokens into a clamped percentage of the context window.
-pub(crate) fn context_percent_used(input_tokens: u64, context_window: u64) -> u8 {
-    if context_window == 0 {
+pub(crate) fn context_percent_used(
+    input_tokens: tau_proto::TokenCount,
+    context_window: tau_proto::TokenCount,
+) -> u8 {
+    if context_window == tau_proto::TokenCount::ZERO {
         return 0;
     }
-    let percent = u128::from(input_tokens) * 100 / u128::from(context_window);
+    let percent = u128::from(input_tokens.get()) * 100 / u128::from(context_window.get());
     percent.min(100) as u8
 }
 

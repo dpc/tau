@@ -2526,10 +2526,11 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     let mut h = echo_harness(&sp).expect("start"); // bound to "s1"
     h.config.selected_model = Some("test/model".into());
     let model: tau_proto::ModelId = "test/model".into();
-    h.session_runtime.current_session_state.context_input_tokens = Some(92_000);
+    h.session_runtime.current_session_state.context_input_tokens =
+        Some(tau_proto::TokenCount::new(92_000));
     h.session_runtime
         .current_session_state
-        .context_cached_tokens = Some(90_000);
+        .context_cached_tokens = Some(tau_proto::TokenCount::new(90_000));
     h.session_runtime.current_session_state.context_percent_used = Some(92);
     h.session_runtime
         .current_session_state

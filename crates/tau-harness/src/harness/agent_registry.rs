@@ -1180,9 +1180,15 @@ impl Harness {
                 started_total: agent.execution.tools_total,
             },
             context: AgentContextStats {
-                input_tokens: agent.execution.context_input_tokens,
-                cached_tokens: agent.execution.context_cached_tokens,
-                context_window,
+                input_tokens: agent
+                    .execution
+                    .context_input_tokens
+                    .map(tau_proto::TokenCount::get),
+                cached_tokens: agent
+                    .execution
+                    .context_cached_tokens
+                    .map(tau_proto::TokenCount::get),
+                context_window: context_window.map(tau_proto::TokenCount::get),
                 percent_used: agent.execution.context_percent_used,
             },
             estimated_api_cost: self

@@ -13,6 +13,11 @@ use crate::event::HarnessEvent;
 fn navigation_reconciles_usage_from_selected_branch_response() {
     let td = TempDir::new().expect("tempdir");
     let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .context_window = tau_proto::TokenCount::new(1_234);
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("measured branch".to_owned()))
@@ -34,6 +39,24 @@ fn navigation_reconciles_usage_from_selected_branch_response() {
     });
     h.handle_provider_response_finished(response)
         .expect("finish measured response");
+    let exact_positive_usage = |event: &Event| {
+        matches!(
+            event,
+            Event::HarnessAgentContextUsageChanged(usage)
+                if usage.agent_id == cid
+                    && usage.input_tokens == Some(900)
+                    && usage.cached_tokens == Some(450)
+                    && usage.context_window == Some(1_234)
+                    && usage.percent_used == Some(72)
+        )
+    };
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| exact_positive_usage(event))
+            .count(),
+        1
+    );
     let measured_head = h.agent_runtime.agent_registry.agents[&cid]
         .identity
         .head
@@ -63,13 +86,20 @@ fn navigation_reconciles_usage_from_selected_branch_response() {
         h.agent_runtime.agent_registry.agents[&cid]
             .execution
             .context_input_tokens,
-        Some(900)
+        Some(tau_proto::TokenCount::new(900))
     );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid]
             .execution
             .context_cached_tokens,
-        Some(450)
+        Some(tau_proto::TokenCount::new(450))
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| exact_positive_usage(event))
+            .count(),
+        2
     );
     assert_eq!(
         h.agent_runtime.agent_registry.agents[&cid]

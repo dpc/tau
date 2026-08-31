@@ -3731,8 +3731,8 @@ impl Harness {
         agent_id: &str,
     ) -> Option<(
         ModelId,
-        u64,
-        u64,
+        tau_proto::TokenCount,
+        tau_proto::TokenCount,
         Option<tau_proto::NodeId>,
         tau_proto::AgentPromptId,
     )> {
@@ -3748,8 +3748,8 @@ impl Harness {
         head: Option<tau_proto::NodeId>,
     ) -> Option<(
         ModelId,
-        u64,
-        u64,
+        tau_proto::TokenCount,
+        tau_proto::TokenCount,
         Option<tau_proto::NodeId>,
         tau_proto::AgentPromptId,
     )> {
@@ -3763,8 +3763,8 @@ impl Harness {
                     let model = usage.model.as_ref()?;
                     return Some((
                         model.clone(),
-                        usage.prompt_sent_tokens,
-                        usage.prompt_cached_tokens,
+                        tau_proto::TokenCount::new(usage.prompt_sent_tokens),
+                        tau_proto::TokenCount::new(usage.prompt_cached_tokens),
                         node.parent_id,
                         tree.provider_prompt_for_response_node(node_id)?,
                     ));

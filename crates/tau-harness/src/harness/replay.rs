@@ -886,7 +886,8 @@ impl Harness {
                 .config
                 .selected_model
                 .as_ref()
-                .and_then(|m| context_window_for_model(&self.provider_runtime.model_info, m)),
+                .and_then(|m| context_window_for_model(&self.provider_runtime.model_info, m))
+                .map(tau_proto::TokenCount::get),
             role: self.config.selected_role.clone(),
         });
         if selector_matches_event(selectors, &selected_event) {
@@ -896,11 +897,13 @@ impl Harness {
             input_tokens: self
                 .session_runtime
                 .current_session_state
-                .context_input_tokens,
+                .context_input_tokens
+                .map(tau_proto::TokenCount::get),
             cached_tokens: self
                 .session_runtime
                 .current_session_state
-                .context_cached_tokens,
+                .context_cached_tokens
+                .map(tau_proto::TokenCount::get),
             percent_used: self
                 .session_runtime
                 .current_session_state

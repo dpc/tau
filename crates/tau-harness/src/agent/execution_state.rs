@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use tau_core::NodeId;
-use tau_proto::{AgentPromptId, ModelId};
+use tau_proto::{AgentPromptId, ModelId, TokenCount};
 
 use super::LoopGuardState;
 use crate::dedup::ResultDedupMap;
@@ -17,7 +17,7 @@ pub(crate) struct AgentExecutionState {
     pub(crate) tools_total: u32,
     /// Most recent input-token count this agent's agent
     /// reported on a finished response. Used for generic agent stats snapshots.
-    pub(crate) context_input_tokens: Option<u64>,
+    pub(crate) context_input_tokens: Option<TokenCount>,
     /// Transcript head represented by `context_input_tokens`.
     pub(crate) context_usage_head: Option<NodeId>,
     /// Provider-qualified model that produced `context_input_tokens`.
@@ -26,7 +26,7 @@ pub(crate) struct AgentExecutionState {
     pub(crate) context_usage_prompt_id: Option<AgentPromptId>,
     /// Most recent cached input-token count this agent's provider reported on
     /// a finished response.
-    pub(crate) context_cached_tokens: Option<u64>,
+    pub(crate) context_cached_tokens: Option<TokenCount>,
     /// Most recent percent-of-context-window this conversation's
     /// agent has used. Computed from `context_input_tokens` and the
     /// model's window size; `None` when the window is unknown.

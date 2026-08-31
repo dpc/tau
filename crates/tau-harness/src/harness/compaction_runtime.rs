@@ -2084,8 +2084,7 @@ impl Harness {
             && self.context_usage_baseline_applies(agent))
         .then_some(agent.execution.context_input_tokens)
         .flatten()
-        .filter(|tokens| *tokens > 0)
-        .map(tau_proto::TokenCount::new)
+        .filter(|tokens| *tokens > tau_proto::TokenCount::ZERO)
     }
 
     /// Reapply durable self-compaction consumption after generic restored tool

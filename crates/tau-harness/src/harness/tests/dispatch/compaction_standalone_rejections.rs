@@ -249,8 +249,8 @@ fn standalone_rejections_do_not_mutate_context_or_compaction_authority() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        agent.execution.context_input_tokens = Some(55);
-        agent.execution.context_cached_tokens = Some(21);
+        agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(55));
+        agent.execution.context_cached_tokens = Some(tau_proto::TokenCount::new(21));
         agent.execution.context_usage_model = Some("test/model".into());
         agent.execution.context_usage_prompt_id =
             Some(test_agent_prompt_id("ap-test-provider-usage"));

@@ -7534,7 +7534,7 @@ fn intercepted_compaction_start_pins_materialized_model() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        agent.execution.context_input_tokens = Some(1);
+        agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(1));
         agent.execution.context_usage_head = agent.identity.head;
         agent.execution.context_usage_model = Some("echo/model".into());
     }
@@ -7633,7 +7633,7 @@ fn intercepted_compaction_completion_steer_precedes_continuation_checkpoint() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        agent.execution.context_input_tokens = Some(1);
+        agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(1));
         agent.execution.context_usage_head = agent.identity.head;
         agent.execution.context_usage_model = Some("test/model".into());
     }

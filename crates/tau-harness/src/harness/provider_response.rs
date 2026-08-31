@@ -2495,9 +2495,7 @@ impl Harness {
                     .statuses
                     .as_ref()
                     .is_none_or(|statuses| statuses.contains(&logical_status))
-                && alert
-                    .threshold
-                    .is_exceeded_by(tau_proto::TokenCount::new(input_tokens))
+                && alert.threshold.is_exceeded_by(input_tokens)
                 && agent.execution.fired_context_size_alerts.insert(name)
             {
                 agent
@@ -4564,6 +4562,8 @@ impl Harness {
         cached_tokens: Option<u64>,
         source: Option<&tau_proto::ConnectionId>,
     ) {
+        let input_tokens = input_tokens.map(tau_proto::TokenCount::new);
+        let cached_tokens = cached_tokens.map(tau_proto::TokenCount::new);
         let context_window =
             model.and_then(|m| context_window_for_model(&self.provider_runtime.model_info, m));
         let percent_used = match (context_window, input_tokens) {
@@ -4582,9 +4582,9 @@ impl Harness {
             source,
             Event::HarnessAgentContextUsageChanged(HarnessAgentContextUsageChanged {
                 agent_id: cid.clone(),
-                input_tokens,
-                cached_tokens,
-                context_window,
+                input_tokens: input_tokens.map(tau_proto::TokenCount::get),
+                cached_tokens: cached_tokens.map(tau_proto::TokenCount::get),
+                context_window: context_window.map(tau_proto::TokenCount::get),
                 percent_used,
             }),
         );
@@ -4696,9 +4696,9 @@ impl Harness {
             None,
             Event::HarnessAgentContextUsageChanged(HarnessAgentContextUsageChanged {
                 agent_id: cid.clone(),
-                input_tokens,
-                cached_tokens,
-                context_window,
+                input_tokens: input_tokens.map(tau_proto::TokenCount::get),
+                cached_tokens: cached_tokens.map(tau_proto::TokenCount::get),
+                context_window: context_window.map(tau_proto::TokenCount::get),
                 percent_used,
             }),
         );

@@ -2194,8 +2194,7 @@ fn publish_exact_automatic_start(
     provider_prompt_id: tau_proto::AgentPromptId,
 ) {
     let agent = &h.agent_runtime.agent_registry.agents[cid];
-    let provider_input_tokens =
-        tau_proto::TokenCount::new(agent.execution.context_input_tokens.expect("exact usage"));
+    let provider_input_tokens = agent.execution.context_input_tokens.expect("exact usage");
     h.publish_for_agent(
         cid,
         Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {

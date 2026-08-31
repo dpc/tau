@@ -54,7 +54,7 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
                 .agents
                 .get_mut(&cid)
                 .expect("agent");
-            agent.execution.context_input_tokens = Some(1_000);
+            agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(1_000));
             agent.execution.context_usage_model = Some("test/model".into());
             agent.execution.context_usage_prompt_id =
                 Some(test_agent_prompt_id("ap-test-provider-usage"));
@@ -93,7 +93,7 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
                 .agents
                 .get_mut(&cid)
                 .expect("agent");
-            agent.execution.context_input_tokens = Some(1_000);
+            agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(1_000));
             agent.execution.context_usage_model = Some("test/model".into());
             agent.execution.context_usage_prompt_id =
                 Some(test_agent_prompt_id("ap-test-provider-usage"));
@@ -130,7 +130,7 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
             agent.identity.head.map(tau_proto::AgentHead::Node),
             failed_head.as_option().map(tau_proto::AgentHead::Node)
         );
-        agent.execution.context_input_tokens = Some(1_000);
+        agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(1_000));
         agent.execution.context_usage_model = Some("test/model".into());
         agent.execution.context_usage_prompt_id =
             Some(test_agent_prompt_id("ap-test-provider-usage"));
@@ -177,7 +177,7 @@ fn automatic_suppression_survives_unrelated_branch_success_and_cold_replay() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        agent.execution.context_input_tokens = Some(1_000);
+        agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(1_000));
         agent.execution.context_usage_model = Some("test/model".into());
         agent.execution.context_usage_prompt_id =
             Some(test_agent_prompt_id("ap-test-provider-usage"));

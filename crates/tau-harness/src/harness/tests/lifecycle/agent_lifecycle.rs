@@ -2969,7 +2969,7 @@ fn parked_provider_terminal_cancellation_arbitrates_once() {
                 .agents
                 .get_mut(&cid)
                 .expect("agent");
-            agent.execution.context_input_tokens = Some(100);
+            agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(100));
             agent.execution.context_usage_model = Some("test/model".into());
             agent.execution.context_usage_prompt_id =
                 Some(test_agent_prompt_id("ap-terminal-race-usage"));

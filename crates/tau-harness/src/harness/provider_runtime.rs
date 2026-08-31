@@ -597,7 +597,7 @@ impl Harness {
                     .map(|model| self.params_for_role_model(&self.config.selected_role, model))
                     .unwrap_or_default(),
                 model: selected_model,
-                context_window,
+                context_window: context_window.map(tau_proto::TokenCount::get),
                 role: self.config.selected_role.clone(),
             }),
         );
@@ -607,11 +607,13 @@ impl Harness {
                 input_tokens: self
                     .session_runtime
                     .current_session_state
-                    .context_input_tokens,
+                    .context_input_tokens
+                    .map(tau_proto::TokenCount::get),
                 cached_tokens: self
                     .session_runtime
                     .current_session_state
-                    .context_cached_tokens,
+                    .context_cached_tokens
+                    .map(tau_proto::TokenCount::get),
                 percent_used: self
                     .session_runtime
                     .current_session_state

@@ -263,6 +263,70 @@ fn provider_model_catch_up_ignores_requested_declaration_persistence() {
     assert_eq!(event_log_events(&h).len(), before_log);
 }
 
+/// Live and subscribe-time model/context projections must extract exact raw
+/// scalars from distinct typed input, cached, and context-window counts.
+#[test]
+fn model_and_context_usage_scalar_projections_match_live_and_catch_up() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    h.provider_runtime
+        .model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .context_window = tau_proto::TokenCount::new(123_456);
+    h.session_runtime.current_session_state.context_input_tokens =
+        Some(tau_proto::TokenCount::new(32_100));
+    h.session_runtime
+        .current_session_state
+        .context_cached_tokens = Some(tau_proto::TokenCount::new(12_300));
+    h.session_runtime.current_session_state.context_percent_used = Some(26);
+
+    h.publish_current_model_state();
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::HarnessRoleSelected(selected) if selected.context_window == Some(123_456)
+    )));
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::HarnessContextUsageChanged(usage)
+            if usage.input_tokens == Some(32_100)
+                && usage.cached_tokens == Some(12_300)
+                && usage.percent_used == Some(26)
+    )));
+
+    let sink = connect_test_client(&mut h, "typed-usage-replay-ui", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "typed-usage-replay-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::HARNESS_ROLE_SELECTED),
+                EventSelector::Exact(tau_proto::EventName::HARNESS_CONTEXT_USAGE_CHANGED),
+            ],
+            live_selectors: Vec::new(),
+        })),
+    )
+    .expect("subscribe to model and context state");
+    let replayed = sink
+        .lock()
+        .expect("replay sink")
+        .iter()
+        .filter_map(|routed| peel_inner_event(&routed.frame))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(replayed.iter().any(|event| matches!(
+        event,
+        Event::HarnessRoleSelected(selected) if selected.context_window == Some(123_456)
+    )));
+    assert!(replayed.iter().any(|event| matches!(
+        event,
+        Event::HarnessContextUsageChanged(usage)
+            if usage.input_tokens == Some(32_100)
+                && usage.cached_tokens == Some(12_300)
+                && usage.percent_used == Some(26)
+    )));
+    h.shutdown().expect("shutdown");
+}
+
 /// Construct one stamped fallback message fact for persistence/replay tests.
 fn replay_message_fact() -> Event {
     Event::MessageDelivered(tau_proto::MessageDelivered::new(

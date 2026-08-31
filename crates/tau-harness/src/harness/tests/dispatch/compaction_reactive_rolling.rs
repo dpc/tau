@@ -209,7 +209,7 @@ fn reactive_context_overflow_rolls_fitting_prefixes_without_token_evidence() {
         .agents
         .get_mut(&cid)
         .expect("agent");
-    agent.execution.context_input_tokens = Some(1);
+    agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(1));
     agent.execution.context_usage_model = Some("test/model".into());
     agent.execution.context_usage_prompt_id = Some(test_agent_prompt_id("ap-test-provider-usage"));
 
@@ -318,7 +318,7 @@ fn reactive_context_overflow_terminalizes_unfitting_rolling_prefix() {
         .agents
         .get_mut(&cid)
         .expect("agent");
-    agent.execution.context_input_tokens = Some(1);
+    agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(1));
     agent.execution.context_usage_model = Some("test/model".into());
     agent.execution.context_usage_prompt_id = Some(test_agent_prompt_id("ap-test-provider-usage"));
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("retained activation".to_owned()))
@@ -451,7 +451,7 @@ fn reactive_context_overflow_partial_success_rolls_after_cold_replay() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        agent.execution.context_input_tokens = Some(1);
+        agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(1));
         agent.execution.context_usage_model = Some("test/model".into());
         agent.execution.context_usage_prompt_id =
             Some(test_agent_prompt_id("ap-test-provider-usage"));

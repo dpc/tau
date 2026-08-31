@@ -261,6 +261,115 @@ fn provider_report_at_threshold_schedules_once_despite_tiny_transcript() {
     h.shutdown().expect("shutdown");
 }
 
+/// Proactive scheduling must compare typed provider usage to the configured
+/// token threshold exactly below, at, and above the boundary.
+#[test]
+fn provider_report_threshold_boundary_remains_exact() {
+    for (input_tokens, expected_schedule) in [(199_999, false), (200_000, true), (200_001, true)] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        let info = h
+            .provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("test model");
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(tau_proto::TokenCount::new(200_000));
+        let cid = ensure_test_user_agent(&mut h);
+        establish_exact_provider_usage(&mut h, &cid, input_tokens);
+
+        assert_eq!(
+            h.schedule_standalone_auto_compaction_for_activation(&cid, true, None),
+            expected_schedule,
+            "input tokens: {input_tokens}"
+        );
+        assert_eq!(
+            event_log_count(&h, |event| matches!(
+                event,
+                Event::AgentStandaloneCompactionStarted(_)
+            )),
+            usize::from(expected_schedule),
+            "input tokens: {input_tokens}"
+        );
+        h.shutdown().expect("shutdown");
+    }
+}
+
+/// The newest ordinary response owns usage freshness: missing and explicit
+/// zero observations must both block fallback to an older threshold-crossing
+/// count after branch reconstruction.
+#[test]
+fn newest_missing_or_zero_usage_blocks_older_compaction_authority() {
+    for newest_input_tokens in [None, Some(0)] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        let info = h
+            .provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("test model");
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(tau_proto::TokenCount::MAX);
+        let cid = ensure_test_user_agent(&mut h);
+        establish_exact_provider_usage(&mut h, &cid, 900);
+
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("newest observation".to_owned()))
+            .expect("dispatch newest observation");
+        let prompt = read_nth_prompt_created(&h, 1);
+        let mut response =
+            provider_text_response(&prompt.agent_prompt_id, prompt.agent_id, "newest response");
+        response.usage = newest_input_tokens.map(|input_tokens| tau_proto::ProviderTokenUsage {
+            model: Some("test/model".into()),
+            prompt_sent_tokens: input_tokens,
+            prompt_cached_tokens: 0,
+            prompt_cache_read_ceiling_tokens: None,
+            cache: None,
+            response_received_tokens: 1,
+            stats: Default::default(),
+        });
+        h.handle_provider_response_finished(response)
+            .expect("finish newest response");
+        let newest_head = h.agent_runtime.agent_registry.agents[&cid]
+            .identity
+            .head
+            .expect("newest response head");
+        let agent_id = durable_agent_id_for_conversation(&h, &cid);
+        for head in [
+            tau_proto::AgentHead::Root,
+            tau_proto::AgentHead::Node(newest_head),
+        ] {
+            h.publish_for_agent(
+                &cid,
+                Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                    agent_id: agent_id.clone(),
+                    head,
+                }),
+            );
+        }
+        h.provider_runtime
+            .model_info
+            .get_mut(&"test/model".into())
+            .expect("test model")
+            .standalone_compaction_threshold = Some(tau_proto::TokenCount::new(900));
+
+        assert_eq!(
+            h.agent_runtime.agent_registry.agents[&cid]
+                .execution
+                .context_input_tokens,
+            newest_input_tokens.map(tau_proto::TokenCount::new)
+        );
+        assert!(!h.schedule_standalone_auto_compaction_for_activation(&cid, true, None));
+        assert!(
+            event_log_events(&h)
+                .iter()
+                .all(|event| !matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+        );
+        h.shutdown().expect("shutdown");
+    }
+}
+
 /// A user cancellation must not erase standalone-compaction continuation
 /// ownership: that durable transaction requires its own terminal recovery path.
 #[test]
@@ -390,8 +499,8 @@ fn off_branch_usage_baseline_is_ineligible_for_scheduling_and_telemetry() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        agent.execution.context_input_tokens = Some(10_000);
-        agent.execution.context_cached_tokens = Some(5_000);
+        agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(10_000));
+        agent.execution.context_cached_tokens = Some(tau_proto::TokenCount::new(5_000));
         agent.execution.context_usage_model = Some("test/model".into());
         agent.execution.context_usage_prompt_id =
             Some(test_agent_prompt_id("ap-test-provider-usage"));
@@ -706,7 +815,7 @@ fn readiness_deferred_activation_is_branch_owned_below_compaction_threshold() {
         .get_mut(&cid)
         .expect("agent")
         .execution
-        .context_input_tokens = Some(0);
+        .context_input_tokens = Some(tau_proto::TokenCount::new(0));
     h.agent_runtime
         .agent_registry
         .agents
@@ -6355,7 +6464,10 @@ fn cold_resume_restores_exact_usage_for_first_activation_compaction() {
         }),
     );
     let agent = &h.agent_runtime.agent_registry.agents[&cid];
-    assert_eq!(agent.execution.context_input_tokens, Some(900));
+    assert_eq!(
+        agent.execution.context_input_tokens,
+        Some(tau_proto::TokenCount::new(900))
+    );
     assert!(agent.execution.context_usage_prompt_id.is_some());
     assert!(agent.execution.context_usage_head.is_some());
 
@@ -6387,7 +6499,7 @@ fn agent_compacted_resets_live_and_restored_context_usage() {
             h.agent_runtime.agent_registry.agents[&cid]
                 .execution
                 .context_input_tokens,
-            Some(900)
+            Some(tau_proto::TokenCount::new(900))
         );
         h.publish_for_agent(
             &cid,
@@ -8154,7 +8266,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        agent.execution.context_input_tokens = Some(1_000);
+        agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(1_000));
         agent.execution.context_usage_model = Some("test/model".into());
         agent.execution.context_usage_prompt_id =
             Some(test_agent_prompt_id("ap-test-provider-usage"));
@@ -8579,7 +8691,7 @@ fn standalone_auto_compaction_ignores_stale_usage_baseline() {
         .agents
         .get_mut(&cid)
         .expect("agent");
-    agent.execution.context_input_tokens = Some(100_000);
+    agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(100_000));
     agent.execution.context_usage_model = Some("stale/model".into());
     agent.execution.context_usage_prompt_id = Some(test_agent_prompt_id("ap-test-provider-usage"));
 
@@ -8879,8 +8991,8 @@ fn rewind_discards_off_branch_usage_before_tiny_and_new_agent_activations() {
             .agents
             .get_mut(&cid)
             .expect("agent");
-        agent.execution.context_input_tokens = Some(10_000);
-        agent.execution.context_cached_tokens = Some(5_000);
+        agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(10_000));
+        agent.execution.context_cached_tokens = Some(tau_proto::TokenCount::new(5_000));
         agent.execution.context_usage_head = Some(old_branch);
         agent.execution.context_usage_model = Some("test/model".into());
         agent.execution.context_usage_prompt_id =
@@ -8997,7 +9109,7 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
             .get_mut(&cid)
             .expect("agent")
             .execution
-            .context_input_tokens = Some(900);
+            .context_input_tokens = Some(tau_proto::TokenCount::new(900));
         h.agent_runtime
             .agent_registry
             .agents
@@ -9111,7 +9223,7 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
         .get_mut(&cid)
         .expect("agent")
         .execution
-        .context_input_tokens = Some(900);
+        .context_input_tokens = Some(tau_proto::TokenCount::new(900));
     h.agent_runtime
         .agent_registry
         .agents
@@ -9327,7 +9439,7 @@ fn standalone_auto_compaction_keeps_complete_mixed_tool_round_in_suffix() {
         .get_mut(&cid)
         .expect("agent")
         .execution
-        .context_input_tokens = Some(900);
+        .context_input_tokens = Some(tau_proto::TokenCount::new(900));
     h.agent_runtime
         .agent_registry
         .agents

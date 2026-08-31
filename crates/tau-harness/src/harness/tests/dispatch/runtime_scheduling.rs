@@ -1022,7 +1022,7 @@ fn automatic_policy_terminal_matrix_commits_owned_suffix_once() {
                     .agents
                     .get_mut(&cid)
                     .expect("agent");
-                agent.execution.context_input_tokens = Some(100);
+                agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(100));
                 agent.execution.context_usage_model = Some("test/model".into());
                 agent.execution.context_usage_prompt_id =
                     Some(test_agent_prompt_id("ap-test-provider-usage"));
@@ -1186,7 +1186,7 @@ fn outer_finish_alert_uses_terminal_snapshot_and_retains_hysteresis() {
         },
     };
     let arm = |agent: &mut Agent| {
-        agent.execution.context_input_tokens = Some(200);
+        agent.execution.context_input_tokens = Some(tau_proto::TokenCount::new(200));
         agent.turn.terminal_status_was_available = false;
         agent.turn.terminal_notice_eligible = true;
         agent.turn.terminal_notice_outer_turn_id = Some(outer_turn_id.clone());
