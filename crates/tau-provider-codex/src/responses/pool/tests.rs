@@ -134,6 +134,56 @@ fn keys_distinguish_accounts_under_same_thread_id() {
     assert_ne!(a, b);
 }
 
+/// Provider namespaces must partition otherwise identical socket realms, so a
+/// same-shaped URL, account, and thread cannot substitute for another profile.
+#[test]
+fn keys_distinguish_profiles_with_identical_socket_realm() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash as _, Hasher as _};
+
+    let first = make_config("https://chatgpt.com/backend-api", Some("acc"));
+    let second = ResponsesConfig {
+        profile_namespace: tau_proto::ProviderName::new("work-chatgpt"),
+        ..first.clone()
+    };
+    let first_key = pool_key_for(&first, "agent", tau_proto::PromptOriginator::User, false);
+    let second_key = pool_key_for(&second, "agent", tau_proto::PromptOriginator::User, false);
+
+    assert_ne!(first_key, second_key);
+    let hash = |key: &PoolKey| {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    };
+    assert_ne!(
+        hash(&first_key),
+        hash(&second_key),
+        "otherwise identical profiles must contribute distinct pool-key hash input",
+    );
+    assert_eq!(
+        std::collections::HashSet::from([first_key, second_key]).len(),
+        2,
+        "profile identity must contribute to the pool key hash",
+    );
+}
+
+/// Pool diagnostics keep their established raw namespace rendering while the
+/// key retains a validated provider identity internally.
+#[test]
+fn pool_key_debug_preserves_profile_namespace_diagnostic() {
+    let key = PoolKey {
+        profile_namespace: tau_proto::ProviderName::new("chatgpt"),
+        base_url: "https://chatgpt.com/backend-api".to_owned(),
+        account_id: Some("acc".to_owned()),
+        thread_id: "thread".to_owned(),
+    };
+
+    assert_eq!(
+        format!("{key:?}"),
+        r#"PoolKey { profile_namespace: "chatgpt", base_url: "https://chatgpt.com/backend-api", account_id: Some("acc"), thread_id: "thread" }"#,
+    );
+}
+
 /// The headline pool invariant: alternating between two prompt-cache threads
 /// must NOT cause the second thread's turn to flush the first thread's
 /// connection. Each `(account, thread-id)` must hold its own socket so the
@@ -681,6 +731,33 @@ fn invalidate_all_discards_late_reserved_socket_release() {
         "invalidated owner must not reinstall its stale socket"
     );
     pool.abandon(&key).expect("release test reservation");
+}
+
+/// Profile invalidation must remove only the matching typed namespace, leaving
+/// another profile's identical socket realm warm and forcing the stale profile
+/// to reconnect.
+#[test]
+fn invalidate_profile_preserves_other_typed_profile_socket() {
+    let (addr, server) = spawn_fake_codex_server();
+    let first = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let second = ResponsesConfig {
+        profile_namespace: tau_proto::ProviderName::new("work-chatgpt"),
+        ..first.clone()
+    };
+    let pool = SharedWsPool::new(Arc::new(crate::test_network_policy()));
+
+    run_shared_turn(&pool, &first, "same-session", "first-warm");
+    run_shared_turn(&pool, &second, "same-session", "second-warm");
+    pool.invalidate_profile(&first.profile_namespace)
+        .expect("invalidate only first profile");
+    run_shared_turn(&pool, &second, "same-session", "second-reuse");
+    run_shared_turn(&pool, &first, "same-session", "first-reconnect");
+
+    assert_eq!(
+        server.lock_state().upgrade_count,
+        3,
+        "invalidation must preserve the other profile's socket and reconnect only the invalidated profile",
+    );
 }
 
 /// Cancellation landing after socket installation but before reservation
@@ -2686,7 +2763,7 @@ fn run_shared_turn_with_abort(
 
 fn make_config(base_url: &str, account_id: Option<&str>) -> ResponsesConfig {
     ResponsesConfig {
-        profile_namespace: "chatgpt".to_owned(),
+        profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: ResponsesMode::Standard,
         base_url: base_url.into(),
         api_key: "test".into(),

@@ -640,7 +640,7 @@ fn test_ws_conn() -> (WsConn, InboundSender, UnboundedReceiver<WsCommand>) {
 
 fn test_responses_config() -> ResponsesConfig {
     ResponsesConfig {
-        profile_namespace: "chatgpt".to_owned(),
+        profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: ResponsesMode::Standard,
         base_url: "https://chatgpt.com/backend-api".to_owned(),
         api_key: "test-token".to_owned(),

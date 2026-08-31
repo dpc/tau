@@ -67,10 +67,10 @@ pub const MAX_CONNECTION_AGE: Duration = Duration::from_secs(55 * 60);
 /// - `thread_id` is the upstream session/thread UUID sent on the WebSocket
 ///   upgrade. It is the same UUID as the request body's `prompt_cache_key`, so
 ///   a socket is never reused for a different cache bucket.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PoolKey {
     /// Filename-derived provider namespace owning this socket.
-    pub profile_namespace: String,
+    pub profile_namespace: tau_proto::ProviderName,
     /// WS endpoint realm. Cross-realm reuse is impossible.
     pub base_url: String,
     /// Account realm for the socket's bearer and server-side state.
@@ -81,6 +81,18 @@ pub struct PoolKey {
     /// `prompt_cache_key` and is sent as both `session-id` and `thread-id` on
     /// the WebSocket upgrade.
     pub thread_id: String,
+}
+
+impl std::fmt::Debug for PoolKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PoolKey")
+            .field("profile_namespace", &self.profile_namespace.as_str())
+            .field("base_url", &self.base_url)
+            .field("account_id", &self.account_id)
+            .field("thread_id", &self.thread_id)
+            .finish()
+    }
 }
 
 impl PoolKey {
@@ -322,13 +334,16 @@ impl SharedWsPool {
     }
 
     /// Invalidates cached and reserved sockets for one provider namespace.
-    pub(crate) fn invalidate_profile(&self, namespace: &str) -> Result<(), WsTurnError> {
+    pub(crate) fn invalidate_profile(
+        &self,
+        provider: &tau_proto::ProviderName,
+    ) -> Result<(), WsTurnError> {
         let mut inner = self.lock_inner()?;
         let cached = inner
             .pool
             .conns
             .iter()
-            .filter(|(key, _)| key.profile_namespace == namespace)
+            .filter(|(key, _)| &key.profile_namespace == provider)
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         for key in cached {
@@ -337,7 +352,7 @@ impl SharedWsPool {
         let busy = inner
             .busy
             .iter()
-            .filter(|key| key.profile_namespace == namespace)
+            .filter(|key| &key.profile_namespace == provider)
             .cloned()
             .collect::<Vec<_>>();
         inner.invalidated_busy.extend(busy);

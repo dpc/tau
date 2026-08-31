@@ -988,7 +988,7 @@ impl CodexRuntime {
     /// namespace, preserving unrelated configured providers.
     pub fn invalidate_profile_websockets(&self, provider: &ProviderName) -> Result<(), CodexError> {
         self.ws_pool
-            .invalidate_profile(provider.as_str())
+            .invalidate_profile(provider)
             .map_err(path_responses_pool::WsTurnError::into_llm_error)
             .map_err(CodexError)
     }
@@ -1364,7 +1364,7 @@ pub fn resolved_config_for_provider_model(
     let mode = effective_mode(model_id, requested_mode);
     ResolvedConfig {
         inner: responses::ResponsesConfig {
-            profile_namespace: provider.as_str().to_owned(),
+            profile_namespace: provider.clone(),
             mode,
             base_url: DEFAULT_BASE_URL.to_owned(),
             api_key: credentials.access_token,

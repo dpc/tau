@@ -271,10 +271,10 @@ pub(super) fn record_provider_raw_event_after(
 }
 
 /// Config for the ChatGPT/Codex Responses API.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ResponsesConfig {
     /// Filename-derived provider namespace owning this connection generation.
-    pub profile_namespace: String,
+    pub profile_namespace: tau_proto::ProviderName,
     /// Startup-stable Responses protocol contract for this profile/model route.
     pub mode: ResponsesMode,
     /// Base URL for the selected surface, without the final Responses path.
@@ -331,6 +331,34 @@ pub struct ResponsesConfig {
     /// The wire key is derived per `(base_url, mode, agent lifetime)` and is
     /// stable across prompt originators for the same target agent.
     pub supports_prompt_cache_key: bool,
+}
+
+impl std::fmt::Debug for ResponsesConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResponsesConfig")
+            .field("profile_namespace", &self.profile_namespace.as_str())
+            .field("mode", &self.mode)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key)
+            .field("model_id", &self.model_id)
+            .field("raw_context_window", &self.raw_context_window)
+            .field("account_id", &self.account_id)
+            .field("supports_reasoning_effort", &self.supports_reasoning_effort)
+            .field(
+                "supports_reasoning_summary",
+                &self.supports_reasoning_summary,
+            )
+            .field("supports_verbosity", &self.supports_verbosity)
+            .field("supports_phase", &self.supports_phase)
+            .field(
+                "supports_encrypted_reasoning",
+                &self.supports_encrypted_reasoning,
+            )
+            .field("supports_compaction", &self.supports_compaction)
+            .field("supports_prompt_cache_key", &self.supports_prompt_cache_key)
+            .finish()
+    }
 }
 
 /// Serialize and submit the exact Responses request body Tau is about to send.

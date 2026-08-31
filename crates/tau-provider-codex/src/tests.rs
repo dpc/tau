@@ -1051,7 +1051,7 @@ fn compact_large_fixed_material_reaches_canonical_context_rejection_once() {
 
 fn test_config(base_url: String) -> responses::ResponsesConfig {
     responses::ResponsesConfig {
-        profile_namespace: "chatgpt".to_owned(),
+        profile_namespace: tau_proto::ProviderName::new("chatgpt"),
         mode: responses::ResponsesMode::Standard,
         base_url,
         api_key: "token".to_owned(),
@@ -1223,6 +1223,22 @@ fn config_for_model_enables_codex_responses_capabilities() {
     assert!(config.supports_compaction);
     assert!(config.supports_phase);
     assert!(config.supports_encrypted_reasoning);
+}
+
+/// A configured non-default provider namespace must reach the private wire
+/// configuration as the same validated identity, rather than a raw or default
+/// profile string.
+#[test]
+fn resolved_provider_config_retains_typed_profile_namespace() {
+    let provider = ProviderName::new("work-chatgpt");
+    let config = resolved_config_for_provider_model(
+        &provider,
+        &ModelName::new("gpt-5.3-codex"),
+        ResolvedCredentials::new("token".to_owned(), Some("account".to_owned())),
+        CodexMode::Standard,
+    );
+
+    assert_eq!(config.inner.profile_namespace, provider);
 }
 
 /// Exact audited model IDs, rather than a name prefix, control GPT-5.6 image
