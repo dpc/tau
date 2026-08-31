@@ -7692,6 +7692,53 @@ fn test_connection_id(value: impl AsRef<str>) -> tau_proto::ConnectionId {
         .expect("test connection id must satisfy the identifier grammar")
 }
 
+/// Exhaustively preserves the four reachable automatic-decision states and
+/// their three durable transitions so invalid boolean combinations cannot
+/// silently reappear.
+#[test]
+fn automatic_compaction_decision_state_has_exact_reachable_transition_table() {
+    fn projections(state: AutomaticCompactionDecisionState) -> (bool, bool, bool, bool) {
+        (
+            state.is_awaiting_start(),
+            state.finish_committed(),
+            matches!(state, AutomaticCompactionDecisionState::Claimed),
+            state.is_closed(),
+        )
+    }
+
+    let awaiting = AutomaticCompactionDecisionState::AwaitingOuterTurnFinish;
+    assert_eq!(projections(awaiting), (true, false, false, false));
+
+    let mut invalid_claim = awaiting;
+    assert!(!invalid_claim.claim());
+    assert_eq!(invalid_claim, awaiting);
+    let mut invalid_close = awaiting;
+    assert!(!invalid_close.close());
+    assert_eq!(invalid_close, awaiting);
+
+    let mut ready = awaiting;
+    assert!(ready.commit_finish());
+    assert_eq!(ready, AutomaticCompactionDecisionState::Ready);
+    assert_eq!(projections(ready), (true, true, false, false));
+    assert!(!ready.commit_finish());
+
+    let mut claimed = ready;
+    assert!(claimed.claim());
+    assert_eq!(claimed, AutomaticCompactionDecisionState::Claimed);
+    assert_eq!(projections(claimed), (false, true, true, false));
+    assert!(!claimed.commit_finish());
+    assert!(!claimed.claim());
+    assert!(!claimed.close());
+
+    let mut closed = ready;
+    assert!(closed.close());
+    assert_eq!(closed, AutomaticCompactionDecisionState::Closed);
+    assert_eq!(projections(closed), (false, true, false, true));
+    assert!(!closed.commit_finish());
+    assert!(!closed.claim());
+    assert!(!closed.close());
+}
+
 /// A continuation prompt's durable outer-turn ownership admits its eager
 /// decision, which survives the finish cut and is claimed exactly once.
 #[test]

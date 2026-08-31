@@ -754,9 +754,81 @@ impl std::ops::DerefMut for StandaloneCompactionTransactions {
 struct AutomaticCompactionDecisionFold {
     decision: tau_proto::AutomaticCompactionDecision,
     cut: tau_proto::AgentHead,
-    finish_committed: bool,
-    claimed: bool,
-    closed: bool,
+    state: AutomaticCompactionDecisionState,
+}
+
+/// Reachable durable lifecycle states for one automatic-compaction decision.
+///
+/// The durable transition table is:
+///
+/// | Current state | Durable event | Next state |
+/// | --- | --- | --- |
+/// | `AwaitingOuterTurnFinish` | `AgentOuterTurnFinished` | `Ready` |
+/// | `Ready` | `AgentStandaloneCompactionStarted` | `Claimed` |
+/// | `Ready` | pre-start `AgentStandaloneCompactionFailed` | `Closed` |
+///
+/// No other transition is valid. In particular, outer-turn finish commitment
+/// is a lifecycle prerequisite rather than an orthogonal fact: neither a claim
+/// nor a pre-start closure validates before it commits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AutomaticCompactionDecisionState {
+    /// The canonical terminal committed, but its outer turn has not finished.
+    AwaitingOuterTurnFinish,
+    /// The outer turn finished and the decision may be claimed or closed.
+    Ready,
+    /// A standalone compaction transaction claimed the decision.
+    Claimed,
+    /// A pre-start failure permanently closed the decision.
+    Closed,
+}
+
+impl AutomaticCompactionDecisionState {
+    /// Returns whether the decision remains visible as an awaiting start.
+    fn is_awaiting_start(self) -> bool {
+        matches!(self, Self::AwaitingOuterTurnFinish | Self::Ready)
+    }
+
+    /// Returns whether the owning outer-turn finish committed.
+    fn finish_committed(self) -> bool {
+        !matches!(self, Self::AwaitingOuterTurnFinish)
+    }
+
+    /// Returns whether the decision is ready for its sole terminal transition.
+    fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    /// Returns whether a pre-start failure closed the decision.
+    fn is_closed(self) -> bool {
+        matches!(self, Self::Closed)
+    }
+
+    /// Applies the sole valid outer-turn-finish transition.
+    fn commit_finish(&mut self) -> bool {
+        if *self != Self::AwaitingOuterTurnFinish {
+            return false;
+        }
+        *self = Self::Ready;
+        true
+    }
+
+    /// Applies the sole valid transaction-claim transition.
+    fn claim(&mut self) -> bool {
+        if *self != Self::Ready {
+            return false;
+        }
+        *self = Self::Claimed;
+        true
+    }
+
+    /// Applies the sole valid pre-start-closure transition.
+    fn close(&mut self) -> bool {
+        if *self != Self::Ready {
+            return false;
+        }
+        *self = Self::Closed;
+        true
+    }
 }
 
 /// Exactly one terminal compact outcome.
@@ -967,13 +1039,13 @@ impl AgentTree {
             .rev()
             .filter_map(|id| self.automatic_compaction_decisions.get(id))
             .find(|decision| {
-                !decision.claimed && !decision.closed && decision.decision.evidence.is_some()
+                decision.state.is_awaiting_start() && decision.decision.evidence.is_some()
             })
         {
             return Some(StandaloneCompactionRecovery::AwaitingAutomaticStart {
                 decision: decision.decision.clone(),
                 cut: decision.cut,
-                finish_committed: decision.finish_committed,
+                finish_committed: decision.state.finish_committed(),
             });
         }
         let id = self.compaction_transactions.order.last()?;
@@ -2530,9 +2602,7 @@ impl AgentTree {
                     decision: decision.clone(),
                     cut: resolved_parent
                         .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                    finish_committed: false,
-                    claimed: false,
-                    closed: false,
+                    state: AutomaticCompactionDecisionState::AwaitingOuterTurnFinish,
                 },
             );
         }
@@ -2573,9 +2643,7 @@ impl AgentTree {
                             automatic_terminal_node
                                 .expect("decision response appends its assistant node first"),
                         ),
-                        finish_committed: false,
-                        claimed: false,
-                        closed: false,
+                        state: AutomaticCompactionDecisionState::AwaitingOuterTurnFinish,
                     },
                 );
             }
@@ -2765,7 +2833,9 @@ impl AgentTree {
                 if let Some(decision_id) = decision_id
                     && let Some(decision) = self.automatic_compaction_decisions.get_mut(decision_id)
                 {
-                    decision.claimed = true;
+                    let transitioned = decision.state.claim();
+                    // ast-grep-ignore: debug-assert-expression-must-not-mutate
+                    debug_assert!(transitioned);
                 }
                 if let tau_proto::StandaloneCompactionTrigger::ManualAgentTool {
                     request_id, ..
@@ -2811,7 +2881,9 @@ impl AgentTree {
                     .automatic_compaction_decisions
                     .get_mut(&failed.transaction_id)
                 {
-                    decision.closed = true;
+                    let transitioned = decision.state.close();
+                    // ast-grep-ignore: debug-assert-expression-must-not-mutate
+                    debug_assert!(transitioned);
                 }
             }
             Event::AgentCompacted(compacted) => {
@@ -2950,7 +3022,9 @@ impl AgentTree {
                 if let Some(id) = &finished.automatic_compaction_decision
                     && let Some(decision) = self.automatic_compaction_decisions.get_mut(id)
                 {
-                    decision.finish_committed = true;
+                    let transitioned = decision.state.commit_finish();
+                    // ast-grep-ignore: debug-assert-expression-must-not-mutate
+                    debug_assert!(transitioned);
                 }
                 self.active_outer_turn = None;
             }
@@ -3644,7 +3718,7 @@ impl AgentTree {
                                 .automatic_compaction_decisions
                                 .values()
                                 .find(|decision| {
-                                    !decision.finish_committed
+                                    !decision.state.finish_committed()
                                         && decision.decision.outer_turn_id == turn.outer_turn_id
                                 })
                                 .map(|decision| &decision.decision.transaction_id)
@@ -4261,7 +4335,7 @@ impl AgentTree {
                         || {
                             self.automatic_compaction_decisions
                                 .get(id)
-                                .is_some_and(|decision| decision.closed)
+                                .is_some_and(|decision| decision.state.is_closed())
                         },
                         |transaction| {
                             matches!(
@@ -4369,9 +4443,7 @@ impl AgentTree {
                     "automatic compaction references unknown terminal decision",
                 ));
             };
-            if decision.claimed
-                || decision.closed
-                || !decision.finish_committed
+            if !decision.state.is_ready()
                 || started.transaction_id != *decision_id
                 || !self.is_ancestor_head(started.cut, decision.cut)
                 || started.model != decision.decision.model
@@ -5119,7 +5191,7 @@ impl AgentTree {
             let active_decision = eligible_transaction.is_some_and(|id| {
                 self.automatic_compaction_decisions
                     .get(id)
-                    .is_some_and(|decision| !decision.claimed && !decision.closed)
+                    .is_some_and(|decision| decision.state.is_awaiting_start())
             });
             let any_active_automatic = self.compaction_transactions.values().any(|transaction| {
                 transaction.outcome.is_none()
@@ -5132,7 +5204,7 @@ impl AgentTree {
             }) || self
                 .automatic_compaction_decisions
                 .values()
-                .any(|decision| !decision.claimed && !decision.closed);
+                .any(|decision| decision.state.is_awaiting_start());
             if eligible_transaction.is_some() != (active_transaction || active_decision)
                 || eligible_transaction.is_none() && any_active_automatic
             {
@@ -5389,9 +5461,7 @@ impl AgentTree {
                 .automatic_compaction_decisions
                 .get(&failed.transaction_id)
                 .is_some_and(|decision| {
-                    decision.finish_committed
-                        && !decision.claimed
-                        && !decision.closed
+                    decision.state.is_ready()
                         && !self.is_ancestor_head(
                             decision.cut,
                             self.head
@@ -5846,8 +5916,7 @@ impl AgentTree {
                     .values()
                     .any(|existing| {
                         existing.decision.outer_turn_id == decision.outer_turn_id
-                            && !existing.claimed
-                            && !existing.closed
+                            && existing.state.is_awaiting_start()
                     })
                 && self.active_outer_turn.as_ref() == Some(&decision.outer_turn_id)
                 && self
