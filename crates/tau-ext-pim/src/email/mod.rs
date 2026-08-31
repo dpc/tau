@@ -524,8 +524,8 @@ pub struct ValidatedImapConfig {
     pub tls: TlsMode,
     /// Login user name.
     pub login: String,
-    /// Whole-operation timeout in seconds.
-    pub timeout_seconds: u64,
+    /// Whole-operation timeout derived from the validated config seconds.
+    pub timeout: Duration,
 }
 
 /// Validated SMTP connection settings.
@@ -539,8 +539,8 @@ pub struct ValidatedSmtpConfig {
     pub tls: TlsMode,
     /// Login user name.
     pub login: String,
-    /// Whole-operation timeout in seconds.
-    pub timeout_seconds: u64,
+    /// Whole-operation timeout derived from the validated config seconds.
+    pub timeout: Duration,
 }
 
 /// Validated authentication settings.
@@ -607,12 +607,13 @@ fn validate_imap_config(
     let host = required_config_string(config.host, account_id, "imap.host")?;
     let login = required_config_string(config.login, account_id, "imap.login")?;
     validate_timeout(account_id, "imap.timeout_seconds", config.timeout_seconds)?;
+    let timeout = Duration::from_secs(config.timeout_seconds);
     Ok(Some(ValidatedImapConfig {
         host,
         port: config.port,
         tls: config.tls,
         login,
-        timeout_seconds: config.timeout_seconds,
+        timeout,
     }))
 }
 
@@ -626,12 +627,13 @@ fn validate_smtp_config(
     let host = required_config_string(config.host, account_id, "smtp.host")?;
     let login = required_config_string(config.login, account_id, "smtp.login")?;
     validate_timeout(account_id, "smtp.timeout_seconds", config.timeout_seconds)?;
+    let timeout = Duration::from_secs(config.timeout_seconds);
     Ok(Some(ValidatedSmtpConfig {
         host,
         port: config.port,
         tls: config.tls,
         login,
-        timeout_seconds: config.timeout_seconds,
+        timeout,
     }))
 }
 

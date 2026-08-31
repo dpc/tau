@@ -182,12 +182,12 @@ impl RealEmailBackend {
             .ok_or_else(|| "internal_error: account not found in backend".to_owned())
     }
 
-    fn block_with_timeout<T, Fut>(&self, seconds: u64, fut: Fut) -> Result<T, String>
+    fn block_with_timeout<T, Fut>(&self, timeout: Duration, fut: Fut) -> Result<T, String>
     where
         Fut: Future<Output = Result<T, String>>,
     {
         self.runtime.block_on(async move {
-            match time::timeout(Duration::from_secs(seconds), fut).await {
+            match time::timeout(timeout, fut).await {
                 Ok(result) => result,
                 Err(_) => Err("network_error: email backend operation timed out".to_owned()),
             }
@@ -198,8 +198,8 @@ impl RealEmailBackend {
 impl EmailBackend for RealEmailBackend {
     fn list_folders(&self, account: &str) -> Result<Vec<BackendFolder>, String> {
         let account = self.account(account)?;
-        let timeout_seconds = account.imap_config()?.timeout_seconds;
-        self.block_with_timeout(timeout_seconds, async move {
+        let timeout = account.imap_config()?.timeout;
+        self.block_with_timeout(timeout, async move {
             let mut session = connect_imap(&account).await?;
             let mut names = session.list(None, Some("*")).await.map_err(imap_error)?;
             let mut folders = Vec::new();
@@ -230,9 +230,9 @@ impl EmailBackend for RealEmailBackend {
         offset: usize,
     ) -> Result<BackendMessagePage, String> {
         let account = self.account(account)?;
-        let timeout_seconds = account.imap_config()?.timeout_seconds;
+        let timeout = account.imap_config()?.timeout;
         let folder = folder.to_owned();
-        self.block_with_timeout(timeout_seconds, async move {
+        self.block_with_timeout(timeout, async move {
             list_messages_by_uid_page_async(&account, &folder, limit, offset).await
         })
     }
@@ -247,9 +247,9 @@ impl EmailBackend for RealEmailBackend {
         now: SystemTime,
     ) -> Result<BackendMessagePage, String> {
         let account = self.account(account)?;
-        let timeout_seconds = account.imap_config()?.timeout_seconds;
+        let timeout = account.imap_config()?.timeout;
         let folder = folder.to_owned();
-        self.block_with_timeout(timeout_seconds, async move {
+        self.block_with_timeout(timeout, async move {
             list_recent_messages_page_async(&account, &folder, limit, offset, days, now).await
         })
     }
@@ -261,10 +261,10 @@ impl EmailBackend for RealEmailBackend {
         uid: &str,
     ) -> Result<BackendMessage, String> {
         let account = self.account(account)?;
-        let timeout_seconds = account.imap_config()?.timeout_seconds;
+        let timeout = account.imap_config()?.timeout;
         let folder = folder.to_owned();
         let uid = uid.to_owned();
-        self.block_with_timeout(timeout_seconds, async move {
+        self.block_with_timeout(timeout, async move {
             message_metadata_async(&account, &folder, &uid).await
         })
     }
@@ -276,10 +276,10 @@ impl EmailBackend for RealEmailBackend {
         uid: &str,
     ) -> Result<BackendMessage, String> {
         let account = self.account(account)?;
-        let timeout_seconds = account.imap_config()?.timeout_seconds;
+        let timeout = account.imap_config()?.timeout;
         let folder = folder.to_owned();
         let uid = uid.to_owned();
-        self.block_with_timeout(timeout_seconds, async move {
+        self.block_with_timeout(timeout, async move {
             read_message_async(&account, &folder, &uid).await
         })
     }
@@ -292,10 +292,10 @@ impl EmailBackend for RealEmailBackend {
         mutation: MessageFlagMutation,
     ) -> Result<(), String> {
         let account = self.account(account)?;
-        let timeout_seconds = account.imap_config()?.timeout_seconds;
+        let timeout = account.imap_config()?.timeout;
         let folder = folder.to_owned();
         let uid = uid.to_owned();
-        self.block_with_timeout(timeout_seconds, async move {
+        self.block_with_timeout(timeout, async move {
             update_message_flags_async(&account, &folder, &uid, mutation).await
         })
     }
@@ -307,10 +307,10 @@ impl EmailBackend for RealEmailBackend {
         uid: &str,
     ) -> Result<String, String> {
         let account = self.account(account)?;
-        let timeout_seconds = account.imap_config()?.timeout_seconds;
+        let timeout = account.imap_config()?.timeout;
         let folder = folder.to_owned();
         let uid = uid.to_owned();
-        self.block_with_timeout(timeout_seconds, async move {
+        self.block_with_timeout(timeout, async move {
             move_message_to_trash_async(&account, &folder, &uid).await
         })
     }
@@ -319,20 +319,15 @@ impl EmailBackend for RealEmailBackend {
         let account = self
             .account(&message.account)
             .map_err(EmailSendFailure::NotDispatched)?;
-        let timeout_seconds = account
+        let timeout = account
             .smtp_config()
             .map_err(EmailSendFailure::NotDispatched)?
-            .timeout_seconds;
+            .timeout;
         let message = clone_outgoing_message(message);
         let send_stage = SmtpSubmissionStage::default();
         let timeout_stage = send_stage.clone();
         self.runtime.block_on(async move {
-            match time::timeout(
-                Duration::from_secs(timeout_seconds),
-                send_message_async(&account, &message, send_stage),
-            )
-            .await
-            {
+            match time::timeout(timeout, send_message_async(&account, &message, send_stage)).await {
                 Ok(result) => result,
                 Err(_) => Err(timeout_stage.timeout_failure()),
             }
@@ -1034,7 +1029,7 @@ async fn connect_smtp_for_auth(account: &RealAccount) -> Result<AsyncSmtpConnect
     let mut conn = match smtp.tls {
         TlsMode::Required => AsyncSmtpConnection::connect_tokio1(
             (smtp.host.as_str(), smtp.port),
-            Some(Duration::from_secs(smtp.timeout_seconds)),
+            Some(smtp.timeout),
             &client_id,
             Some(tls_parameters()?),
             None,
@@ -1043,7 +1038,7 @@ async fn connect_smtp_for_auth(account: &RealAccount) -> Result<AsyncSmtpConnect
         .map_err(|error| error.to_string())?,
         TlsMode::StartTls | TlsMode::None => AsyncSmtpConnection::connect_tokio1(
             (smtp.host.as_str(), smtp.port),
-            Some(Duration::from_secs(smtp.timeout_seconds)),
+            Some(smtp.timeout),
             &client_id,
             None,
             None,

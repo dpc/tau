@@ -164,7 +164,7 @@ fn smtp_backend(
             port,
             tls: TlsMode::None,
             login: "alice@example.com".to_owned(),
-            timeout_seconds: 5,
+            timeout: Duration::from_secs(5),
         }),
         auth,
         secrets: Arc::new(secrets),

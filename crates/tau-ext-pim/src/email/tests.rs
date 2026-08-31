@@ -1196,6 +1196,88 @@ fn disabled_defaults_and_config_validation() {
     assert!(!config.validate().expect("valid").accounts["work"].enable);
 }
 
+/// Ensures the YAML seconds DTO retains its accepted values and defaults while
+/// validated IMAP and SMTP configuration carries the corresponding durations.
+#[test]
+fn validated_email_timeouts_convert_once_at_the_config_boundary() {
+    let yaml = r#"
+enable: true
+accounts:
+  - id: work
+    enable: true
+    from: Alice <alice@company.com>
+    imap:
+      host: imap.company.com
+      login: alice@company.com
+      timeout_seconds: 17
+    smtp:
+      host: smtp.company.com
+      login: alice@company.com
+    auth:
+      password_secret: email_password
+"#;
+    let config = serde_yaml_ng::from_str::<EmailExtensionConfig>(yaml).expect("valid YAML");
+    assert_eq!(
+        config.accounts[0]
+            .imap
+            .as_ref()
+            .expect("IMAP config")
+            .timeout_seconds,
+        17
+    );
+    assert_eq!(
+        config.accounts[0]
+            .smtp
+            .as_ref()
+            .expect("SMTP config")
+            .timeout_seconds,
+        30
+    );
+
+    let validated = config.validate().expect("valid config");
+    assert_eq!(
+        validated.accounts["work"]
+            .imap
+            .as_ref()
+            .expect("validated IMAP config")
+            .timeout,
+        std::time::Duration::from_secs(17)
+    );
+    assert_eq!(
+        validated.accounts["work"]
+            .smtp
+            .as_ref()
+            .expect("validated SMTP config")
+            .timeout,
+        std::time::Duration::from_secs(30)
+    );
+
+    for field in ["imap", "smtp"] {
+        let mut zero_timeout = cfg();
+        if field == "imap" {
+            zero_timeout.accounts[0]
+                .imap
+                .as_mut()
+                .expect("IMAP config")
+                .timeout_seconds = 0;
+        } else {
+            zero_timeout.accounts[0]
+                .smtp
+                .as_mut()
+                .expect("SMTP config")
+                .timeout_seconds = 0;
+        }
+        let error = match zero_timeout.validate() {
+            Ok(_) => panic!("zero timeout accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains(&format!("{field}.timeout_seconds")),
+            "{error}"
+        );
+    }
+}
+
 #[test]
 fn real_backend_config_requires_connection_identity_and_rejects_legacy_auth() {
     let mut missing_host = cfg();
