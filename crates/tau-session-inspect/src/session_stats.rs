@@ -124,7 +124,7 @@ pub fn read_session_stats(
 }
 
 fn aggregate_agent(
-    session_id: &str,
+    session_id: &tau_proto::SessionId,
     agent_id: &tau_proto::AgentId,
     events: &[tau_core::PersistedAgentEvent],
     missing: &mut BTreeSet<MissingAccountingData>,
@@ -150,18 +150,18 @@ fn aggregate_agent(
                 }
             }
             Event::AgentDisplayNameSet(name) => result.name = Some(name.display_name.clone()),
-            Event::AgentOuterTurnStarted(turn) if turn.session_id == session_id => {
+            Event::AgentOuterTurnStarted(turn) if &turn.session_id == session_id => {
                 result.totals.outer_turns_started =
                     result.totals.outer_turns_started.saturating_add(1);
                 open_turns.insert(turn.outer_turn_id.clone());
             }
-            Event::AgentOuterTurnFinished(turn) if turn.session_id == session_id => {
+            Event::AgentOuterTurnFinished(turn) if &turn.session_id == session_id => {
                 let AgentOuterTurnDisposition::Settled = turn.disposition;
                 result.totals.outer_turns_finished =
                     result.totals.outer_turns_finished.saturating_add(1);
                 open_turns.remove(&turn.outer_turn_id);
             }
-            Event::AgentPromptStarted(prompt) if prompt.session_id == session_id => {
+            Event::AgentPromptStarted(prompt) if &prompt.session_id == session_id => {
                 if prompt.operation.is_inference() {
                     result.totals.inner_turns = result.totals.inner_turns.saturating_add(1);
                 }

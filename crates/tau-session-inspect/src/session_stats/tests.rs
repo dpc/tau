@@ -64,8 +64,9 @@ fn record(seq: u64, event: Event) -> PersistedAgentEvent {
     }
 }
 
-/// Exact aggregation must use response-local counters and the captured cost
-/// increment rather than the much larger cumulative usage snapshot.
+/// Exact aggregation must accept an independently parsed, lexically equal
+/// session identity while excluding nonmatching session records and retaining
+/// response-local counters plus captured dispatch fields.
 #[test]
 fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
     let agent_id = AgentId::parse("engineer_0").expect("agent id");
@@ -239,8 +240,9 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
         }),
     ));
     let mut missing = BTreeSet::new();
+    let selected_session = SessionId::parse("s1").expect("known-safe SessionId must be valid");
     let stats = aggregate_agent(
-        "s1",
+        &selected_session,
         &AgentId::parse("engineer_0").expect("agent id"),
         &events,
         &mut missing,
@@ -296,7 +298,7 @@ fn aggregation_reports_legacy_accounting_gaps_without_inference() {
     ];
     let mut missing = BTreeSet::new();
     let stats = aggregate_agent(
-        "s1",
+        &SessionId::parse("s1").expect("known-safe SessionId must be valid"),
         &AgentId::parse("legacy_0").expect("agent id"),
         &events,
         &mut missing,
@@ -373,7 +375,12 @@ fn aggregation_treats_present_zero_accounting_as_complete() {
         ),
     ];
     let mut missing = BTreeSet::new();
-    let stats = aggregate_agent("s1", &agent_id, &events, &mut missing);
+    let stats = aggregate_agent(
+        &SessionId::parse("s1").expect("known-safe SessionId must be valid"),
+        &agent_id,
+        &events,
+        &mut missing,
+    );
 
     assert_eq!(stats.totals.cached_input_tokens, 0);
     assert_eq!(stats.totals.uncached_input_tokens, 0);
