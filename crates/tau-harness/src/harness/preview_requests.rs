@@ -104,8 +104,7 @@ impl Harness {
         let agent_id = self.agent_runtime.agent_registry.agents[&agent]
             .identity
             .agent_id
-            .as_deref()
-            .map(crate::parse_agent_id)
+            .clone()
             .expect("new preview agent has an id");
         self.prompt_coordination
             .context_discovery
@@ -441,7 +440,7 @@ impl Harness {
                     && agent.identity.agent_id.is_some()
             })
             .filter_map(|(cid, agent)| {
-                let agent_id = AgentId::parse(agent.identity.agent_id.as_deref()?).ok()?;
+                let agent_id = agent.identity.agent_id.clone()?;
                 let navigation_mode = self
                     .agent_runtime
                     .agent_registry

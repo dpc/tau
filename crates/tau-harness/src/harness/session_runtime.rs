@@ -540,9 +540,7 @@ impl Harness {
                     None,
                     Event::UiCancelPrompt(UiCancelPrompt {
                         session_id: session_id.clone(),
-                        target_agent_id: self
-                            .target_agent_id_for_agent(cid)
-                            .map(crate::parse_agent_id),
+                        target_agent_id: self.target_agent_id_for_agent(cid),
                         agent_prompt_id: Some(spid.clone()),
                     }),
                 );
@@ -607,9 +605,7 @@ impl Harness {
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {
                     session_id: session_id.clone(),
-                    target_agent_id: self
-                        .target_agent_id_for_agent(cid)
-                        .map(crate::parse_agent_id),
+                    target_agent_id: self.target_agent_id_for_agent(cid),
                     agent_prompt_id: Some(spid.clone()),
                 }),
             );
@@ -638,7 +634,7 @@ impl Harness {
         let agent_id = self
             .target_agent_id_for_agent(&cid)
             .expect("agent has durable id");
-        let parsed_agent_id = crate::parse_agent_id(&agent_id);
+        let parsed_agent_id = agent_id.clone();
         let events = match self.session_runtime.agent_store.agent_events(&agent_id) {
             Ok(events) => events,
             Err(error) => {
@@ -712,10 +708,9 @@ impl Harness {
             self.send_ui_error_response(client_id, "navigate ignored: unknown agent");
             return None;
         };
-        let agent_id: tau_proto::AgentId = crate::parse_agent_id(
-            self.target_agent_id_for_agent(&cid)
-                .expect("agent has durable id"),
-        );
+        let agent_id = self
+            .target_agent_id_for_agent(&cid)
+            .expect("agent has durable id");
         let tree = self.session_runtime.agent_store.agent(agent_id.as_str());
         let events = match self
             .session_runtime
@@ -1535,8 +1530,7 @@ impl Harness {
                     let agent_id = conv
                         .identity
                         .agent_id
-                        .as_deref()
-                        .map(crate::parse_agent_id)
+                        .clone()
                         .unwrap_or_else(|| cid.clone());
                     (conv.identity.session_id.clone(), agent_id)
                 })
@@ -2551,7 +2545,6 @@ impl Harness {
         let mut restored_output_length_steers = Vec::new();
         let mut restored_output_length_dormant = Vec::new();
         for agent_id in loaded_agents {
-            let agent_id_string = agent_id.to_string();
             match self
                 .session_runtime
                 .agent_store
@@ -2586,7 +2579,7 @@ impl Harness {
                 .agent_store
                 .agent(agent_id.as_str())
                 .and_then(|tree| tree.head());
-            let cid: AgentId = crate::parse_agent_id(&agent_id_string);
+            let cid = agent_id.clone();
             self.seed_agent_creator_topology(&agent_id);
             let meta = self
                 .session_runtime
@@ -2606,7 +2599,7 @@ impl Harness {
                     .agent_registry
                     .restored_unavailable
                     .insert(
-                        agent_id_string,
+                        agent_id.clone(),
                         restored_runtime
                             .role
                             .unwrap_or_else(|| self.config.selected_role.clone()),
@@ -2698,7 +2691,7 @@ impl Harness {
                     )
                 });
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
-                conv.identity.agent_id = Some(agent_id_string.clone());
+                conv.identity.agent_id = Some(agent_id.clone());
                 conv.identity.head = head;
                 conv.identity.originator = originator;
                 conv.identity.source_connection =
@@ -2717,7 +2710,7 @@ impl Harness {
                     head,
                     tool_backed_start.then(|| crate::harness::harness_connection_id().clone()),
                 );
-                conv.identity.agent_id = Some(agent_id_string.clone());
+                conv.identity.agent_id = Some(agent_id.clone());
                 conv.identity.role = role.clone();
                 conv.identity.display_name = display_name.clone();
                 conv.identity.persistence = persistence;
@@ -2804,7 +2797,7 @@ impl Harness {
                 self.agent_runtime
                     .agent_registry
                     .pending_builtin_delegates
-                    .insert(query_id, agent_id_string.clone());
+                    .insert(query_id, agent_id.clone());
             }
             let restored_next_prompt_index = self.next_prompt_index_from_log(agent_id.as_str());
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
@@ -2831,7 +2824,7 @@ impl Harness {
             self.agent_runtime
                 .agent_registry
                 .agent_routes
-                .insert(agent_id_string.clone(), cid.clone());
+                .insert(agent_id.clone(), cid.clone());
             if let Some(terminal) = restored_output_length_terminal {
                 self.project_agent_watch_provider_state(
                     &cid,

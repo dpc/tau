@@ -768,12 +768,12 @@ fn existing_agent_loaded_into_different_session_gets_session_state_notice() {
         None,
     );
     agent.identity.role = Some("engineer".to_owned());
-    agent.identity.agent_id = Some(agent_id.to_string());
+    agent.identity.agent_id = Some(agent_id.clone());
     h.agent_runtime
         .agent_registry
         .agents
         .insert(cid.clone(), agent);
-    h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
+    h.ensure_loaded_agent_for_agent(&cid, &agent_id);
 
     assert!(
         !event_log_contains_any_source(&h, |event| matches!(event, Event::AgentPromptCreated(_))),
@@ -815,7 +815,7 @@ fn same_session_agent_reload_does_not_repeat_changed_session_notice() {
         &h.session_runtime.current_session_id.clone(),
         agent_id.as_str(),
     );
-    h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
+    h.ensure_loaded_agent_for_agent(&cid, &agent_id);
 
     assert!(
         h.take_pending_restore_prompts_for_user_prompt(&cid)
@@ -837,7 +837,7 @@ fn ephemeral_same_session_agent_reload_does_not_warn() {
         &h.session_runtime.current_session_id.clone(),
         agent_id.as_str(),
     );
-    h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
+    h.ensure_loaded_agent_for_agent(&cid, &agent_id);
 
     assert!(
         h.take_pending_restore_prompts_for_user_prompt(&cid)

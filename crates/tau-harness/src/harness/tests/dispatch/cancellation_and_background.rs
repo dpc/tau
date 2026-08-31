@@ -4145,7 +4145,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
             matches!(
                 event,
                 Event::SessionAgentUnloaded(unloaded)
-                    if unloaded.agent_id.as_str() == side_agent_id
+                    if unloaded.agent_id.as_str() == side_agent_id.as_str()
             )
         })
         .is_some()
@@ -4258,7 +4258,7 @@ fn background_completion_from_removed_side_conversation_is_retired() {
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::SessionAgentUnloaded(unloaded)
-            if unloaded.agent_id.as_str() == fault_agent_id
+            if unloaded.agent_id.as_str() == fault_agent_id.as_str()
     )));
     let parent = h
         .agent_runtime

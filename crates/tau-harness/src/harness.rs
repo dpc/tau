@@ -2091,7 +2091,7 @@ impl Harness {
             })
             .and_then(|agent| {
                 Some((
-                    crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
+                    agent.identity.agent_id.clone()?,
                     agent.turn.outer_turn.active_id().cloned(),
                 ))
             })
@@ -2321,7 +2321,7 @@ impl Harness {
             None,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
                 inference_activation: false,
-                agent_id: crate::parse_agent_id(&agent_id),
+                agent_id,
                 text: user_message.to_owned(),
                 trusted_internal_spans: Vec::new(),
                 message_class: tau_proto::PromptMessageClass::User,
@@ -3025,12 +3025,12 @@ impl Harness {
         extension_name: &tau_proto::ExtensionName,
         request: &tau_proto::ExtInternalPromptSubmitRequest,
     ) -> Result<(), HarnessError> {
-        let agent_id = request.agent_id.to_string();
+        let agent_id = &request.agent_id;
         let Some(cid) = self
             .agent_runtime
             .agent_registry
             .agent_routes
-            .get(&agent_id)
+            .get(agent_id)
             .cloned()
         else {
             self.emit_info(&format!(
@@ -3059,7 +3059,7 @@ impl Harness {
             prompt.source = path_crate_agent::PendingPromptSource::Timer;
         }
         if let PromptSubmission::Rejected { reason } =
-            self.submit_prompt_to_agent(session_id, &agent_id, prompt)?
+            self.submit_prompt_to_agent(session_id, agent_id.as_str(), prompt)?
         {
             self.emit_info(&format!("extension prompt submit rejected: {reason}"));
         }

@@ -907,9 +907,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(cid)
-                .and_then(|conv| conv.identity.agent_id.as_ref())
-                .cloned()
-                .map(crate::parse_agent_id)
+                .and_then(|conv| conv.identity.agent_id.clone())
         });
         let must_pass = matches!(
             completion,
@@ -1786,7 +1784,7 @@ impl Harness {
             cid,
             Event::AgentPromptTerminated(AgentPromptTerminated {
                 automatic_compaction_decision: None,
-                agent_id: crate::parse_agent_id(&durable_agent_id),
+                agent_id: durable_agent_id,
                 agent_prompt_id,
                 reason: AgentPromptTerminationReason::Stale,
                 originator,

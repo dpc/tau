@@ -297,7 +297,7 @@ impl Harness {
                         .get(&cid)
                         .and_then(|agent| {
                             Some((
-                                crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
+                                agent.identity.agent_id.clone()?,
                                 agent.identity.originator.clone(),
                             ))
                         })
@@ -1770,12 +1770,11 @@ impl Harness {
             .agents
             .get(&agent_prompt_id)
             .cloned();
-        let agent_id = crate::parse_agent_id(
-            cid.as_ref()
-                .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
-                .and_then(|conv| conv.identity.agent_id.clone())
-                .expect("agent has durable id"),
-        );
+        let agent_id = cid
+            .as_ref()
+            .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
+            .and_then(|conv| conv.identity.agent_id.clone())
+            .expect("agent has durable id");
         let event = Event::AgentPromptTerminated(AgentPromptTerminated {
             automatic_compaction_decision,
             agent_id,
@@ -1926,8 +1925,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.identity.agent_id.as_ref())
-            .map(|agent_id| tau_proto::AgentId::parse(agent_id.as_str()).expect("agent id"))
+            .and_then(|agent| agent.identity.agent_id.clone())
         else {
             return true;
         };
@@ -1942,8 +1940,7 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .and_then(|agent| agent.identity.agent_id.as_ref())
-            .map(|agent_id| tau_proto::AgentId::parse(agent_id.as_str()).expect("agent id"))
+            .and_then(|agent| agent.identity.agent_id.clone())
         else {
             return false;
         };

@@ -1667,8 +1667,7 @@ impl Harness {
                 .agent_registry
                 .agents
                 .get(cid)
-                .and_then(|agent| agent.identity.agent_id.as_deref())
-                .map(crate::parse_agent_id)
+                .and_then(|agent| agent.identity.agent_id.clone())
         });
         self.commit_event(
             source,

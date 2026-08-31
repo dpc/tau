@@ -186,7 +186,7 @@ fn parked_ownerless_result_settles_once_after_canonical_commit() {
             .filter(|event| {
                 matches!(
                     event,
-                    Event::AgentStatsUpdated(stats) if stats.agent_id.as_str() == agent_id
+                    Event::AgentStatsUpdated(stats) if stats.agent_id.as_str() == agent_id.as_str()
                 )
             })
             .count()

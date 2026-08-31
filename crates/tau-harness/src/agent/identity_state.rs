@@ -64,7 +64,7 @@ pub(crate) struct AgentIdentityState {
     /// from the role.
     pub(crate) model_override: Option<ModelId>,
     /// Stable id assigned when this conversation first starts a turn.
-    pub(crate) agent_id: Option<String>,
+    pub(crate) agent_id: Option<AgentId>,
     /// Whether this agent's semantic transcript is durable or memory-only.
     pub(crate) persistence: AgentPersistenceMode,
     /// Durable semantic lifecycle marker for a peer-created entrypoint

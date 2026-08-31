@@ -1718,7 +1718,7 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
     h.agent_runtime
         .agent_registry
         .agent_routes
-        .insert(agent_id.clone(), cid.clone());
+        .insert(crate::parse_agent_id(&agent_id), cid.clone());
     if let Some(model) = model {
         h.prompt_coordination.prompt_runtime.models.insert(
             spid.parse::<tau_proto::AgentPromptId>()
@@ -1751,7 +1751,7 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
         .agents
         .get(cid)
         .and_then(|conv| conv.identity.agent_id.clone())
-        .unwrap_or_else(|| "main".to_owned());
+        .unwrap_or_else(|| crate::parse_agent_id("main"));
     h.publish_for_agent(
         cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {

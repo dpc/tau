@@ -283,8 +283,7 @@ impl<'a> InternalToolHost<'a> {
             .agent_registry
             .agents
             .get(conversation_id)
-            .and_then(|agent| agent.identity.agent_id.as_deref())
-            .and_then(|agent_id| tau_proto::AgentId::parse(agent_id).ok())
+            .and_then(|agent| agent.identity.agent_id.clone())
             .and_then(|agent_id| {
                 self.harness
                     .prompt_coordination
@@ -331,7 +330,9 @@ impl<'a> InternalToolHost<'a> {
 
     /// Ensure and return the agent id for a conversation.
     pub fn ensure_agent_id_for_agent(&mut self, conversation_id: &AgentId) -> Option<String> {
-        self.harness.ensure_agent_id_for_agent(conversation_id)
+        self.harness
+            .ensure_agent_id_for_agent(conversation_id)
+            .map(|agent_id| agent_id.to_string())
     }
 
     /// Return a redacted, deterministically ordered current-session agent
@@ -354,7 +355,7 @@ impl<'a> InternalToolHost<'a> {
                 Some(InternalAgentSummary {
                     group: self.harness.role_group_name_for_role(&role),
                     role,
-                    agent_id,
+                    agent_id: agent_id.to_string(),
                     state: match agent.turn.published_runtime_state {
                         tau_proto::AgentRuntimeState::Idle => InternalAgentState::Idle,
                         tau_proto::AgentRuntimeState::Running => InternalAgentState::Running,
@@ -378,7 +379,7 @@ impl<'a> InternalToolHost<'a> {
                 .iter()
                 .map(|(agent_id, role)| InternalAgentSummary {
                     group: self.harness.role_group_name_for_role(role),
-                    agent_id: agent_id.clone(),
+                    agent_id: agent_id.to_string(),
                     role: role.to_string(),
                     state: InternalAgentState::RestoredUnavailable,
                 }),
@@ -431,7 +432,7 @@ impl<'a> InternalToolHost<'a> {
             .agent_registry
             .pending_builtin_delegates
             .get(query_id)
-            .cloned()
+            .map(ToString::to_string)
     }
 
     /// Start bounded runtime-dir peer-session discovery off the harness event
@@ -689,7 +690,7 @@ impl<'a> InternalToolHost<'a> {
             .agent_registry
             .agents
             .get(owner.conversation_id())?;
-        let agent_id = tau_proto::AgentId::parse(agent.identity.agent_id.as_deref()?).ok()?;
+        let agent_id = agent.identity.agent_id.clone()?;
         let prompt_id = self
             .harness
             .prompt_coordination

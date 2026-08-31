@@ -262,7 +262,7 @@ impl Harness {
                     self.agent_runtime
                         .agent_watch
                         .provider_status
-                        .get(&agent_id)
+                        .get(agent_id.as_str())
                 })
                 .filter(|status| status.agent_prompt_id == response.agent_prompt_id)
                 .and_then(|status| match status.state {
@@ -388,7 +388,7 @@ impl Harness {
             self.agent_runtime
                 .agent_watch
                 .provider_status
-                .remove(&public_id);
+                .remove(public_id.as_str());
         }
 
         self.attach_finished_response_usage(
@@ -1381,12 +1381,9 @@ impl Harness {
         }
         self.prompt_coordination
             .compaction_runtime
-            .suppress_start_for_queued_terminal(
-                crate::parse_agent_id(&agent_id),
-                transaction_id.clone(),
-            );
+            .suppress_start_for_queued_terminal(agent_id.clone(), transaction_id.clone());
         let failure = tau_proto::AgentStandaloneCompactionFailed {
-            agent_id: crate::parse_agent_id(&agent_id),
+            agent_id: agent_id.clone(),
             transaction_id: transaction_id.clone(),
             cut,
             reason,
@@ -1398,7 +1395,7 @@ impl Harness {
             cid,
             None,
             Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
-                agent_id: crate::parse_agent_id(&agent_id),
+                agent_id,
                 transaction_id: transaction_id.clone(),
                 compact_prompt_id,
                 cut,
@@ -1507,7 +1504,7 @@ impl Harness {
             cid,
             source,
             Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
-                agent_id: crate::parse_agent_id(&agent_id),
+                agent_id,
                 transaction_id: transaction_id.clone(),
                 compact_prompt_id,
                 cut,
@@ -1704,7 +1701,7 @@ impl Harness {
             tau_core::AgentEventParent::Under,
         );
         Some((
-            agent_id,
+            agent_id.to_string(),
             parent,
             Event::AgentCompacted(tau_proto::AgentCompacted {
                 original_input_tokens: response
@@ -2543,7 +2540,7 @@ impl Harness {
             self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
             return false;
         };
-        response.agent_id = crate::parse_agent_id(&agent_id);
+        response.agent_id = agent_id;
         true
     }
 
@@ -3651,12 +3648,12 @@ impl Harness {
                 .agents
                 .get(cid)
                 .and_then(|agent| agent.identity.agent_id.clone())
-                .unwrap_or_else(|| cid.to_string());
+                .unwrap_or_else(|| cid.clone());
             self.agent_runtime
                 .agent_watch
                 .pending_unload_reasons
                 .insert(
-                    agent_id.clone(),
+                    agent_id.to_string(),
                     tau_proto::AgentWatchLifecycleReason::RestoredDelegationRouteLost,
                 );
             tracing::error!(

@@ -45,7 +45,7 @@ fn add_routed_prompt(h: &mut Harness, agent_id: &str, prompt_id: &str, provider_
         None,
         None,
     );
-    agent.identity.agent_id = Some(agent_id.to_owned());
+    agent.identity.agent_id = Some(crate::parse_agent_id(agent_id));
     agent.identity.display_name = Some(format!("{agent_id} label"));
     agent.dispatch.in_flight_prompt = Some(
         prompt_id
@@ -59,7 +59,7 @@ fn add_routed_prompt(h: &mut Harness, agent_id: &str, prompt_id: &str, provider_
     h.agent_runtime
         .agent_registry
         .agent_routes
-        .insert(agent_id.to_owned(), cid.clone());
+        .insert(crate::parse_agent_id(agent_id), cid.clone());
     h.prompt_coordination.prompt_runtime.agents.insert(
         prompt_id
             .parse::<tau_proto::AgentPromptId>()
@@ -230,7 +230,7 @@ fn retry_rejects_invalid_targets_and_duplicate_request_ids() {
         None,
         None,
     );
-    idle_agent.identity.agent_id = Some("idle-agent".to_owned());
+    idle_agent.identity.agent_id = Some(crate::parse_agent_id("idle-agent"));
     h.agent_runtime
         .agent_registry
         .agents
@@ -238,7 +238,7 @@ fn retry_rejects_invalid_targets_and_duplicate_request_ids() {
     h.agent_runtime
         .agent_registry
         .agent_routes
-        .insert("idle-agent".to_owned(), idle);
+        .insert(crate::parse_agent_id("idle-agent"), idle);
 
     for request in [
         retry_request("stale", "old", Some("no-route")),

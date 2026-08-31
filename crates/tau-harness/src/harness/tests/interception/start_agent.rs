@@ -620,7 +620,7 @@ fn active_duplicate_rebinds_without_creating_another_agent() {
             .expect("duplicate acceptance")
             .agent_id
             .as_str(),
-        side_agent_id
+        side_agent_id.as_str()
     );
     assert!(source_committed(&h, "old-requester", |event| {
         matches!(event, Event::StartAgentRequest(request) if request.query_id == "q-duplicate")
@@ -712,7 +712,7 @@ fn pending_duplicate_rebinds_without_minting_or_dispatching() {
         .agent_runtime
         .agent_registry
         .agent_routes
-        .get(&expected_agent_id)
+        .get(expected_agent_id.as_str())
         .cloned()
         .expect("dispatched side agent");
     h.deliver_finished_side_conversation_result(

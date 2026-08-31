@@ -1929,7 +1929,7 @@ fn install_manual_compaction_target(
         None,
         None,
     );
-    target.identity.agent_id = Some(target_agent_id.to_owned());
+    target.identity.agent_id = Some(crate::parse_agent_id(target_agent_id));
     target.identity.role = Some(h.config.selected_role.clone());
     h.agent_runtime
         .agent_registry
@@ -1938,7 +1938,7 @@ fn install_manual_compaction_target(
     h.agent_runtime
         .agent_registry
         .agent_routes
-        .insert(target_agent_id.to_owned(), target_cid.clone());
+        .insert(crate::parse_agent_id(target_agent_id), target_cid.clone());
     h.publish_for_agent(
         &target_cid,
         Event::AgentStarted(tau_proto::AgentStarted {
@@ -1952,7 +1952,7 @@ fn install_manual_compaction_target(
             ephemeral: false,
         }),
     );
-    h.ensure_loaded_agent_for_agent(&target_cid, target_agent_id);
+    h.ensure_loaded_agent_for_agent(&target_cid, &crate::parse_agent_id(target_agent_id));
     (
         target_cid,
         tau_proto::AgentId::parse(target_agent_id).expect("target id"),
@@ -2349,7 +2349,7 @@ fn start_background_tool_and_finish_placeholder_turn(
 ) {
     let agent_id = h
         .ensure_agent_id_for_agent(cid)
-        .unwrap_or_else(|| "main".to_owned());
+        .unwrap_or_else(|| crate::parse_agent_id("main"));
     h.publish_for_agent(
         cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {

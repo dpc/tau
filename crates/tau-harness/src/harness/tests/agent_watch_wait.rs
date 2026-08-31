@@ -816,7 +816,7 @@ fn cold_resume_replays_long_wait_context_without_runtime_state() {
         .agent_runtime
         .agent_registry
         .agent_routes
-        .get(&watcher_id)
+        .get(watcher_id.as_str())
         .cloned()
         .expect("restored watcher");
     assert!(

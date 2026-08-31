@@ -26,7 +26,7 @@ fn repeated_loaded_agent_ensure_does_not_rescan_history() {
         std::thread::sleep(Duration::from_millis(5));
     }
     std::fs::write(journal, b"corrupt after initial load").expect("corrupt journal");
-    h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
+    h.ensure_loaded_agent_for_agent(&cid, &agent_id);
 
     assert_eq!(h.runtime_io.replayable_harness_notices.len(), notice_count);
     h.shutdown().expect("shutdown");

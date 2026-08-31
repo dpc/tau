@@ -77,7 +77,7 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
         h.agent_runtime
             .agent_registry
             .agent_routes
-            .contains_key(&first_agent_id)
+            .contains_key(first_agent_id.as_str())
     );
     assert!(
         h.agent_runtime
@@ -115,7 +115,7 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
         h.agent_runtime
             .agent_registry
             .agent_routes
-            .contains_key(&second_agent_id)
+            .contains_key(second_agent_id.as_str())
     );
     let second_records = h
         .session_runtime

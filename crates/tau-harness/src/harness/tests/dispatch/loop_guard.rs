@@ -281,7 +281,7 @@ fn loop_guard_block_preserves_canonical_agent_message_wake() {
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::AgentPromptCreated(prompt)
-            if prompt.agent_id.as_str() == recipient_id
+            if prompt.agent_id.as_str() == recipient_id.as_str()
                 && prompt.context.flatten().iter().any(|item| {
                     text_part(item).is_some_and(|text| text.contains("external message"))
                 })

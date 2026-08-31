@@ -2558,11 +2558,11 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         .get_mut(&cid)
         .expect("default conversation")
         .identity
-        .agent_id = Some("old-agent".to_owned());
+        .agent_id = Some(crate::parse_agent_id("old-agent"));
     h.agent_runtime
         .agent_registry
         .agent_routes
-        .insert("old-agent".to_owned(), cid.clone());
+        .insert(crate::parse_agent_id("old-agent"), cid.clone());
     let transaction_id =
         tau_proto::CompactionTransactionId::parse("ct-session-reset").expect("transaction");
     h.prompt_coordination
@@ -2774,7 +2774,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         .clone()
         .expect("new session agent id");
     publish_pending_agent_discovery(&mut h, new_agent_id.as_str());
-    assert!(read_nth_prompt_created(&h, 0).agent_id.as_str() == new_agent_id);
+    assert!(read_nth_prompt_created(&h, 0).agent_id.as_str() == new_agent_id.as_str());
 
     h.shutdown().expect("shutdown");
 }
@@ -3236,7 +3236,7 @@ fn user_prompt_mints_first_agent_for_empty_startup() {
         .and_then(|conversation| conversation.identity.agent_id.as_deref())
         .expect("first prompt minted agent id");
     if let Some(existing_agent_id) = existing_agent_id {
-        assert_eq!(agent_id, existing_agent_id);
+        assert_eq!(agent_id, existing_agent_id.as_str());
     } else {
         assert_role_hex_agent_id(agent_id, "engineer");
     }

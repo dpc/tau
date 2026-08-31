@@ -1156,7 +1156,7 @@ impl Harness {
             let event = Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
                 inference_activation,
                 submission_source: prompt.submission_source,
-                agent_id: crate::parse_agent_id(&agent_id),
+                agent_id,
                 text: prompt.text,
                 trusted_internal_spans: prompt.trusted_internal_spans,
                 message_class: prompt.message_class,
@@ -1342,7 +1342,6 @@ impl Harness {
             .agents
             .get(cid)
             .and_then(|conv| conv.identity.agent_id.clone())
-            .map(crate::parse_agent_id)
             .unwrap_or_else(|| cid.clone())
     }
 

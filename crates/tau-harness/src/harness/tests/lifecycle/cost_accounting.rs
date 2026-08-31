@@ -27,13 +27,13 @@ fn sparse_cold_restore_attaches_pending_creator_subtree_once() {
             None,
             None,
         );
-        runtime.identity.agent_id = Some(agent_id.to_string());
+        runtime.identity.agent_id = Some(agent_id.clone());
         harness
             .agent_runtime
             .agent_registry
             .agents
             .insert(agent_id.clone(), runtime);
-        harness.ensure_loaded_agent_for_agent(agent_id, agent_id.as_str());
+        harness.ensure_loaded_agent_for_agent(agent_id, agent_id);
     }
 
     let td = tempfile::tempdir().expect("tempdir");
@@ -221,7 +221,7 @@ fn descendant_cost_increment_publishes_loaded_creator_snapshots() {
             None,
             None,
         );
-        agent.identity.agent_id = Some(agent_id.to_string());
+        agent.identity.agent_id = Some(agent_id.clone());
         harness
             .agent_runtime
             .agent_registry
@@ -329,14 +329,14 @@ fn existing_agent_load_reseeds_creator_cost_topology() {
         None,
         None,
     );
-    child_runtime.identity.agent_id = Some(child.to_string());
+    child_runtime.identity.agent_id = Some(child.clone());
     harness
         .agent_runtime
         .agent_registry
         .agents
         .insert(child.clone(), child_runtime);
 
-    harness.ensure_loaded_agent_for_agent(&child, child.as_str());
+    harness.ensure_loaded_agent_for_agent(&child, &child);
 
     assert_eq!(
         harness

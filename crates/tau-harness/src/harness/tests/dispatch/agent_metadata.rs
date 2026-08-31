@@ -16,7 +16,10 @@ fn agent_id_generation_is_stable_and_cleaned_up() {
     assert_eq!(first, second);
     assert_role_hex_agent_id(&first, "engineer");
     assert_eq!(
-        h.agent_runtime.agent_registry.agent_routes.get(&first),
+        h.agent_runtime
+            .agent_registry
+            .agent_routes
+            .get(first.as_str()),
         Some(&cid)
     );
 
@@ -25,7 +28,7 @@ fn agent_id_generation_is_stable_and_cleaned_up() {
         !h.agent_runtime
             .agent_registry
             .agent_routes
-            .contains_key(&first)
+            .contains_key(first.as_str())
     );
 
     h.shutdown().expect("shutdown");

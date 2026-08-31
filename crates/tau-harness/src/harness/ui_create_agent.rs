@@ -169,7 +169,6 @@ impl Harness {
         };
         let created_agent_id = self
             .target_agent_id_for_agent(&cid)
-            .map(crate::parse_agent_id)
             .expect("new UI agent has a durable id");
         let bootstrap_prompt = bootstrap_id.is_some();
         if is_user_initial_prompt

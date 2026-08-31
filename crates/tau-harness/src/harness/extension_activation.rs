@@ -681,7 +681,7 @@ impl Harness {
                         dispatch,
                     } => Some(RestoredCompactionCheckpoint {
                         cid: cid.clone(),
-                        agent_id: crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
+                        agent_id: agent.identity.agent_id.clone()?,
                         transaction_id: transaction_id.clone(),
                         agent_prompt_id: agent_prompt_id.clone(),
                         through: *through,

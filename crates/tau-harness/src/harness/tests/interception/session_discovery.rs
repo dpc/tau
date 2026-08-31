@@ -777,7 +777,7 @@ fn unloaded_agent_cannot_be_recreated_by_parked_snapshot() {
         &h.config.selected_role.clone(),
     );
     let agent_id = durable_agent_id_for_conversation(&h, &cid);
-    h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
+    h.ensure_loaded_agent_for_agent(&cid, &agent_id);
     let initialization_id = h.prompt_coordination.context_discovery.pending_agents[&agent_id]
         .initialization_id
         .clone();
@@ -949,8 +949,8 @@ fn concurrent_agents_isolate_duplicate_and_ready_before_snapshot() {
     );
     let first = durable_agent_id_for_conversation(&h, &first_cid);
     let second = durable_agent_id_for_conversation(&h, &second_cid);
-    h.ensure_loaded_agent_for_agent(&first_cid, first.as_str());
-    h.ensure_loaded_agent_for_agent(&second_cid, second.as_str());
+    h.ensure_loaded_agent_for_agent(&first_cid, &first);
+    h.ensure_loaded_agent_for_agent(&second_cid, &second);
     let first_init = h.prompt_coordination.context_discovery.pending_agents[&first]
         .initialization_id
         .clone();

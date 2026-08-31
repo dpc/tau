@@ -2078,7 +2078,7 @@ fn scheduler_agent_compact_publishes_one_placeholder_and_keeps_publication_live(
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(vec![(
                 CborValue::Text("agent_id".into()),
-                CborValue::Text(target_id),
+                CborValue::Text(target_id.to_string()),
             )]),
             raw_arguments_json: None,
             responses_envelope: None,
@@ -6674,7 +6674,7 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
             .any(|event| matches!(
                 event,
                 Event::AgentState(changed)
-                    if changed.agent_id.as_str() == agent_id
+                    if changed.agent_id.as_str() == agent_id.as_str()
                         && changed.state == tau_proto::AgentRuntimeState::Idle
             )),
         "no turn-stop may be emitted between rejection and continuation"
@@ -7961,7 +7961,7 @@ fn reactive_context_overflow_session_switch_cancels_and_cleans_state() {
         !h.agent_runtime
             .agent_watch
             .provider_status
-            .contains_key(&agent_id)
+            .contains_key(agent_id.as_str())
     );
     h.handle_provider_response_finished(context_overflow_response(&compact))
         .expect("late old-session response is ignored");
@@ -8385,7 +8385,7 @@ fn failed_ui_compaction_replay_restores_nonblocking_suppression() {
             .agent_runtime
             .agent_watch
             .provider_status
-            .contains_key(&agent_id)
+            .contains_key(agent_id.as_str())
     );
     let recovered = resumed
         .agent_runtime
@@ -9052,7 +9052,7 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
     let mut resumed =
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
             .expect("resume");
-    let status = &resumed.agent_runtime.agent_watch.provider_status[&agent_id];
+    let status = &resumed.agent_runtime.agent_watch.provider_status[agent_id.as_str()];
     assert_eq!(status.agent_prompt_id, inference_prompt_id);
     assert!(matches!(
         status.state,

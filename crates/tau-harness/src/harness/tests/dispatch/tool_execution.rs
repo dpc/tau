@@ -1523,9 +1523,9 @@ fn message_tool_to_agent_uses_canonical_projection_and_payload_free_wake() {
     assert_eq!(sent.len(), 1);
     assert_eq!(received.len(), 1);
     assert_eq!(sent[0].message_id, received[0].message_id);
-    assert_eq!(sent[0].sender_id.as_str(), recipient_id);
-    assert_eq!(received[0].sender_id.as_str(), recipient_id);
-    assert_eq!(received[0].recipient_id.as_str(), recipient_id);
+    assert_eq!(sent[0].sender_id.as_str(), recipient_id.as_str());
+    assert_eq!(received[0].sender_id.as_str(), recipient_id.as_str());
+    assert_eq!(received[0].recipient_id.as_str(), recipient_id.as_str());
     assert_eq!(received[0].kind, tau_proto::AgentMessageKind::Message);
 
     let durable_sent = durable_agent_message_sent_events(&h);
@@ -4303,7 +4303,7 @@ fn detached_delegate_preserves_reentrant_tool_completion_turn() {
         h.agent_runtime
             .agent_registry
             .agent_routes
-            .contains_key(&side_agent_id),
+            .contains_key(side_agent_id.as_str()),
         "a stale extension originator must not tear down the detached delegate"
     );
     assert!(matches!(

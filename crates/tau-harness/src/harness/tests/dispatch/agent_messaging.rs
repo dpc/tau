@@ -1018,12 +1018,12 @@ fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
     assert_eq!(result.failure, None);
     assert_eq!(
         result.recipient_id.as_ref().map(ToString::to_string),
-        Some(idle_id)
+        Some(idle_id.to_string())
     );
     assert!(!result.started);
     let received = durable_agent_message_received_events(&h);
     assert_eq!(received.len(), 1);
-    assert_ne!(received[0].recipient_id.as_str(), busy_id);
+    assert_ne!(received[0].recipient_id.as_str(), busy_id.as_str());
 }
 
 /// Loaded endpoints whose creation role no longer resolves to an available
@@ -2723,7 +2723,7 @@ fn agent_watch_response_uses_distinct_canonical_projection() {
 
     h.publish_agent_watch_response_from_agent(
         &cid,
-        recipient_id.clone(),
+        recipient_id.to_string(),
         "done <response>&</response> payload >".to_owned(),
     )
     .expect("watch response");
@@ -2986,7 +2986,10 @@ fn user_prompt_watch_fanout_orders_exact_payloads_and_prunes_failed_delivery() {
         .into_iter()
         .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchPrompt)
         .collect();
-    let mut expected_recipients = watcher_ids.to_vec();
+    let mut expected_recipients = watcher_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
     expected_recipients.sort();
     assert_eq!(
         received
@@ -3006,7 +3009,10 @@ fn user_prompt_watch_fanout_orders_exact_payloads_and_prunes_failed_delivery() {
             .any(|watcher_id| watcher_id == "missing-watcher"),
         "a failed delivery still prunes only its stale relation"
     );
-    assert_eq!(h.watchers_for_agent(&watched_id), expected_recipients);
+    assert_eq!(
+        h.watchers_for_agent(watched_id.as_str()),
+        expected_recipients
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -4259,11 +4265,11 @@ fn disabling_agent_watch_removes_response_fanout_route() {
         .get_mut(&sender_cid)
         .expect("sender")
         .identity
-        .agent_id = Some("child-agent".to_owned());
+        .agent_id = Some(crate::parse_agent_id("child-agent"));
     h.agent_runtime
         .agent_registry
         .agent_routes
-        .insert("child-agent".to_owned(), sender_cid.clone());
+        .insert(crate::parse_agent_id("child-agent"), sender_cid.clone());
     h.set_agent_watch(
         "watcher-agent",
         "child-agent",
@@ -4330,7 +4336,7 @@ fn external_agent_message_request_publishes_received_projection() {
         received[0].sender_session_id.as_deref(),
         Some("other-session")
     );
-    assert_eq!(received[0].recipient_id.as_str(), recipient_id);
+    assert_eq!(received[0].recipient_id.as_str(), recipient_id.as_str());
     assert_eq!(received[0].message, "hello from outside");
     let recipient = h
         .agent_runtime

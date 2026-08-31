@@ -74,12 +74,7 @@ impl Harness {
             self.send_ui_error_response(client_id, "selected model does not support compaction");
             return;
         }
-        let Some(agent_id) = agent
-            .identity
-            .agent_id
-            .as_deref()
-            .map(crate::parse_agent_id)
-        else {
+        let Some(agent_id) = agent.identity.agent_id.clone() else {
             self.send_ui_error_response(client_id, "nothing to compact yet");
             return;
         };
@@ -530,7 +525,7 @@ impl Harness {
                     tau_proto::AgentStandaloneCompactionStarted {
                         compact_prompt_id,
                         operation: tau_proto::PromptOperation::StandaloneCompaction,
-                        agent_id: crate::parse_agent_id(&agent_id),
+                        agent_id: agent_id.clone(),
                         transaction_id,
                         cut,
                         resume_through,
@@ -546,7 +541,7 @@ impl Harness {
         self.publish_for_agent(
             cid,
             Event::AgentCompactionTriggered(tau_proto::AgentCompactionTriggered {
-                agent_id: crate::parse_agent_id(&agent_id),
+                agent_id,
                 originator: conv.identity.originator.clone(),
                 resume_inference: false,
             }),
@@ -582,7 +577,7 @@ impl Harness {
             );
             return;
         };
-        if target_agent_id.is_some_and(|target| target.as_str() == caller_public_id) {
+        if target_agent_id.is_some_and(|target| target.as_str() == caller_public_id.as_str()) {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
                 call.id.clone(),
@@ -626,13 +621,13 @@ impl Harness {
             .compaction_runtime
             .accepted_manual_tools
             .values()
-            .any(|entry| Some(entry.request.target_agent_id.to_string()) == target_public_id);
+            .any(|entry| Some(entry.request.target_agent_id.clone()) == target_public_id);
         let staged_target_pending = self
             .prompt_coordination
             .compaction_runtime
             .pending_manual_acceptances
             .values()
-            .any(|entry| Some(entry.request().target_agent_id.to_string()) == target_public_id);
+            .any(|entry| Some(entry.request().target_agent_id.clone()) == target_public_id);
         if committed_target_pending || staged_target_pending {
             self.finish_harness_owned_tool_with_error(
                 caller_cid,
@@ -720,10 +715,9 @@ impl Harness {
             .accepted_manual_tools
             .values()
             .filter(|entry| {
-                entry
-                    .request
-                    .tool_source()
-                    .is_some_and(|source| source.caller_agent_id.as_str() == caller_public_id)
+                entry.request.tool_source().is_some_and(|source| {
+                    source.caller_agent_id.as_str() == caller_public_id.as_str()
+                })
             })
             .count()
             + self
@@ -736,7 +730,7 @@ impl Harness {
                         entry,
                         PendingManualCompactionAcceptance::ModelTool(staged)
                             if staged.request.tool_source().is_some_and(|source| {
-                                source.caller_agent_id.as_str() == caller_public_id
+                                source.caller_agent_id.as_str() == caller_public_id.as_str()
                             })
                     )
                 })
@@ -824,10 +818,10 @@ impl Harness {
         .expect("generated request id");
         let request = tau_proto::AgentManualCompactionRequested {
             request_id: request_id.clone(),
-            target_agent_id: crate::parse_agent_id(&target_public_id),
+            target_agent_id: target_public_id,
             source: tau_proto::ManualCompactionSource::Tool(
                 tau_proto::ManualToolCompactionSource {
-                    caller_agent_id: crate::parse_agent_id(&caller_public_id),
+                    caller_agent_id: caller_public_id,
                     initiating_agent_prompt_id,
                     initiating_tool_call_id: call.id.clone(),
                     initiating_tool_name: if self_request {
@@ -1379,7 +1373,7 @@ impl Harness {
             self.prompt_coordination
                 .compaction_runtime
                 .suppress_start_for_preflight(
-                    crate::parse_agent_id(&agent_id),
+                    agent_id.clone(),
                     transaction_id.clone(),
                     failure_reason,
                 );
@@ -1398,7 +1392,7 @@ impl Harness {
             cid,
             None,
             Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
-                agent_id: crate::parse_agent_id(&agent_id),
+                agent_id,
                 transaction_id,
                 compact_prompt_id,
                 cut,
@@ -1740,7 +1734,7 @@ impl Harness {
                 cid,
                 Event::AgentStandaloneCompactionFailed(
                     tau_proto::AgentStandaloneCompactionFailed {
-                        agent_id: crate::parse_agent_id(&agent_id),
+                        agent_id,
                         transaction_id: decision.transaction_id,
                         cut,
                         reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
@@ -1780,7 +1774,7 @@ impl Harness {
             self.prompt_coordination
                 .compaction_runtime
                 .suppress_start_for_preflight(
-                    crate::parse_agent_id(&agent_id),
+                    agent_id.clone(),
                     decision.transaction_id.clone(),
                     tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
                 );
@@ -1798,7 +1792,7 @@ impl Harness {
         self.publish_for_agent(
             cid,
             Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
-                agent_id: crate::parse_agent_id(&agent_id),
+                agent_id,
                 transaction_id: decision.transaction_id.clone(),
                 compact_prompt_id,
                 cut,
@@ -2034,7 +2028,7 @@ impl Harness {
             self.prompt_coordination
                 .compaction_runtime
                 .suppress_start_for_preflight(
-                    crate::parse_agent_id(&agent_id),
+                    agent_id.clone(),
                     transaction_id.clone(),
                     tau_proto::StandaloneCompactionFailureReason::PrefixTooLarge,
                 );
@@ -2062,7 +2056,7 @@ impl Harness {
             Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
                 compact_prompt_id,
                 operation: tau_proto::PromptOperation::StandaloneCompaction,
-                agent_id: crate::parse_agent_id(&agent_id),
+                agent_id,
                 transaction_id,
                 cut,
                 resume_through,

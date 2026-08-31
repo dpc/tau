@@ -810,9 +810,13 @@ impl Harness {
             .agents
             .get(cid)
             .map(|agent| {
-                let durable_agent_id = agent.identity.agent_id.as_deref().unwrap_or(cid.as_ref());
+                let durable_agent_id = agent
+                    .identity
+                    .agent_id
+                    .clone()
+                    .unwrap_or_else(|| cid.clone());
                 (
-                    crate::parse_agent_id(durable_agent_id),
+                    durable_agent_id.clone(),
                     tau_proto::AgentPromptId::parse(format!(
                         "ap-{durable_agent_id}-{}",
                         agent.dispatch.next_prompt_index
@@ -1281,7 +1285,7 @@ impl Harness {
                 .agents
                 .get(cid)
                 .and_then(|agent| {
-                    let agent_id = crate::parse_agent_id(agent.identity.agent_id.as_deref()?);
+                    let agent_id = agent.identity.agent_id.clone()?;
                     let repair = self
                         .session_runtime
                         .agent_store
@@ -1457,7 +1461,7 @@ impl Harness {
                         .automatic_compaction
                         .decision_id()
                         .cloned(),
-                    agent_id: crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
+                    agent_id: agent.identity.agent_id.clone()?,
                     session_id: agent.identity.session_id.clone(),
                     outer_turn_id,
                     disposition: tau_proto::AgentOuterTurnDisposition::Settled,
@@ -1513,7 +1517,7 @@ impl Harness {
                         return None;
                     };
                     Some((
-                        crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
+                        agent.identity.agent_id.clone()?,
                         transaction_id.clone(),
                         agent_prompt_id.clone(),
                         *through,
@@ -3754,7 +3758,7 @@ impl Harness {
             self.agent_runtime
                 .agent_registry
                 .stopped_ids
-                .insert(unloaded.agent_id.to_string());
+                .insert(unloaded.agent_id.clone());
             self.discard_input_wait_for(&cid);
             self.prompt_coordination
                 .prompt_runtime
@@ -4187,7 +4191,7 @@ impl Harness {
         selection: InferenceDispatchSelection,
     ) -> Option<InferenceCheckpointInput> {
         let agent = self.agent_runtime.agent_registry.agents.get_mut(cid)?;
-        let durable_agent_id = crate::parse_agent_id(agent.identity.agent_id.as_deref()?);
+        let durable_agent_id = agent.identity.agent_id.clone()?;
         let (agent_prompt_id, through, output_length_continuation) = if let Some(continuation) =
             agent.turn.output_length_continuation.claim_pending()
         {
@@ -4439,7 +4443,7 @@ impl Harness {
                 .agent_registry
                 .agent_routes
                 .keys()
-                .any(|loaded_agent_id| loaded_agent_id == agent_id.as_str())
+                .any(|loaded_agent_id| loaded_agent_id == agent_id)
     }
 
     pub(super) fn session_membership_event_persistence(
@@ -4502,9 +4506,7 @@ impl Harness {
                 .get(&sync.cid)?
                 .identity
                 .agent_id
-                .as_ref()
-                .cloned()
-                .map(crate::parse_agent_id)
+                .clone()
         })
     }
 
@@ -4856,36 +4858,28 @@ impl Harness {
                 .tool_agents
                 .get(&result.call_id)
                 .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
-                .and_then(|conv| conv.identity.agent_id.as_ref())
-                .cloned()
-                .map(crate::parse_agent_id),
+                .and_then(|conv| conv.identity.agent_id.clone()),
             Event::ProviderToolError(error) | Event::ToolError(error) => self
                 .tool_routing
                 .tool_runtime
                 .tool_agents
                 .get(&error.call_id)
                 .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
-                .and_then(|conv| conv.identity.agent_id.as_ref())
-                .cloned()
-                .map(crate::parse_agent_id),
+                .and_then(|conv| conv.identity.agent_id.clone()),
             Event::ToolBackgroundResult(result) => self
                 .tool_routing
                 .tool_runtime
                 .tool_agents
                 .get(&result.call_id)
                 .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
-                .and_then(|conv| conv.identity.agent_id.as_ref())
-                .cloned()
-                .map(crate::parse_agent_id),
+                .and_then(|conv| conv.identity.agent_id.clone()),
             Event::ToolBackgroundError(error) => self
                 .tool_routing
                 .tool_runtime
                 .tool_agents
                 .get(&error.call_id)
                 .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
-                .and_then(|conv| conv.identity.agent_id.as_ref())
-                .cloned()
-                .map(crate::parse_agent_id),
+                .and_then(|conv| conv.identity.agent_id.clone()),
             _ => None,
         }
     }

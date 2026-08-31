@@ -363,7 +363,7 @@ impl Harness {
                 ) {
                     return None;
                 }
-                let durable_agent_id = crate::parse_agent_id(agent.identity.agent_id.as_deref()?);
+                let durable_agent_id = agent.identity.agent_id.clone()?;
                 let outer_turn_id = tau_proto::AgentOuterTurnId::for_prompt(&prompt_id);
                 agent.turn.outer_turn =
                     path_crate_agent::OuterTurnRuntimeState::Active(outer_turn_id.clone());
@@ -508,7 +508,7 @@ impl Harness {
                     model,
                     operation,
                     agent.identity.runtime_incarnation,
-                    crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
+                    agent.identity.agent_id.clone()?,
                     agent.identity.originator.clone(),
                 ))
             })?;
@@ -647,7 +647,7 @@ impl Harness {
                     return None;
                 };
                 Some((
-                    crate::parse_agent_id(agent.identity.agent_id.as_deref()?),
+                    agent.identity.agent_id.clone()?,
                     agent.identity.originator.clone(),
                     continuation.clone(),
                 ))
@@ -779,11 +779,7 @@ impl Harness {
         let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return;
         };
-        let agent_id = agent
-            .identity
-            .agent_id
-            .as_deref()
-            .map(crate::parse_agent_id);
+        let agent_id = agent.identity.agent_id.clone();
         let originator = agent.identity.originator.clone();
         let output_length_owner = match &agent.turn.output_length_continuation {
             path_crate_agent::OutputLengthContinuationState::Active(continuation) => Some((
@@ -894,12 +890,7 @@ impl Harness {
         let Some(agent) = self.agent_runtime.agent_registry.agents.get(cid) else {
             return;
         };
-        let Some(agent_id) = agent
-            .identity
-            .agent_id
-            .as_deref()
-            .map(crate::parse_agent_id)
-        else {
+        let Some(agent_id) = agent.identity.agent_id.clone() else {
             return;
         };
         let originator = agent.identity.originator.clone();
@@ -1147,7 +1138,7 @@ impl Harness {
             );
         }
         let operation = owned_operation;
-        let durable_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
+        let durable_agent_id = agent_id_for_tree.clone();
         let surface = match self.prepare_prompt_surface_for_dispatch_timed(
             &role_name,
             durable_agent_id.as_ref(),
@@ -1287,10 +1278,9 @@ impl Harness {
             .identity
             .session_id
             .clone();
-        let agent_id: tau_proto::AgentId = crate::parse_agent_id(
-            self.ensure_agent_id_for_agent(cid)
-                .expect("agent has durable id"),
-        );
+        let agent_id = self
+            .ensure_agent_id_for_agent(cid)
+            .expect("agent has durable id");
         let compaction = self.compaction_context_for_agent(cid, &model);
         if let Some(timing) = timing {
             timing.record(
@@ -1376,7 +1366,7 @@ impl Harness {
             );
             return false;
         }
-        let durable_agent_id = conv.identity.agent_id.as_deref().map(crate::parse_agent_id);
+        let durable_agent_id = conv.identity.agent_id.clone();
         let contains_payload_envelope_provenance_projection = conv
             .identity
             .agent_id

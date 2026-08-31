@@ -244,8 +244,7 @@ impl Harness {
                     conversation.identity.session_id == command.session_id
                         && !conversation.dispatch.terminating
                 })
-                .and_then(|conversation| conversation.identity.agent_id.as_deref())
-                .map(crate::parse_agent_id)
+                .and_then(|conversation| conversation.identity.agent_id.clone())
         } else {
             self.default_shell_output_target_agent()
                 .map(|(_, agent_id)| agent_id)
@@ -548,10 +547,9 @@ impl Harness {
         self.publish_event(
             None,
             Event::AgentPromptRecalled(AgentPromptRecalled {
-                agent_id: crate::parse_agent_id(
-                    self.target_agent_id_for_agent(&cid)
-                        .expect("agent has durable id"),
-                ),
+                agent_id: self
+                    .target_agent_id_for_agent(&cid)
+                    .expect("agent has durable id"),
                 text: prompt.text,
             }),
         );
@@ -631,9 +629,7 @@ impl Harness {
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {
                     session_id: req.session_id.clone(),
-                    target_agent_id: self
-                        .target_agent_id_for_agent(&cid)
-                        .map(crate::parse_agent_id),
+                    target_agent_id: self.target_agent_id_for_agent(&cid),
                     agent_prompt_id: Some(prompt_id),
                 }),
             );
@@ -706,7 +702,6 @@ impl Harness {
         };
         let target_agent_id = self
             .target_agent_id_for_agent(&cid)
-            .map(crate::parse_agent_id)
             .expect("runtime agent has durable id");
         let target_label = self
             .agent_runtime
@@ -843,7 +838,7 @@ impl Harness {
         if let Some((agent_id, transaction_id)) = pending {
             self.prompt_coordination
                 .compaction_runtime
-                .suppress_start_for_cancellation(crate::parse_agent_id(&agent_id), transaction_id);
+                .suppress_start_for_cancellation(agent_id, transaction_id);
         }
     }
 
@@ -1226,7 +1221,6 @@ impl Harness {
                 agent_prompt_id: canceled_prompt_id.clone(),
                 agent_id: self
                     .target_agent_id_for_agent(cid)
-                    .map(crate::parse_agent_id)
                     .expect("loaded agent has durable identity"),
                 output_items: Vec::new(),
                 stop_reason: ProviderStopReason::Error,
@@ -1405,7 +1399,7 @@ impl Harness {
                 None,
                 Event::AgentStandaloneCompactionFailed(
                     tau_proto::AgentStandaloneCompactionFailed {
-                        agent_id: crate::parse_agent_id(&agent_id),
+                        agent_id,
                         transaction_id,
                         cut,
                         reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
@@ -1643,9 +1637,7 @@ impl Harness {
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {
                     session_id,
-                    target_agent_id: self
-                        .target_agent_id_for_agent(cid)
-                        .map(crate::parse_agent_id),
+                    target_agent_id: self.target_agent_id_for_agent(cid),
                     agent_prompt_id: Some(spid),
                 }),
             );
@@ -1896,7 +1888,7 @@ impl Harness {
             .identity
             .display_name
             .clone()
-            .or_else(|| conv.identity.agent_id.clone())
+            .or_else(|| conv.identity.agent_id.as_ref().map(ToString::to_string))
             .unwrap_or_else(|| cid.to_string());
         if previous_usage_model.as_ref() != Some(&select.model) {
             self.clear_agent_context_usage(&cid);
@@ -2011,7 +2003,7 @@ impl Harness {
         client_id: &tau_proto::ConnectionId,
         prompt: tau_proto::UiPromptSubmitted,
     ) -> Result<bool, HarnessError> {
-        let agent_id = prompt.agent_id.to_string();
+        let agent_id = &prompt.agent_id;
         let is_user_interaction =
             prompt.originator.is_user() && !prompt.message_class.is_internal();
         let text = if is_user_interaction && !prompt.literal {
@@ -2036,7 +2028,7 @@ impl Harness {
                 .agent_runtime
                 .agent_registry
                 .agent_routes
-                .get(&agent_id)
+                .get(agent_id)
                 .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
                 .is_some_and(|agent| !agent.dispatch.terminating);
         if will_accept
@@ -2054,13 +2046,13 @@ impl Harness {
         {
             tracing::error!(
                 target: "tau_harness",
-                agent_id,
+                agent_id = agent_id.as_str(),
                 "routable prompt target is missing loaded membership or navigation mode"
             );
             return Ok(true);
         }
         if will_accept && is_user_interaction {
-            self.record_accepted_visible_user_interaction(&agent_id)?;
+            self.record_accepted_visible_user_interaction(agent_id.as_str())?;
             if self
                 .write_loaded_agent_navigation_mode(
                     &prompt.agent_id,
@@ -2073,7 +2065,8 @@ impl Harness {
                 )));
             }
         }
-        let submission = self.submit_prompt_to_agent(prompt.session_id, &agent_id, pending)?;
+        let submission =
+            self.submit_prompt_to_agent(prompt.session_id, agent_id.as_str(), pending)?;
         if let PromptSubmission::Rejected { reason } = &submission {
             self.send_ui_error_response(client_id, reason.clone());
         }
@@ -2227,10 +2220,7 @@ impl Harness {
         if !prompt.expand_user_skill_on_dispatch {
             return Ok(prompt);
         }
-        let Some(agent_id) = self
-            .target_agent_id_for_agent(cid)
-            .map(crate::parse_agent_id)
-        else {
+        let Some(agent_id) = self.target_agent_id_for_agent(cid) else {
             return Err("created agent route is unavailable".to_owned());
         };
         prompt.text = self.expand_user_skill_command(&agent_id, &prompt.text)?;
@@ -2259,12 +2249,12 @@ impl Harness {
             self.send_ui_error_response(client_id, "agent display name must not be empty");
             return Ok(true);
         };
-        let agent_id = req.agent_id.to_string();
+        let agent_id = &req.agent_id;
         let Some(cid) = self
             .agent_runtime
             .agent_registry
             .agent_routes
-            .get(&agent_id)
+            .get(agent_id)
             .cloned()
         else {
             self.send_ui_error_response(client_id, format!("unknown agent: {agent_id}"));
@@ -2368,7 +2358,7 @@ impl Harness {
             .cloned()
     }
 
-    pub(super) fn target_agent_id_for_agent(&self, cid: &AgentId) -> Option<String> {
+    pub(super) fn target_agent_id_for_agent(&self, cid: &AgentId) -> Option<AgentId> {
         self.agent_runtime
             .agent_registry
             .agents
@@ -2390,12 +2380,11 @@ impl Harness {
         }
 
         if let Some(target_agent_id) = finished.target_agent_id.as_ref() {
-            let target_agent_id = target_agent_id.to_string();
             let Some(cid) = self
                 .agent_runtime
                 .agent_registry
                 .agent_routes
-                .get(&target_agent_id)
+                .get(target_agent_id)
                 .cloned()
             else {
                 self.emit_info(&format!(
@@ -2422,13 +2411,13 @@ impl Harness {
                 ));
                 return None;
             }
-            let Some(agent_id) = conv.identity.agent_id.as_deref() else {
+            let Some(agent_id) = conv.identity.agent_id.clone() else {
                 self.emit_info(&format!(
                     "shell output ignored: target agent `{target_agent_id}` has no durable id"
                 ));
                 return None;
             };
-            return Some((cid, crate::parse_agent_id(agent_id)));
+            return Some((cid, agent_id));
         }
 
         self.default_shell_output_target_agent()
@@ -2453,7 +2442,7 @@ impl Harness {
                 let interaction_order = self
                     .session_runtime
                     .user_interaction_order
-                    .get(&agent_id)
+                    .get(agent_id.as_str())
                     .copied()
                     .unwrap_or_default();
                 Some((interaction_order, cid.clone(), agent_id))
@@ -2494,23 +2483,23 @@ impl Harness {
                     .agent_registry
                     .agents
                     .get(&cid)
-                    .and_then(|conv| conv.identity.agent_id.as_deref())
+                    .and_then(|conv| conv.identity.agent_id.clone())
                     .expect("new user agent has durable id");
-                Some((cid, crate::parse_agent_id(agent_id)))
+                Some((cid, agent_id))
             }
             1 => {
                 let (_, cid, agent_id) = candidates.pop().expect("one candidate");
-                Some((cid, crate::parse_agent_id(&agent_id)))
+                Some((cid, agent_id))
             }
             _ => {
                 candidates
                     .sort_by_key(|(last_user_interaction_time, _, _)| *last_user_interaction_time);
                 let (selected_time, cid, agent_id) = candidates.pop().expect("last candidate");
                 let Some((previous_time, _, _)) = candidates.last() else {
-                    return Some((cid, crate::parse_agent_id(&agent_id)));
+                    return Some((cid, agent_id));
                 };
                 if *previous_time < selected_time {
-                    return Some((cid, crate::parse_agent_id(&agent_id)));
+                    return Some((cid, agent_id));
                 }
                 self.emit_info(
                     "shell output ignored: multiple user agents exist and no explicit target was provided",
@@ -2758,7 +2747,7 @@ impl Harness {
                     || pending.query.tool_call_id.as_ref() == Some(target_call_id);
                 if is_canceled {
                     source_id = Some(pending.source_id.clone());
-                    stopped_pending_agent_ids.push(pending.agent_id.clone());
+                    stopped_pending_agent_ids.push(crate::parse_agent_id(&pending.agent_id));
                 }
                 !is_canceled
             });

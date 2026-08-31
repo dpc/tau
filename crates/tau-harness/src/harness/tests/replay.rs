@@ -1170,7 +1170,7 @@ fn received_agent_message_replay_restores_context_and_activation() {
     }));
     assert!(event_log_events(&resumed).iter().any(|event| matches!(
         event,
-        Event::AgentPromptCreated(prompt) if prompt.agent_id.as_str() == agent_id
+        Event::AgentPromptCreated(prompt) if prompt.agent_id.as_str() == agent_id.as_str()
     )));
     resumed.shutdown().expect("shutdown");
 }
@@ -2613,7 +2613,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
         None,
         None,
     );
-    agent.identity.agent_id = Some(agent_id.to_string());
+    agent.identity.agent_id = Some(agent_id.clone());
     h.agent_runtime
         .agent_registry
         .agents
@@ -2621,7 +2621,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
     h.agent_runtime
         .agent_registry
         .agent_routes
-        .insert(agent_id.to_string(), cid.clone());
+        .insert(agent_id.clone(), cid.clone());
     h.agent_runtime
         .agent_registry
         .session_loaded
@@ -3104,7 +3104,7 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
 
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].text, "still queued");
-    assert_eq!(queued[0].agent_id.as_str(), agent_id);
+    assert_eq!(queued[0].agent_id.as_str(), agent_id.as_str());
 
     h.shutdown().expect("shutdown");
 }

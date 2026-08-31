@@ -1010,7 +1010,7 @@ fn reactive_context_overflow_ui_cancel_is_terminal_once() {
             .agent_runtime
             .agent_watch
             .provider_status
-            .get(&agent_id)
+            .get(agent_id.as_str())
             .is_none_or(|status| !matches!(
                 status.state,
                 tau_proto::AgentWatchProviderState::Blocked { .. }

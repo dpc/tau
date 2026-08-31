@@ -431,7 +431,7 @@ impl Harness {
                 .context_discovery
                 .agent_context
                 .publish(
-                    tau_proto::AgentId::parse(agent_id).expect("agent id"),
+                    agent_id,
                     AgentContextKey::new("delegate_roles"),
                     crate::harness::harness_connection_id().clone(),
                     "harness".to_owned(),
@@ -815,14 +815,14 @@ impl Harness {
         captured.sort_by(|left, right| left.0.cmp(&right.0));
         for (sender_id, status_epoch, thresholds) in captured {
             let recipients = self
-                .watchers_for_agent(&sender_id)
+                .watchers_for_agent(sender_id.as_str())
                 .into_iter()
                 .filter_map(|watcher_id| {
                     let subscription_id = self
                         .agent_runtime
                         .agent_watch
                         .subscriptions
-                        .get(&(watcher_id.clone(), sender_id.clone()))?
+                        .get(&(watcher_id.clone(), sender_id.to_string()))?
                         .clone();
                     Some((watcher_id, subscription_id))
                 })
@@ -834,7 +834,7 @@ impl Harness {
                 .agent_watch
                 .pending_long_wait_notifications
                 .push_back(PendingLongWaitNotifications {
-                    sender_id,
+                    sender_id: sender_id.to_string(),
                     status_epoch,
                     recipients,
                     thresholds,
@@ -1088,7 +1088,7 @@ impl Harness {
         let sender = self
             .ensure_agent_id_for_agent(conversation_id)
             .ok_or_else(|| "sender agent no longer exists".to_owned())?;
-        let sender_id = crate::parse_agent_id(&sender);
+        let sender_id = sender;
         if message.len() > MAX_EXTERNAL_AGENT_MESSAGE_BYTES {
             return Err("peer message exceeds the 64 KiB limit".to_owned());
         }
@@ -2033,7 +2033,6 @@ impl Harness {
             }
         }
         let recipient_id = crate::parse_agent_id(&recipient_id);
-        let sender_id: tau_proto::AgentId = crate::parse_agent_id(&sender_id);
         let message_id = next_agent_message_id(&sender_id);
         if kind == tau_proto::AgentMessageKind::Message {
             self.publish_for_agent_from(
@@ -2086,7 +2085,6 @@ impl Harness {
         let sender_id = self
             .ensure_agent_id_for_agent(conversation_id)
             .ok_or_else(|| "sender agent no longer exists".to_owned())?;
-        let sender_id: tau_proto::AgentId = crate::parse_agent_id(&sender_id);
         let message_id = next_agent_message_id(&sender_id);
         let request_id = format!("external-{message_id}");
         let capability =
@@ -2479,7 +2477,7 @@ impl Harness {
                         ),
                         self.peer_messaging
                             .peer_last_routed
-                            .get(id)
+                            .get(id.as_str())
                             .copied()
                             .unwrap_or(0),
                         id.clone(),
@@ -2497,10 +2495,10 @@ impl Harness {
                             0,
                             self.peer_messaging
                                 .peer_last_routed
-                                .get(&pending.agent_id)
+                                .get(pending.agent_id.as_str())
                                 .copied()
                                 .unwrap_or(0),
-                            pending.agent_id.clone(),
+                            crate::parse_agent_id(&pending.agent_id),
                         )
                     }),
             )
@@ -2509,7 +2507,7 @@ impl Harness {
         candidates
             .into_iter()
             .next()
-            .map(|(_, _, id)| crate::parse_agent_id(&id))
+            .map(|(_, _, id)| id)
             .ok_or_else(|| INTER_SESSION_UNAVAILABLE.to_owned())
     }
 

@@ -496,19 +496,19 @@ fn unloading_watched_agent_clears_status_and_stops_durable_fanout() {
     h.agent_runtime
         .agent_registry
         .agent_routes
-        .remove(&minted_id);
+        .remove(minted_id.as_str());
     h.agent_runtime
         .agent_registry
         .agents
         .get_mut(&reloaded_cid)
         .expect("reloaded agent")
         .identity
-        .agent_id = Some(watched_id.clone());
+        .agent_id = Some(crate::parse_agent_id(&watched_id));
     h.agent_runtime
         .agent_registry
         .agent_routes
-        .insert(watched_id.clone(), reloaded_cid.clone());
-    h.ensure_loaded_agent_for_agent(&reloaded_cid, &watched_id);
+        .insert(crate::parse_agent_id(&watched_id), reloaded_cid.clone());
+    h.ensure_loaded_agent_for_agent(&reloaded_cid, &crate::parse_agent_id(&watched_id));
     assert!(h.watchers_for_agent(&watched_id).is_empty());
     assert_eq!(h.agent_watch_provider_status_summary(&watched_id), None);
     assert!(
@@ -602,7 +602,7 @@ fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
         .agent_runtime
         .agent_registry
         .agent_routes
-        .get(&watcher_id)
+        .get(watcher_id.as_str())
         .cloned()
         .expect("watcher restored");
     assert!(

@@ -637,7 +637,7 @@ impl Harness {
                     .iter()
                     .map(|prompt| {
                         Event::AgentPromptQueued(AgentPromptQueued {
-                            agent_id: crate::parse_agent_id(&agent_id),
+                            agent_id: agent_id.clone(),
                             text: prompt.text.clone(),
                             message_class: prompt.message_class,
                         })
@@ -683,7 +683,7 @@ impl Harness {
             .filter_map(|agent| {
                 let agent_id = agent.identity.agent_id.as_ref()?;
                 Some(Event::AgentState(tau_proto::AgentStateChanged {
-                    agent_id: crate::parse_agent_id(agent_id),
+                    agent_id: agent_id.clone(),
                     state: agent_runtime_state_for_turn(&agent.turn.turn_state),
                 }))
             })

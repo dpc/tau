@@ -118,12 +118,11 @@ impl Harness {
         if reset_loop_guard_for_progress && !prompt.is_internal() {
             self.reset_loop_guard_for_progress(agent_id);
         }
-        let target_agent_id: tau_proto::AgentId =
-            crate::parse_agent_id(self.ensure_agent_id_for_agent(agent_id).ok_or_else(|| {
-                HarnessError::Participant(format!(
-                    "publish_pending_prompt_for_agent: unknown agent `{agent_id}`"
-                ))
-            })?);
+        let target_agent_id = self.ensure_agent_id_for_agent(agent_id).ok_or_else(|| {
+            HarnessError::Participant(format!(
+                "publish_pending_prompt_for_agent: unknown agent `{agent_id}`"
+            ))
+        })?;
         let branch_originator = self
             .agent_runtime
             .agent_registry
@@ -308,7 +307,7 @@ impl Harness {
                 agent_id,
                 tau_proto::Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
                     automatic_compaction_decision: None,
-                    agent_id: crate::parse_agent_id(&durable_agent_id),
+                    agent_id: durable_agent_id,
                     agent_prompt_id: uncertain_prompt_id,
                     reason: tau_proto::AgentPromptTerminationReason::Stale,
                     originator,
@@ -739,7 +738,7 @@ impl Harness {
                     self.publish_event(
                         Some(crate::harness::harness_connection_id()),
                         Event::AgentPromptRejected(tau_proto::AgentPromptRejected {
-                            agent_id: crate::parse_agent_id(&public_agent_id),
+                            agent_id: public_agent_id,
                             message_class: prompt.message_class,
                             message: NO_PROVIDER_MODELS_MESSAGE.to_owned(),
                         }),
