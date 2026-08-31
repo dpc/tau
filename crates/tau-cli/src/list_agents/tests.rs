@@ -4,21 +4,6 @@ use std::{io as path_std_io, time as path_std_time};
 use super::*;
 use crate::estimated_cost::AgentCostSnapshot;
 
-/// The direct roster request boundary must reject invalid controlled session
-/// identifiers before attempting socket I/O.
-#[test]
-fn roster_request_rejects_invalid_session_id_without_panicking() {
-    let error = run(&crate::cli::AgentListArgs {
-        session_id: "bad.id".to_owned(),
-        include_suspended: false,
-        include_unavailable: false,
-        include_unloaded: false,
-        all: false,
-    })
-    .expect_err("invalid session id must fail");
-    assert!(error.to_string().contains("invalid session id `bad.id`"));
-}
-
 fn entry(id: &str, parent: Option<&str>, started_at: Option<u64>) -> SessionAgentListEntry {
     SessionAgentListEntry {
         agent_id: tau_proto::AgentId::parse(id).expect("valid test id"),
@@ -315,7 +300,7 @@ fn all_category_filter_is_additive() {
 #[test]
 fn public_filter_flags_map_independently_and_all_enables_every_flag() {
     let base = crate::cli::AgentListArgs {
-        session_id: "s1".to_owned(),
+        session_id: "s1".parse().expect("valid session id"),
         include_suspended: false,
         include_unavailable: false,
         include_unloaded: false,

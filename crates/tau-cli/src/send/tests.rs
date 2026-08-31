@@ -6,7 +6,10 @@ use tau_proto::{
     UiTreeNavigationTarget,
 };
 
-use super::{event_for_test_line, message_for_line, read_tree_result, run_send, tree_stdout_text};
+use super::{
+    event_for_test_line, message_for_line, read_tree_result, run_send as run_send_typed,
+    tree_stdout_text,
+};
 use crate::test_support::TREE_PREVIEW_PARITY_NOTICE;
 use crate::ui_prompt::DEFAULT_AGENT_ROLE;
 
@@ -20,12 +23,11 @@ fn message(text: &str) -> Option<HarnessInputMessage> {
     message_for_line(SESSION_ID, text)
 }
 
-/// The external headless-send boundary must reject an invalid controlled
-/// session identifier instead of reaching infallible UI event construction.
-#[test]
-fn headless_send_rejects_invalid_session_id_without_panicking() {
-    let error = run_send("bad.id", "hello").expect_err("invalid session id must fail");
-    assert!(error.to_string().contains("invalid session id `bad.id`"));
+fn run_send(session_id: &str, line: &str) -> Result<(), crate::CliError> {
+    run_send_typed(
+        &session_id.parse().expect("test session id must be valid"),
+        line,
+    )
 }
 
 fn prompt_text(text: &str) -> String {

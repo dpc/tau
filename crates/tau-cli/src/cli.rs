@@ -367,7 +367,7 @@ pub enum AgentTraceMode {
 #[derive(Args, Clone)]
 pub struct AgentListArgs {
     /// Running session to query.
-    pub session_id: String,
+    pub session_id: SessionId,
 
     /// Include suspended live agents.
     #[arg(long)]
@@ -392,7 +392,7 @@ pub enum DevCommand {
     /// Send one line to a running session.
     Send {
         /// Running session identifier.
-        session_id: String,
+        session_id: SessionId,
 
         /// Line to submit. Commands are interpreted like the TUI.
         #[arg(required = true, trailing_var_arg = true)]

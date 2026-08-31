@@ -304,7 +304,7 @@ fn harness_settings_validation_is_limited_to_config_consumers() {
     assert!(!super::super::consumes_harness_settings(
         &super::super::DispatchCommand::Other(path_super_cli::Command::Dev {
             command: path_super_cli::DevCommand::Send {
-                session_id: "s1".to_owned(),
+                session_id: "s1".parse().expect("valid session id"),
                 line: vec!["hello".to_owned()],
             },
         })

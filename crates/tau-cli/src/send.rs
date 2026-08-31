@@ -19,15 +19,12 @@ enum SendLineDisposition {
     Noop,
 }
 
-pub(crate) fn run_send(session_id: &str, line: &str) -> Result<(), CliError> {
-    let session_id = tau_proto::SessionId::parse(session_id).map_err(|error| {
-        CliError::Participant(format!("invalid session id `{session_id}`: {error}"))
-    })?;
-    let disposition = classify_send_line(&session_id, line)?;
+pub(crate) fn run_send(session_id: &tau_proto::SessionId, line: &str) -> Result<(), CliError> {
+    let disposition = classify_send_line(session_id, line)?;
     let SendLineDisposition::Message(message) = disposition else {
         return Ok(());
     };
-    send_message(&session_id, *message)
+    send_message(session_id, *message)
 }
 
 fn classify_send_line(

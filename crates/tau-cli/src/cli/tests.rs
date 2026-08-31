@@ -1,6 +1,45 @@
 use clap::{CommandFactory, Parser};
 
-use super::Cli;
+use super::{Cli, Command, DevCommand};
+
+/// Agent-list and headless-send parse their session argument into the shared
+/// durable identity before command dispatch, rejecting the same invalid
+/// grammar.
+#[test]
+fn session_commands_parse_session_ids_at_the_clap_boundary() {
+    let agent_list = Cli::parse_from(["tau", "agent", "list", "session_A-1"]);
+    assert!(matches!(
+        agent_list.command,
+        Some(Command::Agent {
+            command: super::AgentCommand::List(super::AgentListArgs { ref session_id, .. }),
+        }) if session_id.as_str() == "session_A-1"
+    ));
+
+    let dev_send = Cli::parse_from(["tau", "dev", "send", "session_A-1", "hello"]);
+    assert!(matches!(
+        dev_send.command,
+        Some(Command::Dev {
+            command: DevCommand::Send { ref session_id, ref line },
+        }) if session_id.as_str() == "session_A-1" && line.as_slice() == ["hello"]
+    ));
+
+    for command in [
+        ["tau", "agent", "list", "bad.id"].as_slice(),
+        ["tau", "dev", "send", "bad.id", "hello"].as_slice(),
+    ] {
+        let error = match Cli::try_parse_from(command) {
+            Ok(_) => panic!("invalid session id must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(
+                "invalid value 'bad.id' for '<SESSION_ID>': \
+                 session id contains invalid byte 0x2e at byte offset 3"
+            ),
+            "{command:?} must preserve the SessionId diagnostic: {error}"
+        );
+    }
+}
 
 /// Ensures the hidden developer command exposes the papercut list, Markdown,
 /// clear, and explicit-state-root interface without loading user configuration.

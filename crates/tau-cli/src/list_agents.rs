@@ -72,23 +72,23 @@ impl AgentPickerFilter {
 
 /// Runs `tau agent list`.
 pub(crate) fn run(args: &crate::cli::AgentListArgs) -> Result<(), CliError> {
-    let session_id = tau_proto::SessionId::parse(&args.session_id).map_err(|error| {
-        CliError::Participant(format!("invalid session id `{}`: {error}", args.session_id))
-    })?;
     let filter = AgentListFilter::from_args(args);
     let scope = if filter.include_unloaded {
         SessionAgentListScope::History
     } else {
         SessionAgentListScope::Current
     };
-    let harness_path = tau_harness::runtime_dir::find_harness_for_session(session_id.as_str())
+    let harness_path = tau_harness::runtime_dir::find_harness_for_session(args.session_id.as_str())
         .map_err(|error| CliError::Participant(error.to_string()))?
         .ok_or_else(|| {
-            CliError::Participant(format!("no running harness for session `{}`", session_id))
+            CliError::Participant(format!(
+                "no running harness for session `{}`",
+                args.session_id
+            ))
         })?;
     let agents = request_at_socket_with_timeout_typed(
         &tau_harness::runtime_dir::socket_path(&harness_path),
-        &session_id,
+        &args.session_id,
         scope,
         AGENT_LIST_RPC_TIMEOUT,
     )?;
