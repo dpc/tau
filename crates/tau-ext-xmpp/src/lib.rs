@@ -35,10 +35,10 @@ use rand::RngCore;
 use registration_authority::{RegistrationAuthority, RegistrationLease};
 use tau_client::{ClientError, ClientResult, ExtensionBuilder, ManualRuntimePoll, TauExtension};
 use tau_proto::{
-    AgentId, CborValue, Event, MessageAgentTarget, MessageConversation, MessageDelivered,
-    MessageFactId, MessageParty, MessageSenderAuth, MessageSent, RawMessagePublisherId, SessionId,
-    ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
-    ToolUseStatus,
+    AgentId, CborValue, Event, ExtensionName, MessageAgentTarget, MessageConversation,
+    MessageDelivered, MessageFactId, MessageParty, MessageSenderAuth, MessageSent,
+    RawMessagePublisherId, SessionId, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec,
+    ToolStarted, ToolUseState, ToolUseStatus,
 };
 use tokio::{runtime as path_tokio_runtime, sync as path_tokio_sync, time as path_tokio_time};
 use tokio_xmpp::rustls::crypto as path_tokio_xmpp_rustls_crypto;
@@ -211,7 +211,7 @@ struct RuntimeConfig {
     max_message_bytes: usize,
     /// Harness-configured instance identity used for publisher claims and
     /// generated resources/rooms; present in every admitted runtime config.
-    instance_name: Option<String>,
+    instance_name: ExtensionName,
 }
 
 /// Raw deserialized extension config from `harness.yaml`.
@@ -330,7 +330,7 @@ impl ExtConfig {
     fn validate(
         self,
         secrets: &BTreeMap<String, tau_proto::SecretValue>,
-        instance_name: Option<String>,
+        instance_name: ExtensionName,
     ) -> Result<RuntimeConfig, String> {
         let account_jid = validate_account_jid(self.jid)?;
         let password = resolve_password(secrets, self.password_secret)?;
@@ -509,9 +509,10 @@ struct RoomTemplateContext<'a> {
     group_id_present: bool,
     /// Validated legacy room prefix.
     room_prefix: &'a str,
-    /// Configured extension instance name, or an empty string when unnamed.
+    /// Configured extension instance name.
     instance_name: &'a str,
-    /// Whether [`Self::instance_name`] is available.
+    /// Whether [`Self::instance_name`] is available; always true for configured
+    /// runtimes.
     instance_name_present: bool,
 }
 
@@ -667,7 +668,6 @@ fn room_localpart_for_registration(
     }
     let role = state.agent_roles.get(agent_id);
     let group = role.and_then(|role| state.role_groups.get(role));
-    let instance_name = cfg.instance_name.as_deref();
     let context = RoomTemplateContext {
         agent_id: agent_id.as_ref(),
         agent_hash: muc_room_disambiguator(agent_id),
@@ -681,8 +681,8 @@ fn room_localpart_for_registration(
         role_group_present: group.is_some(),
         group_id_present: group.is_some(),
         room_prefix: &cfg.muc.room_prefix,
-        instance_name: instance_name.unwrap_or(""),
-        instance_name_present: instance_name.is_some(),
+        instance_name: cfg.instance_name.as_str(),
+        instance_name_present: true,
     };
     let localpart = render_room_template(&cfg.muc.room_template, &context)?;
     let service = cfg
@@ -943,10 +943,7 @@ impl Extension {
                 RoutingMode::Muc => registered_conversation,
                 RoutingMode::DirectResource => cfg.default_recipient.to_bare().to_string(),
             };
-            let publisher_name = cfg
-                .instance_name
-                .clone()
-                .expect("configured XMPP runtime retains its instance name");
+            let publisher = RawMessagePublisherId::new(cfg.instance_name.as_str());
             drop(state);
             let parts = match outbound_message_parts(&invoke.agent_id, &message) {
                 Ok(parts) => parts,
@@ -970,7 +967,7 @@ impl Extension {
             let _ = self
                 .output
                 .emit_message_report(Event::MessageSentReported(MessageSent::new(
-                    RawMessagePublisherId::new(publisher_name),
+                    publisher,
                     MessageAgentTarget::new(invoke.agent_id.as_ref()),
                     generated_xmpp_send_message_id(invoke.call_id.as_str(), &conversation),
                     None,
@@ -2344,12 +2341,7 @@ impl WorkerState {
             .publish_if_active(&agent_id, lease, || {
                 self.output
                     .emit_message_report(Event::MessageDeliveredReported(MessageDelivered::new(
-                        RawMessagePublisherId::new(
-                            self.cfg
-                                .instance_name
-                                .as_deref()
-                                .expect("configured XMPP worker retains its instance name"),
-                        ),
+                        RawMessagePublisherId::new(self.cfg.instance_name.as_str()),
                         MessageAgentTarget::new(agent_id.as_ref()),
                         message_id,
                         sender,
@@ -2809,7 +2801,7 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, XmppRuntime>) -> Cli
             return Err(error);
         }
     };
-    let instance_name = Some(cx.instance_name().to_string());
+    let instance_name = cx.instance_name().clone();
     let cfg = match cfg.validate(cx.secrets(), instance_name) {
         Ok(cfg) => cfg,
         Err(message) => {
@@ -3092,11 +3084,7 @@ fn short_random_hex() -> String {
 }
 
 fn generated_resource(cfg: &RuntimeConfig) -> String {
-    let instance = cfg
-        .instance_name
-        .as_deref()
-        .map(|name| clean_token_or(name, "session"))
-        .unwrap_or_else(|| "session".to_owned());
+    let instance = clean_token_or(cfg.instance_name.as_str(), "session");
     format!(
         "{}-{}-{}-{}",
         cfg.resource_prefix,

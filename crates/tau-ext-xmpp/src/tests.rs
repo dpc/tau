@@ -471,8 +471,42 @@ fn cfg() -> RuntimeConfig {
         },
         ..Default::default()
     }
-    .validate(&secrets(), Some("std-xmpp".to_owned()))
+    .validate(&secrets(), extension_name())
     .expect("valid config")
+}
+
+/// Return the mandatory configured extension identity used by XMPP test
+/// runtimes.
+fn extension_name() -> tau_proto::ExtensionName {
+    tau_proto::ExtensionName::parse("std-xmpp")
+        .expect("test extension name must satisfy the identifier grammar")
+}
+
+/// A configured extension identity remains typed until each XMPP-only adapter
+/// borrows its exact text for room-template rendering and resource generation.
+#[test]
+fn runtime_config_retains_extension_name_for_xmpp_boundary_adapters() {
+    let mut config = cfg();
+    assert_eq!(config.instance_name.as_str(), "std-xmpp");
+
+    config.muc.room_template = "{{instance_name}}".to_owned();
+    let localpart = room_localpart_for_registration(
+        &State::default(),
+        &config,
+        &"session-1"
+            .parse::<tau_proto::SessionId>()
+            .expect("known-safe SessionId must be valid"),
+        &agent_id("agent-1"),
+    )
+    .expect("render")
+    .expect("MUC room");
+    assert_eq!(localpart, "std-xmpp");
+
+    let resource = generated_resource(&config);
+    assert!(
+        resource.starts_with(&format!("tau-std-xmpp-{}-", std::process::id())),
+        "resource must retain the configured instance text before its random suffix"
+    );
 }
 
 fn secrets() -> BTreeMap<String, tau_proto::SecretValue> {
@@ -533,8 +567,7 @@ fn configure_from_json(config: serde_json::Value) -> tau_proto::Configure {
     tau_proto::Configure {
         tool_prefix: None,
         config: tau_proto::json_to_cbor(&config),
-        instance_name: tau_proto::ExtensionName::parse("std-xmpp")
-            .expect("test extension name must satisfy the identifier grammar"),
+        instance_name: extension_name(),
         state_dir: None,
         secrets: secrets(),
         settings_files: Default::default(),
@@ -987,7 +1020,7 @@ fn xmpp_tool_examples_are_schema_valid() {
 #[test]
 fn config_rejects_unsafe_shapes() {
     let err = ExtConfig::default()
-        .validate(&BTreeMap::new(), None)
+        .validate(&BTreeMap::new(), extension_name())
         .err()
         .expect("missing jid");
     assert!(err.contains("jid"));
@@ -996,7 +1029,7 @@ fn config_rejects_unsafe_shapes() {
         jid: Some("tau@example.org/resource".to_owned()),
         ..Default::default()
     }
-    .validate(&BTreeMap::new(), None)
+    .validate(&BTreeMap::new(), extension_name())
     .err()
     .expect("full jid rejected");
     assert!(err.contains("bare account JID"));
@@ -1006,7 +1039,7 @@ fn config_rejects_unsafe_shapes() {
         password_secret: Some("xmpp_password".to_owned()),
         ..Default::default()
     }
-    .validate(&BTreeMap::new(), None)
+    .validate(&BTreeMap::new(), extension_name())
     .err()
     .expect("missing password secret rejected");
     assert_eq!(err, "xmpp secret `xmpp_password` is missing or empty");
@@ -1016,7 +1049,7 @@ fn config_rejects_unsafe_shapes() {
         password_secret: Some("xmpp_password".to_owned()),
         ..Default::default()
     }
-    .validate(&empty_password_secrets(), None)
+    .validate(&empty_password_secrets(), extension_name())
     .err()
     .expect("empty password secret rejected");
     assert_eq!(err, "xmpp secret `xmpp_password` is missing or empty");
@@ -1026,10 +1059,10 @@ fn config_rejects_unsafe_shapes() {
         password_secret: Some("xmpp_password".to_owned()),
         ..Default::default()
     }
-    .validate(&secrets(), None)
+    .validate(&secrets(), extension_name())
     .err()
     .expect("empty allowlist rejected");
-    assert!(err.contains("allowed_jids"));
+    assert_eq!(err, "xmpp config requires non-empty `allowed_jids`");
 
     let err = ExtConfig {
         jid: Some("tau@example.org".to_owned()),
@@ -1041,7 +1074,7 @@ fn config_rejects_unsafe_shapes() {
         },
         ..Default::default()
     }
-    .validate(&secrets(), None)
+    .validate(&secrets(), extension_name())
     .err()
     .expect("default recipient not allowed");
     assert!(err.contains("default_recipient"));
@@ -1056,7 +1089,7 @@ fn config_rejects_unsafe_shapes() {
         },
         ..Default::default()
     }
-    .validate(&secrets(), None)
+    .validate(&secrets(), extension_name())
     .err()
     .expect("unsupported routing mode rejected");
     assert!(err.contains("routing.mode"));
@@ -1071,7 +1104,7 @@ fn config_rejects_unsafe_shapes() {
         },
         ..Default::default()
     }
-    .validate(&secrets(), None)
+    .validate(&secrets(), extension_name())
     .err()
     .expect("muc service required");
     assert!(err.contains("muc.service"));
@@ -1087,7 +1120,7 @@ fn config_rejects_unsafe_shapes() {
         max_message_bytes: Some(0),
         ..Default::default()
     }
-    .validate(&secrets(), None)
+    .validate(&secrets(), extension_name())
     .err()
     .expect("zero limit rejected");
     assert!(err.contains("max_message_bytes"));
@@ -1103,7 +1136,7 @@ fn config_rejects_unsafe_shapes() {
         max_message_bytes: Some(MAX_MESSAGE_LIMIT + 1),
         ..Default::default()
     }
-    .validate(&secrets(), None)
+    .validate(&secrets(), extension_name())
     .err()
     .expect("oversized limit rejected");
     assert!(err.contains("max_message_bytes"));
@@ -1122,7 +1155,7 @@ fn config_rejects_unsafe_shapes() {
         },
         ..Default::default()
     }
-    .validate(&secrets(), None)
+    .validate(&secrets(), extension_name())
     .err()
     .expect("muc service with localpart/resource rejected");
     assert!(err.contains("domain-only"));
@@ -1744,8 +1777,9 @@ fn xmpp_register_rejects_unknown_arguments() {
     assert!(error.message.contains("destination"));
 }
 
-/// After registration, `xmpp_send` sends to the fixed conversation and prefixes
-/// the text with the stable agent id rather than accepting a destination JID.
+/// After registration, `xmpp_send` sends to the fixed conversation, reports the
+/// exact configured publisher identity, and prefixes the text with the stable
+/// agent id rather than accepting a destination JID.
 #[test]
 fn xmpp_send_uses_registered_conversation_without_destination_arg() {
     let (ext, rx, bridge) = extension();
@@ -2804,6 +2838,23 @@ fn muc_room_template_exposes_missing_metadata_flags() {
     assert_eq!(localpart, "no-role-no-group");
 }
 
+/// Configure validates both documented instance-name template branches even
+/// though admitted runtime configuration always carries an instance name.
+#[test]
+fn muc_room_template_rejects_invalid_missing_instance_name_branch() {
+    let error = validate_room_template(
+        Some(
+            "{{#if instance_name_present}}{{agent_id}}{{else}}{{unknown_identity}}{{/if}}"
+                .to_owned(),
+        ),
+        "tau",
+        Some(&Jid::new("conference.example.org").expect("JID").to_bare()),
+    )
+    .expect_err("missing instance-name branch must be validated");
+
+    assert!(error.contains("unknown_identity"));
+}
+
 /// The optional random helper matches agent-id template ergonomics while
 /// keeping randomness entirely opt-in and outside the stable default room
 /// policy.
@@ -3124,7 +3175,7 @@ fn config_prefix_sanitization_uses_call_site_fallbacks() {
         },
         ..Default::default()
     }
-    .validate(&secrets(), None)
+    .validate(&secrets(), extension_name())
     .expect("valid config");
 
     assert_eq!(cfg.resource_prefix, DEFAULT_RESOURCE_PREFIX);
@@ -3246,7 +3297,8 @@ fn inbound_message_ids_follow_native_composite_and_local_fallback_rules() {
 }
 
 /// Allowed MUC text with a cached real JID submits one transport-neutral report
-/// whose live projection is identical on replay.
+/// with the exact configured publisher identity whose live projection is
+/// identical on replay.
 #[test]
 fn allowed_muc_message_submits_replay_stable_report() {
     let (tx, rx) = mpsc::channel();
