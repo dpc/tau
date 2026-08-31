@@ -952,8 +952,7 @@ fn prompt_snapshot_cleanup_removes_call_backreferences() {
         .harness
         .prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert("call-1".into(), prompt_id.clone());
+        .record_tool_call_prompt("call-1".into(), prompt_id.clone());
 
     policy.harness.clear_prompt_tool_snapshot(&prompt_id);
 
@@ -970,8 +969,7 @@ fn prompt_snapshot_cleanup_removes_call_backreferences() {
             .harness
             .prompt_coordination
             .prompt_runtime
-            .tool_call_prompts
-            .is_empty()
+            .tool_call_prompts_is_empty()
     );
 }
 

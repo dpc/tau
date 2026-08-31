@@ -478,7 +478,7 @@ impl Harness {
                 .get(cid)
                 .and_then(|conv| match &conv.turn.turn_state {
                     AgentTurnState::ToolsRunning { remaining_calls } => {
-                        Some(remaining_calls.clone())
+                        Some(remaining_calls.ordered_remaining())
                     }
                     _ => None,
                 })

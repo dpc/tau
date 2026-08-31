@@ -1362,8 +1362,7 @@ fn manual_self_compaction_waits_for_complete_sibling_round() {
             .record_unqueued_in_flight(cid.clone(), call_id.into(), ToolTurnCategories::default());
         h.prompt_coordination
             .prompt_runtime
-            .tool_call_prompts
-            .insert(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
+            .record_tool_call_prompt(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
     }
     let compact_call = AgentToolCall {
         call_ref: None,
@@ -2168,8 +2167,7 @@ fn manual_self_compaction_pre_start_cancel_delivers_after_round_closes() {
             .record_unqueued_in_flight(cid.clone(), call_id.into(), ToolTurnCategories::default());
         h.prompt_coordination
             .prompt_runtime
-            .tool_call_prompts
-            .insert(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
+            .record_tool_call_prompt(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
     }
     let call = AgentToolCall {
         call_ref: None,
@@ -2348,8 +2346,7 @@ fn manual_self_compaction_failure_delivers_error_once() {
         .record_unqueued_in_flight(cid.clone(), call_id.clone(), ToolTurnCategories::default());
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
+        .record_tool_call_prompt(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
     h.request_agent_tool_compaction(
         &cid,
         &AgentToolCall {
@@ -2492,8 +2489,7 @@ fn manual_self_compaction_cold_failure_before_delivery() {
         .record_unqueued_in_flight(cid.clone(), call_id.clone(), ToolTurnCategories::default());
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
+        .record_tool_call_prompt(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
     h.request_agent_tool_compaction(
         &cid,
         &AgentToolCall {
@@ -2619,8 +2615,7 @@ fn manual_self_compaction_success_delivers_directly() {
         .record_unqueued_in_flight(cid.clone(), call_id.clone(), ToolTurnCategories::default());
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
+        .record_tool_call_prompt(call_id.clone(), test_agent_prompt_id("sp-seeded-tools"));
     h.request_agent_tool_compaction(
         &cid,
         &AgentToolCall {
@@ -2709,8 +2704,7 @@ fn manual_self_compaction_replay_repairs_completion_before_checkpoint() {
         );
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(
+        .record_tool_call_prompt(
             "call-replay-compact".into(),
             test_agent_prompt_id("sp-seeded-tools"),
         );
@@ -4245,8 +4239,7 @@ fn manual_self_compaction_retries_matching_failed_transaction() {
         );
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(
+        .record_tool_call_prompt(
             "call-self-blocked".into(),
             test_agent_prompt_id("sp-seeded-tools"),
         );

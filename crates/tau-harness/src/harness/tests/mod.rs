@@ -1738,7 +1738,7 @@ fn seed_tools_running(h: &mut Harness, cid: &crate::AgentId, remaining: Vec<Tool
         .expect("conversation present")
         .turn
         .turn_state = AgentTurnState::ToolsRunning {
-        remaining_calls: remaining,
+        remaining_calls: remaining.into(),
     };
 }
 

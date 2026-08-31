@@ -1002,7 +1002,7 @@ impl Harness {
             }
             AgentTurnState::ToolsRunning { remaining_calls } => {
                 self.reject_pending_ui_compaction(cid);
-                let mut cancelled_calls = remaining_calls;
+                let mut cancelled_calls = remaining_calls.ordered_remaining();
                 cancelled_calls.extend(
                     self.tool_routing
                         .tool_runtime
@@ -1549,7 +1549,7 @@ impl Harness {
         }
 
         let mut cancelled_calls = match turn_state {
-            AgentTurnState::ToolsRunning { remaining_calls } => remaining_calls,
+            AgentTurnState::ToolsRunning { remaining_calls } => remaining_calls.ordered_remaining(),
             _ => Vec::new(),
         };
         cancelled_calls.extend(

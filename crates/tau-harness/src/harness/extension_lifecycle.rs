@@ -1198,19 +1198,11 @@ impl Harness {
         );
     }
 
+    /// Clears one prompt's tool snapshots and every exact call backreference.
     pub(super) fn clear_prompt_tool_snapshot(&mut self, agent_prompt_id: &AgentPromptId) {
         self.prompt_coordination
             .prompt_runtime
-            .tool_specs
-            .remove(agent_prompt_id);
-        self.prompt_coordination
-            .prompt_runtime
-            .tool_invocation_policies
-            .remove(agent_prompt_id);
-        self.prompt_coordination
-            .prompt_runtime
-            .tool_call_prompts
-            .retain(|_, prompt_id| prompt_id != agent_prompt_id);
+            .clear_prompt_tool_snapshot(agent_prompt_id);
     }
 
     /// Releases the conversation/name/provider mappings for a completed tool
@@ -1295,27 +1287,9 @@ impl Harness {
             .tool_runtime
             .pending_cancellation_observations
             .remove(call_id);
-        if let Some(prompt_id) = self
-            .prompt_coordination
+        self.prompt_coordination
             .prompt_runtime
-            .tool_call_prompts
-            .remove(call_id)
-            && !self
-                .prompt_coordination
-                .prompt_runtime
-                .tool_call_prompts
-                .values()
-                .any(|other_prompt_id| other_prompt_id == &prompt_id)
-        {
-            self.prompt_coordination
-                .prompt_runtime
-                .tool_specs
-                .remove(&prompt_id);
-            self.prompt_coordination
-                .prompt_runtime
-                .tool_invocation_policies
-                .remove(&prompt_id);
-        }
+            .remove_tool_call_prompt(call_id);
     }
 
     pub(super) fn validate_tool_event_source(

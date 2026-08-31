@@ -797,8 +797,7 @@ fn isolated_watch_notification_does_not_request_status_acknowledgement() {
     );
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert("isolated-watch-call".into(), prompt_id);
+        .record_tool_call_prompt("isolated-watch-call".into(), prompt_id);
     h.agent_runtime
         .agent_registry
         .agents
@@ -1010,8 +1009,7 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
     };
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(unavailable_surface_call.id.clone(), unavailable_prompt);
+        .record_tool_call_prompt(unavailable_surface_call.id.clone(), unavailable_prompt);
     {
         let status = &mut h
             .agent_runtime
@@ -1074,8 +1072,7 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
     };
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(call.id.clone(), prompt_id.clone());
+        .record_tool_call_prompt(call.id.clone(), prompt_id.clone());
     h.execute_agent_tool_call(&cid, &call)
         .expect("accept substantive skill call");
     assert!(
@@ -1098,8 +1095,7 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
     };
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(wait.id.clone(), prompt_id.clone());
+        .record_tool_call_prompt(wait.id.clone(), prompt_id.clone());
     h.execute_agent_tool_call(&cid, &wait)
         .expect("accept lifecycle wait");
     assert!(
@@ -1120,8 +1116,7 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
     };
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(unavailable.id.clone(), prompt_id);
+        .record_tool_call_prompt(unavailable.id.clone(), prompt_id);
     h.execute_agent_tool_call(&cid, &unavailable)
         .expect("reject unknown call in band");
     assert!(
@@ -1159,8 +1154,7 @@ fn working_reminder_is_recorded_at_substantive_tool_admission() {
     };
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(rejected_status.id.clone(), rejected_status_prompt);
+        .record_tool_call_prompt(rejected_status.id.clone(), rejected_status_prompt);
     h.execute_agent_tool_call(&cid, &rejected_status)
         .expect("settle rejected status-only call");
     h.queue_working_reminder_if_needed(&cid);
@@ -1238,8 +1232,7 @@ fn background_completion_substantive_tool_admission_records_working_reminder() {
     };
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(call.id.clone(), prompt_id);
+        .record_tool_call_prompt(call.id.clone(), prompt_id);
 
     h.execute_agent_tool_call(&cid, &call)
         .expect("admit background substantive work");

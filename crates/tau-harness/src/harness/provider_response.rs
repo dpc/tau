@@ -3345,8 +3345,7 @@ impl Harness {
         normalization.normalize_call_id(index, &mut call);
         self.prompt_coordination
             .prompt_runtime
-            .tool_call_prompts
-            .insert(call.id.clone(), response.agent_prompt_id.clone());
+            .record_tool_call_prompt(call.id.clone(), response.agent_prompt_id.clone());
         let background_support = self.resolve_tool_background_support(call.name.as_str());
         let turn_categories = self
             .resolve_enabled_tool_spec_for_prompt(&call.name, &response.agent_prompt_id)
@@ -3567,7 +3566,12 @@ impl Harness {
             .map(|entry| entry.call.id.clone())
             .collect();
         self.register_finished_response_pending_tools(&normalized_tool_calls.calls);
-        self.set_agent_turn_state(cid, AgentTurnState::ToolsRunning { remaining_calls });
+        self.set_agent_turn_state(
+            cid,
+            AgentTurnState::ToolsRunning {
+                remaining_calls: remaining_calls.into(),
+            },
+        );
         for entry in &normalized_tool_calls.calls {
             let message = normalized_tool_calls
                 .invalid_errors
@@ -3790,7 +3794,12 @@ impl Harness {
             .map(|entry| entry.call.id.clone())
             .collect();
         self.register_finished_response_pending_tools(&normalized_tool_calls.calls);
-        self.set_agent_turn_state(cid, AgentTurnState::ToolsRunning { remaining_calls });
+        self.set_agent_turn_state(
+            cid,
+            AgentTurnState::ToolsRunning {
+                remaining_calls: remaining_calls.into(),
+            },
+        );
         if self
             .agent_runtime
             .agent_registry

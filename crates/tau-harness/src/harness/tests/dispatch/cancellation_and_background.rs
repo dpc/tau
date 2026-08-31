@@ -1565,7 +1565,7 @@ fn background_notification_unsuppress_before_completion_allows_later_prompt() {
         .expect("default conversation remains live")
         .turn
         .turn_state = AgentTurnState::ToolsRunning {
-        remaining_calls: Vec::new(),
+        remaining_calls: Vec::new().into(),
     };
     h.tool_routing
         .tool_runtime
@@ -1621,7 +1621,7 @@ fn background_notification_unsuppress_after_suppressed_completion_queues_prompt(
         .expect("default conversation remains live")
         .turn
         .turn_state = AgentTurnState::ToolsRunning {
-        remaining_calls: Vec::new(),
+        remaining_calls: Vec::new().into(),
     };
     h.unsuppress_background_completion_prompt(call_id.clone());
 
@@ -2210,7 +2210,7 @@ fn active_background_completion_steering_carries_typed_provenance() {
     h.set_agent_turn_state(
         &cid,
         AgentTurnState::ToolsRunning {
-            remaining_calls: vec![call_id.clone()],
+            remaining_calls: vec![call_id.clone()].into(),
         },
     );
 

@@ -24,6 +24,31 @@ use super::WAIT_TOOL_NAME;
 const MAX_WAIT_TERMINAL_TOMBSTONES: usize = 1024;
 const ORIGINAL_TOOL_CALL_ID_HEADER: &str = "original_tool_call_id";
 const NO_BACKGROUND_WAIT_CANDIDATES: &str = "no background tool calls are running or completed in this conversation; use `wait({\"timeout_minutes\": N})` with a positive integer N to wait for new activating input";
+
+/// Generation of one completion queue entry for a potentially reused call ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompletionGeneration(
+    /// Monotonic wrapping completion stamp.
+    u64,
+);
+
+impl CompletionGeneration {
+    /// Returns the next generation, wrapping only after exhausting the `u64`
+    /// space.
+    fn wrapping_successor(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
+}
+
+/// One generation-stamped entry in an owner's completion FIFO.
+#[derive(Clone, Debug)]
+struct CompletionNode {
+    /// Completed display call identifier.
+    call_id: ToolCallId,
+    /// Generation that prevents a reused call ID from reviving an old node.
+    generation: CompletionGeneration,
+}
+
 /// Render the normalized input-wait timeout for tool display state.
 pub(super) fn wait_timeout_args(timeout: Duration) -> String {
     format!("{}m", timeout.as_secs() / 60)
@@ -254,8 +279,20 @@ pub(super) struct WaitTracker {
     call_refs: HashMap<ToolCallId, ToolCallRef>,
     /// Canonical terminal identity retained for immediate and active delivery.
     terminal_observations: HashMap<ToolCallId, tau_proto::ObservationId>,
-    /// Oldest-first deliverable completion order.
-    completion_order: VecDeque<ToolCallId>,
+    /// Oldest-first completion order scoped to each owning agent.
+    ///
+    /// `completed_membership` identifies the sole live generation for a call.
+    /// Removal leaves older nodes as tombstones; only this owner's front prunes
+    /// them, while owner teardown retires the complete owner-local queue.
+    completion_order_by_owner: HashMap<AgentId, VecDeque<CompletionNode>>,
+    /// Exact live completion generation by display call ID.
+    completed_membership: HashMap<ToolCallId, CompletionGeneration>,
+    /// Next generation assigned to a completion queue node.
+    next_completion_generation: CompletionGeneration,
+    /// Completion queue nodes retired by lazy pruning or owner teardown in
+    /// tests.
+    #[cfg(test)]
+    completion_nodes_retired: usize,
     /// Oldest-first bounded order for `NormalReturned` and `Consumed` states.
     terminal_order: VecDeque<ToolCallId>,
 }
@@ -282,7 +319,11 @@ impl WaitTracker {
             call_tool_names: HashMap::new(),
             call_refs: HashMap::new(),
             terminal_observations: HashMap::new(),
-            completion_order: VecDeque::new(),
+            completion_order_by_owner: HashMap::new(),
+            completed_membership: HashMap::new(),
+            next_completion_generation: CompletionGeneration(0),
+            #[cfg(test)]
+            completion_nodes_retired: 0,
             terminal_order: VecDeque::new(),
         }
     }
@@ -1605,9 +1646,14 @@ impl WaitTracker {
             self.terminal_observations.remove(call_id);
             self.call_owners.remove(call_id);
             self.call_tool_names.remove(call_id);
-            self.completion_order
-                .retain(|completed| completed != call_id);
+            self.completed_membership.remove(call_id);
             self.terminal_order.retain(|terminal| terminal != call_id);
+        }
+        if let Some(_queue) = self.completion_order_by_owner.remove(owner) {
+            #[cfg(test)]
+            {
+                self.completion_nodes_retired += _queue.len();
+            }
         }
         call_ids
     }
@@ -1636,12 +1682,34 @@ impl WaitTracker {
         vec![reply]
     }
 
-    /// Return the oldest unconsumed background completion owned by an agent.
-    pub(super) fn oldest_completed_for_owner(&self, owner: &AgentId) -> Option<ToolCallId> {
-        self.completion_order.iter().find_map(|call_id| {
-            (self.call_owners.get(call_id) == Some(owner) && self.is_completed(call_id))
-                .then_some(call_id.clone())
-        })
+    /// Return the oldest unconsumed background completion owned by an agent,
+    /// lazily pruning tombstones only from that owner's FIFO front.
+    pub(super) fn oldest_completed_for_owner(&mut self, owner: &AgentId) -> Option<ToolCallId> {
+        loop {
+            let node = self
+                .completion_order_by_owner
+                .get(owner)
+                .and_then(|queue| queue.front())
+                .cloned()?;
+            let live = self.completed_membership.get(&node.call_id) == Some(&node.generation)
+                && self.call_owners.get(&node.call_id) == Some(owner)
+                && self.is_completed(&node.call_id);
+            if live {
+                return Some(node.call_id);
+            }
+            let queue = self
+                .completion_order_by_owner
+                .get_mut(owner)
+                .expect("front node came from this owner");
+            queue.pop_front();
+            #[cfg(test)]
+            {
+                self.completion_nodes_retired += 1;
+            }
+            if queue.is_empty() {
+                self.completion_order_by_owner.remove(owner);
+            }
+        }
     }
 
     fn has_running_background_for_owner(&self, owner: &AgentId) -> bool {
@@ -1652,17 +1720,33 @@ impl WaitTracker {
     }
 
     fn push_completed(&mut self, call_id: ToolCallId) {
-        if self
-            .completion_order
-            .iter()
-            .all(|existing| existing != &call_id)
-        {
-            self.completion_order.push_back(call_id);
+        if self.completed_membership.contains_key(&call_id) {
+            return;
         }
+        let Some(owner) = self.call_owners.get(&call_id).cloned() else {
+            return;
+        };
+        let generation = self.next_completion_generation;
+        self.next_completion_generation = self.next_completion_generation.wrapping_successor();
+        self.completed_membership
+            .insert(call_id.clone(), generation);
+        self.completion_order_by_owner
+            .entry(owner)
+            .or_default()
+            .push_back(CompletionNode {
+                call_id,
+                generation,
+            });
     }
 
     fn remove_completed(&mut self, call_id: &ToolCallId) {
-        self.completion_order.retain(|existing| existing != call_id);
+        self.completed_membership.remove(call_id);
+    }
+
+    /// Returns the number of completion queue nodes retired in tests.
+    #[cfg(test)]
+    fn completion_nodes_retired(&self) -> usize {
+        self.completion_nodes_retired
     }
 
     fn record_terminal_state(&mut self, call_id: ToolCallId, state: WaitCallState) {

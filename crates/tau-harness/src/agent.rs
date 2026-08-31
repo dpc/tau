@@ -13,6 +13,7 @@
 
 mod dispatch_state;
 mod execution_state;
+mod foreground_tool_round;
 mod identity_state;
 mod loop_guard;
 mod turn_runtime_state;
@@ -22,12 +23,13 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 
 pub(crate) use dispatch_state::AgentDispatchState;
 pub(crate) use execution_state::AgentExecutionState;
+pub(crate) use foreground_tool_round::ForegroundToolRound;
 pub(crate) use identity_state::AgentIdentityState;
 pub(crate) use loop_guard::{LoopCycleState, LoopGuardState, LoopGuardTrigger, LoopTurnSignature};
 use tau_core::{AgentPersistenceMode, NodeId};
 use tau_proto::{
     AgentId, AgentPromptId, ConnectionId, ModelId, PromptMessageClass, PromptOriginator, SessionId,
-    ToolCallId, ToolUseStats,
+    ToolUseStats,
 };
 pub(crate) use turn_runtime_state::AgentTurnRuntimeState;
 pub use work_status::WorkStatusReport;
@@ -337,7 +339,9 @@ pub(crate) enum AgentTurnState {
         agent_prompt_id: AgentPromptId,
     },
     ToolsRunning {
-        remaining_calls: Vec<ToolCallId>,
+        /// Immutable provider order plus exact live membership for this tool
+        /// round.
+        remaining_calls: ForegroundToolRound,
     },
 }
 

@@ -351,7 +351,7 @@ fn disconnected_tool_completes_pending_call() {
         .record_unqueued_in_flight(cid.clone(), call_id.clone(), ToolTurnCategories::default());
     if let Some(conv) = h.agent_runtime.agent_registry.agents.get_mut(&cid) {
         conv.turn.turn_state = AgentTurnState::ToolsRunning {
-            remaining_calls: vec![call_id.clone()],
+            remaining_calls: vec![call_id.clone()].into(),
         };
     }
 

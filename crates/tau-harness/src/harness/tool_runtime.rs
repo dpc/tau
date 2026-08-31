@@ -194,8 +194,7 @@ impl Harness {
                     &next.invocation.name,
                     self.prompt_coordination
                         .prompt_runtime
-                        .tool_call_prompts
-                        .get(&next.invocation.id),
+                        .tool_call_prompt(&next.invocation.id),
                 )
             };
             if waits_for_staged_registration {
@@ -946,8 +945,7 @@ impl Harness {
         let should_send = if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(cid)
         {
             if let AgentTurnState::ToolsRunning { remaining_calls } = &mut conv.turn.turn_state {
-                remaining_calls.retain(|id| id.as_str() != completed_call_id);
-                if remaining_calls.is_empty() {
+                if remaining_calls.complete(completed_call_id) {
                     conv.turn.turn_state = AgentTurnState::Idle;
                     true
                 } else {
@@ -1090,7 +1088,7 @@ impl Harness {
         );
         if let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(cid) {
             agent.turn.turn_state = AgentTurnState::ToolsRunning {
-                remaining_calls: vec![completed_call_id.clone()],
+                remaining_calls: vec![completed_call_id.clone()].into(),
             };
         }
         self.maybe_complete_agent_turn_for(cid, completed_call_id.as_str());
@@ -1571,8 +1569,7 @@ impl Harness {
         let prompt_id = self
             .prompt_coordination
             .prompt_runtime
-            .tool_call_prompts
-            .get(&call.id)
+            .tool_call_prompt(&call.id)
             .cloned();
         let prompt_tool_spec = prompt_id
             .as_ref()

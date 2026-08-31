@@ -5274,7 +5274,7 @@ fn context_size_alert_waits_for_tool_round_completion() {
     h.set_agent_turn_state(
         &cid,
         AgentTurnState::ToolsRunning {
-            remaining_calls: vec!["alert-tool".into()],
+            remaining_calls: vec!["alert-tool".into()].into(),
         },
     );
     let alerts = h.config.available_roles[&h.config.selected_role]
@@ -5315,7 +5315,7 @@ fn agent_stats_keep_outer_turn_running_across_inner_tool_continuation() {
     h.set_agent_turn_state(
         &cid,
         AgentTurnState::ToolsRunning {
-            remaining_calls: vec!["tool-round".into()],
+            remaining_calls: vec!["tool-round".into()].into(),
         },
     );
     h.agent_runtime
@@ -6571,12 +6571,10 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
         .insert(spid.clone(), vec![shared_test_tool_spec("snapshot_tool")]);
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert("snapshot-typo".into(), spid.clone());
+        .record_tool_call_prompt("snapshot-typo".into(), spid.clone());
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert("registered-not-snapshot".into(), spid.clone());
+        .record_tool_call_prompt("registered-not-snapshot".into(), spid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         automatic_compaction_decision: None,

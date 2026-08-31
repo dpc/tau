@@ -1988,8 +1988,7 @@ fn register_manual_cross_compaction_call(
         );
     h.prompt_coordination
         .prompt_runtime
-        .tool_call_prompts
-        .insert(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
+        .record_tool_call_prompt(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
     AgentToolCall {
         call_ref: None,
         id: call_id.into(),

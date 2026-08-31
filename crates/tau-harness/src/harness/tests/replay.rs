@@ -3545,7 +3545,7 @@ fn resumed_harness_replays_context_size_alert_at_delivery_position() {
         h.set_agent_turn_state(
             &cid,
             AgentTurnState::ToolsRunning {
-                remaining_calls: vec!["replay-alert-tool".into()],
+                remaining_calls: vec!["replay-alert-tool".into()].into(),
             },
         );
         let alerts = h.config.available_roles[&h.config.selected_role]

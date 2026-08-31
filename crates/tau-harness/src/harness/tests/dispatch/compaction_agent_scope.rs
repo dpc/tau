@@ -56,8 +56,7 @@ fn equal_local_model_request_ids_commit_and_continue_for_both_targets() {
                 );
             h.prompt_coordination
                 .prompt_runtime
-                .tool_call_prompts
-                .insert(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
+                .record_tool_call_prompt(call_id.into(), test_agent_prompt_id("sp-seeded-tools"));
         }
         h.request_agent_tool_compaction(
             cid,

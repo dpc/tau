@@ -694,8 +694,7 @@ impl<'a> InternalToolHost<'a> {
             .harness
             .prompt_coordination
             .prompt_runtime
-            .tool_call_prompts
-            .get(&owner.call().id)?;
+            .tool_call_prompt(&owner.call().id)?;
         let started = self
             .harness
             .session_runtime

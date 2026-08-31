@@ -494,7 +494,7 @@ fn discarded_background_correlation_is_fully_retired() {
         tracker
             .calls
             .insert(call_id.clone(), WaitCallState::Backgrounded);
-        tracker.completion_order.push_back(call_id.clone());
+        tracker.push_completed(call_id.clone());
         tracker.discard_owner(&owner);
     }
 
@@ -503,7 +503,8 @@ fn discarded_background_correlation_is_fully_retired() {
     assert!(tracker.terminal_observations.is_empty());
     assert!(tracker.call_owners.is_empty());
     assert!(tracker.call_tool_names.is_empty());
-    assert!(tracker.completion_order.is_empty());
+    assert!(tracker.completion_order_by_owner.is_empty());
+    assert!(tracker.completed_membership.is_empty());
     assert!(tracker.terminal_order.is_empty());
 }
 
@@ -527,7 +528,7 @@ fn discarded_owner_retires_source_exact_bare_and_input_wait_state() {
         "source".into(),
         WaitCallState::BackgroundResult(background_result("source", "done")),
     );
-    tracker.completion_order.push_back("source".into());
+    tracker.push_completed("source".into());
     let wait = |call_id: &str, wait_owner: AgentId| WaitRequest {
         call_id: call_id.into(),
         tool_name: wait_tool_name(),
@@ -1509,6 +1510,146 @@ fn no_arg_wait_consumes_oldest_completed_background_result_for_owner() {
         cbor_map_text(&second_result, "output"),
         Some("second finished")
     );
+}
+
+/// Owner-local completion FIFOs must match a simple reference model across a
+/// 4,096-call workload while lazy tombstones retire each queue node at most
+/// once.
+#[test]
+fn large_owner_local_completion_queues_match_reference_with_linear_retirement() {
+    const OWNERS: usize = 4;
+    const CALLS: usize = 4_096;
+    let owners: Vec<_> = (0..OWNERS)
+        .map(|index| conv(&format!("owner-{index}")))
+        .collect();
+    let mut expected = vec![VecDeque::<ToolCallId>::new(); OWNERS];
+    let mut tracker = WaitTracker::default();
+
+    for index in 0..CALLS {
+        let owner_index = index % OWNERS;
+        let owner = owners[owner_index].clone();
+        let call_id: ToolCallId = format!("queued-{index:04}").into();
+        tracker.record_tool_invoke(call_id.clone(), slow_tool_name(), owner.clone());
+        assert!(
+            tracker
+                .record_tool_result(
+                    &background_placeholder(call_id.as_str()),
+                    owner.clone(),
+                    observation(),
+                )
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .record_background_result(
+                    background_result(call_id.as_str(), call_id.as_str()),
+                    owner,
+                    observation(),
+                )
+                .is_empty()
+        );
+        expected[owner_index].push_back(call_id);
+    }
+
+    for index in (0..CALLS).step_by(7) {
+        let call_id: ToolCallId = format!("queued-{index:04}").into();
+        tracker.consume_completed_call(&call_id);
+        expected[index % OWNERS].retain(|candidate| candidate != &call_id);
+    }
+    for index in (3..CALLS).step_by(11) {
+        let call_id: ToolCallId = format!("queued-{index:04}").into();
+        if expected[index % OWNERS]
+            .iter()
+            .any(|candidate| candidate == &call_id)
+        {
+            let reply = start_reply(start_wait_exact(
+                &mut tracker,
+                &owners[index % OWNERS],
+                &format!("exact-{index:04}"),
+                call_id.as_str(),
+            ));
+            assert_eq!(reply_result(reply), CborValue::Text(call_id.to_string()));
+            expected[index % OWNERS].retain(|candidate| candidate != &call_id);
+        }
+    }
+
+    let torn_down = OWNERS - 1;
+    tracker.discard_owner(&owners[torn_down]);
+    expected[torn_down].clear();
+    for owner_index in 0..OWNERS {
+        while let Some(expected_call_id) = expected[owner_index].pop_front() {
+            let reply = start_reply(start_wait_any(
+                &mut tracker,
+                &owners[owner_index],
+                &format!("bare-{owner_index}-{}", expected_call_id.as_str()),
+            ));
+            let result = reply_result(reply);
+            assert_eq!(
+                cbor_map_text(&result, ORIGINAL_TOOL_CALL_ID_HEADER),
+                Some(expected_call_id.as_str())
+            );
+        }
+        assert!(
+            tracker
+                .oldest_completed_for_owner(&owners[owner_index])
+                .is_none()
+        );
+    }
+
+    assert!(tracker.completed_membership.is_empty());
+    assert!(tracker.completion_order_by_owner.is_empty());
+    assert_eq!(tracker.completion_nodes_retired(), CALLS);
+}
+
+/// Reusing a completed call ID must not revive its stale FIFO position ahead of
+/// completions that occurred between the old and new generations.
+#[test]
+fn reused_call_id_keeps_new_completion_at_its_new_fifo_position() {
+    let owner = conv("reuse-owner");
+    let mut tracker = WaitTracker::default();
+
+    for call_id in ["x", "y"] {
+        tracker.record_tool_invoke(call_id.into(), slow_tool_name(), owner.clone());
+        assert!(
+            tracker
+                .record_tool_result(
+                    &background_placeholder(call_id),
+                    owner.clone(),
+                    observation()
+                )
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .record_background_result(
+                    background_result(call_id, &format!("old-{call_id}")),
+                    owner.clone(),
+                    observation(),
+                )
+                .is_empty()
+        );
+        if call_id == "x" {
+            tracker.consume_completed_call(&ToolCallId::from("x"));
+        }
+    }
+
+    tracker.record_tool_invoke("x".into(), slow_tool_name(), owner.clone());
+    tracker.record_tool_result(&background_placeholder("x"), owner.clone(), observation());
+    tracker.record_background_result(
+        background_result("x", "new-x"),
+        owner.clone(),
+        observation(),
+    );
+
+    for (wait_id, expected) in [("wait-y", "y"), ("wait-x", "x")] {
+        let result = reply_result(start_reply(start_wait_any(&mut tracker, &owner, wait_id)));
+        assert_eq!(
+            cbor_map_text(&result, ORIGINAL_TOOL_CALL_ID_HEADER),
+            Some(expected)
+        );
+    }
+    assert!(tracker.oldest_completed_for_owner(&owner).is_none());
+    assert_eq!(tracker.completion_nodes_retired(), 3);
 }
 
 /// If a same-conversation background call is still running, `wait({})`

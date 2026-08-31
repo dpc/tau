@@ -194,7 +194,7 @@ impl Harness {
         let AgentTurnState::ToolsRunning { remaining_calls } = turn_state else {
             return false;
         };
-        let [wait_call_id] = remaining_calls.as_slice() else {
+        let Some(wait_call_id) = remaining_calls.sole_remaining() else {
             return false;
         };
         if self
@@ -268,7 +268,7 @@ impl Harness {
         let AgentTurnState::ToolsRunning { remaining_calls } = &turn_state else {
             return;
         };
-        let [wait_call_id] = remaining_calls.as_slice() else {
+        let Some(wait_call_id) = remaining_calls.sole_remaining() else {
             return;
         };
         if let Some(pending) = self
@@ -759,8 +759,7 @@ impl Harness {
         let Some(initiating_agent_prompt_id) = self
             .prompt_coordination
             .prompt_runtime
-            .tool_call_prompts
-            .get(&call.id)
+            .tool_call_prompt(&call.id)
             .cloned()
         else {
             self.finish_harness_owned_tool_with_error(

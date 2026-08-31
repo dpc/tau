@@ -977,15 +977,9 @@ impl Harness {
             .local_route_failures
             .clear();
         self.prompt_coordination.prompt_runtime.operations.clear();
-        self.prompt_coordination.prompt_runtime.tool_specs.clear();
         self.prompt_coordination
             .prompt_runtime
-            .tool_invocation_policies
-            .clear();
-        self.prompt_coordination
-            .prompt_runtime
-            .tool_call_prompts
-            .clear();
+            .clear_all_tool_snapshots();
         self.prompt_coordination
             .prompt_runtime
             .shown_tool_failure_examples
