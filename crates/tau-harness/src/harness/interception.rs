@@ -30,6 +30,7 @@ use tau_proto::{
 
 use super::gated_final::GatedFinalDisposition;
 use super::prompt_materialization_timing::PromptMaterializationTiming;
+use super::start_coordinator::StartPhaseOwner;
 use crate::debug_log::DebugEventSensitivity;
 use crate::harness::compaction_runtime_state::ManualCompactionRequestKey;
 use crate::harness::prompt_acceptance_timing::PromptAcceptanceTiming;
@@ -301,6 +302,8 @@ struct EnqueuePublishOptions {
     prompt_acceptance: Option<PromptAcceptanceTiming>,
     /// Exact diagnostic sensitivity retained through deferral and interception.
     debug_sensitivity: DebugEventSensitivity,
+    /// Optional single-event startup outcome owner.
+    start_owner: Option<StartPhaseOwner>,
 }
 
 /// Source envelope retained through generic interception and commit.
@@ -311,6 +314,25 @@ struct PublicationSource {
     peer_context: PeerPublicationContext,
     /// Process-local aggregate timing for one eligible UI prompt.
     prompt_acceptance: Option<PromptAcceptanceTiming>,
+    /// Optional single-event startup outcome owner.
+    start_owner: Option<StartPhaseOwner>,
+}
+
+/// Independent one-shot owners consumed by a canonical publication outcome.
+pub(crate) struct PublicationOutcomeOwners {
+    /// Optional UI prompt latency accounting.
+    pub(crate) prompt_acceptance: Option<PromptAcceptanceTiming>,
+    /// Optional startup phase transition owner.
+    pub(crate) start: Option<StartPhaseOwner>,
+}
+
+/// One compact must-pass startup terminal retained across live publication
+/// capacity rejection.
+pub(crate) struct RetainedStartTerminal {
+    /// Exact terminal event; no startup request payload is duplicated.
+    pub(crate) event: Event,
+    /// One-event owner consumed by the eventual committed publication.
+    pub(crate) owner: StartPhaseOwner,
 }
 
 /// A publish that arrived while another publish was in interception limbo.
@@ -1007,7 +1029,9 @@ fn invalid_tool_request_replacement(event: &Event) -> bool {
 pub(super) fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) -> bool {
     matches!(
         original,
-        Event::AgentStarted(_)
+        Event::StartAgentAccepted(_)
+            | Event::AgentStartFailed(_)
+            | Event::AgentStarted(_)
             | Event::AgentUserInteractionRecorded(_)
             | Event::AgentMessageSent(_)
             | Event::AgentMessageReceived(_)
@@ -1449,6 +1473,87 @@ impl Harness {
         }
     }
 
+    /// Remove the one uncommitted publication owned by `start_id`.
+    ///
+    /// The caller owns the terminal outcome. This method only removes the
+    /// envelope and performs the same local continuation cleanup as an
+    /// interceptor drop.
+    pub(super) fn cancel_start_phase_publication(
+        &mut self,
+        start_id: tau_proto::StartOperationId,
+    ) -> Option<StartPhaseOwner> {
+        let pending_matches = self
+            .runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .is_some_and(|pending| {
+                pending
+                    .source
+                    .start_owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.start_id == start_id)
+            });
+        let mut removed_pending = false;
+        let mut owner = None;
+        if pending_matches {
+            let pending = self
+                .runtime_io
+                .publication
+                .pending_intercept
+                .take()
+                .expect("matched startup publication");
+            self.suspend_interceptor_after_destructive_cancel(&pending.conn_id);
+            let deferred = DeferredPublish {
+                source: pending.source,
+                event: pending.event,
+                persist: pending.persist,
+                must_pass: pending.must_pass,
+                sync_head_for: pending.sync_head_for,
+            };
+            owner = self.discard_deferred_publish_without_start_outcome(
+                deferred,
+                "startup publication was terminally canceled",
+            );
+            removed_pending = true;
+        }
+        if let Some(index) = self
+            .runtime_io
+            .publication
+            .deferred
+            .iter()
+            .position(|publish| {
+                publish
+                    .source
+                    .start_owner
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.start_id == start_id)
+            })
+        {
+            let deferred = self
+                .runtime_io
+                .publication
+                .deferred
+                .remove(index)
+                .expect("matched deferred startup publication");
+            let deferred_owner = self.discard_deferred_publish_without_start_outcome(
+                deferred,
+                "startup publication was terminally canceled",
+            );
+            // ast-grep-ignore: debug-assert-expression-must-not-mutate
+            debug_assert!(
+                owner.is_none(),
+                "one start phase owns at most one publication"
+            );
+            owner = deferred_owner;
+        }
+        if removed_pending {
+            self.drain_deferred_publishes();
+            self.drain_publish_idle_dispatches();
+        }
+        owner
+    }
+
     /// Cancel exact pre-commit model-compaction acceptances whose caller or
     /// target is being torn down, without disturbing other target work.
     pub(super) fn cancel_staged_model_acceptance_publications(
@@ -1686,7 +1791,10 @@ impl Harness {
                 continuation: Some(PostCommitContinuation::AgentPublish(Box::new(completion))),
                 notify_watchers,
             }),
-            None,
+            PublicationOutcomeOwners {
+                prompt_acceptance: None,
+                start: None,
+            },
         );
         self.drain_deferred_publishes();
     }
@@ -1777,8 +1885,20 @@ impl Harness {
     /// owned by an interceptor Drop, without exposing it to another
     /// interceptor.
     fn discard_deferred_publish(&mut self, deferred: DeferredPublish, reason: &str) {
+        if let Some(owner) = self.discard_deferred_publish_without_start_outcome(deferred, reason) {
+            self.reject_start_phase(owner, tau_proto::AgentStartFailure::Internal);
+        }
+    }
+
+    /// Discard one envelope while returning its startup outcome owner to the
+    /// caller, if any.
+    fn discard_deferred_publish_without_start_outcome(
+        &mut self,
+        deferred: DeferredPublish,
+        reason: &str,
+    ) -> Option<StartPhaseOwner> {
         let DeferredPublish {
-            source,
+            mut source,
             event,
             persist: _,
             must_pass: _,
@@ -1806,6 +1926,7 @@ impl Harness {
             self.discard_uncommitted_shell_canonical_marker(&progress.command_id);
         }
         self.discard_peer_activation_reservation(&source.peer_context);
+        source.start_owner.take()
     }
 
     /// True when no event is parked in interception and no publish is
@@ -1917,6 +2038,7 @@ impl Harness {
                 )
             });
         if !output_length_owner_ready && !self.validate_prompt_render_for_dispatch(cid) {
+            self.fail_start_dispatch_for_agent(cid, tau_proto::AgentStartFailure::DispatchRejected);
             return;
         }
         let selection = match self.select_inference_dispatch(cid, captured_activation_cut) {
@@ -1927,15 +2049,30 @@ impl Harness {
                     "role `{role_name}` has no available model — use :role to pick a role, :model <provider>/<model> to pick an agent model, or enable a provider"
                 ));
                 self.set_agent_turn_state(cid, path_crate_agent::AgentTurnState::Idle);
+                self.fail_start_dispatch_for_agent(
+                    cid,
+                    tau_proto::AgentStartFailure::DispatchRejected,
+                );
                 return;
             }
             Err(InferenceDispatchSelectionError::OutputLengthBranchInvalid) => {
+                self.fail_start_dispatch_for_agent(
+                    cid,
+                    tau_proto::AgentStartFailure::DispatchRejected,
+                );
                 self.repair_dormant_output_length_lineage(cid);
                 return;
             }
-            Err(InferenceDispatchSelectionError::MissingActivationCut) => return,
+            Err(InferenceDispatchSelectionError::MissingActivationCut) => {
+                self.fail_start_dispatch_for_agent(
+                    cid,
+                    tau_proto::AgentStartFailure::DispatchRejected,
+                );
+                return;
+            }
         };
         let Some(checkpoint) = self.claim_inference_checkpoint(cid, selection) else {
+            self.fail_start_dispatch_for_agent(cid, tau_proto::AgentStartFailure::DispatchRejected);
             return;
         };
         self.publish_for_agent(
@@ -2296,6 +2433,56 @@ impl Harness {
                 admission: None,
                 prompt_acceptance: None,
                 debug_sensitivity: DebugEventSensitivity::Ordinary,
+                start_owner: None,
+            },
+        );
+    }
+
+    /// Enqueue one ordinary event whose committed or rejected outcome advances
+    /// startup.
+    pub(super) fn enqueue_start_phase(
+        &mut self,
+        event: Event,
+        persist: bool,
+        must_pass: bool,
+        owner: StartPhaseOwner,
+    ) {
+        self.enqueue_publish_inner(
+            Some(crate::harness::harness_connection_id()),
+            event,
+            EnqueuePublishOptions {
+                persist,
+                must_pass,
+                sync_head_for: None,
+                admission: None,
+                prompt_acceptance: None,
+                debug_sensitivity: DebugEventSensitivity::Ordinary,
+                start_owner: Some(owner),
+            },
+        );
+    }
+
+    /// Enqueue an agent-scoped event with one startup outcome owner.
+    pub(super) fn enqueue_publish_with_start_owner(
+        &mut self,
+        source: Option<&tau_proto::ConnectionId>,
+        event: Event,
+        persist: bool,
+        must_pass: bool,
+        sync_head_for: Option<ConversationHeadSync>,
+        owner: StartPhaseOwner,
+    ) {
+        self.enqueue_publish_inner(
+            source,
+            event,
+            EnqueuePublishOptions {
+                persist,
+                must_pass,
+                sync_head_for,
+                admission: None,
+                prompt_acceptance: None,
+                debug_sensitivity: DebugEventSensitivity::Ordinary,
+                start_owner: Some(owner),
             },
         );
     }
@@ -2320,6 +2507,7 @@ impl Harness {
                 admission: None,
                 prompt_acceptance: None,
                 debug_sensitivity,
+                start_owner: None,
             },
         );
     }
@@ -2359,6 +2547,7 @@ impl Harness {
                 admission: None,
                 prompt_acceptance: Some(prompt_acceptance),
                 debug_sensitivity,
+                start_owner: None,
             },
         );
     }
@@ -2383,6 +2572,7 @@ impl Harness {
                 admission: Some(admission),
                 prompt_acceptance: None,
                 debug_sensitivity: DebugEventSensitivity::Ordinary,
+                start_owner: None,
             },
         );
     }
@@ -2400,7 +2590,11 @@ impl Harness {
             admission,
             prompt_acceptance,
             debug_sensitivity,
+            mut start_owner,
         } = options;
+        if start_owner.is_none() {
+            start_owner = self.start_phase_owner_for_event(&event);
+        }
         let shell_report_targets_ephemeral = match &event {
             Event::ShellCommandProgressReported(progress) => Some(&progress.command_id),
             Event::ShellCommandFinishedReported(finished) => Some(&finished.command_id),
@@ -2459,6 +2653,7 @@ impl Harness {
             connection_id: source.cloned(),
             peer_context,
             prompt_acceptance,
+            start_owner,
         };
         if let Some(timing) = source.prompt_acceptance.as_mut() {
             timing.finish_setup();
@@ -2526,7 +2721,10 @@ impl Harness {
                     event,
                     persist,
                     sync_head_for,
-                    source.prompt_acceptance.take(),
+                    PublicationOutcomeOwners {
+                        prompt_acceptance: source.prompt_acceptance.take(),
+                        start: source.start_owner.take(),
+                    },
                 );
                 return;
             };
@@ -2716,7 +2914,13 @@ impl Harness {
                         "interceptor returned a different event type; \
                          falling back to the original",
                     );
-                    Some(original_event)
+                    if source.start_owner.is_some()
+                        && !matches!(original_event, Event::AgentStartFailed(_))
+                    {
+                        None
+                    } else {
+                        Some(original_event)
+                    }
                 } else if mandatory_harness_notice_was_modified(&original_event, &new_event) {
                     tracing::warn!(
                         target: "tau_harness::interception",
@@ -2736,7 +2940,13 @@ impl Harness {
                             "interceptor tried to modify protected prompt fields; \
                              publishing original instead",
                         );
-                        Some(original_event)
+                        if source.start_owner.is_some()
+                            && !matches!(original_event, Event::AgentStartFailed(_))
+                        {
+                            None
+                        } else {
+                            Some(original_event)
+                        }
                     } else if immutable_protected_fact_was_modified(&original_event, &new_event) {
                         tracing::warn!(
                             target: "tau_harness::interception",
@@ -2744,7 +2954,13 @@ impl Harness {
                             "interceptor tried to modify an immutable protected fact; \
                              publishing original instead",
                         );
-                        Some(original_event)
+                        if source.start_owner.is_some()
+                            && !matches!(original_event, Event::AgentStartFailed(_))
+                        {
+                            None
+                        } else {
+                            Some(original_event)
+                        }
                     } else if invalid_tool_request_replacement(&new_event) {
                         tracing::warn!(
                             target: "tau_harness::interception",
@@ -2770,11 +2986,17 @@ impl Harness {
                 }
             }
             InterceptAction::Drop => {
-                if Harness::pending_external_receive_message_id(&original_event).is_some_and(|id| {
-                    self.peer_messaging
-                        .pending_external_receive_acks
-                        .contains_key(id)
-                }) {
+                if source.start_owner.is_some()
+                    && !matches!(original_event, Event::AgentStartFailed(_))
+                {
+                    None
+                } else if Harness::pending_external_receive_message_id(&original_event).is_some_and(
+                    |id| {
+                        self.peer_messaging
+                            .pending_external_receive_acks
+                            .contains_key(id)
+                    },
+                ) {
                     self.fail_pending_external_receive(
                         &original_event,
                         "peer receive projection was rejected by interception",
@@ -2810,6 +3032,9 @@ impl Harness {
                 self.discard_uncommitted_shell_canonical_marker(command_id);
             }
             self.discard_peer_activation_reservation(&source.peer_context);
+            if let Some(owner) = source.start_owner.take() {
+                self.reject_start_phase(owner, tau_proto::AgentStartFailure::InterceptionDropped);
+            }
             return;
         };
 

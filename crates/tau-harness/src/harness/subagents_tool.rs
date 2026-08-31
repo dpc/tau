@@ -7,6 +7,8 @@
 use std::sync as path_std_sync;
 use std::sync::{atomic as path_std_sync_atomic, mpsc as path_std_sync_mpsc};
 
+use path_crate_harness::start_coordinator::StartPhase;
+
 use crate::harness::SessionGeneration;
 use crate::{harness as path_crate_harness, runtime_dir as path_crate_runtime_dir};
 
@@ -2487,18 +2489,22 @@ impl Harness {
             .chain(
                 self.agent_runtime
                     .agent_registry
-                    .pending_start_requests
-                    .iter()
-                    .filter(|pending| role_available(&pending.role))
-                    .map(|pending| {
+                    .start_coordinator
+                    .operations
+                    .values()
+                    .filter(|operation| {
+                        operation.phase != StartPhase::AwaitAcceptedCommit
+                            && role_available(&operation.pending.role)
+                    })
+                    .map(|operation| {
                         (
                             0,
                             self.peer_messaging
                                 .peer_last_routed
-                                .get(pending.agent_id.as_str())
+                                .get(operation.pending.agent_id.as_str())
                                 .copied()
                                 .unwrap_or(0),
-                            crate::parse_agent_id(&pending.agent_id),
+                            crate::parse_agent_id(&operation.pending.agent_id),
                         )
                     }),
             )
@@ -2606,11 +2612,15 @@ impl Harness {
         let pending_start_wake_bytes = self
             .agent_runtime
             .agent_registry
-            .pending_start_requests
-            .iter()
-            .find(|pending| pending.agent_id == recipient_id.as_str())
+            .start_coordinator
+            .operations
+            .values()
+            .find(|operation| {
+                operation.phase != StartPhase::AwaitAcceptedCommit
+                    && operation.pending.agent_id == recipient_id.as_str()
+            })
             .into_iter()
-            .flat_map(|pending| &pending.pending_agent_message_wakes)
+            .flat_map(|operation| &operation.pending.pending_agent_message_wakes)
             .filter_map(|wake| wake.source.peer_admission_bytes());
         let parked_receive_bytes = self
             .peer_messaging
@@ -2694,10 +2704,13 @@ impl Harness {
             || self
                 .agent_runtime
                 .agent_registry
-                .pending_start_requests
-                .iter()
-                .any(|pending| {
-                    pending.agent_id == recipient_id.as_str() && role_available(&pending.role)
+                .start_coordinator
+                .operations
+                .values()
+                .any(|operation| {
+                    operation.phase != StartPhase::AwaitAcceptedCommit
+                        && operation.pending.agent_id == recipient_id.as_str()
+                        && role_available(&operation.pending.role)
                 })
     }
 

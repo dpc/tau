@@ -371,6 +371,7 @@ fn delegated_agent_effectiveness_follows_stats_not_start_result() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
@@ -423,6 +424,7 @@ fn switched_agent_shows_its_tool_usage() {
         reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
@@ -2607,6 +2609,7 @@ fn watched_agent_provider_prompt_terminal_keeps_status_row() {
 
     renderer.switch_agent(agent_id("parent_1"));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "delegate-1".to_owned(),
         agent_id: agent_id("engineer_1"),
     }));
@@ -3440,6 +3443,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     ));
 
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q1".to_owned(),
         agent_id: agent_id("engineer_1"),
     }));

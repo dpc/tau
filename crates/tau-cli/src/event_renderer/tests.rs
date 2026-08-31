@@ -3351,6 +3351,57 @@ fn agent_message_summary_excludes_body() {
     assert!(!summary.contains("secret payload"));
 }
 
+/// A startup terminal retires the provisional endpoint even when the immutable
+/// creation fact committed before session membership failed.
+#[test]
+fn agent_start_failure_after_agent_started_retires_provisional_endpoint() {
+    let agent_id = agent_id("failed-worker");
+    let query_id = "failed-worker-query".to_owned();
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.handle(&tau_proto::Event::StartAgentAccepted(
+        tau_proto::StartAgentAccepted {
+            start_id: tau_proto::StartOperationId(1),
+            query_id: query_id.clone(),
+            agent_id: agent_id.clone(),
+        },
+    ));
+    renderer.handle(&tau_proto::Event::AgentStarted(tau_proto::AgentStarted {
+        creator: Some(tau_proto::AgentCreator::default()),
+        agent_id: agent_id.clone(),
+        parent_agent: None,
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+
+    renderer.handle(&tau_proto::Event::AgentStartFailed(
+        tau_proto::AgentStartFailed {
+            start_id: tau_proto::StartOperationId(1),
+            agent_id: agent_id.clone(),
+            phase: tau_proto::AgentStartPhase::SessionAgentLoaded,
+            reason: tau_proto::AgentStartFailure::StorageAdmission,
+        },
+    ));
+
+    assert!(
+        !renderer
+            .discovery
+            .agent_navigation
+            .lock()
+            .expect("navigation")
+            .is_live(&agent_id)
+    );
+    assert!(
+        !renderer
+            .known_agents()
+            .lock()
+            .expect("known agents")
+            .contains(&agent_id.to_string())
+    );
+    assert_eq!(renderer.event_owners.query_agents.get(&query_id), None);
+}
+
 /// An explicitly named sender keeps its supplemental label even when that name
 /// equals its operational role, while a manually created unnamed target is
 /// rendered as its routing id without parentheses.

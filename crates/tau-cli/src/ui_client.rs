@@ -285,6 +285,7 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         // consumes `agent.prompt_started`, not the heavier `agent.prompt_created`.
         EventSelector::Exact(E::AGENT_START_REQUEST),
         EventSelector::Exact(E::AGENT_START_ACCEPTED),
+        EventSelector::Exact(E::AGENT_START_FAILED),
         EventSelector::Exact(E::AGENT_START_RESULT),
         EventSelector::Exact(E::AGENT_MESSAGE_SENT),
         EventSelector::Exact(E::AGENT_MESSAGE_RECEIVED),

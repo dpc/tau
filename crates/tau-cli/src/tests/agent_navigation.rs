@@ -918,6 +918,7 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
     let full_render_count = handle.full_render_count();
 
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
@@ -1060,6 +1061,7 @@ fn selected_hidden_agent_placeholder_distinguishes_modes() {
         cli_test_theme(),
     );
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
@@ -1110,6 +1112,7 @@ fn delayed_navigation_refresh_cannot_resurrect_unloaded_agent() {
         cli_test_theme(),
     );
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker-1".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
@@ -1142,6 +1145,7 @@ fn delayed_navigation_refresh_cannot_resurrect_unloaded_agent() {
     );
 
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker-2".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
@@ -1167,6 +1171,7 @@ fn hidden_agent_activity_keeps_global_in_progress() {
         "main-sp", "s1",
     )));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
@@ -1208,6 +1213,7 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
         reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));

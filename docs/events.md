@@ -702,8 +702,14 @@ transient runtime observations and never enter semantic replay. See
   absent; non-tool requests without `role` use the currently selected
   interactive role.
   See [`SPEC-start-agent-requests`](../specs/SPEC-start-agent-requests.md).
-- **`agent.start_accepted`** — The harness accepted an agent-start request and
-  created or reused the delegated agent route for the requested task.
+- **`agent.start_accepted`** — Post-commit acknowledgement that the harness
+  reserved one `start_id` and `agent_id` and now owes either the matching
+  inference-dispatch checkpoint or `agent.start_failed`. It does not claim that
+  a route, membership, prompt, or provider dispatch exists yet.
+- **`agent.start_failed`** — Compact transient canonical terminal for one
+  post-accept startup failure. It carries `start_id`, `agent_id`, the failed
+  phase, and a stable reason; the requester-directed `agent.start_result` error
+  is projected only after this event commits.
 - **`agent.start_result`** — The agent's final answer to an
   earlier `agent.start_request`, routed point-to-point back to the
   requesting extension. Carries the same `query_id`.

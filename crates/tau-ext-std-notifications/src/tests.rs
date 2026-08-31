@@ -1761,6 +1761,7 @@ fn agent_idle_all_summary_side_prompt_does_not_cancel_pending_notification() {
 
     writer
         .write_event(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+            start_id: tau_proto::StartOperationId(1),
             query_id: query.query_id.clone(),
             agent_id: tau_proto::AgentId::parse("summary").expect("agent id"),
         }))
@@ -1876,6 +1877,7 @@ fn unrelated_session_shutdown_preserves_pending_all_idle_summary_ignore() {
 
     writer
         .write_event(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+            start_id: tau_proto::StartOperationId(1),
             query_id: query.query_id.clone(),
             agent_id: tau_proto::AgentId::parse("summary").expect("agent id"),
         }))

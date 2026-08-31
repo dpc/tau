@@ -8,7 +8,27 @@ use super::compaction_runtime::RollingCompactionPass;
 use super::compaction_runtime_state::SuppressedStart;
 use super::interception::{OwnedPublication, OwnedPublicationBranch, OwnedPublicationRetryPolicy};
 use super::prompt_materialization_timing::PromptMaterializationTiming;
+use super::start_coordinator::StartPhase;
 use super::*;
+
+/// Exact persistence failure scope consumed by startup targeting.
+#[derive(Clone, Debug)]
+pub(super) enum StartPersistenceFailureScope {
+    /// The shared owner exited.
+    OwnerExit {
+        /// Process-unique owner identity whose leases were invalidated.
+        owner_epoch: u64,
+    },
+    /// One prepared agent stream failed terminally.
+    Agent {
+        /// Affected agent stream.
+        agent_id: tau_proto::AgentId,
+        /// Process-unique owner identity that reported the stream failure.
+        owner_epoch: u64,
+        /// Exact prepared stream generation.
+        generation: u64,
+    },
+}
 
 impl Harness {
     /// Drains content-free persistence diagnostics and retries exact retained
@@ -17,7 +37,28 @@ impl Harness {
         let Some(owner) = self.session_runtime.persistence_owner.as_ref() else {
             return;
         };
+        let owner_epoch = owner.owner_epoch();
         let status = owner.drain_operational_status();
+        let mut start_failures = Vec::new();
+        for failure in &status.failures {
+            if failure.kind() == tau_core::PersistenceFailureKind::WorkerExit {
+                start_failures.push(StartPersistenceFailureScope::OwnerExit { owner_epoch });
+            } else if matches!(
+                failure.kind(),
+                tau_core::PersistenceFailureKind::Collision
+                    | tau_core::PersistenceFailureKind::GenerationFailed
+                    | tau_core::PersistenceFailureKind::Rollback
+            ) && let (Some(tau_core::StreamIdentity::Agent(agent_id)), Some(generation)) =
+                (failure.stream(), failure.generation())
+            {
+                start_failures.push(StartPersistenceFailureScope::Agent {
+                    agent_id: agent_id.clone(),
+                    owner_epoch,
+                    generation: generation.get(),
+                });
+            }
+        }
+        self.fail_start_operations_for_persistence(start_failures);
         for kind in [
             tau_core::PersistenceFailureKind::Open,
             tau_core::PersistenceFailureKind::Lock,
@@ -79,14 +120,7 @@ impl Harness {
             for cid in pending_finishes {
                 self.retry_outer_turn_finish(&cid);
             }
-            if !self
-                .runtime_io
-                .publication
-                .capacity_rejected_activations
-                .is_empty()
-            {
-                self.retry_capacity_rejected_activations();
-            }
+            self.handle_publication_capacity_ready();
         }
         if let Some(usage) = status.drained {
             tracing::info!(
@@ -96,6 +130,81 @@ impl Harness {
                 streams = usage.streams,
                 "semantic persistence accepted-frame FIFO drained after recovery"
             );
+        }
+    }
+
+    /// Wake every publication owner retained by temporary admission pressure.
+    pub(super) fn handle_publication_capacity_ready(&mut self) {
+        if !self
+            .runtime_io
+            .publication
+            .capacity_rejected_activations
+            .is_empty()
+        {
+            self.retry_capacity_rejected_activations();
+        }
+        self.retry_retained_start_terminals();
+    }
+
+    /// Terminalize only starts owned by the exact failed persistence scope.
+    pub(super) fn fail_start_operations_for_persistence(
+        &mut self,
+        failures: impl IntoIterator<Item = StartPersistenceFailureScope>,
+    ) {
+        let coordinator = &self.agent_runtime.agent_registry.start_coordinator;
+        let mut failed_starts = Vec::new();
+        for failure in failures {
+            match failure {
+                StartPersistenceFailureScope::OwnerExit { owner_epoch } => {
+                    failed_starts.extend(coordinator.operations.iter().filter_map(
+                        |(start_id, operation)| {
+                            (operation.uses_persistence_owner
+                                && operation.persistence_owner_epoch == Some(owner_epoch)
+                                && operation.session_generation
+                                    == self.session_runtime.current_session_generation)
+                                .then_some(*start_id)
+                        },
+                    ));
+                }
+                StartPersistenceFailureScope::Agent {
+                    agent_id,
+                    owner_epoch,
+                    generation,
+                } => {
+                    let Some(start_id) = coordinator.agents.get(&agent_id).copied() else {
+                        continue;
+                    };
+                    if coordinator
+                        .operations
+                        .get(&start_id)
+                        .is_some_and(|operation| {
+                            operation.uses_persistence_owner
+                                && operation.persistence_owner_epoch == Some(owner_epoch)
+                                && operation.session_generation
+                                    == self.session_runtime.current_session_generation
+                                && operation.persistence_generation == Some(generation)
+                        })
+                    {
+                        failed_starts.push(start_id);
+                    }
+                }
+            }
+        }
+        failed_starts.sort_unstable();
+        failed_starts.dedup();
+        for start_id in failed_starts {
+            let preaccept = self
+                .agent_runtime
+                .agent_registry
+                .start_coordinator
+                .operations
+                .get(&start_id)
+                .is_some_and(|operation| operation.phase == StartPhase::AwaitAcceptedCommit);
+            if preaccept {
+                self.abort_preaccept_start(start_id, tau_proto::AgentStartFailure::CreationWorker);
+            } else {
+                self.begin_start_failure(start_id, tau_proto::AgentStartFailure::CreationWorker);
+            }
         }
     }
 
@@ -1169,6 +1278,7 @@ impl Harness {
     /// Retry retained append-rejected publications when ordinary runtime input
     /// proves that the harness is making progress again.
     pub(super) fn retry_pending_agent_publications(&mut self) {
+        self.retry_retained_start_terminals();
         let rejected_ui_starts = std::mem::take(
             &mut self
                 .prompt_coordination
@@ -4190,6 +4300,24 @@ impl Harness {
         cid: &AgentId,
         selection: InferenceDispatchSelection,
     ) -> Option<InferenceCheckpointInput> {
+        let startup_owned = self
+            .agent_runtime
+            .agent_registry
+            .start_coordinator
+            .agents
+            .get(cid)
+            .and_then(|start_id| {
+                self.agent_runtime
+                    .agent_registry
+                    .start_coordinator
+                    .operations
+                    .get(start_id)
+            })
+            .is_some_and(|operation| operation.phase == StartPhase::AwaitDispatchCommit);
+        if startup_owned {
+            let provider_route = self.provider_runtime.model_routes.get(&selection.model)?;
+            self.runtime_io.bus.connection(provider_route)?;
+        }
         let agent = self.agent_runtime.agent_registry.agents.get_mut(cid)?;
         let durable_agent_id = agent.identity.agent_id.clone()?;
         let (agent_prompt_id, through, output_length_continuation) = if let Some(continuation) =

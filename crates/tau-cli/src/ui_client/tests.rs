@@ -39,6 +39,18 @@ fn chat_subscription_includes_manual_compaction_lifecycle() {
     }
 }
 
+/// The daemon-attached renderer must receive the transient terminal that
+/// retires a committed acceptance whose startup never reached membership.
+#[test]
+fn chat_subscription_includes_agent_start_failure_terminal() {
+    let HarnessInputMessage::Subscribe(subscription) = chat_subscribe_message() else {
+        panic!("chat subscription must produce Subscribe")
+    };
+    let selector = EventSelector::Exact(EventName::AGENT_START_FAILED);
+    assert!(subscription.live_selectors.contains(&selector));
+    assert!(subscription.historical_selectors.contains(&selector));
+}
+
 /// Cold attach requests running shell snapshots and omission notices while
 /// retaining live terminal delivery.
 #[test]

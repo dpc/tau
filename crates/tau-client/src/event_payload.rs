@@ -130,6 +130,11 @@ impl_event_payload!(
     tau_proto::Event::StartAgentAccepted
 );
 impl_event_payload!(
+    tau_proto::AgentStartFailed,
+    tau_proto::EventName::AGENT_START_FAILED,
+    tau_proto::Event::AgentStartFailed
+);
+impl_event_payload!(
     tau_proto::StartAgentResult,
     tau_proto::EventName::AGENT_START_RESULT,
     tau_proto::Event::StartAgentResult

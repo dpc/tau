@@ -1,6 +1,1264 @@
 //! Tests for runtime scheduling behavior.
 
 use super::*;
+use crate::harness::publication_completion::StartPersistenceFailureScope;
+use crate::harness::start_coordinator::{
+    MAX_START_QUERY_ID_BYTES, MAX_START_RETAINED_BYTES, StartPhase, StartPhaseOwner,
+};
+
+/// Park acceptance so the coordinator's count bound is exercised without
+/// advancing or freeing any operation.
+#[test]
+fn start_coordinator_enforces_operation_count_bound() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "acceptance-bound-interceptor");
+    h.handle_extension_event(
+        "acceptance-bound-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_START_ACCEPTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register acceptance interceptor");
+
+    for index in 0..65 {
+        h.handle_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query(&format!("bounded-{index}")),
+        )
+        .expect("admit bounded request");
+    }
+
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert_eq!(
+        coordinator.operations.len(),
+        crate::harness::start_coordinator::MAX_START_OPERATIONS
+    );
+    assert_eq!(coordinator.requests.len(), coordinator.operations.len());
+    assert_eq!(coordinator.agents.len(), coordinator.operations.len());
+    assert!(
+        coordinator.retained_bytes <= crate::harness::start_coordinator::MAX_START_RETAINED_BYTES
+    );
+    assert!(
+        !coordinator
+            .requests
+            .keys()
+            .any(|(_, query_id)| query_id == "bounded-64")
+    );
+}
+
+/// Parked acceptances reserve their minted ids, so a collision-prone template
+/// cannot overwrite the agent-to-operation index.
+#[test]
+fn start_coordinator_reserves_agent_ids_before_acceptance_commits() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    h.config.agent_id_template = "fixed-agent".to_owned();
+    let _interceptor = connect_test_tool(&mut h, "acceptance-id-interceptor");
+    h.handle_extension_event(
+        "acceptance-id-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_START_ACCEPTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register acceptance interceptor");
+
+    for query_id in ["collision-a", "collision-b"] {
+        h.handle_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query(query_id),
+        )
+        .expect("admit colliding request");
+    }
+
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert_eq!(coordinator.operations.len(), 2);
+    assert_eq!(coordinator.requests.len(), 2);
+    assert_eq!(coordinator.agents.len(), 2);
+    let mut ids = coordinator.agents.keys().collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 2);
+}
+
+/// Parked starts cannot retain more than the aggregate startup payload budget.
+#[test]
+fn start_coordinator_enforces_aggregate_payload_bound() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "acceptance-byte-interceptor");
+    h.handle_extension_event(
+        "acceptance-byte-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_START_ACCEPTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register acceptance interceptor");
+
+    for index in 0..5 {
+        let mut query = ext_query(&format!("payload-{index}"));
+        query.instruction = "x".repeat(1024 * 1024);
+        h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
+            .expect("admit bounded request");
+    }
+
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert!(coordinator.operations.len() < 5);
+    assert_eq!(coordinator.requests.len(), coordinator.operations.len());
+    assert_eq!(coordinator.agents.len(), coordinator.operations.len());
+    assert!(
+        coordinator.retained_bytes <= crate::harness::start_coordinator::MAX_START_RETAINED_BYTES
+    );
+}
+
+/// Prompt commit drops the charged backing allocations before making the 4 MiB
+/// budget reusable by another parked startup.
+#[test]
+fn startup_prompt_commit_releases_physical_payload_before_budget_reuse() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "physical-bound-interceptor");
+    h.handle_extension_event(
+        "physical-bound-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register checkpoint interceptor");
+    let payload_bytes = MAX_START_RETAINED_BYTES - 64 * 1024;
+    let mut first = ext_query("physical-first");
+    first.instruction = "x".repeat(payload_bytes);
+    first.task_name = Some("charged task".repeat(128));
+    h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), first)
+        .expect("park first checkpoint");
+
+    let first_start_id = *h
+        .agent_runtime
+        .agent_registry
+        .start_coordinator
+        .operations
+        .keys()
+        .next()
+        .expect("first operation");
+    let first_operation =
+        &h.agent_runtime.agent_registry.start_coordinator.operations[&first_start_id];
+    assert_eq!(first_operation.phase, StartPhase::AwaitDispatchCommit);
+    assert_eq!(first_operation.retained_bytes, 0);
+    assert_eq!(first_operation.pending.query.instruction.capacity(), 0);
+    assert_eq!(
+        first_operation
+            .pending
+            .query
+            .trusted_internal_spans
+            .capacity(),
+        0
+    );
+    assert!(first_operation.pending.query.task_name.is_none());
+    assert!(first_operation.pending.query.tool_call_id.is_none());
+    assert_eq!(
+        h.agent_runtime
+            .agent_registry
+            .start_coordinator
+            .retained_bytes,
+        0
+    );
+
+    let mut second = ext_query("physical-second");
+    second.instruction = "y".repeat(payload_bytes);
+    let second = h
+        .prepare_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), second)
+        .expect("prepare second")
+        .expect("new second request");
+    h.begin_start_operation(second);
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert_eq!(coordinator.operations.len(), 2);
+    assert!(coordinator.retained_bytes <= MAX_START_RETAINED_BYTES);
+    assert!(coordinator.retained_bytes > payload_bytes);
+    assert_eq!(
+        coordinator.operations[&first_start_id]
+            .pending
+            .query
+            .instruction
+            .capacity(),
+        0
+    );
+}
+
+/// Oversized requester correlation is rejected before reserving an id or
+/// touching startup storage.
+#[test]
+fn start_coordinator_rejects_oversized_query_before_reservation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let query_id = "q".repeat(MAX_START_QUERY_ID_BYTES + 1);
+    let mut query = ext_query(&query_id);
+    query.instruction = "never retained".to_owned();
+
+    h.handle_start_agent_request(&crate::test_connection_id(HARNESS_CONNECTION_ID), query)
+        .expect("reject oversized query");
+
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert!(coordinator.operations.is_empty());
+    assert!(coordinator.requests.is_empty());
+    assert!(coordinator.agents.is_empty());
+    assert_eq!(coordinator.retained_bytes, 0);
+}
+
+/// Once `AgentStarted` installs the live runtime, agent-list projection must
+/// replace—not append to—the accepted placeholder row.
+#[test]
+fn agent_list_deduplicates_placeholder_after_agent_started() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "loaded-list-interceptor");
+    h.handle_extension_event(
+        "loaded-list-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SESSION_AGENT_LOADED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register membership interceptor");
+    h.handle_start_agent_request(
+        &crate::test_connection_id(HARNESS_CONNECTION_ID),
+        ext_query("agent-list-dedup"),
+    )
+    .expect("start");
+    let agent_id = event_log_events(&h)
+        .iter()
+        .find_map(|event| match event {
+            Event::StartAgentAccepted(accepted) if accepted.query_id == "agent-list-dedup" => {
+                Some(accepted.agent_id.clone())
+            }
+            _ => None,
+        })
+        .expect("accepted id");
+
+    assert_eq!(
+        h.agent_runtime
+            .agent_registry
+            .agents
+            .values()
+            .filter(|agent| agent.identity.agent_id.as_ref() == Some(&agent_id))
+            .count(),
+        1
+    );
+    assert!(
+        h.pending_agent_summary_data()
+            .iter()
+            .all(|(pending_id, _)| pending_id != agent_id.as_str())
+    );
+}
+
+/// Synthetic owner and stream failures target only the exact durable owner,
+/// session, and prepared generation across every startup phase.
+#[test]
+fn persistence_failures_target_exact_owner_generation_and_mixed_phases() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let owner_epoch = h
+        .session_runtime
+        .persistence_owner
+        .as_ref()
+        .expect("durable owner")
+        .owner_epoch();
+    let mut inserted = Vec::new();
+    for (index, phase) in [
+        StartPhase::AwaitAcceptedCommit,
+        StartPhase::AwaitStartedCommit,
+        StartPhase::AwaitLoadedCommit,
+        StartPhase::AwaitPromptCommit,
+        StartPhase::AwaitDispatchCommit,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pending = h
+            .prepare_start_agent_request(
+                &crate::test_connection_id(HARNESS_CONNECTION_ID),
+                ext_query(&format!("owner-phase-{index}")),
+            )
+            .expect("prepare")
+            .expect("new request");
+        let agent_id = pending.cid.clone();
+        let start_id = h.insert_start_operation_for_test(
+            pending,
+            phase,
+            true,
+            Some(owner_epoch),
+            (2 <= index).then_some(10 + index as u64),
+        );
+        inserted.push((start_id, agent_id, phase));
+    }
+    let ephemeral_pending = h
+        .prepare_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query("owner-ephemeral"),
+        )
+        .expect("prepare")
+        .expect("new request");
+    let ephemeral_id = h.insert_start_operation_for_test(
+        ephemeral_pending,
+        StartPhase::AwaitDispatchCommit,
+        false,
+        None,
+        None,
+    );
+    let stale_pending = h
+        .prepare_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query("owner-stale"),
+        )
+        .expect("prepare")
+        .expect("new request");
+    let stale_agent_id = stale_pending.cid.clone();
+    let stale_id = h.insert_start_operation_for_test(
+        stale_pending,
+        StartPhase::AwaitDispatchCommit,
+        true,
+        Some(owner_epoch + 1),
+        Some(77),
+    );
+
+    let unprepared_agent_id = inserted
+        .iter()
+        .find_map(|(_, agent_id, phase)| {
+            (*phase == StartPhase::AwaitStartedCommit).then_some(agent_id.clone())
+        })
+        .expect("accepted but unprepared start");
+    h.fail_start_operations_for_persistence([StartPersistenceFailureScope::Agent {
+        agent_id: unprepared_agent_id,
+        owner_epoch,
+        generation: 999,
+    }]);
+    assert_eq!(
+        h.agent_runtime
+            .agent_registry
+            .start_coordinator
+            .operations
+            .len(),
+        7,
+        "an unprepared start cannot match a stream-local diagnostic"
+    );
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .all(|event| !matches!(event, Event::AgentStartFailed(_)))
+    );
+
+    h.fail_start_operations_for_persistence([StartPersistenceFailureScope::OwnerExit {
+        owner_epoch,
+    }]);
+
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert_eq!(coordinator.operations.len(), 2);
+    assert!(coordinator.operations.contains_key(&ephemeral_id));
+    assert!(coordinator.operations.contains_key(&stale_id));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentStartFailed(_)))
+            .count(),
+        4,
+        "preaccept rejects without a failure; every accepted durable phase terminalizes"
+    );
+    for (start_id, _, _) in &inserted {
+        assert!(!coordinator.operations.contains_key(start_id));
+    }
+
+    h.fail_start_operations_for_persistence([StartPersistenceFailureScope::Agent {
+        agent_id: stale_agent_id.clone(),
+        owner_epoch,
+        generation: 76,
+    }]);
+    assert!(
+        h.agent_runtime
+            .agent_registry
+            .start_coordinator
+            .operations
+            .contains_key(&stale_id)
+    );
+    h.fail_start_operations_for_persistence([StartPersistenceFailureScope::Agent {
+        agent_id: stale_agent_id.clone(),
+        owner_epoch,
+        generation: 77,
+    }]);
+    assert!(
+        h.agent_runtime
+            .agent_registry
+            .start_coordinator
+            .operations
+            .contains_key(&stale_id),
+        "a stream failure from a different persistence owner must not terminalize the start"
+    );
+    h.fail_start_operations_for_persistence([StartPersistenceFailureScope::Agent {
+        agent_id: stale_agent_id,
+        owner_epoch: owner_epoch + 1,
+        generation: 77,
+    }]);
+    assert!(
+        !h.agent_runtime
+            .agent_registry
+            .start_coordinator
+            .operations
+            .contains_key(&stale_id)
+    );
+    assert!(
+        h.agent_runtime
+            .agent_registry
+            .start_coordinator
+            .operations
+            .contains_key(&ephemeral_id)
+    );
+    h.begin_start_failure(ephemeral_id, tau_proto::AgentStartFailure::Canceled);
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert!(coordinator.operations.is_empty());
+    assert!(coordinator.requests.is_empty());
+    assert!(coordinator.agents.is_empty());
+    assert_eq!(coordinator.retained_bytes, 0);
+}
+
+/// Cancellation owns every startup cut, including the preaccept rejection cut,
+/// without leaving a second terminal owner or retained payload.
+#[test]
+fn cancellation_terminalizes_every_startup_phase_exactly_once() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let mut starts = Vec::new();
+    for (index, phase) in [
+        StartPhase::AwaitAcceptedCommit,
+        StartPhase::AwaitStartedCommit,
+        StartPhase::AwaitLoadedCommit,
+        StartPhase::AwaitPromptCommit,
+        StartPhase::AwaitDispatchCommit,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pending = h
+            .prepare_start_agent_request(
+                &crate::test_connection_id(HARNESS_CONNECTION_ID),
+                ext_query(&format!("cancel-phase-{index}")),
+            )
+            .expect("prepare")
+            .expect("new request");
+        let start_id = h.insert_start_operation_for_test(pending, phase, false, None, None);
+        starts.push((start_id, phase));
+    }
+
+    for (start_id, phase) in starts {
+        if phase == StartPhase::AwaitAcceptedCommit {
+            h.abort_preaccept_start(start_id, tau_proto::AgentStartFailure::Canceled);
+        } else {
+            h.begin_start_failure(start_id, tau_proto::AgentStartFailure::Canceled);
+        }
+    }
+
+    let failures = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentStartFailed(failed) => Some(failed),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 4);
+    assert!(
+        failures
+            .iter()
+            .all(|failed| failed.reason == tau_proto::AgentStartFailure::Canceled)
+    );
+    for phase in [
+        tau_proto::AgentStartPhase::AgentStarted,
+        tau_proto::AgentStartPhase::SessionAgentLoaded,
+        tau_proto::AgentStartPhase::AgentPromptSubmitted,
+        tau_proto::AgentStartPhase::AgentInferenceDispatchStarted,
+    ] {
+        assert_eq!(
+            failures
+                .iter()
+                .filter(|failed| failed.phase == phase)
+                .count(),
+            1
+        );
+    }
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert!(coordinator.operations.is_empty());
+    assert!(coordinator.requests.is_empty());
+    assert!(coordinator.agents.is_empty());
+    assert_eq!(coordinator.retained_bytes, 0);
+}
+
+/// Clean shutdown rejects a private acceptance and emits one live
+/// `SessionStopped` terminal for every already-accepted phase.
+#[test]
+fn session_shutdown_terminalizes_every_startup_phase_exactly_once() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    for (index, phase) in [
+        StartPhase::AwaitAcceptedCommit,
+        StartPhase::AwaitStartedCommit,
+        StartPhase::AwaitLoadedCommit,
+        StartPhase::AwaitPromptCommit,
+        StartPhase::AwaitDispatchCommit,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pending = h
+            .prepare_start_agent_request(
+                &crate::test_connection_id(HARNESS_CONNECTION_ID),
+                ext_query(&format!("shutdown-phase-{index}")),
+            )
+            .expect("prepare")
+            .expect("new request");
+        h.insert_start_operation_for_test(pending, phase, false, None, None);
+    }
+
+    h.fail_start_operations_for_session_shutdown();
+
+    let failures = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentStartFailed(failed) => Some(failed),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 4);
+    assert!(
+        failures
+            .iter()
+            .all(|failed| failed.reason == tau_proto::AgentStartFailure::SessionStopped)
+    );
+    for phase in [
+        tau_proto::AgentStartPhase::AgentStarted,
+        tau_proto::AgentStartPhase::SessionAgentLoaded,
+        tau_proto::AgentStartPhase::AgentPromptSubmitted,
+        tau_proto::AgentStartPhase::AgentInferenceDispatchStarted,
+    ] {
+        assert_eq!(
+            failures
+                .iter()
+                .filter(|failed| failed.phase == phase)
+                .count(),
+            1
+        );
+    }
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert!(coordinator.operations.is_empty());
+    assert!(coordinator.requests.is_empty());
+    assert!(coordinator.agents.is_empty());
+    assert_eq!(coordinator.retained_bytes, 0);
+}
+
+/// A committed creation fact whose runtime installation loses its authenticated
+/// parent closes with one creation-worker terminal and exposes no route.
+#[test]
+fn committed_agent_started_runtime_install_failure_terminalizes_without_route() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let mut pending = h
+        .prepare_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query("forced-install-failure"),
+        )
+        .expect("prepare")
+        .expect("new request");
+    pending.query.tool_call_id = Some(tau_proto::ToolCallId::new("missing-parent-tool"));
+    pending.parent_cid = Some(crate::parse_agent_id("missing-parent"));
+    let agent_id = pending.cid.clone();
+    let start_id = h.insert_start_operation_for_test(
+        pending,
+        StartPhase::AwaitStartedCommit,
+        false,
+        None,
+        None,
+    );
+    let event = Event::AgentStarted(tau_proto::AgentStarted {
+        creator: None,
+        agent_id: agent_id.clone(),
+        parent_agent: None,
+        role: "engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    });
+
+    h.commit_start_phase(
+        StartPhaseOwner {
+            start_id,
+            expected_phase: StartPhase::AwaitStartedCommit,
+            expected_event: tau_proto::EventName::AGENT_STARTED,
+        },
+        &event,
+        None,
+    );
+
+    assert!(
+        !h.agent_runtime
+            .agent_registry
+            .agent_routes
+            .contains_key(&agent_id)
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentStartFailed(failed)
+                if failed.start_id == start_id
+                    && failed.reason == tau_proto::AgentStartFailure::CreationWorker))
+            .count(),
+        1
+    );
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert!(coordinator.operations.is_empty());
+    assert!(coordinator.requests.is_empty());
+    assert!(coordinator.agents.is_empty());
+    assert_eq!(coordinator.retained_bytes, 0);
+}
+
+/// A stream-local failure and canonical startup-prompt commit are serialized by
+/// the central loop: failure-first prevents prompt/dispatch, while prompt and
+/// checkpoint success make the later diagnostic stale.
+#[test]
+fn stream_failure_races_startup_prompt_commit_without_double_terminal() {
+    for failure_first in [true, false] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path()).expect("harness");
+        let interceptor_name = if failure_first {
+            "prompt-race-failure-first"
+        } else {
+            "prompt-race-commit-first"
+        };
+        let _interceptor = connect_test_tool(&mut h, interceptor_name);
+        h.handle_extension_event(
+            interceptor_name,
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register prompt interceptor");
+        h.handle_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query(if failure_first {
+                "prompt-race-failure-first"
+            } else {
+                "prompt-race-commit-first"
+            }),
+        )
+        .expect("start");
+        let (start_id, agent_id, owner_epoch, generation) = {
+            let (start_id, operation) = h
+                .agent_runtime
+                .agent_registry
+                .start_coordinator
+                .operations
+                .iter()
+                .next()
+                .expect("prompt-phase operation");
+            assert_eq!(operation.phase, StartPhase::AwaitPromptCommit);
+            (
+                *start_id,
+                operation.pending.cid.clone(),
+                operation.persistence_owner_epoch.expect("owner epoch"),
+                operation
+                    .persistence_generation
+                    .expect("prepared generation"),
+            )
+        };
+        let failure = StartPersistenceFailureScope::Agent {
+            agent_id: agent_id.clone(),
+            owner_epoch,
+            generation,
+        };
+
+        if failure_first {
+            h.fail_start_operations_for_persistence([failure]);
+        } else {
+            h.handle_extension_event(
+                interceptor_name,
+                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                    action: InterceptAction::Pass(None),
+                })),
+            )
+            .expect("commit prompt and checkpoint");
+            assert!(
+                !h.agent_runtime
+                    .agent_registry
+                    .start_coordinator
+                    .operations
+                    .contains_key(&start_id)
+            );
+            h.fail_start_operations_for_persistence([failure]);
+        }
+
+        let events = event_log_events(&h);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::AgentStartFailed(failed)
+                    if failed.start_id == start_id))
+                .count(),
+            usize::from(failure_first)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::AgentPromptSubmitted(prompt)
+                    if prompt.agent_id == agent_id))
+                .count(),
+            usize::from(!failure_first)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |event| matches!(event, Event::AgentInferenceDispatchStarted(started)
+                    if started.agent_id == agent_id)
+                )
+                .count(),
+            usize::from(!failure_first)
+        );
+        let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+        assert!(coordinator.operations.is_empty());
+        assert!(coordinator.requests.is_empty());
+        assert!(coordinator.agents.is_empty());
+        assert_eq!(coordinator.retained_bytes, 0);
+    }
+}
+
+/// A selected model whose provider route disappeared before checkpoint claim is
+/// rejected before the checkpoint or any provider prompt can commit.
+#[test]
+fn startup_provider_route_loss_rejects_before_checkpoint_and_delivery() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "route-loss-prompt-interceptor");
+    h.handle_extension_event(
+        "route-loss-prompt-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register prompt interceptor");
+    h.handle_start_agent_request(
+        &crate::test_connection_id(HARNESS_CONNECTION_ID),
+        ext_query("startup-route-loss"),
+    )
+    .expect("start");
+    let (start_id, agent_id) = {
+        let (start_id, operation) = h
+            .agent_runtime
+            .agent_registry
+            .start_coordinator
+            .operations
+            .iter()
+            .next()
+            .expect("prompt phase");
+        (*start_id, operation.pending.cid.clone())
+    };
+    for route in h.provider_runtime.model_routes.values_mut() {
+        *route = crate::test_connection_id("missing-provider-route");
+    }
+    h.handle_extension_event(
+        "route-loss-prompt-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit prompt");
+
+    let events = event_log_events(&h);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentStartFailed(failed)
+                if failed.start_id == start_id
+                    && failed.reason == tau_proto::AgentStartFailure::DispatchRejected))
+            .count(),
+        1
+    );
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started) if started.agent_id == agent_id
+    )));
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id
+    )));
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert!(coordinator.operations.is_empty());
+    assert!(coordinator.requests.is_empty());
+    assert!(coordinator.agents.is_empty());
+    assert_eq!(coordinator.retained_bytes, 0);
+}
+
+/// Semantic admission rejection of the inference checkpoint closes startup as
+/// `DispatchRejected` and never reaches provider prompt materialization.
+#[test]
+fn startup_checkpoint_semantic_admission_rejects_without_provider_delivery() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "checkpoint-interceptor");
+    h.handle_extension_event(
+        "checkpoint-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register checkpoint interceptor");
+    h.handle_start_agent_request(
+        &crate::test_connection_id(HARNESS_CONNECTION_ID),
+        ext_query("startup-checkpoint-admission"),
+    )
+    .expect("park checkpoint");
+    let (start_id, agent_id) = {
+        let (start_id, operation) = h
+            .agent_runtime
+            .agent_registry
+            .start_coordinator
+            .operations
+            .iter()
+            .next()
+            .expect("checkpoint phase");
+        assert_eq!(operation.phase, StartPhase::AwaitDispatchCommit);
+        (*start_id, operation.pending.cid.clone())
+    };
+    reject_next_semantic_admission(&h);
+    h.handle_extension_event(
+        "checkpoint-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("attempt checkpoint admission");
+
+    let events = event_log_events(&h);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentStartFailed(failed)
+                if failed.start_id == start_id
+                    && failed.reason == tau_proto::AgentStartFailure::DispatchRejected))
+            .count(),
+        1
+    );
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentInferenceDispatchStarted(started) if started.agent_id == agent_id
+    )));
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        Event::AgentPromptCreated(prompt) if prompt.agent_id == agent_id
+    )));
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert!(coordinator.operations.is_empty());
+    assert!(coordinator.requests.is_empty());
+    assert!(coordinator.agents.is_empty());
+    assert_eq!(coordinator.retained_bytes, 0);
+}
+
+/// Cancellation and checkpoint commit have one central-loop winner: cancel
+/// first closes the accepted obligation, while checkpoint first completes
+/// startup and makes later cancellation ordinary agent teardown.
+#[test]
+fn cancellation_races_startup_checkpoint_commit_with_one_winner() {
+    for cancel_first in [true, false] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path()).expect("harness");
+        let interceptor_name = if cancel_first {
+            "checkpoint-cancel-first"
+        } else {
+            "checkpoint-commit-first"
+        };
+        let query_id = format!("{interceptor_name}-query");
+        let _interceptor = connect_test_tool(&mut h, interceptor_name);
+        h.handle_extension_event(
+            interceptor_name,
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register checkpoint interceptor");
+        h.handle_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query(&query_id),
+        )
+        .expect("park checkpoint");
+        let (start_id, agent_id) = {
+            let (start_id, operation) = h
+                .agent_runtime
+                .agent_registry
+                .start_coordinator
+                .operations
+                .iter()
+                .next()
+                .expect("checkpoint operation");
+            assert_eq!(operation.phase, StartPhase::AwaitDispatchCommit);
+            (*start_id, operation.pending.cid.clone())
+        };
+
+        if cancel_first {
+            h.cancel_start_agent_request(
+                &query_id,
+                &tau_proto::ToolCallId::new("checkpoint-race-cancel"),
+                false,
+            )
+            .expect("cancel parked checkpoint");
+        } else {
+            h.handle_extension_event(
+                interceptor_name,
+                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                    action: InterceptAction::Pass(None),
+                })),
+            )
+            .expect("commit checkpoint");
+            assert!(
+                !h.agent_runtime
+                    .agent_registry
+                    .start_coordinator
+                    .operations
+                    .contains_key(&start_id)
+            );
+            let late_cancel = h.cancel_start_agent_request(
+                &query_id,
+                &tau_proto::ToolCallId::new("checkpoint-race-cancel"),
+                false,
+            );
+            assert!(
+                late_cancel.is_err(),
+                "completed startup no longer exposes a startup cancellation owner"
+            );
+        }
+
+        let events = event_log_events(&h);
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |event| matches!(event, Event::AgentInferenceDispatchStarted(started)
+                    if started.agent_id == agent_id)
+                )
+                .count(),
+            usize::from(!cancel_first)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::AgentStartFailed(failed)
+                    if failed.start_id == start_id
+                        && failed.reason == tau_proto::AgentStartFailure::Canceled))
+                .count(),
+            usize::from(cancel_first)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::AgentStartFailed(failed)
+                    if failed.start_id == start_id))
+                .count(),
+            usize::from(cancel_first)
+        );
+        let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+        assert!(coordinator.operations.is_empty());
+        assert!(coordinator.requests.is_empty());
+        assert!(coordinator.agents.is_empty());
+        assert_eq!(coordinator.retained_bytes, 0);
+    }
+}
+
+/// Cold restart never reconstructs coordinator state or dispatches an initial
+/// prompt whose startup checkpoint did not commit.
+#[test]
+fn cold_restart_classifies_membership_and_prompt_prefixes_without_dispatch() {
+    for (cut_name, intercepted_event, expect_creation, expect_prompt, expect_unavailable) in [
+        (
+            "acceptance-only",
+            tau_proto::EventName::AGENT_STARTED,
+            false,
+            false,
+            false,
+        ),
+        (
+            "started-only",
+            tau_proto::EventName::SESSION_AGENT_LOADED,
+            true,
+            false,
+            false,
+        ),
+        (
+            "membership-only",
+            tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            true,
+            false,
+            true,
+        ),
+        (
+            "prompt-only",
+            tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+            true,
+            true,
+            true,
+        ),
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join(cut_name);
+        let agent_id = {
+            let mut h = quiet_provider_harness(&state).expect("harness");
+            let interceptor_name = format!("{cut_name}-interceptor");
+            let _interceptor = connect_test_tool(&mut h, &interceptor_name);
+            h.handle_extension_event(
+                &interceptor_name,
+                TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                    selectors: vec![EventSelector::Exact(intercepted_event)],
+                    priority: InterceptionPriority::new(0),
+                })),
+            )
+            .expect("register cut interceptor");
+            h.handle_start_agent_request(
+                &crate::test_connection_id(HARNESS_CONNECTION_ID),
+                ext_query(&format!("cut-{cut_name}")),
+            )
+            .expect("start");
+            let agent_id = event_log_events(&h)
+                .iter()
+                .find_map(|event| match event {
+                    Event::StartAgentAccepted(accepted)
+                        if accepted.query_id == format!("cut-{cut_name}") =>
+                    {
+                        Some(accepted.agent_id.clone())
+                    }
+                    _ => None,
+                })
+                .expect("accepted id");
+            assert!(h.runtime_io.publication.pending_intercept.is_some());
+            drop(h);
+            agent_id
+        };
+
+        let h =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        assert!(
+            !h.agent_runtime
+                .agent_registry
+                .agent_routes
+                .contains_key(&agent_id)
+        );
+        assert_eq!(
+            h.agent_runtime
+                .agent_registry
+                .restored_unavailable
+                .contains_key(&agent_id),
+            expect_unavailable
+        );
+        let agent_events = h
+            .session_runtime
+            .agent_store
+            .agent_events(agent_id.as_str())
+            .unwrap_or_default();
+        assert_eq!(
+            agent_events
+                .iter()
+                .any(|record| matches!(record.event, Event::AgentStarted(_))),
+            expect_creation
+        );
+        let submitted = agent_events
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::AgentPromptSubmitted(prompt) => Some(prompt.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if expect_prompt {
+            let expected = format!("instruction cut-{cut_name}");
+            assert_eq!(submitted, [expected.as_str()]);
+        } else {
+            assert!(submitted.is_empty());
+        }
+        assert!(
+            agent_events
+                .iter()
+                .all(|record| !matches!(record.event, Event::AgentInferenceDispatchStarted(_)))
+        );
+        let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+        assert!(coordinator.operations.is_empty());
+        assert!(coordinator.requests.is_empty());
+        assert!(coordinator.agents.is_empty());
+        assert_eq!(coordinator.retained_bytes, 0);
+    }
+}
+
+/// An unrelated checkpoint on another branch cannot complete an interrupted
+/// startup whose canonical initial prompt it does not cover.
+#[test]
+fn cold_restart_rejects_off_branch_checkpoint_as_startup_completion() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("off-branch-checkpoint");
+    let agent_id = {
+        let mut h = quiet_provider_harness(&state).expect("harness");
+        let _interceptor = connect_test_tool(&mut h, "off-branch-checkpoint-interceptor");
+        h.handle_extension_event(
+            "off-branch-checkpoint-interceptor",
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(
+                    tau_proto::EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+                )],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("register checkpoint interceptor");
+        h.handle_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query("off-branch-checkpoint"),
+        )
+        .expect("park canonical checkpoint");
+        let (agent_id, startup_through) = {
+            let operation = h
+                .agent_runtime
+                .agent_registry
+                .start_coordinator
+                .operations
+                .values()
+                .next()
+                .expect("startup operation");
+            (
+                operation.pending.cid.clone(),
+                operation
+                    .startup_through
+                    .expect("canonical startup prompt head"),
+            )
+        };
+        assert_ne!(startup_through, tau_proto::AgentHead::Root);
+        let mut off_branch = match h
+            .runtime_io
+            .publication
+            .pending_intercept
+            .as_ref()
+            .map(|pending| pending.event.clone())
+        {
+            Some(Event::AgentInferenceDispatchStarted(checkpoint)) => checkpoint,
+            other => panic!("expected parked checkpoint, got {other:?}"),
+        };
+        off_branch.through = tau_proto::AgentHead::Root;
+        off_branch.activation_cut = Some(tau_proto::AgentHead::Root);
+        h.append_direct_agent_semantic_event(
+            agent_id.as_str(),
+            tau_core::AgentEventParent::Root,
+            Event::AgentInferenceDispatchStarted(off_branch),
+        )
+        .expect("append unrelated off-branch checkpoint");
+        drop(h);
+        agent_id
+    };
+
+    let reopened =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("cold reopen");
+    assert!(
+        !reopened
+            .agent_runtime
+            .agent_registry
+            .agent_routes
+            .contains_key(&agent_id)
+    );
+    assert!(
+        reopened
+            .agent_runtime
+            .agent_registry
+            .restored_unavailable
+            .contains_key(&agent_id)
+    );
+    assert!(
+        reopened
+            .agent_runtime
+            .agent_registry
+            .start_coordinator
+            .operations
+            .is_empty()
+    );
+    assert!(reopened.runtime_io.publication.idle_dispatches.is_empty());
+}
+
+/// A committed startup checkpoint is the exact cold-restart success boundary;
+/// later provider uncertainty follows ordinary inference recovery.
+#[test]
+fn cold_restart_restores_checkpointed_start_without_coordinator() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("checkpointed");
+    let agent_id = {
+        let mut h = quiet_provider_harness(&state).expect("harness");
+        h.handle_start_agent_request(
+            &crate::test_connection_id(HARNESS_CONNECTION_ID),
+            ext_query("cut-checkpointed"),
+        )
+        .expect("start");
+        let accepted = event_log_events(&h)
+            .iter()
+            .find_map(|event| match event {
+                Event::StartAgentAccepted(accepted) if accepted.query_id == "cut-checkpointed" => {
+                    Some(accepted.clone())
+                }
+                _ => None,
+            })
+            .expect("accepted");
+        assert!(
+            h.session_runtime
+                .agent_store
+                .agent_events(accepted.agent_id.as_str())
+                .expect("agent journal")
+                .iter()
+                .any(|record| matches!(record.event, Event::AgentInferenceDispatchStarted(_)))
+        );
+        assert!(
+            h.agent_runtime
+                .agent_registry
+                .start_coordinator
+                .operations
+                .is_empty()
+        );
+        drop(h);
+        accepted.agent_id
+    };
+
+    let h = quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+        .expect("resume");
+    assert!(
+        h.agent_runtime
+            .agent_registry
+            .agent_routes
+            .contains_key(&agent_id)
+    );
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert!(coordinator.operations.is_empty());
+    assert!(coordinator.requests.is_empty());
+    assert!(coordinator.agents.is_empty());
+    assert_eq!(coordinator.retained_bytes, 0);
+}
 
 /// A physical post-accept creation failure terminalizes accepted requests
 /// without exposing the failed identity while later FIFO work continues.
@@ -25,16 +1283,6 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
         .expect("second pending");
     let first_agent_id = first.agent_id.clone();
     let second_agent_id = second.agent_id.clone();
-    h.accept_duplicate_start_agent_request(
-        &crate::test_connection_id(HARNESS_CONNECTION_ID),
-        &first.query.query_id,
-        &first_agent_id,
-    );
-    h.accept_duplicate_start_agent_request(
-        &crate::test_connection_id(HARNESS_CONNECTION_ID),
-        &second.query.query_id,
-        &second_agent_id,
-    );
     h.agent_runtime
         .agent_registry
         .pending_start_requests
@@ -69,35 +1317,12 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
             _ => None,
         })
         .collect();
+    assert_eq!(failed_results.len(), 1);
     assert!(
-        failed_results.is_empty(),
-        "asynchronous collision cannot retract accepted creation"
-    );
-    assert!(
-        h.agent_runtime
+        !h.agent_runtime
             .agent_registry
             .agent_routes
             .contains_key(first_agent_id.as_str())
-    );
-    assert!(
-        h.agent_runtime
-            .agent_registry
-            .agents
-            .contains_key(&crate::parse_agent_id(&first_agent_id))
-    );
-    assert!(
-        h.agent_runtime
-            .agent_registry
-            .session_loaded
-            .contains(&crate::parse_agent_id(&first_agent_id))
-    );
-    assert!(
-        h.session_runtime
-            .store
-            .session("s1")
-            .is_some_and(|membership| {
-                membership.contains_agent(&crate::parse_agent_id(&first_agent_id))
-            })
     );
     assert!(events.iter().all(|event| !matches!(
         event,
@@ -107,10 +1332,19 @@ fn accepted_start_storage_failure_terminalizes_and_continues_fifo() {
         event,
         Event::AgentStarted(started) if started.agent_id.as_str() == first_agent_id
     )));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        Event::SessionAgentLoaded(loaded) if loaded.agent_id.as_str() == first_agent_id
-    )));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStartFailed(failed)
+                    if failed.agent_id.as_str() == first_agent_id
+                        && failed.reason == tau_proto::AgentStartFailure::CreationWorker
+            ))
+            .count(),
+        1,
+        "events: {events:#?}"
+    );
     assert!(
         h.agent_runtime
             .agent_registry

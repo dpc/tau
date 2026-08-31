@@ -139,6 +139,7 @@ impl Harness {
                     restored_unavailable: HashMap::new(),
                     pending_builtin_delegates: HashMap::new(),
                     pending_start_requests: VecDeque::new(),
+                    start_coordinator: StartCoordinator::new(),
                 },
                 agent_watch: AgentWatchState::default(),
                 subagents: SubagentToolState::with_input_wait_timeout_bounds(

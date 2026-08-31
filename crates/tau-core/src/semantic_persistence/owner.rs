@@ -548,6 +548,12 @@ pub(crate) struct RegisteredStream {
 }
 
 impl SemanticPersistenceOwner {
+    /// Returns the process-unique identity of this lifecycle owner.
+    #[must_use]
+    pub fn owner_epoch(&self) -> u64 {
+        self.shared.owner_epoch
+    }
+
     /// Starts the unique persistence worker with fixed aggregate capacity.
     pub fn new(capacity: PersistenceCapacity) -> Result<Self, PersistenceAdmissionError> {
         Self::with_backend(capacity, Arc::new(FilesystemBackend))

@@ -963,6 +963,68 @@ fn settled_empty_model_inventory_rejects_queued_prompt_and_later_recovers() {
     );
 }
 
+/// An accepted startup whose initial inference has no model closes with one
+/// dispatch rejection instead of retaining `AwaitDispatchCommit`.
+#[test]
+fn settled_empty_model_inventory_terminalizes_accepted_startup() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "startup-model-interceptor");
+    h.handle_extension_event(
+        "startup-model-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register prompt interceptor");
+
+    h.handle_start_agent_request(
+        crate::harness::harness_connection_id(),
+        tau_proto::StartAgentRequest {
+            trusted_internal_spans: Vec::new(),
+            query_id: "q-no-start-model".to_owned(),
+            instruction: "startup without a model".to_owned(),
+            role: Some("engineer".to_owned()),
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: None,
+            task_name: None,
+            parent_agent: None,
+        },
+    )
+    .expect("start request");
+    clear_startup_echo_models(&mut h);
+    h.extensions.pending_connects = 0;
+    h.handle_extension_event(
+        "startup-model-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("commit initial prompt");
+    h.try_advance_queue();
+
+    let events = event_log_events(&h);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStartFailed(failed)
+                    if failed.reason == tau_proto::AgentStartFailure::DispatchRejected
+            ))
+            .count(),
+        1
+    );
+    let coordinator = &h.agent_runtime.agent_registry.start_coordinator;
+    assert!(coordinator.operations.is_empty());
+    assert!(coordinator.requests.is_empty());
+    assert!(coordinator.agents.is_empty());
+    assert_eq!(coordinator.retained_bytes, 0);
+}
+
 /// A create-agent initial prompt keeps its existing request/ctx terminal
 /// correlation when settled-empty startup rejects it, and must not also emit
 /// the ordinary queued-prompt terminal or provider work.

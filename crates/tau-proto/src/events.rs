@@ -2955,7 +2955,7 @@ pub struct SessionAgentUnloaded {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StartAgentRequest {
     /// Requester-assigned correlation id, echoed back on accepted/result
-    /// events.
+    /// events. The harness accepts at most 128 UTF-8 bytes.
     pub query_id: String,
     /// User-style instruction text. Appended to the current
     /// conversation's history as a `User` message before dispatch.
@@ -2996,10 +2996,66 @@ pub struct StartAgentRequest {
 /// A [`StartAgentRequest`] was accepted for side-agent startup.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StartAgentAccepted {
+    /// Harness-run-unique operation correlation for the startup obligation.
+    pub start_id: StartOperationId,
     /// Request correlation id copied from [`StartAgentRequest::query_id`].
     pub query_id: String,
     /// Harness-minted side-agent id for the accepted request.
     pub agent_id: AgentId,
+}
+
+/// Fixed-size harness-run-unique identity for one side-agent startup.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StartOperationId(pub u64);
+
+/// Startup phase that failed after [`StartAgentAccepted`] committed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStartPhase {
+    /// The immutable agent-creation fact was awaiting commit.
+    AgentStarted,
+    /// Session membership was awaiting commit.
+    SessionAgentLoaded,
+    /// The initial transcript prompt was awaiting commit.
+    AgentPromptSubmitted,
+    /// The inference-dispatch checkpoint was awaiting commit.
+    AgentInferenceDispatchStarted,
+}
+
+/// Compact reason a committed side-agent startup obligation failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStartFailure {
+    /// Semantic storage rejected one required phase.
+    StorageAdmission,
+    /// Agent installation or its persistence worker failed.
+    CreationWorker,
+    /// An interceptor dropped a required post-accept phase.
+    InterceptionDropped,
+    /// An interceptor disconnect rejected the publication.
+    InterceptorDisconnected,
+    /// Runtime cancellation won before dispatch committed.
+    Canceled,
+    /// Model selection or dispatch-checkpoint admission failed.
+    DispatchRejected,
+    /// The owning session stopped.
+    SessionStopped,
+    /// An invariant-preserving bounded internal failure occurred.
+    Internal,
+}
+
+/// Transient canonical terminal for a committed startup obligation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentStartFailed {
+    /// Correlated startup operation.
+    pub start_id: StartOperationId,
+    /// Reserved child identity.
+    pub agent_id: AgentId,
+    /// Required transition that did not commit.
+    pub phase: AgentStartPhase,
+    /// Compact stable failure classification.
+    pub reason: AgentStartFailure,
 }
 
 /// Final reply to a [`StartAgentRequest`]. `text` is the agent's final answer
@@ -6764,6 +6820,8 @@ pub enum Event {
     StartAgentRequest(StartAgentRequest),
     #[serde(rename = "agent.start_accepted")]
     StartAgentAccepted(StartAgentAccepted),
+    #[serde(rename = "agent.start_failed")]
+    AgentStartFailed(AgentStartFailed),
     #[serde(rename = "agent.start_result")]
     StartAgentResult(StartAgentResult),
     #[serde(rename = "agent.initialization_context_set")]
@@ -7260,6 +7318,7 @@ impl Event {
             }
             Self::StartAgentRequest(_) => EventName::AGENT_START_REQUEST,
             Self::StartAgentAccepted(_) => EventName::AGENT_START_ACCEPTED,
+            Self::AgentStartFailed(_) => EventName::AGENT_START_FAILED,
             Self::StartAgentResult(_) => EventName::AGENT_START_RESULT,
             Self::AgentMessageSent(_) => EventName::AGENT_MESSAGE_SENT,
             Self::AgentMessageReceived(_) => EventName::AGENT_MESSAGE_RECEIVED,
@@ -7527,6 +7586,8 @@ impl Event {
                 | Self::ExtAgentContextPublish(_)
                 | Self::ExtInternalPromptSubmitRequest(_)
                 | Self::StartAgentRequest(_)
+                | Self::StartAgentAccepted(_)
+                | Self::AgentStartFailed(_)
                 | Self::AgentMetadataSetRequest(_)
                 | Self::AgentMetadataUnsetRequest(_)
                 | Self::ShellCommandProgressReported(_)

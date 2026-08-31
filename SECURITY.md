@@ -800,8 +800,33 @@ cannot submit work. See
 Every configured extension kind may also publish transient start-agent requests.
 The harness commits the raw request before revalidating the exact live generation
 and admission session, then applies role, parent/tool-owner, duplicate rebinding,
-and child-creation logic. Unconfigured/socket peers are denied; stale generations
-or sessions are observation-only, and raw requests never enter semantic replay. See
+and child-creation logic. Accepted startup is bounded to 64 concurrent operations
+and 4 MiB of aggregate retained instruction, span, task, and routing data; agent-id
+reservations and requester query ids are bounded before storage side effects.
+Each successful phase owns one ordinary committed or rejected publication outcome.
+After acceptance, exactly one compact `agent.start_failed` terminal owns failure
+projection and runtime cleanup; no cross-event reservation or journal transaction
+is implied.
+
+Clean session switch or process shutdown terminalizes every accepted start before
+generation rollover and rejects a still-uncommitted acceptance without inventing a
+failure fact. A hard crash can leave only the already committed durable prefix.
+Cold restore keeps that prefix inspectable but never reconstructs requester routes,
+buffered wakes, coordinator state, or initial-prompt dispatch. Only a committed
+startup inference checkpoint permits ordinary post-start inference recovery.
+Stream-local terminal persistence diagnostics target the exact agent generation;
+whole-owner exit affects only durable starts bound to that current owner, not
+memory-only or ephemeral starts. Retryable open, lock, write, and sync diagnostics
+do not independently terminalize startup.
+
+Unconfigured/socket peers are denied; stale generations or sessions are
+observation-only, and raw requests never enter semantic replay. Deterministic
+startup regressions preserve every pre/post-accept interception cut, canonical
+prompt replacement, dispatch rejection, persistence-owner exit, cancellation and
+shutdown boundary, terminal retry, bounded-index cleanup, and cold-restart prefix.
+Revisit these safeguards when changing event interception, semantic persistence
+generation ownership, agent-id templates, prompt dispatch, session shutdown, or
+restore activation. See
 [SPEC-start-agent-requests](specs/SPEC-start-agent-requests.md).
 Every live configured extension kind and attached local UI may publish terminal
 bell and OSC side-effect events through ordinary interception and commit.

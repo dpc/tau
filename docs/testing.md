@@ -671,6 +671,82 @@ provider terminals, live-only interactive subscription, and output routing.
 Deterministic process tests own end-to-end daemon/provider completion and
 failure behavior.
 
+## Start-agent atomic phase coverage
+
+Treat acceptance, creation, membership, initial-prompt submission, and inference
+dispatch as five independent publication outcomes. The focused harness startup
+suite must assert canonical event sequence and cardinality, then use one shared
+terminal helper to prove the operation map, request index, agent index, and
+retained-byte total are all empty. Keep these deterministic cases:
+
+1. every validation and runtime-bound rejection before acceptance;
+2. acceptance pass, canonical replacement, drop, disconnect pass-through, and
+   cancellation versus commit;
+3. duplicate rebinding before acceptance, after acceptance, and after Agent
+   installation, including collision-prone id templates;
+4. failure before creation, before membership, before prompt, and before dispatch;
+5. stream-local creation failure versus prompt commit, and owner-wide exit with
+   durable and ephemeral starts in different phases;
+6. canonical prompt replacement and drop, proving only committed replacement text
+   reaches the selected provider;
+7. every dispatch preflight rejection and a delayed checkpoint whose selected head
+   covers the startup prompt through later committed facts;
+8. cancellation and clean process/session shutdown at every phase boundary;
+9. terminal interception/capacity retry with one failure and one directed result;
+10. 64-operation, 4-MiB aggregate payload, and query-id limits with no rejected
+    ephemeral-storage residue;
+11. cold reopen after each durable prefix, proving incomplete starts are
+    restored-unavailable and never replay-dispatched while a committed dispatch
+    checkpoint retains ordinary recovery; and
+12. post-membership failure followed by at most one unload, with runtime authority
+    removed at failure commit even if unload publication parks or rejects.
+
+The deterministic fake-provider restart scenarios own the cross-process completed
+worker and incomplete-prefix cuts. Proto/client/CLI tests separately own the typed
+failure payload, transient classification, accepted-placeholder projection, and
+pre-membership phantom retirement. Do not replace these focused cuts with a broad
+timing matrix or infer correctness from callback order.
+
+The approved 18-row startup matrix is pinned by these exact named oracles:
+
+1. `invalid_role_commits_before_directed_rejection`,
+   `invalid_parent_commits_before_directed_rejection`,
+   `loaded_parent_tool_owner_mismatch_commits_before_directed_rejection`, and
+   the remaining validation cases in `interception::start_agent`;
+2. `parked_acceptance_replace_and_drop_have_post_commit_visibility`,
+   `preaccept_cancel_removes_parked_owner_without_failure_terminal`, and
+   `acceptance_commit_racing_cancellation_emits_one_failure_obligation`;
+3. `await_acceptance_duplicate_rebinds_without_early_projection`,
+   `postaccept_preterminal_duplicate_rebinds_acceptance_and_failure`,
+   `active_duplicate_rebinds_without_creating_another_agent`, and
+   `start_coordinator_reserves_agent_ids_before_acceptance_commits`;
+4. `dropped_agent_started_phase_commits_one_correlated_failure` and
+   `wrong_family_agent_started_replacement_terminalizes_start`;
+5. `accepted_start_storage_failure_terminalizes_and_continues_fifo`;
+6. `stream_failure_races_startup_prompt_commit_without_double_terminal`;
+7. `persistence_failures_target_exact_owner_generation_and_mixed_phases`;
+8. `startup_prompt_replacement_reaches_provider_with_canonical_text_only`;
+9. `post_membership_failure_removes_route_before_unload_resolves`;
+10. `startup_interceptor_disconnect_passes_original_without_failure`;
+11. `cancellation_terminalizes_every_startup_phase_exactly_once`,
+    `acceptance_commit_racing_cancellation_emits_one_failure_obligation`, and
+    `cancellation_races_startup_checkpoint_commit_with_one_winner`;
+12. `committed_agent_started_runtime_install_failure_terminalizes_without_route`;
+13. `settled_empty_model_inventory_terminalizes_accepted_startup`,
+    `startup_provider_route_loss_rejects_before_checkpoint_and_delivery`, and
+    `startup_checkpoint_semantic_admission_rejects_without_provider_delivery`;
+14. `startup_failure_terminal_retries_once_after_capacity_wake`;
+15. `session_shutdown_terminalizes_every_startup_phase_exactly_once` and
+    `process_shutdown_terminalizes_parked_startup_prompt`;
+16. `cold_restart_classifies_membership_and_prompt_prefixes_without_dispatch`
+    `cold_restart_rejects_off_branch_checkpoint_as_startup_completion`, and
+    `cold_restart_restores_checkpointed_start_without_coordinator`;
+17. deterministic E2E `cold_resume_restores_completed_production_worker` and
+    core-resume `public_terminal_cold_resume_selects_main_and_worker`; and
+18. `post_membership_failure_removes_route_before_unload_resolves`, including
+    warm pre/post-unload Current-roster assertions, plus
+    `post_membership_unload_admission_rejection_restores_unavailable`.
+
 
 ## Self-compaction terminal crash coverage
 

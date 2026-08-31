@@ -3,6 +3,9 @@
 //!
 //! Watch fanout remains a separate authority from registry membership.
 
+use super::start_coordinator::{
+    MAX_START_QUERY_ID_BYTES, StartCoordinator, StartPhase, StartPhaseOwner,
+};
 use super::*;
 
 /// Agent identity, membership, routing, and lifecycle state owned by the
@@ -49,6 +52,8 @@ pub(crate) struct AgentRegistryState {
     pub(crate) pending_builtin_delegates: HashMap<String, AgentId>,
     /// Extension-started agents waiting for ordered creation and dispatch.
     pub(super) pending_start_requests: VecDeque<PendingStartAgentRequest>,
+    /// Bounded runtime owner for accepted multi-event startup obligations.
+    pub(super) start_coordinator: StartCoordinator,
 }
 
 pub(super) fn agent_runtime_state_for_turn(state: &AgentTurnState) -> tau_proto::AgentRuntimeState {
@@ -72,7 +77,7 @@ pub(super) fn default_navigation_mode(
 
 /// Agent creation accepted by the harness but not yet installed as a live
 /// route.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct PendingStartAgentRequest {
     /// Connection that owns the accepted start request.
     pub(super) source_id: tau_proto::ConnectionId,
@@ -455,19 +460,6 @@ impl Harness {
                 return Ok(());
             }
         };
-        let accepted = tau_proto::StartAgentAccepted {
-            query_id: pending.query.query_id.clone(),
-            agent_id: crate::parse_agent_id(&pending.agent_id),
-        };
-        self.publish_event(
-            Some(crate::harness::harness_connection_id()),
-            Event::StartAgentAccepted(accepted.clone()),
-        );
-        let _ = self.runtime_io.bus.send_to(
-            source_id,
-            None,
-            HarnessOutputMessage::deliver(Event::StartAgentAccepted(accepted)),
-        );
         self.agent_runtime
             .agent_registry
             .pending_start_requests
@@ -480,15 +472,13 @@ impl Harness {
         source_id: &tau_proto::ConnectionId,
         query_id: &str,
         agent_id: &str,
+        start_id: tau_proto::StartOperationId,
     ) {
         let accepted = tau_proto::StartAgentAccepted {
+            start_id,
             query_id: query_id.to_owned(),
             agent_id: crate::parse_agent_id(agent_id),
         };
-        self.publish_event(
-            Some(crate::harness::harness_connection_id()),
-            Event::StartAgentAccepted(accepted.clone()),
-        );
         let _ = self.runtime_io.bus.send_to(
             source_id,
             None,
@@ -507,19 +497,6 @@ impl Harness {
             return Err("duplicate tool-backed start-agent request".to_owned());
         };
         let agent_id = pending.agent_id.clone();
-        let accepted = tau_proto::StartAgentAccepted {
-            query_id: pending.query.query_id.clone(),
-            agent_id: crate::parse_agent_id(&agent_id),
-        };
-        self.publish_event(
-            Some(crate::harness::harness_connection_id()),
-            Event::StartAgentAccepted(accepted.clone()),
-        );
-        let _ = self.runtime_io.bus.send_to(
-            crate::harness::harness_connection_id(),
-            None,
-            HarnessOutputMessage::deliver(Event::StartAgentAccepted(accepted)),
-        );
         self.agent_runtime
             .agent_registry
             .pending_start_requests
@@ -737,11 +714,68 @@ impl Harness {
             if let Some(conv) = self.agent_runtime.agent_registry.agents.get_mut(&cid) {
                 conv.identity.source_connection = Some(source_id.clone());
             }
-            self.accept_duplicate_start_agent_request(source_id, &query.query_id, &agent_id);
+            let Some(start_id) = self
+                .agent_runtime
+                .agent_registry
+                .agents
+                .get(&cid)
+                .and_then(|agent| agent.identity.start_operation_id)
+            else {
+                self.fail_start_agent_request(
+                    source_id,
+                    query.query_id,
+                    "existing agent has no live startup correlation".to_owned(),
+                );
+                return Ok(None);
+            };
+            if let Some(operation) = self
+                .agent_runtime
+                .agent_registry
+                .start_coordinator
+                .operations
+                .get_mut(&start_id)
+            {
+                operation.source_id = source_id.clone();
+            }
+            self.accept_duplicate_start_agent_request(
+                source_id,
+                &query.query_id,
+                &agent_id,
+                start_id,
+            );
             self.emit_info(&format!(
                 "rebound duplicate start-agent-request `{}` from `{}` to existing agent `{}`",
                 query.query_id, extension_name, agent_id
             ));
+            return Ok(None);
+        }
+        if let Some(start_id) = self
+            .agent_runtime
+            .agent_registry
+            .start_coordinator
+            .requests
+            .get(&(extension_name.clone(), query.query_id.clone()))
+            .copied()
+        {
+            let accepted = {
+                let operation = self
+                    .agent_runtime
+                    .agent_registry
+                    .start_coordinator
+                    .operations
+                    .get_mut(&start_id)
+                    .expect("start request index points to operation");
+                operation.source_id = source_id.clone();
+                operation.pending.source_id = source_id.clone();
+                operation.accepted.clone()
+            };
+            if let Some(accepted) = accepted {
+                let _ = self.runtime_io.bus.send_to(
+                    source_id,
+                    None,
+                    HarnessOutputMessage::deliver(Event::StartAgentAccepted(accepted)),
+                );
+            }
             return Ok(None);
         }
         if let Some(idx) = self
@@ -759,7 +793,6 @@ impl Harness {
                 .clone();
             self.agent_runtime.agent_registry.pending_start_requests[idx].source_id =
                 source_id.to_owned();
-            self.accept_duplicate_start_agent_request(source_id, &query.query_id, &agent_id);
             self.emit_info(&format!(
                 "rebound duplicate start-agent-request `{}` from `{}` to pending agent `{}`",
                 query.query_id, extension_name, agent_id
@@ -779,18 +812,7 @@ impl Harness {
             .and_then(|cid| self.agent_runtime.agent_registry.agents.get(cid))
             .map(|agent| agent.identity.persistence)
             .unwrap_or_default();
-        if persistence.is_ephemeral()
-            && let Err(error) = self
-                .session_runtime
-                .agent_store
-                .mark_agent_ephemeral(&agent_id)
-        {
-            return Err(format!(
-                "failed to mark child agent `{agent_id}` ephemeral: {error}"
-            ));
-        }
-
-        Ok(Some(PendingStartAgentRequest {
+        let pending = PendingStartAgentRequest {
             source_id: source_id.to_owned(),
             extension_name,
             query,
@@ -800,7 +822,22 @@ impl Harness {
             agent_id,
             persistence,
             pending_agent_message_wakes: VecDeque::new(),
-        }))
+        };
+        if pending.query.query_id.len() > MAX_START_QUERY_ID_BYTES {
+            return Err(format!(
+                "start query id exceeds the {MAX_START_QUERY_ID_BYTES}-byte limit"
+            ));
+        }
+        let retained_bytes = StartCoordinator::retained_payload_bytes(&pending)?;
+        if !self
+            .agent_runtime
+            .agent_registry
+            .start_coordinator
+            .can_insert(retained_bytes)
+        {
+            return Err("too many or too much retained side-agent startup work".to_owned());
+        }
+        Ok(Some(pending))
     }
 
     /// Dispatch queued `StartAgentRequest`s in FIFO order. Directory/update
@@ -817,19 +854,7 @@ impl Harness {
                 .pending_start_requests
                 .remove(idx)
                 .expect("index just located");
-            let source_id = pending.source_id.clone();
-            let query_id = pending.query.query_id.clone();
-            let agent_id = pending.agent_id.clone();
-            if let Err(error) = self.start_agent_request(pending) {
-                self.emit_harness_failure(&format!(
-                    "failed to start accepted agent `{agent_id}`: {error}"
-                ));
-                self.fail_start_agent_request(
-                    &source_id,
-                    query_id,
-                    format!("failed to start agent `{agent_id}`"),
-                );
-            }
+            self.begin_start_operation(pending);
         }
     }
 
@@ -857,30 +882,13 @@ impl Harness {
         }
     }
 
-    /// Spawn a fresh side agent runtime for an extension's
-    /// [`tau_proto::StartAgentRequest`] and dispatch it after FIFO admission.
-    ///
-    /// All start-agent requests create an independent agent log with fresh
-    /// transcript context. Tool-backed requests (for example `agent_start`) and
-    /// non-tool extension requests differ in result routing and
-    /// cache/tool-choice details, but neither copies parent transcript
-    /// nodes. When an explicit or derived parent agent is known, only
-    /// metadata entries marked inheritable are copied to the child (for
-    /// example a shell extension instance's remembered workdir).
-    pub(super) fn start_agent_request(
-        &mut self,
-        pending: PendingStartAgentRequest,
-    ) -> Result<(), HarnessError> {
-        self.start_agent_request_inner(pending, true, false)
-    }
-
     /// Construct an ordinary side-agent endpoint without inventing an initial
     /// user instruction. The committed peer receive supplies its first input.
     pub(super) fn start_peer_agent_request(
         &mut self,
         pending: PendingStartAgentRequest,
     ) -> Result<(), HarnessError> {
-        self.start_agent_request_inner(pending, false, true)
+        self.start_agent_request_inner(pending, false, true, false, None)
     }
 
     pub(super) fn start_agent_request_inner(
@@ -888,6 +896,8 @@ impl Harness {
         pending: PendingStartAgentRequest,
         publish_initial_instruction: bool,
         peer_entrypoint_endpoint: bool,
+        creation_already_committed: bool,
+        start_operation_id: Option<tau_proto::StartOperationId>,
     ) -> Result<(), HarnessError> {
         let PendingStartAgentRequest {
             source_id,
@@ -952,6 +962,17 @@ impl Harness {
         // runtime cursor starts at the root. Parent branch NodeIds belong
         // to the parent's agent log and must not be reused in the child log.
         let initial_head = None;
+        if !creation_already_committed
+            && persistence.is_ephemeral()
+            && let Err(error) = self
+                .session_runtime
+                .agent_store
+                .mark_agent_ephemeral(&agent_id)
+        {
+            return Err(HarnessError::Participant(format!(
+                "failed to mark child agent `{agent_id}` ephemeral: {error}"
+            )));
+        }
 
         let originator = tau_proto::PromptOriginator::Extension {
             name: extension_name.clone(),
@@ -988,11 +1009,13 @@ impl Harness {
             ephemeral: self.session_runtime.storage_mode.is_memory_only()
                 || persistence.is_ephemeral(),
         });
-        self.append_direct_agent_semantic_event(
-            &agent_id,
-            tau_core::AgentEventParent::InheritHead,
-            started.clone(),
-        )?;
+        if !creation_already_committed {
+            self.append_direct_agent_semantic_event(
+                &agent_id,
+                tau_core::AgentEventParent::InheritHead,
+                started.clone(),
+            )?;
+        }
         let runtime_incarnation = self.mint_agent_runtime_incarnation();
         let mut conv = Agent::new(
             cid.clone(),
@@ -1014,6 +1037,7 @@ impl Harness {
         conv.identity.role = conversation_role;
         conv.identity.agent_id = Some(agent_id_proto.clone());
         conv.identity.persistence = persistence;
+        conv.identity.start_operation_id = start_operation_id;
         conv.identity.peer_entrypoint_endpoint = peer_entrypoint_endpoint;
         conv.dispatch.pending_message_wakes = pending_agent_message_wakes;
         if let Some(last_node_id) = conv
@@ -1062,26 +1086,33 @@ impl Harness {
         for (observation, kind, source_observation) in buffered_activations {
             self.append_activation_queued(&cid, observation, kind, source_observation, None);
         }
-        self.agent_runtime
-            .agent_registry
-            .precommitted_starts
-            .insert(agent_id.clone());
-        self.enqueue_publish(
-            None,
-            started,
-            true,
-            true,
-            Some(ConversationHeadSync {
-                cid: cid.clone(),
-                agent_id: Some(agent_id_proto.clone()),
-                session_generation: self.session_runtime.current_session_generation,
-                fold_parent: None,
-                suppress_activation_dispatch: false,
-                continuation: None,
-                notify_watchers: false,
-            }),
+        if !creation_already_committed {
+            self.agent_runtime
+                .agent_registry
+                .precommitted_starts
+                .insert(agent_id.clone());
+            self.enqueue_publish(
+                None,
+                started,
+                true,
+                true,
+                Some(ConversationHeadSync {
+                    cid: cid.clone(),
+                    agent_id: Some(agent_id_proto.clone()),
+                    session_generation: self.session_runtime.current_session_generation,
+                    fold_parent: None,
+                    suppress_activation_dispatch: false,
+                    continuation: None,
+                    notify_watchers: false,
+                }),
+            );
+        }
+        self.ensure_loaded_agent_for_agent_with_metadata(
+            &cid,
+            &agent_id_proto,
+            initial_metadata,
+            start_operation_id,
         );
-        self.ensure_loaded_agent_for_agent_with_metadata(&cid, &agent_id_proto, initial_metadata);
         if let Some(display_name) = self
             .agent_runtime
             .agent_registry
@@ -1581,6 +1612,26 @@ impl Harness {
     }
 
     pub(super) fn remove_agent(&mut self, cid: &AgentId) {
+        let active_start = self
+            .agent_runtime
+            .agent_registry
+            .start_coordinator
+            .agents
+            .get(cid)
+            .copied();
+        if let Some(start_id) = active_start {
+            let closing = self
+                .agent_runtime
+                .agent_registry
+                .start_coordinator
+                .operations
+                .get(&start_id)
+                .is_some_and(|operation| operation.phase == StartPhase::ClosingFailure);
+            if !closing {
+                self.begin_start_failure(start_id, tau_proto::AgentStartFailure::Canceled);
+            }
+            return;
+        }
         let active_standalone_prompts = self
             .prompt_coordination
             .standalone_accounting
@@ -1917,6 +1968,27 @@ impl Harness {
             .pending_start_requests
             .iter()
             .map(|pending| (pending.agent_id.clone(), pending.role.clone()))
+            .chain(
+                self.agent_runtime
+                    .agent_registry
+                    .start_coordinator
+                    .operations
+                    .values()
+                    .filter(|operation| {
+                        operation.phase != StartPhase::AwaitAcceptedCommit
+                            && !self
+                                .agent_runtime
+                                .agent_registry
+                                .agents
+                                .contains_key(&operation.pending.cid)
+                    })
+                    .map(|operation| {
+                        (
+                            operation.pending.agent_id.clone(),
+                            operation.pending.role.clone(),
+                        )
+                    }),
+            )
             .collect()
     }
 
@@ -1959,6 +2031,7 @@ impl Harness {
         let agent_store = &self.session_runtime.agent_store;
         let pending_start_agent_requests =
             &self.agent_runtime.agent_registry.pending_start_requests;
+        let reserved_start_agent_ids = &self.agent_runtime.agent_registry.start_coordinator.agents;
         let agent_id = mint_available_agent_id_for_role_with(
             role,
             &role_group,
@@ -1967,6 +2040,7 @@ impl Harness {
                 agent_routes.contains_key(agent_id)
                     || stopped_agent_ids.contains(agent_id)
                     || agent_store.agent_exists(agent_id)
+                    || reserved_start_agent_ids.contains_key(agent_id)
                     || pending_start_agent_requests
                         .iter()
                         .any(|pending| pending.agent_id == agent_id)
@@ -2117,7 +2191,7 @@ impl Harness {
             }),
         );
         self.publish_delegate_roles_context();
-        self.ensure_loaded_agent_for_agent_with_metadata(&cid, &agent_id_proto, metadata);
+        self.ensure_loaded_agent_for_agent_with_metadata(&cid, &agent_id_proto, metadata, None);
         Ok(cid)
     }
 
@@ -2227,7 +2301,7 @@ impl Harness {
     }
 
     pub(super) fn ensure_loaded_agent_for_agent(&mut self, cid: &AgentId, agent_id: &AgentId) {
-        self.ensure_loaded_agent_for_agent_with_metadata(cid, agent_id, Vec::new());
+        self.ensure_loaded_agent_for_agent_with_metadata(cid, agent_id, Vec::new(), None);
     }
 
     /// Returns whether an existing agent is being introduced to the current
@@ -2260,6 +2334,7 @@ impl Harness {
         cid: &AgentId,
         agent_id: &AgentId,
         initial_metadata: Vec<tau_proto::AgentInitialMetadata>,
+        start_operation_id: Option<tau_proto::StartOperationId>,
     ) {
         self.agent_runtime
             .agent_registry
@@ -2497,7 +2572,18 @@ impl Harness {
             ephemeral: self.session_runtime.storage_mode.is_memory_only()
                 || persistence.is_ephemeral(),
         });
-        if already_loaded {
+        if let Some(start_id) = start_operation_id {
+            self.enqueue_start_phase(
+                loaded,
+                !already_loaded,
+                false,
+                StartPhaseOwner {
+                    start_id,
+                    expected_phase: StartPhase::AwaitLoadedCommit,
+                    expected_event: tau_proto::EventName::SESSION_AGENT_LOADED,
+                },
+            );
+        } else if already_loaded {
             self.enqueue_publish(None, loaded, false, false, None);
         } else {
             self.publish_event(None, loaded);

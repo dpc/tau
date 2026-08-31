@@ -5604,6 +5604,18 @@ impl EventRenderer {
                 }
                 true
             }
+            Event::AgentStartFailed(failed) => {
+                if let Ok(mut navigation) = self.discovery.agent_navigation.lock() {
+                    navigation.unload(&failed.agent_id);
+                }
+                if let Ok(mut agents) = self.discovery.known_agents.lock() {
+                    agents.retain(|agent_id| agent_id != failed.agent_id.as_str());
+                }
+                self.event_owners
+                    .query_agents
+                    .retain(|_, agent_id| agent_id != &failed.agent_id);
+                true
+            }
             Event::AgentDisplayNameSet(name) => {
                 let agent_id = name.agent_id.clone();
                 self.remember_agent(agent_id.clone());

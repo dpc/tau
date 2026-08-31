@@ -66,6 +66,7 @@ use self::session_runtime::{
     extension_disconnected_tool_call_error_message, format_agent_head, restore_notice_elapsed,
     restore_notice_prompt_for_elapsed_inner,
 };
+use self::start_coordinator::{StartCoordinator, StartPhaseOwner};
 #[cfg(test)]
 use self::ui_runtime::{
     CancelTarget, PendingUiShellCommand, shell_route_id, ui_shell_provider_ids,
@@ -1418,6 +1419,7 @@ mod session_runtime_state;
 mod side_conversation_terminal_reducer;
 mod standalone_compaction_terminal_reducer;
 mod standalone_execution_accounting_state;
+mod start_coordinator;
 mod terminal_response_projection;
 #[cfg(test)]
 mod terminal_response_projection_tests;
@@ -2440,6 +2442,7 @@ impl Harness {
             ));
         }
         if !self.session_runtime.shutdown_published {
+            self.fail_start_operations_for_session_shutdown();
             // Revoke old-session admission before forcing all already accepted
             // publications through their terminal rollover path.
             self.session_runtime.current_session_generation = self

@@ -2109,6 +2109,7 @@ fn dir_lock_releases_delegate_locks_on_start_agent_result() {
 
     writer
         .write_event(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+            start_id: tau_proto::StartOperationId(1),
             query_id: "delegate-locker".to_owned(),
             agent_id: tau_proto::AgentId::parse("agent-locker").expect("agent id"),
         }))

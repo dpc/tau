@@ -7,6 +7,7 @@ use tau_proto::ToolResultStatus;
 
 use super::prompt_acceptance_timing::{PromptAcceptanceTerminal, PromptAcceptanceTiming};
 use super::prompt_materialization_timing::MaterializationStage;
+use super::start_coordinator::StartPhase;
 use super::*;
 use crate::debug_log::DebugEventSensitivity;
 
@@ -823,6 +824,29 @@ impl Harness {
         notify_watchers: bool,
     ) {
         self.publish_event_for_agent_inner(cid, source, event, completion, notify_watchers, None);
+    }
+
+    /// Publish the exact initial startup prompt with its one-event outcome
+    /// owner.
+    pub(super) fn publish_event_for_agent_with_start_owner(
+        &mut self,
+        cid: &AgentId,
+        event: Event,
+        notify_watchers: bool,
+        owner: StartPhaseOwner,
+    ) {
+        let persist = event.defaults_to_persist();
+        let agent_id = self.agent_id_for_event(&event);
+        let sync = Some(ConversationHeadSync {
+            cid: cid.clone(),
+            agent_id,
+            session_generation: self.session_runtime.current_session_generation,
+            fold_parent: None,
+            suppress_activation_dispatch: false,
+            continuation: None,
+            notify_watchers,
+        });
+        self.enqueue_publish_with_start_owner(None, event, persist, false, sync, owner);
     }
 
     /// Publish one eligible UI prompt while retaining its aggregate timing.
@@ -1813,8 +1837,12 @@ impl Harness {
         event: Event,
         persist: bool,
         mut sync_head_for: Option<ConversationHeadSync>,
-        mut prompt_acceptance: Option<PromptAcceptanceTiming>,
+        owners: interception::PublicationOutcomeOwners,
     ) {
+        let interception::PublicationOutcomeOwners {
+            mut prompt_acceptance,
+            start: mut start_owner,
+        } = owners;
         let mut event = event;
         self.arbitrate_prompt_terminal_cancellation(&mut event, &mut sync_head_for);
         let watch_retirement = sync_head_for
@@ -1828,6 +1856,9 @@ impl Harness {
             self.emit_harness_failure(
                 "watch lifecycle publication was replaced with an invalid event",
             );
+            if let Some(owner) = start_owner.take() {
+                self.reject_start_phase(owner, tau_proto::AgentStartFailure::Internal);
+            }
             return;
         }
         if !self.prompt_publication_is_authorized(&event, sync_head_for.as_ref()) {
@@ -1835,6 +1866,9 @@ impl Harness {
                 sync_head_for.as_ref(),
                 "prompt publication lost its compact-fact delivery authority",
             );
+            if let Some(owner) = start_owner.take() {
+                self.reject_start_phase(owner, tau_proto::AgentStartFailure::Internal);
+            }
             return;
         }
         if event.message_agent_target().is_some() {
@@ -1849,6 +1883,9 @@ impl Harness {
         if !self.synchronized_inference_checkpoint_has_live_owner(&event, sync_head_for.as_ref()) {
             self.rollback_rejected_activation_successor(&event);
             self.emit_info("dropping stale synchronized inference checkpoint after teardown");
+            if let Some(owner) = start_owner.take() {
+                self.reject_start_phase(owner, tau_proto::AgentStartFailure::DispatchRejected);
+            }
             return;
         }
         let reactive_recovery_claim = matches!(
@@ -1869,6 +1906,9 @@ impl Harness {
                 "dropping stale off-branch activation successor {}",
                 event.name()
             ));
+            if let Some(owner) = start_owner.take() {
+                self.reject_start_phase(owner, tau_proto::AgentStartFailure::DispatchRejected);
+            }
             return;
         }
         if sync_head_for.as_ref().is_some_and(|sync| {
@@ -1888,6 +1928,9 @@ impl Harness {
                         }))
         }) {
             self.emit_info("dropping stale completion publication after agent/session teardown");
+            if let Some(owner) = start_owner.take() {
+                self.reject_start_phase(owner, tau_proto::AgentStartFailure::Canceled);
+            }
             return;
         }
         if let Some(sync) = sync_head_for.as_ref()
@@ -1908,6 +1951,18 @@ impl Harness {
                 source,
             );
             self.emit_info("retaining branch-owned publication until its exact parent is selected");
+            return;
+        }
+        if matches!(&event, Event::AgentStartFailed(_))
+            && start_owner
+                .as_ref()
+                .is_some_and(|owner| owner.expected_phase == StartPhase::ClosingFailure)
+            && !self.start_terminal_live_admission_available()
+        {
+            let owner = start_owner
+                .take()
+                .expect("matched startup terminal must retain its outcome owner");
+            self.retain_start_terminal(event, owner);
             return;
         }
         let mut commit_timing = CommitEventTiming::new(event.name());
@@ -2030,8 +2085,19 @@ impl Harness {
                 ) {
                     self.retain_rejected_outer_turn_finish(&event);
                 }
-                if semantic_event_router::session_membership_id_for_event(&event)
-                    .is_some_and(|session_id| session_id == self.session_runtime.current_session_id)
+                let rejected_failed_start_unload = matches!(
+                    &event,
+                    Event::SessionAgentUnloaded(unloaded)
+                        if self
+                            .agent_runtime
+                            .agent_registry
+                            .stopped_ids
+                            .contains(&unloaded.agent_id)
+                );
+                if !rejected_failed_start_unload
+                    && semantic_event_router::session_membership_id_for_event(&event).is_some_and(
+                        |session_id| session_id == self.session_runtime.current_session_id,
+                    )
                 {
                     self.agent_runtime.agent_registry.roster_valid = false;
                 }
@@ -2071,6 +2137,22 @@ impl Harness {
                     && let Some(agent) = self.agent_runtime.agent_registry.agents.get_mut(&cid)
                 {
                     agent.dispatch.next_prompt_index = next_prompt_index;
+                }
+                if let Some(owner) = start_owner.take() {
+                    if matches!(&event, Event::AgentStartFailed(_))
+                        && owner.expected_phase == StartPhase::ClosingFailure
+                    {
+                        self.retain_start_terminal(event, owner);
+                        return;
+                    }
+                    let reason = match (event, capacity_full) {
+                        (Event::AgentInferenceDispatchStarted(_), _) => {
+                            tau_proto::AgentStartFailure::DispatchRejected
+                        }
+                        (_, true) => tau_proto::AgentStartFailure::StorageAdmission,
+                        _ => tau_proto::AgentStartFailure::CreationWorker,
+                    };
+                    self.reject_start_phase(owner, reason);
                 }
                 return;
             }
@@ -2466,8 +2548,21 @@ impl Harness {
                 self.inject_user_shell_output(finished);
             }
         }
+        // A committed acceptance makes its reserved placeholder addressable.
+        // First-party `agent_start` reacts below by installing a watch, so expose
+        // that post-commit state before invoking internal tool handlers.
+        let acceptance_successor = if matches!(event, Event::StartAgentAccepted(_))
+            && let Some(owner) = start_owner.take()
+        {
+            self.commit_start_phase(owner, &event, append_outcome.as_ref())
+        } else {
+            None
+        };
         if let Err(error) = self.dispatch_internal_tool_event(&event) {
             self.emit_harness_failure(&format!("internal tool event handler failed: {error}"));
+        }
+        if let Some((event, owner)) = acceptance_successor {
+            self.enqueue_start_phase(event, true, false, owner);
         }
         if Self::is_provider_execution_report(&event) {
             // Raw report persistence/debug/observer work above already owns its
@@ -2481,6 +2576,12 @@ impl Harness {
             return;
         }
         self.process_committed_peer_event(source, peer_context, &event);
+        if let Some(owner) = start_owner.take()
+            && let Some((event, owner)) =
+                self.commit_start_phase(owner, &event, append_outcome.as_ref())
+        {
+            self.enqueue_start_phase(event, true, false, owner);
+        }
         self.with_derived_publish_source(source.cloned(), |harness| {
             harness.react_to_committed_event(source, &event, persist, append_outcome.as_ref());
         });
@@ -2489,6 +2590,12 @@ impl Harness {
             .is_some_and(|sync| sync.notify_watchers)
         {
             match &event {
+                Event::AgentPromptSubmitted(submitted) => {
+                    self.notify_agent_watchers_about_user_prompt(
+                        submitted.agent_id.as_str(),
+                        &submitted.text,
+                    );
+                }
                 Event::AgentPromptSteered(steered) => self.notify_agent_watchers_about_user_prompt(
                     steered.agent_id.as_str(),
                     &steered.text,

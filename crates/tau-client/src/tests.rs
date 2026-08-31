@@ -1199,6 +1199,7 @@ fn tool_cancel_request() -> Event {
 
 fn start_agent_accepted() -> Event {
     Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "query-1".to_owned(),
         agent_id: agent_id(),
     })

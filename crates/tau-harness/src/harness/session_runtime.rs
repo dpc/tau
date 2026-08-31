@@ -807,6 +807,7 @@ impl Harness {
         }
 
         let old_id = self.session_runtime.current_session_id.clone();
+        self.fail_start_operations_for_session_shutdown();
         self.clear_cache_refreshes(tau_proto::ProviderCacheRefreshCancelReason::SessionChanged);
         self.cancel_rendered_previews(|_| true);
         // Invalidate every admitted old-session action before quiescing
@@ -3572,18 +3573,18 @@ impl Harness {
             // Legacy journals can predate durable prompt submissions. Keep
             // their original first-observed fallback semantics.
             .or_else(|| initial_originator.clone());
-        let durable_extension_originator = matches!(
-            historical_originator,
-            Some(tau_proto::PromptOriginator::Extension { .. })
-        );
         let historical_originator =
             historical_originator.unwrap_or_else(|| tau_proto::PromptOriginator::Extension {
                 name: harness_extension_name().clone(),
                 query_id: format!("restored-{agent_id}"),
             });
-        let completed_worker = initial_originator.as_ref().is_some_and(|originator| {
-            Self::journal_proves_completed_start_agent_worker(&events, creation, originator)
+        let startup_dispatch_committed = initial_originator.as_ref().is_some_and(|originator| {
+            Self::journal_has_covering_startup_dispatch(&events, creation, originator)
         });
+        let completed_worker = startup_dispatch_committed
+            && initial_originator.as_ref().is_some_and(|originator| {
+                Self::journal_proves_completed_start_agent_worker(&events, creation, originator)
+            });
         if completed_worker {
             return RestoredAgentRuntime {
                 role,
@@ -3606,23 +3607,24 @@ impl Harness {
                     && metadata.value == CborValue::Bool(true)
             })
         });
-        let harness_delegation = matches!(
-            &historical_originator,
-            tau_proto::PromptOriginator::Extension { name, query_id }
-                if *name == *harness_extension_name()
-                    && query_id.starts_with("delegate-")
-                    && tool_backed_start
-        );
         let extension_side_request = creation.is_some_and(|started| {
             matches!(
                 started.creator,
                 Some(tau_proto::AgentCreator::Extension { .. })
             )
-        });
-        let resumable = historical_originator.is_user()
-            || harness_delegation
-            || peer_entrypoint
-            || (!durable_extension_originator && !extension_side_request);
+        }) || creation
+            .is_some_and(|started| started.creator.is_none())
+            && matches!(
+                initial_originator,
+                Some(tau_proto::PromptOriginator::Extension { .. })
+            );
+        let startup_managed = !peer_entrypoint && (tool_backed_start || extension_side_request);
+        let requester_restorable = matches!(
+            initial_originator,
+            Some(tau_proto::PromptOriginator::Extension { name, .. })
+                if name.as_str() == harness_extension_name().as_str()
+        );
+        let resumable = !startup_managed || startup_dispatch_committed && requester_restorable;
         RestoredAgentRuntime {
             role,
             navigation_mode: default_navigation_mode(&historical_originator),
@@ -3631,6 +3633,42 @@ impl Harness {
             tool_backed_start,
             resumable,
         }
+    }
+
+    /// Returns whether one later checkpoint covers the exact canonical initial
+    /// startup prompt occurrence on its durable branch.
+    fn journal_has_covering_startup_dispatch(
+        events: &[tau_core::PersistedAgentEvent],
+        creation: Option<&tau_proto::AgentStarted>,
+        initial_originator: &tau_proto::PromptOriginator,
+    ) -> bool {
+        let Some(agent_id) = creation.map(|started| started.agent_id.clone()) else {
+            return false;
+        };
+        let Ok(tree) = tau_core::AgentTree::try_from_events(agent_id.clone(), events) else {
+            return false;
+        };
+        let Some((prompt_index, prompt_head)) =
+            events.iter().enumerate().find_map(|(index, record)| {
+                let Event::AgentPromptSubmitted(submitted) = &record.event else {
+                    return None;
+                };
+                (submitted.agent_id == agent_id && &submitted.originator == initial_originator)
+                    .then(|| tree.node_for_durable_event_seq(record.seq))
+                    .flatten()
+                    .map(|node_id| (index, tau_proto::AgentHead::Node(node_id)))
+            })
+        else {
+            return false;
+        };
+        events.iter().skip(prompt_index + 1).any(|record| {
+            matches!(
+                &record.event,
+                Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint.agent_id == agent_id
+                        && tree.contains_head_ancestry(prompt_head, checkpoint.through)
+            )
+        })
     }
 
     /// Returns whether durable events match a warm side-request terminal path.

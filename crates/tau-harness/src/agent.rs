@@ -428,6 +428,8 @@ pub(crate) struct PendingPrompt {
     pub(crate) initial_prompt_correlation: Option<InitialPromptCorrelation>,
     /// Typed durable authority when this prompt delivers self compaction.
     pub(crate) self_compaction_terminal: Option<tau_proto::SelfCompactionTerminal>,
+    /// Runtime-only owner for the accepted side-agent startup prompt.
+    pub(crate) start_operation_id: Option<tau_proto::StartOperationId>,
 }
 
 /// Correlation for an accepted initial prompt before provider materialization.
@@ -479,6 +481,7 @@ impl PendingPrompt {
             activation_observation: None,
             initial_prompt_correlation: None,
             self_compaction_terminal: None,
+            start_operation_id: None,
         }
     }
 
@@ -511,6 +514,7 @@ impl PendingPrompt {
             activation_observation: None,
             initial_prompt_correlation: None,
             self_compaction_terminal: None,
+            start_operation_id: None,
         }
     }
 
@@ -727,6 +731,7 @@ impl Agent {
                 head,
                 branch_generation: 0,
                 source_connection,
+                start_operation_id: None,
                 parent_tool_call_id: None,
                 parent_agent_id: None,
                 restored_tool_backed_start: false,

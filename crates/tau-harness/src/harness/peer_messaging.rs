@@ -4,6 +4,7 @@
 //! with the publication coordinator.
 
 use super::selected_branch_wake_view::{SelectedBranchWakeProbe, SelectedBranchWakeView};
+use super::start_coordinator::StartPhase;
 use super::*;
 
 /// Runtime-only authentication, delivery, and fair routing state for
@@ -183,9 +184,13 @@ impl Harness {
             || self
                 .agent_runtime
                 .agent_registry
-                .pending_start_requests
-                .iter()
-                .any(|pending| pending.agent_id == recipient_id)
+                .start_coordinator
+                .operations
+                .values()
+                .any(|operation| {
+                    operation.phase != StartPhase::AwaitAcceptedCommit
+                        && operation.pending.agent_id == recipient_id
+                })
         {
             AgentMessageRecipientStatus::Live
         } else if self
@@ -307,25 +312,32 @@ impl Harness {
         let Some(activation_class) = agent_message_activation_class(message) else {
             return;
         };
-        if let Some(pending) = self
+        if let Some(operation) = self
             .agent_runtime
             .agent_registry
-            .pending_start_requests
-            .iter_mut()
-            .find(|pending| pending.agent_id == message.recipient_id.as_str())
-            && !pending.pending_agent_message_wakes.iter().any(|wake| {
-                matches!(
-                    wake.source,
-                    crate::agent::PendingMessageWakeSource::AgentMessageReceived {
-                        durable_event_seq,
-                        ..
-                    } if durable_event_seq == outcome.seq
-                )
+            .start_coordinator
+            .operations
+            .values_mut()
+            .find(|operation| {
+                operation.phase != StartPhase::AwaitAcceptedCommit
+                    && operation.pending.agent_id == message.recipient_id.as_str()
             })
-        {
-            pending
+            && !operation
+                .pending
                 .pending_agent_message_wakes
-                .push_back(crate::agent::PendingMessageWake {
+                .iter()
+                .any(|wake| {
+                    matches!(
+                        wake.source,
+                        crate::agent::PendingMessageWakeSource::AgentMessageReceived {
+                            durable_event_seq,
+                            ..
+                        } if durable_event_seq == outcome.seq
+                    )
+                })
+        {
+            operation.pending.pending_agent_message_wakes.push_back(
+                crate::agent::PendingMessageWake {
                     source: path_crate_agent::PendingMessageWakeSource::AgentMessageReceived {
                         durable_event_seq: outcome.seq,
                         activation_class,
@@ -334,7 +346,8 @@ impl Harness {
                     node_id: outcome.folded_node_id,
                     activation_observation: Some(tau_proto::ObservationId::random()),
                     source_observation: Some(outcome.observation_id),
-                });
+                },
+            );
         }
     }
 

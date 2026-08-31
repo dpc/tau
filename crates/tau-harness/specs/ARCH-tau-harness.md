@@ -160,7 +160,14 @@ harness stamps accepted canonical prompt facts from the authenticated configured
 publisher rather than request payload provenance. See
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
 Start-agent requests likewise commit before role/parent validation, duplicate
-route rebinding, acceptance/result routing, or child creation. See
+route rebinding, acceptance/result routing, or child creation. A bounded
+event-loop-owned coordinator then advances each accepted start through ordinary
+independently committed `StartAgentAccepted`, `AgentStarted`,
+`SessionAgentLoaded`, `AgentPromptSubmitted`, and
+`AgentInferenceDispatchStarted` facts. Each publication owns one committed or
+rejected outcome; a post-accept rejection closes through the compact transient
+`AgentStartFailed` terminal. Cold restore inspects the durable prefix but never
+recreates the coordinator or dispatches an incomplete startup. See
 [SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
 Metadata set/unset requests commit before target and payload validation. Exact
 live extension/UI checks prevent parked stale requests from publishing
@@ -422,7 +429,8 @@ live harness confirms its current session and effective policy through a narrow
 probe.
 The same event loop owns inter-session receiver admission, fair live selection,
 and configured-order role auto-start. It admits bounded count/bytes/rate before
-creation, treats pending and busy eligible agents as reusable endpoints, and
+creation, treats accepted startup placeholders and busy eligible agents as
+reusable endpoints, and
 releases sender success only from the receive projection's post-commit
 continuation. This state is generation-bound and in-memory; crash ambiguity
 follows best-effort at-least-once semantics.

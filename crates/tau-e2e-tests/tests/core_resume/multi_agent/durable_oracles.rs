@@ -152,9 +152,9 @@ fn assert_exact_event_names(
     ];
     let worker_expected = [
         E::AGENT_STARTED,
-        E::AGENT_INITIALIZATION_CONTEXT_SET,
         E::AGENT_ACTIVATION_QUEUED,
         E::AGENT_PROMPT_SUBMITTED,
+        E::AGENT_INITIALIZATION_CONTEXT_SET,
         E::AGENT_INFERENCE_DISPATCH_STARTED,
         E::AGENT_OUTER_TURN_STARTED,
         E::AGENT_PROMPT_STARTED,
@@ -211,7 +211,7 @@ fn assert_boot_a_agent_payloads(
                 && started.metadata.is_empty()
                 && !started.ephemeral
     ) || !matches!(
-        &worker[1].event,
+        &worker[3].event,
         Event::AgentInitializationContextSet(context)
             if context.agent_id == identities.worker
                 && context.session_id == snapshot.session_id
@@ -251,7 +251,7 @@ fn assert_boot_a_agent_payloads(
                     }
             })
         || !matches!(
-            &worker[3].event,
+            &worker[2].event,
             Event::AgentPromptSubmitted(prompt)
                 if prompt.agent_id == identities.worker
                     && prompt.inference_activation

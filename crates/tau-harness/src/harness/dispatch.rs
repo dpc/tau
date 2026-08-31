@@ -23,6 +23,7 @@ use std::time::Instant;
 use tau_proto::{AgentId, Event, SessionId};
 
 use super::prompt_materialization_timing::PrecheckpointMaterializationTiming;
+use super::start_coordinator::{StartPhase, StartPhaseOwner};
 use crate::agent as path_crate_agent;
 use crate::agent::{AgentTurnState, InitialPromptCorrelation, PendingPrompt};
 use crate::error::HarnessError;
@@ -157,7 +158,9 @@ impl Harness {
             .clone()
             .map(|correlation| AgentPublishCompletion::InitialPromptSubmission { correlation });
         let defers_notification = completion.is_some();
-        let notification_text = (notify_watchers
+        let start_operation_id = prompt.start_operation_id;
+        let notification_text = (start_operation_id.is_none()
+            && notify_watchers
             && !defers_notification
             && self.has_watchers_for_agent(target_agent_id.as_str()))
         .then(|| self.clone_prompt_text_for_watch_notification(&prompt.text));
@@ -173,7 +176,18 @@ impl Harness {
             display_name: self.agent_display_name_for_cid(agent_id),
             ctx_id: prompt.ctx_id,
         });
-        if let Some(prompt_acceptance) = prompt_acceptance {
+        if let Some(start_id) = start_operation_id {
+            self.publish_event_for_agent_with_start_owner(
+                agent_id,
+                event,
+                notify_watchers,
+                StartPhaseOwner {
+                    start_id,
+                    expected_phase: StartPhase::AwaitPromptCommit,
+                    expected_event: tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+                },
+            );
+        } else if let Some(prompt_acceptance) = prompt_acceptance {
             self.publish_event_for_agent_with_prompt_acceptance(
                 agent_id,
                 None,
@@ -551,18 +565,34 @@ impl Harness {
                             &agent_id,
                             path_crate_agent::AgentTurnState::Idle,
                         );
+                        self.fail_start_dispatch_for_agent(
+                            &agent_id,
+                            tau_proto::AgentStartFailure::DispatchRejected,
+                        );
                         return;
                     }
                     Err(InferenceDispatchSelectionError::OutputLengthBranchInvalid) => {
+                        self.fail_start_dispatch_for_agent(
+                            &agent_id,
+                            tau_proto::AgentStartFailure::DispatchRejected,
+                        );
                         self.repair_dormant_output_length_lineage(&agent_id);
                         return;
                     }
                     Err(InferenceDispatchSelectionError::MissingActivationCut) => {
+                        self.fail_start_dispatch_for_agent(
+                            &agent_id,
+                            tau_proto::AgentStartFailure::DispatchRejected,
+                        );
                         return;
                     }
                 };
                 self.record_durable_agent_session_activity(&agent_id, false);
                 let Some(checkpoint) = self.claim_inference_checkpoint(&agent_id, selection) else {
+                    self.fail_start_dispatch_for_agent(
+                        &agent_id,
+                        tau_proto::AgentStartFailure::DispatchRejected,
+                    );
                     continue;
                 };
                 if checkpoint.selection.operation == tau_proto::PromptOperation::Inference
@@ -705,6 +735,12 @@ impl Harness {
             .collect::<Vec<_>>();
 
         for agent_id in runnable_agents {
+            if self.fail_start_dispatch_for_agent(
+                &agent_id,
+                tau_proto::AgentStartFailure::DispatchRejected,
+            ) {
+                continue;
+            }
             let pending = self
                 .agent_runtime
                 .agent_registry
@@ -808,7 +844,22 @@ impl Harness {
             if MEASURE {
                 work.agent_visits += 1;
             }
-            if allowed.is_some_and(|allowed| !allowed.contains(agent_id))
+            let startup_blocks_other_activation = self
+                .agent_runtime
+                .agent_registry
+                .start_coordinator
+                .agents
+                .get(agent_id)
+                .and_then(|start_id| {
+                    self.agent_runtime
+                        .agent_registry
+                        .start_coordinator
+                        .operations
+                        .get(start_id)
+                })
+                .is_some_and(|operation| operation.phase != StartPhase::AwaitDispatchCommit);
+            if startup_blocks_other_activation
+                || allowed.is_some_and(|allowed| !allowed.contains(agent_id))
                 || (allowed.is_none()
                     && self
                         .runtime_io

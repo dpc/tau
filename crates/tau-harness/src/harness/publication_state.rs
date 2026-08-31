@@ -34,4 +34,11 @@ pub(crate) struct PublicationState {
     /// semantic capacity before canonical admission.
     pub(crate) capacity_rejected_activations:
         HashMap<AgentId, tau_proto::AgentInferenceDispatchStarted>,
+    /// Compact startup terminals retained until ordinary publication capacity
+    /// becomes available.
+    pub(crate) retained_start_terminals:
+        HashMap<tau_proto::StartOperationId, interception::RetainedStartTerminal>,
+    /// Deterministic one-shot live-log admission rejection for startup tests.
+    #[cfg(test)]
+    pub(crate) reject_next_start_terminal_live_admission_for_test: bool,
 }

@@ -1438,13 +1438,22 @@ fn peer_input_queue_limit_rejects_before_auto_start_spend() {
     assert!(durable_agent_message_received_events(&h).is_empty());
 }
 
-/// Pending ordinary start-agent endpoints participate in the same peer queue
-/// count and byte accounting as already loaded endpoints.
+/// Accepted start placeholders participate in the same peer queue count and
+/// byte accounting as already loaded endpoints.
 #[test]
 fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     configure_inter_session_receivers(&mut h, &[("engineer", false)]);
+    let _interceptor = connect_test_tool(&mut h, "pending-endpoint-interceptor");
+    h.handle_extension_event(
+        "pending-endpoint-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_STARTED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register creation interceptor");
     let pending_id = h
         .enqueue_internal_start_agent_request_without_draining(StartAgentRequest {
             trusted_internal_spans: Vec::new(),
@@ -1457,13 +1466,17 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
             parent_agent: None,
         })
         .expect("reserve pending endpoint");
+    h.drain_pending_start_agent_requests()
+        .expect("commit acceptance");
     let pending = h
         .agent_runtime
         .agent_registry
-        .pending_start_requests
-        .iter_mut()
-        .find(|pending| pending.agent_id == pending_id)
-        .expect("pending endpoint");
+        .start_coordinator
+        .operations
+        .values_mut()
+        .find(|operation| operation.pending.agent_id == pending_id)
+        .map(|operation| &mut operation.pending)
+        .expect("accepted endpoint");
     pending
         .pending_agent_message_wakes
         .extend((0..32).map(|index| crate::agent::PendingMessageWake {
@@ -1486,10 +1499,12 @@ fn pending_endpoint_peer_queue_enforces_count_and_byte_bounds() {
     let pending = h
         .agent_runtime
         .agent_registry
-        .pending_start_requests
-        .iter_mut()
-        .find(|pending| pending.agent_id == pending_id)
-        .expect("pending endpoint");
+        .start_coordinator
+        .operations
+        .values_mut()
+        .find(|operation| operation.pending.agent_id == pending_id)
+        .map(|operation| &mut operation.pending)
+        .expect("accepted endpoint");
     pending.pending_agent_message_wakes.clear();
     pending
         .pending_agent_message_wakes

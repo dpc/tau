@@ -3,6 +3,7 @@
 //!
 //! Human UI authority remains distinct from configured extensions and peers.
 
+use super::start_coordinator::StartPhase;
 use super::*;
 
 /// Runtime-only state for attached clients and human-UI command routes.
@@ -2737,6 +2738,29 @@ impl Harness {
         target_call_id: &ToolCallId,
         suppress_background_completion_prompt: bool,
     ) -> Result<(), String> {
+        let coordinated_start = self
+            .agent_runtime
+            .agent_registry
+            .start_coordinator
+            .operations
+            .iter()
+            .find_map(|(start_id, operation)| {
+                (operation.pending.query.query_id == query_id
+                    || operation.pending.query.tool_call_id.as_ref() == Some(target_call_id))
+                .then_some((*start_id, operation.phase))
+            });
+        if let Some((start_id, phase)) = coordinated_start {
+            self.emit_info("tool call cancellation request");
+            if suppress_background_completion_prompt {
+                self.suppress_background_completion_prompt(target_call_id.clone());
+            }
+            if phase == StartPhase::AwaitAcceptedCommit {
+                self.abort_preaccept_start(start_id, tau_proto::AgentStartFailure::Canceled);
+            } else {
+                self.begin_start_failure(start_id, tau_proto::AgentStartFailure::Canceled);
+            }
+            return Ok(());
+        }
         let mut source_id = None;
         let mut stopped_pending_agent_ids = Vec::new();
         self.agent_runtime

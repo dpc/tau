@@ -184,9 +184,11 @@ with `agent_id`, `text`, optional `ctx_id`, and optional typed `activation_kind`
 (`internal_prompt` or `timer`). It defaults to `persist=false`; its
 commit-before-effects contract is
 [SPEC-internal-prompt-submit-requests](../../../specs/SPEC-internal-prompt-submit-requests.md).
-`agent.start_request` is another `persist=false`-by-default configured-extension
-request. The raw event commits live but never enters semantic history; accepted
-and terminal outcomes retain their existing shared/directed routing. See
+`agent.start_request`, `agent.start_accepted`, and `agent.start_failed` are
+`persist=false`-by-default startup protocol events. Acceptance carries fixed-size
+operation correlation and becomes requester-visible only after canonical commit;
+the compact failure is the shared post-accept terminal, with
+`agent.start_result` retained as its directed projection. See
 [SPEC-start-agent-requests](../../../specs/SPEC-start-agent-requests.md).
 UI agent creation similarly carries a caller correlation id and receives one
 transient requester-directed admission result. Its distinct prompt correlation

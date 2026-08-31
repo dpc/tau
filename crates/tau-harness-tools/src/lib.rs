@@ -56,12 +56,24 @@ struct BuiltinState {
     cancel_requested: HashSet<ToolCallId>,
     in_progress_tool_names: HashMap<ToolCallId, ToolName>,
     next_delegate_query_id: u64,
+    pending_delegate_acceptance: HashMap<String, PendingDelegateAcceptance>,
+}
+
+struct PendingDelegateAcceptance {
+    conversation_id: AgentId,
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    self_agent_id: String,
+    agent_id: String,
+    prompt_stats: ToolUseStats,
 }
 
 impl BuiltinState {
     fn clear_session_runtime_state(&mut self) {
         self.cancel_requested.clear();
         self.in_progress_tool_names.clear();
+        self.pending_delegate_acceptance.clear();
     }
 
     fn record_tool_started(&mut self, call_id: ToolCallId, tool_name: ToolName) {
@@ -365,9 +377,63 @@ impl InternalToolHandler for BuiltinTools {
                     _ => Ok(()),
                 }
             }
-            Event::StartAgentResult(_) => Ok(()),
+            Event::StartAgentResult(result) => {
+                let pending = self
+                    .state
+                    .lock()
+                    .expect("builtin tool state poisoned")
+                    .pending_delegate_acceptance
+                    .remove(&result.query_id);
+                if let Some(pending) = pending
+                    && let Some(error) = result.error.as_ref()
+                {
+                    host.finish_tool_with_error(
+                        &pending.conversation_id,
+                        pending.call_id,
+                        pending.tool_name,
+                        pending.tool_type,
+                        error.clone(),
+                        None,
+                    );
+                }
+                Ok(())
+            }
             Event::ToolCancelRequest(_) => Ok(()),
-            Event::StartAgentAccepted(_) => Ok(()),
+            Event::StartAgentAccepted(accepted) => {
+                let pending = self
+                    .state
+                    .lock()
+                    .expect("builtin tool state poisoned")
+                    .pending_delegate_acceptance
+                    .remove(&accepted.query_id);
+                if let Some(pending) = pending {
+                    if accepted.agent_id.as_str() != pending.agent_id {
+                        return Err(HarnessError::Participant(
+                            "committed delegate acceptance changed the reserved agent".to_owned(),
+                        ));
+                    }
+                    host.try_set_agent_watch(
+                        &pending.self_agent_id,
+                        &pending.agent_id,
+                        true,
+                        tau_proto::AgentWatchUpdateCause::AgentStart,
+                    )
+                    .map_err(HarnessError::Participant)?;
+                    finish_agent_start_success(
+                        host,
+                        &pending.conversation_id,
+                        pending.call_id,
+                        pending.tool_name,
+                        pending.tool_type,
+                        AgentStartSuccess {
+                            self_agent_id: &pending.self_agent_id,
+                            agent_id: &pending.agent_id,
+                            prompt_stats: pending.prompt_stats,
+                        },
+                    );
+                }
+                Ok(())
+            }
             _ => {
                 self.state
                     .lock()
@@ -447,25 +513,22 @@ impl BuiltinTools {
                 return Ok(());
             }
         };
-        host.try_set_agent_watch(
-            &self_agent_id,
-            &agent_id,
-            true,
-            tau_proto::AgentWatchUpdateCause::AgentStart,
-        )
-        .map_err(HarnessError::Participant)?;
-        finish_agent_start_success(
-            host,
-            cid,
-            call_id,
-            visible_tool_name,
-            call.tool_type,
-            AgentStartSuccess {
-                self_agent_id: &self_agent_id,
-                agent_id: &agent_id,
-                prompt_stats,
-            },
-        );
+        self.state
+            .lock()
+            .expect("builtin tool state poisoned")
+            .pending_delegate_acceptance
+            .insert(
+                query_id,
+                PendingDelegateAcceptance {
+                    conversation_id: cid.clone(),
+                    call_id,
+                    tool_name: visible_tool_name,
+                    tool_type: call.tool_type,
+                    self_agent_id,
+                    agent_id,
+                    prompt_stats,
+                },
+            );
         host.drain_start_agent_requests()
     }
 

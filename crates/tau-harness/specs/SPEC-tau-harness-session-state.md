@@ -331,6 +331,12 @@ fresh user turn cannot emit another start result or unload the worker as request
 completion. Parentless non-tool typed starts remain one-shot and unloaded; peer
 entrypoints retain their separate ordinary-agent lifecycle.
 
+A durable start-agent prefix without its matching
+`AgentInferenceDispatchStarted` checkpoint is not a completed worker. Cold
+restore keeps its transcript inspectable but classifies any retained membership
+as restored-unavailable, installs no live route or pending built-in delegate,
+and never replay-dispatches the initial prompt.
+
 ## Agent roster projection
 
 The current roster scope contains every distinct currently loaded membership id.

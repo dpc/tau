@@ -34,6 +34,8 @@ pub(crate) struct AgentIdentityState {
     /// [`tau_proto::StartAgentRequest`], so the harness knows where to
     /// route the matching [`tau_proto::StartAgentResult`].
     pub(crate) source_connection: Option<ConnectionId>,
+    /// Runtime startup correlation retained for duplicate acceptance replay.
+    pub(crate) start_operation_id: Option<tau_proto::StartOperationId>,
     /// For side agents spawned by a tool-implementing extension
     /// (currently just `agent_start`): the parent agent's tool call id
     /// that this conversation is fulfilling. Kept for teardown/routing of

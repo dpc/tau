@@ -1914,8 +1914,15 @@ fn representative_events() -> Vec<Event> {
             parent_agent: Some(agent_id("agent-1")),
         }),
         Event::StartAgentAccepted(StartAgentAccepted {
+            start_id: StartOperationId(1),
             query_id: "query-1".to_owned(),
             agent_id: agent_id("delegate_1"),
+        }),
+        Event::AgentStartFailed(AgentStartFailed {
+            start_id: StartOperationId(1),
+            agent_id: agent_id("delegate_1"),
+            phase: AgentStartPhase::AgentPromptSubmitted,
+            reason: AgentStartFailure::InterceptionDropped,
         }),
         Event::StartAgentResult(StartAgentResult {
             query_id: "query-1".to_owned(),
@@ -2900,6 +2907,8 @@ fn expected_default_persist(event: &Event) -> bool {
                 | Event::ExtAgentContextPublish(_)
                 | Event::ExtInternalPromptSubmitRequest(_)
                 | Event::StartAgentRequest(_)
+                | Event::StartAgentAccepted(_)
+                | Event::AgentStartFailed(_)
                 | Event::AgentMetadataSetRequest(_)
                 | Event::AgentMetadataUnsetRequest(_)
                 | Event::ShellCommandProgressReported(_)
@@ -2954,6 +2963,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.prompt_terminated",
         "agent.replay_complete",
         "agent.start_accepted",
+        "agent.start_failed",
         "agent.start_request",
         "agent.start_result",
         "agent.started",

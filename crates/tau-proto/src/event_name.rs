@@ -335,6 +335,7 @@ impl EventName {
     pub const AGENT_START_REQUEST: Self = Self::from_static(EventCategory::Agent, "start_request");
     pub const AGENT_START_ACCEPTED: Self =
         Self::from_static(EventCategory::Agent, "start_accepted");
+    pub const AGENT_START_FAILED: Self = Self::from_static(EventCategory::Agent, "start_failed");
     pub const AGENT_START_RESULT: Self = Self::from_static(EventCategory::Agent, "start_result");
     pub const AGENT_MESSAGE_SENT: Self = Self::from_static(EventCategory::Agent, "message_sent");
     pub const AGENT_MESSAGE_RECEIVED: Self =

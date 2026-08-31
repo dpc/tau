@@ -548,6 +548,7 @@ fn hidden_provider_final_stays_off_screen_without_redraw() {
         ),
     ));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-visible-worker".to_owned(),
         agent_id: agent_id("visible-worker"),
     }));
@@ -1137,6 +1138,7 @@ fn clearing_selected_agent_preserves_previous_transcript() {
     );
 
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
@@ -1152,6 +1154,7 @@ fn clearing_selected_agent_preserves_previous_transcript() {
     }));
     renderer.clear_selected_agent();
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-helper".to_owned(),
         agent_id: agent_id("helper-1"),
     }));
@@ -1171,6 +1174,7 @@ fn new_session_resets_agent_transcripts() {
         cli_test_theme(),
     );
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
@@ -1205,6 +1209,7 @@ fn agent_switch_preserves_separate_transcripts() {
         reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
@@ -3753,6 +3758,7 @@ fn prompt_and_terminal_events_do_not_replace_navigation_snapshot() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        start_id: tau_proto::StartOperationId(1),
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));

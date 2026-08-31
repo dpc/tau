@@ -37,16 +37,28 @@ Post-commit processing preserves the existing request contract:
   parent they must agree;
 - children inherit their resolved parent's session, ephemeral persistence mode,
   and inheritable metadata, but never copy the parent transcript;
-- accepted work mints or reuses one agent id, publishes the shared
-  harness-authored `agent.start_accepted`, sends the matching directed
-  acceptance, and dispatches the instruction through the ordinary prompt path;
+- accepted work reserves one bounded runtime operation and advances only from
+  separately committed `agent.start_accepted`, `agent.started`,
+  `session.agent_loaded`, `agent.prompt_submitted`, and
+  `agent.inference_dispatch_started` occurrences;
+- `agent.start_accepted` carries the run-unique `start_id` and becomes visible,
+  including its requester-directed projection, only after its own canonical
+  commit. It promises a later dispatch checkpoint or correlated transient
+  `agent.start_failed`, not an already-created route;
+- every post-accept startup failure commits at most one compact
+  `agent.start_failed` before projecting the existing directed
+  `agent.start_result` error; pre-accept rejection emits no failure terminal;
 - validation failures send the existing requester-directed
   `agent.start_result` error without an accepted identity; and
 - terminal results remain point-to-point to the bound requesting connection.
 
 Duplicate identity is the stable configured extension name plus `query_id`.
-Repeating an active or pending request reuses its existing agent id and rebinds
-the directed acceptance/result route to the latest live connection. Existing
+`query_id` is limited to 128 UTF-8 bytes and rejects before acceptance or
+AgentStore reservation when oversized.
+Repeating an active or pending request reuses its existing start and agent ids
+and rebinds the directed acceptance/result route to the latest live connection.
+Before acceptance commits it exposes no directed acceptance; afterward it may
+replay the cached directed acknowledgement without another shared event. Existing
 role validation still precedes duplicate lookup; duplicate payload fields do not
 replace already admitted work.
 
@@ -64,15 +76,15 @@ agent, session, and restore journals for either caller-supplied
 Canonical child lifecycle, membership, transcript, acceptance, and result
 behavior retains its existing classification.
 
-Before restart admission opens, cold recovery classifies every interrupted
-delegation. An outstanding built-in `agent_start` worker reconstructs its harness
-source route and query-to-worker correlation from durable start facts, remains
-tool-backed, and can finish exactly once through the ordinary result path. A
-restored extension-owned delegation whose result route cannot be reconstructed is
-not loaded as Live: `agent_list` reports its exact state as
+Cold recovery never restores the runtime start coordinator, requester routes,
+buffered wakes, or startup continuations and never synthesizes acceptance,
+failure, or result events. A durable delegated prefix without
+`agent.inference_dispatch_started` is classified as interrupted and is not
+replay-dispatched. If membership had committed, `agent_list` reports the child as
 `restored_unavailable`, and message or watch admission rejects it before provider
-work. Missing completion routes retain structured agent, query, extension, reason,
-and unload-action diagnostics. Message and watch behavior follow
+work; a prompt prefix remains inspectable. A committed inference-dispatch
+checkpoint completes startup and leaves later uncertain provider work to the
+ordinary inference recovery contract. Message and watch behavior follow
 [SPEC-agent-message-delivery](SPEC-agent-message-delivery.md) and
 [SPEC-agent-watch](SPEC-agent-watch.md); the approved persistence/interface shape
 is governed by
