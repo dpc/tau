@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::{self, Cursor, Write};
+use std::num::NonZeroI64;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process as path_std_process;
@@ -17,6 +18,80 @@ use super::*;
 
 /// Serializes fixtures that observe the test-only detached-overload latch.
 static SATURATION_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Shell job allocation must retain its positive, sequential Rhai integer
+/// projection and reject exhaustion without wrapping into a colliding key.
+#[test]
+fn shell_job_ids_are_positive_sequential_and_never_wrap() {
+    let mut state = HostState::default();
+
+    let first = state.allocate_shell_job_id().expect("first shell job id");
+    let second = state.allocate_shell_job_id().expect("second shell job id");
+    assert_eq!(first.as_rhai_int(), 1);
+    assert_eq!(second.as_rhai_int(), 2);
+    assert_ne!(first, second);
+
+    let maximum = ShellJobId(NonZeroI64::new(i64::MAX).expect("i64::MAX is nonzero"));
+    state.last_shell_job_id = Some(maximum);
+    assert_eq!(
+        state.allocate_shell_job_id(),
+        Err("shell job id space exhausted".to_owned())
+    );
+    assert_eq!(state.last_shell_job_id, Some(maximum));
+}
+
+/// Callback job maps must retain the existing positive sequential integer IDs
+/// and their command and tag metadata while unrelated pending jobs coexist.
+#[test]
+fn shell_callbacks_project_sequential_job_ids_without_changing_metadata() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) { register_tool("job_ids", #{}, Fn("job_ids")); }
+            fn job_ids(args, call_info) {
+                shell_spawn("printf unrelated", #{ timeout: 5 });
+                return shell_spawn(
+                    "printf selected",
+                    #{ timeout: 5, on_complete: Fn("done"), tag: "selected-tag" },
+                );
+            }
+            fn done(result, job) {
+                if job.id != 2 { throw `unexpected job id ${job.id}`; }
+                if job.command != "printf selected" { throw "unexpected command"; }
+                if job.tag != "selected-tag" { throw "unexpected tag"; }
+                return #{ id: job.id, output: result.output };
+            }
+        "#,
+    );
+    let started = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        tool_started("job_ids", CborValue::Map(Vec::new())),
+    );
+
+    let frames = run_frames(&[configure_with_script(&script), started]);
+
+    let result = frames
+        .iter()
+        .find_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolResultReported(result)) => Some(&result.result),
+            _ => None,
+        })
+        .expect("callback tool result");
+    assert_eq!(
+        result,
+        &CborValue::Map(vec![
+            (
+                CborValue::Text("id".to_owned()),
+                CborValue::Integer(2.into())
+            ),
+            (
+                CborValue::Text("output".to_owned()),
+                CborValue::Text("selected".to_owned())
+            ),
+        ])
+    );
+}
 
 /// Ensures arbitrary script-authored text is absent from the normal Rhai
 /// baseline and appears only when the private target is explicitly enabled.

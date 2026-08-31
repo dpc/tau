@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fs;
 use std::io::{Read, Write};
+use std::num::NonZeroI64;
 use std::path::PathBuf;
 use std::rc::Rc;
 #[cfg(test)]
@@ -132,10 +133,27 @@ struct HostState {
     groups: BTreeMap<String, StagedToolGroup>,
     /// Tool registrations staged by `register_tool` during init.
     tools: Vec<StagedTool>,
-    /// Next host-local shell job id.
-    next_shell_job_id: i64,
+    /// Most recently allocated host-local shell job id.
+    last_shell_job_id: Option<ShellJobId>,
     /// Shell jobs known to the runtime but not yet completed.
-    shell_jobs: HashMap<i64, PendingShellJob>,
+    shell_jobs: HashMap<ShellJobId, PendingShellJob>,
+}
+
+impl HostState {
+    /// Allocate the next positive host-local shell job id without wrapping.
+    fn allocate_shell_job_id(&mut self) -> Result<ShellJobId, String> {
+        let id = match self.last_shell_job_id {
+            Some(previous) => previous
+                .get()
+                .checked_add(1)
+                .and_then(NonZeroI64::new)
+                .map(ShellJobId),
+            None => NonZeroI64::new(1).map(ShellJobId),
+        }
+        .ok_or_else(|| "shell job id space exhausted".to_owned())?;
+        self.last_shell_job_id = Some(id);
+        Ok(id)
+    }
 }
 
 /// A tool group staged by a script during init.
@@ -234,17 +252,40 @@ impl ShellWorkerJoin {
     }
 }
 
+/// Checked positive identity for one host-local asynchronous shell job.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ShellJobId(NonZeroI64);
+
+impl ShellJobId {
+    /// Return this identity in Rhai's signed integer representation.
+    fn as_rhai_int(self) -> i64 {
+        self.0.get()
+    }
+
+    /// Return this identity for diagnostics that retain the existing decimal
+    /// form.
+    fn get(self) -> i64 {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Display for ShellJobId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.get().fmt(formatter)
+    }
+}
+
 /// Rhai-visible token identifying an asynchronous host shell job.
 #[derive(Clone, Debug)]
 struct ShellJob {
-    /// Host-local shell job id.
-    id: i64,
+    /// Checked host-local shell job identity.
+    id: ShellJobId,
 }
 
 /// Completion message sent from shell worker threads to the interpreter loop.
 struct ShellCompletion {
-    /// Completed job id.
-    job_id: i64,
+    /// Completed host-local shell job identity.
+    job_id: ShellJobId,
     /// Structured shell outcome.
     result: serde_json::Value,
 }
@@ -997,8 +1038,7 @@ fn shell_spawn(
             "too many pending shell jobs (limit {MAX_PENDING_SHELL_JOBS})"
         ));
     }
-    state_guard.next_shell_job_id += 1;
-    let id = state_guard.next_shell_job_id;
+    let id = state_guard.allocate_shell_job_id()?;
     let cancel = shell::ShellCancel::default();
     let worker_cancel = cancel.clone();
     let sender = runtime_sender.clone();
@@ -1570,9 +1610,12 @@ fn tool_call_json(started: &ToolStarted) -> serde_json::Value {
     })
 }
 
-fn shell_job_json(id: i64, job: &PendingShellJob) -> serde_json::Value {
+fn shell_job_json(id: ShellJobId, job: &PendingShellJob) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    map.insert("id".to_owned(), serde_json::Value::Number(id.into()));
+    map.insert(
+        "id".to_owned(),
+        serde_json::Value::Number(id.as_rhai_int().into()),
+    );
     map.insert(
         "command".to_owned(),
         serde_json::Value::String(job.command.clone()),
