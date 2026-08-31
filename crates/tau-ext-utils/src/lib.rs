@@ -24,8 +24,8 @@ use tau_client::{
 use tau_proto::{
     AgentId, AgentPromptSubmitted, AgentReplayComplete, CborValue, Event, EventName, EventSelector,
     ExtInternalPromptSubmitRequest, ExtensionDataPath, ExtensionDataRequestOp, ExtensionDataScope,
-    ExtensionDataValue, HarnessInputMessage, ToolError, ToolResult, ToolResultKind, ToolSpec,
-    ToolStarted, ToolType, ToolUseState, ToolUseStats, ToolUseStatus, UnixMicros,
+    ExtensionDataValue, HarnessInputMessage, ToolCallId, ToolError, ToolResult, ToolResultKind,
+    ToolSpec, ToolStarted, ToolType, ToolUseState, ToolUseStats, ToolUseStatus, UnixMicros,
 };
 
 /// Protocol/logging name for the utility extension.
@@ -131,7 +131,7 @@ struct TimerRuntime {
     /// Monotonic instant of the last host-timezone refresh attempt.
     timezone_checked_at: Option<Instant>,
     /// Replayed live timer invocations awaiting their terminal success/error.
-    pending_invocations: HashMap<String, PendingInvocation>,
+    pending_invocations: HashMap<ToolCallId, PendingInvocation>,
     /// Agents whose restore boundary succeeded and may receive timer prompts.
     replay_complete_agents: HashSet<AgentId>,
     /// Agents whose last emitted complete indicator set contained
@@ -419,7 +419,7 @@ struct PendingInvocation {
     /// Agent that owned the original tool call.
     agent_id: AgentId,
     /// Stable tool call id used to correlate terminal results.
-    call_id: String,
+    call_id: ToolCallId,
     /// Original tool arguments copied from `tool.started`.
     arguments: CborValue,
     /// Recorded start timestamp used as the stable schedule anchor.
@@ -805,10 +805,10 @@ impl TimerRuntime {
             return;
         }
         self.pending_invocations.insert(
-            started.call_id.to_string(),
+            started.call_id.clone(),
             PendingInvocation {
                 agent_id: started.agent_id.clone(),
-                call_id: started.call_id.to_string(),
+                call_id: started.call_id.clone(),
                 arguments: started.arguments.clone(),
                 started_at: recorded_at.unwrap_or_else(UnixMicros::now),
             },
@@ -819,14 +819,13 @@ impl TimerRuntime {
         if !self.is_timer_tool(&result.tool_name) || result.kind != ToolResultKind::Final {
             return;
         }
-        let call_id = result.call_id.to_string();
-        let Some(pending) = self.pending_invocations.remove(&call_id) else {
+        let Some(pending) = self.pending_invocations.remove(&result.call_id) else {
             return;
         };
         let _ = self.apply_successful_invocation(&pending, ScheduleMutationSource::Replay);
     }
 
-    fn handle_error_replay(&mut self, call_id: &str) {
+    fn handle_error_replay(&mut self, call_id: &ToolCallId) {
         self.pending_invocations.remove(call_id);
     }
 
@@ -949,11 +948,11 @@ impl TimerRuntime {
         self.replay_complete_agents.insert(invoke.agent_id.clone());
         let pending = PendingInvocation {
             agent_id: invoke.agent_id.clone(),
-            call_id: invoke.call_id.to_string(),
+            call_id: invoke.call_id.clone(),
             arguments: invoke.arguments.clone(),
             started_at: now,
         };
-        let action = parse_action(&pending.arguments, &pending.call_id)?;
+        let action = parse_action(&pending.arguments, pending.call_id.as_str())?;
         let display_args = timer_action_display_args(&action);
         let TimerActionResult { result, outcome } =
             self.apply_timer_action(&pending.agent_id, action, now, ScheduleMutationSource::Live)?;
@@ -999,7 +998,7 @@ impl TimerRuntime {
         pending: &PendingInvocation,
         source: ScheduleMutationSource,
     ) -> Result<CborValue, String> {
-        let action = parse_action(&pending.arguments, &pending.call_id)?;
+        let action = parse_action(&pending.arguments, pending.call_id.as_str())?;
         self.apply_timer_action(&pending.agent_id, action, pending.started_at, source)
             .map(|result| result.result)
     }
@@ -1326,9 +1325,7 @@ fn handle_delivery(
                 runtime.state_mut().handle_result_replay(result)
             }
             Event::ToolError(error) | Event::ProviderToolError(error) => {
-                runtime
-                    .state_mut()
-                    .handle_error_replay(error.call_id.as_str());
+                runtime.state_mut().handle_error_replay(&error.call_id);
             }
             Event::AgentPromptSubmitted(prompt) => runtime
                 .state_mut()

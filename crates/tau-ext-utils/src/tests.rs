@@ -338,6 +338,82 @@ fn overdue_timer_waits_for_agent_replay_complete() {
     assert_eq!(fires[0].ctx_id, "timer:wake:1");
 }
 
+/// Replay terminal correlation keeps the typed call id from the start through
+/// result and error handling, leaving unknown terminals inert and preserving
+/// the established fallback timer id.
+#[test]
+fn replay_terminal_correlation_preserves_typed_call_ids_and_fallback_timer_ids() {
+    let mut rt = runtime();
+    let agent = AgentId::parse("agent-one").expect("agent id");
+    let first = started(
+        "call/one?",
+        agent.as_ref(),
+        cbor_map(vec![
+            ("action", CborValue::Text("schedule".to_owned())),
+            ("delay_seconds", CborValue::Integer(10.into())),
+            ("message", CborValue::Text("wake".to_owned())),
+        ]),
+    );
+    let second = started(
+        "call-error",
+        agent.as_ref(),
+        cbor_map(vec![
+            ("action", CborValue::Text("schedule".to_owned())),
+            ("timer_id", CborValue::Text("discarded".to_owned())),
+            ("delay_seconds", CborValue::Integer(10.into())),
+            ("message", CborValue::Text("wake".to_owned())),
+        ]),
+    );
+
+    rt.handle_started_replay(&first, Some(UnixMicros::new(0)));
+    rt.handle_started_replay(&second, Some(UnixMicros::new(0)));
+    assert_eq!(
+        rt.pending_invocations
+            .get(&first.call_id)
+            .expect("first pending invocation")
+            .call_id,
+        first.call_id
+    );
+
+    let unknown = ToolCallId::new("unknown");
+    rt.handle_error_replay(&unknown);
+    assert_eq!(rt.pending_invocations.len(), 2);
+
+    rt.handle_error_replay(&second.call_id);
+    rt.handle_result_replay(&ToolResult {
+        presentation: Default::default(),
+        call_id: second.call_id.clone(),
+        tool_name: second.tool_name.clone(),
+        tool_type: ToolType::Function,
+        result: CborValue::Text("ok".to_owned()),
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    assert!(!rt.timers.contains_key(&TimerKey {
+        agent_id: agent.clone(),
+        timer_id: "discarded".to_owned(),
+    }));
+
+    rt.handle_result_replay(&ToolResult {
+        presentation: Default::default(),
+        call_id: first.call_id.clone(),
+        tool_name: first.tool_name.clone(),
+        tool_type: ToolType::Function,
+        result: CborValue::Text("ok".to_owned()),
+        provider_content: Vec::new(),
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    assert!(rt.pending_invocations.is_empty());
+    assert!(rt.timers.contains_key(&TimerKey {
+        agent_id: agent,
+        timer_id: "call-call-one-".to_owned(),
+    }));
+}
+
 /// Periodic timers coalesce missed downtime into one prompt and advance
 /// past now.
 #[test]
