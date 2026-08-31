@@ -1,5 +1,6 @@
 //! Regression tests for notification-report admission failures.
 
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -31,7 +32,7 @@ fn overdue_report_state() -> (tempfile::TempDir, AgentId, Arc<Mutex<State>>) {
 
     let agent = AgentId::parse("agent").expect("agent ID");
     state.enable(agent.clone(), cursor(4)).expect("enable");
-    state.set_pending_due(&agent, cursor(5), 1);
+    state.set_pending_due(&agent, cursor(5), NonZeroUsize::MIN);
     (directory, agent, Arc::new(Mutex::new(state)))
 }
 
@@ -107,10 +108,10 @@ fn count_only_wakes_exclude_preview_content() {
         end: cursor(5),
         first_queued_at: now,
         last_queued_at: now,
-        count: 1,
+        count: NonZeroUsize::MIN,
     };
     let plural = Pending {
-        count: 32,
+        count: NonZeroUsize::new(32).expect("nonzero plural count"),
         ..singular.clone()
     };
     let report = |pending: &Pending| {

@@ -1,5 +1,6 @@
 //! Pending source pages awaiting one canonical notification report.
 
+use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use rostra_client::SocialPostMaterializationCursor;
@@ -13,6 +14,6 @@ pub(crate) struct Pending {
     pub(crate) first_queued_at: Instant,
     /// Last selected row in monotonic time.
     pub(crate) last_queued_at: Instant,
-    /// Number of selected posts represented by this wake.
-    pub(crate) count: usize,
+    /// Nonzero number of selected posts represented by this wake.
+    pub(crate) count: NonZeroUsize,
 }

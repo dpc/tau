@@ -486,7 +486,8 @@ impl State {
         if let Some(pending) = registration.pending.as_mut() {
             pending.end = page.scanned_through;
             if page.count != 0 {
-                pending.count += page.count;
+                pending.count = NonZeroUsize::new(pending.count.get() + page.count)
+                    .expect("pending selected-post count remains nonzero");
                 pending.last_queued_at = Instant::now();
             }
         } else if page.count == 0 {
@@ -504,7 +505,8 @@ impl State {
                     .checked_sub(Duration::from_millis(elapsed))
                     .unwrap_or(now),
                 last_queued_at: now,
-                count: page.count,
+                count: NonZeroUsize::new(page.count)
+                    .expect("selected page constructs a nonzero pending count"),
             });
         }
         self.commit(next)?;
@@ -555,7 +557,7 @@ impl State {
         &mut self,
         agent: &AgentId,
         end: SocialPostMaterializationCursor,
-        count: usize,
+        count: NonZeroUsize,
     ) {
         let now = Instant::now();
         if let Some(registration) = self.registrations.get_mut(agent) {

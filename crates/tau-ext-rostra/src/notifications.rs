@@ -35,9 +35,6 @@ fn report(
     attempt: ReportAttempt,
     pending: &Pending,
 ) -> Result<MessageDelivered<RawMessagePublisherId>, &'static str> {
-    if pending.count == 0 {
-        return Err("notification report requires selected posts");
-    }
     let mut delivered = MessageDelivered::new(
         publisher,
         MessageAgentTarget::new(agent_id.as_ref()),
@@ -52,7 +49,7 @@ fn report(
             display_name: Some("Rostra following".to_owned()),
             alias: None,
         }),
-        report_body(pending.count),
+        report_body(pending.count.get()),
     );
     delivered.extension_data = MessageExtensionData::new(CborValue::Map(vec![
         (

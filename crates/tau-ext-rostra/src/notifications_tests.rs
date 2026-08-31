@@ -124,7 +124,7 @@ fn durable_report_spacing_survives_reconstruction() {
         end: cursor(5),
         first_queued_at: now.checked_sub(MAX_BATCH_AGE).expect("monotonic start"),
         last_queued_at: now.checked_sub(IDLE_DEBOUNCE).expect("monotonic idle"),
-        count: 1,
+        count: NonZeroUsize::MIN,
     });
     let due = registration
         .due_at(
@@ -299,7 +299,7 @@ fn configured_store_binds_due_report_and_canonical_acknowledgement() {
     state.enable(agent.clone(), cursor(4)).expect("enable");
     state.loaded(agent.clone());
     state.replay_complete(agent.clone());
-    state.set_pending_due(&agent, cursor(17), 1);
+    state.set_pending_due(&agent, cursor(17), NonZeroUsize::MIN);
 
     let (report_publisher, report_identity, pending) =
         state.due_report(&agent).expect("due configured report");
@@ -459,7 +459,7 @@ fn report_due_at_preserves_millisecond_boundary_and_rounding() {
         end: cursor(5),
         first_queued_at: now.checked_sub(MAX_BATCH_AGE).expect("batch age"),
         last_queued_at: now.checked_sub(IDLE_DEBOUNCE).expect("idle age"),
-        count: 1,
+        count: NonZeroUsize::MIN,
     };
     let registration = Registration {
         baseline: cursor(4),
@@ -619,7 +619,7 @@ fn pending_page_continuation_runs_until_a_report_is_inflight() {
         end: cursor(17),
         first_queued_at: now,
         last_queued_at: now,
-        count: 1,
+        count: NonZeroUsize::MIN,
     });
     let deadline = state.next_deadline().expect("continuation deadline");
     assert!(
@@ -636,9 +636,9 @@ fn pending_page_continuation_runs_until_a_report_is_inflight() {
     assert_eq!(state.next_deadline(), None);
 }
 
-/// Ensures sequential one-row state-machine outcomes advance filtered and
-/// selected cursors immediately, carry the final cursor into one report, and
-/// let exactly one matching canonical echo commit that cursor.
+/// Ensures an empty selected page creates no pending report, later selected
+/// pages retain their exact nonzero total and final cursor, and exactly one
+/// matching canonical echo commits that cursor.
 #[test]
 fn one_row_continuation_advances_and_canonical_echo_commits_once() {
     let (_directory, mut state) = configured_state();
@@ -661,6 +661,7 @@ fn one_row_continuation_advances_and_canonical_echo_commits_once() {
         )
         .expect("merge filtered row");
     assert_eq!(state.registrations[&agent].committed, cursor(5));
+    assert!(state.registrations[&agent].pending.is_none());
     assert!(state.next_deadline().is_some_and(|deadline| {
         deadline
             < Instant::now()
@@ -677,7 +678,7 @@ fn one_row_continuation_advances_and_canonical_echo_commits_once() {
                 scanned_through: cursor(6),
                 had_items: true,
                 exhausted: false,
-                count: 1,
+                count: 2,
             },
         )
         .expect("merge selected row");
@@ -696,19 +697,19 @@ fn one_row_continuation_advances_and_canonical_echo_commits_once() {
                 scanned_through: cursor(7),
                 had_items: true,
                 exhausted: true,
-                count: 0,
+                count: 3,
             },
         )
-        .expect("merge final filtered row");
+        .expect("merge final selected row");
     let pending = state.registrations[&agent]
         .pending
         .as_ref()
         .expect("selected batch");
     assert_eq!(pending.end, cursor(7));
-    assert_eq!(pending.count, 1);
+    assert_eq!(pending.count.get(), 5);
     assert!(!state.continuations.contains(&agent));
 
-    state.set_pending_due(&agent, cursor(7), 1);
+    state.set_pending_due(&agent, cursor(7), NonZeroUsize::MIN);
     state
         .registrations
         .get_mut(&agent)
@@ -718,6 +719,52 @@ fn one_row_continuation_advances_and_canonical_echo_commits_once() {
     assert!(state.acknowledge(&echo).expect("first canonical echo"));
     assert_eq!(state.registrations[&agent].committed, cursor(7));
     assert!(!state.acknowledge(&echo).expect("duplicate canonical echo"));
+}
+
+/// Ensures selected-page merging retains the exact machine-sized count rather
+/// than capping or saturating a pending notification batch.
+#[test]
+fn pending_count_merge_preserves_exact_arithmetic() {
+    let (_directory, mut state) = configured_state();
+    let agent = AgentId::parse("agent").expect("agent id");
+    state.enable(agent.clone(), cursor(4)).expect("enable");
+
+    let first = state.scan_snapshot(&agent).expect("first scan");
+    state
+        .merge_page(
+            &agent,
+            &first,
+            ScannedPage {
+                scanned_through: cursor(5),
+                had_items: true,
+                exhausted: false,
+                count: usize::MAX - 1,
+            },
+        )
+        .expect("merge largest non-overflowing selected page");
+    let second = state.scan_snapshot(&agent).expect("second scan");
+    state
+        .merge_page(
+            &agent,
+            &second,
+            ScannedPage {
+                scanned_through: cursor(6),
+                had_items: true,
+                exhausted: true,
+                count: 1,
+            },
+        )
+        .expect("merge exact final selected row");
+
+    assert_eq!(
+        state.registrations[&agent]
+            .pending
+            .as_ref()
+            .expect("pending selected pages")
+            .count
+            .get(),
+        usize::MAX
+    );
 }
 
 /// Ensures unloading cancels a pending scan continuation rather than retaining
@@ -852,7 +899,7 @@ fn retry_backoff_overrides_overdue_pending_report() {
         end: cursor(17),
         first_queued_at: now.checked_sub(MAX_BATCH_AGE).expect("old pending page"),
         last_queued_at: now.checked_sub(MAX_BATCH_AGE).expect("old pending page"),
-        count: 1,
+        count: NonZeroUsize::MIN,
     });
     let retry_at = now
         .checked_add(Duration::from_secs(1))
@@ -876,7 +923,7 @@ fn merged_rows_extend_idle_debounce_but_keep_batch_age_cap() {
                 .checked_sub(Duration::from_secs(29))
                 .expect("first selected row"),
             last_queued_at: now,
-            count: 2,
+            count: NonZeroUsize::new(2).expect("nonzero selected-post count"),
         }),
         inflight_end: None,
         queued_since_unix_ms: None,
