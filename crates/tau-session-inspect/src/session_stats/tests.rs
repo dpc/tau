@@ -261,6 +261,157 @@ fn aggregation_uses_response_local_usage_and_captured_dispatch_fields() {
     assert_eq!(stats.totals.tool_results, 1);
 }
 
+/// Tool aggregation must retain each validated name through calls and every
+/// terminal kind, ignore an unselected foreign terminal, and serialize the
+/// final public vector in its established lexical order.
+#[test]
+fn aggregation_groups_typed_tool_names_and_preserves_lexical_json_order() {
+    let agent_id = AgentId::parse("tool_stats_0").expect("agent id");
+    let prompt_id =
+        AgentPromptId::parse("ap-tool_stats_0-0").expect("known-safe AgentPromptId must be valid");
+    let model = "openai/gpt-5".parse().expect("model id");
+    let response = |agent_prompt_id: AgentPromptId, calls: &[(&str, &str)]| {
+        Event::ProviderResponseFinished(ProviderResponseFinished {
+            automatic_compaction_decision: None,
+            agent_prompt_id,
+            agent_id: agent_id.clone(),
+            output_items: calls
+                .iter()
+                .map(|(call_id, tool)| {
+                    ContextItem::ToolCall(ToolCallItem {
+                        call_id: (*call_id).into(),
+                        name: ToolName::new(*tool),
+                        tool_type: ToolType::Function,
+                        arguments: tau_proto::CborValue::Null,
+                        raw_arguments_json: None,
+                        responses_envelope: None,
+                    })
+                })
+                .collect(),
+            stop_reason: ProviderStopReason::ToolCalls,
+            error: None,
+            failure_kind: None,
+            context_limit_telemetry: None,
+            recovery_disposition: Default::default(),
+            output_length_disposition: tau_proto::OutputLengthDisposition::None,
+            provider_attempt: Default::default(),
+            originator: Default::default(),
+            usage: Some(ProviderTokenUsage::default()),
+            estimated_api_cost_rates: Some(tau_proto::ESTIMATED_API_COST_FALLBACK),
+            estimated_api_cost_increment: Some(EstimatedApiCost::from_picodollars(0)),
+            compaction_original_input_tokens: None,
+            compaction_output_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+    };
+    let result = |call_id: &str, tool_name: &str| {
+        Event::ProviderToolResult(tau_proto::ToolResult {
+            presentation: Default::default(),
+            call_id: call_id.into(),
+            tool_name: ToolName::new(tool_name),
+            tool_type: ToolType::Function,
+            result: tau_proto::CborValue::Null,
+            provider_content: Vec::new(),
+            kind: Default::default(),
+            display: None,
+            originator: Default::default(),
+        })
+    };
+    let error = |call_id: &str, tool_name: &str| {
+        Event::ProviderToolError(tau_proto::ToolError {
+            call_id: call_id.into(),
+            tool_name: ToolName::new(tool_name),
+            tool_type: ToolType::Function,
+            message: "failed".to_owned(),
+            details: None,
+            presentation: Default::default(),
+            display: None,
+            originator: Default::default(),
+        })
+    };
+    let cancelled = |call_id: &str, tool_name: &str| {
+        Event::ToolCancelled(tau_proto::ToolCancelled {
+            call_id: call_id.into(),
+            tool_name: ToolName::new(tool_name),
+            tool_type: ToolType::Function,
+            presentation: Default::default(),
+            display: None,
+        })
+    };
+    let events = vec![
+        record(
+            0,
+            Event::AgentPromptStarted(AgentPromptStarted {
+                agent_prompt_id: prompt_id.clone(),
+                agent_id: agent_id.clone(),
+                session_id: SessionId::parse("s1").expect("known-safe SessionId must be valid"),
+                model,
+                model_params: Some(ModelParams::default()),
+                outer_turn_id: Some(test_agent_outer_turn_id("ot-ap-tool_stats_0-0")),
+                operation: PromptOperation::Inference,
+                originator: Default::default(),
+                ctx_id: None,
+            }),
+        ),
+        record(
+            1,
+            response(
+                prompt_id,
+                &[
+                    ("call-zeta", "zeta"),
+                    ("call-middle-result", "middle"),
+                    ("call-alpha", "alpha"),
+                    ("call-middle-cancelled", "middle"),
+                ],
+            ),
+        ),
+        record(2, cancelled("call-zeta", "zeta")),
+        record(3, result("call-middle-result", "middle")),
+        record(4, error("call-alpha", "alpha")),
+        record(5, cancelled("call-middle-cancelled", "middle")),
+        record(6, result("call-foreign", "foreign")),
+    ];
+    let mut missing = BTreeSet::new();
+    let stats = aggregate_agent(
+        &SessionId::parse("s1").expect("known-safe SessionId must be valid"),
+        &agent_id,
+        &events,
+        &mut missing,
+    );
+
+    assert!(missing.is_empty());
+    assert_eq!(
+        stats
+            .tools
+            .iter()
+            .map(|tool| {
+                (
+                    tool.tool.as_str(),
+                    tool.calls,
+                    tool.results,
+                    tool.errors,
+                    tool.cancellations,
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("alpha", 1, 0, 1, 0),
+            ("middle", 2, 1, 0, 1),
+            ("zeta", 1, 0, 0, 1),
+        ]
+    );
+    assert_eq!(stats.totals.tool_calls, 4);
+    assert_eq!(stats.totals.tool_results, 1);
+    assert_eq!(stats.totals.tool_errors, 1);
+    assert_eq!(stats.totals.tool_cancellations, 2);
+    assert_eq!(
+        serde_json::to_vec(&stats.tools).expect("serialize tool activity stats"),
+        br#"[{"tool":"alpha","calls":1,"results":0,"errors":1,"cancellations":0},{"tool":"middle","calls":2,"results":1,"errors":0,"cancellations":1},{"tool":"zeta","calls":1,"results":0,"errors":0,"cancellations":1}]"#
+    );
+}
+
 /// Pre-contract prompt and response records must remain visible as incomplete
 /// instead of receiving inferred creator, turn, model-parameter, or cost facts.
 #[test]

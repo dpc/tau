@@ -132,7 +132,7 @@ fn aggregate_agent(
     let mut result = empty_agent(agent_id.clone());
     let mut prompts = HashMap::new();
     let mut models: BTreeMap<(ModelId, Effort), ActivityCounts> = BTreeMap::new();
-    let mut tools: BTreeMap<String, ToolActivityStats> = BTreeMap::new();
+    let mut tools: HashMap<tau_proto::ToolName, ToolActivityStats> = HashMap::new();
     let mut open_turns = HashSet::<AgentOuterTurnId>::new();
     let mut selected_calls = HashMap::new();
     for record in events {
@@ -219,7 +219,7 @@ fn aggregate_agent(
                     continue;
                 }
                 tools
-                    .entry(terminal.tool_name.to_string())
+                    .entry(terminal.tool_name.clone())
                     .or_insert_with(|| ToolActivityStats::new(terminal.tool_name.clone()))
                     .results += 1;
                 result.totals.tool_results = result.totals.tool_results.saturating_add(1);
@@ -229,7 +229,7 @@ fn aggregate_agent(
                     continue;
                 }
                 tools
-                    .entry(terminal.tool_name.to_string())
+                    .entry(terminal.tool_name.clone())
                     .or_insert_with(|| ToolActivityStats::new(terminal.tool_name.clone()))
                     .errors += 1;
                 result.totals.tool_errors = result.totals.tool_errors.saturating_add(1);
@@ -239,7 +239,7 @@ fn aggregate_agent(
                     continue;
                 }
                 tools
-                    .entry(terminal.tool_name.to_string())
+                    .entry(terminal.tool_name.clone())
                     .or_insert_with(|| ToolActivityStats::new(terminal.tool_name.clone()))
                     .cancellations += 1;
                 result.totals.tool_cancellations =
@@ -259,13 +259,16 @@ fn aggregate_agent(
         .collect();
     result.tools = tools.into_values().collect();
     result
+        .tools
+        .sort_unstable_by(|left, right| left.tool.as_str().cmp(right.tool.as_str()));
+    result
 }
 
 fn account_response(
     response: &tau_proto::ProviderResponseFinished,
     totals: &mut ActivityCounts,
     bucket: Option<&mut ActivityCounts>,
-    tools: &mut BTreeMap<String, ToolActivityStats>,
+    tools: &mut HashMap<tau_proto::ToolName, ToolActivityStats>,
 ) {
     let mut delta = ActivityCounts::default();
     if let Some(usage) = &response.usage {
@@ -282,7 +285,7 @@ fn account_response(
         if let tau_proto::ContextItem::ToolCall(call) = item {
             delta.tool_calls = delta.tool_calls.saturating_add(1);
             let stats = tools
-                .entry(call.name.to_string())
+                .entry(call.name.clone())
                 .or_insert_with(|| ToolActivityStats::new(call.name.clone()));
             stats.calls = stats.calls.saturating_add(1);
         }
