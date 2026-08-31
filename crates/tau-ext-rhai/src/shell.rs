@@ -8,6 +8,7 @@ mod tests;
 use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -114,7 +115,7 @@ struct ShellCancelState {
 /// Run one shell command to completion with bounded capture and timeout.
 pub(crate) fn run_shell_command(
     command: String,
-    cwd: Option<String>,
+    cwd: Option<PathBuf>,
     timeout: Duration,
     cancel: ShellCancel,
 ) -> serde_json::Value {
@@ -126,7 +127,7 @@ pub(crate) fn run_shell_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .current_dir(cwd.unwrap_or_else(|| ".".to_owned()));
+        .current_dir(cwd.unwrap_or_else(|| PathBuf::from(".")));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

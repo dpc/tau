@@ -979,7 +979,7 @@ fn shell_spawn(
             "shell_spawn timeout must be at most {MAX_SHELL_TIMEOUT_SECS} seconds"
         ));
     }
-    let cwd = optional_string_field(&opts, "cwd")?;
+    let cwd = optional_string_field(&opts, "cwd")?.map(PathBuf::from);
     let on_complete = opts
         .get("on_complete")
         .map(|value| {

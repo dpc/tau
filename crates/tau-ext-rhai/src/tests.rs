@@ -1727,8 +1727,9 @@ fn shell_completion_callback_throw_emits_tool_error() {
     )));
 }
 
-/// Shell results preserve working-directory behavior, stderr appending, nonzero
-/// exits, and start failures for script tools.
+/// Shell results preserve absent, empty, relative, and absolute
+/// working-directory inputs, stderr appending, nonzero exits, and start
+/// failures for script tools.
 #[test]
 fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1743,44 +1744,48 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
                     register_tool("shell_contract", #{{}}, Fn("shell_contract"));
                 }}
                 fn shell_contract(args, c) {{
-                    if args["case"] == "cwd_stderr" {{
+                    if args["case"] == "absolute" {{
                         return shell_spawn("cat input.txt; printf err >&2; exit 7", #{{
                             cwd: "{}",
                             timeout: 5,
                         }});
                     }}
-                    return shell_spawn("printf nope", #{{
-                        cwd: "{}",
-                        timeout: 5,
-                    }});
+                    if args["case"] == "relative" {{
+                        return shell_spawn("printf relative", #{{ cwd: ".", timeout: 5 }});
+                    }}
+                    if args["case"] == "empty" {{
+                        return shell_spawn("printf empty", #{{ cwd: "", timeout: 5 }});
+                    }}
+                    if args["case"] == "missing" {{
+                        return shell_spawn("printf missing", #{{
+                            cwd: "{}",
+                            timeout: 5,
+                        }});
+                    }}
+                    return shell_spawn("printf absent", #{{ timeout: 5 }});
                 }}
             "#,
             cwd.path().display(),
             missing_cwd.display()
         ),
     );
-    let ok = HarnessOutputMessage::deliver_live(
-        UnixMicros::new(1),
-        tool_started(
-            "shell_contract",
-            CborValue::Map(vec![(
-                CborValue::Text("case".to_owned()),
-                CborValue::Text("cwd_stderr".to_owned()),
-            )]),
-        ),
-    );
-    let start_error = HarnessOutputMessage::deliver_live(
-        UnixMicros::new(2),
-        tool_started(
-            "shell_contract",
-            CborValue::Map(vec![(
-                CborValue::Text("case".to_owned()),
-                CborValue::Text("start_error".to_owned()),
-            )]),
-        ),
-    );
-
-    let frames = run_frames(&[configure_with_script(&script), ok, start_error]);
+    let mut inputs = vec![configure_with_script(&script)];
+    for (index, case) in ["absolute", "relative", "empty", "missing", "absent"]
+        .into_iter()
+        .enumerate()
+    {
+        inputs.push(HarnessOutputMessage::deliver_live(
+            UnixMicros::new((index + 1) as u64),
+            tool_started(
+                "shell_contract",
+                CborValue::Map(vec![(
+                    CborValue::Text("case".to_owned()),
+                    CborValue::Text(case.to_owned()),
+                )]),
+            ),
+        ));
+    }
+    let frames = run_frames(&inputs);
 
     let results: Vec<_> = frames
         .iter()
@@ -1789,7 +1794,7 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
             _ => None,
         })
         .collect();
-    assert_eq!(results.len(), 2);
+    assert_eq!(results.len(), 5);
     let cwd_result = results
         .iter()
         .find_map(|result| match result {
@@ -1806,7 +1811,7 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
             }
             _ => None,
         })
-        .expect("cwd shell result");
+        .expect("absolute cwd shell result");
     assert!(cwd_result.iter().any(|(key, value)| matches!(
         (key, value),
         (CborValue::Text(key), CborValue::Bool(false)) if key == "success"
@@ -1820,9 +1825,25 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
         (CborValue::Text(key), CborValue::Text(output))
             if key == "output" && output.contains("ok") && output.contains("[stderr]\nerr")
     )));
-    let _start_error_result = results
+    assert!(results.iter().any(|result| matches!(
+        result,
+        CborValue::Map(fields) if fields.iter().any(|(key, value)| matches!(
+            (key, value),
+            (CborValue::Text(key), CborValue::Text(output))
+                if key == "output" && output == "relative"
+        ))
+    )));
+    assert!(results.iter().any(|result| matches!(
+        result,
+        CborValue::Map(fields) if fields.iter().any(|(key, value)| matches!(
+            (key, value),
+            (CborValue::Text(key), CborValue::Text(output))
+                if key == "output" && output == "absent"
+        ))
+    )));
+    let start_errors = results
         .iter()
-        .find_map(|result| match result {
+        .filter_map(|result| match result {
             CborValue::Map(fields)
                 if fields.iter().any(|(key, value)| {
                     matches!(
@@ -1836,7 +1857,8 @@ fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
             }
             _ => None,
         })
-        .expect("start error shell result");
+        .count();
+    assert_eq!(start_errors, 2, "empty and missing cwd stay start errors");
 }
 
 /// An oversized timeout rejects its tool call without spawning the requested
