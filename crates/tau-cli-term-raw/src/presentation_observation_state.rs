@@ -38,6 +38,11 @@ impl PresentationInvalidation {
         self.0 |= 1_u64 << key.0;
         self
     }
+
+    /// Returns whether this invalidation set contains one opaque key.
+    const fn contains(self, key: PresentationObservationKey) -> bool {
+        self.0 & (1_u64 << key.0) != 0
+    }
 }
 
 /// One caller-owned opaque, content-free fact accepted by raw correlation.
@@ -72,8 +77,8 @@ pub(super) struct PresentationObservation {
     pub(super) delivery_id: RendererDeliveryId,
     /// Caller-owned stable content-free label.
     pub(super) fact: &'static str,
-    /// Caller-owned invalidation key in `0..64`.
-    kind: u8,
+    /// Caller-owned validated invalidation key.
+    key: PresentationObservationKey,
     /// Monotonic selected-presentation generation assigned at registration.
     pub(super) generation: PresentationMutationGeneration,
     /// Monotonic time at which the selected handler completed its mutation.
@@ -90,6 +95,36 @@ pub(super) struct CapturedPresentationObservations {
     pub(super) generation: PresentationMutationGeneration,
 }
 
+/// Count-only overflow retained for one caller-owned opaque key.
+struct OmittedPresentationObservations {
+    /// Validated key shared by all omitted observations in this aggregate.
+    key: PresentationObservationKey,
+    /// Saturating number of omitted observations with this key.
+    count: u64,
+}
+
+impl OmittedPresentationObservations {
+    /// Creates the first omitted observation aggregate for one key.
+    const fn new(key: PresentationObservationKey) -> Self {
+        Self { key, count: 1 }
+    }
+
+    /// Returns whether this aggregate represents one opaque key.
+    fn has_key(&self, key: PresentationObservationKey) -> bool {
+        self.key == key
+    }
+
+    /// Returns whether an invalidation set supersedes this aggregate.
+    const fn is_invalidated_by(&self, invalidates: PresentationInvalidation) -> bool {
+        invalidates.contains(self.key)
+    }
+
+    /// Adds one omitted observation without overflowing the bounded diagnostic.
+    fn increment(&mut self) {
+        self.count = self.count.saturating_add(1);
+    }
+}
+
 /// Coherent bounded opaque correlation state protected by `SharedState`.
 pub(super) struct PresentationObservationState {
     /// Latest selected-presentation mutation generation.
@@ -97,7 +132,7 @@ pub(super) struct PresentationObservationState {
     /// Exact observations awaiting capture by a redraw pass.
     pending: VecDeque<PresentationObservation>,
     /// Count-only overflow retained independently for each opaque key.
-    omitted_by_kind: Vec<(u8, u64)>,
+    omitted_by_key: Vec<OmittedPresentationObservations>,
     /// Saturating total of all count-only overflow.
     omitted_total: u64,
     /// Successful pass receipts retained only for focused unit-test assertions.
@@ -112,7 +147,7 @@ impl PresentationObservationState {
         Self {
             generation: PresentationMutationGeneration::default(),
             pending: VecDeque::new(),
-            omitted_by_kind: Vec::new(),
+            omitted_by_key: Vec::new(),
             omitted_total: 0,
             #[cfg(test)]
             successful_test_passes: Vec::new(),
@@ -131,27 +166,27 @@ impl PresentationObservationState {
         fact: OpaquePresentationFact,
         observed_at: Instant,
     ) {
-        let kind = fact.key.0;
-        let invalidates = fact.invalidates.0;
         self.pending
-            .retain(|pending| invalidates & (1_u64 << pending.kind) == 0);
-        self.omitted_by_kind.retain(|(omitted_kind, count)| {
-            let invalidated = invalidates & (1_u64 << *omitted_kind) != 0;
-            if invalidated {
-                self.omitted_total = self.omitted_total.saturating_sub(*count);
+            .retain(|pending| !fact.invalidates.contains(pending.key));
+        self.omitted_by_key.retain(|omitted| {
+            if omitted.is_invalidated_by(fact.invalidates) {
+                self.omitted_total = self.omitted_total.saturating_sub(omitted.count);
+                false
+            } else {
+                true
             }
-            !invalidated
         });
         self.generation.advance();
         if self.pending.len() == MAX_PENDING_PRESENTATION_OBSERVATIONS {
-            if let Some((_, omitted)) = self
-                .omitted_by_kind
+            if let Some(omitted) = self
+                .omitted_by_key
                 .iter_mut()
-                .find(|(omitted_kind, _)| *omitted_kind == kind)
+                .find(|omitted| omitted.has_key(fact.key))
             {
-                *omitted = omitted.saturating_add(1);
+                omitted.increment();
             } else {
-                self.omitted_by_kind.push((kind, 1));
+                self.omitted_by_key
+                    .push(OmittedPresentationObservations::new(fact.key));
             }
             self.omitted_total = self.omitted_total.saturating_add(1);
             return;
@@ -159,7 +194,7 @@ impl PresentationObservationState {
         self.pending.push_back(PresentationObservation {
             delivery_id,
             fact: fact.label,
-            kind,
+            key: fact.key,
             generation: self.generation,
             observed_at,
         });
@@ -167,7 +202,7 @@ impl PresentationObservationState {
 
     /// Captures and clears all observations represented by a prepared frame.
     pub(super) fn capture(&mut self) -> CapturedPresentationObservations {
-        self.omitted_by_kind.clear();
+        self.omitted_by_key.clear();
         CapturedPresentationObservations {
             facts: self.pending.drain(..).collect(),
             omitted: std::mem::take(&mut self.omitted_total),
@@ -190,3 +225,7 @@ impl PresentationObservationState {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "presentation_observation_state_tests.rs"]
+mod presentation_observation_state_tests;
