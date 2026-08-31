@@ -531,43 +531,42 @@ fn pid_to_rustix_pid(pid: u32) -> io::Result<Pid> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "pid was not positive"))
 }
 
-// Owns a child during spawn and waiter startup. It kills/waits unless the
-// waiter thread has already successfully waited for the child.
+// Owns one armed direct-child kill-and-wait obligation during spawn and waiter
+// startup. A successful wait consumes the obligation.
 struct SpawnedChildGuard {
+    // The direct child while kill-and-wait cleanup remains armed.
     child: Option<Child>,
-    waited: bool,
 }
 
 impl SpawnedChildGuard {
     fn new(child: Child) -> Self {
-        Self {
-            child: Some(child),
-            waited: false,
-        }
+        Self { child: Some(child) }
     }
 
     fn child_mut(&mut self) -> &mut Child {
-        self.child.as_mut().expect("guard always holds child")
+        self.child
+            .as_mut()
+            .expect("spawn initialization holds the cleanup obligation")
     }
 
     fn wait_for_exit(&mut self) -> Result<ChildExit, io::Error> {
-        let result = self.child_mut().wait().map(ChildExit::from_status);
-        if result.is_ok() {
-            self.mark_waited();
+        let mut child = self
+            .child
+            .take()
+            .expect("waiter owns the cleanup obligation until wait succeeds");
+        match child.wait() {
+            Ok(status) => Ok(ChildExit::from_status(status)),
+            Err(error) => {
+                self.child = Some(child);
+                Err(error)
+            }
         }
-        result
-    }
-
-    fn mark_waited(&mut self) {
-        self.waited = true;
     }
 }
 
 impl Drop for SpawnedChildGuard {
     fn drop(&mut self) {
-        if let Some(child) = &mut self.child
-            && !self.waited
-        {
+        if let Some(child) = &mut self.child {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -629,3 +628,6 @@ fn exit_signal(status: std::process::ExitStatus) -> Option<i32> {
 fn exit_signal(_status: std::process::ExitStatus) -> Option<i32> {
     None
 }
+
+#[cfg(test)]
+mod tests;
