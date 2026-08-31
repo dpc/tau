@@ -67,3 +67,34 @@ fn historical_prefix_budget_accepts_exact_bytes_and_rejects_the_next_byte() {
         Some(false)
     );
 }
+
+/// Budget accounting must retain byte-domain units across zero and chunked
+/// serializer writes, accepting the final byte exactly at the selected
+/// boundary.
+#[test]
+fn json_budget_writer_accepts_zero_and_chunked_writes_at_exact_boundary() {
+    let mut writer = JsonBudgetWriter::new(tau_proto::ByteCount::new(3));
+
+    assert_eq!(writer.write(b"").expect("zero-sized write"), 0);
+    assert_eq!(writer.write(b"a").expect("first chunk"), 1);
+    assert_eq!(writer.write(b"bc").expect("final chunk"), 2);
+    assert_eq!(writer.remaining, tau_proto::ByteCount::ZERO);
+    assert!(!writer.exceeded);
+}
+
+/// A write that would cross the boundary must not consume a partial chunk and
+/// must preserve the historical budget-exhaustion diagnostic.
+#[test]
+fn json_budget_writer_rejects_overflow_without_consuming_partial_chunk() {
+    let mut writer = JsonBudgetWriter::new(tau_proto::ByteCount::new(2));
+
+    assert_eq!(writer.write(b"a").expect("first chunk"), 1);
+    let error = writer
+        .write(b"bc")
+        .expect_err("chunk crosses remaining budget");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert_eq!(error.to_string(), "historical prompt prefix exceeds budget");
+    assert_eq!(writer.remaining, tau_proto::ByteCount::new(1));
+    assert!(writer.exceeded);
+}

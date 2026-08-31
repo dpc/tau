@@ -206,7 +206,7 @@ struct HistoricalPromptContext<'a> {
 /// Counting JSON sink that rejects the first write beyond an exact byte budget.
 struct JsonBudgetWriter {
     /// Bytes still available to the serializer.
-    remaining: u64,
+    remaining: tau_proto::ByteCount,
     /// Whether the serializer attempted to cross the budget.
     exceeded: bool,
 }
@@ -215,7 +215,7 @@ impl JsonBudgetWriter {
     /// Start a sink with the addressable part of the selected byte budget.
     fn new(budget: tau_proto::ByteCount) -> Self {
         Self {
-            remaining: budget.get(),
+            remaining: budget,
             exceeded: false,
         }
     }
@@ -223,12 +223,12 @@ impl JsonBudgetWriter {
 
 impl Write for JsonBudgetWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let byte_count = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if self.remaining < byte_count {
+        let byte_count = tau_proto::ByteCount::new(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let Some(remaining) = self.remaining.checked_sub(byte_count) else {
             self.exceeded = true;
             return Err(io::Error::other("historical prompt prefix exceeds budget"));
-        }
-        self.remaining -= byte_count;
+        };
+        self.remaining = remaining;
         Ok(bytes.len())
     }
 
