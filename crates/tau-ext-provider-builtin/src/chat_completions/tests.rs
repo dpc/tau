@@ -354,7 +354,7 @@ fn cache_usage_requires_stream_options() {
     let model_override = ChatCompletionsModel {
         id: tau_proto::ModelName::new("deepseek-v4-flash"),
         display_name: None,
-        context_window: 128_000,
+        context_window: tau_proto::TokenCount::new(128_000),
         compat: Some(ChatCompletionsCompat {
             cache_usage: CacheUsageCompat::DeepSeek,
             ..ChatCompletionsCompat::default()
@@ -395,6 +395,50 @@ fn parallel_capability_defaults_true_and_is_omitted() {
     assert!(model.supports_parallel_tool_calls);
     let value = serde_json::to_value(model).expect("serialized model");
     assert!(value.get("supports_parallel_tool_calls").is_none());
+}
+
+/// Context-window token typing must preserve profile JSON, zero handling,
+/// published model metadata, and the scalar summary-backend boundary.
+#[test]
+fn context_window_token_count_preserves_profile_and_summary_behavior() {
+    let configured: ChatCompletionsModel =
+        serde_json::from_str(r#"{"id":"local","context_window":8192}"#).expect("configured model");
+    assert_eq!(configured.context_window, tau_proto::TokenCount::new(8192));
+    assert_eq!(
+        serde_json::to_string(&configured).expect("configured model JSON"),
+        r#"{"id":"local","context_window":8192}"#
+    );
+    assert_eq!(
+        models_for_provider(
+            &tau_proto::ProviderName::new("local"),
+            &ChatCompletionsProvider {
+                models: vec![configured],
+                ..ChatCompletionsProvider::default()
+            },
+        )[0]
+        .context_window,
+        tau_proto::TokenCount::new(8192)
+    );
+    assert_eq!(
+        resolved_local_summary_compaction(None, tau_proto::TokenCount::new(8192))
+            .expect("positive context window")
+            .max_output_tokens(),
+        1024
+    );
+
+    let defaulted: ChatCompletionsModel =
+        serde_json::from_str(r#"{"id":"defaulted"}"#).expect("defaulted model");
+    assert_eq!(
+        defaulted.context_window,
+        tau_proto::TokenCount::new(128_000)
+    );
+    let zero: ChatCompletionsModel =
+        serde_json::from_str(r#"{"id":"zero","context_window":0}"#).expect("zero model");
+    assert_eq!(zero.context_window, tau_proto::TokenCount::ZERO);
+    assert!(
+        resolved_local_summary_compaction(None, zero.context_window).is_none(),
+        "zero retains the prior disabled generic summary fallback"
+    );
 }
 
 /// Generic compatible models receive a no-byte-cap summary fallback while a
@@ -516,7 +560,7 @@ fn openrouter_defaults_to_telemetry_without_cache_policy() {
     let model = ChatCompletionsModel {
         id: tau_proto::ModelName::new("upstream/model"),
         display_name: None,
-        context_window: 128_000,
+        context_window: tau_proto::TokenCount::new(128_000),
         compat: None,
         tags: Vec::new(),
         hosted_tool_capabilities: Vec::new(),
@@ -847,7 +891,7 @@ fn unpriced_local_model_uses_central_fallback() {
         models: vec![ChatCompletionsModel {
             id: ModelName::new("local-free"),
             display_name: None,
-            context_window: 4096,
+            context_window: tau_proto::TokenCount::new(4096),
             compat: None,
             tags: Vec::new(),
             hosted_tool_capabilities: Vec::new(),
@@ -908,7 +952,7 @@ fn known_model_without_explicit_prices_uses_builtin_default() {
         models: vec![ChatCompletionsModel {
             id: ModelName::new("deepseek-v4-flash"),
             display_name: None,
-            context_window: 4096,
+            context_window: tau_proto::TokenCount::new(4096),
             compat: None,
             tags: Vec::new(),
             hosted_tool_capabilities: Vec::new(),
@@ -991,7 +1035,7 @@ fn parallel_capability_false_is_independent_from_request_compatibility() {
         models: vec![ChatCompletionsModel {
             id: ModelName::new("serial-tools"),
             display_name: None,
-            context_window: 4096,
+            context_window: tau_proto::TokenCount::new(4096),
             compat: Some(ChatCompletionsCompat {
                 parallel_tool_calls: true,
                 ..ChatCompletionsCompat::default()

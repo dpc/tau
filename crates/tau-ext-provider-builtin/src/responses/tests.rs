@@ -389,7 +389,7 @@ fn profile_publishes_default_responses_efforts() {
             efforts: None,
             compat: None,
             display_name: None,
-            context_window: 128_000,
+            context_window: tau_proto::TokenCount::new(128_000),
             tags: Vec::new(),
             supports_parallel_tool_calls: true,
             local_summary_compaction: None,
@@ -427,6 +427,66 @@ fn profile_publishes_default_responses_efforts() {
     assert!(!models[0].supports_compaction);
     assert!(models[0].supports_standalone_compaction);
     assert_eq!(models[0].standalone_compaction_threshold, None);
+}
+
+/// Context-window token typing must retain the Responses profile bytes, zero
+/// and default behavior, published metadata, and scalar summary-backend
+/// derivation.
+#[test]
+fn context_window_token_count_preserves_profile_and_summary_behavior() {
+    let configured: ResponsesModel =
+        serde_json::from_str(r#"{"id":"local","context_window":8192}"#).expect("configured model");
+    assert_eq!(configured.context_window, tau_proto::TokenCount::new(8192));
+    assert_eq!(
+        serde_json::to_string(&configured).expect("configured model JSON"),
+        r#"{"id":"local","context_window":8192}"#
+    );
+    assert_eq!(
+        models_for_provider(
+            &ProviderName::new("local"),
+            &ResponsesProvider {
+                models: vec![configured],
+                ..ResponsesProvider::default()
+            },
+        )[0]
+        .context_window,
+        tau_proto::TokenCount::new(8192)
+    );
+    assert_eq!(
+        resolved_summary_config(&ResponsesModel {
+            id: ModelName::new("local"),
+            efforts: None,
+            compat: None,
+            display_name: None,
+            context_window: tau_proto::TokenCount::new(8192),
+            tags: Vec::new(),
+            supports_parallel_tool_calls: true,
+            local_summary_compaction: None,
+            cache_contract: None,
+            est_uncached_input_cost_1m_usd: None,
+            est_cached_input_cost_1m_usd: None,
+            est_cache_write_input_cost_1m_usd: None,
+            est_output_cost_1m_usd: None,
+            est_cache_storage_cost_1m_token_hour_usd: None,
+        })
+        .expect("positive context window")
+        .max_output_tokens(),
+        1024
+    );
+
+    let defaulted: ResponsesModel =
+        serde_json::from_str(r#"{"id":"defaulted"}"#).expect("defaulted model");
+    assert_eq!(
+        defaulted.context_window,
+        tau_proto::TokenCount::new(128_000)
+    );
+    let zero: ResponsesModel =
+        serde_json::from_str(r#"{"id":"zero","context_window":0}"#).expect("zero model");
+    assert_eq!(zero.context_window, tau_proto::TokenCount::ZERO);
+    assert!(
+        resolved_summary_config(&zero).is_none(),
+        "zero retains the prior disabled generic summary fallback"
+    );
 }
 
 /// Public Responses emits both visible reasoning text and an opaque replay

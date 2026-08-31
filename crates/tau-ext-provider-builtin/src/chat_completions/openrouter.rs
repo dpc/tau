@@ -331,7 +331,7 @@ fn openrouter_model(entry: OpenRouterModelEntry) -> Option<ChatCompletionsModel>
     Some(ChatCompletionsModel {
         id,
         display_name: entry.name,
-        context_window,
+        context_window: tau_proto::TokenCount::new(context_window),
         compat: Some(ChatCompletionsCompat {
             stream_options: true,
             parallel_tool_calls: supports_parallel_tool_calls,

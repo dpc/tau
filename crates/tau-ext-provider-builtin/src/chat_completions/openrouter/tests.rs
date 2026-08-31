@@ -141,7 +141,7 @@ fn authenticated_discovery_normalizes_models_and_refreshes_cache() {
     .expect("discovery");
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id.as_str(), "vendor/model");
-    assert_eq!(models[0].context_window, 1234);
+    assert_eq!(models[0].context_window, tau_proto::TokenCount::new(1234));
     let compat = models[0].compat.as_ref().expect("compat");
     assert!(compat.reasoning_effort.is_some());
     assert!(compat.stream_options);
@@ -179,7 +179,10 @@ fn discovery_filters_models_without_root_context_length() {
             .iter()
             .map(|model| (model.id.as_str(), model.context_window))
             .collect::<Vec<_>>(),
-        vec![("vendor/valid", 1234), ("vendor/zero", 0)]
+        vec![
+            ("vendor/valid", tau_proto::TokenCount::new(1234)),
+            ("vendor/zero", tau_proto::TokenCount::ZERO),
+        ]
     );
     server.finish();
 }

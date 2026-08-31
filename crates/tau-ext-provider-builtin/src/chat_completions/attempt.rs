@@ -39,7 +39,7 @@ pub fn models_for_provider(
                         .supported_tool_types
                         .contains(&tau_proto::ToolType::Function),
                 default_affinity: 0,
-                context_window: tau_proto::TokenCount::new(model.context_window),
+                context_window: model.context_window,
                 efforts: compat.reasoning_effort.as_ref().map_or_else(
                     || vec![tau_proto::Effort::Off],
                     |config| config.efforts.canonical(),
@@ -369,7 +369,9 @@ fn validate_narrative_output(
     validate_resolved_narrative_output(
         items,
         config
-            .validated_for(config.context_window_tokens.get())
+            .validated_for(tau_proto::TokenCount::new(
+                config.context_window_tokens.get(),
+            ))
             .expect("test compaction config is valid"),
     )
 }

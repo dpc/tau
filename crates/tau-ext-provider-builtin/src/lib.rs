@@ -1746,7 +1746,7 @@ fn parse_chat_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<d
         models.push(ChatCompletionsModel {
             id: ModelName::try_new(model.to_owned())?,
             display_name: None,
-            context_window: 128_000,
+            context_window: tau_proto::TokenCount::new(128_000),
             compat: None,
             tags: Vec::new(),
             hosted_tool_capabilities: Vec::new(),
@@ -1780,7 +1780,7 @@ fn parse_responses_model_list(input: &str) -> Result<Vec<ResponsesModel>, Box<dy
                     efforts: None,
                     compat: None,
                     display_name: None,
-                    context_window: 128_000,
+                    context_window: tau_proto::TokenCount::new(128_000),
                     tags: Vec::new(),
                     supports_parallel_tool_calls: true,
                     local_summary_compaction: None,

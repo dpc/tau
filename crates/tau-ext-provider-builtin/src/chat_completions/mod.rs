@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
-use tau_proto::ModelName;
+use tau_proto::{ModelName, TokenCount};
 use tau_provider::local_summary_compaction::Config as SummaryCompactionConfig;
 
 /// Default context window advertised by configured compatible models.
-const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+const DEFAULT_CONTEXT_WINDOW: TokenCount = TokenCount::new(128_000);
 
 /// One serialized Chat Completions-compatible provider profile.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,7 +52,7 @@ pub struct ChatCompletionsModel {
     pub display_name: Option<String>,
     /// Published context window.
     #[serde(default = "default_context_window")]
-    pub context_window: u64,
+    pub context_window: TokenCount,
     /// Optional model-level wire compatibility override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<ChatCompletionsCompat>,
@@ -132,11 +132,11 @@ impl LocalSummaryCompactionConfig {
     /// Convert this serialized profile into validated provider request limits.
     pub(crate) fn validated_for(
         self,
-        model_context_window: u64,
+        model_context_window: TokenCount,
     ) -> Option<tau_provider_chat_completions::LocalSummaryCompactionConfig> {
         tau_provider_chat_completions::LocalSummaryCompactionConfig::new(
             self.context_window_tokens,
-            model_context_window,
+            model_context_window.get(),
             self.max_input_bytes,
             self.max_output_tokens,
             self.max_output_bytes,
@@ -147,11 +147,11 @@ impl LocalSummaryCompactionConfig {
 /// Resolve an explicit profile or the generic no-byte-cap fallback.
 fn resolved_local_summary_compaction(
     override_config: Option<LocalSummaryCompactionConfig>,
-    context_window: u64,
+    context_window: TokenCount,
 ) -> Option<SummaryCompactionConfig> {
     match override_config {
         Some(config) => config.validated_for(context_window),
-        None => SummaryCompactionConfig::default_for(context_window),
+        None => SummaryCompactionConfig::default_for(context_window.get()),
     }
 }
 
@@ -509,7 +509,7 @@ impl ChatCompletionsCompat {
     }
 }
 
-const fn default_context_window() -> u64 {
+const fn default_context_window() -> TokenCount {
     DEFAULT_CONTEXT_WINDOW
 }
 fn function_tool_types() -> Vec<tau_proto::ToolType> {

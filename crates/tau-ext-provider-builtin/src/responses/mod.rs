@@ -15,7 +15,7 @@ pub use prompt_cache::{
 };
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use tau_proto::{Effort, ModelName, ProviderModelInfo, ProviderName};
+use tau_proto::{Effort, ModelName, ProviderModelInfo, ProviderName, TokenCount};
 use tau_provider::local_summary_compaction::Config as SummaryCompactionConfig;
 
 use self::sampling::ResponsesResponseSampler;
@@ -75,7 +75,7 @@ pub struct ResponsesModel {
     pub display_name: Option<String>,
     /// Advertised input context window.
     #[serde(default = "default_context_window")]
-    pub context_window: u64,
+    pub context_window: TokenCount,
     /// Model-specific tags.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<tau_proto::ModelTag>,
@@ -186,8 +186,8 @@ fn model_efforts(model: &ResponsesModel) -> Vec<Effort> {
     )
 }
 
-fn default_context_window() -> u64 {
-    128_000
+fn default_context_window() -> TokenCount {
+    TokenCount::new(128_000)
 }
 
 fn default_max_output_tokens() -> u32 {
@@ -231,7 +231,7 @@ pub fn models_for_provider(
                 tool_result_modalities: Vec::new(),
                 supports_parallel_tool_calls: model.supports_parallel_tool_calls,
                 default_affinity: 0,
-                context_window: tau_proto::TokenCount::new(model.context_window),
+                context_window: model.context_window,
                 efforts: model_efforts(model),
                 verbosities: vec![tau_proto::Verbosity::Medium],
                 thinking_summaries: vec![tau_proto::ThinkingSummary::Off],
@@ -455,7 +455,7 @@ fn materialize_summary_prompt(
 fn resolved_summary_config(model: &ResponsesModel) -> Option<SummaryCompactionConfig> {
     match model.local_summary_compaction {
         Some(config) => config.validated_for(model.context_window),
-        None => SummaryCompactionConfig::default_for(model.context_window),
+        None => SummaryCompactionConfig::default_for(model.context_window.get()),
     }
 }
 
