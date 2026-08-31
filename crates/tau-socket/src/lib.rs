@@ -8,14 +8,20 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::RecvTimeoutError;
+#[cfg(test)]
+use std::sync::mpsc::SyncSender;
 use std::time::Duration;
-use std::{fmt, fs, net as path_std_net, thread};
+use std::{fmt, fs, net as path_std_net};
 
 use tau_proto::{
     DecodeError, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
-    HarnessOutputWriter, PeerInputReader, PeerOutputWriter,
+    HarnessOutputWriter, PeerOutputWriter,
 };
+
+use self::reader_worker::ReaderWorker;
+
+mod reader_worker;
 
 /// Errors returned by the Unix socket transport.
 #[derive(Debug)]
@@ -371,12 +377,10 @@ pub enum SocketReceive {
 pub struct SocketPeer {
     /// Writer for peer/client-to-harness input messages.
     writer: PeerOutputWriter<BufWriter<UnixStream>>,
-    /// Bounded queue of decoded harness-to-peer/client output messages.
-    reader_frames: Option<Receiver<Result<HarnessOutputMessage, DecodeError>>>,
+    /// Background reader state, present together until peer shutdown begins.
+    reader_worker: Option<ReaderWorker>,
     /// Stream clone used to wake the reader thread during peer drop.
     shutdown_stream: UnixStream,
-    /// Background reader thread that owns the read side of the socket.
-    reader_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl SocketPeer {
@@ -436,12 +440,11 @@ impl SocketPeer {
         let shutdown_stream = stream
             .try_clone()
             .map_err(|source| SocketTransportError::Clone { source })?;
-        let (reader_frames, reader_thread) = spawn_reader(stream)?;
+        let reader_worker = ReaderWorker::spawn(stream)?;
         Ok(Self {
             writer: PeerOutputWriter::new(BufWriter::new(writer_stream)),
-            reader_frames: Some(reader_frames),
+            reader_worker: Some(reader_worker),
             shutdown_stream,
-            reader_thread: Some(reader_thread),
         })
     }
 
@@ -456,13 +459,11 @@ impl SocketPeer {
         let shutdown_stream = stream
             .try_clone()
             .map_err(|source| SocketTransportError::Clone { source })?;
-        let (reader_frames, reader_thread) =
-            spawn_reader_with_blocked_enqueue_hook(stream, blocked_enqueue)?;
+        let reader_worker = ReaderWorker::spawn_with_blocked_enqueue_hook(stream, blocked_enqueue)?;
         Ok(Self {
             writer: PeerOutputWriter::new(BufWriter::new(writer_stream)),
-            reader_frames: Some(reader_frames),
+            reader_worker: Some(reader_worker),
             shutdown_stream,
-            reader_thread: Some(reader_thread),
         })
     }
 
@@ -503,11 +504,11 @@ impl SocketPeer {
         &mut self,
         timeout: Duration,
     ) -> Result<SocketReceive, SocketTransportError> {
-        let reader_frames = self
-            .reader_frames
+        let reader_worker = self
+            .reader_worker
             .as_ref()
             .expect("socket peer reader missing before drop");
-        match reader_frames.recv_timeout(timeout) {
+        match reader_worker.frames.recv_timeout(timeout) {
             Ok(Ok(frame)) => Ok(SocketReceive::Message { message: frame }),
             Ok(Err(error)) => Err(SocketTransportError::Decode { source: error }),
             Err(RecvTimeoutError::Timeout) => Ok(SocketReceive::Timeout),
@@ -525,86 +526,13 @@ fn connect_unix_with_timeout(path: &Path, timeout: Duration) -> io::Result<UnixS
 
 impl Drop for SocketPeer {
     fn drop(&mut self) {
-        self.reader_frames.take();
+        let ReaderWorker { frames, thread } = self
+            .reader_worker
+            .take()
+            .expect("socket peer reader missing during drop");
+        drop(frames);
         let _ = self.shutdown_stream.shutdown(path_std_net::Shutdown::Both);
-        if let Some(reader_thread) = self.reader_thread.take() {
-            let _ = reader_thread.join();
-        }
-    }
-}
-
-type ReaderWorker = (
-    Receiver<Result<HarnessOutputMessage, DecodeError>>,
-    thread::JoinHandle<()>,
-);
-
-fn spawn_reader(stream: UnixStream) -> Result<ReaderWorker, SocketTransportError> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let reader_thread = thread::Builder::new()
-        .name("tau-socket-reader".to_owned())
-        .spawn(move || read_frames(stream, sender))
-        .map_err(|source| SocketTransportError::SpawnReader { source })?;
-    Ok((receiver, reader_thread))
-}
-
-fn read_frames(stream: UnixStream, sender: SyncSender<Result<HarnessOutputMessage, DecodeError>>) {
-    let mut reader = PeerInputReader::new(stream);
-    loop {
-        match reader.read_message() {
-            Ok(Some(frame)) => {
-                if sender.send(Ok(frame)).is_err() {
-                    return;
-                }
-            }
-            Ok(None) => return,
-            Err(error) => {
-                let _ = sender.send(Err(error));
-                return;
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-fn spawn_reader_with_blocked_enqueue_hook(
-    stream: UnixStream,
-    blocked_enqueue: SyncSender<()>,
-) -> Result<ReaderWorker, SocketTransportError> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let reader_thread = thread::Builder::new()
-        .name("tau-socket-reader".to_owned())
-        .spawn(move || read_frames_until_blocked_enqueue(stream, sender, blocked_enqueue))
-        .map_err(|source| SocketTransportError::SpawnReader { source })?;
-    Ok((receiver, reader_thread))
-}
-
-#[cfg(test)]
-fn read_frames_until_blocked_enqueue(
-    stream: UnixStream,
-    sender: SyncSender<Result<HarnessOutputMessage, DecodeError>>,
-    blocked_enqueue: SyncSender<()>,
-) {
-    let mut reader = PeerInputReader::new(stream);
-    loop {
-        match reader.read_message() {
-            Ok(Some(frame)) => match sender.try_send(Ok(frame)) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(frame)) => {
-                    blocked_enqueue
-                        .send(())
-                        .expect("queue-drop test should wait for blocked enqueue");
-                    if sender.send(frame).is_err() {
-                        return;
-                    }
-                }
-                Err(mpsc::TrySendError::Disconnected(_)) => return,
-            },
-            Ok(None) => return,
-            Err(error) => {
-                let _ = sender.send(Err(error));
-                return;
-            }
-        }
+        let _ = thread.join();
     }
 }
 
