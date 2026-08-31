@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -7,6 +8,33 @@ use super::*;
 const PRE_TRIGGER_WAIT: Duration = Duration::from_millis(50);
 const RESULT_WAIT: Duration = Duration::from_secs(1);
 const CONCURRENT_SENDERS: usize = 8;
+
+/// Ensures the private sender count starts at one and identifies only the final
+/// drop as the transition to a disconnected channel.
+#[test]
+fn live_sender_count_tracks_clone_and_last_drop() {
+    let count = LiveSenderCount::one();
+    assert_eq!(count.0.load(Ordering::Relaxed), 1);
+
+    count.clone_handle();
+    assert_eq!(count.0.load(Ordering::Relaxed), 2);
+    assert!(!count.drop_handle_is_last());
+    assert!(count.drop_handle_is_last());
+}
+
+/// Ensures a failed clone at the maximum count leaves sender accounting intact
+/// rather than wrapping and allowing a premature disconnect.
+#[test]
+fn live_sender_count_rejects_overflow_without_mutation() {
+    let count = LiveSenderCount(AtomicUsize::new(usize::MAX));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        count.clone_handle();
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(count.0.load(Ordering::Relaxed), usize::MAX);
+}
 
 /// Ensures dropping the receiver does not make later sender notifications
 /// panic.

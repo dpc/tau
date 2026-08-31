@@ -55,7 +55,7 @@ pub fn channel() -> (Sender, Receiver) {
             disconnected: false,
         }),
         condvar: Condvar::new(),
-        sender_count: AtomicUsize::new(1),
+        sender_count: LiveSenderCount::one(),
     });
     (
         Sender {
@@ -128,13 +128,42 @@ struct State {
 //   notification is delivered before disconnect.
 // - Receiver drop is intentionally not stored in shared state; senders keep
 //   accepting notifications after the receiver is gone.
+struct LiveSenderCount(AtomicUsize);
+
+impl LiveSenderCount {
+    // The channel starts with the sender returned by `channel`.
+    const fn one() -> Self {
+        Self(AtomicUsize::new(1))
+    }
+
+    // Accounts for a cloned sender without synchronizing channel state.
+    fn clone_handle(&self) {
+        let mut count = self.0.load(Ordering::Relaxed);
+        loop {
+            let next = count.checked_add(1).expect("live sender count overflow");
+            match self
+                .0
+                .compare_exchange_weak(count, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return,
+                Err(actual) => count = actual,
+            }
+        }
+    }
+
+    // Accounts for a dropped sender and reports whether it was the last one.
+    fn drop_handle_is_last(&self) -> bool {
+        self.0.fetch_sub(1, Ordering::AcqRel) == 1
+    }
+}
+
 struct Shared {
     // Protected notification/disconnection state.
     state: Mutex<State>,
     // Waits and wakes the single blocking receiver.
     condvar: Condvar,
     // Number of live sender handles, including clones.
-    sender_count: AtomicUsize,
+    sender_count: LiveSenderCount,
 }
 
 impl Shared {
@@ -151,7 +180,7 @@ pub struct Sender {
 
 impl Clone for Sender {
     fn clone(&self) -> Self {
-        self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
+        self.shared.sender_count.clone_handle();
         Sender {
             shared: Arc::clone(&self.shared),
         }
@@ -160,7 +189,7 @@ impl Clone for Sender {
 
 impl Drop for Sender {
     fn drop(&mut self) {
-        if self.shared.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+        if self.shared.sender_count.drop_handle_is_last() {
             let mut state = self.shared.lock();
             state.disconnected = true;
             // Wake a parked `recv()` that hasn't yet observed disconnect.
