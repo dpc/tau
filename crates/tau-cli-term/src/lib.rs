@@ -294,7 +294,7 @@ pub struct HighTerm {
     /// Optional small limits used by focused test-only history state machines.
     #[cfg(test)]
     prompt_history_limit_override: Option<PromptHistoryLimits>,
-    completion_rules: CompletionRules,
+    completion_command_rules: completion::CompletionCommandRules,
     last_command_completion_token: Option<String>,
 }
 
@@ -360,6 +360,7 @@ impl HighTerm {
         let handle_clone = handle.clone();
         let data = CompletionData::new();
         let data_clone = data.clone();
+        let completion_command_rules = completion_rules.command_rules().clone();
         term.set_completion_source(Some(make_completion_source(
             commands,
             data,
@@ -383,7 +384,7 @@ impl HighTerm {
                 last_submitted_prompt_retained: false,
                 #[cfg(test)]
                 prompt_history_limit_override: None,
-                completion_rules,
+                completion_command_rules,
                 last_command_completion_token: None,
             },
             handle_clone,
@@ -393,19 +394,41 @@ impl HighTerm {
 
     #[cfg(test)]
     pub(crate) fn new_for_test(
-        mut term: tau_cli_term_raw::Term,
+        term: tau_cli_term_raw::Term,
         handle: TermHandle,
         commands: Vec<CommandCompletion>,
         theme: Theme,
         bindings: impl IntoIterator<Item = (String, String)>,
     ) -> (Self, CompletionData) {
+        Self::new_for_test_with_completion_rules(
+            term,
+            handle,
+            commands,
+            theme,
+            bindings,
+            CompletionRules::default(),
+        )
+    }
+
+    /// Creates a virtual terminal with explicit completion rules for focused
+    /// runtime tests.
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_completion_rules(
+        mut term: tau_cli_term_raw::Term,
+        handle: TermHandle,
+        commands: Vec<CommandCompletion>,
+        theme: Theme,
+        bindings: impl IntoIterator<Item = (String, String)>,
+        completion_rules: CompletionRules,
+    ) -> (Self, CompletionData) {
         term.defer_submitted_input_history_limit();
         let data = CompletionData::new();
         let data_clone = data.clone();
+        let completion_command_rules = completion_rules.command_rules().clone();
         term.set_completion_source(Some(make_completion_source(
             commands,
             data,
-            CompletionRules::default(),
+            completion_rules.clone(),
         )));
         term.set_bindings(bindings);
         (
@@ -419,7 +442,7 @@ impl HighTerm {
                 prompt_history: Vec::new(),
                 last_submitted_prompt_retained: false,
                 prompt_history_limit_override: None,
-                completion_rules: CompletionRules::default(),
+                completion_command_rules,
                 last_command_completion_token: None,
             },
             data_clone,
@@ -930,11 +953,8 @@ impl HighTerm {
         let buffer = self.handle.get_buffer();
         let cursor = self.handle.get_cursor();
         let Some((command, before, after)) = self
-            .completion_rules
+            .completion_command_rules
             .command_for_exact_token(&buffer, cursor)
-            .map(|(command, before, after)| {
-                (command.to_vec(), before.to_owned(), after.to_owned())
-            })
         else {
             self.last_command_completion_token = None;
             return Ok(false);
@@ -944,7 +964,15 @@ impl HighTerm {
             return Ok(false);
         }
         self.last_command_completion_token = Some(token_key);
-        match run_completion_command(&self.term, &command) {
+        let completion_result = match command {
+            completion::CommandCompletionMatch::Command(command) => {
+                run_completion_command(&self.term, command)
+            }
+            completion::CommandCompletionMatch::EmptyCommand => {
+                Err(empty_completion_command_error())
+            }
+        };
+        match completion_result {
             Ok(Some(text)) => {
                 let new_text = format!("{before}{text}{after}");
                 let new_cursor = before.len() + text.len();
@@ -1173,17 +1201,14 @@ fn make_completion_source(
 
 fn run_completion_command(
     term: &tau_cli_term_raw::Term,
-    command: &[String],
+    command: &completion::CompletionCommand,
 ) -> Result<Option<String>, BoundedCommandError> {
-    let Some((program, args)) = command.split_first() else {
-        return Err("empty command".to_owned().into());
-    };
     term.pause_for_external()
         .map_err(|e| format!("could not release terminal: {e}"))?;
     let guard = ExternalResumeGuard::new(|| term.resume_after_external());
-    let mut command_builder = path_std_process::Command::new(program);
+    let mut command_builder = path_std_process::Command::new(command.program());
     command_builder
-        .args(args)
+        .args(command.args())
         .stdin(path_std_process::Stdio::null())
         .stdout(path_std_process::Stdio::piped())
         .stderr(path_std_process::Stdio::null());
@@ -1208,6 +1233,12 @@ fn run_completion_command(
     } else {
         Ok(Some(text))
     }
+}
+
+/// Returns the established diagnostic for a public completion command with no
+/// executable argv element.
+fn empty_completion_command_error() -> BoundedCommandError {
+    "empty command".to_owned().into()
 }
 
 struct PromptShellCommand {

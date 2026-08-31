@@ -3,6 +3,7 @@ use std::{cell as path_std_cell, rc as path_std_rc, sync as path_std_sync, time 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::*;
+use crate::completion::CompletionRuleKind;
 
 const TEST_PROMPT_HISTORY_MAX_BYTES: usize = 64 * 1024;
 
@@ -112,6 +113,31 @@ fn new_test_term(
     path_std_sync::mpsc::Sender<TestRawEvent>,
 ) {
     let (term, handle, _completion_data, input_tx) = new_test_term_with_data(commands);
+    (term, handle, input_tx)
+}
+
+fn new_test_term_with_completion_rules(
+    completion_rules: CompletionRules,
+) -> (
+    HighTerm,
+    TermHandle,
+    path_std_sync::mpsc::Sender<TestRawEvent>,
+) {
+    let (raw_term, handle, input_tx) = tau_cli_term_raw::Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(std::io::sink()),
+        CursorShape::Bar,
+    );
+    let (term, _) = HighTerm::new_for_test_with_completion_rules(
+        raw_term,
+        handle.clone(),
+        Vec::new(),
+        Theme::new(),
+        std::iter::empty::<(String, String)>(),
+        completion_rules,
+    );
     (term, handle, input_tx)
 }
 
@@ -1311,6 +1337,77 @@ fn fake_fzf(script: &str) -> tempfile::TempPath {
     permissions.set_mode(0o700);
     std::fs::set_permissions(file.path(), permissions).expect("make fake fzf executable");
     file.into_temp_path()
+}
+
+#[cfg(unix)]
+fn fake_completion_command(script: &str) -> tempfile::TempPath {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let file = tempfile::NamedTempFile::new().expect("fake completion command file");
+    std::fs::write(file.path(), format!("#!/bin/sh\n{script}\n"))
+        .expect("write fake completion command");
+    let mut permissions = std::fs::metadata(file.path())
+        .expect("fake completion command metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(file.path(), permissions)
+        .expect("make fake completion command executable");
+    file.into_temp_path()
+}
+
+/// A publicly constructed command argv must spawn only its named program and
+/// preserve every argument's order and UTF-8 bytes through execution.
+#[cfg(unix)]
+#[test]
+fn completion_command_spawns_named_program_with_exact_argv() {
+    let program = fake_completion_command(
+        r#"set -eu
+test "$#" -eq 3
+test "$1" = "first argument"
+test "$2" = "雪"
+test "$3" = "last"
+printf 'resolved token\n'"#,
+    );
+    let rules = CompletionRules::new(vec![CompletionRule {
+        prefix: "#/".to_owned(),
+        kind: CompletionRuleKind::Command(vec![
+            program.to_string_lossy().into_owned(),
+            "first argument".to_owned(),
+            "雪".to_owned(),
+            "last".to_owned(),
+        ]),
+    }]);
+    let (mut term, handle, _input_tx) = new_test_term_with_completion_rules(rules);
+    handle.set_buffer("#/".to_owned(), 2);
+
+    assert!(
+        term.maybe_run_command_completion()
+            .expect("completion command succeeds")
+    );
+    assert_eq!(handle.get_buffer(), "resolved token");
+}
+
+/// A public empty command vector keeps its local `empty command` notice and
+/// never reaches the subprocess runner or rewrites the exact trigger token.
+#[test]
+fn empty_completion_command_keeps_diagnostic_and_does_not_replace_token() {
+    let rules = CompletionRules::new(vec![CompletionRule {
+        prefix: "#/".to_owned(),
+        kind: CompletionRuleKind::Command(Vec::new()),
+    }]);
+    let (mut term, handle, _input_tx) = new_test_term_with_completion_rules(rules);
+    handle.set_buffer("#/".to_owned(), 2);
+
+    assert!(
+        term.maybe_run_command_completion()
+            .expect("empty command remains a local diagnostic")
+    );
+    assert_eq!(
+        empty_completion_command_error().to_string(),
+        "empty command"
+    );
+    assert_eq!(handle.get_buffer(), "#/");
+    assert_eq!(handle.output_snapshot().block_count(), 1);
 }
 
 #[cfg(unix)]

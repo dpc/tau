@@ -282,6 +282,92 @@ pub struct CompletionRule {
     pub kind: CompletionRuleKind,
 }
 
+/// Private nonempty argv retained for one configured completion command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CompletionCommand {
+    /// Executable name passed as argv element zero.
+    program: String,
+    /// Remaining argv elements passed to the executable unchanged and in order.
+    args: Vec<String>,
+}
+
+impl CompletionCommand {
+    /// Converts a public command argv into its private nonempty runtime form.
+    fn from_argv(argv: Vec<String>) -> Option<Self> {
+        let mut argv = argv.into_iter();
+        Some(Self {
+            program: argv.next()?,
+            args: argv.collect(),
+        })
+    }
+
+    /// Returns the executable name selected by the public command argv.
+    pub(super) fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// Returns the executable arguments after the program name.
+    pub(super) fn args(&self) -> &[String] {
+        &self.args
+    }
+}
+
+/// Exact command-completion match selected from the private runtime rules.
+pub(super) enum CommandCompletionMatch<'a> {
+    /// A public command argv with a program, ready for execution.
+    Command(&'a CompletionCommand),
+    /// A publicly constructed empty command argv, retained for the established
+    /// runtime fallback diagnostic.
+    EmptyCommand,
+}
+
+/// One completion rule retained by the private command-completion runtime.
+#[derive(Clone, Debug)]
+struct RuntimeCompletionRule {
+    /// Word prefix that activates this rule.
+    prefix: String,
+    /// Runtime behavior selected from the public rule kind.
+    kind: RuntimeCompletionRuleKind,
+}
+
+impl From<&CompletionRule> for RuntimeCompletionRule {
+    fn from(rule: &CompletionRule) -> Self {
+        Self {
+            prefix: rule.prefix.clone(),
+            kind: (&rule.kind).into(),
+        }
+    }
+}
+
+/// Runtime completion behavior with command argv made nonempty before storage.
+#[derive(Clone, Debug)]
+enum RuntimeCompletionRuleKind {
+    /// Complete active agent mentions from harness-provided agent data.
+    Agents,
+    /// Complete filesystem paths by reading the matching directory.
+    Path,
+    /// Complete filesystem paths, preferring fuzzy git-tracked file matches.
+    PathFuzzy,
+    /// Complete action/command names.
+    Actions,
+    /// Run a configured command, or retain the public empty-argv fallback.
+    Command(Option<CompletionCommand>),
+}
+
+impl From<&CompletionRuleKind> for RuntimeCompletionRuleKind {
+    fn from(kind: &CompletionRuleKind) -> Self {
+        match kind {
+            CompletionRuleKind::Agents => Self::Agents,
+            CompletionRuleKind::Path => Self::Path,
+            CompletionRuleKind::PathFuzzy => Self::PathFuzzy,
+            CompletionRuleKind::Actions => Self::Actions,
+            CompletionRuleKind::Command(argv) => {
+                Self::Command(CompletionCommand::from_argv(argv.clone()))
+            }
+        }
+    }
+}
+
 impl CompletionRule {
     /// Parses a `cli.yaml` completion entry such as `complete_path` or
     /// `complete_with_command fzf --filter foo`.
@@ -310,7 +396,12 @@ impl CompletionRule {
 /// Prompt completion rules. If multiple rules match, the longest prefix wins.
 #[derive(Clone, Debug)]
 pub struct CompletionRules {
+    /// Public/config rules retained for the public accessor and completion
+    /// menu.
     rules: Vec<CompletionRule>,
+    /// Private command runtime derived at the public-rule construction
+    /// boundary.
+    command_rules: CompletionCommandRules,
 }
 
 impl CompletionRules {
@@ -322,7 +413,11 @@ impl CompletionRules {
                 .cmp(&a.prefix.len())
                 .then(a.prefix.cmp(&b.prefix))
         });
-        Self { rules }
+        let command_rules = CompletionCommandRules::from_public_rules(&rules);
+        Self {
+            rules,
+            command_rules,
+        }
     }
 
     /// Built-in prompt completion defaults used when no config is supplied.
@@ -350,26 +445,77 @@ impl CompletionRules {
         buffer: &'a str,
         cursor: usize,
     ) -> Option<(&'a [String], &'a str, &'a str)> {
-        if first_non_whitespace_starts_command(buffer) {
-            return None;
-        }
-        let token = word_token(buffer, cursor)?;
-        if buffer
-            .get(cursor..)?
-            .chars()
-            .next()
-            .is_some_and(|ch| !ch.is_whitespace())
-        {
-            return None;
-        }
+        let token = exact_command_token(buffer, cursor)?;
         let rule = self.rules.iter().find(|rule| rule.prefix == token.prefix)?;
         match &rule.kind {
-            CompletionRuleKind::Command(command) => {
-                Some((command.as_slice(), token.before, token.after))
-            }
+            CompletionRuleKind::Command(command) => Some((command, token.before, token.after)),
             _ => None,
         }
     }
+
+    /// Returns the private command runtime derived with these public rules.
+    pub(super) fn command_rules(&self) -> &CompletionCommandRules {
+        &self.command_rules
+    }
+}
+
+/// Private command rules converted from the public completion-rule boundary.
+#[derive(Clone, Debug)]
+pub(super) struct CompletionCommandRules {
+    /// All rules in public rule order so duplicate-prefix behavior remains
+    /// exact.
+    rules: Vec<RuntimeCompletionRule>,
+}
+
+impl CompletionCommandRules {
+    /// Converts public completion rules at their construction boundary.
+    fn from_public_rules(rules: &[CompletionRule]) -> Self {
+        Self {
+            rules: rules.iter().map(RuntimeCompletionRule::from).collect(),
+        }
+    }
+
+    /// Returns the private command and replacement surroundings for one exact
+    /// command trigger token.
+    pub(super) fn command_for_exact_token<'a>(
+        &'a self,
+        buffer: &'a str,
+        cursor: usize,
+    ) -> Option<(CommandCompletionMatch<'a>, &'a str, &'a str)> {
+        let token = exact_command_token(buffer, cursor)?;
+        let rule = self.rules.iter().find(|rule| rule.prefix == token.prefix)?;
+        match &rule.kind {
+            RuntimeCompletionRuleKind::Command(Some(command)) => Some((
+                CommandCompletionMatch::Command(command),
+                token.before,
+                token.after,
+            )),
+            RuntimeCompletionRuleKind::Command(None) => Some((
+                CommandCompletionMatch::EmptyCommand,
+                token.before,
+                token.after,
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// Finds a configured command trigger only when it occupies the complete token
+/// at the cursor outside intrinsic command mode.
+fn exact_command_token(buffer: &str, cursor: usize) -> Option<PathToken<'_>> {
+    if first_non_whitespace_starts_command(buffer) {
+        return None;
+    }
+    let token = word_token(buffer, cursor)?;
+    if buffer
+        .get(cursor..)?
+        .chars()
+        .next()
+        .is_some_and(|ch| !ch.is_whitespace())
+    {
+        return None;
+    }
+    Some(token)
 }
 
 impl Default for CompletionRules {
@@ -988,5 +1134,8 @@ fn render_menu_block_with_max_rows(
     StyledBlock::new(StyledText::from(spans))
 }
 
+#[cfg(test)]
+#[path = "completion_rule_tests.rs"]
+mod completion_rule_tests;
 #[cfg(test)]
 mod render_tests;
