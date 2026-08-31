@@ -24,8 +24,58 @@ pub struct ClientHandle {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StartupGate {
-    PreReady { rejected: bool },
+    /// Startup remains eligible to enqueue its runner-owned `Ready` frame.
+    PreReady,
+    /// A pre-Ready `ConfigError` permanently prevents the terminal `Ready`.
+    Rejected,
+    /// The terminal `Ready` frame is enqueued, but may not yet be published.
     Ready,
+}
+
+impl StartupGate {
+    /// Return whether startup remains eligible for its terminal `Ready`.
+    const fn is_pre_ready(self) -> bool {
+        matches!(self, Self::PreReady)
+    }
+
+    /// Record one pre-Ready `ConfigError` attempt as a terminal rejection.
+    ///
+    /// Returns whether this error changed startup eligibility. Runtime
+    /// `ConfigError` frames remain valid after `Ready`.
+    fn reject_for_config_error(&mut self) -> bool {
+        if !self.is_pre_ready() {
+            return false;
+        }
+        *self = Self::Rejected;
+        true
+    }
+
+    /// Return whether a configuration error has terminally rejected startup.
+    const fn is_rejected(self) -> bool {
+        matches!(self, Self::Rejected)
+    }
+
+    /// Confirm that the runner retains authority to enqueue its terminal
+    /// `Ready`.
+    fn check_ready_authority(self) -> ClientResult<()> {
+        match self {
+            Self::PreReady => Ok(()),
+            Self::Rejected => Err(ClientError::handler(
+                "startup cannot send Ready after ConfigError",
+            )),
+            Self::Ready => Err(ClientError::handler("startup Ready has already been sent")),
+        }
+    }
+
+    /// Record that the runner has enqueued its one terminal `Ready` frame.
+    ///
+    /// Call this only after the frame enters the writer lane, preserving the
+    /// Ready-enqueued before startup-published phase.
+    fn mark_ready_enqueued(&mut self) {
+        // ast-grep-ignore: debug-assert-expression-must-not-mutate
+        debug_assert!(self.is_pre_ready());
+        *self = Self::Ready;
+    }
 }
 
 impl ClientHandle {
@@ -36,7 +86,7 @@ impl ClientHandle {
             sender: Arc::new(Mutex::new(Some(sender))),
             tool_name_scope: Arc::new(OnceLock::new()),
             startup_complete: Arc::new(AtomicBool::new(false)),
-            startup_gate: Arc::new(Mutex::new(StartupGate::PreReady { rejected: false })),
+            startup_gate: Arc::new(Mutex::new(StartupGate::PreReady)),
             configuring: Arc::new(AtomicBool::new(false)),
             pending_configure_outputs: Arc::new(Mutex::new(Vec::new())),
         }
@@ -407,8 +457,7 @@ impl ClientHandle {
 
     fn send_config_error(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
         let mut gate = self.startup_gate.lock().expect("lock startup gate");
-        if let StartupGate::PreReady { rejected } = &mut *gate {
-            *rejected = true;
+        if gate.reject_for_config_error() {
             self.activate_detached()?;
             let ack = self.enqueue_after_detached(message)?;
             drop(gate);
@@ -488,10 +537,12 @@ impl ClientHandle {
         }
         if matches!(&message, tau_proto::HarnessInputMessage::ConfigError(_)) {
             let mut gate = self.startup_gate.lock().expect("lock startup gate");
-            if let StartupGate::PreReady { rejected } = &mut *gate {
+            if gate.is_pre_ready() {
                 let result = self.admit_detached(message);
                 if result.is_ok() {
-                    *rejected = true;
+                    let rejected = gate.reject_for_config_error();
+                    // ast-grep-ignore: debug-assert-expression-must-not-mutate
+                    debug_assert!(rejected);
                     if let Err(error) = self.activate_detached() {
                         drop(gate);
                         return Err(error);
@@ -736,10 +787,10 @@ impl ClientHandle {
 
     /// Return whether startup has emitted a configuration rejection.
     pub(crate) fn startup_rejected(&self) -> bool {
-        matches!(
-            *self.startup_gate.lock().expect("lock startup gate"),
-            StartupGate::PreReady { rejected: true }
-        )
+        self.startup_gate
+            .lock()
+            .expect("lock startup gate")
+            .is_rejected()
     }
 
     pub(crate) fn set_configuring(&self, configuring: bool) {
@@ -749,22 +800,12 @@ impl ClientHandle {
     /// Atomically reject or publish the one terminal startup Ready frame.
     pub(crate) fn send_ready(&self, message: Option<String>) -> ClientResult<()> {
         let mut gate = self.startup_gate.lock().expect("lock startup gate");
-        match *gate {
-            StartupGate::PreReady { rejected: true } => {
-                return Err(ClientError::handler(
-                    "startup cannot send Ready after ConfigError",
-                ));
-            }
-            StartupGate::PreReady { rejected: false } => {}
-            StartupGate::Ready => {
-                return Err(ClientError::handler("startup Ready has already been sent"));
-            }
-        }
+        gate.check_ready_authority()?;
         let ack =
             self.enqueue_immediate(tau_proto::HarnessInputMessage::Ready(tau_proto::Ready {
                 message,
             }))?;
-        *gate = StartupGate::Ready;
+        gate.mark_ready_enqueued();
         drop(gate);
         Self::wait_for_ack(ack)?;
         self.startup_complete.store(true, Ordering::Release);

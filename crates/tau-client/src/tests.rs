@@ -4014,6 +4014,72 @@ fn detached_config_error_before_ready_withholds_ready() {
     ));
 }
 
+/// A pre-Ready ConfigError accepted through one concurrently usable handle
+/// clone must reject Ready and remain visible through every other clone.
+#[test]
+fn cloned_handle_config_error_rejection_is_shared_before_ready() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
+    let handle = ClientHandle::new(sender);
+    let rejecting_handle = handle.clone();
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+
+    std::thread::spawn(move || {
+        rejecting_handle.send_detached(HarnessInputMessage::ConfigError(tau_proto::ConfigError {
+            message: "rejection from clone".to_owned(),
+        }))
+    })
+    .join()
+    .expect("ConfigError sender")
+    .expect("detached ConfigError");
+
+    assert!(handle.startup_rejected());
+    assert_eq!(
+        handle
+            .send_ready(None)
+            .expect_err("shared rejection must prevent Ready")
+            .to_string(),
+        "startup cannot send Ready after ConfigError"
+    );
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+    assert!(matches!(
+        frames_from_writer(&written).as_slice(),
+        [HarnessInputMessage::ConfigError(tau_proto::ConfigError { message })]
+            if message == "rejection from clone"
+    ));
+}
+
+/// The runner-owned Ready transition must publish one frame and preserve the
+/// exact diagnostic when a later call tries to claim Ready authority again.
+#[test]
+fn client_handle_ready_is_at_most_once() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let (sender, receiver) = crate::writer_thread::writer_channel();
+    let handle = ClientHandle::new(sender);
+    let writer_thread =
+        std::thread::spawn(move || crate::writer_thread::run_writer(writer, receiver));
+
+    handle.send_ready(None).expect("first Ready");
+    assert!(!handle.startup_rejected());
+    assert_eq!(
+        handle
+            .send_ready(None)
+            .expect_err("Ready authority is at most once")
+            .to_string(),
+        "startup Ready has already been sent"
+    );
+    handle.shutdown().expect("shutdown");
+    writer_thread.join().expect("writer join").expect("writer");
+    assert!(matches!(
+        frames_from_writer(&written).as_slice(),
+        [HarnessInputMessage::Ready(_)]
+    ));
+}
+
 /// Raw synchronous Ready is rejected even while a Configure callback has
 /// temporary access to other startup output.
 #[test]
