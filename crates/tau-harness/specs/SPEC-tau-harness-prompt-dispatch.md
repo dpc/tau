@@ -36,10 +36,12 @@ surface for request-cache equivalence while using provider `tool_choice: none`.
 Non-tool extension side queries instead set `tool_choice: none` and suppress
 both ordinary and hosted logical web definitions before provider delivery.
 They also hide tool instructions and locally reject any provider violation.
-A peer auto-start query owns this restricted surface only until an authenticated
-human UI prompt commits on the reusable endpoint. That prompt records user
-originator authority and later materialization uses the ordinary tool-capable
-surface. Payload message class and claimed originator never grant that authority.
+Authenticated cross-harness peer entrypoints retain extension provenance but use
+the ordinary tool-capable surface immediately. The peer message remains
+untrusted request content rather than user authority; the configured target role,
+tool policy, and registered tool routes remain the capability boundary. A later
+authenticated human UI prompt records user originator authority independently of
+payload message class or claimed originator.
 
 The same concrete model snapshot supplies the parallel-call capability.
 Templates advertise parallel execution only when the effective provider route

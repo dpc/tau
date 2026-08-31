@@ -153,7 +153,7 @@ impl GateFixture {
         });
         if matches!(
             mode,
-            FixtureMode::DummyTool | FixtureMode::ReleasableDummyTool
+            FixtureMode::DummyTool | FixtureMode::ReleasableDummyTool | FixtureMode::PeerEntrypoint
         ) {
             let config = if let Some((socket, nonce)) = &dummy_release {
                 serde_json::json!({
@@ -204,7 +204,7 @@ impl GateFixture {
                 serde_json::json!({
                     "deterministic-peer": {
                         "model": "fake/test",
-                        "tools": [],
+                        "tools": ["restart_test_dummy"],
                         "inter_session_receiver": true,
                         "inter_session_auto_start": true,
                     }
@@ -269,10 +269,10 @@ impl GateFixture {
             artifacts,
             completed: Cell::new(false),
             enabled_extensions: match mode {
-                FixtureMode::DummyTool | FixtureMode::ReleasableDummyTool => {
-                    &["e2e-fake-provider", "test-dummy"]
-                }
-                FixtureMode::MultiAgent | FixtureMode::PeerEntrypoint => &["e2e-fake-provider"],
+                FixtureMode::DummyTool
+                | FixtureMode::ReleasableDummyTool
+                | FixtureMode::PeerEntrypoint => &["e2e-fake-provider", "test-dummy"],
+                FixtureMode::MultiAgent => &["e2e-fake-provider"],
             },
             dummy_release,
         })

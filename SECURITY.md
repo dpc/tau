@@ -342,12 +342,18 @@ runtime socket discovery. A dedicated external-message connection is admitted
 only to its message, callback-authentication, and session-probe RPCs and cannot
 reach UI or Action handlers. Callback correlation prevents accidental sender/route
 confusion before bounded admission or model-spending auto-start, while peer text
-remains model input rather than a harness instruction. Delivery is best-effort
-at-least-once: an ambiguous crash or retry can duplicate receive occurrences,
-agents, model work, and spend. Each accepted directional occurrence is its
-owning journal's sole canonical payload projection. Local inbound provider
-context exact-close-frames peer text inside a sender-labelled wrapper; live activation
-uses a payload-free sequence wake, and replay restores context without waking.
+remains model input rather than a harness instruction. An authenticated bare-peer
+auto-start immediately receives the target's configured role- and policy-filtered
+tool surface so cooperative handovers can operate without a second UI prompt;
+peer payload cannot select or expand that authority and retains extension
+provenance. The hot dispatch and cold marker behavior are governed by
+[SPEC-tau-harness-prompt-dispatch](crates/tau-harness/specs/SPEC-tau-harness-prompt-dispatch.md).
+Delivery is best-effort at-least-once: an ambiguous crash or retry can duplicate
+receive occurrences, agents, model work, and spend. Each accepted directional
+occurrence is its owning journal's sole canonical payload projection. Local
+inbound provider context exact-close-frames peer text inside a sender-labelled
+wrapper; live activation uses a payload-free sequence wake, and replay restores
+context without waking.
 The target's complete foreground framed write remains ACK authority; ACK does
 not wait for background filesystem sync. An ACK or provider effect can therefore
 survive a crash that loses its journal fact. Tau adds no restart deduplication,

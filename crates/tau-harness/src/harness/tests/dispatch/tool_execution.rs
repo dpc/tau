@@ -1328,10 +1328,10 @@ fn tools_drift_invalidates_chain_anchor() {
     );
 }
 
-/// A peer-created endpoint keeps its creating query non-tool, then an
-/// authenticated UI prompt adopts it with ordinary tool authority.
+/// An authenticated peer handover auto-starts an endpoint that can immediately
+/// execute a real registered tool without a target-session UI prompt.
 #[test]
-fn human_ui_prompt_adopts_peer_auto_start_endpoint_with_tool_authority() {
+fn peer_auto_start_handover_dispatches_tool_without_human_ui_prompt() {
     let td = TempDir::new().expect("tempdir");
     let mut h = echo_harness(td.path().join("state")).expect("start");
     configure_inter_session_receivers(&mut h, &[("engineer", true)]);
@@ -1373,7 +1373,17 @@ fn human_ui_prompt_adopts_peer_auto_start_endpoint_with_tool_authority() {
         .clone();
     let initial_prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(initial_prompt.originator, initial_originator);
-    assert_eq!(initial_prompt.tool_choice, tau_proto::ToolChoice::None);
+    assert_eq!(initial_prompt.tool_choice, tau_proto::ToolChoice::Auto);
+    assert!(
+        !event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::AgentPromptSubmitted(prompt)
+                if prompt.agent_id == recipient
+                    && prompt.submission_source
+                        == tau_proto::PromptSubmissionSource::HumanUi
+        )),
+        "peer handover must not depend on a target-session UI prompt"
+    );
     assert!(
         !h.complete_failed_compaction_side_conversation(&cid, None),
         "peer endpoint compaction failure follows ordinary blocked-agent recovery"
@@ -1385,62 +1395,8 @@ fn human_ui_prompt_adopts_peer_auto_start_endpoint_with_tool_authority() {
         output_length_disposition: tau_proto::OutputLengthDisposition::None,
         estimated_api_cost_rates: None,
         estimated_api_cost_increment: None,
+
         agent_prompt_id: initial_prompt_id,
-        agent_id: recipient.clone(),
-        output_items: Vec::new(),
-        stop_reason: tau_proto::ProviderStopReason::EndTurn,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        usage: None,
-        originator: initial_originator,
-        compaction_original_input_tokens: None,
-        compaction_output_tokens: None,
-        backend: None,
-        provider_attempt: Default::default(),
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("complete creating peer query");
-
-    h.handle_authenticated_ui_prompt_submitted(
-        crate::harness::harness_connection_id(),
-        tau_proto::UiPromptSubmitted {
-            literal: true,
-            session_id: h.session_runtime.current_session_id.clone(),
-            text: "now use the test tool".to_owned(),
-            agent_id: recipient.clone(),
-            message_class: tau_proto::PromptMessageClass::User,
-            // This payload claim is deliberately stale. The authenticated UI
-            // connection, not this field, owns submission authority.
-            originator: tau_proto::PromptOriginator::Extension {
-                name: tau_proto::ExtensionName::parse("forged-extension").expect("extension name"),
-                query_id: "forged-query".to_owned(),
-            },
-            ctx_id: None,
-        },
-    )
-    .expect("submit authenticated UI prompt");
-    let adopted_prompt = read_nth_prompt_created(&h, 1);
-    assert_eq!(adopted_prompt.originator, tau_proto::PromptOriginator::User);
-    assert_eq!(adopted_prompt.tool_choice, tau_proto::ToolChoice::Auto);
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::AgentPromptSubmitted(prompt)
-            if prompt.agent_id == recipient
-                && prompt.originator == tau_proto::PromptOriginator::User
-                && prompt.submission_source == tau_proto::PromptSubmissionSource::HumanUi
-    )));
-    let prompt_id = adopted_prompt.agent_prompt_id;
-
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        automatic_compaction_decision: None,
-        output_length_disposition: tau_proto::OutputLengthDisposition::None,
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
-
-        agent_prompt_id: prompt_id,
         agent_id: recipient.clone(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "peer-tool-call".into(),
@@ -1456,7 +1412,7 @@ fn human_ui_prompt_adopts_peer_auto_start_endpoint_with_tool_authority() {
         context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
-        originator: tau_proto::PromptOriginator::User,
+        originator: initial_originator,
         compaction_original_input_tokens: None,
         compaction_output_tokens: None,
         backend: None,
@@ -1480,90 +1436,6 @@ fn human_ui_prompt_adopts_peer_auto_start_endpoint_with_tool_authority() {
             .get("peer-tool-call")
             .map(|connection| connection.as_str()),
         Some("peer-tool-owner")
-    );
-}
-
-/// A provider cannot bypass the peer query's initial `ToolChoice::None`
-/// authority; the harness rejects the call locally without retiring the
-/// reusable endpoint.
-#[test]
-fn peer_auto_start_initial_prompt_rejects_provider_tool_violation() {
-    let td = TempDir::new().expect("tempdir");
-    let mut h = echo_harness(td.path().join("state")).expect("start");
-    configure_inter_session_receivers(&mut h, &[("engineer", true)]);
-    let _tool = connect_test_tool(&mut h, "peer-tool-owner");
-    h.tool_routing.registry.register(
-        &crate::test_connection_id("peer-tool-owner"),
-        shared_test_tool_spec("peer_test_tool"),
-    );
-    let result = h.handle_external_agent_message_request_without_auth_for_test(
-        tau_proto::ExternalAgentMessageRequest {
-            request_id: "peer-tool-violation".to_owned(),
-            message_id: tau_proto::AgentMessageId::parse("peer-tool-violation-message")
-                .expect("test identifier must satisfy its grammar"),
-            capability: "test-only".to_owned(),
-            sender_session_id: test_session_id("sender-session"),
-            sender_id: crate::parse_agent_id("sender_agent"),
-            recipient_session_id: h.session_runtime.current_session_id.clone(),
-            recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
-            kind: tau_proto::AgentMessageKind::Message,
-            message: "attempt a forbidden tool call".to_owned(),
-        },
-    );
-    let recipient = result.recipient_id.expect("peer recipient");
-    let cid = h
-        .agent_runtime
-        .agent_registry
-        .agent_routes
-        .get(recipient.as_str())
-        .cloned()
-        .expect("peer route");
-    let prompt = read_nth_prompt_created(&h, 0);
-    assert_eq!(prompt.tool_choice, tau_proto::ToolChoice::None);
-
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        automatic_compaction_decision: None,
-        output_length_disposition: tau_proto::OutputLengthDisposition::None,
-        estimated_api_cost_rates: None,
-        estimated_api_cost_increment: None,
-        agent_prompt_id: prompt.agent_prompt_id,
-        agent_id: recipient.clone(),
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "forbidden-peer-tool-call".into(),
-            name: ToolName::new("peer_test_tool"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-            raw_arguments_json: None,
-            responses_envelope: None,
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        error: None,
-        failure_kind: None,
-        context_limit_telemetry: None,
-        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
-        usage: None,
-        originator: prompt.originator,
-        compaction_original_input_tokens: None,
-        compaction_output_tokens: None,
-        backend: None,
-        provider_attempt: Default::default(),
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("reject peer tool violation");
-
-    assert!(
-        !h.tool_routing
-            .tool_runtime
-            .pending_tool_providers
-            .contains_key("forbidden-peer-tool-call")
-    );
-    assert!(h.agent_runtime.agent_registry.agents.contains_key(&cid));
-    assert!(
-        h.agent_runtime
-            .agent_registry
-            .agent_routes
-            .contains_key(recipient.as_str())
     );
 }
 

@@ -435,10 +435,12 @@ harness embeds a reserved, non-inheritable metadata marker in the immutable
 ordered `AgentStarted` creation fact and restores it before extension-query
 teardown classification. Interception cannot drop or rewrite the protected
 creation fact, and general metadata intake cannot set, unset, or inherit this key.
-The creating peer query retains non-tool extension authority for its own prompt.
-An authenticated attached-UI submission can subsequently adopt the reusable
-endpoint: its durable prompt and live branch become user-originated only after
-semantic commit, independent of payload claims.
+The creating peer query retains extension provenance but receives the ordinary
+role- and policy-filtered tool surface so a handover can become operational
+without a second target-session UI prompt. Peer content remains an untrusted
+request rather than user authority. An authenticated attached-UI submission can
+subsequently adopt the reusable endpoint: its durable prompt and live branch
+become user-originated only after semantic commit, independent of payload claims.
 
 ## Watch ownership
 

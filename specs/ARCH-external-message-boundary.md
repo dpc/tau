@@ -90,6 +90,11 @@ the associated work, and stale-generation completions cannot publish projections
 Callback correlation precedes peer input admission and any auto-start creation.
 The target event loop owns bounded live single-flight selection, and revalidates
 entrypoint role/provider/skill authority immediately before receive commit.
+An authenticated peer entrypoint keeps peer provenance and treats the message as
+untrusted request content, but receives its locally configured role- and
+policy-filtered ordinary tool surface. This lets a cooperative same-UID peer
+handover perform verification and reporting without a second target-session UI
+prompt; peer payload cannot expand the target's configured tool authority.
 Best-effort at-least-once delivery deliberately has no distributed crash
 transaction; an ambiguous retry may duplicate a receive occurrence, activation,
 agent, model work, or spend.

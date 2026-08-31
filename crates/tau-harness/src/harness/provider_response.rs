@@ -3281,20 +3281,18 @@ impl Harness {
             .agent_registry
             .agents
             .get(cid)
-            .is_some_and(|agent| {
-                !Self::is_peer_entrypoint_agent(agent)
-                    && Self::agent_uses_non_tool_prompt_surface(agent)
-            })
+            .is_some_and(Self::agent_uses_non_tool_prompt_surface)
     }
 
-    /// Return whether current prompt authority requires the restricted non-tool
-    /// surface.
+    /// Return whether the current extension side query requires the restricted
+    /// non-tool surface.
     pub(super) fn agent_uses_non_tool_prompt_surface(agent: &Agent) -> bool {
         matches!(
             agent.identity.originator,
             tau_proto::PromptOriginator::Extension { .. }
         ) && agent.identity.parent_tool_call_id.is_none()
             && !agent.identity.restored_tool_backed_start
+            && !Self::is_peer_entrypoint_agent(agent)
     }
 
     /// Identify the durable lifecycle purpose assigned by peer auto-start.

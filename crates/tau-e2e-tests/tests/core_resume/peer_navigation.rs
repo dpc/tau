@@ -6,7 +6,7 @@ use std::time::Instant;
 use tau_e2e_tests::{ScenarioActionV2, ScenarioLaneV2, ScenarioV2};
 use tau_proto::{
     AgentId, AgentNavigationMode, AgentPromptCreated, AgentPromptTerminationReason,
-    AgentRuntimeState, Event, HarnessInputMessage, HarnessOutputMessage, SessionId,
+    AgentRuntimeState, Event, HarnessInputMessage, HarnessOutputMessage, SessionId, ToolCallId,
 };
 
 #[path = "peer_navigation/fake_external_sender.rs"]
@@ -138,6 +138,128 @@ fn external_message_first_agent_is_immediately_navigable() -> Result<(), Box<dyn
         "peer-target-observer.json",
         &serde_json::to_vec_pretty(&observer.events)?,
     )?;
+    drop(peer);
+    drop(observer);
+    sender.finish()?;
+    target.finish()?;
+    fixture.require_boot_gone(target_session.as_str())?;
+    fixture.complete();
+    Ok(())
+}
+
+/// Proves an authenticated peer handover can execute the target's configured
+/// tool without any target-session UI prompt.
+#[test]
+fn external_message_auto_start_dispatches_tool_without_ui_prompt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let sender_session = SessionId::parse(format!("peer-tool-sender-{}", std::process::id()))?;
+    let sender_id = AgentId::parse("peer-tool-sender")?;
+    let message = "run the handover verification tool".to_owned();
+    let model_input = format!(
+        "<tau_internal>Authenticated peer message\n\n\
+         <tau_peer_message sender_session=\"{sender_session}\" sender_agent=\"{sender_id}\">\n\
+         {message}\n\
+         </tau_peer_message></tau_internal>"
+    );
+    let call_id = ToolCallId::from(format!("peer-handover-tool-{}", std::process::id()));
+    let scenario = ScenarioV2::new(
+        "external-message-auto-start-tool",
+        vec![ScenarioLaneV2 {
+            ctx_id: "peer-tool-entrypoint".to_owned(),
+            actions: vec![
+                ScenarioActionV2::DummyToolCall {
+                    user_text: model_input,
+                    call_id: call_id.clone(),
+                },
+                ScenarioActionV2::DummyToolResult {
+                    user_text: format!(
+                        "<tau_internal>Authenticated peer message\n\n\
+                         <tau_peer_message sender_session=\"{sender_session}\" sender_agent=\"{sender_id}\">\n\
+                         {message}\n\
+                         </tau_peer_message></tau_internal>"
+                    ),
+                    call_id: call_id.clone(),
+                    response: "handover verification complete".to_owned(),
+                },
+            ],
+        }],
+    );
+    let fixture = GateFixture::new_peer_entrypoint(&scenario, Path::new(FAKE_PROVIDER))?;
+    let target = PtyProcess::spawn(fixture.command(None), false, None)?;
+    let deadline = Instant::now() + DEADLINE;
+    let (target_socket, target_session) = discover_daemon(fixture.runtime_home(), None, deadline)?;
+    let mut observer = SideObserver::connect(
+        &target_socket,
+        &target_session,
+        fixture.artifact_path("peer-tool-observer.json"),
+        deadline,
+    )?;
+    observer.wait_for_extension("e2e-fake-provider", deadline)?;
+    observer.wait_for_extension("test-dummy", deadline)?;
+    target.wait_for(
+        "Write a message to start a new deterministic-peer agent...",
+        deadline,
+    )?;
+
+    let request = tau_proto::ExternalAgentMessageRequest {
+        request_id: REQUEST_ID.to_owned(),
+        message_id: tau_proto::AgentMessageId::parse("peer-tool-message")?,
+        capability: "peer-tool-capability".to_owned(),
+        sender_session_id: sender_session.clone(),
+        sender_id,
+        recipient_session_id: target_session.clone(),
+        recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+        kind: tau_proto::AgentMessageKind::Message,
+        message,
+    };
+    let mut sender =
+        FakeExternalSender::start(fixture.runtime_home(), &sender_session, request.clone())?;
+    let mut peer = tau_socket::SocketPeer::connect(&target_socket)?;
+    peer.send(&HarnessInputMessage::Hello(tau_proto::Hello {
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: tau_proto::ExtensionName::parse(CALLBACK_CLIENT_NAME)?,
+        client_kind: tau_proto::ClientKind::External,
+        expected_session_id: None,
+        capabilities: Default::default(),
+    }))?;
+    peer.send(&HarnessInputMessage::ExternalAgentMessage(request))?;
+    sender.authorize(deadline)?;
+    let result = recv_external_message_result(&mut peer, deadline)?;
+    if result.failure.is_some() || !result.started {
+        return Err(format!("peer handover did not auto-start: {result:?}").into());
+    }
+    let agent_id = result.recipient_id.ok_or("missing peer tool recipient")?;
+
+    let created = observer.recv_until(deadline, |observed| {
+        matches!(
+            &observed.event,
+            Event::AgentPromptCreated(prompt)
+                if prompt.agent_id == agent_id
+                    && prompt.tool_choice == tau_proto::ToolChoice::Auto
+                    && matches!(
+                        prompt.originator,
+                        tau_proto::PromptOriginator::Extension { .. }
+                    )
+        )
+    })?;
+    if !matches!(created.event, Event::AgentPromptCreated(_)) {
+        return Err("peer tool prompt was not created".into());
+    }
+    observer.recv_until(deadline, |observed| {
+        matches!(
+            &observed.event,
+            Event::ToolRequest(request)
+                if request.agent_id == agent_id
+                    && request.call_id == call_id
+        )
+    })?;
+    observer.recv_until(deadline, |observed| {
+        matches!(
+            &observed.event,
+            Event::ToolResultDisplay(result) if result.call_id == call_id
+        )
+    })?;
+
     drop(peer);
     drop(observer);
     sender.finish()?;

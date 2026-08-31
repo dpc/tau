@@ -1307,6 +1307,10 @@ fn peer_auto_start_lifecycle_marker_survives_cold_resume() {
             .peer_entrypoint_endpoint
     );
     assert!(!h.is_non_tool_extension_query(&cid));
+    assert!(
+        !Harness::agent_uses_non_tool_prompt_surface(&h.agent_runtime.agent_registry.agents[&cid]),
+        "restored peer endpoint retains ordinary tool authority"
+    );
     assert!(Harness::is_peer_entrypoint_agent(
         &h.agent_runtime.agent_registry.agents[&cid]
     ));

@@ -264,13 +264,16 @@ only bounded stderr/observer/PTY diagnostics, and verifies the socket, lock, and
 process group disappear before reuse. This adds no network, credential, shell,
 arbitrary prompt, production-provider, or manual cold-resume authority.
 
-The peer-navigation PTY case exposes no tools and starts with no agent. Its
-fixture-owned sender record and callback socket live only under the private
-runtime root, authorize one exact typed request, and add no general network or
-credential authority. A bounded fake-provider hold preserves the receiver's
-live interval long enough to exercise the real Ctrl-J binding, then an exact
-prompt cancellation reaps it. The case proves navigation eligibility, not
-stronger peer authentication or delivery semantics.
+The peer-navigation PTY cases start with no agent and expose only the synthetic
+`restart_test_dummy` tool to the fixed peer role. Their fixture-owned sender
+record and callback socket live only under the private runtime root, authorize
+one exact typed request, and add no general network or credential authority. A
+bounded fake-provider hold preserves one receiver's live interval long enough to
+exercise the real Ctrl-J binding, then an exact prompt cancellation reaps it. A
+separate closed scenario proves a peer-auto-started endpoint retains extension
+provenance, receives `ToolChoice::Auto`, and dispatches that dummy tool without a
+target UI prompt. These cases prove navigation eligibility and the configured
+handover tool surface, not stronger peer authentication or delivery semantics.
 Callback accept/read/write run synchronously under one absolute deadline with no
 detached worker; negative fixtures cover both an absent callback and a complete
 Hello that stalls before authentication.
