@@ -1,5 +1,8 @@
 //! Filesystem-backed directory lock registry for `tau-ext-shell`.
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io as path_std_io;
@@ -15,9 +18,10 @@ use serde::{Deserialize, Serialize};
 use tau_proto::{AgentId, ToolCallId};
 
 use super::{
-    AbandonedLock, AutoDirLockGuard, AutoLockToken, DirLockManager, DirLockWakeGeneration,
-    ForceUnlockedLock, LockAcquireError, LockWaitPolicy, ManualLockAcquireError, UnlockOwnerScope,
-    WaitKind, dirs_overlap, normalize_lock_dirs, paths_overlap,
+    AbandonedLock, AutoDirLockGuard, AutoLockToken, DirLockAutoId, DirLockManager, DirLockWaiterId,
+    DirLockWakeGeneration, ForceUnlockedLock, FsRegistryGeneration, LockAcquireError,
+    LockWaitPolicy, ManualLockAcquireError, UnlockOwnerScope, WaitKind, dirs_overlap,
+    normalize_lock_dirs, paths_overlap,
 };
 
 // Keep at zero per `GATE-no-backward-compatibility`.
@@ -71,11 +75,11 @@ struct FsRegistry {
     /// Persistent registry format version used to reject incompatible state.
     version: u32,
     /// Monotonic change counter bumped whenever persisted lock state changes.
-    generation: u64,
+    generation: FsRegistryGeneration,
     /// Next FIFO waiter id, unique within this registry file.
-    next_waiter_id: u64,
+    next_waiter_id: DirLockWaiterId,
     /// Next automatic lock id, unique within this registry file.
-    next_auto_id: u64,
+    next_auto_id: DirLockAutoId,
     /// Manual locks retained until explicit unlock, owner cleanup, or lease
     /// reap.
     manual: Vec<FsManualLock>,
@@ -93,9 +97,9 @@ impl Default for FsRegistry {
     fn default() -> Self {
         Self {
             version: FS_REGISTRY_VERSION,
-            generation: 0,
-            next_waiter_id: 0,
-            next_auto_id: 0,
+            generation: FsRegistryGeneration::from_raw(0),
+            next_waiter_id: DirLockWaiterId::from_raw(0),
+            next_auto_id: DirLockAutoId::from_raw(0),
             manual: Vec::new(),
             automatic: Vec::new(),
             waiters: VecDeque::new(),
@@ -122,13 +126,13 @@ struct FsManualLock {
     /// Last acquisition or same-owner automatic use for abandonment detection.
     last_used_at_ms: u64,
     /// Same-owner automatic lock ids currently running under this manual lock.
-    active_auto_ids: Vec<u64>,
+    active_auto_ids: Vec<DirLockAutoId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct FsAutomaticLock {
     /// Automatic lock id referenced by manual `active_auto_ids`.
-    id: u64,
+    id: DirLockAutoId,
     /// Instance/agent pair that owns the active mutating tool.
     owner: FsOwner,
     /// Canonical directories covered by this automatic lock.
@@ -138,7 +142,7 @@ struct FsAutomaticLock {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct FsWaiter {
     /// FIFO waiter id persisted so pollers can find their queue entry.
-    id: u64,
+    id: DirLockWaiterId,
     /// Tool call id used by cancellation to remove this queued waiter.
     call_id: ToolCallId,
     /// Instance/agent pair waiting for the lock.
@@ -184,7 +188,7 @@ impl FsLockBackend {
             .lock_exclusive()
             .map_err(|error| format!("failed to lock dir_lock instance lease: {error}"))?;
         with_registry_lock(&state_dir, |registry| {
-            registry.generation = registry.generation.saturating_add(1);
+            registry.generation = registry.generation.saturating_next();
             Ok(())
         })?;
         Ok(Self {
@@ -624,7 +628,7 @@ impl FsLockBackend {
         .unwrap_or((0, 0))
     }
 
-    pub(super) fn release_auto(&self, id: u64) {
+    pub(super) fn release_auto(&self, id: DirLockAutoId) {
         let _ = with_registry_lock(&self.state_dir, |registry| {
             let before = registry.automatic.len();
             registry
@@ -695,7 +699,7 @@ impl FsLockBackend {
 }
 
 enum FsAcquireOutcome {
-    Granted(u64),
+    Granted(DirLockAutoId),
     Waiting,
     NeedsAdmission,
     Cancelled,
@@ -715,7 +719,7 @@ enum FsManualOutcome {
 
 impl FsRegistry {
     fn bump(&mut self) {
-        self.generation = self.generation.saturating_add(1);
+        self.generation = self.generation.saturating_next();
     }
 
     fn push_waiter(
@@ -724,9 +728,9 @@ impl FsRegistry {
         owner: FsOwner,
         dirs: Vec<PathBuf>,
         kind: WaitKind,
-    ) -> u64 {
+    ) -> DirLockWaiterId {
         let id = self.next_waiter_id;
-        self.next_waiter_id = self.next_waiter_id.saturating_add(1);
+        self.next_waiter_id = self.next_waiter_id.saturating_next();
         self.waiters.push_back(FsWaiter {
             id,
             call_id,
@@ -852,16 +856,16 @@ impl FsRegistry {
         self.bump();
     }
 
-    fn add_auto(&mut self, owner: FsOwner, dirs: Vec<PathBuf>, now_ms: u64) -> u64 {
+    fn add_auto(&mut self, owner: FsOwner, dirs: Vec<PathBuf>, now_ms: u64) -> DirLockAutoId {
         let id = self.next_auto_id;
-        self.next_auto_id = self.next_auto_id.saturating_add(1);
+        self.next_auto_id = self.next_auto_id.saturating_next();
         self.automatic.push(FsAutomaticLock { id, owner, dirs });
         self.mark_auto_acquired(id, now_ms);
         self.bump();
         id
     }
 
-    fn mark_auto_acquired(&mut self, id: u64, now_ms: u64) {
+    fn mark_auto_acquired(&mut self, id: DirLockAutoId, now_ms: u64) {
         let Some(lock) = self.automatic.iter().find(|lock| lock.id == id) else {
             return;
         };
@@ -876,7 +880,7 @@ impl FsRegistry {
         }
     }
 
-    fn mark_auto_released(&mut self, id: u64, now_ms: u64) {
+    fn mark_auto_released(&mut self, id: DirLockAutoId, now_ms: u64) {
         for manual in &mut self.manual {
             let before = manual.active_auto_ids.len();
             manual.active_auto_ids.retain(|active_id| *active_id != id);
@@ -886,7 +890,7 @@ impl FsRegistry {
         }
     }
 
-    fn remove_waiter(&mut self, waiter_id: Option<u64>) {
+    fn remove_waiter(&mut self, waiter_id: Option<DirLockWaiterId>) {
         let Some(waiter_id) = waiter_id else {
             return;
         };
@@ -1019,7 +1023,7 @@ fn with_registry_lock<T>(
     result
 }
 
-fn cleanup_waiter_after_backend_error(backend: &FsLockBackend, waiter_id: Option<u64>) {
+fn cleanup_waiter_after_backend_error(backend: &FsLockBackend, waiter_id: Option<DirLockWaiterId>) {
     let Some(waiter_id) = waiter_id else {
         return;
     };
@@ -1063,7 +1067,7 @@ fn read_registry(state_dir: &Path) -> Result<FsRegistry, String> {
 
 #[cfg(test)]
 pub(super) fn registry_generation(state_dir: &Path) -> Result<u64, String> {
-    read_registry(state_dir).map(|registry| registry.generation)
+    read_registry(state_dir).map(|registry| registry.generation.into_raw())
 }
 
 #[cfg(test)]
@@ -1086,7 +1090,7 @@ fn write_registry(
         .map_err(|error| format!("failed to encode dir_lock registry: {error}"))?;
     let temp_path = state_dir.join(format!(
         ".registry.json.{}.tmp",
-        now_ms().saturating_add(registry.generation)
+        now_ms().saturating_add(registry.generation.into_raw())
     ));
     let mut file = OpenOptions::new()
         .write(true)
@@ -1115,8 +1119,8 @@ fn write_registry(
     // successful registry update into an apparent operation failure.
     let _ = lock_file
         .seek(SeekFrom::Start(0))
-        .and_then(|_| lock_file.write_all(registry.generation.to_string().as_bytes()))
-        .and_then(|_| lock_file.set_len(registry.generation.to_string().len() as u64));
+        .and_then(|_| lock_file.write_all(registry.generation.into_raw().to_string().as_bytes()))
+        .and_then(|_| lock_file.set_len(registry.generation.into_raw().to_string().len() as u64));
     Ok(())
 }
 

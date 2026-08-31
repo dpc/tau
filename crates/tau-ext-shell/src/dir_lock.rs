@@ -64,6 +64,72 @@ const ABANDONED_LOCK_OUTPUT: &str = "Directory locked and inactive - possibly ab
 const DUPLICATE_LOCK_ERROR: &str = "dir_lock_duplicate";
 const DUPLICATE_LOCK_OUTPUT: &str = "Directory lock already held by this agent. Unlock the existing lock before locking another overlapping directory.";
 
+/// FIFO identity for one queued directory-lock request.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct DirLockWaiterId(u64);
+
+impl DirLockWaiterId {
+    /// Construct an identity from its unchanged raw registry representation.
+    const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Advance the process-local counter with its existing arithmetic behavior.
+    fn increment(&mut self) {
+        self.0 += 1;
+    }
+
+    /// Advance the filesystem counter without excluding the maximum value.
+    const fn saturating_next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+/// Identity for one active automatic directory lock.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct DirLockAutoId(u64);
+
+impl DirLockAutoId {
+    /// Construct an identity from its unchanged raw registry representation.
+    const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Advance the process-local counter with its existing arithmetic behavior.
+    fn increment(&mut self) {
+        self.0 += 1;
+    }
+
+    /// Advance the filesystem counter without excluding the maximum value.
+    const fn saturating_next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+/// Monotonic generation persisted in the filesystem lock registry.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct FsRegistryGeneration(u64);
+
+impl FsRegistryGeneration {
+    /// Construct a generation from its unchanged raw registry representation.
+    const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Return the unchanged raw registry representation.
+    const fn into_raw(self) -> u64 {
+        self.0
+    }
+
+    /// Advance the generation without excluding the maximum value.
+    const fn saturating_next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
 #[cfg(test)]
 static CONFIGURE_PAUSE_FOR_TEST: std::sync::LazyLock<Mutex<Option<Arc<ConfigurePauseForTest>>>> =
     path_std_sync::LazyLock::new(|| Mutex::new(None));
@@ -211,9 +277,9 @@ struct LockState {
     /// whose directories overlap.
     waiters: VecDeque<Waiter>,
     /// Next FIFO waiter id, unique within this process-local state.
-    next_waiter_id: u64,
+    next_waiter_id: DirLockWaiterId,
     /// Next automatic lock id, unique within this process-local state.
-    next_auto_id: u64,
+    next_auto_id: DirLockAutoId,
 }
 
 #[derive(Clone, Debug)]
@@ -222,12 +288,12 @@ struct ManualLock {
     dir: PathBuf,
     acquired_at: Instant,
     last_used_at: Instant,
-    active_auto_ids: Vec<u64>,
+    active_auto_ids: Vec<DirLockAutoId>,
 }
 
 #[derive(Clone, Debug)]
 struct AutomaticLock {
-    id: u64,
+    id: DirLockAutoId,
     owner: AgentId,
     dirs: Vec<PathBuf>,
 }
@@ -243,7 +309,7 @@ pub(crate) struct ForceUnlockedLock {
 
 #[derive(Clone, Debug)]
 struct Waiter {
-    id: u64,
+    id: DirLockWaiterId,
     call_id: ToolCallId,
     owner: AgentId,
     dirs: Vec<PathBuf>,
@@ -296,8 +362,11 @@ pub(crate) struct AutoDirLockGuard {
 
 #[derive(Debug)]
 enum AutoLockToken {
-    Memory(u64),
-    Filesystem { backend: FsLockBackend, id: u64 },
+    Memory(DirLockAutoId),
+    Filesystem {
+        backend: FsLockBackend,
+        id: DirLockAutoId,
+    },
 }
 
 impl Drop for AutoDirLockGuard {
@@ -980,9 +1049,9 @@ impl LockState {
         owner: AgentId,
         dirs: Vec<PathBuf>,
         kind: WaitKind,
-    ) -> u64 {
+    ) -> DirLockWaiterId {
         let id = self.next_waiter_id;
-        self.next_waiter_id += 1;
+        self.next_waiter_id.increment();
         self.waiters.push_back(Waiter {
             id,
             call_id,
@@ -1125,15 +1194,15 @@ impl LockState {
         }
     }
 
-    fn add_auto(&mut self, owner: AgentId, dirs: Vec<PathBuf>) -> u64 {
+    fn add_auto(&mut self, owner: AgentId, dirs: Vec<PathBuf>) -> DirLockAutoId {
         let id = self.next_auto_id;
-        self.next_auto_id += 1;
+        self.next_auto_id.increment();
         self.automatic.push(AutomaticLock { id, owner, dirs });
         self.mark_auto_acquired(id, Instant::now());
         id
     }
 
-    fn mark_auto_acquired(&mut self, id: u64, now: Instant) {
+    fn mark_auto_acquired(&mut self, id: DirLockAutoId, now: Instant) {
         let Some(lock) = self.automatic.iter().find(|lock| lock.id == id) else {
             return;
         };
@@ -1148,7 +1217,7 @@ impl LockState {
         }
     }
 
-    fn mark_auto_released(&mut self, id: u64, now: Instant) {
+    fn mark_auto_released(&mut self, id: DirLockAutoId, now: Instant) {
         for manual in &mut self.manual {
             let before = manual.active_auto_ids.len();
             manual.active_auto_ids.retain(|active_id| *active_id != id);
