@@ -103,8 +103,9 @@ compact conversation view.
 
 Compact mode is a stricter top-level filter. It hides all thinking and turn
 statistics. Completed historical tools and results disappear; each currently
-running tool remains as exactly one payload-free line naming the tool, and that
-line disappears on success, error, or cancellation. User and agent messages,
+running tool retains the same informative status line as verbose mode without
+its payload body, and that line disappears on success, error, or cancellation.
+User and agent messages,
 direct responses, alerts, critical notices, prompt input, navigation, watched activity, and other
 user-facing UI remain available. `Message` and `WatchResponse` agent activity
 retain only their existing headers; their bodies and typed watched-agent

@@ -46,7 +46,7 @@ use crate::tool_render::{
     format_context_token_count, format_token_count, pending_tool_call_display,
     render_action_output_block, render_compaction_block, render_diff_tool_block,
     render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
-    render_tool_use_state, render_tool_use_state_payload_free,
+    render_tool_header_block, render_tool_use_state, render_tool_use_state_payload_free,
     render_tool_use_state_without_status, render_turn_stats_projection_block, session_status_block,
     streaming_block, streaming_block_with_indicator_suffix, synthesize_fallback_display,
     tool_duration_suffix, ui_dir_block,
@@ -3364,16 +3364,11 @@ impl EventRenderer {
         if self.presentation.verbose_mode {
             return self.render_tool_history_block(display);
         }
-        render_tool_block(
-            &self.resources.theme,
-            &pending_tool_call_display(display.tool_name.as_str()),
-        )
+        self.render_compact_tool_block(display)
     }
 
     fn render_compact_tool_block(&self, display: &ToolCallDisplay) -> tau_cli_term::StyledBlock {
-        let mut display = display.clone();
-        display.payload = None;
-        render_tool_block(&self.resources.theme, &display)
+        render_tool_header_block(&self.resources.theme, display)
     }
 
     fn render_diff_history_block(

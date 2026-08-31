@@ -3,19 +3,20 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync as path_std_sync;
 use std::sync::atomic as path_std_sync_atomic;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tau_cli_term_raw::Term;
 use tau_config::settings as path_tau_config_settings;
 
 use super::finished_response_projection::assistant_text_with_citations;
 use super::{
-    AgentActivity, MessageRenderMode, QUEUED_PROJECTION_WINDOW_BYTES, RoleCompletionDetails,
-    assistant_text_from_message_item, assistant_text_from_output_items, bounded_queued_line_end,
-    bounded_queued_line_start, content_part_text, presentation_fact_name, queued_prompt_projection,
-    reasoning_text_from_output_items, role_setting_value_completions,
+    AgentActivity, EventRenderer, MessageRenderMode, QUEUED_PROJECTION_WINDOW_BYTES,
+    RoleCompletionDetails, assistant_text_from_message_item, assistant_text_from_output_items,
+    bounded_queued_line_end, bounded_queued_line_start, content_part_text, presentation_fact_name,
+    queued_prompt_projection, reasoning_text_from_output_items, role_setting_value_completions,
 };
 use crate::chat::{DraftSlot, queue_prompt_draft_snapshot};
+use crate::tool_render::render_tool_use_state;
 
 fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
@@ -1902,6 +1903,44 @@ fn blocker_actions_survive_live_and_terminal_tool_lifecycles() {
                 .all(|entry| !rendered_tool_block_text(&entry.display).contains("private"))
         );
     }
+}
+
+/// Compact live projection must reuse the verbose header formatter with a
+/// controlled nonzero elapsed duration while removing only the payload body.
+#[test]
+fn compact_live_tool_projection_matches_verbose_header_with_elapsed_state() {
+    let mut renderer = renderer_for_agent_id_tests();
+    let mut display = render_tool_use_state(
+        "wait",
+        &tau_proto::ToolUseState {
+            args: "60m".to_owned(),
+            status: tau_proto::ToolUseStatus::InProgress,
+            status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+            payload: Some(tau_proto::ToolUsePayload::Text {
+                text: "private wait payload".to_owned(),
+            }),
+            ..Default::default()
+        },
+    );
+    EventRenderer::upsert_tool_duration_suffix(&mut display, Duration::from_secs(337), None);
+
+    let verbose = renderer.render_live_tool_block(&display);
+    renderer.presentation.verbose_mode = false;
+    let compact = renderer.render_live_tool_block(&display);
+    let header = |block: &tau_cli_term::StyledBlock| {
+        block
+            .priority_line_content()
+            .expect("tool priority header")
+            .layout(120)
+            .iter()
+            .map(|cell| cell.ch)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    };
+
+    assert_eq!(header(&verbose), header(&compact));
+    assert_eq!(header(&compact), "wait 60m 337s …");
 }
 
 /// An invalid blocker action fails closed through terminal rendering rather

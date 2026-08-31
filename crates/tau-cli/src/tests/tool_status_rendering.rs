@@ -77,7 +77,7 @@ fn verbose_mode_reprojects_streaming_thinking_hidden_agents_and_attach_tools() {
     );
     sync(&handle);
     let pending = vt.screen_text(100).join("\n");
-    assert!(pending.contains("read pending"), "{pending}");
+    assert!(pending.contains("read 0s pending"), "{pending}");
     assert!(!pending.contains("SECRET_ATTACH_ARGUMENT"), "{pending}");
 
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
@@ -88,7 +88,7 @@ fn verbose_mode_reprojects_streaming_thinking_hidden_agents_and_attach_tools() {
         display: None,
     }));
     sync(&handle);
-    assert!(!vt.screen_contains(100, "read pending"));
+    assert!(!vt.screen_contains(100, "read 0s pending"));
 }
 
 /// Tool lifecycle events must keep the timer notifier keyed by their canonical
@@ -4234,9 +4234,9 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
     assert!(vt.screen_contains(80, "read src/main.rs 0s ok"));
 }
 
-/// Compact mode must be a reversible projection: it retains conversation text,
-/// removes thinking and completed tools, and exposes one payload-free row for
-/// every tool that is still running, regardless of its eventual terminal kind.
+/// Compact mode must preserve each verbose live tool header, including useful
+/// arguments and elapsed time, while hiding payloads and removing every row at
+/// its terminal outcome; returning to verbose mode restores terminal history.
 #[test]
 fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
     let (_term, handle, vt) = setup(120, 30);
@@ -4268,10 +4268,11 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
         finished_response_with_usage("sp-stats", "main", 20_000, 10_000, 500, "stats answer"),
     ));
 
-    for (call_id, tool_name) in [
-        ("call-ok", "read"),
-        ("call-error", "search"),
-        ("call-cancel", "write"),
+    for (call_id, tool_name, args) in [
+        ("call-ok", "read", "READ_ARGUMENT"),
+        ("call-error", "search", "SEARCH_ARGUMENT"),
+        ("call-cancel", "write", "WRITE_ARGUMENT"),
+        ("call-wait", "wait", "60m"),
     ] {
         let mut started = tool_started(call_id, tool_name, CborValue::Null);
         let Event::ToolStarted(started_event) = &mut started else {
@@ -4282,10 +4283,46 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
         renderer.handle(&initial_tool_progress(
             call_id,
             tool_name,
-            "SECRET_ARGUMENT",
-            "SECRET_MODE",
+            args,
+            if tool_name == "wait" { "" } else { "LIVE_MODE" },
         ));
     }
+    renderer.handle(&Event::ToolProgress(tau_proto::ToolProgress {
+        call_id: "call-ok".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        message: None,
+        progress: None,
+        display: Some(tau_proto::ToolUseState {
+            args: "READ_ARGUMENT".to_owned(),
+            mode: "LIVE_MODE".to_owned(),
+            status: tau_proto::ToolUseStatus::InProgress,
+            status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+            payload: Some(tau_proto::ToolUsePayload::Text {
+                text: "PRIVATE_LIVE_PAYLOAD".to_owned(),
+            }),
+            ..Default::default()
+        }),
+    }));
+    renderer.handle_tool_timer_tick();
+    sync(&handle);
+
+    let verbose = vt.screen_text(120).join("\n");
+    assert!(verbose.contains("PRIVATE_LIVE_PAYLOAD"), "{verbose}");
+    let verbose_headers =
+        ["READ_ARGUMENT", "SEARCH_ARGUMENT", "WRITE_ARGUMENT", "60m"].map(|argument| {
+            verbose
+                .lines()
+                .find(|line| line.contains(argument))
+                .unwrap_or_else(|| panic!("missing verbose header for {argument}: {verbose}"))
+                .trim()
+                .to_owned()
+        });
+    assert!(
+        verbose_headers[3].contains("wait 60m"),
+        "{}",
+        verbose_headers[3]
+    );
+
     renderer.toggle_verbose_mode();
     sync(&handle);
 
@@ -4293,9 +4330,14 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
     assert!(compact.contains("conversation answer"), "{compact}");
     assert!(!compact.contains("private reasoning"), "{compact}");
     assert!(!compact.contains('Δ'), "{compact}");
-    assert!(!compact.contains("SECRET_ARGUMENT"), "{compact}");
-    assert!(!compact.contains("SECRET_MODE"), "{compact}");
-    for tool_name in ["read", "search", "write"] {
+    assert!(!compact.contains("PRIVATE_LIVE_PAYLOAD"), "{compact}");
+    for header in verbose_headers {
+        assert!(
+            compact.lines().any(|line| line.trim() == header),
+            "compact mode changed verbose live header {header:?}: {compact}"
+        );
+    }
+    for tool_name in ["read", "search", "write", "wait"] {
         assert_eq!(compact.matches(tool_name).count(), 1, "{compact}");
     }
 
@@ -4332,6 +4374,22 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
         tool_type: tau_proto::ToolType::Function,
         display: None,
     }));
+    renderer.handle(&Event::ToolResult(ToolResult {
+        presentation: Default::default(),
+        call_id: "call-wait".into(),
+        tool_name: tau_proto::ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Null,
+        provider_content: Vec::new(),
+        kind: tau_proto::ToolResultKind::Final,
+        display: Some(tau_proto::ToolUseState {
+            args: "60m".to_owned(),
+            status: tau_proto::ToolUseStatus::Success,
+            status_text: "ok".to_owned(),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }));
     sync(&handle);
 
     let completed_compact = vt.screen_text(120).join("\n");
@@ -4339,9 +4397,12 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
         "read",
         "search",
         "write",
+        "wait",
         "SECRET_RESULT",
         "SECRET_ERROR",
-        "SECRET_ARGUMENT",
+        "READ_ARGUMENT",
+        "SEARCH_ARGUMENT",
+        "WRITE_ARGUMENT",
     ] {
         assert!(!completed_compact.contains(hidden), "{completed_compact}");
     }
@@ -4354,6 +4415,7 @@ fn verbose_mode_round_trips_thinking_and_overlapping_tool_outcomes() {
     assert!(restored.contains("read"), "{restored}");
     assert!(restored.contains("search"), "{restored}");
     assert!(restored.contains("write"), "{restored}");
+    assert!(restored.contains("wait"), "{restored}");
     assert!(restored.contains("SECRET_ERROR"), "{restored}");
 }
 

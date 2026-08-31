@@ -1167,6 +1167,24 @@ pub(crate) fn render_tool_block(
     theme: &tau_themes::Theme,
     display: &ToolCallDisplay,
 ) -> tau_cli_term::StyledBlock {
+    render_tool_block_with_payload(theme, display, true)
+}
+
+/// Paints only the adaptive header of a [`ToolCallDisplay`] without cloning or
+/// rendering its potentially large payload.
+pub(crate) fn render_tool_header_block(
+    theme: &tau_themes::Theme,
+    display: &ToolCallDisplay,
+) -> tau_cli_term::StyledBlock {
+    render_tool_block_with_payload(theme, display, false)
+}
+
+/// Paints a tool header and optionally attaches its text payload body.
+fn render_tool_block_with_payload(
+    theme: &tau_themes::Theme,
+    display: &ToolCallDisplay,
+    include_payload: bool,
+) -> tau_cli_term::StyledBlock {
     use tau_cli_term::resolve::resolve;
     use tau_cli_term::{
         PriorityLine, PriorityLineAlignment, PriorityLineTruncation, Span, StyledBlock, StyledText,
@@ -1294,7 +1312,7 @@ pub(crate) fn render_tool_block(
     }
 
     let mut body = StyledText::new();
-    if let Some(ToolUsePayload::Text { text }) = &display.payload {
+    if include_payload && let Some(ToolUsePayload::Text { text }) = &display.payload {
         let style = overlay_style(
             resolve(theme, names::TOOL_OUTPUT),
             resolve(theme, names::TOOL_ARGS),
