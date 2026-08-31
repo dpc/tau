@@ -25,6 +25,8 @@ struct WriteFaultBackend {
     hold_writes: AtomicBool,
     write_held: Mutex<bool>,
     write_hold_wake: Condvar,
+    /// Number of writes that entered the deterministic blocking boundary.
+    write_hold_entries: AtomicUsize,
     exit_next_write: AtomicBool,
     fail_next_sync_data: AtomicBool,
     fail_next_sync_all: AtomicBool,
@@ -79,6 +81,7 @@ impl WriteFaultBackend {
             hold_writes: AtomicBool::new(false),
             write_held: Mutex::new(false),
             write_hold_wake: Condvar::new(),
+            write_hold_entries: AtomicUsize::new(0),
             exit_next_write: AtomicBool::new(false),
             fail_next_sync_data: AtomicBool::new(false),
             fail_next_sync_all: AtomicBool::new(false),
@@ -206,6 +209,7 @@ impl PersistenceBackend for WriteFaultBackend {
             return Err(io::Error::other("injected exact-offset write failure"));
         }
         if self.hold_writes.load(Ordering::SeqCst) {
+            self.write_hold_entries.fetch_add(1, Ordering::SeqCst);
             let mut held = self.write_held.lock().expect("write hold");
             *held = true;
             self.write_hold_wake.notify_all();
@@ -301,6 +305,66 @@ impl PersistenceBackend for WriteFaultBackend {
     fn read_file(&self, path: &Path) -> io::Result<Vec<u8>> {
         FilesystemBackend.read_file(path)
     }
+}
+
+/// A queued lifecycle release must discard a due lossy session touch before
+/// entering its filesystem write, so shutdown cannot expire behind work that
+/// the release itself makes obsolete.
+#[test]
+fn release_preempts_due_lossy_touch_before_filesystem_io() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let backend = Arc::new(WriteFaultBackend::new());
+    let owner = Arc::new(
+        SemanticPersistenceOwner::with_test_backend(
+            PersistenceCapacity::default(),
+            backend.clone(),
+        )
+        .expect("owner"),
+    );
+    let mut store =
+        SessionStore::open_managed(root.path().join("sessions"), owner.clone()).expect("store");
+    store
+        .prepare_session("managed-session", SessionPreparationMode::New)
+        .expect("prepare");
+    store
+        .append_session_event_at(
+            "managed-session",
+            None,
+            loaded_event("managed-session"),
+            tau_proto::UnixMicros::new(7),
+        )
+        .expect("append");
+    assert!(
+        owner.wait_for_latest_durability_for_test(Duration::from_secs(2)),
+        "authoritative append and its durability debt drained"
+    );
+    owner.arm_derived_work_pause_for_test();
+    store
+        .record_session_activity("managed-session")
+        .expect("queue lossy touch");
+    assert!(
+        owner.wait_for_derived_work_pause_for_test(Duration::from_secs(2)),
+        "worker reached due derived work"
+    );
+
+    backend.hold_writes.store(true, Ordering::SeqCst);
+    let leases = store.managed_persistence_leases("managed-session");
+    let release_owner = Arc::clone(&owner);
+    let release = thread::spawn(move || release_owner.release(&leases, Duration::from_secs(2)));
+    assert!(
+        owner.wait_for_release_command_for_test(Duration::from_secs(2)),
+        "release command reached the worker queue"
+    );
+    owner.release_derived_work_pause_for_test();
+    let result = release.join().expect("release thread");
+    backend.release_writes();
+
+    result.expect("queued release preempts obsolete lossy touch");
+    assert_eq!(
+        backend.write_hold_entries.load(Ordering::SeqCst),
+        0,
+        "release must not enter the obsolete touch write"
+    );
 }
 
 /// Authoritative frames write in one FIFO across distinct prepared streams.

@@ -450,6 +450,30 @@ pub(crate) struct Shared {
     operational_wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Coalesces arbitrarily many bounded outcomes into one outstanding wake.
     operational_wake_pending: AtomicBool,
+    /// Deterministic pause immediately before due derived work is selected.
+    #[cfg(test)]
+    pub(crate) derived_work_pause: DerivedWorkPause,
+}
+
+/// Test-only worker pause at the command-versus-derived-work scheduling cut.
+#[cfg(test)]
+pub(crate) struct DerivedWorkPause {
+    /// Armed, reached, and released state for one pause.
+    pub(crate) state: Mutex<DerivedWorkPauseState>,
+    /// Waiters observing or releasing the pause.
+    pub(crate) wake: Condvar,
+}
+
+/// Named state for one deterministic derived-work scheduling pause.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct DerivedWorkPauseState {
+    /// Whether the next due derived-work cut should pause.
+    pub(crate) armed: bool,
+    /// Whether the worker has reached the armed cut.
+    pub(crate) reached: bool,
+    /// Whether the test has released the paused worker.
+    pub(crate) released: bool,
 }
 
 pub(crate) struct AdmissionState {
@@ -609,6 +633,11 @@ impl SemanticPersistenceOwner {
             wake: Condvar::new(),
             operational_wake: Mutex::new(None),
             operational_wake_pending: AtomicBool::new(false),
+            #[cfg(test)]
+            derived_work_pause: DerivedWorkPause {
+                state: Mutex::new(DerivedWorkPauseState::default()),
+                wake: Condvar::new(),
+            },
         });
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
@@ -720,6 +749,76 @@ impl SemanticPersistenceOwner {
         } else {
             false
         }
+    }
+
+    /// Arms one deterministic worker pause before it selects due derived work.
+    #[cfg(test)]
+    pub(crate) fn arm_derived_work_pause_for_test(&self) {
+        let mut state = self
+            .shared
+            .derived_work_pause
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *state = DerivedWorkPauseState {
+            armed: true,
+            ..DerivedWorkPauseState::default()
+        };
+    }
+
+    /// Waits until the worker reaches the armed derived-work scheduling cut.
+    #[cfg(test)]
+    pub(crate) fn wait_for_derived_work_pause_for_test(&self, timeout: Duration) -> bool {
+        let state = self
+            .shared
+            .derived_work_pause
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (state, _) = self
+            .shared
+            .derived_work_pause
+            .wake
+            .wait_timeout_while(state, timeout, |state| !state.reached)
+            .unwrap_or_else(|error| error.into_inner());
+        state.reached
+    }
+
+    /// Releases the worker from the armed derived-work scheduling cut.
+    #[cfg(test)]
+    pub(crate) fn release_derived_work_pause_for_test(&self) {
+        let mut state = self
+            .shared
+            .derived_work_pause
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.released = true;
+        self.shared.derived_work_pause.wake.notify_all();
+    }
+
+    /// Waits until one release command is durably present in the worker queue.
+    #[cfg(test)]
+    pub(crate) fn wait_for_release_command_for_test(&self, timeout: Duration) -> bool {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (state, _) = self
+            .shared
+            .wake
+            .wait_timeout_while(state, timeout, |state| {
+                !state
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, WorkerCommand::Release { .. }))
+            })
+            .unwrap_or_else(|error| error.into_inner());
+        state
+            .commands
+            .iter()
+            .any(|command| matches!(command, WorkerCommand::Release { .. }))
     }
 
     /// Waits for one exact stream-local deterministic test failure without

@@ -19,6 +19,8 @@ use serde::de::DeserializeOwned;
 
 use super::backend::PersistenceBackend;
 use super::identity::{PersistenceGeneration, StreamIdentity};
+#[cfg(test)]
+use super::owner::DerivedWorkPauseState;
 use super::owner::{
     FrameAdmissionToken, PersistenceAdmissionError, PersistenceFailureKind, RetentionCharge,
     Shared, StagedFrame, invalidate_worker, report_failure, report_rollback_failure_and_poison,
@@ -316,6 +318,33 @@ pub(crate) fn worker_main(shared: Arc<Shared>) {
     let mut durability_barrier = None;
     let mut derived_since_frame = false;
     loop {
+        #[cfg(test)]
+        pause_before_due_derived_work_for_test(&shared, &head, &debts, &touches);
+        if durability_barrier.is_none() {
+            let command = {
+                let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                (state.available
+                    && head.is_none()
+                    && state.frames.is_empty()
+                    && state
+                        .commands
+                        .iter()
+                        .any(|command| matches!(command, WorkerCommand::Release { .. })))
+                .then(|| state.commands.pop_front())
+                .flatten()
+            };
+            if let Some(command) = command {
+                process_command(
+                    &shared,
+                    &mut streams,
+                    &mut debts,
+                    &mut touches,
+                    &mut durability_barrier,
+                    command,
+                );
+                continue;
+            }
+        }
         service_one_due_debt(&shared, &streams, &mut debts);
         service_one_due_touch(&shared, &mut streams, &mut touches);
         if durability_barrier.is_some() {
@@ -456,6 +485,38 @@ pub(crate) fn worker_main(shared: Arc<Shared>) {
             AppendDisposition::WorkerExit => return,
         }
     }
+}
+
+#[cfg(test)]
+fn pause_before_due_derived_work_for_test(
+    shared: &Shared,
+    head: &Option<FrameJob>,
+    debts: &VecDeque<DurabilityDebt>,
+    touches: &VecDeque<TouchDebt>,
+) {
+    if minimum_deadline(head.as_ref(), debts, touches)
+        .is_none_or(|deadline| deadline > Instant::now())
+    {
+        return;
+    }
+    let mut state = shared
+        .derived_work_pause
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if !state.armed {
+        return;
+    }
+    state.reached = true;
+    shared.derived_work_pause.wake.notify_all();
+    while !state.released {
+        state = shared
+            .derived_work_pause
+            .wake
+            .wait(state)
+            .unwrap_or_else(|error| error.into_inner());
+    }
+    *state = DerivedWorkPauseState::default();
 }
 
 fn record_frame_disposition(
