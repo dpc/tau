@@ -145,7 +145,14 @@ fn lock_wait_duration_header_extends_tool_error_details() {
 fn configure_instance_name_changes_workdir_metadata_key() {
     let cwd_state = CwdState::new();
     assert_eq!(cwd_state.key().as_str(), "ext_core-shell_cwd");
-    cwd_state.set_instance_name("project-shell".to_owned());
+    let instance_name =
+        tau_proto::ExtensionName::parse("project-shell").expect("known-safe extension name");
+    assert_eq!(instance_name.to_string(), "project-shell");
+    assert_eq!(
+        format!("{instance_name:?}"),
+        r#"ExtensionName("project-shell")"#
+    );
+    cwd_state.set_instance_name(instance_name);
     assert_eq!(cwd_state.key().as_str(), "ext_project-shell_cwd");
 }
 
@@ -157,14 +164,18 @@ fn two_shell_instance_workdirs_are_independent_and_prefix_associated() {
     let first_dir = TempDir::new().expect("first");
     let second_dir = TempDir::new().expect("second");
     let first = CwdState::new();
-    first.set_instance_name("core-shell".to_owned());
+    first.set_instance_name(
+        tau_proto::ExtensionName::parse("core-shell").expect("known-safe extension name"),
+    );
     first.set_context_label(None);
     first.set(
         agent_id.clone(),
         first_dir.path().canonicalize().expect("first canonical"),
     );
     let second = CwdState::new();
-    second.set_instance_name("prod-shell".to_owned());
+    second.set_instance_name(
+        tau_proto::ExtensionName::parse("prod-shell").expect("known-safe extension name"),
+    );
     let prod = tau_proto::ToolNamePrefix::parse("prod").expect("prefix");
     second.set_context_label(Some(&prod));
     second.set(

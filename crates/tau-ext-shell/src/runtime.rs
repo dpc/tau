@@ -182,8 +182,7 @@ impl ShellRuntime {
         if cfg.working_directory.is_none() {
             cfg.working_directory = self.config.working_directory.clone();
         }
-        self.cwd_state
-            .set_instance_name(instance_name.as_str().to_owned());
+        self.cwd_state.set_instance_name(instance_name);
         self.cwd_state.set_context_label(tool_prefix.as_ref());
         if let Err(message) = apply_working_directory(&self.config, &cfg, self.runtime_started) {
             return Err(tau_client::ClientError::handler(message));

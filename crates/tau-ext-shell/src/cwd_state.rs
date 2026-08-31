@@ -68,7 +68,7 @@ pub(crate) struct CompletedPendingWorkdir {
 pub(crate) struct CwdState {
     /// Configured extension instance name used only for durable metadata
     /// identity.
-    instance_name: Arc<Mutex<String>>,
+    instance_name: Arc<Mutex<tau_proto::ExtensionName>>,
     /// Model-visible prefix label used only for dynamic prompt association.
     context_label: Arc<Mutex<String>>,
     /// Validated process cwd frozen after startup configuration.
@@ -112,7 +112,10 @@ impl CwdState {
 
     fn with_startup_cwd(process_startup_cwd: Result<PathBuf, String>) -> Self {
         Self {
-            instance_name: Arc::new(Mutex::new("core-shell".to_owned())),
+            instance_name: Arc::new(Mutex::new(
+                tau_proto::ExtensionName::parse("core-shell")
+                    .expect("known-safe default extension name must be valid"),
+            )),
             context_label: Arc::new(Mutex::new("default".to_owned())),
             process_startup_cwd: Arc::new(Mutex::new(process_startup_cwd)),
             workdir_by_agent: Arc::new(Mutex::new(HashMap::new())),
@@ -129,7 +132,7 @@ impl CwdState {
     }
 
     /// Set the configured instance identity before runtime events begin.
-    pub(crate) fn set_instance_name(&self, name: String) {
+    pub(crate) fn set_instance_name(&self, name: tau_proto::ExtensionName) {
         *self
             .instance_name
             .lock()
@@ -158,9 +161,8 @@ impl CwdState {
         let name = self
             .instance_name
             .lock()
-            .expect("cwd instance lock poisoned")
-            .clone();
-        tau_proto::AgentMetadataKey::new(format!("ext_{name}_cwd"))
+            .expect("cwd instance lock poisoned");
+        tau_proto::AgentMetadataKey::new(format!("ext_{}_cwd", name.as_str()))
     }
 
     /// Return a valid committed path, excluding missing or malformed state.

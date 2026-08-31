@@ -419,6 +419,28 @@ fn configure_runtime_dir_lock(runtime: &mut ShellRuntime, enable: bool) {
         .expect("configure dir lock");
 }
 
+/// Ensures runtime configuration retains its validated instance identity until
+/// the cwd namespace key is derived, without changing the configured bytes.
+#[test]
+fn configuration_retains_extension_name_for_workdir_namespace() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let (tx, _rx) = mpsc::channel();
+    let mut runtime = ShellRuntime::new_for_test_harness(
+        Output::channel(tx),
+        ExtConfig::default(),
+        DiscoverySourcePolicy::Environment,
+        tempdir.path().to_path_buf(),
+    );
+    let instance_name =
+        tau_proto::ExtensionName::parse("test-extension").expect("known-safe extension name");
+
+    runtime
+        .apply_config(instance_name, None, ExtConfig::default())
+        .expect("valid configuration");
+
+    assert_eq!(runtime.cwd_state.key().as_str(), "ext_test-extension_cwd");
+}
+
 /// Wait until one tool reports that it is blocked on directory-lock
 /// acquisition.
 fn wait_for_tool_progress(
