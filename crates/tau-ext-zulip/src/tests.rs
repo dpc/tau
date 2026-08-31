@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Cursor, Error};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
@@ -1838,6 +1839,82 @@ fn direct_message_reply_is_source_bound() {
     );
 }
 
+/// Owner indexing retains typed fact IDs through lookup and FIFO ordering while
+/// accepting and returning unchanged opaque strings at tool boundaries.
+#[test]
+fn owner_index_uses_typed_fact_ids_and_preserves_tool_reference_text() {
+    let (ext, rx, client) = extension();
+    let state = ext.state.lock();
+    let generation = state.config_generation;
+    let registration = state.registration_generation;
+    drop(state);
+    ext.process_event(
+        serde_json::json!({
+            "id": 12, "type": "message", "message": {
+                "id": 501, "type": "private", "sender_id": 42, "content": "hello", "flags": [],
+                "display_recipient": [{"id": 99}, {"id": 42}]
+            }
+        }),
+        generation,
+        registration,
+        99,
+    );
+    let expected = message_fact_id(&cfg(), 501);
+    let Event::MessageDeliveredReported(report) = event_from(rx.recv().expect("delivery report"))
+    else {
+        panic!("expected delivery report");
+    };
+    assert_eq!(report.message_id, expected);
+
+    {
+        let state = ext.state.lock();
+        let key = state.owners.keys().next().expect("owner key");
+        assert_eq!(key, &expected);
+        assert_eq!(state.owner_order.front(), Some(&expected));
+        let equivalent = MessageFactId::new(expected.as_str());
+        assert_eq!(key, &equivalent);
+        let mut key_hasher = DefaultHasher::new();
+        key.hash(&mut key_hasher);
+        let mut equivalent_hasher = DefaultHasher::new();
+        equivalent.hash(&mut equivalent_hasher);
+        assert_eq!(key_hasher.finish(), equivalent_hasher.finish());
+    }
+
+    let reference = expected.as_str().to_owned();
+    let Event::ToolResult(result) = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        vec![
+            ("message", CborValue::Text("reply".to_owned())),
+            ("reply_to", CborValue::Text(reference)),
+        ],
+    )) else {
+        panic!("expected send result");
+    };
+    let CborValue::Text(result) = result.result else {
+        panic!("expected JSON send result");
+    };
+    let result: serde_json::Value = serde_json::from_str(&result).expect("valid send result");
+    let returned_reference = result
+        .pointer("/message_ref")
+        .and_then(serde_json::Value::as_str)
+        .expect("tool-visible message reference");
+    assert_eq!(
+        returned_reference,
+        message_fact_id(&cfg(), 777).as_str(),
+        "the tool returns the opaque reference without changing its text"
+    );
+    let returned_reference = MessageFactId::new(returned_reference);
+    assert!(ext.state.lock().owners.contains_key(&returned_reference));
+    assert_eq!(
+        ext.state.lock().owner_order.iter().collect::<Vec<_>>(),
+        vec![&expected, &returned_reference]
+    );
+    assert_eq!(
+        client.sends.lock().expect("sends").as_slice(),
+        &[(NativeRoute::Direct(vec![42]), "reply".to_owned())]
+    );
+}
+
 /// Direct-message admission requires complete, bounded, unique participant
 /// evidence so malformed routes cannot omit a participant or narrow authority.
 #[test]
@@ -2537,7 +2614,7 @@ fn self_authored_valid_message_is_suppressed() {
         !ext.state
             .lock()
             .owners
-            .contains_key(message_fact_id(&cfg(), 503).as_str())
+            .contains_key(&message_fact_id(&cfg(), 503))
     );
     assert!(!ext.state.lock().recent_set.contains("message:503"));
 }
@@ -2566,11 +2643,7 @@ fn stale_generation_drops_ingress() {
     );
     assert!(rx.try_recv().is_err());
     let state = ext.state.lock();
-    assert!(
-        !state
-            .owners
-            .contains_key(message_fact_id(&cfg(), 505).as_str())
-    );
+    assert!(!state.owners.contains_key(&message_fact_id(&cfg(), 505)));
     assert!(!state.recent_set.contains("message:505"));
 }
 
@@ -2768,7 +2841,7 @@ fn mutations_emit_immutable_reports_and_delete_revokes() {
         !ext.state
             .lock()
             .owners
-            .contains_key(message_fact_id(&cfg(), 600).as_str())
+            .contains_key(&message_fact_id(&cfg(), 600))
     );
 }
 
@@ -2839,7 +2912,7 @@ fn mandatory_report_failure_preserves_cursor_and_message_ownership() {
             ext.state
                 .lock()
                 .owners
-                .contains_key(message_fact_id(&cfg(), 600).as_str()),
+                .contains_key(&message_fact_id(&cfg(), 600)),
             "failed mutation publication consumed message ownership"
         );
     }
@@ -2865,7 +2938,7 @@ fn mandatory_report_failure_preserves_cursor_and_message_ownership() {
         !ext.state
             .lock()
             .owners
-            .contains_key(message_fact_id(&cfg(), 601).as_str()),
+            .contains_key(&message_fact_id(&cfg(), 601)),
         "failed create publication retained unusable reply ownership"
     );
 }

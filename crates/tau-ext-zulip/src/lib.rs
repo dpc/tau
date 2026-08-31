@@ -194,10 +194,10 @@ struct State {
     recent_ids: VecDeque<String>,
     /// Set matching `recent_ids`.
     recent_set: HashSet<String>,
-    /// Source-bound routes and mutation ownership indexed by fact ref text.
-    owners: HashMap<String, MessageOwner>,
+    /// Source-bound routes and mutation ownership indexed by typed fact IDs.
+    owners: HashMap<MessageFactId, MessageOwner>,
     /// FIFO for bounded owner eviction.
-    owner_order: VecDeque<String>,
+    owner_order: VecDeque<MessageFactId>,
     /// Durable catch-up state, opened only while the opt-in feature is active.
     checkpoint: Option<CheckpointRuntime>,
 }
@@ -218,7 +218,7 @@ impl State {
     }
 
     fn insert_owner(&mut self, owner: MessageOwner) {
-        let key = owner.fact_id.as_str().to_owned();
+        let key = owner.fact_id.clone();
         if !self.owners.contains_key(&key) {
             self.owner_order.push_back(key.clone());
         }
@@ -721,9 +721,10 @@ impl Extension {
                 );
             }
             let conversation = if let Some(reference) = reply_to.as_ref() {
+                let reference = MessageFactId::new(reference);
                 let Some(owner) = state
                     .owners
-                    .get(reference)
+                    .get(&reference)
                     .filter(|owner| owner.agent_id == invoke.agent_id)
                 else {
                     return tool_error(
@@ -869,6 +870,7 @@ impl Extension {
             Ok(value) => value,
             Err(error) => return tool_error(invoke, error),
         };
+        let reference = MessageFactId::new(reference);
         let emoji = match string_field(&invoke.arguments, "emoji") {
             Ok(value) => value,
             Err(error) => return tool_error(invoke, error),
@@ -1115,10 +1117,10 @@ impl Extension {
             }
             if state
                 .owners
-                .get(fact_id.as_str())
+                .get(&fact_id)
                 .is_some_and(|owner| owner.native_message_id == native_id)
             {
-                state.owners.remove(fact_id.as_str());
+                state.owners.remove(&fact_id);
             }
             state.recent_set.remove(&format!("message:{native_id}"));
             state
@@ -1311,13 +1313,10 @@ impl Extension {
             }
         };
         let mut state = self.state.lock();
-        let owner_is_current = state
-            .owners
-            .get(owner.fact_id.as_str())
-            .is_some_and(|current| {
-                current.native_message_id == owner.native_message_id
-                    && current.agent_id == owner.agent_id
-            });
+        let owner_is_current = state.owners.get(&owner.fact_id).is_some_and(|current| {
+            current.native_message_id == owner.native_message_id
+                && current.agent_id == owner.agent_id
+        });
         let edit_is_too_large = matches!(
             &report,
             Event::MessageEditedReported(edit)
@@ -1336,15 +1335,12 @@ impl Extension {
         }
         if self.output.emit_message_report(report)
             && matches!(mutation, Mutation::Delete)
-            && state
-                .owners
-                .get(owner.fact_id.as_str())
-                .is_some_and(|current| {
-                    current.native_message_id == owner.native_message_id
-                        && current.agent_id == owner.agent_id
-                })
+            && state.owners.get(&owner.fact_id).is_some_and(|current| {
+                current.native_message_id == owner.native_message_id
+                    && current.agent_id == owner.agent_id
+            })
         {
-            state.owners.remove(owner.fact_id.as_str());
+            state.owners.remove(&owner.fact_id);
         }
     }
 
