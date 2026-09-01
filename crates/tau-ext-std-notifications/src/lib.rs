@@ -233,23 +233,54 @@ impl IdleState {
     }
 }
 
-/// Configured idle-hook collection a pending timer belongs to.
-#[derive(Clone, Copy)]
-enum IdleHookKind {
-    Agent,
-    AgentAll,
+/// Configured idle-hook selector and optional session ownership for one timer.
+enum PendingIdleTarget {
+    /// An `agent_idle` hook at its raw configured index.
+    Agent {
+        /// Index into `ExtConfig::agent_idle`.
+        hook_index: usize,
+    },
+    /// An `agent_idle_all` hook at its raw configured index and owning session.
+    Session {
+        /// Session whose all-idle transition armed this timer.
+        session_id: tau_proto::SessionId,
+        /// Index into `ExtConfig::agent_idle_all`.
+        hook_index: usize,
+    },
+}
+
+impl PendingIdleTarget {
+    /// Returns the stable notification-hook identity for this target.
+    fn hook(&self) -> NotificationHook {
+        match self {
+            Self::Agent { .. } => NotificationHook::Idle,
+            Self::Session { .. } => NotificationHook::IdleAll,
+        }
+    }
+
+    /// Selects this target's configured idle hook.
+    fn configured_hook<'a>(&self, config: &'a ExtConfig) -> &'a IdleHookConfig {
+        match self {
+            Self::Agent { hook_index } => &config.agent_idle[*hook_index],
+            Self::Session { hook_index, .. } => &config.agent_idle_all[*hook_index],
+        }
+    }
+
+    /// Returns this all-idle target's owning session, if it has one.
+    fn session_id(&self) -> Option<&tau_proto::SessionId> {
+        match self {
+            Self::Agent { .. } => None,
+            Self::Session { session_id, .. } => Some(session_id),
+        }
+    }
 }
 
 /// Pending runtime state for one configured idle hook.
 struct PendingIdleHook {
-    /// Which configured idle hook list owns this timer.
-    hook_kind: IdleHookKind,
-    /// Index into the owning hook list.
-    hook_index: usize,
+    /// Configured hook selector and optional all-idle session ownership.
+    target: PendingIdleTarget,
     /// Agent whose completed work supplies template context.
     agent_id: tau_proto::AgentId,
-    /// Session that owns an `agent_idle_all` timer; absent for `agent_idle`.
-    session_id: Option<tau_proto::SessionId>,
     /// Last user prompt text rendered into idle templates.
     user_prompt: String,
     /// Last assistant response text rendered into idle templates.
@@ -959,12 +990,12 @@ impl NotificationLoop {
         let removed_summary_queries: HashSet<_> = self
             .idle_all
             .iter()
-            .filter(|pending| pending.session_id.as_ref() == Some(session_id))
+            .filter(|pending| pending.target.session_id() == Some(session_id))
             .filter_map(pending_idle_summary_query_id)
             .map(str::to_owned)
             .collect();
         self.idle_all
-            .retain(|pending| pending.session_id.as_ref() != Some(session_id));
+            .retain(|pending| pending.target.session_id() != Some(session_id));
         for agent_id in removed_agents {
             self.all_idle_context.remove(&agent_id);
         }
@@ -1031,8 +1062,8 @@ impl NotificationLoop {
         let running_sessions = self.session_idle.sessions_for_agent(agent_id);
         self.idle_all.retain(|pending| {
             pending
-                .session_id
-                .as_ref()
+                .target
+                .session_id()
                 .is_none_or(|session_id| !running_sessions.contains(session_id))
         });
     }
@@ -1437,7 +1468,7 @@ impl NotificationLoop {
         emit_idle_hook(
             handle,
             IdleHookEmission {
-                hook: idle_hook(pending.hook_kind),
+                hook: pending.target.hook(),
                 config: hook,
                 agent_id: &pending.agent_id,
                 agent_name: &agent_name,
@@ -1631,7 +1662,7 @@ fn emit_due_idle_hook(
     emit_idle_hook(
         handle,
         IdleHookEmission {
-            hook: idle_hook(pending.hook_kind),
+            hook: pending.target.hook(),
             config: hook,
             agent_id: &pending.agent_id,
             agent_name: &agent_name,
@@ -1716,10 +1747,8 @@ fn arm_idle_hooks(
     let now = Instant::now();
     for (hook_index, hook) in config.agent_idle.iter().enumerate() {
         idle.push(PendingIdleHook {
-            hook_kind: IdleHookKind::Agent,
-            hook_index,
+            target: PendingIdleTarget::Agent { hook_index },
             agent_id: agent_id.clone(),
-            session_id: None,
             user_prompt: user_prompt.clone(),
             agent_response: agent_response.clone(),
             state: IdleState::WaitingIdle {
@@ -1741,14 +1770,15 @@ fn arm_idle_all_hooks(
     user_prompt: String,
     agent_response: String,
 ) {
-    idle_all.retain(|pending| pending.session_id.as_ref() != Some(&session_id));
+    idle_all.retain(|pending| pending.target.session_id() != Some(&session_id));
     let now = Instant::now();
     for (hook_index, hook) in config.agent_idle_all.iter().enumerate() {
         idle_all.push(PendingIdleHook {
-            hook_kind: IdleHookKind::AgentAll,
-            hook_index,
+            target: PendingIdleTarget::Session {
+                session_id: session_id.clone(),
+                hook_index,
+            },
             agent_id: agent_id.clone(),
-            session_id: Some(session_id.clone()),
             user_prompt: user_prompt.clone(),
             agent_response: agent_response.clone(),
             state: IdleState::WaitingIdle {
@@ -1784,21 +1814,11 @@ fn pending_idle_summary_query_id(pending: &PendingIdleHook) -> Option<&str> {
     }
 }
 
-fn idle_hook(kind: IdleHookKind) -> NotificationHook {
-    match kind {
-        IdleHookKind::Agent => NotificationHook::Idle,
-        IdleHookKind::AgentAll => NotificationHook::IdleAll,
-    }
-}
-
 fn configured_idle_hook<'a>(
     config: &'a ExtConfig,
     pending: &PendingIdleHook,
 ) -> &'a IdleHookConfig {
-    match pending.hook_kind {
-        IdleHookKind::Agent => &config.agent_idle[pending.hook_index],
-        IdleHookKind::AgentAll => &config.agent_idle_all[pending.hook_index],
-    }
+    pending.target.configured_hook(config)
 }
 
 fn idle_hook_delay(
